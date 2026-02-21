@@ -260,11 +260,12 @@ function createSession(cwd, existingId = null, isNew = false) {
   };
 
   ws.onreconnected = () => {
-    // Remove reconnecting state
+    // Remove reconnecting state and clear terminal
     const entry = [...sessions.entries()].find(([, s]) => s.ws === ws);
     if (entry) {
       const [, session] = entry;
       session.container.classList.remove('reconnecting');
+      session.term.clear();  // Clear old content before new output arrives
     }
   };
 }
