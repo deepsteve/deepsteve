@@ -66,6 +66,68 @@ function updateTitle() {
   document.title = count > 0 ? `(${count}) deepsteve` : 'deepsteve';
 }
 
+// Sessions dropdown
+const sessionsBtn = document.getElementById('sessions-btn');
+const sessionsMenu = document.getElementById('sessions-menu');
+
+sessionsBtn?.addEventListener('click', async (e) => {
+  e.stopPropagation();
+  const isOpen = sessionsMenu.classList.toggle('open');
+  if (isOpen) {
+    await refreshSessionsDropdown();
+  }
+});
+
+document.addEventListener('click', () => {
+  sessionsMenu?.classList.remove('open');
+});
+
+async function refreshSessionsDropdown() {
+  try {
+    const res = await fetch('/api/shells');
+    const data = await res.json();
+    const allShells = data.shells || [];
+
+    if (allShells.length === 0) {
+      sessionsMenu.innerHTML = '<div class="dropdown-empty">No sessions</div>';
+      return;
+    }
+
+    // Get IDs of sessions connected in THIS tab
+    const connectedIds = new Set(sessions.keys());
+
+    sessionsMenu.innerHTML = allShells.map(shell => {
+      const isConnected = connectedIds.has(shell.id);
+      const name = sessions.get(shell.id)?.name || getDefaultTabName(shell.cwd);
+      const statusText = shell.status === 'saved' ? 'saved' : (isConnected ? 'connected' : 'active');
+      const statusClass = isConnected ? 'active' : '';
+      const canClose = !isConnected;
+
+      return `
+        <div class="dropdown-item ${isConnected ? 'connected' : ''}" data-id="${shell.id}">
+          <div class="session-info">
+            <span class="session-name">${name}</span>
+            <span class="session-status ${statusClass}">${statusText}</span>
+          </div>
+          ${canClose ? `<span class="session-close" data-id="${shell.id}">✕</span>` : ''}
+        </div>
+      `;
+    }).join('');
+
+    // Add close handlers
+    sessionsMenu.querySelectorAll('.session-close').forEach(btn => {
+      btn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const id = btn.dataset.id;
+        await fetch(`/api/shells/${id}`, { method: 'DELETE' });
+        await refreshSessionsDropdown();
+      });
+    });
+  } catch (err) {
+    sessionsMenu.innerHTML = '<div class="dropdown-empty">Error loading sessions</div>';
+  }
+}
+
 function updateAppBadge() {
   if (!('setAppBadge' in navigator)) return;
   const count = [...sessions.values()].filter(s => s.waitingForInput).length;

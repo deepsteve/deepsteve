@@ -74,6 +74,30 @@ app.post('/api/shells/killall', (req, res) => {
   res.json({ killed });
 });
 
+app.delete('/api/shells/:id', (req, res) => {
+  const id = req.params.id;
+
+  // Check active shells
+  if (shells.has(id)) {
+    const entry = shells.get(id);
+    entry.shell.kill();
+    shells.delete(id);
+    log(`Killed active shell ${id}`);
+    saveState();
+    return res.json({ killed: id, status: 'active' });
+  }
+
+  // Check saved state
+  if (savedState[id]) {
+    delete savedState[id];
+    log(`Removed saved session ${id}`);
+    saveState();
+    return res.json({ killed: id, status: 'saved' });
+  }
+
+  res.status(404).json({ error: 'Session not found' });
+});
+
 app.post('/api/mkdir', require('express').json(), (req, res) => {
   let dir = req.body.path;
   if (!dir) return res.status(400).json({ error: 'path required' });
@@ -141,8 +165,9 @@ wss.on('connection', (ws, req) => {
           entry.clients.forEach((c) => c.send(stateMsg));
         }
       });
-      shell.onExit(() => shells.delete(id));
+      shell.onExit(() => { shells.delete(id); saveState(); });
       delete savedState[id];
+      saveState();
     } else {
       ws.send(JSON.stringify({ type: 'gone', id }));
       ws.close();
@@ -167,7 +192,8 @@ wss.on('connection', (ws, req) => {
         entry.clients.forEach((c) => c.send(stateMsg));
       }
     });
-    shell.onExit(() => shells.delete(id));
+    shell.onExit(() => { shells.delete(id); saveState(); });
+    saveState();
   }
 
   const entry = shells.get(id);
