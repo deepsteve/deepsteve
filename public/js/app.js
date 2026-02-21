@@ -9,6 +9,7 @@ import { createTerminal, setupTerminalIO, fitTerminal } from './terminal.js';
 import { createWebSocket } from './ws-client.js';
 import { showDirectoryPicker } from './dir-picker.js';
 import { showWindowRestoreModal } from './window-restore-modal.js';
+import { LayoutManager } from './layout-manager.js';
 
 // Active sessions in memory
 const sessions = new Map();
@@ -223,7 +224,11 @@ function createSession(cwd, existingId = null, isNew = false) {
     // Valid JSON - handle control messages (never write to terminal)
     try {
       if (msg.type === 'session') {
-        initTerminal(msg.id, ws, cwd);
+        // Check if this WebSocket already has a session (reconnect case)
+        const existingSession = [...sessions.entries()].find(([, s]) => s.ws === ws);
+        if (!existingSession) {
+          initTerminal(msg.id, ws, cwd);
+        }
       } else if (msg.type === 'gone') {
         SessionStore.removeSession(getWindowId(), msg.id);
       } else if (msg.type === 'state') {
@@ -260,12 +265,11 @@ function createSession(cwd, existingId = null, isNew = false) {
   };
 
   ws.onreconnected = () => {
-    // Remove reconnecting state and clear terminal
+    // Remove reconnecting state - don't clear terminal, preserve scrollback
     const entry = [...sessions.entries()].find(([, s]) => s.ws === ws);
     if (entry) {
       const [, session] = entry;
       session.container.classList.remove('reconnecting');
-      session.term.clear();  // Clear old content before new output arrives
     }
   };
 }
@@ -304,9 +308,11 @@ function initTerminal(id, ws, cwd) {
   // Save to storage
   SessionStore.addSession(windowId, { id, cwd, name });
 
-  // Fit terminal after render
+  // Fit terminal after render, then request redraw
   requestAnimationFrame(() => {
     fitTerminal(term, fit, ws);
+    // Request terminal redraw from server (for reconnecting to existing shells)
+    ws.send(JSON.stringify({ type: 'redraw' }));
   });
 
   // Handle window resize
@@ -411,6 +417,9 @@ async function promptAndCreateSession() {
  * Main initialization
  */
 async function init() {
+  // Initialize layout manager
+  LayoutManager.init();
+
   // Set up new button handler
   document.getElementById('new-btn').addEventListener('click', () => {
     promptAndCreateSession();

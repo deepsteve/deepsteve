@@ -10,16 +10,21 @@
   <link rel="stylesheet" href="/css/styles.css">
 </head>
 <body>
-  <div id="tabs">
-  <button id="new-btn">+ New</button>
-  <div id="tabs-spacer" style="flex: 1;"></div>
-  <div id="sessions-dropdown" class="dropdown">
-    <button id="sessions-btn" class="dropdown-btn">Sessions</button>
-    <div id="sessions-menu" class="dropdown-menu"></div>
+  <div id="app-container">
+    <div id="tabs">
+      <button id="layout-toggle" class="layout-btn" title="Switch to vertical tabs">▤</button>
+      <div id="tabs-list"></div>
+      <button id="new-btn">+ New</button>
+      <div id="tabs-spacer"></div>
+      <div id="sessions-dropdown" class="dropdown">
+        <button id="sessions-btn" class="dropdown-btn">Sessions</button>
+        <div id="sessions-menu" class="dropdown-menu"></div>
+      </div>
+      <button id="settings-btn" class="dropdown-btn">⚙</button>
+    </div>
+    <div id="sidebar-resizer"></div>
+    <div id="terminals"></div>
   </div>
-  <button id="settings-btn" class="dropdown-btn" style="margin-left: 4px;">⚙</button>
-</div>
-  <div id="terminals"></div>
   <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
   <script type="module" src="/js/app.js"></script>
