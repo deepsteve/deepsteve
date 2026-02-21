@@ -250,14 +250,23 @@ wss.on('connection', (ws, req) => {
   }
 
   const entry = shells.get(id);
+  const isReconnect = entry.clients.size > 0 || entry.hadClients;
   // Cancel any pending kill timer on reconnect
   if (entry.killTimer) {
     clearTimeout(entry.killTimer);
     entry.killTimer = null;
   }
   entry.clients.add(ws);
-  log(`[WS] Sending session response: id=${id}, restored=${entry.restored || false}`);
+  entry.hadClients = true;
+  log(`[WS] Sending session response: id=${id}, restored=${entry.restored || false}, reconnect=${isReconnect}`);
   ws.send(JSON.stringify({ type: 'session', id, restored: entry.restored || false, cwd: entry.cwd }));
+
+  // Send Ctrl+L to redraw terminal on reconnect (after resize happens)
+  if (isReconnect) {
+    setTimeout(() => {
+      entry.shell.write('\x0c'); // Ctrl+L - redraw
+    }, 100);
+  }
 
   ws.on('message', (msg) => {
     const str = msg.toString();
