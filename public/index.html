@@ -11,6 +11,10 @@
     .tab.active { background: #0d1117; color: #f0f6fc; border-bottom-color: #0d1117; }
     .tab .close { opacity: 0.5; cursor: pointer; font-size: 11px; }
     .tab .close:hover { opacity: 1; color: #f85149; }
+    /* Context Menu */
+    .context-menu { position: fixed; background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 4px 0; min-width: 140px; z-index: 200; box-shadow: 0 8px 24px rgba(0,0,0,0.4); }
+    .context-menu-item { padding: 8px 12px; cursor: pointer; font-size: 13px; color: #c9d1d9; }
+    .context-menu-item:hover { background: #21262d; }
     #new-btn { padding: 4px 10px; background: #238636; border: none; color: white; border-radius: 4px; cursor: pointer; font-size: 13px; margin-left: 4px; }
     #new-btn:hover { background: #2ea043; }
     .terminal-container { flex: 1; display: none; }
@@ -50,6 +54,80 @@
     const STORAGE_KEY = 'deepsteve';
     function getStorage() { try { return JSON.parse(localStorage.getItem(STORAGE_KEY)) || {}; } catch { return {}; } }
     function setStorage(data) { localStorage.setItem(STORAGE_KEY, JSON.stringify({ ...getStorage(), ...data })); }
+
+    // === Tab Context Menu ===
+    const TabContextMenu = {
+      // Menu item definitions - add new options here
+      items: [
+        { label: 'Rename', action: (id) => TabContextMenu.renameTab(id) }
+        // Add more menu items here: { label: 'Copy Path', action: (id) => ... }
+      ],
+
+      show(x, y, sessionId) {
+        this.hide();
+        const menu = document.createElement('div');
+        menu.className = 'context-menu';
+        menu.id = 'tab-context-menu';
+        this.items.forEach(item => {
+          const el = document.createElement('div');
+          el.className = 'context-menu-item';
+          el.textContent = item.label;
+          el.onclick = () => { this.hide(); item.action(sessionId); };
+          menu.appendChild(el);
+        });
+        menu.style.left = x + 'px';
+        menu.style.top = y + 'px';
+        document.body.appendChild(menu);
+        // Adjust if off-screen
+        const rect = menu.getBoundingClientRect();
+        if (rect.right > window.innerWidth) menu.style.left = (window.innerWidth - rect.width - 8) + 'px';
+        if (rect.bottom > window.innerHeight) menu.style.top = (window.innerHeight - rect.height - 8) + 'px';
+      },
+
+      hide() {
+        document.getElementById('tab-context-menu')?.remove();
+      },
+
+      renameTab(id) {
+        const session = sessions.get(id);
+        if (!session) return;
+        const newName = prompt('Rename tab:', session.name || '');
+        if (newName === null) return;
+        session.name = newName.trim() || getDefaultTabName(session.cwd);
+        updateTabLabel(id);
+        saveSessionName(id, session.name);
+      }
+    };
+
+    document.addEventListener('click', () => TabContextMenu.hide());
+    document.addEventListener('contextmenu', (e) => { if (!e.target.closest('.tab')) TabContextMenu.hide(); });
+
+    function getDefaultTabName(cwd) {
+      if (!cwd) return 'shell';
+      return cwd.split('/').filter(Boolean).pop() || 'root';
+    }
+
+    function updateTabLabel(id) {
+      const tab = document.getElementById('tab-' + id);
+      const session = sessions.get(id);
+      if (tab && session) {
+        tab.querySelector('.tab-label').textContent = session.name || getDefaultTabName(session.cwd);
+      }
+    }
+
+    function saveSessionName(id, name) {
+      const storage = getStorage();
+      const saved = storage.sessions || [];
+      const session = saved.find(s => s.id === id);
+      if (session) { session.name = name; setStorage({ sessions: saved }); }
+    }
+
+    function getSavedSessionName(id) {
+      const storage = getStorage();
+      const saved = storage.sessions || [];
+      const session = saved.find(s => s.id === id);
+      return session?.name;
+    }
     async function fetchDirs(p) { try { const r = await fetch('/api/dirs?path=' + encodeURIComponent(p)); return await r.json(); } catch { return { dirs: [] }; } }
     async function fetchHome() { try { const r = await fetch('/api/home'); return (await r.json()).home; } catch { return '/Users'; } }
     function showDirectoryPicker() {
@@ -136,22 +214,35 @@
       term.open(container);
       ws.onmessage = (e) => term.write(e.data);
       term.onData((data) => ws.send(data));
+      term.attachCustomKeyEventHandler((event) => {
+        if (event.shiftKey && event.key === 'Enter' && event.type === 'keydown') {
+          ws.send('\n');
+          return false;
+        }
+        return true;
+      });
       sessions.set(id, { term, fit, ws, container, cwd });
       addTab(id);
       switchTo(id);
       const storage = getStorage();
       const saved = storage.sessions || [];
-      if (!saved.find(s => s.id === id)) { saved.push({ id, cwd }); setStorage({ sessions: saved }); }
+      if (!saved.find(s => s.id === id)) { saved.push({ id, cwd, name: sessions.get(id)?.name }); setStorage({ sessions: saved }); }
       requestAnimationFrame(() => { fit.fit(); ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows })); });
       window.addEventListener('resize', () => { if (activeId === id) { fit.fit(); ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows })); } });
     }
     function addTab(id) {
+      const session = sessions.get(id);
+      const savedName = getSavedSessionName(id);
+      const displayName = savedName || getDefaultTabName(session?.cwd);
+      if (session) session.name = displayName;
+
       const tab = document.createElement('div');
       tab.className = 'tab';
       tab.id = 'tab-' + id;
-      tab.innerHTML = '<span>' + id + '</span><span class="close">✕</span>';
-      tab.querySelector('span').addEventListener('click', () => switchTo(id));
+      tab.innerHTML = '<span class="tab-label">' + displayName + '</span><span class="close">✕</span>';
+      tab.querySelector('.tab-label').addEventListener('click', () => switchTo(id));
       tab.querySelector('.close').addEventListener('click', (e) => { e.stopPropagation(); killSession(id); });
+      tab.addEventListener('contextmenu', (e) => { e.preventDefault(); TabContextMenu.show(e.clientX, e.clientY, id); });
       document.getElementById('new-btn').before(tab);
     }
     function switchTo(id) {
