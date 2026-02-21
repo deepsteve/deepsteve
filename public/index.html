@@ -208,7 +208,7 @@
       container.className = 'terminal-container';
       container.id = 'term-' + id;
       document.getElementById('terminals').appendChild(container);
-      const term = new Terminal({ fontSize: 14, theme: { background: '#0d1117' } });
+      const term = new Terminal({ fontSize: 14, cursorBlink: true, theme: { background: '#0d1117' } });
       const fit = new FitAddon.FitAddon();
       term.loadAddon(fit);
       term.open(container);
@@ -219,8 +219,11 @@
           ws.send('\n');
           return false;
         }
+        // Let xterm handle all other keys including arrows
         return true;
       });
+      // Ensure terminal gets focus when clicked
+      container.addEventListener('click', () => term.focus());
       sessions.set(id, { term, fit, ws, container, cwd });
       addTab(id);
       switchTo(id);

@@ -7,14 +7,56 @@ const path = require('path');
 const os = require('os');
 
 const PORT = process.env.PORT || 3000;
+const STATE_FILE = path.join(os.homedir(), '.deepsteve', 'state.json');
 const app = express();
 app.use(express.static('public'));
+
+// Load saved state from previous run (shells that can be resumed)
+let savedState = {};
+try {
+  if (fs.existsSync(STATE_FILE)) {
+    savedState = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+    console.log(`Loaded ${Object.keys(savedState).length} saved sessions from state file`);
+  }
+} catch (e) {
+  console.error('Failed to load state file:', e.message);
+}
+
+// Save state on shutdown
+function saveState() {
+  const state = {};
+  for (const [id, entry] of shells) {
+    state[id] = { cwd: entry.cwd };
+  }
+  // Merge with any saved state that wasn't reconnected yet
+  const merged = { ...savedState, ...state };
+  try {
+    fs.mkdirSync(path.dirname(STATE_FILE), { recursive: true });
+    fs.writeFileSync(STATE_FILE, JSON.stringify(merged, null, 2));
+    console.log(`Saved ${Object.keys(merged).length} sessions to state file`);
+  } catch (e) {
+    console.error('Failed to save state:', e.message);
+  }
+}
+
+process.on('SIGTERM', () => {
+  console.log('Received SIGTERM, saving state...');
+  saveState();
+  process.exit(0);
+});
+
+process.on('SIGINT', () => {
+  console.log('Received SIGINT, saving state...');
+  saveState();
+  process.exit(0);
+});
 
 app.get('/api/home', (req, res) => res.json({ home: os.homedir() }));
 
 app.get('/api/shells', (req, res) => {
-  const list = [...shells.entries()].map(([id, entry]) => ({ id, pid: entry.shell.pid }));
-  res.json({ shells: list });
+  const active = [...shells.entries()].map(([id, entry]) => ({ id, pid: entry.shell.pid, cwd: entry.cwd, status: 'active' }));
+  const saved = Object.entries(savedState).map(([id, entry]) => ({ id, cwd: entry.cwd, status: 'saved' }));
+  res.json({ shells: [...active, ...saved] });
 });
 
 app.post('/api/shells/killall', (req, res) => {
@@ -51,31 +93,48 @@ app.get('/api/dirs', (req, res) => {
   } catch { res.json({ dirs: [] }); }
 });
 
-const server = app.listen(PORT, () => console.log(`http://localhost:${PORT}`));
+const server = app.listen(PORT);
 const shells = new Map();
 const wss = new WebSocketServer({ server });
 
 wss.on('connection', (ws, req) => {
   const url = new URL(req.url, 'http://localhost');
   const action = url.searchParams.get('action');
-  if (action === 'list') { ws.send(JSON.stringify({ type: 'list', ids: [...shells.keys()] })); ws.close(); return; }
+  if (action === 'list') {
+    const ids = [...new Set([...shells.keys(), ...Object.keys(savedState)])];
+    ws.send(JSON.stringify({ type: 'list', ids }));
+    ws.close();
+    return;
+  }
 
   let id = url.searchParams.get('id');
   let cwd = url.searchParams.get('cwd') || process.env.HOME;
   if (cwd.startsWith('~')) cwd = path.join(os.homedir(), cwd.slice(1));
   const createNew = url.searchParams.get('new') === '1';
 
-  // If client requested a specific ID that doesn't exist, tell them it's gone
+  // If client requested a specific ID that doesn't exist, check if we can restore it
   if (id && !shells.has(id) && !createNew) {
-    ws.send(JSON.stringify({ type: 'gone', id }));
-    ws.close();
-    return;
+    if (savedState[id]) {
+      // Restore this session with --continue flag
+      const restored = savedState[id];
+      cwd = restored.cwd;
+      console.log(`Restoring session ${id} in ${cwd}`);
+      const shell = pty.spawn('claude', ['-c'], { name: 'xterm-256color', cols: 120, rows: 40, cwd, env: process.env });
+      shells.set(id, { shell, clients: new Set(), cwd, restored: true });
+      shell.onData((data) => { const entry = shells.get(id); if (entry) entry.clients.forEach((c) => c.send(data)); });
+      shell.onExit(() => shells.delete(id));
+      delete savedState[id];
+    } else {
+      ws.send(JSON.stringify({ type: 'gone', id }));
+      ws.close();
+      return;
+    }
   }
 
   if (!id || !shells.has(id)) {
     id = randomUUID().slice(0, 8);
     const shell = pty.spawn('claude', [], { name: 'xterm-256color', cols: 120, rows: 40, cwd, env: process.env });
-    shells.set(id, { shell, clients: new Set() });
+    shells.set(id, { shell, clients: new Set(), cwd });
     shell.onData((data) => { const entry = shells.get(id); if (entry) entry.clients.forEach((c) => c.send(data)); });
     shell.onExit(() => shells.delete(id));
   }
@@ -87,7 +146,7 @@ wss.on('connection', (ws, req) => {
     entry.killTimer = null;
   }
   entry.clients.add(ws);
-  ws.send(JSON.stringify({ type: 'session', id }));
+  ws.send(JSON.stringify({ type: 'session', id, restored: entry.restored || false, cwd: entry.cwd }));
 
   ws.on('message', (msg) => {
     const str = msg.toString();
