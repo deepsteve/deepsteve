@@ -100,16 +100,26 @@
       let cwd;
       if (storage.alwaysUse && storage.lastCwd) { cwd = storage.lastCwd; }
       else { cwd = await showDirectoryPicker(); if (cwd === null) return; }
-      createSession(cwd);
+      createSession(cwd, null, true);
     }
     document.getElementById('new-btn').addEventListener('click', () => promptAndCreateSession());
-    function createSession(cwd, existingId = null) {
+    function createSession(cwd, existingId = null, isNew = false) {
       const params = new URLSearchParams();
       if (existingId) params.set('id', existingId);
       if (cwd) params.set('cwd', cwd);
+      if (isNew) params.set('new', '1');
       const ws = new WebSocket('ws://' + location.host + '?' + params);
       ws.onmessage = (e) => {
-        try { const msg = JSON.parse(e.data); if (msg.type === 'session') { initTerminal(msg.id, ws, cwd); return; } } catch {}
+        try {
+          const msg = JSON.parse(e.data);
+          if (msg.type === 'session') { initTerminal(msg.id, ws, cwd); return; }
+          if (msg.type === 'gone') {
+            // Session no longer exists on server - remove from storage
+            const storage = getStorage();
+            setStorage({ sessions: (storage.sessions || []).filter(s => s.id !== msg.id) });
+            return;
+          }
+        } catch {}
         const session = [...sessions.values()].find(s => s.ws === ws);
         if (session) session.term.write(e.data);
       };

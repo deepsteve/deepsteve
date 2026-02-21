@@ -12,6 +12,21 @@ app.use(express.static('public'));
 
 app.get('/api/home', (req, res) => res.json({ home: os.homedir() }));
 
+app.get('/api/shells', (req, res) => {
+  const list = [...shells.entries()].map(([id, entry]) => ({ id, pid: entry.shell.pid }));
+  res.json({ shells: list });
+});
+
+app.post('/api/shells/killall', (req, res) => {
+  const killed = [];
+  for (const [id, entry] of shells) {
+    killed.push({ id, pid: entry.shell.pid });
+    entry.shell.kill();
+    shells.delete(id);
+  }
+  res.json({ killed });
+});
+
 app.post('/api/mkdir', require('express').json(), (req, res) => {
   let dir = req.body.path;
   if (!dir) return res.status(400).json({ error: 'path required' });
@@ -48,6 +63,14 @@ wss.on('connection', (ws, req) => {
   let id = url.searchParams.get('id');
   let cwd = url.searchParams.get('cwd') || process.env.HOME;
   if (cwd.startsWith('~')) cwd = path.join(os.homedir(), cwd.slice(1));
+  const createNew = url.searchParams.get('new') === '1';
+
+  // If client requested a specific ID that doesn't exist, tell them it's gone
+  if (id && !shells.has(id) && !createNew) {
+    ws.send(JSON.stringify({ type: 'gone', id }));
+    ws.close();
+    return;
+  }
 
   if (!id || !shells.has(id)) {
     id = randomUUID().slice(0, 8);
