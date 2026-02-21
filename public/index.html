@@ -216,10 +216,10 @@
       term.onData((data) => ws.send(data));
       term.attachCustomKeyEventHandler((event) => {
         if (event.shiftKey && event.key === 'Enter' && event.type === 'keydown') {
-          ws.send('\n');
+          // Send CSI u escape sequence for Shift+Enter (like iTerm2)
+          ws.send('\x1b[13;2u');
           return false;
         }
-        // Let xterm handle all other keys including arrows
         return true;
       });
       // Ensure terminal gets focus when clicked
