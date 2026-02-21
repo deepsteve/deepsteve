@@ -11,6 +11,23 @@ body { background: #0d1117; color: #c9d1d9; font-family: system-ui; display: fle
 .tab .badge { width: 8px; height: 8px; background: #58a6ff; border-radius: 50%; display: none; flex-shrink: 0; }
 .tab .badge.visible { display: inline-block; }
 
+/* Sessions Dropdown */
+.dropdown { position: relative; }
+.dropdown-btn { padding: 4px 10px; background: #21262d; border: 1px solid #30363d; color: #8b949e; border-radius: 4px; cursor: pointer; font-size: 13px; }
+.dropdown-btn:hover { background: #30363d; color: #c9d1d9; }
+.dropdown-menu { display: none; position: absolute; right: 0; top: 100%; margin-top: 4px; background: #161b22; border: 1px solid #30363d; border-radius: 6px; min-width: 220px; z-index: 200; box-shadow: 0 8px 24px rgba(0,0,0,0.4); max-height: 300px; overflow-y: auto; }
+.dropdown-menu.open { display: block; }
+.dropdown-item { padding: 8px 12px; font-size: 13px; color: #c9d1d9; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #21262d; }
+.dropdown-item:last-child { border-bottom: none; }
+.dropdown-item .session-info { display: flex; flex-direction: column; gap: 2px; overflow: hidden; }
+.dropdown-item .session-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.dropdown-item .session-status { font-size: 11px; color: #8b949e; }
+.dropdown-item .session-status.active { color: #3fb950; }
+.dropdown-item .session-close { opacity: 0.5; cursor: pointer; padding: 2px 6px; font-size: 11px; }
+.dropdown-item .session-close:hover { opacity: 1; color: #f85149; }
+.dropdown-item.connected { background: #21262d; }
+.dropdown-empty { padding: 12px; text-align: center; color: #8b949e; font-size: 13px; }
+
 /* Context Menu */
 .context-menu { position: fixed; background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 4px 0; min-width: 140px; z-index: 200; box-shadow: 0 8px 24px rgba(0,0,0,0.4); }
 .context-menu-item { padding: 8px 12px; cursor: pointer; font-size: 13px; color: #c9d1d9; }

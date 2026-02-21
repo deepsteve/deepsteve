@@ -10,7 +10,14 @@
   <link rel="stylesheet" href="/css/styles.css">
 </head>
 <body>
-  <div id="tabs"><button id="new-btn">+ New</button></div>
+  <div id="tabs">
+  <button id="new-btn">+ New</button>
+  <div id="tabs-spacer" style="flex: 1;"></div>
+  <div id="sessions-dropdown" class="dropdown">
+    <button id="sessions-btn" class="dropdown-btn">Sessions</button>
+    <div id="sessions-menu" class="dropdown-menu"></div>
+  </div>
+</div>
   <div id="terminals"></div>
   <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
