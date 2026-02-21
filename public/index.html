@@ -254,7 +254,7 @@
       const s = sessions.get(id);
       s.container.classList.add('active');
       document.getElementById('tab-' + id).classList.add('active');
-      requestAnimationFrame(() => { s.fit.fit(); s.term.focus(); });
+      requestAnimationFrame(() => { s.fit.fit(); s.term.scrollToBottom(); s.term.focus(); });
     }
     function killSession(id) {
       const s = sessions.get(id);
