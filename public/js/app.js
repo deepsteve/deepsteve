@@ -1,0 +1,339 @@
+/**
+ * Main application entry point
+ */
+
+import { SessionStore } from './session-store.js';
+import { WindowManager } from './window-manager.js';
+import { TabManager, getDefaultTabName } from './tab-manager.js';
+import { createTerminal, setupTerminalIO, fitTerminal } from './terminal.js';
+import { createWebSocket } from './ws-client.js';
+import { showDirectoryPicker } from './dir-picker.js';
+import { showWindowRestoreModal } from './window-restore-modal.js';
+
+// Active sessions in memory
+const sessions = new Map();
+let activeId = null;
+
+// Prevent accidental browser navigation (back/forward)
+window.addEventListener('popstate', (e) => {
+  // Push state back to prevent navigation
+  history.pushState(null, '', location.href);
+});
+// Initialize history state
+history.pushState(null, '', location.href);
+
+// Warn before leaving page with active sessions
+window.addEventListener('beforeunload', (e) => {
+  if (sessions.size > 0) {
+    e.preventDefault();
+    e.returnValue = '';
+    return '';
+  }
+});
+
+// Notification infrastructure
+let notifPermission = 'Notification' in window ? Notification.permission : 'denied';
+const notifCooldown = new Map();
+const COOLDOWN_MS = 10000;
+
+// Request notification permission on first click
+document.addEventListener('click', () => {
+  if ('Notification' in window && Notification.permission === 'default') {
+    Notification.requestPermission().then(p => notifPermission = p);
+  }
+}, { once: true });
+
+// Register service worker for PWA
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('/sw.js');
+}
+
+function showNotification(id, name) {
+  if (notifPermission !== 'granted') return;
+  if (activeId === id && document.hasFocus()) return;
+  const last = notifCooldown.get(id) || 0;
+  if (Date.now() - last < COOLDOWN_MS) return;
+
+  notifCooldown.set(id, Date.now());
+  new Notification('Claude needs attention', {
+    body: `"${name}" is waiting for input`,
+    tag: id
+  });
+}
+
+function updateTitle() {
+  const count = [...sessions.values()].filter(s => s.waitingForInput).length;
+  document.title = count > 0 ? `(${count}) deepsteve` : 'deepsteve';
+}
+
+function updateAppBadge() {
+  if (!('setAppBadge' in navigator)) return;
+  const count = [...sessions.values()].filter(s => s.waitingForInput).length;
+  if (count > 0) navigator.setAppBadge(count);
+  else navigator.clearAppBadge();
+}
+
+/**
+ * Get the current window ID
+ */
+function getWindowId() {
+  return WindowManager.getWindowId();
+}
+
+/**
+ * Create a new terminal session
+ */
+function createSession(cwd, existingId = null, isNew = false) {
+  const ws = createWebSocket({ id: existingId, cwd, isNew });
+
+  ws.onmessage = (e) => {
+    // Try to parse as JSON control message
+    let msg;
+    try {
+      msg = JSON.parse(e.data);
+    } catch {
+      // Not JSON - pass to terminal
+      const session = [...sessions.values()].find(s => s.ws === ws);
+      if (session) session.term.write(e.data);
+      return;
+    }
+
+    // Valid JSON - handle control messages (never write to terminal)
+    try {
+      if (msg.type === 'session') {
+        initTerminal(msg.id, ws, cwd);
+      } else if (msg.type === 'gone') {
+        SessionStore.removeSession(getWindowId(), msg.id);
+      } else if (msg.type === 'state') {
+        const entry = [...sessions.entries()].find(([, s]) => s.ws === ws);
+        if (entry) {
+          const [sid, s] = entry;
+          s.waitingForInput = msg.waiting;
+          TabManager.updateBadge(sid, msg.waiting && activeId !== sid);
+          updateTitle();
+          updateAppBadge();
+          if (msg.waiting) {
+            showNotification(sid, s.name || getDefaultTabName(s.cwd));
+          }
+        }
+      }
+    } catch (err) {
+      console.error('Error handling control message:', err);
+    }
+  };
+
+  ws.onerror = () => {
+    if (existingId) {
+      SessionStore.removeSession(getWindowId(), existingId);
+    }
+  };
+}
+
+/**
+ * Initialize a terminal after WebSocket connection is established
+ */
+function initTerminal(id, ws, cwd) {
+  const container = document.createElement('div');
+  container.className = 'terminal-container';
+  container.id = 'term-' + id;
+  document.getElementById('terminals').appendChild(container);
+
+  const { term, fit } = createTerminal(container);
+  setupTerminalIO(term, ws);
+
+  // Get saved name or generate default
+  const windowId = getWindowId();
+  const savedSessions = SessionStore.getWindowSessions(windowId);
+  const savedSession = savedSessions.find(s => s.id === id);
+  const name = savedSession?.name || getDefaultTabName(cwd);
+
+  // Store session in memory
+  sessions.set(id, { term, fit, ws, container, cwd, name, waitingForInput: false });
+
+  // Add tab UI with callbacks
+  const tabCallbacks = {
+    onSwitch: (sessionId) => switchTo(sessionId),
+    onClose: (sessionId) => killSession(sessionId),
+    onRename: (sessionId) => renameSession(sessionId)
+  };
+
+  TabManager.addTab(id, name, tabCallbacks);
+  switchTo(id);
+
+  // Save to storage
+  SessionStore.addSession(windowId, { id, cwd, name });
+
+  // Fit terminal after render
+  requestAnimationFrame(() => {
+    fitTerminal(term, fit, ws);
+  });
+
+  // Handle window resize
+  window.addEventListener('resize', () => {
+    if (activeId === id) {
+      fitTerminal(term, fit, ws);
+    }
+  });
+}
+
+/**
+ * Switch to a specific session tab
+ */
+function switchTo(id) {
+  // Deactivate current
+  if (activeId) {
+    const current = sessions.get(activeId);
+    if (current) {
+      current.container.classList.remove('active');
+    }
+    TabManager.setActive(null);
+  }
+
+  // Activate new
+  activeId = id;
+  const session = sessions.get(id);
+  if (session) {
+    session.container.classList.add('active');
+    TabManager.setActive(id);
+    // Clear badge when switching to this tab
+    TabManager.updateBadge(id, false);
+
+    requestAnimationFrame(() => {
+      session.fit.fit();
+      session.term.scrollToBottom();
+      session.term.focus();
+    });
+  }
+}
+
+/**
+ * Kill a session and clean up
+ */
+function killSession(id) {
+  const session = sessions.get(id);
+  if (!session) return;
+
+  session.ws.close();
+  session.term.dispose();
+  session.container.remove();
+
+  TabManager.removeTab(id);
+  sessions.delete(id);
+
+  SessionStore.removeSession(getWindowId(), id);
+
+  // Switch to next available session
+  if (activeId === id) {
+    const next = sessions.keys().next().value;
+    if (next) {
+      switchTo(next);
+    } else {
+      activeId = null;
+    }
+  }
+}
+
+/**
+ * Rename a session
+ */
+function renameSession(id) {
+  const session = sessions.get(id);
+  if (!session) return;
+
+  TabManager.promptRename(id, session.name, (newName) => {
+    const name = newName || getDefaultTabName(session.cwd);
+    session.name = name;
+    TabManager.updateLabel(id, name);
+    SessionStore.updateSession(getWindowId(), id, { name });
+  });
+}
+
+/**
+ * Prompt user and create a new session
+ */
+async function promptAndCreateSession() {
+  const alwaysUse = SessionStore.getAlwaysUse();
+  const lastCwd = SessionStore.getLastCwd();
+
+  let cwd;
+  if (alwaysUse && lastCwd) {
+    cwd = lastCwd;
+  } else {
+    cwd = await showDirectoryPicker();
+    if (cwd === null) return;
+  }
+
+  createSession(cwd, null, true);
+}
+
+/**
+ * Main initialization
+ */
+async function init() {
+  // Set up new button handler
+  document.getElementById('new-btn').addEventListener('click', () => {
+    promptAndCreateSession();
+  });
+
+  // Check if this is an existing tab BEFORE starting heartbeat (which creates window ID)
+  const isExistingTab = WindowManager.hasExistingWindowId();
+
+  // Check for legacy storage format and migrate
+  const legacySessions = SessionStore.migrateFromLegacy();
+
+  // Now get/create window ID and start heartbeat
+  const windowId = WindowManager.getWindowId();
+  WindowManager.startHeartbeat();
+
+  if (isExistingTab) {
+    // Existing tab - restore its sessions
+    const savedSessions = SessionStore.getWindowSessions(windowId);
+    if (savedSessions.length > 0) {
+      for (const { id, cwd } of savedSessions) {
+        createSession(cwd, id);
+      }
+    } else {
+      await promptAndCreateSession();
+    }
+  } else {
+    // New tab - check for orphaned windows or legacy sessions
+    if (legacySessions && legacySessions.length > 0) {
+      // Migrate legacy sessions to this window
+      for (const session of legacySessions) {
+        SessionStore.addSession(windowId, session);
+      }
+      for (const { id, cwd } of legacySessions) {
+        createSession(cwd, id);
+      }
+    } else {
+      // Check for orphaned windows
+      const orphanedWindows = await WindowManager.listOrphanedWindows();
+
+      if (orphanedWindows.length > 0) {
+        const result = await showWindowRestoreModal(orphanedWindows);
+
+        if (result.action === 'restore') {
+          // Claim the selected window's sessions
+          const sessions = WindowManager.claimWindow(result.window.windowId);
+          for (const { id, cwd } of sessions) {
+            createSession(cwd, id);
+          }
+        } else {
+          // Start fresh
+          await promptAndCreateSession();
+        }
+      } else {
+        // No orphaned windows - start fresh
+        await promptAndCreateSession();
+      }
+    }
+  }
+
+  // Update window activity periodically
+  setInterval(() => {
+    SessionStore.touchWindow(windowId);
+  }, 60000);
+}
+
+// Start the app
+init();

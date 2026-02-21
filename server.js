@@ -7,6 +7,11 @@ const path = require('path');
 const os = require('os');
 
 const PORT = process.env.PORT || 3000;
+
+function log(...args) {
+  const ts = new Date().toISOString().slice(11, 23);
+  console.log(`[${ts}]`, ...args);
+}
 const STATE_FILE = path.join(os.homedir(), '.deepsteve', 'state.json');
 const app = express();
 app.use(express.static('public'));
@@ -16,7 +21,7 @@ let savedState = {};
 try {
   if (fs.existsSync(STATE_FILE)) {
     savedState = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
-    console.log(`Loaded ${Object.keys(savedState).length} saved sessions from state file`);
+    log(`Loaded ${Object.keys(savedState).length} saved sessions from state file`);
   }
 } catch (e) {
   console.error('Failed to load state file:', e.message);
@@ -33,20 +38,20 @@ function saveState() {
   try {
     fs.mkdirSync(path.dirname(STATE_FILE), { recursive: true });
     fs.writeFileSync(STATE_FILE, JSON.stringify(merged, null, 2));
-    console.log(`Saved ${Object.keys(merged).length} sessions to state file`);
+    log(`Saved ${Object.keys(merged).length} sessions to state file`);
   } catch (e) {
     console.error('Failed to save state:', e.message);
   }
 }
 
 process.on('SIGTERM', () => {
-  console.log('Received SIGTERM, saving state...');
+  log('Received SIGTERM, saving state...');
   saveState();
   process.exit(0);
 });
 
 process.on('SIGINT', () => {
-  console.log('Received SIGINT, saving state...');
+  log('Received SIGINT, saving state...');
   saveState();
   process.exit(0);
 });
@@ -112,16 +117,30 @@ wss.on('connection', (ws, req) => {
   if (cwd.startsWith('~')) cwd = path.join(os.homedir(), cwd.slice(1));
   const createNew = url.searchParams.get('new') === '1';
 
+  log(`[WS] Connection: id=${id}, cwd=${cwd}, createNew=${createNew}`);
+  log(`[WS] Active shells: ${[...shells.keys()].join(', ') || 'none'}`);
+  log(`[WS] Saved state: ${Object.keys(savedState).join(', ') || 'none'}`);
+
   // If client requested a specific ID that doesn't exist, check if we can restore it
   if (id && !shells.has(id) && !createNew) {
     if (savedState[id]) {
       // Restore this session with --continue flag
       const restored = savedState[id];
       cwd = restored.cwd;
-      console.log(`Restoring session ${id} in ${cwd}`);
+      log(`Restoring session ${id} in ${cwd}`);
       const shell = pty.spawn('claude', ['-c'], { name: 'xterm-256color', cols: 120, rows: 40, cwd, env: process.env });
-      shells.set(id, { shell, clients: new Set(), cwd, restored: true });
-      shell.onData((data) => { const entry = shells.get(id); if (entry) entry.clients.forEach((c) => c.send(data)); });
+      shells.set(id, { shell, clients: new Set(), cwd, restored: true, waitingForInput: false });
+      shell.onData((data) => {
+        const entry = shells.get(id);
+        if (!entry) return;
+        entry.clients.forEach((c) => c.send(data));
+        // Detect BEL character (terminal bell) - Claude waiting for input
+        if (data.includes('\x07') && !entry.waitingForInput) {
+          entry.waitingForInput = true;
+          const stateMsg = JSON.stringify({ type: 'state', waiting: true });
+          entry.clients.forEach((c) => c.send(stateMsg));
+        }
+      });
       shell.onExit(() => shells.delete(id));
       delete savedState[id];
     } else {
@@ -132,10 +151,22 @@ wss.on('connection', (ws, req) => {
   }
 
   if (!id || !shells.has(id)) {
+    const oldId = id;
     id = randomUUID().slice(0, 8);
+    log(`[WS] Creating NEW shell: oldId=${oldId}, newId=${id}, cwd=${cwd}`);
     const shell = pty.spawn('claude', [], { name: 'xterm-256color', cols: 120, rows: 40, cwd, env: process.env });
-    shells.set(id, { shell, clients: new Set(), cwd });
-    shell.onData((data) => { const entry = shells.get(id); if (entry) entry.clients.forEach((c) => c.send(data)); });
+    shells.set(id, { shell, clients: new Set(), cwd, waitingForInput: false });
+    shell.onData((data) => {
+      const entry = shells.get(id);
+      if (!entry) return;
+      entry.clients.forEach((c) => c.send(data));
+      // Detect BEL character (terminal bell) - Claude waiting for input
+      if (data.includes('\x07') && !entry.waitingForInput) {
+        entry.waitingForInput = true;
+        const stateMsg = JSON.stringify({ type: 'state', waiting: true });
+        entry.clients.forEach((c) => c.send(stateMsg));
+      }
+    });
     shell.onExit(() => shells.delete(id));
   }
 
@@ -146,11 +177,18 @@ wss.on('connection', (ws, req) => {
     entry.killTimer = null;
   }
   entry.clients.add(ws);
+  log(`[WS] Sending session response: id=${id}, restored=${entry.restored || false}`);
   ws.send(JSON.stringify({ type: 'session', id, restored: entry.restored || false, cwd: entry.cwd }));
 
   ws.on('message', (msg) => {
     const str = msg.toString();
     try { const parsed = JSON.parse(str); if (parsed.type === 'resize') { entry.shell.resize(parsed.cols, parsed.rows); return; } } catch {}
+    // User sent input - no longer waiting
+    if (entry.waitingForInput) {
+      entry.waitingForInput = false;
+      const stateMsg = JSON.stringify({ type: 'state', waiting: false });
+      entry.clients.forEach((c) => c.send(stateMsg));
+    }
     entry.shell.write(str);
   });
 
