@@ -1,15 +1,128 @@
 * { margin: 0; box-sizing: border-box; }
 html, body { overscroll-behavior: none; }  /* Prevent swipe back/forward gestures */
-body { background: #0d1117; color: #c9d1d9; font-family: system-ui; display: flex; flex-direction: column; height: 100vh; overflow: hidden; touch-action: none; }
+body { background: #0d1117; color: #c9d1d9; font-family: system-ui; height: 100vh; overflow: hidden; touch-action: none; }
 
-/* Tabs */
+/* App container - flexbox for layout switching */
+#app-container { display: flex; flex-direction: column; height: 100vh; }
+
+/* Tabs - horizontal layout (default) */
 #tabs { display: flex; gap: 2px; padding: 4px 8px; background: #161b22; align-items: center; flex-shrink: 0; }
+#tabs-list { display: contents; }
+#tabs-spacer { flex: 1; }
+
+/* Layout toggle button */
+.layout-btn { padding: 4px 8px; background: #21262d; border: 1px solid #30363d; color: #8b949e; border-radius: 4px; cursor: pointer; font-size: 14px; margin-right: 8px; line-height: 1; }
+.layout-btn:hover { background: #30363d; color: #c9d1d9; }
+
+/* Sidebar resizer - hidden in horizontal mode */
+#sidebar-resizer { display: none; }
+
+/* Tab styling */
 .tab { padding: 6px 12px; background: #21262d; border: 1px solid #30363d; border-radius: 6px 6px 0 0; cursor: pointer; color: #8b949e; font-size: 13px; display: flex; align-items: center; gap: 6px; }
 .tab.active { background: #0d1117; color: #f0f6fc; border-bottom-color: #0d1117; }
 .tab .close { opacity: 0.5; cursor: pointer; font-size: 11px; }
 .tab .close:hover { opacity: 1; color: #f85149; }
 .tab .badge { width: 8px; height: 8px; background: #58a6ff; border-radius: 50%; display: none; flex-shrink: 0; }
 .tab .badge.visible { display: inline-block; }
+.tab .tab-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Vertical layout mode */
+#app-container.vertical-layout { flex-direction: row; }
+
+#app-container.vertical-layout #tabs {
+  flex-direction: column;
+  align-items: stretch;
+  padding: 8px;
+  gap: 4px;
+  height: 100vh;
+  flex-shrink: 0;
+  border-right: 1px solid #30363d;
+}
+
+#app-container.vertical-layout #tabs-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 1;
+  overflow-y: auto;
+  min-height: 0;
+}
+
+#app-container.vertical-layout #tabs-spacer { display: none; }
+
+#app-container.vertical-layout .layout-btn { margin-right: 0; margin-bottom: 8px; }
+
+#app-container.vertical-layout .tab {
+  border-radius: 4px;
+  width: 100%;
+  position: relative;
+  padding-right: 8px;
+}
+
+#app-container.vertical-layout .tab .close {
+  position: absolute;
+  right: 4px;
+  top: 50%;
+  transform: translateY(-50%);
+  opacity: 0;
+  background: #21262d;
+  padding: 2px 4px;
+  border-radius: 3px;
+}
+
+#app-container.vertical-layout .tab:hover .close {
+  opacity: 0.7;
+}
+
+#app-container.vertical-layout .tab .close:hover {
+  opacity: 1;
+}
+
+#app-container.vertical-layout #new-btn {
+  width: 100%;
+  margin: 8px 0 0 0;
+}
+
+#app-container.vertical-layout .dropdown {
+  width: 100%;
+  margin-top: 4px;
+}
+
+#app-container.vertical-layout .dropdown-btn {
+  width: 100%;
+}
+
+#app-container.vertical-layout #settings-btn {
+  width: 100%;
+  margin: 4px 0 0 0;
+}
+
+#app-container.vertical-layout .dropdown-menu {
+  left: 100%;
+  right: auto;
+  top: 0;
+  margin-top: 0;
+  margin-left: 4px;
+}
+
+#app-container.vertical-layout #terminals {
+  flex: 1;
+  min-width: 0;
+}
+
+/* Sidebar resizer for vertical layout */
+#app-container.vertical-layout #sidebar-resizer {
+  display: block;
+  width: 4px;
+  background: #30363d;
+  cursor: col-resize;
+  flex-shrink: 0;
+  transition: background 0.15s;
+}
+
+#app-container.vertical-layout #sidebar-resizer:hover {
+  background: #58a6ff;
+}
 
 /* Sessions Dropdown */
 .dropdown { position: relative; }

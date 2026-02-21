@@ -101,7 +101,7 @@ export const TabManager = {
    */
   addTab(sessionId, name, callbacks) {
     const tab = this.createTab(sessionId, name, callbacks);
-    document.getElementById('new-btn').before(tab);
+    document.getElementById('tabs-list').appendChild(tab);
     return tab;
   },
 
