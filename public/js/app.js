@@ -128,6 +128,66 @@ async function refreshSessionsDropdown() {
   }
 }
 
+// Settings modal
+const settingsBtn = document.getElementById('settings-btn');
+
+settingsBtn?.addEventListener('click', async () => {
+  const settings = await fetch('/api/settings').then(r => r.json());
+  const currentProfile = settings.shellProfile || '~/.zshrc';
+
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.innerHTML = `
+    <div class="modal">
+      <h2>Settings</h2>
+      <p style="font-size: 13px; color: #8b949e; margin-bottom: 12px;">
+        Shell profile to source before running Claude:
+      </p>
+      <div class="settings-option">
+        <input type="radio" name="profile" id="profile-zshrc" value="~/.zshrc" ${currentProfile === '~/.zshrc' ? 'checked' : ''}>
+        <label for="profile-zshrc">~/.zshrc (zsh)</label>
+      </div>
+      <div class="settings-option">
+        <input type="radio" name="profile" id="profile-bashrc" value="~/.bashrc" ${currentProfile === '~/.bashrc' ? 'checked' : ''}>
+        <label for="profile-bashrc">~/.bashrc (bash)</label>
+      </div>
+      <div class="settings-option">
+        <input type="radio" name="profile" id="profile-custom" value="custom" ${currentProfile !== '~/.zshrc' && currentProfile !== '~/.bashrc' ? 'checked' : ''}>
+        <label for="profile-custom">Custom</label>
+      </div>
+      <div class="settings-custom">
+        <input type="text" id="custom-profile" placeholder="~/.config/myprofile" value="${currentProfile !== '~/.zshrc' && currentProfile !== '~/.bashrc' ? currentProfile : ''}">
+      </div>
+      <div class="modal-buttons" style="margin-top: 16px;">
+        <button class="btn-secondary" id="settings-cancel">Cancel</button>
+        <button class="btn-primary" id="settings-save">Save</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+
+  const customInput = overlay.querySelector('#custom-profile');
+  overlay.querySelectorAll('input[name="profile"]').forEach(radio => {
+    radio.addEventListener('change', () => {
+      customInput.disabled = radio.value !== 'custom';
+    });
+  });
+  customInput.disabled = overlay.querySelector('#profile-custom:checked') === null;
+
+  overlay.querySelector('#settings-cancel').onclick = () => overlay.remove();
+  overlay.querySelector('#settings-save').onclick = async () => {
+    const selected = overlay.querySelector('input[name="profile"]:checked').value;
+    const shellProfile = selected === 'custom' ? customInput.value : selected;
+    await fetch('/api/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ shellProfile })
+    });
+    overlay.remove();
+  };
+  overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
+});
+
 function updateAppBadge() {
   if (!('setAppBadge' in navigator)) return;
   const count = [...sessions.values()].filter(s => s.waitingForInput).length;
@@ -187,6 +247,24 @@ function createSession(cwd, existingId = null, isNew = false) {
   ws.onerror = () => {
     if (existingId) {
       SessionStore.removeSession(getWindowId(), existingId);
+    }
+  };
+
+  ws.onreconnecting = () => {
+    // Find session by websocket and add reconnecting state
+    const entry = [...sessions.entries()].find(([, s]) => s.ws === ws);
+    if (entry) {
+      const [, session] = entry;
+      session.container.classList.add('reconnecting');
+    }
+  };
+
+  ws.onreconnected = () => {
+    // Remove reconnecting state
+    const entry = [...sessions.entries()].find(([, s]) => s.ws === ws);
+    if (entry) {
+      const [, session] = entry;
+      session.container.classList.remove('reconnecting');
     }
   };
 }

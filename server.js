@@ -13,8 +13,49 @@ function log(...args) {
   console.log(`[${ts}]`, ...args);
 }
 const STATE_FILE = path.join(os.homedir(), '.deepsteve', 'state.json');
+const SETTINGS_FILE = path.join(os.homedir(), '.deepsteve', 'settings.json');
 const app = express();
 app.use(express.static('public'));
+app.use(express.json());
+
+// Load settings
+let settings = { shellProfile: '~/.zshrc' };
+try {
+  if (fs.existsSync(SETTINGS_FILE)) {
+    settings = { ...settings, ...JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8')) };
+    log(`Loaded settings: shellProfile=${settings.shellProfile}`);
+  }
+} catch (e) {
+  console.error('Failed to load settings:', e.message);
+}
+
+function saveSettings() {
+  try {
+    fs.mkdirSync(path.dirname(SETTINGS_FILE), { recursive: true });
+    fs.writeFileSync(SETTINGS_FILE, JSON.stringify(settings, null, 2));
+  } catch (e) {
+    console.error('Failed to save settings:', e.message);
+  }
+}
+
+function getShellProfilePath() {
+  let p = settings.shellProfile || '~/.zshrc';
+  if (p.startsWith('~')) p = path.join(os.homedir(), p.slice(1));
+  return p;
+}
+
+// Spawn claude with full login shell environment (like iTerm does)
+function spawnClaude(args, cwd) {
+  // Use login shell (-l) which properly sources /etc/zprofile, ~/.zprofile, ~/.zshrc
+  const shellCmd = `claude ${args.join(' ')}`;
+  return pty.spawn('zsh', ['-l', '-c', shellCmd], {
+    name: 'xterm-256color',
+    cols: 120,
+    rows: 40,
+    cwd,
+    env: process.env
+  });
+}
 
 // Load saved state from previous run (shells that can be resumed)
 let savedState = {};
@@ -57,6 +98,18 @@ process.on('SIGINT', () => {
 });
 
 app.get('/api/home', (req, res) => res.json({ home: os.homedir() }));
+
+app.get('/api/settings', (req, res) => res.json(settings));
+
+app.post('/api/settings', (req, res) => {
+  const { shellProfile } = req.body;
+  if (shellProfile !== undefined) {
+    settings.shellProfile = shellProfile;
+    saveSettings();
+    log(`Settings updated: shellProfile=${shellProfile}`);
+  }
+  res.json(settings);
+});
 
 app.get('/api/shells', (req, res) => {
   const active = [...shells.entries()].map(([id, entry]) => ({ id, pid: entry.shell.pid, cwd: entry.cwd, status: 'active' }));
@@ -152,7 +205,7 @@ wss.on('connection', (ws, req) => {
       const restored = savedState[id];
       cwd = restored.cwd;
       log(`Restoring session ${id} in ${cwd}`);
-      const shell = pty.spawn('claude', ['-c'], { name: 'xterm-256color', cols: 120, rows: 40, cwd, env: process.env });
+      const shell = spawnClaude(['-c'], cwd);
       shells.set(id, { shell, clients: new Set(), cwd, restored: true, waitingForInput: false });
       shell.onData((data) => {
         const entry = shells.get(id);
@@ -179,7 +232,7 @@ wss.on('connection', (ws, req) => {
     const oldId = id;
     id = randomUUID().slice(0, 8);
     log(`[WS] Creating NEW shell: oldId=${oldId}, newId=${id}, cwd=${cwd}`);
-    const shell = pty.spawn('claude', [], { name: 'xterm-256color', cols: 120, rows: 40, cwd, env: process.env });
+    const shell = spawnClaude([], cwd);
     shells.set(id, { shell, clients: new Set(), cwd, waitingForInput: false });
     shell.onData((data) => {
       const entry = shells.get(id);
