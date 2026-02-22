@@ -57,6 +57,46 @@ function spawnClaude(args, cwd) {
   });
 }
 
+// Gracefully kill a shell - send Ctrl+C first so Claude can save state
+function killShell(entry, id) {
+  if (entry.killed) return;
+  entry.killed = true;
+
+  const pid = entry.shell.pid;
+  log(`Killing shell ${id} (pid=${pid})`);
+
+  // First send Ctrl+C to let Claude exit gracefully and save conversation state
+  try {
+    entry.shell.write('\x03'); // Ctrl+C
+  } catch {}
+
+  // After 3 seconds, escalate to SIGTERM
+  setTimeout(() => {
+    try {
+      process.kill(pid, 0); // Check if still alive
+      log(`Shell ${id} still alive after Ctrl+C, sending SIGTERM`);
+      try {
+        process.kill(-pid, 'SIGTERM');
+      } catch {
+        try { entry.shell.kill('SIGTERM'); } catch {}
+      }
+    } catch { return; } // Already dead
+
+    // After 2 more seconds, escalate to SIGKILL
+    setTimeout(() => {
+      try {
+        process.kill(pid, 0);
+        log(`Shell ${id} still alive, sending SIGKILL`);
+        try {
+          process.kill(-pid, 'SIGKILL');
+        } catch {
+          try { entry.shell.kill('SIGKILL'); } catch {}
+        }
+      } catch {}
+    }, 2000);
+  }, 3000);
+}
+
 // Load saved state from previous run (shells that can be resumed)
 let savedState = {};
 try {
@@ -72,7 +112,7 @@ try {
 function saveState() {
   const state = {};
   for (const [id, entry] of shells) {
-    state[id] = { cwd: entry.cwd };
+    state[id] = { cwd: entry.cwd, claudeSessionId: entry.claudeSessionId };
   }
   // Merge with any saved state that wasn't reconnected yet
   const merged = { ...savedState, ...state };
@@ -85,17 +125,17 @@ function saveState() {
   }
 }
 
-process.on('SIGTERM', () => {
-  log('Received SIGTERM, saving state...');
+function shutdown(signal) {
+  log(`Received ${signal}, saving state...`);
   saveState();
+  // Don't kill processes on graceful shutdown - just exit
+  // Processes will get SIGHUP when PTY closes and can save their state
+  log('Shutdown complete');
   process.exit(0);
-});
+}
 
-process.on('SIGINT', () => {
-  log('Received SIGINT, saving state...');
-  saveState();
-  process.exit(0);
-});
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
 
 app.get('/api/home', (req, res) => res.json({ home: os.homedir() }));
 
@@ -121,7 +161,7 @@ app.post('/api/shells/killall', (req, res) => {
   const killed = [];
   for (const [id, entry] of shells) {
     killed.push({ id, pid: entry.shell.pid });
-    entry.shell.kill();
+    killShell(entry, id);
     shells.delete(id);
   }
   res.json({ killed });
@@ -133,7 +173,7 @@ app.delete('/api/shells/:id', (req, res) => {
   // Check active shells
   if (shells.has(id)) {
     const entry = shells.get(id);
-    entry.shell.kill();
+    killShell(entry, id);
     shells.delete(id);
     log(`Killed active shell ${id}`);
     saveState();
@@ -201,12 +241,15 @@ wss.on('connection', (ws, req) => {
   // If client requested a specific ID that doesn't exist, check if we can restore it
   if (id && !shells.has(id) && !createNew) {
     if (savedState[id]) {
-      // Restore this session with --continue flag
+      // Restore this session with --resume flag using saved Claude session ID
       const restored = savedState[id];
       cwd = restored.cwd;
-      log(`Restoring session ${id} in ${cwd}`);
-      const shell = spawnClaude(['-c'], cwd);
-      shells.set(id, { shell, clients: new Set(), cwd, restored: true, waitingForInput: false });
+      const claudeSessionId = restored.claudeSessionId;
+      log(`Restoring session ${id} in ${cwd} (claude session: ${claudeSessionId})`);
+      const shell = claudeSessionId
+        ? spawnClaude(['--resume', claudeSessionId], cwd)
+        : spawnClaude(['-c'], cwd);  // fallback for old sessions without claudeSessionId
+      shells.set(id, { shell, clients: new Set(), cwd, claudeSessionId, restored: true, waitingForInput: false });
       shell.onData((data) => {
         const entry = shells.get(id);
         if (!entry) return;
@@ -231,9 +274,10 @@ wss.on('connection', (ws, req) => {
   if (!id || !shells.has(id)) {
     const oldId = id;
     id = randomUUID().slice(0, 8);
-    log(`[WS] Creating NEW shell: oldId=${oldId}, newId=${id}, cwd=${cwd}`);
-    const shell = spawnClaude([], cwd);
-    shells.set(id, { shell, clients: new Set(), cwd, waitingForInput: false });
+    const claudeSessionId = randomUUID();  // Full UUID for Claude's --session-id
+    log(`[WS] Creating NEW shell: oldId=${oldId}, newId=${id}, claudeSession=${claudeSessionId}, cwd=${cwd}`);
+    const shell = spawnClaude(['--session-id', claudeSessionId], cwd);
+    shells.set(id, { shell, clients: new Set(), cwd, claudeSessionId, waitingForInput: false });
     shell.onData((data) => {
       const entry = shells.get(id);
       if (!entry) return;
@@ -261,16 +305,16 @@ wss.on('connection', (ws, req) => {
   log(`[WS] Sending session response: id=${id}, restored=${entry.restored || false}, reconnect=${isReconnect}`);
   ws.send(JSON.stringify({ type: 'session', id, restored: entry.restored || false, cwd: entry.cwd }));
 
-  // Send Ctrl+L to redraw terminal on reconnect (after resize happens)
-  if (isReconnect) {
-    setTimeout(() => {
-      entry.shell.write('\x0c'); // Ctrl+L - redraw
-    }, 100);
-  }
+  // Client will request redraw after terminal is ready
+  // by sending a 'redraw' message
 
   ws.on('message', (msg) => {
     const str = msg.toString();
-    try { const parsed = JSON.parse(str); if (parsed.type === 'resize') { entry.shell.resize(parsed.cols, parsed.rows); return; } } catch {}
+    try {
+      const parsed = JSON.parse(str);
+      if (parsed.type === 'resize') { entry.shell.resize(parsed.cols, parsed.rows); return; }
+      if (parsed.type === 'redraw') { entry.shell.write('\x0c'); return; } // Ctrl+L
+    } catch {}
     // User sent input - no longer waiting
     if (entry.waitingForInput) {
       entry.waitingForInput = false;
@@ -286,7 +330,7 @@ wss.on('connection', (ws, req) => {
       // Grace period to allow reconnect on refresh
       entry.killTimer = setTimeout(() => {
         if (entry.clients.size === 0) {
-          entry.shell.kill();
+          killShell(entry, id);
           shells.delete(id);
         }
       }, 30000);

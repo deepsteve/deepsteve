@@ -265,11 +265,18 @@ function createSession(cwd, existingId = null, isNew = false) {
   };
 
   ws.onreconnected = () => {
-    // Remove reconnecting state - don't clear terminal, preserve scrollback
+    // Remove reconnecting state and refresh terminal
     const entry = [...sessions.entries()].find(([, s]) => s.ws === ws);
     if (entry) {
       const [, session] = entry;
       session.container.classList.remove('reconnecting');
+      // Refit and request redraw from server
+      requestAnimationFrame(() => {
+        session.fit.fit();
+        const { cols, rows } = session.term;
+        ws.send(JSON.stringify({ type: 'resize', cols, rows }));
+        ws.send(JSON.stringify({ type: 'redraw' }));
+      });
     }
   };
 }
@@ -427,6 +434,9 @@ async function init() {
 
   // Check if this is an existing tab BEFORE starting heartbeat (which creates window ID)
   const isExistingTab = WindowManager.hasExistingWindowId();
+  console.log('[init] isExistingTab:', isExistingTab);
+  console.log('[init] sessionStorage windowId:', sessionStorage.getItem('deepsteve-window-id'));
+  console.log('[init] localStorage:', localStorage.getItem('deepsteve'));
 
   // Check for legacy storage format and migrate
   const legacySessions = SessionStore.migrateFromLegacy();
@@ -438,11 +448,14 @@ async function init() {
   if (isExistingTab) {
     // Existing tab - restore its sessions
     const savedSessions = SessionStore.getWindowSessions(windowId);
+    console.log('[init] windowId:', windowId, 'savedSessions:', savedSessions);
     if (savedSessions.length > 0) {
       for (const { id, cwd } of savedSessions) {
+        console.log('[init] Restoring session:', id, cwd);
         createSession(cwd, id);
       }
     } else {
+      console.log('[init] No saved sessions, prompting for new');
       await promptAndCreateSession();
     }
   } else {
