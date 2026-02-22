@@ -206,8 +206,8 @@ function getWindowId() {
 /**
  * Create a new terminal session
  */
-function createSession(cwd, existingId = null, isNew = false) {
-  const ws = createWebSocket({ id: existingId, cwd, isNew });
+function createSession(cwd, existingId = null, isNew = false, opts = {}) {
+  const ws = createWebSocket({ id: existingId, cwd, isNew, worktree: opts.worktree });
 
   ws.onmessage = (e) => {
     // Try to parse as JSON control message
@@ -403,20 +403,116 @@ function renameSession(id) {
 }
 
 /**
- * Prompt user and create a new session
+ * Quick new session in same repo as active session
  */
-async function promptAndCreateSession() {
-  const alwaysUse = SessionStore.getAlwaysUse();
-  const lastCwd = SessionStore.getLastCwd();
+function quickNewSession() {
+  const active = activeId && sessions.get(activeId);
+  const cwd = active?.cwd || SessionStore.getLastCwd() || '~';
+  createSession(cwd, null, true);
+}
 
-  let cwd;
-  if (alwaysUse && lastCwd) {
-    cwd = lastCwd;
-  } else {
-    cwd = await showDirectoryPicker();
-    if (cwd === null) return;
-  }
+/**
+ * Show long-press menu for new tab options
+ */
+function showNewTabMenu(e) {
+  // Remove any existing menu
+  document.querySelector('.new-tab-menu')?.remove();
 
+  const menu = document.createElement('div');
+  menu.className = 'new-tab-menu context-menu';
+  menu.innerHTML = `
+    <div class="context-menu-item" data-action="worktree">New worktree...</div>
+    <div class="context-menu-item" data-action="repo">Change repo...</div>
+  `;
+
+  const btn = e.target.closest('#new-btn');
+  const rect = btn.getBoundingClientRect();
+  menu.style.left = rect.left + 'px';
+  menu.style.top = (rect.bottom + 4) + 'px';
+
+  document.body.appendChild(menu);
+
+  // Handle selection via mouseup (drag-release) or click
+  const selectItem = async (ev) => {
+    const item = ev.target.closest('.context-menu-item');
+    if (!item) return;
+    const action = item.dataset.action;
+    menu.remove();
+    cleanup();
+    if (action === 'worktree') {
+      await promptWorktreeSession();
+    } else if (action === 'repo') {
+      await promptRepoSession();
+    }
+  };
+
+  menu.addEventListener('mouseup', selectItem);
+  menu.addEventListener('click', selectItem);
+
+  // Close on click outside
+  const cleanup = () => {
+    document.removeEventListener('mousedown', closeHandler);
+  };
+  const closeHandler = (ev) => {
+    if (!menu.contains(ev.target) && ev.target !== e.target) {
+      menu.remove();
+      cleanup();
+    }
+  };
+  setTimeout(() => document.addEventListener('mousedown', closeHandler), 0);
+}
+
+/**
+ * Prompt for worktree name and create session
+ */
+async function promptWorktreeSession() {
+  const active = activeId && sessions.get(activeId);
+  const cwd = active?.cwd || SessionStore.getLastCwd();
+  if (!cwd) return promptRepoSession();
+
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.innerHTML = `
+    <div class="modal">
+      <h2>New worktree</h2>
+      <p style="font-size: 13px; color: #8b949e; margin-bottom: 12px;">
+        Creates a git worktree and opens Claude in it.
+      </p>
+      <input type="text" id="worktree-name" placeholder="e.g. feature-auth, bugfix-123" style="width: 100%; box-sizing: border-box;">
+      <div class="modal-buttons" style="margin-top: 16px;">
+        <button class="btn-secondary" id="wt-cancel">Cancel</button>
+        <button class="btn-primary" id="wt-create">Create</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+
+  const input = overlay.querySelector('#worktree-name');
+  input.focus();
+
+  return new Promise((resolve) => {
+    const submit = () => {
+      const name = input.value.trim();
+      overlay.remove();
+      if (name) {
+        createSession(cwd, null, true, { worktree: name });
+      }
+      resolve();
+    };
+
+    overlay.querySelector('#wt-cancel').onclick = () => { overlay.remove(); resolve(); };
+    overlay.querySelector('#wt-create').onclick = submit;
+    input.addEventListener('keydown', (e) => { if (e.key === 'Enter') submit(); });
+    overlay.onclick = (e) => { if (e.target === overlay) { overlay.remove(); resolve(); } };
+  });
+}
+
+/**
+ * Prompt for directory and create session
+ */
+async function promptRepoSession() {
+  const cwd = await showDirectoryPicker();
+  if (cwd === null) return;
   createSession(cwd, null, true);
 }
 
@@ -427,9 +523,26 @@ async function init() {
   // Initialize layout manager
   LayoutManager.init();
 
-  // Set up new button handler
-  document.getElementById('new-btn').addEventListener('click', () => {
-    promptAndCreateSession();
+  // Set up new button handler with long-press for menu
+  const newBtn = document.getElementById('new-btn');
+  let holdTimer = null;
+  let holdMenuOpen = false;
+
+  newBtn.addEventListener('mousedown', (e) => {
+    holdMenuOpen = false;
+    holdTimer = setTimeout(() => {
+      holdMenuOpen = true;
+      showNewTabMenu(e);
+    }, 500);
+  });
+
+  newBtn.addEventListener('mouseup', () => {
+    clearTimeout(holdTimer);
+    if (!holdMenuOpen) quickNewSession();
+  });
+
+  newBtn.addEventListener('mouseleave', () => {
+    if (!holdMenuOpen) clearTimeout(holdTimer);
   });
 
   // Check if this is an existing tab BEFORE starting heartbeat (which creates window ID)
@@ -456,7 +569,7 @@ async function init() {
       }
     } else {
       console.log('[init] No saved sessions, prompting for new');
-      await promptAndCreateSession();
+      await promptRepoSession();
     }
   } else {
     // New tab - check for orphaned windows or legacy sessions
@@ -483,11 +596,11 @@ async function init() {
           }
         } else {
           // Start fresh
-          await promptAndCreateSession();
+          await promptRepoSession();
         }
       } else {
         // No orphaned windows - start fresh
-        await promptAndCreateSession();
+        await promptRepoSession();
       }
     }
   }

@@ -233,8 +233,9 @@ wss.on('connection', (ws, req) => {
   let cwd = url.searchParams.get('cwd') || process.env.HOME;
   if (cwd.startsWith('~')) cwd = path.join(os.homedir(), cwd.slice(1));
   const createNew = url.searchParams.get('new') === '1';
+  const worktree = url.searchParams.get('worktree');
 
-  log(`[WS] Connection: id=${id}, cwd=${cwd}, createNew=${createNew}`);
+  log(`[WS] Connection: id=${id}, cwd=${cwd}, createNew=${createNew}, worktree=${worktree}`);
   log(`[WS] Active shells: ${[...shells.keys()].join(', ') || 'none'}`);
   log(`[WS] Saved state: ${Object.keys(savedState).join(', ') || 'none'}`);
 
@@ -249,6 +250,7 @@ wss.on('connection', (ws, req) => {
       const shell = claudeSessionId
         ? spawnClaude(['--resume', claudeSessionId], cwd)
         : spawnClaude(['-c'], cwd);  // fallback for old sessions without claudeSessionId
+      const startTime = Date.now();
       shells.set(id, { shell, clients: new Set(), cwd, claudeSessionId, restored: true, waitingForInput: false });
       shell.onData((data) => {
         const entry = shells.get(id);
@@ -261,7 +263,36 @@ wss.on('connection', (ws, req) => {
           entry.clients.forEach((c) => c.send(stateMsg));
         }
       });
-      shell.onExit(() => { shells.delete(id); saveState(); });
+      shell.onExit(() => {
+        const elapsed = Date.now() - startTime;
+        if (elapsed < 5000 && claudeSessionId) {
+          // --resume failed quickly, fall back to fresh session with -c
+          log(`Session ${id} exited after ${elapsed}ms, --resume likely failed. Falling back to -c`);
+          const newClaudeSessionId = randomUUID();
+          const fallbackShell = spawnClaude(['--session-id', newClaudeSessionId, '-c'], cwd);
+          const entry = shells.get(id);
+          if (entry) {
+            entry.shell = fallbackShell;
+            entry.claudeSessionId = newClaudeSessionId;
+            entry.killed = false;
+            fallbackShell.onData((data) => {
+              const e = shells.get(id);
+              if (!e) return;
+              e.clients.forEach((c) => c.send(data));
+              if (data.includes('\x07') && !e.waitingForInput) {
+                e.waitingForInput = true;
+                const stateMsg = JSON.stringify({ type: 'state', waiting: true });
+                e.clients.forEach((c) => c.send(stateMsg));
+              }
+            });
+            fallbackShell.onExit(() => { shells.delete(id); saveState(); });
+            saveState();
+          }
+        } else {
+          shells.delete(id);
+          saveState();
+        }
+      });
       delete savedState[id];
       saveState();
     } else {
@@ -275,8 +306,10 @@ wss.on('connection', (ws, req) => {
     const oldId = id;
     id = randomUUID().slice(0, 8);
     const claudeSessionId = randomUUID();  // Full UUID for Claude's --session-id
-    log(`[WS] Creating NEW shell: oldId=${oldId}, newId=${id}, claudeSession=${claudeSessionId}, cwd=${cwd}`);
-    const shell = spawnClaude(['--session-id', claudeSessionId], cwd);
+    const claudeArgs = ['--session-id', claudeSessionId];
+    if (worktree) claudeArgs.push('--worktree', worktree);
+    log(`[WS] Creating NEW shell: oldId=${oldId}, newId=${id}, claudeSession=${claudeSessionId}, worktree=${worktree || 'none'}, cwd=${cwd}`);
+    const shell = spawnClaude(claudeArgs, cwd);
     shells.set(id, { shell, clients: new Set(), cwd, claudeSessionId, waitingForInput: false });
     shell.onData((data) => {
       const entry = shells.get(id);

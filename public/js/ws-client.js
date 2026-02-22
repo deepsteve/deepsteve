@@ -8,6 +8,7 @@ export function createWebSocket(options = {}) {
   if (options.id) params.set('id', options.id);
   if (options.cwd) params.set('cwd', options.cwd);
   if (options.isNew) params.set('new', '1');
+  if (options.worktree) params.set('worktree', options.worktree);
 
   const url = 'ws://' + location.host + '?' + params;
   let ws = new WebSocket(url);
