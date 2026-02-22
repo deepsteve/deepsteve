@@ -18,5 +18,5 @@ cp server.js ~/.deepsteve/
 cp -r public/* ~/.deepsteve/public/
 
 launchctl unload ~/Library/LaunchAgents/com.deepsteve.plist 2>/dev/null
-sleep 1
+sleep 3
 launchctl load ~/Library/LaunchAgents/com.deepsteve.plist
