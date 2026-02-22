@@ -58,6 +58,44 @@ function spawnClaude(args, cwd, { cols = 120, rows = 40 } = {}) {
   });
 }
 
+/**
+ * Write a prompt to a Claude PTY as if a user typed it and pressed Enter.
+ *
+ * Ink's input-parser treats \r inside a text chunk as pasted text — it only
+ * recognizes Enter when \r arrives as its own stdin read. So we write the
+ * text first, then send \r in a separate write after a short delay to ensure
+ * they land in different readable events.
+ */
+function submitToShell(shell, text) {
+  shell.write(text);
+  setTimeout(() => shell.write('\r'), 1000);
+}
+
+/**
+ * Wire up a shell's onData handler: broadcast output to WebSocket clients,
+ * detect BEL (Claude waiting for input), and auto-submit initialPrompt.
+ */
+function wireShellOutput(id) {
+  const entry = shells.get(id);
+  if (!entry) return;
+  entry.shell.onData((data) => {
+    const e = shells.get(id);
+    if (!e) return;
+    e.clients.forEach((c) => c.send(data));
+    if (data.includes('\x07') && !e.waitingForInput) {
+      e.waitingForInput = true;
+      const stateMsg = JSON.stringify({ type: 'state', waiting: true });
+      e.clients.forEach((c) => c.send(stateMsg));
+      if (e.initialPrompt) {
+        const prompt = e.initialPrompt;
+        e.initialPrompt = null;
+        e.waitingForInput = false;
+        setTimeout(() => submitToShell(e.shell, prompt), 500);
+      }
+    }
+  });
+}
+
 // Gracefully kill a shell - send Ctrl+C first so Claude can save state
 function killShell(entry, id) {
   if (entry.killed) return;
@@ -326,23 +364,7 @@ wss.on('connection', (ws, req) => {
         : spawnClaude(['-c'], cwd, ptySize);  // fallback for old sessions without claudeSessionId
       const startTime = Date.now();
       shells.set(id, { shell, clients: new Set(), cwd, claudeSessionId, restored: true, waitingForInput: false });
-      shell.onData((data) => {
-        const entry = shells.get(id);
-        if (!entry) return;
-        entry.clients.forEach((c) => c.send(data));
-        // Detect BEL character (terminal bell) - Claude waiting for input
-        if (data.includes('\x07') && !entry.waitingForInput) {
-          entry.waitingForInput = true;
-          const stateMsg = JSON.stringify({ type: 'state', waiting: true });
-          entry.clients.forEach((c) => c.send(stateMsg));
-          if (entry.initialPrompt) {
-            const prompt = entry.initialPrompt;
-            entry.initialPrompt = null;
-            entry.waitingForInput = false;
-            setTimeout(() => entry.shell.write(prompt + '\n'), 500);
-          }
-        }
-      });
+      wireShellOutput(id);
       shell.onExit(() => {
         const elapsed = Date.now() - startTime;
         if (elapsed < 5000 && claudeSessionId) {
@@ -355,22 +377,7 @@ wss.on('connection', (ws, req) => {
             entry.shell = fallbackShell;
             entry.claudeSessionId = newClaudeSessionId;
             entry.killed = false;
-            fallbackShell.onData((data) => {
-              const e = shells.get(id);
-              if (!e) return;
-              e.clients.forEach((c) => c.send(data));
-              if (data.includes('\x07') && !e.waitingForInput) {
-                e.waitingForInput = true;
-                const stateMsg = JSON.stringify({ type: 'state', waiting: true });
-                e.clients.forEach((c) => c.send(stateMsg));
-                if (e.initialPrompt) {
-                  const prompt = e.initialPrompt;
-                  e.initialPrompt = null;
-                  e.waitingForInput = false;
-                  setTimeout(() => fallbackShell.write(prompt + '\n'), 500);
-                }
-              }
-            });
+            wireShellOutput(id);
             fallbackShell.onExit(() => { shells.delete(id); saveState(); });
             saveState();
           }
@@ -397,23 +404,7 @@ wss.on('connection', (ws, req) => {
     log(`[WS] Creating NEW shell: oldId=${oldId}, newId=${id}, claudeSession=${claudeSessionId}, worktree=${worktree || 'none'}, cwd=${cwd}`);
     const shell = spawnClaude(claudeArgs, cwd, { cols: initialCols, rows: initialRows });
     shells.set(id, { shell, clients: new Set(), cwd, claudeSessionId, waitingForInput: false });
-    shell.onData((data) => {
-      const entry = shells.get(id);
-      if (!entry) return;
-      entry.clients.forEach((c) => c.send(data));
-      // Detect BEL character (terminal bell) - Claude waiting for input
-      if (data.includes('\x07') && !entry.waitingForInput) {
-        entry.waitingForInput = true;
-        const stateMsg = JSON.stringify({ type: 'state', waiting: true });
-        entry.clients.forEach((c) => c.send(stateMsg));
-        if (entry.initialPrompt) {
-          const prompt = entry.initialPrompt;
-          entry.initialPrompt = null;
-          entry.waitingForInput = false;
-          setTimeout(() => entry.shell.write(prompt + '\n'), 500);
-        }
-      }
-    });
+    wireShellOutput(id);
     shell.onExit(() => { shells.delete(id); saveState(); });
     saveState();
   }
