@@ -126,17 +126,65 @@ function saveState() {
   }
 }
 
-function shutdown(signal) {
+async function shutdown(signal) {
   log(`Received ${signal}, saving state...`);
   saveState();
-  // Don't kill processes on graceful shutdown - just exit
-  // Processes will get SIGHUP when PTY closes and can save their state
+
+  const entries = [...shells.entries()];
+  if (entries.length === 0) {
+    log('No active shells, exiting');
+    process.exit(0);
+  }
+
+  // Phase 1: Send Ctrl+C to all shells so Claude saves state
+  log(`Sending Ctrl+C to ${entries.length} shells...`);
+  for (const [id, entry] of entries) {
+    try { entry.shell.write('\x03'); } catch {}
+  }
+
+  // Phase 2: Wait up to 5s for shells to exit naturally
+  const alive = new Set(entries.map(([id]) => id));
+  for (const [id, entry] of entries) {
+    entry.shell.onExit(() => alive.delete(id));
+  }
+
+  const deadline = Date.now() + 5000;
+  while (alive.size > 0 && Date.now() < deadline) {
+    await new Promise(r => setTimeout(r, 200));
+  }
+
+  if (alive.size === 0) {
+    log('All shells exited gracefully');
+    process.exit(0);
+  }
+
+  // Phase 3: SIGTERM remaining
+  log(`${alive.size} shells still alive, sending SIGTERM...`);
+  for (const id of alive) {
+    const entry = shells.get(id);
+    if (!entry) continue;
+    try { process.kill(-entry.shell.pid, 'SIGTERM'); } catch {
+      try { entry.shell.kill('SIGTERM'); } catch {}
+    }
+  }
+
+  // Phase 4: Wait 2s more, then force kill
+  await new Promise(r => setTimeout(r, 2000));
+  for (const id of alive) {
+    const entry = shells.get(id);
+    if (!entry) continue;
+    try { process.kill(-entry.shell.pid, 'SIGKILL'); } catch {
+      try { entry.shell.kill('SIGKILL'); } catch {}
+    }
+  }
+
   log('Shutdown complete');
   process.exit(0);
 }
 
-process.on('SIGTERM', () => shutdown('SIGTERM'));
-process.on('SIGINT', () => shutdown('SIGINT'));
+let shuttingDown = false;
+process.on('SIGTERM', () => { if (!shuttingDown) { shuttingDown = true; shutdown('SIGTERM'); } });
+process.on('SIGINT', () => { if (!shuttingDown) { shuttingDown = true; shutdown('SIGINT'); } });
 
 app.get('/api/home', (req, res) => res.json({ home: os.homedir() }));
 
