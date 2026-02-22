@@ -35,6 +35,7 @@ window.addEventListener('beforeunload', (e) => {
 // Notification infrastructure
 let notifPermission = 'Notification' in window ? Notification.permission : 'denied';
 const notifCooldown = new Map();
+const activeNotifications = new Map();
 const COOLDOWN_MS = 10000;
 
 // Request notification permission on first click
@@ -56,11 +57,38 @@ function showNotification(id, name) {
   if (Date.now() - last < COOLDOWN_MS) return;
 
   notifCooldown.set(id, Date.now());
-  new Notification('Claude needs attention', {
+  const notif = new Notification('Claude needs attention', {
     body: `"${name}" is waiting for input`,
     tag: id
   });
+  notif.onclose = () => activeNotifications.delete(id);
+  activeNotifications.set(id, notif);
 }
+
+function clearNotification(id) {
+  const notif = activeNotifications.get(id);
+  if (notif) {
+    notif.close();
+    activeNotifications.delete(id);
+  }
+}
+
+function clearAllNotifications() {
+  for (const [id, notif] of activeNotifications) {
+    notif.close();
+  }
+  activeNotifications.clear();
+}
+
+// Clear notifications for the active session when the window regains focus
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden && activeId) {
+    clearNotification(activeId);
+  }
+});
+window.addEventListener('focus', () => {
+  if (activeId) clearNotification(activeId);
+});
 
 function updateTitle() {
   const count = [...sessions.values()].filter(s => s.waitingForInput).length;
@@ -295,7 +323,9 @@ function initTerminal(id, ws, cwd, initialName) {
   document.getElementById('terminals').appendChild(container);
 
   const { term, fit } = createTerminal(container);
-  setupTerminalIO(term, ws);
+  setupTerminalIO(term, ws, {
+    onUserInput: () => clearNotification(id)
+  });
 
   // Get saved name or generate default
   const windowId = getWindowId();
@@ -355,8 +385,9 @@ function switchTo(id) {
   if (session) {
     session.container.classList.add('active');
     TabManager.setActive(id);
-    // Clear badge when switching to this tab
+    // Clear badge and notification when switching to this tab
     TabManager.updateBadge(id, false);
+    clearNotification(id);
 
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
