@@ -2,6 +2,7 @@ const express = require('express');
 const pty = require('node-pty');
 const { WebSocketServer } = require('ws');
 const { randomUUID } = require('crypto');
+const { execSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
@@ -215,6 +216,28 @@ app.get('/api/dirs', (req, res) => {
   } catch { res.json({ dirs: [] }); }
 });
 
+app.get('/api/git-root', (req, res) => {
+  let cwd = req.query.cwd || process.env.HOME;
+  if (cwd.startsWith('~')) cwd = path.join(os.homedir(), cwd.slice(1));
+  try {
+    const root = execSync('git rev-parse --show-toplevel', { cwd, encoding: 'utf8' }).trim();
+    res.json({ root });
+  } catch {
+    res.status(400).json({ error: 'Not a git repository' });
+  }
+});
+
+app.get('/api/issues', (req, res) => {
+  let cwd = req.query.cwd || process.env.HOME;
+  if (cwd.startsWith('~')) cwd = path.join(os.homedir(), cwd.slice(1));
+  try {
+    const out = execSync('gh issue list --json number,title,body,labels,url --limit 30', { cwd, encoding: 'utf8', timeout: 15000 });
+    res.json({ issues: JSON.parse(out) });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 const server = app.listen(PORT);
 const shells = new Map();
 const wss = new WebSocketServer({ server });
@@ -261,6 +284,12 @@ wss.on('connection', (ws, req) => {
           entry.waitingForInput = true;
           const stateMsg = JSON.stringify({ type: 'state', waiting: true });
           entry.clients.forEach((c) => c.send(stateMsg));
+          if (entry.initialPrompt) {
+            const prompt = entry.initialPrompt;
+            entry.initialPrompt = null;
+            entry.waitingForInput = false;
+            setTimeout(() => entry.shell.write(prompt + '\n'), 500);
+          }
         }
       });
       shell.onExit(() => {
@@ -283,6 +312,12 @@ wss.on('connection', (ws, req) => {
                 e.waitingForInput = true;
                 const stateMsg = JSON.stringify({ type: 'state', waiting: true });
                 e.clients.forEach((c) => c.send(stateMsg));
+                if (e.initialPrompt) {
+                  const prompt = e.initialPrompt;
+                  e.initialPrompt = null;
+                  e.waitingForInput = false;
+                  setTimeout(() => fallbackShell.write(prompt + '\n'), 500);
+                }
               }
             });
             fallbackShell.onExit(() => { shells.delete(id); saveState(); });
@@ -320,6 +355,12 @@ wss.on('connection', (ws, req) => {
         entry.waitingForInput = true;
         const stateMsg = JSON.stringify({ type: 'state', waiting: true });
         entry.clients.forEach((c) => c.send(stateMsg));
+        if (entry.initialPrompt) {
+          const prompt = entry.initialPrompt;
+          entry.initialPrompt = null;
+          entry.waitingForInput = false;
+          setTimeout(() => entry.shell.write(prompt + '\n'), 500);
+        }
       }
     });
     shell.onExit(() => { shells.delete(id); saveState(); });
@@ -347,6 +388,7 @@ wss.on('connection', (ws, req) => {
       const parsed = JSON.parse(str);
       if (parsed.type === 'resize') { entry.shell.resize(parsed.cols, parsed.rows); return; }
       if (parsed.type === 'redraw') { entry.shell.write('\x0c'); return; } // Ctrl+L
+      if (parsed.type === 'initialPrompt') { entry.initialPrompt = parsed.text; return; }
     } catch {}
     // User sent input - no longer waiting
     if (entry.waitingForInput) {

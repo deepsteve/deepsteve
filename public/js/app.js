@@ -228,6 +228,9 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
         const existingSession = [...sessions.entries()].find(([, s]) => s.ws === ws);
         if (!existingSession) {
           initTerminal(msg.id, ws, cwd);
+          if (opts.initialPrompt) {
+            ws.sendJSON({ type: 'initialPrompt', text: opts.initialPrompt });
+          }
         }
       } else if (msg.type === 'gone') {
         SessionStore.removeSession(getWindowId(), msg.id);
@@ -421,6 +424,7 @@ function showNewTabMenu(e) {
   const menu = document.createElement('div');
   menu.className = 'new-tab-menu context-menu';
   menu.innerHTML = `
+    <div class="context-menu-item" data-action="issue">Pick issue...</div>
     <div class="context-menu-item" data-action="worktree">New worktree...</div>
     <div class="context-menu-item" data-action="repo">Change repo...</div>
   `;
@@ -439,7 +443,9 @@ function showNewTabMenu(e) {
     const action = item.dataset.action;
     menu.remove();
     cleanup();
-    if (action === 'worktree') {
+    if (action === 'issue') {
+      await showIssuePicker();
+    } else if (action === 'worktree') {
       await promptWorktreeSession();
     } else if (action === 'repo') {
       await promptRepoSession();
@@ -517,6 +523,114 @@ async function promptRepoSession() {
 }
 
 /**
+ * Escape HTML special characters for safe rendering
+ */
+function escapeHtml(str) {
+  return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+/**
+ * Show GitHub issue picker and create worktree session
+ */
+async function showIssuePicker() {
+  const active = activeId && sessions.get(activeId);
+  const cwd = active?.cwd || SessionStore.getLastCwd();
+  if (!cwd) return promptRepoSession();
+
+  // Check git root
+  let gitRoot;
+  try {
+    const res = await fetch('/api/git-root?cwd=' + encodeURIComponent(cwd));
+    if (!res.ok) throw new Error('Not a git repository');
+    gitRoot = (await res.json()).root;
+  } catch {
+    alert('Current directory is not a git repository.');
+    return;
+  }
+
+  // Fetch issues
+  let issues;
+  try {
+    const res = await fetch('/api/issues?cwd=' + encodeURIComponent(gitRoot));
+    if (!res.ok) throw new Error((await res.json()).error || 'Failed to fetch issues');
+    issues = (await res.json()).issues;
+  } catch (e) {
+    alert('Failed to fetch issues: ' + e.message);
+    return;
+  }
+
+  // Build modal
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.innerHTML = `
+    <div class="modal" style="width: 520px;">
+      <h2>Pick a GitHub Issue</h2>
+      ${issues.length === 0 ? '<div class="issue-empty">No open issues found</div>' : `
+        <div class="issue-list">${issues.map(issue => `
+          <div class="issue-item" data-number="${issue.number}">
+            <span class="issue-number">#${issue.number}</span>
+            <div>
+              <div class="issue-title">${escapeHtml(issue.title)}</div>
+              ${issue.labels && issue.labels.length > 0 ? `
+                <div class="issue-labels">${issue.labels.map(l => `<span class="issue-label">${escapeHtml(l.name)}</span>`).join('')}</div>
+              ` : ''}
+            </div>
+          </div>
+        `).join('')}</div>
+      `}
+      <div class="modal-buttons">
+        <button class="btn-secondary" id="issue-cancel">Cancel</button>
+        ${issues.length > 0 ? '<button class="btn-primary" id="issue-start" disabled>Start</button>' : ''}
+      </div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+
+  let selectedIssue = null;
+
+  // Issue selection
+  overlay.querySelectorAll('.issue-item').forEach(item => {
+    item.addEventListener('click', () => {
+      overlay.querySelectorAll('.issue-item').forEach(i => i.classList.remove('selected'));
+      item.classList.add('selected');
+      selectedIssue = issues.find(i => i.number === parseInt(item.dataset.number));
+      const startBtn = overlay.querySelector('#issue-start');
+      if (startBtn) startBtn.disabled = false;
+    });
+    item.addEventListener('dblclick', () => {
+      selectedIssue = issues.find(i => i.number === parseInt(item.dataset.number));
+      startIssue();
+    });
+  });
+
+  function startIssue() {
+    if (!selectedIssue) return;
+    overlay.remove();
+
+    const body = selectedIssue.body ? selectedIssue.body.slice(0, 2000) : '(no description)';
+    const labels = selectedIssue.labels?.map(l => l.name).join(', ') || 'none';
+    const prompt = `I need you to work on GitHub issue #${selectedIssue.number}: "${selectedIssue.title}"
+Labels: ${labels}
+URL: ${selectedIssue.url}
+
+Issue description:
+${body}
+
+Please read the issue carefully, understand the codebase context, and implement the changes needed.`;
+
+    createSession(gitRoot, null, true, {
+      worktree: 'github-issue-' + selectedIssue.number,
+      initialPrompt: prompt
+    });
+  }
+
+  overlay.querySelector('#issue-cancel').onclick = () => overlay.remove();
+  const startBtn = overlay.querySelector('#issue-start');
+  if (startBtn) startBtn.onclick = startIssue;
+  overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
+}
+
+/**
  * Main initialization
  */
 async function init() {
@@ -544,6 +658,10 @@ async function init() {
   newBtn.addEventListener('mouseleave', () => {
     if (!holdMenuOpen) clearTimeout(holdTimer);
   });
+
+  // Wire up wand button
+  const wandBtn = document.getElementById('wand-btn');
+  if (wandBtn) wandBtn.onclick = showIssuePicker;
 
   // Check if this is an existing tab BEFORE starting heartbeat (which creates window ID)
   const isExistingTab = WindowManager.hasExistingWindowId();

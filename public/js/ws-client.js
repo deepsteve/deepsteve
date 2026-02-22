@@ -24,6 +24,12 @@ export function createWebSocket(options = {}) {
       }
     },
 
+    sendJSON(obj) {
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify(obj));
+      }
+    },
+
     close() {
       clearInterval(reconnectTimer);
       ws.close();

@@ -151,6 +151,26 @@ body { background: #0d1117; color: #c9d1d9; font-family: system-ui; height: 100v
 #new-btn:hover { background: #2ea043; }
 #new-btn:active { background: #1a7f37; }
 
+/* Wand button */
+#wand-btn { padding: 4px 10px; background: #6e40c9; border: none; color: white; border-radius: 4px; cursor: pointer; font-size: 13px; margin-left: 4px; user-select: none; }
+#wand-btn:hover { background: #8957e5; }
+#wand-btn:active { background: #553098; }
+
+/* Vertical layout wand button */
+#app-container.vertical-layout #wand-btn { width: 100%; margin: 4px 0 0 0; }
+
+/* Issue picker */
+.issue-list { background: #0d1117; border: 1px solid #30363d; border-radius: 4px; max-height: 360px; overflow-y: auto; margin-bottom: 16px; }
+.issue-item { padding: 10px 12px; cursor: pointer; border-bottom: 1px solid #21262d; display: flex; align-items: flex-start; gap: 10px; }
+.issue-item:last-child { border-bottom: none; }
+.issue-item:hover { background: #21262d; }
+.issue-item.selected { background: #1f3a2e; border-color: #238636; }
+.issue-number { color: #8b949e; font-size: 13px; font-weight: 600; flex-shrink: 0; min-width: 36px; }
+.issue-title { color: #c9d1d9; font-size: 13px; flex: 1; }
+.issue-labels { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+.issue-label { font-size: 11px; padding: 1px 6px; border-radius: 12px; background: #21262d; color: #8b949e; border: 1px solid #30363d; }
+.issue-empty { padding: 16px; text-align: center; color: #8b949e; font-size: 13px; }
+
 /* Terminal containers */
 .terminal-container { flex: 1; display: none; position: relative; }
 .terminal-container.active { display: block; }
