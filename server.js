@@ -46,13 +46,13 @@ function getShellProfilePath() {
 }
 
 // Spawn claude with full login shell environment (like iTerm does)
-function spawnClaude(args, cwd) {
+function spawnClaude(args, cwd, { cols = 120, rows = 40 } = {}) {
   // Use login shell (-l) which properly sources /etc/zprofile, ~/.zprofile, ~/.zshrc
   const shellCmd = `claude ${args.join(' ')}`;
   return pty.spawn('zsh', ['-l', '-c', shellCmd], {
     name: 'xterm-256color',
-    cols: 120,
-    rows: 40,
+    cols,
+    rows,
     cwd,
     env: process.env
   });
@@ -257,6 +257,8 @@ wss.on('connection', (ws, req) => {
   if (cwd.startsWith('~')) cwd = path.join(os.homedir(), cwd.slice(1));
   const createNew = url.searchParams.get('new') === '1';
   const worktree = url.searchParams.get('worktree');
+  const initialCols = parseInt(url.searchParams.get('cols')) || 120;
+  const initialRows = parseInt(url.searchParams.get('rows')) || 40;
 
   log(`[WS] Connection: id=${id}, cwd=${cwd}, createNew=${createNew}, worktree=${worktree}`);
   log(`[WS] Active shells: ${[...shells.keys()].join(', ') || 'none'}`);
@@ -270,9 +272,10 @@ wss.on('connection', (ws, req) => {
       cwd = restored.cwd;
       const claudeSessionId = restored.claudeSessionId;
       log(`Restoring session ${id} in ${cwd} (claude session: ${claudeSessionId})`);
+      const ptySize = { cols: initialCols, rows: initialRows };
       const shell = claudeSessionId
-        ? spawnClaude(['--resume', claudeSessionId], cwd)
-        : spawnClaude(['-c'], cwd);  // fallback for old sessions without claudeSessionId
+        ? spawnClaude(['--resume', claudeSessionId], cwd, ptySize)
+        : spawnClaude(['-c'], cwd, ptySize);  // fallback for old sessions without claudeSessionId
       const startTime = Date.now();
       shells.set(id, { shell, clients: new Set(), cwd, claudeSessionId, restored: true, waitingForInput: false });
       shell.onData((data) => {
@@ -298,7 +301,7 @@ wss.on('connection', (ws, req) => {
           // --resume failed quickly, fall back to fresh session with -c
           log(`Session ${id} exited after ${elapsed}ms, --resume likely failed. Falling back to -c`);
           const newClaudeSessionId = randomUUID();
-          const fallbackShell = spawnClaude(['--session-id', newClaudeSessionId, '-c'], cwd);
+          const fallbackShell = spawnClaude(['--session-id', newClaudeSessionId, '-c'], cwd, { cols: initialCols, rows: initialRows });
           const entry = shells.get(id);
           if (entry) {
             entry.shell = fallbackShell;
@@ -344,7 +347,7 @@ wss.on('connection', (ws, req) => {
     const claudeArgs = ['--session-id', claudeSessionId];
     if (worktree) claudeArgs.push('--worktree', worktree);
     log(`[WS] Creating NEW shell: oldId=${oldId}, newId=${id}, claudeSession=${claudeSessionId}, worktree=${worktree || 'none'}, cwd=${cwd}`);
-    const shell = spawnClaude(claudeArgs, cwd);
+    const shell = spawnClaude(claudeArgs, cwd, { cols: initialCols, rows: initialRows });
     shells.set(id, { shell, clients: new Set(), cwd, claudeSessionId, waitingForInput: false });
     shell.onData((data) => {
       const entry = shells.get(id);
