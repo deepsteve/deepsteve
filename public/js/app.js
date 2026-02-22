@@ -228,7 +228,7 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
         // Check if this WebSocket already has a session (reconnect case)
         const existingSession = [...sessions.entries()].find(([, s]) => s.ws === ws);
         if (!existingSession) {
-          initTerminal(msg.id, ws, cwd);
+          initTerminal(msg.id, ws, cwd, opts.name);
           if (opts.initialPrompt) {
             ws.sendJSON({ type: 'initialPrompt', text: opts.initialPrompt });
           }
@@ -288,7 +288,7 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
 /**
  * Initialize a terminal after WebSocket connection is established
  */
-function initTerminal(id, ws, cwd) {
+function initTerminal(id, ws, cwd, initialName) {
   const container = document.createElement('div');
   container.className = 'terminal-container';
   container.id = 'term-' + id;
@@ -301,7 +301,7 @@ function initTerminal(id, ws, cwd) {
   const windowId = getWindowId();
   const savedSessions = SessionStore.getWindowSessions(windowId);
   const savedSession = savedSessions.find(s => s.id === id);
-  const name = savedSession?.name || getDefaultTabName(cwd);
+  const name = savedSession?.name || initialName || getDefaultTabName(cwd);
 
   // Store session in memory
   sessions.set(id, { term, fit, ws, container, cwd, name, waitingForInput: false });
@@ -625,7 +625,8 @@ Please read the issue carefully, understand the codebase context, and implement 
 
     createSession(gitRoot, null, true, {
       worktree: 'github-issue-' + selectedIssue.number,
-      initialPrompt: prompt
+      initialPrompt: prompt,
+      name: `#${selectedIssue.number} ${selectedIssue.title}`
     });
   }
 
