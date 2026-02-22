@@ -172,8 +172,10 @@ body { background: #0d1117; color: #c9d1d9; font-family: system-ui; height: 100v
 .issue-empty { padding: 16px; text-align: center; color: #8b949e; font-size: 13px; }
 
 /* Terminal containers */
-.terminal-container { flex: 1; display: none; position: relative; }
-.terminal-container.active { display: block; }
+#terminals { flex: 1; min-height: 0; position: relative; }
+.terminal-container { position: absolute; inset: 0; display: none; }
+.terminal-container.active { display: flex; flex-direction: column; }
+.terminal-container .xterm { flex: 1; }
 .terminal-container.reconnecting::after {
   content: 'Reconnecting...';
   position: absolute;
