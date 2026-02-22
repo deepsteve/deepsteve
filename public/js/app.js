@@ -5,7 +5,7 @@
 import { SessionStore } from './session-store.js';
 import { WindowManager } from './window-manager.js';
 import { TabManager, getDefaultTabName } from './tab-manager.js';
-import { createTerminal, setupTerminalIO, fitTerminal } from './terminal.js';
+import { createTerminal, setupTerminalIO, fitTerminal, measureTerminalSize } from './terminal.js';
 import { createWebSocket } from './ws-client.js';
 import { showDirectoryPicker } from './dir-picker.js';
 import { showWindowRestoreModal } from './window-restore-modal.js';
@@ -207,7 +207,8 @@ function getWindowId() {
  * Create a new terminal session
  */
 function createSession(cwd, existingId = null, isNew = false, opts = {}) {
-  const ws = createWebSocket({ id: existingId, cwd, isNew, worktree: opts.worktree });
+  const { cols, rows } = measureTerminalSize();
+  const ws = createWebSocket({ id: existingId, cwd, isNew, worktree: opts.worktree, cols, rows });
 
   ws.onmessage = (e) => {
     // Try to parse as JSON control message
@@ -318,11 +319,13 @@ function initTerminal(id, ws, cwd) {
   // Save to storage
   SessionStore.addSession(windowId, { id, cwd, name });
 
-  // Fit terminal after render, then request redraw
+  // Fit terminal after layout is complete (double-rAF ensures layout has happened)
   requestAnimationFrame(() => {
-    fitTerminal(term, fit, ws);
-    // Request terminal redraw from server (for reconnecting to existing shells)
-    ws.send(JSON.stringify({ type: 'redraw' }));
+    requestAnimationFrame(() => {
+      fitTerminal(term, fit, ws);
+      // Request terminal redraw from server (for reconnecting to existing shells)
+      ws.send(JSON.stringify({ type: 'redraw' }));
+    });
   });
 
   // Handle window resize
@@ -356,9 +359,11 @@ function switchTo(id) {
     TabManager.updateBadge(id, false);
 
     requestAnimationFrame(() => {
-      session.fit.fit();
-      session.term.scrollToBottom();
-      session.term.focus();
+      requestAnimationFrame(() => {
+        fitTerminal(session.term, session.fit, session.ws);
+        session.term.scrollToBottom();
+        session.term.focus();
+      });
     });
   }
 }

@@ -43,3 +43,33 @@ export function fitTerminal(term, fit, ws) {
     rows: term.rows
   }));
 }
+
+/**
+ * Measure the cols/rows that would fit in the #terminals container
+ * using a temporary hidden terminal. Returns {cols, rows} or defaults.
+ */
+export function measureTerminalSize() {
+  const container = document.getElementById('terminals');
+  if (!container || container.clientWidth === 0 || container.clientHeight === 0) {
+    return { cols: 120, rows: 40 };
+  }
+
+  // Create a temporary off-screen terminal to measure cell size
+  const tmp = document.createElement('div');
+  tmp.style.cssText = 'position:absolute;visibility:hidden;pointer-events:none;';
+  container.appendChild(tmp);
+
+  const term = new Terminal({ fontSize: 14 });
+  const fit = new FitAddon.FitAddon();
+  term.loadAddon(fit);
+  term.open(tmp);
+
+  const dims = fit.proposeDimensions();
+  term.dispose();
+  tmp.remove();
+
+  if (dims && dims.cols > 0 && dims.rows > 0) {
+    return { cols: dims.cols, rows: dims.rows };
+  }
+  return { cols: 120, rows: 40 };
+}
