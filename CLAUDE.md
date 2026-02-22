@@ -6,7 +6,7 @@ Web UI for running multiple Claude Code instances in browser tabs using real PTY
 
 ### Restart the daemon after making changes:
 ```bash
-launchctl unload ~/Library/LaunchAgents/com.deepsteve.plist && launchctl load ~/Library/LaunchAgents/com.deepsteve.plist
+./restart.sh
 ```
 
 ### View logs:
@@ -86,7 +86,4 @@ Key input handling:
 - State: `~/.deepsteve/state.json`
 - LaunchAgent: `~/Library/LaunchAgents/com.deepsteve.plist`
 
-**Important:** After editing repo files, sync to install directory:
-```bash
-cp server.js public/index.html ~/.deepsteve/ && cp public/index.html ~/.deepsteve/public/
-```
+**Important:** After editing repo files, run `./restart.sh` to sync and restart.
