@@ -19,10 +19,13 @@ export function createTerminal(container) {
   return { term, fit };
 }
 
-export function setupTerminalIO(term, ws) {
+export function setupTerminalIO(term, ws, { onUserInput } = {}) {
   // Note: ws.onmessage is set in app.js to handle JSON control messages
   // and route terminal data here via term.write()
-  term.onData((data) => ws.send(data));
+  term.onData((data) => {
+    ws.send(data);
+    if (onUserInput) onUserInput();
+  });
 
   // Handle Shift+Enter for multi-line input
   term.attachCustomKeyEventHandler((event) => {
