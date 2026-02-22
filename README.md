@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="deepsteve_logo_1024x768_3_4.png" alt="deepsteve logo" width="200">
+</p>
+
 # deepsteve
 
 Run multiple Claude Code sessions side-by-side in your browser, each with full terminal capabilities and persistent conversation history.
