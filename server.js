@@ -220,7 +220,7 @@ app.get('/api/git-root', (req, res) => {
   let cwd = req.query.cwd || process.env.HOME;
   if (cwd.startsWith('~')) cwd = path.join(os.homedir(), cwd.slice(1));
   try {
-    const root = execSync('git rev-parse --show-toplevel', { cwd, encoding: 'utf8' }).trim();
+    const root = execSync("zsh -l -c 'git rev-parse --show-toplevel'", { cwd, encoding: 'utf8' }).trim();
     res.json({ root });
   } catch {
     res.status(400).json({ error: 'Not a git repository' });
@@ -231,7 +231,7 @@ app.get('/api/issues', (req, res) => {
   let cwd = req.query.cwd || process.env.HOME;
   if (cwd.startsWith('~')) cwd = path.join(os.homedir(), cwd.slice(1));
   try {
-    const out = execSync('gh issue list --json number,title,body,labels,url --limit 30', { cwd, encoding: 'utf8', timeout: 15000 });
+    const out = execSync("zsh -l -c 'gh issue list --json number,title,body,labels,url --limit 30'", { cwd, encoding: 'utf8', timeout: 15000 });
     res.json({ issues: JSON.parse(out) });
   } catch (e) {
     res.status(500).json({ error: e.message });
