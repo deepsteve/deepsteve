@@ -6,6 +6,8 @@
 
 Run multiple Claude Code sessions side-by-side in your browser, each with full terminal capabilities and persistent conversation history.
 
+**Requires macOS.** deepsteve uses macOS LaunchAgents for daemon management and macOS-specific paths for logs and state.
+
 ## Features
 
 - **Multiple sessions** - Open as many Claude Code instances as you need in separate tabs
@@ -13,6 +15,12 @@ Run multiple Claude Code sessions side-by-side in your browser, each with full t
 - **Session persistence** - Conversations survive server restarts and page refreshes
 - **Directory picker** - Start each session in any working directory
 - **Runs as a daemon** - Always available in the background on your Mac
+
+## Requirements
+
+- macOS
+- Node.js
+- [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI installed
 
 ## Installation
 
