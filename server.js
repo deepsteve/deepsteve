@@ -8,6 +8,7 @@ const path = require('path');
 const os = require('os');
 
 const PORT = process.env.PORT || 3000;
+const SCROLLBACK_SIZE = 100 * 1024; // 100KB circular buffer per shell
 
 function log(...args) {
   const ts = new Date().toISOString().slice(11, 23);
@@ -78,9 +79,18 @@ function submitToShell(shell, text) {
 function wireShellOutput(id) {
   const entry = shells.get(id);
   if (!entry) return;
+  if (!entry.scrollback) entry.scrollback = [];
+  if (!entry.scrollbackSize) entry.scrollbackSize = 0;
   entry.shell.onData((data) => {
     const e = shells.get(id);
     if (!e) return;
+    // Append to scrollback buffer
+    e.scrollback.push(data);
+    e.scrollbackSize += data.length;
+    // Trim scrollback if it exceeds the limit
+    while (e.scrollbackSize > SCROLLBACK_SIZE && e.scrollback.length > 1) {
+      e.scrollbackSize -= e.scrollback.shift().length;
+    }
     e.clients.forEach((c) => c.send(data));
     if (data.includes('\x07') && !e.waitingForInput) {
       e.waitingForInput = true;
@@ -169,7 +179,7 @@ function saveState() {
   }
   const state = {};
   for (const [id, entry] of shells) {
-    state[id] = { cwd: entry.cwd, claudeSessionId: entry.claudeSessionId };
+    state[id] = { cwd: entry.cwd, claudeSessionId: entry.claudeSessionId, worktree: entry.worktree || null };
   }
   // Merge with any saved state that wasn't reconnected yet
   const merged = { ...savedState, ...state };
@@ -391,27 +401,34 @@ wss.on('connection', (ws, req) => {
       const restored = savedState[id];
       cwd = restored.cwd;
       const claudeSessionId = restored.claudeSessionId;
-      log(`Restoring session ${id} in ${cwd} (claude session: ${claudeSessionId})`);
+      const savedWorktree = restored.worktree || null;
+      log(`Restoring session ${id} in ${cwd} (claude session: ${claudeSessionId}, worktree: ${savedWorktree || 'none'})`);
       const ptySize = { cols: initialCols, rows: initialRows };
-      const shell = claudeSessionId
-        ? spawnClaude(['--resume', claudeSessionId], cwd, ptySize)
-        : spawnClaude(['-c'], cwd, ptySize);  // fallback for old sessions without claudeSessionId
+      const resumeArgs = claudeSessionId
+        ? ['--resume', claudeSessionId]
+        : ['-c'];  // fallback for old sessions without claudeSessionId
+      if (savedWorktree) resumeArgs.push('--worktree', savedWorktree);
+      const shell = spawnClaude(resumeArgs, cwd, ptySize);
       const startTime = Date.now();
-      shells.set(id, { shell, clients: new Set(), cwd, claudeSessionId, restored: true, waitingForInput: false });
+      shells.set(id, { shell, clients: new Set(), cwd, claudeSessionId, worktree: savedWorktree, restored: true, waitingForInput: false });
       wireShellOutput(id);
       shell.onExit(() => {
         if (shuttingDown) return;  // Don't overwrite state file during shutdown
         const elapsed = Date.now() - startTime;
         if (elapsed < 5000 && claudeSessionId) {
-          // --resume failed quickly, fall back to fresh session with -c
+          // --resume failed quickly, fall back to continuing last conversation
           log(`Session ${id} exited after ${elapsed}ms, --resume likely failed. Falling back to -c`);
           const newClaudeSessionId = randomUUID();
-          const fallbackShell = spawnClaude(['--session-id', newClaudeSessionId, '-c'], cwd, { cols: initialCols, rows: initialRows });
           const entry = shells.get(id);
+          const fallbackArgs = ['-c', '--fork-session', '--session-id', newClaudeSessionId];
+          if (entry && entry.worktree) fallbackArgs.push('--worktree', entry.worktree);
+          const fallbackShell = spawnClaude(fallbackArgs, cwd, { cols: initialCols, rows: initialRows });
           if (entry) {
             entry.shell = fallbackShell;
             entry.claudeSessionId = newClaudeSessionId;
             entry.killed = false;
+            entry.scrollback = [];
+            entry.scrollbackSize = 0;
             wireShellOutput(id);
             fallbackShell.onExit(() => { if (!shuttingDown) { shells.delete(id); saveState(); } });
             saveState();
@@ -438,26 +455,29 @@ wss.on('connection', (ws, req) => {
     if (worktree) claudeArgs.push('--worktree', worktree);
     log(`[WS] Creating NEW shell: oldId=${oldId}, newId=${id}, claudeSession=${claudeSessionId}, worktree=${worktree || 'none'}, cwd=${cwd}`);
     const shell = spawnClaude(claudeArgs, cwd, { cols: initialCols, rows: initialRows });
-    shells.set(id, { shell, clients: new Set(), cwd, claudeSessionId, waitingForInput: false });
+    shells.set(id, { shell, clients: new Set(), cwd, claudeSessionId, worktree: worktree || null, waitingForInput: false });
     wireShellOutput(id);
     shell.onExit(() => { if (!shuttingDown) { shells.delete(id); saveState(); } });
     saveState();
   }
 
   const entry = shells.get(id);
-  const isReconnect = entry.clients.size > 0 || entry.hadClients;
   // Cancel any pending kill timer on reconnect
   if (entry.killTimer) {
     clearTimeout(entry.killTimer);
     entry.killTimer = null;
   }
   entry.clients.add(ws);
-  entry.hadClients = true;
-  log(`[WS] Sending session response: id=${id}, restored=${entry.restored || false}, reconnect=${isReconnect}`);
-  ws.send(JSON.stringify({ type: 'session', id, restored: entry.restored || false, cwd: entry.cwd }));
+  const hasScrollback = entry.scrollback && entry.scrollback.length > 0;
+  log(`[WS] Sending session response: id=${id}, restored=${entry.restored || false}, scrollback=${hasScrollback ? entry.scrollbackSize + 'B' : 'none'}`);
+  ws.send(JSON.stringify({ type: 'session', id, restored: entry.restored || false, cwd: entry.cwd, scrollback: hasScrollback }));
 
-  // Client will request redraw after terminal is ready
-  // by sending a 'redraw' message
+  // Send buffered scrollback so the client can render the terminal immediately
+  if (hasScrollback) {
+    for (const chunk of entry.scrollback) {
+      ws.send(chunk);
+    }
+  }
 
   ws.on('message', (msg) => {
     const str = msg.toString();

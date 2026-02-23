@@ -266,15 +266,23 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
   const { cols, rows } = measureTerminalSize();
   const ws = createWebSocket({ id: existingId, cwd, isNew, worktree: opts.worktree, cols, rows });
 
+  // Buffer terminal data that arrives before the terminal is created
+  let pendingData = [];
+  let hasScrollback = false;
+
   ws.onmessage = (e) => {
     // Try to parse as JSON control message
     let msg;
     try {
       msg = JSON.parse(e.data);
     } catch {
-      // Not JSON - pass to terminal
+      // Not JSON - pass to terminal (or buffer if not yet created)
       const session = [...sessions.values()].find(s => s.ws === ws);
-      if (session) session.term.write(e.data);
+      if (session) {
+        session.term.write(e.data);
+      } else {
+        pendingData.push(e.data);
+      }
       return;
     }
 
@@ -283,6 +291,7 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
       if (msg.type === 'session') {
         // Update reconnect URL to use the assigned session ID
         ws.setSessionId(msg.id);
+        hasScrollback = msg.scrollback || false;
         // If server assigned a different ID than requested, update TabSessions
         if (existingId && msg.id !== existingId) {
           TabSessions.updateId(existingId, msg.id);
@@ -290,7 +299,7 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
         // Check if this WebSocket already has a session (reconnect case)
         const existingSession = [...sessions.entries()].find(([, s]) => s.ws === ws);
         if (!existingSession) {
-          initTerminal(msg.id, ws, cwd, opts.name);
+          initTerminal(msg.id, ws, cwd, opts.name, { hasScrollback, pendingData });
           if (opts.initialPrompt) {
             ws.sendJSON({ type: 'initialPrompt', text: opts.initialPrompt });
           }
@@ -352,7 +361,7 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
 /**
  * Initialize a terminal after WebSocket connection is established
  */
-function initTerminal(id, ws, cwd, initialName) {
+function initTerminal(id, ws, cwd, initialName, { hasScrollback = false, pendingData = [] } = {}) {
   const container = document.createElement('div');
   container.className = 'terminal-container';
   container.id = 'term-' + id;
@@ -372,6 +381,12 @@ function initTerminal(id, ws, cwd, initialName) {
   // Store session in memory
   sessions.set(id, { term, fit, ws, container, cwd, name, waitingForInput: false });
 
+  // Flush any buffered data that arrived before the terminal was created
+  for (const data of pendingData) {
+    term.write(data);
+  }
+  pendingData.length = 0;
+
   // Add tab UI with callbacks
   const tabCallbacks = {
     onSwitch: (sessionId) => switchTo(sessionId),
@@ -390,8 +405,10 @@ function initTerminal(id, ws, cwd, initialName) {
   requestAnimationFrame(() => {
     requestAnimationFrame(() => {
       fitTerminal(term, fit, ws);
-      // Request terminal redraw from server (for reconnecting to existing shells)
-      ws.send(JSON.stringify({ type: 'redraw' }));
+      // If no scrollback was replayed, request a Ctrl+L redraw from the PTY
+      if (!hasScrollback) {
+        ws.send(JSON.stringify({ type: 'redraw' }));
+      }
     });
   });
 
