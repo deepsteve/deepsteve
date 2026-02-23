@@ -313,6 +313,24 @@ let shuttingDown = false;
 process.on('SIGTERM', () => { if (!shuttingDown) { shuttingDown = true; shutdown('SIGTERM'); } });
 process.on('SIGINT', () => { if (!shuttingDown) { shuttingDown = true; shutdown('SIGINT'); } });
 
+const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, 'package.json'), 'utf8'));
+
+app.get('/api/version', async (req, res) => {
+  const current = pkg.version;
+  try {
+    const resp = await fetch('https://deepsteve.com/versions/stable', {
+      signal: AbortSignal.timeout(5000)
+    });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const latest = (await resp.text()).trim();
+    const updateAvailable = latest !== current;
+    res.json({ current, latest, updateAvailable });
+  } catch (e) {
+    log(`Version check failed: ${e.message}`);
+    res.json({ current, latest: null, updateAvailable: false });
+  }
+});
+
 app.get('/api/home', (req, res) => res.json({ home: os.homedir() }));
 
 app.get('/api/settings', (req, res) => {

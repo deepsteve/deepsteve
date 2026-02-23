@@ -11,7 +11,7 @@ mkdir -p "$HOME/Library/LaunchAgents"
 cat > "$INSTALL_DIR/package.json" << 'PKGEOF'
 {
   "name": "deepsteve",
-  "version": "1.0.0",
+  "version": "0.1.0",
   "main": "server.js",
   "dependencies": {
     "express": "^4.18.2",

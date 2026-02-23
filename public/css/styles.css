@@ -279,3 +279,10 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
 .settings-section h3 { font-size: 14px; color: var(--ds-text-bright); margin-bottom: 8px; }
 .theme-select { width: 100%; padding: 8px 12px; background: var(--ds-bg-primary); border: 1px solid var(--ds-border); border-radius: 4px; color: var(--ds-text-primary); font-size: 13px; cursor: pointer; }
 .theme-select:focus { outline: none; border-color: var(--ds-accent-green); }
+
+/* Version info in settings */
+.version-info { font-size: 13px; color: var(--ds-text-secondary); }
+.version-status { margin-top: 4px; font-size: 12px; }
+.version-ok { color: var(--ds-accent-green-soft); }
+.version-update { color: var(--ds-accent-blue); }
+.version-failed { color: var(--ds-text-secondary); }
