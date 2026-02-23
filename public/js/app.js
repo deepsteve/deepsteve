@@ -11,6 +11,14 @@ import { showDirectoryPicker } from './dir-picker.js';
 import { showWindowRestoreModal } from './window-restore-modal.js';
 import { LayoutManager } from './layout-manager.js';
 
+// Configuration
+const MAX_TAB_TITLE_LENGTH = 50;
+
+function truncateTitle(title) {
+  if (title.length <= MAX_TAB_TITLE_LENGTH) return title;
+  return title.slice(0, MAX_TAB_TITLE_LENGTH - 1) + '…';
+}
+
 // Active sessions in memory
 const sessions = new Map();
 let activeId = null;
@@ -139,6 +147,18 @@ document.addEventListener('click', () => {
   sessionsMenu?.classList.remove('open');
 });
 
+function formatRelativeTime(timestamp) {
+  if (!timestamp) return '';
+  const seconds = Math.floor((Date.now() - timestamp) / 1000);
+  if (seconds < 60) return 'just now';
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  return `${days}d ago`;
+}
+
 async function refreshSessionsDropdown() {
   try {
     const res = await fetch('/api/shells');
@@ -156,7 +176,8 @@ async function refreshSessionsDropdown() {
     sessionsMenu.innerHTML = allShells.map(shell => {
       const isConnected = connectedIds.has(shell.id);
       const name = sessions.get(shell.id)?.name || getDefaultTabName(shell.cwd);
-      const statusText = shell.status === 'saved' ? 'saved' : (isConnected ? 'connected' : 'active');
+      const staleness = !isConnected && shell.lastActivity ? formatRelativeTime(shell.lastActivity) : '';
+      const statusText = isConnected ? 'connected' : (staleness || (shell.status === 'saved' ? 'saved' : 'not connected'));
       const statusClass = isConnected ? 'active' : '';
       const canClose = !isConnected;
 
@@ -723,7 +744,7 @@ Please read the issue carefully, understand the codebase context, and implement 
     createSession(gitRoot, null, true, {
       worktree: 'github-issue-' + selectedIssue.number,
       initialPrompt: prompt,
-      name: `#${selectedIssue.number} ${selectedIssue.title}`
+      name: truncateTitle(`#${selectedIssue.number} ${selectedIssue.title}`)
     });
   }
 

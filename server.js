@@ -84,6 +84,7 @@ function wireShellOutput(id) {
   entry.shell.onData((data) => {
     const e = shells.get(id);
     if (!e) return;
+    e.lastActivity = Date.now();
     // Append to scrollback buffer
     e.scrollback.push(data);
     e.scrollbackSize += data.length;
@@ -179,7 +180,7 @@ function saveState() {
   }
   const state = {};
   for (const [id, entry] of shells) {
-    state[id] = { cwd: entry.cwd, claudeSessionId: entry.claudeSessionId, worktree: entry.worktree || null };
+    state[id] = { cwd: entry.cwd, claudeSessionId: entry.claudeSessionId, worktree: entry.worktree || null, lastActivity: entry.lastActivity || null };
   }
   // Merge with any saved state that wasn't reconnected yet
   const merged = { ...savedState, ...state };
@@ -283,8 +284,8 @@ app.post('/api/settings', (req, res) => {
 });
 
 app.get('/api/shells', (req, res) => {
-  const active = [...shells.entries()].map(([id, entry]) => ({ id, pid: entry.shell.pid, cwd: entry.cwd, status: 'active' }));
-  const saved = Object.entries(savedState).map(([id, entry]) => ({ id, cwd: entry.cwd, status: 'saved' }));
+  const active = [...shells.entries()].map(([id, entry]) => ({ id, pid: entry.shell.pid, cwd: entry.cwd, status: 'active', lastActivity: entry.lastActivity || null }));
+  const saved = Object.entries(savedState).map(([id, entry]) => ({ id, cwd: entry.cwd, status: 'saved', lastActivity: entry.lastActivity || null }));
   res.json({ shells: [...active, ...saved] });
 });
 
@@ -410,7 +411,7 @@ wss.on('connection', (ws, req) => {
       if (savedWorktree) resumeArgs.push('--worktree', savedWorktree);
       const shell = spawnClaude(resumeArgs, cwd, ptySize);
       const startTime = Date.now();
-      shells.set(id, { shell, clients: new Set(), cwd, claudeSessionId, worktree: savedWorktree, restored: true, waitingForInput: false });
+      shells.set(id, { shell, clients: new Set(), cwd, claudeSessionId, worktree: savedWorktree, restored: true, waitingForInput: false, lastActivity: Date.now() });
       wireShellOutput(id);
       shell.onExit(() => {
         if (shuttingDown) return;  // Don't overwrite state file during shutdown
@@ -455,7 +456,7 @@ wss.on('connection', (ws, req) => {
     if (worktree) claudeArgs.push('--worktree', worktree);
     log(`[WS] Creating NEW shell: oldId=${oldId}, newId=${id}, claudeSession=${claudeSessionId}, worktree=${worktree || 'none'}, cwd=${cwd}`);
     const shell = spawnClaude(claudeArgs, cwd, { cols: initialCols, rows: initialRows });
-    shells.set(id, { shell, clients: new Set(), cwd, claudeSessionId, worktree: worktree || null, waitingForInput: false });
+    shells.set(id, { shell, clients: new Set(), cwd, claudeSessionId, worktree: worktree || null, waitingForInput: false, lastActivity: Date.now() });
     wireShellOutput(id);
     shell.onExit(() => { if (!shuttingDown) { shells.delete(id); saveState(); } });
     saveState();
@@ -487,7 +488,8 @@ wss.on('connection', (ws, req) => {
       if (parsed.type === 'redraw') { entry.shell.write('\x0c'); return; } // Ctrl+L
       if (parsed.type === 'initialPrompt') { entry.initialPrompt = parsed.text; return; }
     } catch {}
-    // User sent input - no longer waiting
+    // User sent input - update activity and clear waiting state
+    entry.lastActivity = Date.now();
     if (entry.waitingForInput) {
       entry.waitingForInput = false;
       const stateMsg = JSON.stringify({ type: 'state', waiting: false });
