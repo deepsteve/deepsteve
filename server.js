@@ -46,6 +46,50 @@ function getShellProfilePath() {
   return p;
 }
 
+// --- Theme system ---
+const THEMES_DIR = path.join(os.homedir(), '.deepsteve', 'themes');
+const MAX_THEME_SIZE = 64 * 1024; // 64KB max per theme file
+
+// Ensure themes directory exists
+try { fs.mkdirSync(THEMES_DIR, { recursive: true }); } catch {}
+
+function listThemes() {
+  try {
+    return fs.readdirSync(THEMES_DIR)
+      .filter(f => f.endsWith('.css'))
+      .map(f => f.replace(/\.css$/, ''))
+      .sort();
+  } catch { return []; }
+}
+
+function readThemeCSS(name) {
+  if (!name) return null;
+  // Path traversal guard
+  const safe = path.basename(name);
+  if (safe !== name) return null;
+  const file = path.join(THEMES_DIR, safe + '.css');
+  try {
+    const stat = fs.statSync(file);
+    if (stat.size > MAX_THEME_SIZE) return null;
+    return fs.readFileSync(file, 'utf8');
+  } catch { return null; }
+}
+
+function getActiveThemeCSS() {
+  const name = settings.activeTheme;
+  if (!name) return null;
+  return readThemeCSS(name);
+}
+
+function broadcastTheme(name, css) {
+  const msg = JSON.stringify({ type: 'theme', name: name || null, css: css || '' });
+  for (const client of wss.clients) {
+    if (client.readyState === 1) { // WebSocket.OPEN
+      client.send(msg);
+    }
+  }
+}
+
 // Spawn claude with full login shell environment (like iTerm does)
 function spawnClaude(args, cwd, { cols = 120, rows = 40 } = {}) {
   // Use login shell (-l) which properly sources /etc/zprofile, ~/.zprofile, ~/.zshrc
@@ -271,7 +315,10 @@ process.on('SIGINT', () => { if (!shuttingDown) { shuttingDown = true; shutdown(
 
 app.get('/api/home', (req, res) => res.json({ home: os.homedir() }));
 
-app.get('/api/settings', (req, res) => res.json(settings));
+app.get('/api/settings', (req, res) => {
+  const themeCSS = getActiveThemeCSS();
+  res.json({ ...settings, themeCSS });
+});
 
 app.post('/api/settings', (req, res) => {
   const { shellProfile } = req.body;
@@ -281,6 +328,29 @@ app.post('/api/settings', (req, res) => {
     log(`Settings updated: shellProfile=${shellProfile}`);
   }
   res.json(settings);
+});
+
+app.get('/api/themes', (req, res) => {
+  res.json({ themes: listThemes(), active: settings.activeTheme || null });
+});
+
+app.post('/api/themes/active', (req, res) => {
+  const { theme } = req.body;
+  // theme=null means "Default" (no theme)
+  if (theme && typeof theme === 'string') {
+    const css = readThemeCSS(theme);
+    if (css === null) return res.status(404).json({ error: 'Theme not found' });
+    settings.activeTheme = theme;
+    saveSettings();
+    broadcastTheme(theme, css);
+    log(`Theme set to: ${theme}`);
+  } else {
+    settings.activeTheme = null;
+    saveSettings();
+    broadcastTheme(null, '');
+    log('Theme reset to default');
+  }
+  res.json({ active: settings.activeTheme || null });
 });
 
 app.get('/api/shells', (req, res) => {
@@ -381,6 +451,13 @@ wss.on('connection', (ws, req) => {
     ws.send(JSON.stringify({ type: 'list', ids }));
     ws.close();
     return;
+  }
+
+  // Live reload: client holds this connection open.
+  // When the server restarts (restart.sh, node --watch, etc.) the WS drops
+  // and the client polls until the server is back, then reloads the page.
+  if (action === 'reload') {
+    return; // Keep alive — server restart closes it naturally.
   }
 
   let id = url.searchParams.get('id');
@@ -511,3 +588,25 @@ wss.on('connection', (ws, req) => {
     }
   });
 });
+
+// Watch themes directory for changes and broadcast to clients
+let themeWatchDebounce = null;
+try {
+  fs.watch(THEMES_DIR, (eventType, filename) => {
+    if (!filename || !filename.endsWith('.css')) return;
+    clearTimeout(themeWatchDebounce);
+    themeWatchDebounce = setTimeout(() => {
+      const name = filename.replace(/\.css$/, '');
+      // Only broadcast if this is the active theme
+      if (settings.activeTheme === name) {
+        const css = readThemeCSS(name);
+        if (css !== null) {
+          log(`Active theme file changed: ${name}, broadcasting update`);
+          broadcastTheme(name, css);
+        }
+      }
+    }, 200);
+  });
+} catch (e) {
+  console.error('Failed to watch themes directory:', e.message);
+}

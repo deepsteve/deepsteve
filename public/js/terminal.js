@@ -2,11 +2,15 @@
  * Terminal setup and management using xterm.js
  */
 
+function getTerminalBackground() {
+  return getComputedStyle(document.documentElement).getPropertyValue('--ds-bg-primary').trim() || '#0d1117';
+}
+
 export function createTerminal(container) {
   const term = new Terminal({
     fontSize: 14,
     cursorBlink: false,  // Disable - Claude has its own cursor
-    theme: { background: '#0d1117' }
+    theme: { background: getTerminalBackground() }
   });
 
   const fit = new FitAddon.FitAddon();
@@ -17,6 +21,15 @@ export function createTerminal(container) {
   container.addEventListener('click', () => term.focus());
 
   return { term, fit };
+}
+
+/**
+ * Update a terminal's background to match the current CSS variable.
+ * Called after theme changes to apply the new color without recreating the terminal.
+ */
+export function updateTerminalTheme(term) {
+  const bg = getTerminalBackground();
+  term.options.theme = { ...term.options.theme, background: bg };
 }
 
 export function setupTerminalIO(term, ws, { onUserInput } = {}) {
