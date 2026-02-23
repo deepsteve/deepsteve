@@ -244,9 +244,10 @@ async function refreshSessionsDropdown() {
 const settingsBtn = document.getElementById('settings-btn');
 
 settingsBtn?.addEventListener('click', async () => {
-  const [settingsData, themesData] = await Promise.all([
+  const [settingsData, themesData, versionData] = await Promise.all([
     fetch('/api/settings').then(r => r.json()),
-    fetch('/api/themes').then(r => r.json())
+    fetch('/api/themes').then(r => r.json()),
+    fetch('/api/version').then(r => r.json()).catch(() => ({ current: '?', latest: null, updateAvailable: false }))
   ]);
   const currentProfile = settingsData.shellProfile || '~/.zshrc';
   const themes = themesData.themes || [];
@@ -285,6 +286,20 @@ settingsBtn?.addEventListener('click', async () => {
           Place .css files in ~/.deepsteve/themes/ to add themes.
         </p>
         <select class="theme-select" id="theme-select">${themeOptions}</select>
+      </div>
+      <div class="settings-section">
+        <h3>Version</h3>
+        <div class="version-info">
+          <span>Version ${escapeHtml(versionData.current)}</span>
+          <div class="version-status ${
+            versionData.latest === null ? 'version-failed' :
+            versionData.updateAvailable ? 'version-update' : 'version-ok'
+          }">${
+            versionData.latest === null ? "Couldn\u2019t check for updates" :
+            versionData.updateAvailable ? `Version ${escapeHtml(versionData.latest)} available \u2014 see deepsteve.com for upgrade instructions` :
+            "You\u2019re up to date"
+          }</div>
+        </div>
       </div>
       <div class="modal-buttons" style="margin-top: 16px;">
         <button class="btn-secondary" id="settings-cancel">Cancel</button>
