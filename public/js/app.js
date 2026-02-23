@@ -161,7 +161,7 @@ async function refreshSessionsDropdown() {
       const canClose = !isConnected;
 
       return `
-        <div class="dropdown-item ${isConnected ? 'connected' : ''}" data-id="${shell.id}">
+        <div class="dropdown-item ${isConnected ? 'connected' : 'clickable'}" data-id="${shell.id}" data-cwd="${shell.cwd}">
           <div class="session-info">
             <span class="session-name">${name}</span>
             <span class="session-status ${statusClass}">${statusText}</span>
@@ -170,6 +170,17 @@ async function refreshSessionsDropdown() {
         </div>
       `;
     }).join('');
+
+    // Add click handlers to attach to non-connected sessions
+    sessionsMenu.querySelectorAll('.dropdown-item.clickable').forEach(item => {
+      item.addEventListener('click', (e) => {
+        if (e.target.closest('.session-close')) return;
+        const id = item.dataset.id;
+        const cwd = item.dataset.cwd;
+        sessionsMenu.classList.remove('open');
+        createSession(cwd, id);
+      });
+    });
 
     // Add close handlers
     sessionsMenu.querySelectorAll('.session-close').forEach(btn => {
