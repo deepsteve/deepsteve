@@ -490,8 +490,11 @@ function initTerminal(id, ws, cwd, initialName, { hasScrollback = false, pending
   requestAnimationFrame(() => {
     requestAnimationFrame(() => {
       fitTerminal(term, fit, ws);
-      // If no scrollback was replayed, request a Ctrl+L redraw from the PTY
-      if (!hasScrollback) {
+      if (hasScrollback) {
+        // Scroll to bottom after scrollback replay so user sees latest output
+        term.scrollToBottom();
+      } else {
+        // No scrollback — request a Ctrl+L redraw from the PTY
         ws.send(JSON.stringify({ type: 'redraw' }));
       }
     });
