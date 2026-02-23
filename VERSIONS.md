@@ -12,7 +12,8 @@ The settings modal shows when a new version is available (checks `deepsteve.com/
 
 ## Cutting a Release (maintainers)
 
-1. Bump the version in `package.json` and `install.sh`
-2. Update `deepsteve.com/versions/stable` to the new version string
-3. Create a GitHub release with tag `vX.Y.Z`, attaching `install.sh` as a release asset
-4. Push `deepsteve.com` changes so the update check serves the new version
+1. Bump the version in `package.json`
+2. Run `./release.sh` to generate `install.sh` from the current source files
+3. Update `deepsteve.com/versions/stable` to the new version string
+4. Create a GitHub release with tag `vX.Y.Z`, attaching the generated `install.sh` as a release asset
+5. Push `deepsteve.com` changes so the update check serves the new version
