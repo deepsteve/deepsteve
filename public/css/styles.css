@@ -176,19 +176,28 @@ body { background: #0d1117; color: #c9d1d9; font-family: system-ui; height: 100v
 .terminal-container { position: absolute; inset: 0; display: none; }
 .terminal-container.active { display: flex; flex-direction: column; }
 .terminal-container .xterm { flex: 1; }
+.terminal-container.reconnecting::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: rgba(13, 17, 23, 0.75);
+  z-index: 10;
+}
 .terminal-container.reconnecting::after {
   content: 'Reconnecting...';
   position: absolute;
   top: 50%;
   left: 50%;
   transform: translate(-50%, -50%);
-  background: rgba(22, 27, 34, 0.9);
+  background: #161b22;
   color: #f0f6fc;
-  padding: 12px 24px;
-  border-radius: 6px;
-  border: 1px solid #30363d;
-  font-size: 14px;
-  z-index: 10;
+  padding: 16px 32px;
+  border-radius: 8px;
+  border: 1px solid #f0883e;
+  font-size: 16px;
+  font-weight: 600;
+  z-index: 11;
+  box-shadow: 0 0 20px rgba(240, 136, 62, 0.3);
   animation: pulse 1.5s ease-in-out infinite;
 }
 @keyframes pulse {
