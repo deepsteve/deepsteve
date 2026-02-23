@@ -253,6 +253,8 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
     // Valid JSON - handle control messages (never write to terminal)
     try {
       if (msg.type === 'session') {
+        // Update reconnect URL to use the assigned session ID
+        ws.setSessionId(msg.id);
         // Check if this WebSocket already has a session (reconnect case)
         const existingSession = [...sessions.entries()].find(([, s]) => s.ws === ws);
         if (!existingSession) {

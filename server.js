@@ -96,24 +96,37 @@ function wireShellOutput(id) {
   });
 }
 
-// Gracefully kill a shell - send Ctrl+C first so Claude can save state
+// Gracefully kill a shell - send /exit only if Claude is waiting for input,
+// otherwise Ctrl+C first to interrupt, then /exit once it's ready.
 function killShell(entry, id) {
   if (entry.killed) return;
   entry.killed = true;
 
   const pid = entry.shell.pid;
-  log(`Killing shell ${id} (pid=${pid})`);
+  log(`Killing shell ${id} (pid=${pid}, waitingForInput=${entry.waitingForInput})`);
 
-  // First send Ctrl+C to let Claude exit gracefully and save conversation state
-  try {
-    entry.shell.write('\x03'); // Ctrl+C
-  } catch {}
+  if (entry.waitingForInput) {
+    // Safe to send /exit directly
+    try { submitToShell(entry.shell, '/exit'); } catch {}
+  } else {
+    // Claude is busy — send Ctrl+C to interrupt, then /exit when it's ready
+    try { entry.shell.write('\x03'); } catch {}
+    // Watch for BEL (Claude back at prompt), then send /exit
+    const exitHandler = (data) => {
+      if (data.includes('\x07')) {
+        entry.shell.removeListener('data', exitHandler);
+        try { submitToShell(entry.shell, '/exit'); } catch {}
+      }
+    };
+    entry.shell.on('data', exitHandler);
+    // If BEL never comes, the SIGTERM fallback below will handle it
+  }
 
-  // After 3 seconds, escalate to SIGTERM
+  // After 8 seconds, escalate to SIGTERM
   setTimeout(() => {
     try {
       process.kill(pid, 0); // Check if still alive
-      log(`Shell ${id} still alive after Ctrl+C, sending SIGTERM`);
+      log(`Shell ${id} still alive after /exit, sending SIGTERM`);
       try {
         process.kill(-pid, 'SIGTERM');
       } catch {
@@ -133,7 +146,7 @@ function killShell(entry, id) {
         }
       } catch {}
     }, 2000);
-  }, 3000);
+  }, 8000);
 }
 
 // Load saved state from previous run (shells that can be resumed)
@@ -174,19 +187,34 @@ async function shutdown(signal) {
     process.exit(0);
   }
 
-  // Phase 1: Send Ctrl+C to all shells so Claude saves state
-  log(`Sending Ctrl+C to ${entries.length} shells...`);
+  // Phase 1: Gracefully exit all shells so Claude persists sessions.
+  // Only send /exit when Claude is at the input prompt (waitingForInput).
+  // If busy, Ctrl+C first to interrupt, then /exit once it returns to prompt.
+  log(`Gracefully exiting ${entries.length} shells...`);
   for (const [id, entry] of entries) {
-    try { entry.shell.write('\x03'); } catch {}
+    try {
+      if (entry.waitingForInput) {
+        submitToShell(entry.shell, '/exit');
+      } else {
+        entry.shell.write('\x03');
+        const exitHandler = (data) => {
+          if (data.includes('\x07')) {
+            entry.shell.removeListener('data', exitHandler);
+            try { submitToShell(entry.shell, '/exit'); } catch {}
+          }
+        };
+        entry.shell.on('data', exitHandler);
+      }
+    } catch {}
   }
 
-  // Phase 2: Wait up to 5s for shells to exit naturally
+  // Phase 2: Wait up to 8s for shells to exit naturally (1s for \r delay + time to save)
   const alive = new Set(entries.map(([id]) => id));
   for (const [id, entry] of entries) {
     entry.shell.onExit(() => alive.delete(id));
   }
 
-  const deadline = Date.now() + 5000;
+  const deadline = Date.now() + 8000;
   while (alive.size > 0 && Date.now() < deadline) {
     await new Promise(r => setTimeout(r, 200));
   }
