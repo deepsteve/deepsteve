@@ -16,13 +16,21 @@ Run multiple Claude Code sessions side-by-side in your browser, each with full t
 - **Directory picker** - Start each session in any working directory
 - **Runs as a daemon** - Always available in the background on your Mac
 
+## Quick Install
+
+```bash
+curl -fsSL https://github.com/deepsteve/deepsteve/releases/latest/download/install.sh | bash
+```
+
 ## Requirements
 
 - macOS
 - Node.js
 - [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI installed
 
-## Installation
+## Installation (from source)
+
+If you've cloned the repo:
 
 ```bash
 ./install.sh
