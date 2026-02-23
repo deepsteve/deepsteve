@@ -81,6 +81,10 @@ function wireShellOutput(id) {
   entry.shell.onData((data) => {
     const e = shells.get(id);
     if (!e) return;
+    // Respond to Kitty keyboard protocol query so Claude enables CSI u
+    if (data.includes('\x1b[?u')) {
+      e.shell.write('\x1b[?0u');
+    }
     e.clients.forEach((c) => c.send(data));
     if (data.includes('\x07') && !e.waitingForInput) {
       e.waitingForInput = true;

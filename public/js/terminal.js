@@ -29,9 +29,12 @@ export function setupTerminalIO(term, ws, { onUserInput } = {}) {
 
   // Handle Shift+Enter for multi-line input
   term.attachCustomKeyEventHandler((event) => {
-    if (event.shiftKey && event.key === 'Enter' && event.type === 'keydown') {
-      // Send CSI u escape sequence for Shift+Enter (like iTerm2)
-      ws.send('\x1b[13;2u');
+    if (event.shiftKey && event.key === 'Enter') {
+      if (event.type === 'keydown') {
+        // Send CSI u escape sequence for Shift+Enter (like iTerm2)
+        ws.send('\x1b[13;2u');
+      }
+      // Block all event types (keydown, keyup, keypress) for Shift+Enter
       return false;
     }
     return true;
