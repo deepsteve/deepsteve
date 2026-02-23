@@ -12,7 +12,7 @@ export function createWebSocket(options = {}) {
   if (options.cols) params.set('cols', options.cols);
   if (options.rows) params.set('rows', options.rows);
 
-  const url = 'ws://' + location.host + '?' + params;
+  let url = 'ws://' + location.host + '?' + params;
   let ws = new WebSocket(url);
   let reconnectTimer = null;
   let isReconnecting = false;
@@ -35,6 +35,17 @@ export function createWebSocket(options = {}) {
     close() {
       clearInterval(reconnectTimer);
       ws.close();
+    },
+
+    // Called after server assigns a session ID — updates the reconnect URL
+    // so future reconnections request the existing session instead of creating new ones.
+    setSessionId(id) {
+      const p = new URLSearchParams();
+      p.set('id', id);
+      if (options.cwd) p.set('cwd', options.cwd);
+      if (options.cols) p.set('cols', options.cols);
+      if (options.rows) p.set('rows', options.rows);
+      url = 'ws://' + location.host + '?' + p;
     },
 
     // Event handlers - set by caller
