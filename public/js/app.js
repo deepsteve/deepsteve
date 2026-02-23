@@ -15,6 +15,34 @@ import { LayoutManager } from './layout-manager.js';
 const sessions = new Map();
 let activeId = null;
 
+/**
+ * Per-tab session persistence via sessionStorage.
+ * This is the authoritative source for "what sessions does THIS tab have."
+ * Survives page refresh, doesn't depend on localStorage window-ID mapping.
+ */
+const TabSessions = {
+  KEY: 'deepsteve-tab-sessions',
+  get() {
+    try { return JSON.parse(sessionStorage.getItem(this.KEY)) || []; } catch { return []; }
+  },
+  save(sessionList) {
+    sessionStorage.setItem(this.KEY, JSON.stringify(sessionList));
+  },
+  add(session) {
+    const list = this.get();
+    if (!list.find(s => s.id === session.id)) list.push(session);
+    this.save(list);
+  },
+  remove(sessionId) {
+    this.save(this.get().filter(s => s.id !== sessionId));
+  },
+  updateId(oldId, newId) {
+    const list = this.get();
+    const s = list.find(s => s.id === oldId);
+    if (s) { s.id = newId; this.save(list); }
+  }
+};
+
 // Prevent accidental browser navigation (back/forward)
 window.addEventListener('popstate', (e) => {
   // Push state back to prevent navigation
@@ -255,6 +283,10 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
       if (msg.type === 'session') {
         // Update reconnect URL to use the assigned session ID
         ws.setSessionId(msg.id);
+        // If server assigned a different ID than requested, update TabSessions
+        if (existingId && msg.id !== existingId) {
+          TabSessions.updateId(existingId, msg.id);
+        }
         // Check if this WebSocket already has a session (reconnect case)
         const existingSession = [...sessions.entries()].find(([, s]) => s.ws === ws);
         if (!existingSession) {
@@ -265,6 +297,7 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
         }
       } else if (msg.type === 'gone') {
         SessionStore.removeSession(getWindowId(), msg.id);
+        TabSessions.remove(msg.id);
       } else if (msg.type === 'state') {
         const entry = [...sessions.entries()].find(([, s]) => s.ws === ws);
         if (entry) {
@@ -286,6 +319,7 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
   ws.onerror = () => {
     if (existingId) {
       SessionStore.removeSession(getWindowId(), existingId);
+      TabSessions.remove(existingId);
     }
   };
 
@@ -348,7 +382,8 @@ function initTerminal(id, ws, cwd, initialName) {
   TabManager.addTab(id, name, tabCallbacks);
   switchTo(id);
 
-  // Save to storage
+  // Save to both storages — TabSessions is per-tab truth, SessionStore is for cross-tab
+  TabSessions.add({ id, cwd, name });
   SessionStore.addSession(windowId, { id, cwd, name });
 
   // Fit terminal after layout is complete (double-rAF ensures layout has happened)
@@ -416,6 +451,7 @@ function killSession(id) {
   sessions.delete(id);
 
   SessionStore.removeSession(getWindowId(), id);
+  TabSessions.remove(id);
 
   // Switch to next available session
   if (activeId === id) {
@@ -715,13 +751,25 @@ async function init() {
   const windowId = WindowManager.getWindowId();
   WindowManager.startHeartbeat();
 
-  if (isExistingTab) {
-    // Existing tab - restore its sessions
+  // TabSessions (sessionStorage) is the authoritative per-tab source.
+  // It survives page refresh and doesn't depend on localStorage window-ID mapping.
+  const tabSessions = TabSessions.get();
+  console.log('[init] TabSessions:', tabSessions);
+
+  if (isExistingTab && tabSessions.length > 0) {
+    // Existing tab with sessions saved in sessionStorage — restore them
+    console.log('[init] Restoring from TabSessions');
+    for (const { id, cwd } of tabSessions) {
+      console.log('[init] Restoring session:', id, cwd);
+      createSession(cwd, id);
+    }
+  } else if (isExistingTab) {
+    // Existing tab but TabSessions is empty — try localStorage as fallback
     const savedSessions = SessionStore.getWindowSessions(windowId);
-    console.log('[init] windowId:', windowId, 'savedSessions:', savedSessions);
+    console.log('[init] windowId:', windowId, 'savedSessions (fallback):', savedSessions);
     if (savedSessions.length > 0) {
       for (const { id, cwd } of savedSessions) {
-        console.log('[init] Restoring session:', id, cwd);
+        console.log('[init] Restoring session (fallback):', id, cwd);
         createSession(cwd, id);
       }
     } else {
@@ -734,6 +782,7 @@ async function init() {
       // Migrate legacy sessions to this window
       for (const session of legacySessions) {
         SessionStore.addSession(windowId, session);
+        TabSessions.add(session);
       }
       for (const { id, cwd } of legacySessions) {
         createSession(cwd, id);
@@ -748,6 +797,9 @@ async function init() {
         if (result.action === 'restore') {
           // Claim the selected window's sessions
           const sessions = WindowManager.claimWindow(result.window.windowId);
+          for (const sess of sessions) {
+            TabSessions.add(sess);
+          }
           for (const { id, cwd } of sessions) {
             createSession(cwd, id);
           }

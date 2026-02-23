@@ -165,7 +165,12 @@ try {
 }
 
 // Save state on shutdown
+let stateFrozen = false;  // Set during shutdown to prevent onExit handlers from overwriting
 function saveState() {
+  if (stateFrozen) {
+    log(`[saveState] BLOCKED — state frozen during shutdown`);
+    return;
+  }
   const state = {};
   for (const [id, entry] of shells) {
     state[id] = { cwd: entry.cwd, claudeSessionId: entry.claudeSessionId };
@@ -184,6 +189,7 @@ function saveState() {
 async function shutdown(signal) {
   log(`Received ${signal}, saving state...`);
   saveState();
+  stateFrozen = true;  // Prevent onExit/onClose handlers from overwriting state file
 
   const entries = [...shells.entries()];
   if (entries.length === 0) {
@@ -398,6 +404,7 @@ wss.on('connection', (ws, req) => {
       shells.set(id, { shell, clients: new Set(), cwd, claudeSessionId, restored: true, waitingForInput: false });
       wireShellOutput(id);
       shell.onExit(() => {
+        if (shuttingDown) return;  // Don't overwrite state file during shutdown
         const elapsed = Date.now() - startTime;
         if (elapsed < 5000 && claudeSessionId) {
           // --resume failed quickly, fall back to fresh session with -c
@@ -410,7 +417,7 @@ wss.on('connection', (ws, req) => {
             entry.claudeSessionId = newClaudeSessionId;
             entry.killed = false;
             wireShellOutput(id);
-            fallbackShell.onExit(() => { shells.delete(id); saveState(); });
+            fallbackShell.onExit(() => { if (!shuttingDown) { shells.delete(id); saveState(); } });
             saveState();
           }
         } else {
@@ -437,7 +444,7 @@ wss.on('connection', (ws, req) => {
     const shell = spawnClaude(claudeArgs, cwd, { cols: initialCols, rows: initialRows });
     shells.set(id, { shell, clients: new Set(), cwd, claudeSessionId, waitingForInput: false });
     wireShellOutput(id);
-    shell.onExit(() => { shells.delete(id); saveState(); });
+    shell.onExit(() => { if (!shuttingDown) { shells.delete(id); saveState(); } });
     saveState();
   }
 
