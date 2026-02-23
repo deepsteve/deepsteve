@@ -154,9 +154,9 @@ body { background: #0d1117; color: #c9d1d9; font-family: system-ui; height: 100v
 #new-btn:active { background: #1a7f37; }
 
 /* Wand button */
-#wand-btn { padding: 4px 10px; background: #6e40c9; border: none; color: white; border-radius: 4px; cursor: pointer; font-size: 13px; margin-left: 4px; user-select: none; }
-#wand-btn:hover { background: #8957e5; }
-#wand-btn:active { background: #553098; }
+#wand-btn { padding: 4px 10px; background: #30363d; border: none; color: #c9d1d9; border-radius: 4px; cursor: pointer; font-size: 13px; margin-left: 4px; user-select: none; }
+#wand-btn:hover { background: #3d444d; }
+#wand-btn:active { background: #272c33; }
 
 /* Vertical layout wand button */
 #app-container.vertical-layout #wand-btn { width: 100%; margin: 4px 0 0 0; }
