@@ -29,7 +29,7 @@ export function showWindowRestoreModal(orphanedWindows) {
     overlay.innerHTML = `
       <div class="modal">
         <h2>Restore Previous Sessions</h2>
-        <p style="font-size: 13px; color: #8b949e; margin-bottom: 12px;">
+        <p style="font-size: 13px; color: var(--ds-text-secondary); margin-bottom: 12px;">
           Found ${orphanedWindows.length} window${orphanedWindows.length !== 1 ? 's' : ''} from previous sessions. Select one to restore:
         </p>
         <div class="window-list">

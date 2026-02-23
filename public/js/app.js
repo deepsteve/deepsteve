@@ -5,11 +5,12 @@
 import { SessionStore } from './session-store.js';
 import { WindowManager } from './window-manager.js';
 import { TabManager, getDefaultTabName } from './tab-manager.js';
-import { createTerminal, setupTerminalIO, fitTerminal, measureTerminalSize } from './terminal.js';
+import { createTerminal, setupTerminalIO, fitTerminal, measureTerminalSize, updateTerminalTheme } from './terminal.js';
 import { createWebSocket } from './ws-client.js';
 import { showDirectoryPicker } from './dir-picker.js';
 import { showWindowRestoreModal } from './window-restore-modal.js';
 import { LayoutManager } from './layout-manager.js';
+import { initLiveReload } from './live-reload.js';
 
 // Configuration
 const MAX_TAB_TITLE_LENGTH = 50;
@@ -114,6 +115,28 @@ function clearAllNotifications() {
     notif.close();
   }
   activeNotifications.clear();
+}
+
+/**
+ * Apply a theme by injecting/updating a <style> tag with the given CSS.
+ * Pass empty string to revert to default (built-in CSS variables).
+ */
+function applyTheme(css) {
+  let style = document.getElementById('ds-theme');
+  if (!css) {
+    if (style) style.remove();
+  } else {
+    if (!style) {
+      style = document.createElement('style');
+      style.id = 'ds-theme';
+      document.head.appendChild(style);
+    }
+    style.textContent = css;
+  }
+  // Update all existing terminal backgrounds to match the new --ds-bg-primary
+  for (const [, session] of sessions) {
+    updateTerminalTheme(session.term);
+  }
 }
 
 // Clear notifications for the active session when the window regains focus
@@ -221,15 +244,24 @@ async function refreshSessionsDropdown() {
 const settingsBtn = document.getElementById('settings-btn');
 
 settingsBtn?.addEventListener('click', async () => {
-  const settings = await fetch('/api/settings').then(r => r.json());
-  const currentProfile = settings.shellProfile || '~/.zshrc';
+  const [settingsData, themesData] = await Promise.all([
+    fetch('/api/settings').then(r => r.json()),
+    fetch('/api/themes').then(r => r.json())
+  ]);
+  const currentProfile = settingsData.shellProfile || '~/.zshrc';
+  const themes = themesData.themes || [];
+  const activeTheme = themesData.active || '';
+
+  const themeOptions = ['<option value="">Default</option>']
+    .concat(themes.map(t => `<option value="${escapeHtml(t)}" ${t === activeTheme ? 'selected' : ''}>${escapeHtml(t)}</option>`))
+    .join('');
 
   const overlay = document.createElement('div');
   overlay.className = 'modal-overlay';
   overlay.innerHTML = `
     <div class="modal">
       <h2>Settings</h2>
-      <p style="font-size: 13px; color: #8b949e; margin-bottom: 12px;">
+      <p style="font-size: 13px; color: var(--ds-text-secondary); margin-bottom: 12px;">
         Shell profile to source before running Claude:
       </p>
       <div class="settings-option">
@@ -247,6 +279,13 @@ settingsBtn?.addEventListener('click', async () => {
       <div class="settings-custom">
         <input type="text" id="custom-profile" placeholder="~/.config/myprofile" value="${currentProfile !== '~/.zshrc' && currentProfile !== '~/.bashrc' ? currentProfile : ''}">
       </div>
+      <div class="settings-section">
+        <h3>Theme</h3>
+        <p style="font-size: 13px; color: var(--ds-text-secondary); margin-bottom: 8px;">
+          Place .css files in ~/.deepsteve/themes/ to add themes.
+        </p>
+        <select class="theme-select" id="theme-select">${themeOptions}</select>
+      </div>
       <div class="modal-buttons" style="margin-top: 16px;">
         <button class="btn-secondary" id="settings-cancel">Cancel</button>
         <button class="btn-primary" id="settings-save">Save</button>
@@ -262,6 +301,18 @@ settingsBtn?.addEventListener('click', async () => {
     });
   });
   customInput.disabled = overlay.querySelector('#profile-custom:checked') === null;
+
+  // Live preview: apply theme immediately on select change
+  const themeSelect = overlay.querySelector('#theme-select');
+  themeSelect.addEventListener('change', async () => {
+    const theme = themeSelect.value || null;
+    await fetch('/api/themes/active', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ theme })
+    });
+    // The server will broadcast the theme CSS via WebSocket — applyTheme runs from the WS handler
+  });
 
   overlay.querySelector('#settings-cancel').onclick = () => overlay.remove();
   overlay.querySelector('#settings-save').onclick = async () => {
@@ -339,6 +390,8 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
       } else if (msg.type === 'gone') {
         SessionStore.removeSession(getWindowId(), msg.id);
         TabSessions.remove(msg.id);
+      } else if (msg.type === 'theme') {
+        applyTheme(msg.css || '');
       } else if (msg.type === 'state') {
         const entry = [...sessions.entries()].find(([, s]) => s.ws === ws);
         if (entry) {
@@ -604,7 +657,7 @@ async function promptWorktreeSession() {
   overlay.innerHTML = `
     <div class="modal">
       <h2>New worktree</h2>
-      <p style="font-size: 13px; color: #8b949e; margin-bottom: 12px;">
+      <p style="font-size: 13px; color: var(--ds-text-secondary); margin-bottom: 12px;">
         Creates a git worktree and opens Claude in it.
       </p>
       <input type="text" id="worktree-name" placeholder="e.g. feature-auth, bugfix-123" style="width: 100%; box-sizing: border-box;">
@@ -760,6 +813,17 @@ Please read the issue carefully, understand the codebase context, and implement 
 async function init() {
   // Initialize layout manager
   LayoutManager.init();
+
+  // Auto-reload browser when server restarts (restart.sh, node --watch, etc.)
+  initLiveReload();
+
+  // Load active theme before creating any terminals (prevents color flash)
+  try {
+    const settingsData = await fetch('/api/settings').then(r => r.json());
+    if (settingsData.themeCSS) {
+      applyTheme(settingsData.themeCSS);
+    }
+  } catch {}
 
   // Set up new button handler with long-press for menu
   const newBtn = document.getElementById('new-btn');
