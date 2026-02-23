@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
+  <style>
+    * { margin: 0; box-sizing: border-box; }
+    body {
+      background: linear-gradient(180deg, #0a0a1a 0%, #1a1a2e 40%, #16213e 100%);
+      color: #c9d1d9;
+      font-family: system-ui;
+      height: 100vh;
+      overflow: hidden;
+    }
+    #tower-root { height: 100vh; }
+  </style>
+</head>
+<body>
+  <div id="tower-root"></div>
+  <script src="https://cdn.jsdelivr.net/npm/react@18/umd/react.production.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@babel/standalone/babel.min.js"></script>
+  <script type="text/babel" data-type="module" src="tower.jsx"></script>
+</body>
+</html>

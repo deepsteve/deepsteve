@@ -11,6 +11,7 @@ import { showDirectoryPicker } from './dir-picker.js';
 import { showWindowRestoreModal } from './window-restore-modal.js';
 import { LayoutManager } from './layout-manager.js';
 import { initLiveReload } from './live-reload.js';
+import { ModManager } from './mod-manager.js';
 
 // Configuration
 const MAX_TAB_TITLE_LENGTH = 50;
@@ -152,6 +153,18 @@ window.addEventListener('focus', () => {
 function updateTitle() {
   const count = [...sessions.values()].filter(s => s.waitingForInput).length;
   document.title = count > 0 ? `(${count}) deepsteve` : 'deepsteve';
+}
+
+/**
+ * Build a session list for the mod bridge API
+ */
+function getSessionList() {
+  return [...sessions.entries()].map(([id, s]) => ({
+    id,
+    name: s.name || getDefaultTabName(s.cwd),
+    cwd: s.cwd,
+    waitingForInput: s.waitingForInput || false,
+  }));
 }
 
 // Sessions dropdown
@@ -418,6 +431,7 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
           if (msg.waiting) {
             showNotification(sid, s.name || getDefaultTabName(s.cwd));
           }
+          ModManager.notifySessionsChanged(getSessionList());
         }
       }
     } catch (err) {
@@ -521,12 +535,21 @@ function initTerminal(id, ws, cwd, initialName, { hasScrollback = false, pending
       fitTerminal(term, fit, ws);
     }
   });
+
+  // Notify mods of session list change
+  ModManager.notifySessionsChanged(getSessionList());
 }
 
 /**
  * Switch to a specific session tab
  */
 function switchTo(id) {
+  // If mod view is active, delegate to ModManager to show terminal with back button
+  if (ModManager.isModViewVisible()) {
+    ModManager.showTerminalForSession(id);
+    return;
+  }
+
   // Deactivate current
   if (activeId) {
     const current = sessions.get(activeId);
@@ -582,6 +605,9 @@ function killSession(id) {
       activeId = null;
     }
   }
+
+  // Notify mods of session list change
+  ModManager.notifySessionsChanged(getSessionList());
 }
 
 /**
@@ -832,6 +858,14 @@ async function init() {
   // Initialize layout manager
   LayoutManager.init();
 
+  // Initialize mod system
+  ModManager.init({
+    getSessions: getSessionList,
+    focusSession: switchTo,
+    createSession: (cwd) => createSession(cwd, null, true),
+    killSession: killSession,
+  });
+
   // Auto-reload browser when server restarts (restart.sh, node --watch, etc.)
   initLiveReload();
 
@@ -842,6 +876,9 @@ async function init() {
       applyTheme(settingsData.themeCSS);
     }
   } catch {}
+
+  // Load available mods (creates Mods button, auto-activates persisted mod)
+  await ModManager.loadAvailableMods();
 
   // Set up new button handler with long-press for menu
   const newBtn = document.getElementById('new-btn');

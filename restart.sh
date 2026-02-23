@@ -18,6 +18,8 @@ cp server.js ~/.deepsteve/
 cp -r public/* ~/.deepsteve/public/
 mkdir -p ~/.deepsteve/themes
 cp -n themes/*.css ~/.deepsteve/themes/ 2>/dev/null || true
+mkdir -p ~/.deepsteve/mods
+cp -r mods/* ~/.deepsteve/mods/ 2>/dev/null || true
 
 launchctl unload ~/Library/LaunchAgents/com.deepsteve.plist 2>/dev/null
 sleep 3

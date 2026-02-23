@@ -18,6 +18,7 @@ const STATE_FILE = path.join(os.homedir(), '.deepsteve', 'state.json');
 const SETTINGS_FILE = path.join(os.homedir(), '.deepsteve', 'settings.json');
 const app = express();
 app.use(express.static('public'));
+app.use('/mods', express.static('mods'));
 app.use(express.json());
 
 // Load settings
@@ -369,6 +370,28 @@ app.post('/api/themes/active', (req, res) => {
     log('Theme reset to default');
   }
   res.json({ active: settings.activeTheme || null });
+});
+
+// --- Mods system ---
+const MODS_DIR = path.join(__dirname, 'mods');
+
+app.get('/api/mods', (req, res) => {
+  try {
+    if (!fs.existsSync(MODS_DIR)) return res.json({ mods: [] });
+    const entries = fs.readdirSync(MODS_DIR, { withFileTypes: true });
+    const mods = [];
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const manifestPath = path.join(MODS_DIR, entry.name, 'mod.json');
+      try {
+        const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+        mods.push({ id: entry.name, ...manifest });
+      } catch { /* skip dirs without valid mod.json */ }
+    }
+    res.json({ mods });
+  } catch (e) {
+    res.json({ mods: [] });
+  }
 });
 
 app.get('/api/shells', (req, res) => {
