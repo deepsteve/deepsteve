@@ -22,7 +22,17 @@ export function createTerminal(container) {
 export function setupTerminalIO(term, ws, { onUserInput } = {}) {
   // Note: ws.onmessage is set in app.js to handle JSON control messages
   // and route terminal data here via term.write()
+
+  // xterm.js attachCustomKeyEventHandler returns false to block Shift+Enter,
+  // but onData still fires with \r. Use a flag to suppress the leaked \r.
+  let suppressNextEnter = false;
+
   term.onData((data) => {
+    if (suppressNextEnter && data === '\r') {
+      suppressNextEnter = false;
+      return;
+    }
+    suppressNextEnter = false;
     ws.send(data);
     if (onUserInput) onUserInput();
   });
@@ -33,8 +43,8 @@ export function setupTerminalIO(term, ws, { onUserInput } = {}) {
       if (event.type === 'keydown') {
         // Send CSI u escape sequence for Shift+Enter (like iTerm2)
         ws.send('\x1b[13;2u');
+        suppressNextEnter = true;
       }
-      // Block all event types (keydown, keyup, keypress) for Shift+Enter
       return false;
     }
     return true;
