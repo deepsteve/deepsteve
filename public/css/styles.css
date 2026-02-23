@@ -138,6 +138,8 @@ body { background: #0d1117; color: #c9d1d9; font-family: system-ui; height: 100v
 .dropdown-item .session-status.active { color: #3fb950; }
 .dropdown-item .session-close { opacity: 0.5; cursor: pointer; padding: 2px 6px; font-size: 11px; }
 .dropdown-item .session-close:hover { opacity: 1; color: #f85149; }
+.dropdown-item.clickable { cursor: pointer; }
+.dropdown-item.clickable:hover { background: #21262d; }
 .dropdown-item.connected { background: #21262d; }
 .dropdown-empty { padding: 12px; text-align: center; color: #8b949e; font-size: 13px; }
 
