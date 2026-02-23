@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="deepsteve_logo_1024x768_3_4.png" alt="deepsteve logo" width="200">
+  <img src="public/icon-512.png" alt="deepsteve logo" width="200">
 </p>
 
 # deepsteve
