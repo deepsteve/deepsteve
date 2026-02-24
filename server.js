@@ -302,7 +302,7 @@ async function shutdown(signal) {
   // Disconnect all client WebSockets so no user input can reach PTYs during shutdown.
   // Clients will show "Reconnecting..." overlay and block all keystrokes.
   for (const [, entry] of shells) {
-    entry.clients.forEach((c) => { try { c.close(); } catch {} });
+    entry.clients.forEach((c) => { try { c.terminate(); } catch {} });
   }
 
   const entries = [...shells.entries()];
