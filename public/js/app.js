@@ -219,14 +219,14 @@ async function refreshSessionsDropdown() {
 
     sessionsMenu.innerHTML = allShells.map(shell => {
       const isConnected = connectedIds.has(shell.id);
-      const name = sessions.get(shell.id)?.name || getDefaultTabName(shell.cwd);
+      const name = sessions.get(shell.id)?.name || shell.name || getDefaultTabName(shell.cwd);
       const staleness = !isConnected && shell.lastActivity ? formatRelativeTime(shell.lastActivity) : '';
       const statusText = isConnected ? 'connected' : (staleness || (shell.status === 'saved' ? 'saved' : 'not connected'));
       const statusClass = isConnected ? 'active' : '';
       const canClose = !isConnected;
 
       return `
-        <div class="dropdown-item ${isConnected ? 'connected' : 'clickable'}" data-id="${shell.id}" data-cwd="${shell.cwd}">
+        <div class="dropdown-item ${isConnected ? 'connected' : 'clickable'}" data-id="${shell.id}" data-cwd="${shell.cwd}" data-name="${escapeHtml(name)}">
           <div class="session-info">
             <span class="session-name">${name}</span>
             <span class="session-status ${statusClass}">${statusText}</span>
@@ -242,8 +242,9 @@ async function refreshSessionsDropdown() {
         if (e.target.closest('.session-close')) return;
         const id = item.dataset.id;
         const cwd = item.dataset.cwd;
+        const name = item.dataset.name || null;
         sessionsMenu.classList.remove('open');
-        createSession(cwd, id);
+        createSession(cwd, id, false, { name });
       });
     });
 
@@ -393,7 +394,7 @@ function getWindowId() {
  */
 function createSession(cwd, existingId = null, isNew = false, opts = {}) {
   const { cols, rows } = measureTerminalSize();
-  const ws = createWebSocket({ id: existingId, cwd, isNew, worktree: opts.worktree, cols, rows });
+  const ws = createWebSocket({ id: existingId, cwd, isNew, worktree: opts.worktree, name: opts.name, cols, rows });
 
   // Buffer terminal data that arrives before the terminal is created
   let pendingData = [];
@@ -428,7 +429,9 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
         // Check if this WebSocket already has a session (reconnect case)
         const existingSession = [...sessions.entries()].find(([, s]) => s.ws === ws);
         if (!existingSession) {
-          initTerminal(msg.id, ws, cwd, opts.name, { hasScrollback, pendingData });
+          // Use client-provided name, or fall back to server-persisted name
+          const sessionName = opts.name || msg.name;
+          initTerminal(msg.id, ws, cwd, sessionName, { hasScrollback, pendingData });
           if (opts.initialPrompt) {
             ws.sendJSON({ type: 'initialPrompt', text: opts.initialPrompt });
           }
@@ -658,6 +661,12 @@ function renameSession(id) {
     session.name = name;
     TabManager.updateLabel(id, name);
     SessionStore.updateSession(getWindowId(), id, { name });
+    // Update per-tab storage
+    const tabList = TabSessions.get();
+    const tabEntry = tabList.find(s => s.id === id);
+    if (tabEntry) { tabEntry.name = name; TabSessions.save(tabList); }
+    // Tell server so it persists across tab close/restore
+    session.ws.sendJSON({ type: 'rename', name });
     ModManager.notifySessionsChanged(getSessionList());
   });
 }
