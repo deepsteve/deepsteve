@@ -81,11 +81,10 @@ async function initMCP(context) {
     }
 
     if (sessionId && !sessions.has(sessionId)) {
-      res.status(404).json({ error: 'Session not found' });
-      return;
+      log(`MCP: stale session ${sessionId}, creating new session`);
     }
 
-    // No session ID — must be an initialize request, create new session
+    // No session ID or stale session — create new session
     const { server, transport } = createSession();
 
     // Capture the session ID after the transport generates it
@@ -110,6 +109,7 @@ async function initMCP(context) {
   app.get('/mcp', async (req, res) => {
     const sessionId = req.headers['mcp-session-id'];
     if (!sessionId || !sessions.has(sessionId)) {
+      // Stale or missing session — tell client to re-initialize
       res.status(404).json({ error: 'Session not found' });
       return;
     }
@@ -120,14 +120,15 @@ async function initMCP(context) {
   // DELETE /mcp — session teardown
   app.delete('/mcp', async (req, res) => {
     const sessionId = req.headers['mcp-session-id'];
-    if (!sessionId || !sessions.has(sessionId)) {
-      res.status(404).json({ error: 'Session not found' });
-      return;
+    if (sessionId && sessions.has(sessionId)) {
+      const { transport } = sessions.get(sessionId);
+      await transport.handleRequest(req, res);
+      sessions.delete(sessionId);
+      log(`MCP: session ${sessionId} deleted`);
+    } else {
+      // Stale session — nothing to clean up, just ack
+      res.status(200).end();
     }
-    const { transport } = sessions.get(sessionId);
-    await transport.handleRequest(req, res);
-    sessions.delete(sessionId);
-    log(`MCP: session ${sessionId} deleted`);
   });
 
   log(`MCP: server initialized with ${Object.keys(modTools).length} tools`);

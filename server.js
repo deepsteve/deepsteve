@@ -22,7 +22,10 @@ const SETTINGS_FILE = path.join(os.homedir(), '.deepsteve', 'settings.json');
 const app = express();
 app.use(express.static('public'));
 app.use('/mods', express.static('mods'));
-app.use(express.json());
+app.use((req, res, next) => {
+  if (req.path === '/mcp') return next(); // MCP SDK parses its own body
+  express.json()(req, res, next);
+});
 
 // Load settings
 let settings = { shellProfile: '~/.zshrc' };

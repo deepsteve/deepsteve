@@ -9,6 +9,7 @@
 
 const STORAGE_KEY = 'deepsteve-enabled-mods'; // Set of enabled mod IDs
 const ACTIVE_VIEW_KEY = 'deepsteve-active-mod-view'; // Which mod view is currently showing
+const PANEL_VISIBLE_KEY = 'deepsteve-panel-visible'; // Whether the panel is shown
 
 let allMods = [];          // [{ id, name, description, entry, toolbar }]
 let enabledMods = new Set(); // mod IDs that are enabled
@@ -193,10 +194,15 @@ async function loadAvailableMods() {
     if (mod) _showMod(mod);
   }
 
-  // Auto-open the first enabled panel mod (only one panel can be active at a time)
+  // Load enabled panel mods (iframe always created so MCP tools work).
+  // Only show the panel UI if it was previously visible.
+  const panelWasVisible = localStorage.getItem(PANEL_VISIBLE_KEY) !== 'false';
   for (const mod of allMods) {
     if (enabledMods.has(mod.id) && mod.display === 'panel') {
-      _showPanelMod(mod);
+      _loadPanelMod(mod);
+      if (panelWasVisible) {
+        _showPanel();
+      }
       break;
     }
   }
@@ -249,7 +255,7 @@ function _renderModsMenu() {
       } else {
         enabledMods.delete(modId);
         if (mod.display === 'panel') {
-          _hidePanelMod();
+          _unloadPanelMod();
         } else {
           _removeToolbarButton(modId);
           if (activeViewId === modId) {
@@ -366,26 +372,19 @@ function _setupPanelResizer() {
 }
 
 /**
- * Show a panel-mode mod (iframe beside the terminal, both visible).
+ * Load a panel mod's iframe (creates it hidden if panel not visible).
+ * Called when mod is enabled. The iframe stays alive until the mod is disabled.
  */
-function _showPanelMod(mod) {
-  // If same panel is already open, toggle it off
-  if (activePanelId === mod.id) {
-    _hidePanelMod();
-    return;
-  }
+function _loadPanelMod(mod) {
+  // Already loaded
+  if (activePanelId === mod.id && panelIframe) return;
 
   // Clean up existing panel if different mod
   if (activePanelId) {
-    _destroyPanelIframe();
+    _unloadPanelMod();
   }
 
   activePanelId = mod.id;
-
-  // Update toolbar button states
-  for (const [id, btn] of toolbarButtons) {
-    btn.classList.toggle('active', id === mod.id);
-  }
 
   // Create panel iframe
   const entry = mod.entry || 'index.html';
@@ -396,6 +395,18 @@ function _showPanelMod(mod) {
   panelIframe.addEventListener('load', () => {
     _injectBridgeAPI(panelIframe);
   });
+}
+
+/**
+ * Show the panel UI (make the already-loaded iframe visible).
+ */
+function _showPanel() {
+  if (!activePanelId) return;
+
+  // Update toolbar button states
+  for (const [id, btn] of toolbarButtons) {
+    btn.classList.toggle('active', id === activePanelId);
+  }
 
   // Show panel + resizer
   panelContainer.style.display = 'block';
@@ -407,14 +418,56 @@ function _showPanelMod(mod) {
     document.getElementById('terminals').style.display = 'block';
   }
 
+  localStorage.setItem(PANEL_VISIBLE_KEY, 'true');
+
   // Trigger resize so terminal refits to smaller width
   window.dispatchEvent(new Event('resize'));
 }
 
 /**
- * Hide the active panel mod.
+ * Hide the panel UI but keep the iframe alive.
  */
-function _hidePanelMod() {
+function _hidePanel() {
+  // Clear toolbar button states for panel mod
+  for (const [, btn] of toolbarButtons) {
+    btn.classList.remove('active');
+  }
+
+  // Hide panel container + resizer
+  panelContainer.style.display = 'none';
+  panelResizer.style.display = 'none';
+
+  localStorage.setItem(PANEL_VISIBLE_KEY, 'false');
+
+  // Trigger resize so terminal refits to full width
+  window.dispatchEvent(new Event('resize'));
+}
+
+/**
+ * Toggle panel visibility for a mod. If mod not loaded, loads it first.
+ */
+function _showPanelMod(mod) {
+  if (activePanelId === mod.id) {
+    // Toggle visibility
+    const isVisible = panelContainer.style.display !== 'none';
+    if (isVisible) {
+      _hidePanel();
+    } else {
+      _showPanel();
+    }
+    return;
+  }
+
+  // Different mod or none loaded — load and show
+  _loadPanelMod(mod);
+  _showPanel();
+}
+
+/**
+ * Fully unload a panel mod (destroy iframe, clear callbacks).
+ * Called when the mod is disabled.
+ */
+function _unloadPanelMod() {
   const hiddenModId = activePanelId;
   activePanelId = null;
   taskCallbacks = [];
@@ -424,7 +477,10 @@ function _hidePanelMod() {
     settingsCallbacks = settingsCallbacks.filter(e => e.modId !== hiddenModId);
   }
 
-  _destroyPanelIframe();
+  if (panelIframe) {
+    panelIframe.remove();
+    panelIframe = null;
+  }
 
   // Clear toolbar button states for panel mod
   for (const [, btn] of toolbarButtons) {
@@ -435,18 +491,10 @@ function _hidePanelMod() {
   panelContainer.style.display = 'none';
   panelResizer.style.display = 'none';
 
+  localStorage.removeItem(PANEL_VISIBLE_KEY);
+
   // Trigger resize so terminal refits to full width
   window.dispatchEvent(new Event('resize'));
-}
-
-/**
- * Destroy the panel iframe.
- */
-function _destroyPanelIframe() {
-  if (panelIframe) {
-    panelIframe.remove();
-    panelIframe = null;
-  }
 }
 
 /**
@@ -543,7 +591,7 @@ function _hideMod() {
   // Check if the mod being hidden is a panel mod
   const mod = allMods.find(m => m.id === activeViewId || m.id === activePanelId);
   if (mod && mod.display === 'panel') {
-    _hidePanelMod();
+    _hidePanel();
     return;
   }
 
