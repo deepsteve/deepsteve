@@ -683,22 +683,11 @@ function _hideMod() {
     btn.classList.remove('active');
   }
 
-  // Show terminals, hide mod container and back button
-  document.getElementById('terminals').style.display = '';
+  // Show content row, hide mod container and back button
+  document.getElementById('content-row').style.display = '';
   modContainer.style.display = 'none';
   backBtn.style.display = 'none';
   modViewVisible = false;
-
-  // Restore panel UI
-  if (panelTabs.size > 0) {
-    panelTabsContainer.style.display = 'flex';
-  }
-  if (visiblePanelId) {
-    panelContainer.style.display = 'block';
-    panelContainer.style.width = panelWidth + 'px';
-    panelResizer.style.display = 'block';
-    window.dispatchEvent(new Event('resize'));
-  }
 }
 
 /**
@@ -716,15 +705,10 @@ function _destroyIframe() {
  */
 function showModView() {
   if (!activeViewId) return;
-  document.getElementById('terminals').style.display = 'none';
+  document.getElementById('content-row').style.display = 'none';
   modContainer.style.display = 'flex';
   backBtn.style.display = 'none';
   modViewVisible = true;
-
-  // Hide panel UI so it doesn't occupy space above the fullscreen mod
-  panelContainer.style.display = 'none';
-  panelResizer.style.display = 'none';
-  panelTabsContainer.style.display = 'none';
 }
 
 /**
@@ -732,19 +716,8 @@ function showModView() {
  */
 function showTerminalForSession(id) {
   modContainer.style.display = 'none';
-  document.getElementById('terminals').style.display = '';
+  document.getElementById('content-row').style.display = '';
   modViewVisible = false;
-
-  // Restore panel UI
-  if (panelTabs.size > 0) {
-    panelTabsContainer.style.display = 'flex';
-  }
-  if (visiblePanelId) {
-    panelContainer.style.display = 'block';
-    panelContainer.style.width = panelWidth + 'px';
-    panelResizer.style.display = 'block';
-    window.dispatchEvent(new Event('resize'));
-  }
 
   // Show back button with mod name
   if (activeViewId) {
