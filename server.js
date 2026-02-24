@@ -95,6 +95,12 @@ function broadcastTheme(name, css) {
       client.send(msg);
     }
   }
+  // Also send to live-reload clients so tabs with no sessions still get theme updates
+  for (const client of reloadClients) {
+    if (client.readyState === 1) {
+      client.send(msg);
+    }
+  }
 }
 
 // Spawn claude with full login shell environment (like iTerm does)

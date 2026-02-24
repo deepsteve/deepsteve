@@ -904,7 +904,11 @@ async function init() {
   });
 
   // Auto-reload browser when server restarts (restart.sh, node --watch, etc.)
-  initLiveReload();
+  initLiveReload({
+    onMessage: (msg) => {
+      if (msg.type === 'theme') applyTheme(msg.css || '');
+    }
+  });
 
   // Load settings before creating any terminals (prevents color flash, applies title length)
   try {
