@@ -15,6 +15,8 @@ Run multiple Claude Code sessions side-by-side in your browser, each with full t
 - **Session persistence** - Conversations survive server restarts and page refreshes
 - **Directory picker** - Start each session in any working directory
 - **Runs as a daemon** - Always available in the background on your Mac
+- **Themes** - Customize the UI with CSS files in `~/.deepsteve/themes/`
+- **Mods** - Extend deepsteve with visual mods (e.g. the pixel art Tower view)
 
 ## Quick Install
 
@@ -45,6 +47,19 @@ Open [http://localhost:3000](http://localhost:3000) in your browser.
 - Click **+** to create a new Claude Code session
 - Right-click a tab to rename it
 - Use **Shift+Enter** for multi-line input
+
+## Themes
+
+Place `.css` files in `~/.deepsteve/themes/` to add custom themes. Select the active theme from the settings panel (gear icon).
+
+## Mods
+
+Mods are visual extensions that provide alternative views of your sessions. Each mod lives in `mods/<name>/` with a `mod.json` manifest and an HTML entry point.
+
+Built-in mods:
+- **Tower** - A pixel art skyscraper visualization of your Claude sessions
+
+Enable and disable mods from the Mods dropdown in the toolbar.
 
 ## Managing the Daemon
 
