@@ -1,5 +1,4 @@
 const express = require('express');
-const pty = require('node-pty');
 const { WebSocketServer } = require('ws');
 const { randomUUID } = require('crypto');
 const { execSync } = require('child_process');
@@ -7,6 +6,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { initMCP } = require('./mcp-server');
+const { createEngine } = require('./engines/engine');
 
 const PORT = process.env.PORT || 3000;
 const SCROLLBACK_SIZE = 100 * 1024; // 100KB circular buffer per shell
@@ -25,7 +25,7 @@ app.use('/mods', express.static('mods'));
 app.use(express.json());
 
 // Load settings
-let settings = { shellProfile: '~/.zshrc' };
+let settings = { shellProfile: '~/.zshrc', engine: 'pty' };
 try {
   if (fs.existsSync(SETTINGS_FILE)) {
     settings = { ...settings, ...JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8')) };
@@ -94,18 +94,8 @@ function broadcastTheme(name, css) {
   }
 }
 
-// Spawn claude with full login shell environment (like iTerm does)
-function spawnClaude(args, cwd, { cols = 120, rows = 40 } = {}) {
-  // Use login shell (-l) which properly sources /etc/zprofile, ~/.zprofile, ~/.zshrc
-  const shellCmd = `claude ${args.join(' ')}`;
-  return pty.spawn('zsh', ['-l', '-c', shellCmd], {
-    name: 'xterm-256color',
-    cols,
-    rows,
-    cwd,
-    env: process.env
-  });
-}
+// Create the shell engine (pty or tmux)
+const engine = createEngine(settings, log);
 
 /**
  * Write a prompt to a Claude PTY as if a user typed it and pressed Enter.
@@ -356,10 +346,28 @@ app.post('/api/settings', (req, res) => {
   const { shellProfile } = req.body;
   if (shellProfile !== undefined) {
     settings.shellProfile = shellProfile;
-    saveSettings();
     log(`Settings updated: shellProfile=${shellProfile}`);
   }
+  const { engine: engineSetting } = req.body;
+  if (engineSetting !== undefined && (engineSetting === 'pty' || engineSetting === 'tmux')) {
+    settings.engine = engineSetting;
+    log(`Settings updated: engine=${engineSetting}`);
+  }
+  saveSettings();
   res.json(settings);
+});
+
+app.get('/api/engine', (req, res) => {
+  res.json({ current: engine.name, configured: settings.engine || 'pty' });
+});
+
+app.get('/api/engine/tmux-check', (req, res) => {
+  try {
+    const { checkTmux } = require('./engines/tmux-engine');
+    res.json(checkTmux());
+  } catch {
+    res.json({ available: false, version: null });
+  }
 });
 
 app.get('/api/themes', (req, res) => {
@@ -542,7 +550,7 @@ wss.on('connection', (ws, req) => {
         ? ['--resume', claudeSessionId]
         : ['-c'];  // fallback for old sessions without claudeSessionId
       if (savedWorktree) resumeArgs.push('--worktree', savedWorktree);
-      const shell = spawnClaude(resumeArgs, cwd, ptySize);
+      const shell = engine.spawn(id, resumeArgs, cwd, ptySize);
       const startTime = Date.now();
       shells.set(id, { shell, clients: new Set(), cwd, claudeSessionId, worktree: savedWorktree, restored: true, waitingForInput: false, lastActivity: Date.now() });
       wireShellOutput(id);
@@ -556,7 +564,7 @@ wss.on('connection', (ws, req) => {
           const entry = shells.get(id);
           const fallbackArgs = ['-c', '--fork-session', '--session-id', newClaudeSessionId];
           if (entry && entry.worktree) fallbackArgs.push('--worktree', entry.worktree);
-          const fallbackShell = spawnClaude(fallbackArgs, cwd, { cols: initialCols, rows: initialRows });
+          const fallbackShell = engine.spawn(id, fallbackArgs, cwd, { cols: initialCols, rows: initialRows });
           if (entry) {
             entry.shell = fallbackShell;
             entry.claudeSessionId = newClaudeSessionId;
@@ -588,7 +596,7 @@ wss.on('connection', (ws, req) => {
     const claudeArgs = ['--session-id', claudeSessionId];
     if (worktree) claudeArgs.push('--worktree', worktree);
     log(`[WS] Creating NEW shell: oldId=${oldId}, newId=${id}, claudeSession=${claudeSessionId}, worktree=${worktree || 'none'}, cwd=${cwd}`);
-    const shell = spawnClaude(claudeArgs, cwd, { cols: initialCols, rows: initialRows });
+    const shell = engine.spawn(id, claudeArgs, cwd, { cols: initialCols, rows: initialRows });
     shells.set(id, { shell, clients: new Set(), cwd, claudeSessionId, worktree: worktree || null, waitingForInput: false, lastActivity: Date.now() });
     wireShellOutput(id);
     shell.onExit(() => { if (!shuttingDown) { shells.delete(id); saveState(); } });

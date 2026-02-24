@@ -257,18 +257,28 @@ async function refreshSessionsDropdown() {
 const settingsBtn = document.getElementById('settings-btn');
 
 settingsBtn?.addEventListener('click', async () => {
-  const [settingsData, themesData, versionData] = await Promise.all([
+  const [settingsData, themesData, versionData, engineData, tmuxCheck] = await Promise.all([
     fetch('/api/settings').then(r => r.json()),
     fetch('/api/themes').then(r => r.json()),
-    fetch('/api/version').then(r => r.json()).catch(() => ({ current: '?', latest: null, updateAvailable: false }))
+    fetch('/api/version').then(r => r.json()).catch(() => ({ current: '?', latest: null, updateAvailable: false })),
+    fetch('/api/engine').then(r => r.json()).catch(() => ({ current: 'pty', configured: 'pty' })),
+    fetch('/api/engine/tmux-check').then(r => r.json()).catch(() => ({ available: false, version: null }))
   ]);
   const currentProfile = settingsData.shellProfile || '~/.zshrc';
   const themes = themesData.themes || [];
   const activeTheme = themesData.active || '';
+  const configuredEngine = engineData.configured || 'pty';
+  const runningEngine = engineData.current || 'pty';
 
   const themeOptions = ['<option value="">Default</option>']
     .concat(themes.map(t => `<option value="${escapeHtml(t)}" ${t === activeTheme ? 'selected' : ''}>${escapeHtml(t)}</option>`))
     .join('');
+
+  const tmuxDisabled = !tmuxCheck.available;
+  const tmuxHint = tmuxCheck.available
+    ? `(${escapeHtml(tmuxCheck.version)})`
+    : '(not installed \u2014 <code>brew install tmux</code>)';
+  const engineMismatch = configuredEngine !== runningEngine;
 
   const overlay = document.createElement('div');
   overlay.className = 'modal-overlay';
@@ -292,6 +302,25 @@ settingsBtn?.addEventListener('click', async () => {
       </div>
       <div class="settings-custom">
         <input type="text" id="custom-profile" placeholder="~/.config/myprofile" value="${currentProfile !== '~/.zshrc' && currentProfile !== '~/.bashrc' ? currentProfile : ''}">
+      </div>
+      <div class="settings-section">
+        <h3>Engine</h3>
+        <p style="font-size: 13px; color: var(--ds-text-secondary); margin-bottom: 8px;">
+          Backend for terminal sessions. tmux enables native session persistence.
+        </p>
+        <div class="settings-option">
+          <input type="radio" name="engine" id="engine-pty" value="pty" ${configuredEngine === 'pty' ? 'checked' : ''}>
+          <label for="engine-pty">node-pty</label>
+          <span style="font-size: 12px; color: var(--ds-text-secondary); margin-left: 4px;">(default)</span>
+        </div>
+        <div class="settings-option">
+          <input type="radio" name="engine" id="engine-tmux" value="tmux" ${configuredEngine === 'tmux' ? 'checked' : ''} ${tmuxDisabled ? 'disabled' : ''}>
+          <label for="engine-tmux" ${tmuxDisabled ? 'style="opacity: 0.5"' : ''}>tmux</label>
+          <span style="font-size: 12px; color: var(--ds-text-secondary); margin-left: 4px;">${tmuxHint}</span>
+        </div>
+        <div id="engine-restart-warning" style="display: ${engineMismatch ? 'block' : 'none'}; margin-top: 8px; padding: 6px 10px; background: var(--ds-bg-warning, #3a2e00); border-radius: 4px; font-size: 12px; color: var(--ds-text-warning, #f5c518);">
+          Restart required \u2014 configured engine differs from running engine (${escapeHtml(runningEngine)}).
+        </div>
       </div>
       <div class="settings-section">
         <h3>Theme</h3>
@@ -330,6 +359,19 @@ settingsBtn?.addEventListener('click', async () => {
   });
   customInput.disabled = overlay.querySelector('#profile-custom:checked') === null;
 
+  // Show/hide engine restart warning when radio changes
+  const engineWarning = overlay.querySelector('#engine-restart-warning');
+  overlay.querySelectorAll('input[name="engine"]').forEach(radio => {
+    radio.addEventListener('change', () => {
+      const selected = overlay.querySelector('input[name="engine"]:checked').value;
+      const needsRestart = selected !== runningEngine;
+      engineWarning.style.display = needsRestart ? 'block' : 'none';
+      engineWarning.textContent = needsRestart
+        ? `Restart required \u2014 will switch from ${runningEngine} to ${selected}.`
+        : '';
+    });
+  });
+
   // Live preview: apply theme immediately on select change
   const themeSelect = overlay.querySelector('#theme-select');
   themeSelect.addEventListener('change', async () => {
@@ -346,10 +388,11 @@ settingsBtn?.addEventListener('click', async () => {
   overlay.querySelector('#settings-save').onclick = async () => {
     const selected = overlay.querySelector('input[name="profile"]:checked').value;
     const shellProfile = selected === 'custom' ? customInput.value : selected;
+    const engine = overlay.querySelector('input[name="engine"]:checked').value;
     await fetch('/api/settings', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ shellProfile })
+      body: JSON.stringify({ shellProfile, engine })
     });
     overlay.remove();
   };

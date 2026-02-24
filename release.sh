@@ -32,6 +32,7 @@ NODE_PATH=$(which node)
 
 mkdir -p "$INSTALL_DIR/public/js"
 mkdir -p "$INSTALL_DIR/public/css"
+mkdir -p "$INSTALL_DIR/engines"
 mkdir -p "$INSTALL_DIR/themes"
 mkdir -p "$HOME/Library/LaunchAgents"
 
@@ -52,6 +53,11 @@ embed_text() {
 # Core files
 embed_text "package.json" "package.json"
 embed_text "server.js" "server.js"
+
+# Engine files
+for enginefile in engines/*.js; do
+  embed_text "$enginefile" "$enginefile"
+done
 
 # Public files
 embed_text "public/index.html" "public/index.html"
