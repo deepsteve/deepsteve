@@ -9,6 +9,8 @@ const os = require('os');
 
 const PORT = process.env.PORT || 3000;
 const SCROLLBACK_SIZE = 100 * 1024; // 100KB circular buffer per shell
+const RELOAD_FLAG = path.join(os.homedir(), '.deepsteve', '.reload');
+const reloadClients = new Set(); // WebSocket connections for live-reload
 
 function log(...args) {
   const ts = new Date().toISOString().slice(11, 23);
@@ -241,6 +243,16 @@ function saveState() {
 async function shutdown(signal) {
   log(`Received ${signal}, saving state...`);
   saveState();
+
+  // If .reload flag exists, tell all browsers to refresh after restart
+  const shouldReload = fs.existsSync(RELOAD_FLAG);
+  if (shouldReload) {
+    log(`Reload flag found, notifying ${reloadClients.size} browser(s) to refresh`);
+    try { fs.unlinkSync(RELOAD_FLAG); } catch {}
+    for (const ws of reloadClients) {
+      try { ws.send(JSON.stringify({ type: 'reload' })); } catch {}
+    }
+  }
   stateFrozen = true;  // Prevent onExit/onClose handlers from overwriting state file
 
   const entries = [...shells.entries()];
@@ -495,10 +507,12 @@ wss.on('connection', (ws, req) => {
   }
 
   // Live reload: client holds this connection open.
-  // When the server restarts (restart.sh, node --watch, etc.) the WS drops
-  // and the client polls until the server is back, then reloads the page.
+  // On shutdown, if ~/.deepsteve/.reload flag exists, server sends { type: 'reload' }
+  // telling browsers to refresh. Otherwise the WS just drops and clients silently reconnect.
   if (action === 'reload') {
-    return; // Keep alive — server restart closes it naturally.
+    reloadClients.add(ws);
+    ws.on('close', () => reloadClients.delete(ws));
+    return;
   }
 
   let id = url.searchParams.get('id');

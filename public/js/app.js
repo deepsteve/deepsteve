@@ -622,6 +622,7 @@ function renameSession(id) {
     session.name = name;
     TabManager.updateLabel(id, name);
     SessionStore.updateSession(getWindowId(), id, { name });
+    ModManager.notifySessionsChanged(getSessionList());
   });
 }
 

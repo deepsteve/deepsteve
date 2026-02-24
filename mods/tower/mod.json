@@ -1,5 +1,17 @@
 {
   "name": "Tower",
   "description": "Pixel art skyscraper view of your Claude sessions",
-  "entry": "index.html"
+  "entry": "index.html",
+  "toolbar": {
+    "label": "Tower"
+  },
+  "settings": [
+    {
+      "key": "allowMultiFloor",
+      "type": "boolean",
+      "label": "Allow multi-floor sessions",
+      "description": "Allow one session to be assigned to multiple floors at once",
+      "default": false
+    }
+  ]
 }

@@ -291,24 +291,36 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
 #mod-container { flex: 1; min-height: 0; display: none; }
 #mod-container iframe { width: 100%; height: 100%; border: none; }
 
-/* Mods button */
-#mods-btn { padding: 4px 10px; background: var(--ds-btn-neutral); border: none; color: var(--ds-text-primary); border-radius: 4px; cursor: pointer; font-size: 13px; margin-left: 4px; user-select: none; }
-#mods-btn:hover { background: var(--ds-btn-neutral-hover); }
-#mods-btn:active { background: var(--ds-btn-neutral-active); }
-#mods-btn.active { background: var(--ds-accent-blue); color: #fff; }
+/* Mods dropdown (right side, near Sessions) */
+#mods-dropdown .dropdown-menu { min-width: 260px; }
+.mod-toggle-item { cursor: pointer; }
+.mod-toggle-item:hover { background: var(--ds-bg-tertiary); }
+.mod-toggle-label { cursor: pointer; flex-shrink: 0; }
+.mod-toggle-label input[type="checkbox"] { accent-color: var(--ds-accent-green); cursor: pointer; }
+
+/* Mod toolbar buttons (left side, registered by enabled mods) */
+.mod-toolbar-btn { padding: 4px 10px; background: var(--ds-btn-neutral); border: none; color: var(--ds-text-primary); border-radius: 4px; cursor: pointer; font-size: 13px; margin-left: 4px; user-select: none; }
+.mod-toolbar-btn:hover { background: var(--ds-btn-neutral-hover); }
+.mod-toolbar-btn:active { background: var(--ds-btn-neutral-active); }
+.mod-toolbar-btn.active { background: var(--ds-accent-blue); color: #fff; }
 
 /* Mod back button */
 .mod-back-btn { padding: 4px 10px; background: var(--ds-btn-neutral); border: none; color: var(--ds-accent-blue); border-radius: 4px; cursor: pointer; font-size: 13px; user-select: none; }
 .mod-back-btn:hover { background: var(--ds-btn-neutral-hover); }
 
-/* Mod picker modal */
-.mod-list { background: var(--ds-bg-primary); border: 1px solid var(--ds-border); border-radius: 4px; margin-bottom: 16px; }
-.mod-item { padding: 12px; cursor: pointer; border-bottom: 1px solid var(--ds-bg-tertiary); }
-.mod-item:last-child { border-bottom: none; }
-.mod-item:hover { background: var(--ds-bg-tertiary); }
-.mod-name { font-size: 14px; color: var(--ds-text-bright); margin-bottom: 4px; }
-.mod-desc { font-size: 12px; color: var(--ds-text-secondary); }
-
-/* Vertical layout mods button */
-#app-container.vertical-layout #mods-btn { width: 100%; margin: 4px 0 0 0; }
+/* Vertical layout mod buttons */
+#app-container.vertical-layout .mod-toolbar-btn { width: 100%; margin: 4px 0 0 0; }
 #app-container.vertical-layout .mod-back-btn { width: 100%; margin-bottom: 4px; }
+#app-container.vertical-layout #mods-dropdown { width: 100%; margin-top: 4px; }
+#app-container.vertical-layout #mods-dropdown .dropdown-btn { width: 100%; }
+
+/* Mod settings button (gear icon in mods dropdown) */
+.mod-settings-btn { background: transparent; border: none; color: var(--ds-text-secondary); cursor: pointer; font-size: 14px; padding: 2px 6px; border-radius: 3px; line-height: 1; flex-shrink: 0; }
+.mod-settings-btn:hover { background: var(--ds-bg-tertiary); color: var(--ds-text-primary); }
+
+/* Mod settings modal */
+.mod-setting-item { display: flex; align-items: flex-start; gap: 10px; padding: 12px 0; border-bottom: 1px solid var(--ds-border); }
+.mod-setting-item:last-child { border-bottom: none; }
+.mod-setting-toggle { flex-shrink: 0; margin-top: 2px; accent-color: var(--ds-accent-green); cursor: pointer; width: 16px; height: 16px; }
+.mod-setting-label { font-size: 13px; color: var(--ds-text-primary); cursor: pointer; }
+.mod-setting-desc { font-size: 12px; color: var(--ds-text-secondary); margin-top: 2px; }
