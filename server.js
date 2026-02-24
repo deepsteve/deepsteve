@@ -6,6 +6,7 @@ const { execSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const { initMCP } = require('./mcp-server');
 
 const PORT = process.env.PORT || 3000;
 const SCROLLBACK_SIZE = 100 * 1024; // 100KB circular buffer per shell
@@ -644,6 +645,17 @@ wss.on('connection', (ws, req) => {
   });
 });
 
+// Broadcast a JSON message to all connected browser WebSocket clients
+function broadcast(msg) {
+  const data = typeof msg === 'string' ? msg : JSON.stringify(msg);
+  for (const client of wss.clients) {
+    if (client.readyState === 1) client.send(data);
+  }
+}
+
+// Initialize MCP server (async, ~100ms for dynamic import)
+initMCP({ app, shells, wss, broadcast, log, MODS_DIR }).catch(e => log('MCP init failed:', e.message));
+
 // Watch themes directory for changes and broadcast to clients
 let themeWatchDebounce = null;
 try {
@@ -665,3 +677,35 @@ try {
 } catch (e) {
   console.error('Failed to watch themes directory:', e.message);
 }
+
+// Watch mod directories for changes and broadcast to clients
+const modWatchers = new Map(); // modId → fs.FSWatcher
+function watchModDirs() {
+  // Clean up existing watchers
+  for (const [, watcher] of modWatchers) { try { watcher.close(); } catch {} }
+  modWatchers.clear();
+
+  if (!fs.existsSync(MODS_DIR)) return;
+  const entries = fs.readdirSync(MODS_DIR, { withFileTypes: true });
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const modId = entry.name;
+    const modDir = path.join(MODS_DIR, modId);
+    let debounce = null;
+    try {
+      const watcher = fs.watch(modDir, { recursive: true }, (eventType, filename) => {
+        if (!filename) return;
+        clearTimeout(debounce);
+        debounce = setTimeout(() => {
+          log(`Mod file changed: ${modId}/${filename}, broadcasting reload`);
+          broadcast({ type: 'mod-changed', modId });
+        }, 200);
+      });
+      modWatchers.set(modId, watcher);
+    } catch (e) {
+      console.error(`Failed to watch mod directory ${modId}:`, e.message);
+    }
+  }
+  log(`Watching ${modWatchers.size} mod directories for changes`);
+}
+watchModDirs();

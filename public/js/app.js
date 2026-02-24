@@ -420,6 +420,8 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
         TabSessions.remove(msg.id);
       } else if (msg.type === 'theme') {
         applyTheme(msg.css || '');
+      } else if (msg.type === 'mod-changed') {
+        ModManager.handleModChanged(msg.modId);
       } else if (msg.type === 'state') {
         const entry = [...sessions.entries()].find(([, s]) => s.ws === ws);
         if (entry) {
@@ -433,6 +435,8 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
           }
           ModManager.notifySessionsChanged(getSessionList());
         }
+      } else if (msg.type === 'tasks') {
+        ModManager.notifyTasksChanged(msg.tasks);
       }
     } catch (err) {
       console.error('Error handling control message:', err);

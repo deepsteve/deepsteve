@@ -22,6 +22,16 @@ let modViewVisible = false;
 let toolbarButtons = new Map(); // modId → button element
 let settingsCallbacks = [];     // [{modId, cb}] — notified on settings change
 
+// Panel mode state
+let panelContainer = null;
+let panelResizer = null;
+let panelIframe = null;
+let activePanelId = null;  // mod ID of active panel (or null)
+let taskCallbacks = [];    // callbacks for task broadcasts
+let panelWidth = 360;
+const MIN_PANEL_WIDTH = 200;
+const PANEL_STORAGE_KEY = 'deepsteve-panel-width';
+
 /**
  * Initialize the mod system — creates DOM elements.
  */
@@ -41,6 +51,24 @@ function init(appHooks) {
   backBtn.addEventListener('click', () => showModView());
   const layoutToggle = document.getElementById('layout-toggle');
   layoutToggle.parentNode.insertBefore(backBtn, layoutToggle.nextSibling);
+
+  // Create panel container and resizer (inserted after #terminals)
+  const terminals = document.getElementById('terminals');
+  panelResizer = document.createElement('div');
+  panelResizer.id = 'panel-resizer';
+  terminals.parentNode.insertBefore(panelResizer, terminals.nextSibling);
+
+  panelContainer = document.createElement('div');
+  panelContainer.id = 'panel-container';
+  panelResizer.parentNode.insertBefore(panelContainer, panelResizer.nextSibling);
+
+  // Restore saved panel width
+  try {
+    const saved = parseInt(localStorage.getItem(PANEL_STORAGE_KEY));
+    if (saved >= MIN_PANEL_WIDTH) panelWidth = saved;
+  } catch {}
+
+  _setupPanelResizer();
 
   // Load enabled mods from localStorage
   try {
@@ -191,6 +219,9 @@ function _renderModsMenu() {
         if (activeViewId === modId) {
           _hideMod();
         }
+        if (activePanelId === modId) {
+          _hidePanelMod();
+        }
       }
       _saveEnabledMods();
     });
@@ -266,6 +297,118 @@ function _showSettingsModal(mod) {
 }
 
 /**
+ * Setup panel resizer drag handling.
+ */
+function _setupPanelResizer() {
+  let isDragging = false;
+
+  panelResizer.addEventListener('mousedown', (e) => {
+    isDragging = true;
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+    e.preventDefault();
+  });
+
+  document.addEventListener('mousemove', (e) => {
+    if (!isDragging) return;
+    // Panel is on the right: width = viewport right edge - mouse X
+    const newWidth = window.innerWidth - e.clientX;
+    panelWidth = Math.max(MIN_PANEL_WIDTH, Math.min(newWidth, window.innerWidth * 0.6));
+    panelContainer.style.width = panelWidth + 'px';
+  });
+
+  document.addEventListener('mouseup', () => {
+    if (isDragging) {
+      isDragging = false;
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+      localStorage.setItem(PANEL_STORAGE_KEY, panelWidth);
+      window.dispatchEvent(new Event('resize'));
+    }
+  });
+}
+
+/**
+ * Show a panel-mode mod (iframe beside the terminal, both visible).
+ */
+function _showPanelMod(mod) {
+  // If same panel is already open, toggle it off
+  if (activePanelId === mod.id) {
+    _hidePanelMod();
+    return;
+  }
+
+  // Clean up existing panel if different mod
+  if (activePanelId) {
+    _destroyPanelIframe();
+  }
+
+  activePanelId = mod.id;
+
+  // Update toolbar button states
+  for (const [id, btn] of toolbarButtons) {
+    btn.classList.toggle('active', id === mod.id);
+  }
+
+  // Create panel iframe
+  const entry = mod.entry || 'index.html';
+  panelIframe = document.createElement('iframe');
+  panelIframe.src = `/mods/${mod.id}/${entry}`;
+  panelIframe.setAttribute('sandbox', 'allow-scripts allow-same-origin');
+  panelContainer.appendChild(panelIframe);
+  panelIframe.addEventListener('load', () => {
+    _injectBridgeAPI(panelIframe);
+  });
+
+  // Show panel + resizer
+  panelContainer.style.display = '';
+  panelContainer.style.width = panelWidth + 'px';
+  panelResizer.style.display = '';
+
+  // Ensure terminals stay visible
+  document.getElementById('terminals').style.display = '';
+
+  // Trigger resize so terminal refits to smaller width
+  window.dispatchEvent(new Event('resize'));
+}
+
+/**
+ * Hide the active panel mod.
+ */
+function _hidePanelMod() {
+  const hiddenModId = activePanelId;
+  activePanelId = null;
+  taskCallbacks = [];
+  if (hiddenModId) {
+    settingsCallbacks = settingsCallbacks.filter(e => e.modId !== hiddenModId);
+  }
+
+  _destroyPanelIframe();
+
+  // Clear toolbar button states for panel mod
+  for (const [, btn] of toolbarButtons) {
+    btn.classList.remove('active');
+  }
+
+  // Hide panel container + resizer
+  panelContainer.style.display = 'none';
+  panelResizer.style.display = 'none';
+
+  // Trigger resize so terminal refits to full width
+  window.dispatchEvent(new Event('resize'));
+}
+
+/**
+ * Destroy the panel iframe.
+ */
+function _destroyPanelIframe() {
+  if (panelIframe) {
+    panelIframe.remove();
+    panelIframe = null;
+  }
+}
+
+/**
  * Create a toolbar button for an enabled mod (left side, near wand).
  */
 function _createToolbarButton(mod) {
@@ -313,6 +456,14 @@ function _removeToolbarButton(modId) {
  * Show a mod's iframe view.
  */
 function _showMod(mod) {
+  const display = mod.display || 'fullscreen';
+
+  // Panel mods use a side panel instead of replacing the terminal
+  if (display === 'panel') {
+    _showPanelMod(mod);
+    return;
+  }
+
   // If a different mod is showing, clean up its iframe
   if (activeViewId && activeViewId !== mod.id) {
     _destroyIframe();
@@ -345,6 +496,13 @@ function _showMod(mod) {
  * Hide the active mod view, return to terminals.
  */
 function _hideMod() {
+  // Check if the mod being hidden is a panel mod
+  const mod = allMods.find(m => m.id === activeViewId || m.id === activePanelId);
+  if (mod && mod.display === 'panel') {
+    _hidePanelMod();
+    return;
+  }
+
   const hiddenModId = activeViewId;
   activeViewId = null;
   localStorage.removeItem(ACTIVE_VIEW_KEY);
@@ -416,6 +574,15 @@ function notifySessionsChanged(sessionList) {
 }
 
 /**
+ * Notify panel mods that tasks have changed (called from app.js on WS broadcast).
+ */
+function notifyTasksChanged(tasks) {
+  for (const cb of taskCallbacks) {
+    try { cb(tasks); } catch (e) { console.error('Task callback error:', e); }
+  }
+}
+
+/**
  * Check if the mod view is currently visible.
  */
 function isModViewVisible() {
@@ -455,11 +622,11 @@ function _injectBridgeAPI(iframeEl) {
         hooks.killSession(id);
       },
       getSettings() {
-        const mod = allMods.find(m => m.id === activeViewId);
+        const mod = allMods.find(m => m.id === (activeViewId || activePanelId));
         return mod ? _loadModSettings(mod) : {};
       },
       onSettingsChanged(cb) {
-        const modId = activeViewId;
+        const modId = activeViewId || activePanelId;
         const entry = { modId, cb };
         settingsCallbacks.push(entry);
         // Fire immediately with current values
@@ -468,10 +635,33 @@ function _injectBridgeAPI(iframeEl) {
         return () => {
           settingsCallbacks = settingsCallbacks.filter(e => e !== entry);
         };
+      },
+      onTasksChanged(cb) {
+        taskCallbacks.push(cb);
+        // Fire immediately with current tasks from server
+        fetch('/api/tasks').then(r => r.json()).then(data => {
+          try { cb(data.tasks || []); } catch {}
+        }).catch(() => {});
+        return () => {
+          taskCallbacks = taskCallbacks.filter(fn => fn !== cb);
+        };
       }
     };
   } catch (e) {
     console.error('Failed to inject bridge API:', e);
+  }
+}
+
+/**
+ * Handle a mod-changed message from the server (file watcher detected changes).
+ * Reloads the iframe if the changed mod is currently active.
+ */
+function handleModChanged(modId) {
+  if (activeViewId === modId && iframe) {
+    iframe.src = iframe.src.replace(/(\?v=\d+)?$/, `?v=${Date.now()}`);
+  }
+  if (activePanelId === modId && panelIframe) {
+    panelIframe.src = panelIframe.src.replace(/(\?v=\d+)?$/, `?v=${Date.now()}`);
   }
 }
 
@@ -481,6 +671,8 @@ export const ModManager = {
   showModView,
   showTerminalForSession,
   notifySessionsChanged,
+  notifyTasksChanged,
   isModViewVisible,
   isModActive,
+  handleModChanged,
 };
