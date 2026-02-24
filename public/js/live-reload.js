@@ -1,22 +1,37 @@
 /**
  * Live reload on server restart.
  *
- * Opens a dedicated WebSocket to ?action=reload. When the server restarts
- * (restart.sh, node --watch, etc.) the WS closes. We poll until the server
- * is back, then do a full page reload so the browser picks up new code.
+ * Opens a dedicated WebSocket to ?action=reload. The server sends
+ * { type: 'reload' } during shutdown only when restart.sh --refresh is used.
+ * On normal restart, the WS drops and we silently reconnect without refreshing.
  */
 
 export function initLiveReload() {
   let ws;
+  let shouldReload = false;
   let intentionallyClosed = false;
 
   function connect() {
     ws = new WebSocket('ws://' + location.host + '?action=reload');
 
+    ws.onmessage = (e) => {
+      try {
+        const msg = JSON.parse(e.data);
+        if (msg.type === 'reload') {
+          shouldReload = true;
+        }
+      } catch {}
+    };
+
     ws.onclose = () => {
       if (intentionallyClosed) return;
-      console.log('[live-reload] server went away, waiting for restart...');
-      pollUntilReady();
+      if (shouldReload) {
+        console.log('[live-reload] server requested refresh, waiting for restart...');
+        pollUntilReady();
+      } else {
+        console.log('[live-reload] server went away, reconnecting silently...');
+        reconnectSilently();
+      }
     };
   }
 
@@ -35,7 +50,23 @@ export function initLiveReload() {
     }, 500);
   }
 
-  // Don't trigger reload polling when the user navigates away
+  function reconnectSilently() {
+    const interval = setInterval(async () => {
+      try {
+        const res = await fetch('/api/home', { cache: 'no-store' });
+        if (res.ok) {
+          clearInterval(interval);
+          console.log('[live-reload] server is back, reconnecting WS...');
+          shouldReload = false;
+          connect();
+        }
+      } catch {
+        // Server still down — keep polling
+      }
+    }, 500);
+  }
+
+  // Don't trigger reconnect polling when the user navigates away
   window.addEventListener('beforeunload', () => {
     intentionallyClosed = true;
     if (ws) ws.close();

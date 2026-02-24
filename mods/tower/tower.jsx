@@ -47,7 +47,7 @@ function saveFloors(floors) {
   localStorage.setItem(FLOORS_STORAGE_KEY, JSON.stringify(floors));
 }
 
-function PixelText({ text, x, y, size = 8, color = "#fff", align = "left" }) {
+function PixelText({ text, x, y, size = 12, color = "#fff", align = "left" }) {
   return (
     <text
       x={x}
@@ -160,7 +160,7 @@ function Computer({ x, y, screenColor, sessionName, waiting, onClick }) {
           text={sessionName.length > 10 ? sessionName.slice(0, 9) + "\u2026" : sessionName}
           x={x + monW / 2}
           y={y + monH + 9 * p}
-          size={4}
+          size={7}
           color="#8a8a9a"
           align="center"
         />
@@ -232,8 +232,8 @@ function Floor({ floorData, sessions: floorSessions, y, width, isSelected, onCli
 
       {/* Floor label */}
       <rect x={wallInset + 2 * p} y={y + 3 * p} width={Math.max(floorData.name.length * 5.5 + 14, 60)} height={9 * p} rx={p} fill="rgba(0,0,0,0.5)" />
-      <PixelText text={`F${floorNum}`} x={wallInset + 4 * p} y={y + 8 * p} size={5} color={colorScheme.screen} />
-      <PixelText text={floorData.name} x={wallInset + 16 * p} y={y + 8 * p} size={5} color="#ccc" />
+      <PixelText text={`F${floorNum}`} x={wallInset + 4 * p} y={y + 8 * p} size={8} color={colorScheme.screen} />
+      <PixelText text={floorData.name} x={wallInset + 16 * p} y={y + 8 * p} size={8} color="#ccc" />
 
       {/* Computers and people */}
       {floorSessions.slice(0, 4).map((session, i) => {
@@ -291,7 +291,7 @@ function Roof({ y, width }) {
 
       {/* Sign */}
       <rect x={wallInset + 14 * p} y={y - 14 * p} width={bw - 28 * p} height={10 * p} rx={p} fill="rgba(0,0,0,0.7)" />
-      <PixelText text="CLAUDE CODE TOWER" x={width / 2} y={y - 8.5 * p} size={7} color="#b388ff" align="center" />
+      <PixelText text="DEEP STEVE TOWER" x={width / 2} y={y - 8.5 * p} size={10} color="#b388ff" align="center" />
     </g>
   );
 }
@@ -316,7 +316,7 @@ function Lobby({ y, width, sessions: lobbySessions }) {
       <rect x={width / 2 + p} y={y + 14 * p} width={p} height={8 * p} fill="#8a8a9a" rx={0.5} />
 
       {/* Lobby label */}
-      <PixelText text={"\u25C6 LOBBY \u25C6"} x={width / 2} y={y + lobbyH - 6 * p - (count > 0 ? 30 * p : 0)} size={5} color="#8a8a9a" align="center" />
+      <PixelText text={"\u25C6 LOBBY \u25C6"} x={width / 2} y={y + lobbyH - 6 * p - (count > 0 ? 30 * p : 0)} size={8} color="#8a8a9a" align="center" />
 
       {/* Unassigned sessions in lobby */}
       {lobbySessions.slice(0, 4).map((session, i) => {
@@ -350,6 +350,10 @@ function TowerApp() {
   const [floors, setFloors] = useState(loadFloors);
   const [selectedFloor, setSelectedFloor] = useState(null);
   const [newName, setNewName] = useState("");
+  const [modSettings, setModSettings] = useState({});
+  const [editMode, setEditMode] = useState(false);
+  const [dragIdx, setDragIdx] = useState(null);
+  const [dragOverIdx, setDragOverIdx] = useState(null);
   const [nextId, setNextId] = useState(() => {
     const saved = loadFloors();
     return saved.length > 0 ? Math.max(...saved.map(f => f.id)) + 1 : 1;
@@ -357,21 +361,28 @@ function TowerApp() {
 
   // Connect to deepsteve bridge
   useEffect(() => {
-    let unsub = null;
+    let unsubSessions = null;
+    let unsubSettings = null;
     let attempts = 0;
     const poll = setInterval(() => {
       if (window.deepsteve) {
         clearInterval(poll);
-        unsub = window.deepsteve.onSessionsChanged((list) => {
+        unsubSessions = window.deepsteve.onSessionsChanged((list) => {
           setSessions(list);
         });
+        if (window.deepsteve.onSettingsChanged) {
+          unsubSettings = window.deepsteve.onSettingsChanged((settings) => {
+            setModSettings(settings);
+          });
+        }
       } else if (++attempts > 100) {
         clearInterval(poll);
       }
     }, 100);
     return () => {
       clearInterval(poll);
-      if (unsub) unsub();
+      if (unsubSessions) unsubSessions();
+      if (unsubSettings) unsubSettings();
     };
   }, []);
 
@@ -421,10 +432,12 @@ function TowerApp() {
   };
 
   const assignSession = (floorId, sessionId) => {
-    // Remove from any other floor first
     setFloors(prev => prev.map(f => {
-      const ids = (f.sessionIds || []).filter(id => id !== sessionId);
-      if (f.id === floorId) ids.push(sessionId);
+      // When multi-floor is off, remove from other floors first
+      const ids = modSettings.allowMultiFloor
+        ? [...(f.sessionIds || [])]
+        : (f.sessionIds || []).filter(id => id !== sessionId);
+      if (f.id === floorId && !ids.includes(sessionId)) ids.push(sessionId);
       return { ...f, sessionIds: ids };
     }));
   };
@@ -441,11 +454,43 @@ function TowerApp() {
     );
   };
 
+  const moveFloor = (fromIdx, toIdx) => {
+    if (fromIdx === toIdx) return;
+    setFloors(prev => {
+      const next = [...prev];
+      const [moved] = next.splice(fromIdx, 1);
+      next.splice(toIdx, 0, moved);
+      return next;
+    });
+  };
+
+  const handleDragStart = (idx) => (e) => {
+    setDragIdx(idx);
+    e.dataTransfer.effectAllowed = "move";
+  };
+  const handleDragOver = (idx) => (e) => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+    setDragOverIdx(idx);
+  };
+  const handleDrop = (idx) => (e) => {
+    e.preventDefault();
+    if (dragIdx != null) moveFloor(dragIdx, idx);
+    setDragIdx(null);
+    setDragOverIdx(null);
+  };
+  const handleDragEnd = () => {
+    setDragIdx(null);
+    setDragOverIdx(null);
+  };
+
   const selectedData = floors.find((f) => f.id === selectedFloor);
 
-  // Sessions available to assign (not assigned to the selected floor)
+  // Sessions available to assign to the selected floor
   const selectedFloorSessionIds = new Set((selectedData?.sessionIds || []));
-  const unassignedForSelected = sessions.filter(s => !selectedFloorSessionIds.has(s.id));
+  const unassignedForSelected = modSettings.allowMultiFloor
+    ? sessions.filter(s => !selectedFloorSessionIds.has(s.id))
+    : sessions.filter(s => !selectedFloorSessionIds.has(s.id) && !assignedIds.has(s.id));
 
   return (
     <div style={{
@@ -456,20 +501,20 @@ function TowerApp() {
       flexDirection: "column",
       alignItems: "center",
       padding: "20px 12px",
-      overflow: "hidden",
+      overflow: "auto",
     }}>
       <h1 style={{
-        fontSize: 14, color: "#b388ff",
+        fontSize: 20, color: "#b388ff",
         textShadow: "0 0 20px rgba(179,136,255,0.5)",
-        letterSpacing: 2, marginBottom: 8, textAlign: "center",
+        letterSpacing: 2, marginBottom: 8, textAlign: "center", flexShrink: 0,
       }}>
-        CLAUDE CODE TOWER
+        DEEP STEVE TOWER
       </h1>
-      <p style={{ fontSize: 7, color: "#6a6a8a", marginBottom: 20, textAlign: "center" }}>
+      <p style={{ fontSize: 11, color: "#6a6a8a", marginBottom: 20, textAlign: "center", flexShrink: 0 }}>
         Each floor is a project. Each computer is a session. Click a computer to open it.
       </p>
 
-      <div style={{ display: "flex", gap: 20, flexWrap: "wrap", justifyContent: "center", width: "100%", maxWidth: 900, flex: 1, minHeight: 0 }}>
+      <div style={{ display: "flex", gap: 20, flexWrap: "wrap", justifyContent: "center", width: "100%", maxWidth: 960, flex: "1 0 auto", minHeight: 0 }}>
         {/* SVG Building */}
         <div style={{
           flex: "1 1 520px", maxWidth: 540,
@@ -511,10 +556,10 @@ function TowerApp() {
         </div>
 
         {/* Control Panel */}
-        <div style={{ flex: "1 1 260px", maxWidth: 320, display: "flex", flexDirection: "column", gap: 12, overflow: "auto" }}>
+        <div style={{ flex: "1 1 300px", maxWidth: 380, display: "flex", flexDirection: "column", gap: 12, overflow: "auto" }}>
           {/* Add Floor */}
           <div style={{ background: "rgba(30,30,50,0.8)", border: "2px solid #2a2a4a", borderRadius: 8, padding: 14 }}>
-            <div style={{ fontSize: 8, color: "#b388ff", marginBottom: 10 }}>+ ADD PROJECT FLOOR</div>
+            <div style={{ fontSize: 12, color: "#b388ff", marginBottom: 10 }}>+ ADD PROJECT FLOOR</div>
             <div style={{ display: "flex", gap: 6 }}>
               <input
                 type="text" value={newName} onChange={(e) => setNewName(e.target.value)}
@@ -522,13 +567,13 @@ function TowerApp() {
                 placeholder="Project name..." maxLength={16}
                 style={{
                   flex: 1, background: "#0a0a1a", border: "1px solid #3a3a5a", borderRadius: 4,
-                  color: "#e0e0e0", fontFamily: '"Press Start 2P", monospace', fontSize: 7,
-                  padding: "6px 8px", outline: "none",
+                  color: "#e0e0e0", fontFamily: '"Press Start 2P", monospace', fontSize: 11,
+                  padding: "8px 10px", outline: "none",
                 }}
               />
               <button onClick={addFloor} style={{
                 background: "#7c4dff", border: "none", borderRadius: 4, color: "#fff",
-                fontFamily: '"Press Start 2P", monospace', fontSize: 7, padding: "6px 10px", cursor: "pointer",
+                fontFamily: '"Press Start 2P", monospace', fontSize: 11, padding: "8px 12px", cursor: "pointer",
               }}>
                 BUILD
               </button>
@@ -537,33 +582,62 @@ function TowerApp() {
 
           {/* Floor List */}
           <div style={{ background: "rgba(30,30,50,0.8)", border: "2px solid #2a2a4a", borderRadius: 8, padding: 14, maxHeight: 300, overflow: "auto" }}>
-            <div style={{ fontSize: 8, color: "#8a8a9a", marginBottom: 10 }}>FLOORS ({floors.length})</div>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+              <div style={{ fontSize: 12, color: "#8a8a9a" }}>FLOORS ({floors.length})</div>
+              {floors.length > 1 && (
+                <button onClick={() => { setEditMode(m => !m); setDragIdx(null); setDragOverIdx(null); }} style={{
+                  background: editMode ? "rgba(124,77,255,0.3)" : "transparent",
+                  border: `1px solid ${editMode ? "#b388ff" : "#3a3a5a"}`,
+                  borderRadius: 3, color: editMode ? "#b388ff" : "#6a6a8a",
+                  fontFamily: '"Press Start 2P", monospace', fontSize: 9, padding: "4px 8px", cursor: "pointer",
+                }}>
+                  {editMode ? "DONE" : "EDIT"}
+                </button>
+              )}
+            </div>
             {floors.length === 0 && (
-              <div style={{ fontSize: 7, color: "#4a4a6a", textAlign: "center", padding: 20 }}>
+              <div style={{ fontSize: 11, color: "#4a4a6a", textAlign: "center", padding: 20 }}>
                 No floors yet. Add a project above!
               </div>
             )}
-            {[...floors].reverse().map((f, idx) => {
+            {[...floors].reverse().map((f, revIdx) => {
+              const realIdx = floors.length - 1 - revIdx;
               const col = PROJECT_COLORS[f.color % PROJECT_COLORS.length];
               const isSelected = selectedFloor === f.id;
               const floorSessionCount = getFloorSessions(f).length;
+              const isDragging = dragIdx === realIdx;
+              const isDragOver = dragOverIdx === realIdx && dragIdx !== realIdx;
               return (
-                <div key={f.id} onClick={() => setSelectedFloor(isSelected ? null : f.id)}
+                <div key={f.id}
+                  draggable={editMode}
+                  onDragStart={editMode ? handleDragStart(realIdx) : undefined}
+                  onDragOver={editMode ? handleDragOver(realIdx) : undefined}
+                  onDrop={editMode ? handleDrop(realIdx) : undefined}
+                  onDragEnd={editMode ? handleDragEnd : undefined}
+                  onClick={editMode ? undefined : () => setSelectedFloor(isSelected ? null : f.id)}
                   style={{
-                    background: isSelected ? "rgba(124,77,255,0.15)" : "rgba(0,0,0,0.3)",
-                    border: `1px solid ${isSelected ? col.screen : "#2a2a4a"}`,
-                    borderRadius: 6, padding: "8px 10px", marginBottom: 6, cursor: "pointer",
+                    background: isDragOver ? "rgba(124,77,255,0.25)" : isSelected && !editMode ? "rgba(124,77,255,0.15)" : "rgba(0,0,0,0.3)",
+                    border: `1px solid ${isDragOver ? "#b388ff" : isSelected && !editMode ? col.screen : "#2a2a4a"}`,
+                    borderRadius: 6, padding: "8px 10px", marginBottom: 6,
+                    cursor: editMode ? "grab" : "pointer",
+                    opacity: isDragging ? 0.4 : 1,
+                    transition: "background 0.15s, border-color 0.15s, opacity 0.15s",
                   }}>
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                     <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                      {editMode && (
+                        <span style={{ fontSize: 10, color: "#6a6a8a", cursor: "grab", userSelect: "none" }}>{"\u2630"}</span>
+                      )}
                       <div style={{ width: 8, height: 8, borderRadius: 2, background: col.screen, boxShadow: `0 0 6px ${col.screen}` }} />
-                      <span style={{ fontSize: 7, color: "#e0e0e0" }}>{f.name}</span>
+                      <span style={{ fontSize: 11, color: "#e0e0e0" }}>{f.name}</span>
                     </div>
-                    <span style={{ fontSize: 6, color: "#6a6a8a" }}>F{floors.length - idx}</span>
+                    <span style={{ fontSize: 10, color: "#6a6a8a" }}>F{floors.length - revIdx}</span>
                   </div>
-                  <div style={{ fontSize: 6, color: "#6a6a8a", marginTop: 4 }}>
-                    {floorSessionCount} session{floorSessionCount !== 1 ? "s" : ""} assigned
-                  </div>
+                  {!editMode && (
+                    <div style={{ fontSize: 10, color: "#6a6a8a", marginTop: 4 }}>
+                      {floorSessionCount} session{floorSessionCount !== 1 ? "s" : ""} assigned
+                    </div>
+                  )}
                 </div>
               );
             })}
@@ -576,24 +650,24 @@ function TowerApp() {
               border: `2px solid ${PROJECT_COLORS[selectedData.color % PROJECT_COLORS.length].screen}`,
               borderRadius: 8, padding: 14,
             }}>
-              <div style={{ fontSize: 8, color: PROJECT_COLORS[selectedData.color % PROJECT_COLORS.length].screen, marginBottom: 10 }}>
+              <div style={{ fontSize: 12, color: PROJECT_COLORS[selectedData.color % PROJECT_COLORS.length].screen, marginBottom: 10 }}>
                 {"\u25B8"} {selectedData.name}
               </div>
 
               {/* Assigned sessions */}
-              <div style={{ fontSize: 6, color: "#8a8a9a", marginBottom: 6 }}>ASSIGNED SESSIONS</div>
+              <div style={{ fontSize: 10, color: "#8a8a9a", marginBottom: 6 }}>ASSIGNED SESSIONS</div>
               {getFloorSessions(selectedData).length === 0 && (
-                <div style={{ fontSize: 6, color: "#4a4a6a", marginBottom: 8, padding: "4px 0" }}>None yet</div>
+                <div style={{ fontSize: 10, color: "#4a4a6a", marginBottom: 8, padding: "4px 0" }}>None yet</div>
               )}
               {getFloorSessions(selectedData).map(s => (
                 <div key={s.id} style={{
                   display: "flex", justifyContent: "space-between", alignItems: "center",
-                  background: "rgba(0,0,0,0.3)", borderRadius: 4, padding: "4px 6px", marginBottom: 4, fontSize: 6,
+                  background: "rgba(0,0,0,0.3)", borderRadius: 4, padding: "6px 8px", marginBottom: 4, fontSize: 10,
                 }}>
                   <span style={{ color: "#e0e0e0" }}>{s.name}</span>
                   <button onClick={() => unassignSession(selectedData.id, s.id)} style={{
                     background: "transparent", border: "none", color: "#f85149", cursor: "pointer",
-                    fontFamily: '"Press Start 2P", monospace', fontSize: 6,
+                    fontFamily: '"Press Start 2P", monospace', fontSize: 10,
                   }}>-</button>
                 </div>
               ))}
@@ -601,16 +675,16 @@ function TowerApp() {
               {/* Unassigned sessions to add */}
               {unassignedForSelected.length > 0 && (
                 <div style={{ marginTop: 8 }}>
-                  <div style={{ fontSize: 6, color: "#8a8a9a", marginBottom: 6 }}>ADD SESSION</div>
+                  <div style={{ fontSize: 10, color: "#8a8a9a", marginBottom: 6 }}>ADD SESSION</div>
                   {unassignedForSelected.map(s => (
                     <div key={s.id} style={{
                       display: "flex", justifyContent: "space-between", alignItems: "center",
-                      background: "rgba(0,0,0,0.2)", borderRadius: 4, padding: "4px 6px", marginBottom: 4, fontSize: 6,
+                      background: "rgba(0,0,0,0.2)", borderRadius: 4, padding: "6px 8px", marginBottom: 4, fontSize: 10,
                     }}>
                       <span style={{ color: "#8a8a9a" }}>{s.name}</span>
                       <button onClick={() => assignSession(selectedData.id, s.id)} style={{
                         background: "transparent", border: "none", color: "#00e676", cursor: "pointer",
-                        fontFamily: '"Press Start 2P", monospace', fontSize: 6,
+                        fontFamily: '"Press Start 2P", monospace', fontSize: 10,
                       }}>+</button>
                     </div>
                   ))}
@@ -619,11 +693,11 @@ function TowerApp() {
 
               {/* Color cycle */}
               <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", margin: "12px 0" }}>
-                <span style={{ fontSize: 7, color: "#8a8a9a" }}>Theme</span>
+                <span style={{ fontSize: 11, color: "#8a8a9a" }}>Theme</span>
                 <button onClick={() => cycleColor(selectedData.id)} style={{
                   background: "transparent", border: `1px solid ${PROJECT_COLORS[selectedData.color % PROJECT_COLORS.length].screen}`,
                   borderRadius: 3, color: PROJECT_COLORS[selectedData.color % PROJECT_COLORS.length].screen,
-                  fontFamily: '"Press Start 2P", monospace', fontSize: 6, padding: "4px 8px", cursor: "pointer",
+                  fontFamily: '"Press Start 2P", monospace', fontSize: 10, padding: "6px 10px", cursor: "pointer",
                 }}>
                   {PROJECT_COLORS[selectedData.color % PROJECT_COLORS.length].name.toUpperCase()}
                 </button>
@@ -633,7 +707,7 @@ function TowerApp() {
               <button onClick={() => removeFloor(selectedData.id)} style={{
                 width: "100%", background: "rgba(255,23,68,0.15)", border: "1px solid #ff1744",
                 borderRadius: 4, color: "#ff1744", fontFamily: '"Press Start 2P", monospace',
-                fontSize: 6, padding: "6px", cursor: "pointer",
+                fontSize: 10, padding: "8px", cursor: "pointer",
               }}>
                 DEMOLISH FLOOR
               </button>
@@ -642,8 +716,8 @@ function TowerApp() {
 
           {/* Stats */}
           <div style={{ background: "rgba(30,30,50,0.8)", border: "2px solid #2a2a4a", borderRadius: 8, padding: 14 }}>
-            <div style={{ fontSize: 8, color: "#8a8a9a", marginBottom: 8 }}>TOWER STATS</div>
-            <div style={{ fontSize: 7, color: "#6a6a8a", lineHeight: 2.2 }}>
+            <div style={{ fontSize: 12, color: "#8a8a9a", marginBottom: 8 }}>TOWER STATS</div>
+            <div style={{ fontSize: 11, color: "#6a6a8a", lineHeight: 2.2 }}>
               <div>Floors: <span style={{ color: "#b388ff" }}>{floors.length}</span></div>
               <div>Total Sessions: <span style={{ color: "#00e676" }}>{sessions.length}</span></div>
               <div>In Lobby: <span style={{ color: "#ffab00" }}>{lobbySessions.length}</span></div>

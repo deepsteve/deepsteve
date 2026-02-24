@@ -1,21 +1,29 @@
 /**
  * Mod system for deepsteve — loads alternative visual views in iframes
  * while still connecting to real PTY sessions via a bridge API.
+ *
+ * Two UI concepts:
+ *  1. "Mods" dropdown (right side, near Sessions) — lists available mods with enable/disable toggles
+ *  2. Mod toolbar buttons (left side, near wand) — registered by enabled mods via mod.json "toolbar" field
  */
 
-const STORAGE_KEY = 'deepsteve-active-mod';
+const STORAGE_KEY = 'deepsteve-enabled-mods'; // Set of enabled mod IDs
+const ACTIVE_VIEW_KEY = 'deepsteve-active-mod-view'; // Which mod view is currently showing
 
-let activeMod = null;       // { id, name, description, entry }
+let allMods = [];          // [{ id, name, description, entry, toolbar }]
+let enabledMods = new Set(); // mod IDs that are enabled
+let activeViewId = null;   // mod ID currently showing in the iframe (or null)
 let iframe = null;
 let modContainer = null;
 let backBtn = null;
-let modsBtn = null;
-let hooks = null;            // { getSessions, focusSession, createSession, killSession }
-let sessionCallbacks = [];   // subscribers from onSessionsChanged
+let hooks = null;
+let sessionCallbacks = [];
 let modViewVisible = false;
+let toolbarButtons = new Map(); // modId → button element
+let settingsCallbacks = [];     // [{modId, cb}] — notified on settings change
 
 /**
- * Initialize the mod system — creates DOM elements, checks for persisted mod.
+ * Initialize the mod system — creates DOM elements.
  */
 function init(appHooks) {
   hooks = appHooks;
@@ -33,128 +41,323 @@ function init(appHooks) {
   backBtn.addEventListener('click', () => showModView());
   const layoutToggle = document.getElementById('layout-toggle');
   layoutToggle.parentNode.insertBefore(backBtn, layoutToggle.nextSibling);
+
+  // Load enabled mods from localStorage
+  try {
+    const saved = JSON.parse(localStorage.getItem(STORAGE_KEY));
+    if (Array.isArray(saved)) enabledMods = new Set(saved);
+  } catch {}
 }
 
 /**
- * Fetch available mods from server and create the Mods toggle button.
- * If a mod was previously active (localStorage), auto-activate it.
+ * Persist enabled mod IDs to localStorage.
+ */
+function _saveEnabledMods() {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify([...enabledMods]));
+}
+
+/**
+ * Load mod settings, merging stored values with schema defaults.
+ */
+function _loadModSettings(mod) {
+  const defaults = {};
+  for (const s of (mod.settings || [])) {
+    defaults[s.key] = s.default;
+  }
+  try {
+    const stored = JSON.parse(localStorage.getItem(`deepsteve-mod-settings-${mod.id}`));
+    if (stored) return { ...defaults, ...stored };
+  } catch {}
+  return defaults;
+}
+
+/**
+ * Save a single mod setting value.
+ */
+function _saveModSetting(modId, key, value) {
+  const mod = allMods.find(m => m.id === modId);
+  if (!mod) return;
+  const current = _loadModSettings(mod);
+  current[key] = value;
+  localStorage.setItem(`deepsteve-mod-settings-${modId}`, JSON.stringify(current));
+  _notifySettingsChanged(modId);
+}
+
+/**
+ * Notify mod iframe that settings changed.
+ */
+function _notifySettingsChanged(modId) {
+  const mod = allMods.find(m => m.id === modId);
+  if (!mod) return;
+  const settings = _loadModSettings(mod);
+  for (const entry of settingsCallbacks) {
+    if (entry.modId === modId) {
+      try { entry.cb(settings); } catch (e) { console.error('Settings callback error:', e); }
+    }
+  }
+}
+
+/**
+ * Fetch available mods from server, show the Mods dropdown, and create toolbar buttons.
  */
 async function loadAvailableMods() {
-  let mods = [];
   try {
     const res = await fetch('/api/mods');
     const data = await res.json();
-    mods = data.mods || [];
+    allMods = data.mods || [];
   } catch { return; }
 
-  if (mods.length === 0) return;
+  if (allMods.length === 0) return;
 
-  // Create Mods button (after wand button)
-  modsBtn = document.createElement('button');
-  modsBtn.id = 'mods-btn';
-  modsBtn.textContent = 'Mods';
-  modsBtn.title = 'Toggle mod view';
-  const wandBtn = document.getElementById('wand-btn');
-  wandBtn.parentNode.insertBefore(modsBtn, wandBtn.nextSibling);
+  // Show the Mods dropdown
+  const modsDropdown = document.getElementById('mods-dropdown');
+  modsDropdown.style.display = '';
 
-  modsBtn.addEventListener('click', () => {
-    if (activeMod) {
-      deactivateMod();
-    } else if (mods.length === 1) {
-      activateMod(mods[0]);
-    } else {
-      showModPicker(mods);
+  // Wire up dropdown toggle
+  const modsBtn = document.getElementById('mods-btn');
+  const modsMenu = document.getElementById('mods-menu');
+
+  modsBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    modsMenu.classList.toggle('open');
+    if (modsMenu.classList.contains('open')) {
+      _renderModsMenu();
     }
   });
 
-  // Auto-activate persisted mod
-  const savedId = localStorage.getItem(STORAGE_KEY);
-  if (savedId) {
-    const mod = mods.find(m => m.id === savedId);
-    if (mod) activateMod(mod);
+  document.addEventListener('click', () => {
+    modsMenu.classList.remove('open');
+  });
+
+  // Create toolbar buttons for enabled mods
+  for (const mod of allMods) {
+    if (enabledMods.has(mod.id)) {
+      _createToolbarButton(mod);
+    }
+  }
+
+  // Auto-show the last active view if its mod is still enabled
+  const savedViewId = localStorage.getItem(ACTIVE_VIEW_KEY);
+  if (savedViewId && enabledMods.has(savedViewId)) {
+    const mod = allMods.find(m => m.id === savedViewId);
+    if (mod) _showMod(mod);
   }
 }
 
 /**
- * Show a picker modal when multiple mods are available.
+ * Render the mods dropdown menu with enable/disable toggles.
  */
-function showModPicker(mods) {
-  const overlay = document.createElement('div');
-  overlay.className = 'modal-overlay';
-  overlay.innerHTML = `
-    <div class="modal" style="width: 360px;">
-      <h2>Select a Mod</h2>
-      <div class="mod-list">
-        ${mods.map(m => `
-          <div class="mod-item" data-id="${m.id}">
-            <div class="mod-name">${m.name}</div>
-            <div class="mod-desc">${m.description || ''}</div>
-          </div>
-        `).join('')}
-      </div>
-      <div class="modal-buttons">
-        <button class="btn-secondary" id="mod-cancel">Cancel</button>
-      </div>
-    </div>
-  `;
-  document.body.appendChild(overlay);
+function _renderModsMenu() {
+  const modsMenu = document.getElementById('mods-menu');
+  if (allMods.length === 0) {
+    modsMenu.innerHTML = '<div class="dropdown-empty">No mods available</div>';
+    return;
+  }
 
-  overlay.querySelectorAll('.mod-item').forEach(item => {
-    item.addEventListener('click', () => {
-      const mod = mods.find(m => m.id === item.dataset.id);
-      overlay.remove();
-      if (mod) activateMod(mod);
+  modsMenu.innerHTML = allMods.map(mod => {
+    const enabled = enabledMods.has(mod.id);
+    const hasSettings = mod.settings && mod.settings.length > 0;
+    return `
+      <div class="dropdown-item mod-toggle-item" data-id="${mod.id}">
+        <div class="session-info">
+          <span class="session-name">${mod.name}</span>
+          <span class="session-status">${mod.description || ''}</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:4px">
+          ${hasSettings ? `<button class="mod-settings-btn" data-id="${mod.id}" title="Settings">&#9881;</button>` : ''}
+          <label class="mod-toggle-label" data-id="${mod.id}">
+            <input type="checkbox" ${enabled ? 'checked' : ''} data-id="${mod.id}">
+          </label>
+        </div>
+      </div>
+    `;
+  }).join('');
+
+  // Wire up toggles
+  modsMenu.querySelectorAll('input[type="checkbox"]').forEach(cb => {
+    cb.addEventListener('change', (e) => {
+      e.stopPropagation();
+      const modId = cb.dataset.id;
+      const mod = allMods.find(m => m.id === modId);
+      if (!mod) return;
+
+      if (cb.checked) {
+        enabledMods.add(modId);
+        _createToolbarButton(mod);
+      } else {
+        enabledMods.delete(modId);
+        _removeToolbarButton(modId);
+        // If this mod's view is active, deactivate it
+        if (activeViewId === modId) {
+          _hideMod();
+        }
+      }
+      _saveEnabledMods();
     });
   });
 
-  overlay.querySelector('#mod-cancel').onclick = () => overlay.remove();
-  overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
+  // Clicking the row toggles the checkbox
+  modsMenu.querySelectorAll('.mod-toggle-item').forEach(item => {
+    item.addEventListener('click', (e) => {
+      if (e.target.tagName === 'INPUT' || e.target.closest('.mod-settings-btn')) return;
+      const cb = item.querySelector('input[type="checkbox"]');
+      cb.checked = !cb.checked;
+      cb.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+  });
+
+  // Wire up gear buttons
+  modsMenu.querySelectorAll('.mod-settings-btn').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const mod = allMods.find(m => m.id === btn.dataset.id);
+      if (mod) _showSettingsModal(mod);
+    });
+  });
 }
 
 /**
- * Activate a mod — create iframe, inject bridge, show mod view.
+ * Show a settings modal for a mod.
  */
-function activateMod(mod) {
-  activeMod = mod;
-  localStorage.setItem(STORAGE_KEY, mod.id);
+function _showSettingsModal(mod) {
+  const settings = _loadModSettings(mod);
 
-  // Update button appearance
-  if (modsBtn) {
-    modsBtn.classList.add('active');
-    modsBtn.textContent = mod.name;
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+
+  const modal = document.createElement('div');
+  modal.className = 'modal';
+  modal.style.width = '380px';
+
+  let html = `<h2>${mod.name} Settings</h2>`;
+  for (const s of mod.settings) {
+    if (s.type === 'boolean') {
+      html += `
+        <div class="mod-setting-item">
+          <input type="checkbox" class="mod-setting-toggle" data-key="${s.key}" ${settings[s.key] ? 'checked' : ''}>
+          <div>
+            <div class="mod-setting-label">${s.label}</div>
+            ${s.description ? `<div class="mod-setting-desc">${s.description}</div>` : ''}
+          </div>
+        </div>
+      `;
+    }
+  }
+  html += `<div class="modal-buttons"><button class="btn-secondary" data-close>Close</button></div>`;
+  modal.innerHTML = html;
+
+  overlay.appendChild(modal);
+  document.body.appendChild(overlay);
+
+  // Close dropdown
+  document.getElementById('mods-menu').classList.remove('open');
+
+  // Live-save on change
+  modal.querySelectorAll('.mod-setting-toggle').forEach(toggle => {
+    toggle.addEventListener('change', () => {
+      _saveModSetting(mod.id, toggle.dataset.key, toggle.checked);
+    });
+  });
+
+  // Close modal
+  const close = () => overlay.remove();
+  modal.querySelector('[data-close]').addEventListener('click', close);
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+}
+
+/**
+ * Create a toolbar button for an enabled mod (left side, near wand).
+ */
+function _createToolbarButton(mod) {
+  if (toolbarButtons.has(mod.id)) return;
+
+  const label = mod.toolbar?.label || mod.name;
+  const btn = document.createElement('button');
+  btn.className = 'mod-toolbar-btn';
+  btn.textContent = label;
+  btn.title = mod.description || label;
+  btn.dataset.modId = mod.id;
+
+  btn.addEventListener('click', () => {
+    if (activeViewId === mod.id) {
+      _hideMod();
+    } else {
+      _showMod(mod);
+    }
+  });
+
+  // Insert after wand button
+  const wandBtn = document.getElementById('wand-btn');
+  wandBtn.parentNode.insertBefore(btn, wandBtn.nextSibling);
+
+  // If this mod is currently the active view, mark it
+  if (activeViewId === mod.id) {
+    btn.classList.add('active');
   }
 
-  // Create iframe
-  const entry = mod.entry || 'index.html';
-  iframe = document.createElement('iframe');
-  iframe.src = `/mods/${mod.id}/${entry}`;
-  iframe.setAttribute('sandbox', 'allow-scripts allow-same-origin');
-  modContainer.appendChild(iframe);
+  toolbarButtons.set(mod.id, btn);
+}
 
-  // Wait for iframe to load, then inject bridge API
-  iframe.addEventListener('load', () => {
-    _injectBridgeAPI(iframe);
-  });
+/**
+ * Remove a toolbar button for a mod.
+ */
+function _removeToolbarButton(modId) {
+  const btn = toolbarButtons.get(modId);
+  if (btn) {
+    btn.remove();
+    toolbarButtons.delete(modId);
+  }
+}
+
+/**
+ * Show a mod's iframe view.
+ */
+function _showMod(mod) {
+  // If a different mod is showing, clean up its iframe
+  if (activeViewId && activeViewId !== mod.id) {
+    _destroyIframe();
+  }
+
+  activeViewId = mod.id;
+  localStorage.setItem(ACTIVE_VIEW_KEY, mod.id);
+
+  // Update toolbar button states
+  for (const [id, btn] of toolbarButtons) {
+    btn.classList.toggle('active', id === mod.id);
+  }
+
+  // Create iframe if needed
+  if (!iframe) {
+    const entry = mod.entry || 'index.html';
+    iframe = document.createElement('iframe');
+    iframe.src = `/mods/${mod.id}/${entry}`;
+    iframe.setAttribute('sandbox', 'allow-scripts allow-same-origin');
+    modContainer.appendChild(iframe);
+    iframe.addEventListener('load', () => {
+      _injectBridgeAPI(iframe);
+    });
+  }
 
   showModView();
 }
 
 /**
- * Deactivate the current mod — destroy iframe, return to terminal view.
+ * Hide the active mod view, return to terminals.
  */
-function deactivateMod() {
-  activeMod = null;
-  localStorage.removeItem(STORAGE_KEY);
+function _hideMod() {
+  const hiddenModId = activeViewId;
+  activeViewId = null;
+  localStorage.removeItem(ACTIVE_VIEW_KEY);
   sessionCallbacks = [];
-
-  if (iframe) {
-    iframe.remove();
-    iframe = null;
+  if (hiddenModId) {
+    settingsCallbacks = settingsCallbacks.filter(e => e.modId !== hiddenModId);
   }
 
-  if (modsBtn) {
-    modsBtn.classList.remove('active');
-    modsBtn.textContent = 'Mods';
+  _destroyIframe();
+
+  // Clear toolbar button states
+  for (const [, btn] of toolbarButtons) {
+    btn.classList.remove('active');
   }
 
   // Show terminals, hide mod container and back button
@@ -165,10 +368,20 @@ function deactivateMod() {
 }
 
 /**
+ * Destroy the current iframe.
+ */
+function _destroyIframe() {
+  if (iframe) {
+    iframe.remove();
+    iframe = null;
+  }
+}
+
+/**
  * Show the mod view (hide terminals, show mod container).
  */
 function showModView() {
-  if (!activeMod) return;
+  if (!activeViewId) return;
   document.getElementById('terminals').style.display = 'none';
   modContainer.style.display = 'flex';
   backBtn.style.display = 'none';
@@ -184,8 +397,9 @@ function showTerminalForSession(id) {
   modViewVisible = false;
 
   // Show back button with mod name
-  if (activeMod) {
-    backBtn.textContent = `\u2190 ${activeMod.name}`;
+  if (activeViewId) {
+    const mod = allMods.find(m => m.id === activeViewId);
+    backBtn.textContent = `\u2190 ${mod?.name || 'Back'}`;
     backBtn.style.display = '';
   }
 
@@ -212,7 +426,7 @@ function isModViewVisible() {
  * Check if a mod is currently active.
  */
 function isModActive() {
-  return activeMod !== null;
+  return activeViewId !== null;
 }
 
 /**
@@ -229,9 +443,7 @@ function _injectBridgeAPI(iframeEl) {
       },
       onSessionsChanged(cb) {
         sessionCallbacks.push(cb);
-        // Fire immediately with current state
         try { cb(hooks.getSessions()); } catch {}
-        // Return unsubscribe function
         return () => {
           sessionCallbacks = sessionCallbacks.filter(fn => fn !== cb);
         };
@@ -241,6 +453,21 @@ function _injectBridgeAPI(iframeEl) {
       },
       killSession(id) {
         hooks.killSession(id);
+      },
+      getSettings() {
+        const mod = allMods.find(m => m.id === activeViewId);
+        return mod ? _loadModSettings(mod) : {};
+      },
+      onSettingsChanged(cb) {
+        const modId = activeViewId;
+        const entry = { modId, cb };
+        settingsCallbacks.push(entry);
+        // Fire immediately with current values
+        const mod = allMods.find(m => m.id === modId);
+        if (mod) try { cb(_loadModSettings(mod)); } catch {}
+        return () => {
+          settingsCallbacks = settingsCallbacks.filter(e => e !== entry);
+        };
       }
     };
   } catch (e) {
@@ -251,8 +478,6 @@ function _injectBridgeAPI(iframeEl) {
 export const ModManager = {
   init,
   loadAvailableMods,
-  activateMod,
-  deactivateMod,
   showModView,
   showTerminalForSession,
   notifySessionsChanged,
