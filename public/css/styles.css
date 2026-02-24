@@ -185,10 +185,10 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
 #new-btn:hover { background: var(--ds-accent-green-hover); }
 #new-btn:active { background: var(--ds-accent-green-active); }
 
-/* Wand button */
-#wand-btn { padding: 4px 10px; background: var(--ds-btn-neutral); border: none; color: var(--ds-text-primary); border-radius: 4px; cursor: pointer; font-size: 13px; margin-left: 4px; user-select: none; }
-#wand-btn:hover { background: var(--ds-btn-neutral-hover); }
-#wand-btn:active { background: var(--ds-btn-neutral-active); }
+/* Wand button — lighter than neutral buttons to stand out */
+#wand-btn { padding: 4px 10px; background: #474e57; border: none; color: var(--ds-text-primary); border-radius: 4px; cursor: pointer; font-size: 13px; margin-left: 4px; user-select: none; }
+#wand-btn:hover { background: #545d68; }
+#wand-btn:active { background: #3d444d; }
 
 /* Vertical layout wand button */
 #app-container.vertical-layout #wand-btn { width: 100%; margin: 4px 0 0 0; }

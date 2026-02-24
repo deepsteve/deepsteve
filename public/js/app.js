@@ -266,13 +266,16 @@ async function refreshSessionsDropdown() {
 const settingsBtn = document.getElementById('settings-btn');
 
 settingsBtn?.addEventListener('click', async () => {
-  const [settingsData, themesData, versionData] = await Promise.all([
+  const [settingsData, themesData, versionData, defaultsData] = await Promise.all([
     fetch('/api/settings').then(r => r.json()),
     fetch('/api/themes').then(r => r.json()),
-    fetch('/api/version').then(r => r.json()).catch(() => ({ current: '?', latest: null, updateAvailable: false }))
+    fetch('/api/version').then(r => r.json()).catch(() => ({ current: '?', latest: null, updateAvailable: false })),
+    fetch('/api/settings/defaults').then(r => r.json()).catch(() => ({}))
   ]);
   const currentProfile = settingsData.shellProfile || '~/.zshrc';
   const currentMaxTitle = settingsData.maxIssueTitleLength || 25;
+  const currentWandPlanMode = settingsData.wandPlanMode !== undefined ? settingsData.wandPlanMode : true;
+  const currentWandTemplate = settingsData.wandPromptTemplate || defaultsData.wandPromptTemplate || '';
   const themes = themesData.themes || [];
   const activeTheme = themesData.active || '';
 
@@ -318,6 +321,21 @@ settingsBtn?.addEventListener('click', async () => {
         <input type="number" id="max-issue-title-length" min="10" max="200" value="${currentMaxTitle}" style="width: 80px; padding: 4px 8px; border-radius: 4px; border: 1px solid var(--ds-border); background: var(--ds-bg-secondary); color: var(--ds-text-primary);">
       </div>
       <div class="settings-section">
+        <h3>Magic Wand</h3>
+        <label style="font-size: 13px; color: var(--ds-text-primary); cursor: pointer; display: flex; align-items: center; gap: 8px; margin-bottom: 12px;">
+          <input type="checkbox" id="wand-plan-mode" ${currentWandPlanMode ? 'checked' : ''} style="accent-color: var(--ds-accent-green);">
+          Start issues in plan mode
+        </label>
+        <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px;">
+          <span style="font-size: 13px; color: var(--ds-text-primary);">Prompt template</span>
+          <button class="btn-secondary" id="wand-template-reset" style="padding: 2px 8px; font-size: 11px;">Reset</button>
+        </div>
+        <textarea id="wand-prompt-template" rows="6" style="width: 100%; box-sizing: border-box; padding: 8px; background: var(--ds-bg-primary); border: 1px solid var(--ds-border); border-radius: 4px; color: var(--ds-text-primary); font-size: 12px; font-family: monospace; resize: vertical;">${escapeHtml(currentWandTemplate)}</textarea>
+        <p style="font-size: 11px; color: var(--ds-text-secondary); margin-top: 4px;">
+          Variables: <code>{{number}}</code> <code>{{title}}</code> <code>{{labels}}</code> <code>{{url}}</code> <code>{{body}}</code>
+        </p>
+      </div>
+      <div class="settings-section">
         <h3>Version</h3>
         <div class="version-info">
           <span>Version ${escapeHtml(versionData.current)}</span>
@@ -359,15 +377,24 @@ settingsBtn?.addEventListener('click', async () => {
     // The server will broadcast the theme CSS via WebSocket — applyTheme runs from the WS handler
   });
 
+  // Wand template reset button
+  overlay.querySelector('#wand-template-reset').onclick = async () => {
+    if (!confirm('Reset magic wand prompt template to default?')) return;
+    const templateInput = overlay.querySelector('#wand-prompt-template');
+    templateInput.value = defaultsData.wandPromptTemplate || '';
+  };
+
   overlay.querySelector('#settings-cancel').onclick = () => overlay.remove();
   overlay.querySelector('#settings-save').onclick = async () => {
     const selected = overlay.querySelector('input[name="profile"]:checked').value;
     const shellProfile = selected === 'custom' ? customInput.value : selected;
     const newMaxTitle = Number(overlay.querySelector('#max-issue-title-length').value) || 25;
+    const wandPlanMode = overlay.querySelector('#wand-plan-mode').checked;
+    const wandPromptTemplate = overlay.querySelector('#wand-prompt-template').value;
     await fetch('/api/settings', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ shellProfile, maxIssueTitleLength: newMaxTitle })
+      body: JSON.stringify({ shellProfile, maxIssueTitleLength: newMaxTitle, wandPlanMode, wandPromptTemplate })
     });
     maxIssueTitleLength = Math.max(10, Math.min(200, newMaxTitle));
     overlay.remove();
@@ -433,7 +460,7 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
           const sessionName = opts.name || msg.name;
           initTerminal(msg.id, ws, cwd, sessionName, { hasScrollback, pendingData });
           if (opts.initialPrompt) {
-            ws.sendJSON({ type: 'initialPrompt', text: opts.initialPrompt });
+            ws.sendJSON({ type: 'initialPrompt', text: opts.initialPrompt, planMode: opts.planMode || false });
           }
         }
       } else if (msg.type === 'gone') {
@@ -820,12 +847,18 @@ async function showIssuePicker() {
     return;
   }
 
-  // Fetch issues
-  let issues;
+  // Fetch issues and settings in parallel
+  let issues, wandPlanMode, wandPromptTemplate;
   try {
-    const res = await fetch('/api/issues?cwd=' + encodeURIComponent(gitRoot));
-    if (!res.ok) throw new Error((await res.json()).error || 'Failed to fetch issues');
-    issues = (await res.json()).issues;
+    const [issuesRes, settingsData] = await Promise.all([
+      fetch('/api/issues?cwd=' + encodeURIComponent(gitRoot)),
+      fetch('/api/settings').then(r => r.json())
+    ]);
+    if (!issuesRes.ok) throw new Error((await issuesRes.json()).error || 'Failed to fetch issues');
+    issues = (await issuesRes.json()).issues;
+    wandPlanMode = settingsData.wandPlanMode !== undefined ? settingsData.wandPlanMode : true;
+    wandPromptTemplate = settingsData.wandPromptTemplate || '';
+    if (settingsData.maxIssueTitleLength) maxIssueTitleLength = settingsData.maxIssueTitleLength;
   } catch (e) {
     alert('Failed to fetch issues: ' + e.message);
     return;
@@ -881,18 +914,19 @@ async function showIssuePicker() {
 
     const body = selectedIssue.body ? selectedIssue.body.slice(0, 2000) : '(no description)';
     const labels = selectedIssue.labels?.map(l => l.name).join(', ') || 'none';
-    const prompt = `I need you to work on GitHub issue #${selectedIssue.number}: "${selectedIssue.title}"
-Labels: ${labels}
-URL: ${selectedIssue.url}
-
-Issue description:
-${body}
-
-Please read the issue carefully, understand the codebase context, and implement the changes needed.`;
+    const vars = {
+      number: selectedIssue.number,
+      title: selectedIssue.title,
+      labels,
+      url: selectedIssue.url,
+      body,
+    };
+    const prompt = wandPromptTemplate.replace(/\{\{(\w+)\}\}/g, (_, key) => vars[key] ?? '');
 
     createSession(gitRoot, null, true, {
       worktree: 'github-issue-' + selectedIssue.number,
       initialPrompt: prompt,
+      planMode: wandPlanMode,
       name: truncateTitle(`#${selectedIssue.number} ${selectedIssue.title}`)
     });
   }
