@@ -28,7 +28,7 @@ app.use((req, res, next) => {
 });
 
 // Load settings
-let settings = { shellProfile: '~/.zshrc' };
+let settings = { shellProfile: '~/.zshrc', maxIssueTitleLength: 25 };
 try {
   if (fs.existsSync(SETTINGS_FILE)) {
     settings = { ...settings, ...JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8')) };
@@ -356,12 +356,16 @@ app.get('/api/settings', (req, res) => {
 });
 
 app.post('/api/settings', (req, res) => {
-  const { shellProfile } = req.body;
+  const { shellProfile, maxIssueTitleLength } = req.body;
   if (shellProfile !== undefined) {
     settings.shellProfile = shellProfile;
-    saveSettings();
     log(`Settings updated: shellProfile=${shellProfile}`);
   }
+  if (maxIssueTitleLength !== undefined) {
+    settings.maxIssueTitleLength = Math.max(10, Math.min(200, Number(maxIssueTitleLength) || 25));
+    log(`Settings updated: maxIssueTitleLength=${settings.maxIssueTitleLength}`);
+  }
+  saveSettings();
   res.json(settings);
 });
 
