@@ -637,8 +637,11 @@ wss.on('connection', (ws, req) => {
       // Grace period to allow reconnect on refresh
       entry.killTimer = setTimeout(() => {
         if (entry.clients.size === 0) {
+          // Preserve session info so it can be restored on next connect
+          savedState[id] = { cwd: entry.cwd, claudeSessionId: entry.claudeSessionId, worktree: entry.worktree || null, lastActivity: entry.lastActivity || null };
           killShell(entry, id);
           shells.delete(id);
+          saveState();
         }
       }, 30000);
     }

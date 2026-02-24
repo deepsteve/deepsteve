@@ -1,0 +1,17 @@
+{
+  "name": "Tasks",
+  "description": "Task list for human actions, populated by Claude sessions",
+  "entry": "index.html",
+  "display": "panel",
+  "panel": { "position": "right", "defaultWidth": 360, "minWidth": 200 },
+  "toolbar": { "label": "Tasks" },
+  "tools": [
+    { "name": "add_task", "description": "Add a task for the human" },
+    { "name": "update_task", "description": "Update a task" },
+    { "name": "complete_task", "description": "Mark a task as done" },
+    { "name": "list_tasks", "description": "List current tasks" }
+  ],
+  "settings": [
+    { "key": "panelPosition", "type": "boolean", "label": "Panel on left", "description": "Show panel on left side instead of right", "default": false }
+  ]
+}

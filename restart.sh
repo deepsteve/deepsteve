@@ -23,12 +23,25 @@ fi
 SCRIPT_DIR="$2"
 cd "$SCRIPT_DIR"
 
+cp package.json ~/.deepsteve/
 cp server.js ~/.deepsteve/
+cp mcp-server.js ~/.deepsteve/
 cp -r public/* ~/.deepsteve/public/
 mkdir -p ~/.deepsteve/themes
 cp -n themes/*.css ~/.deepsteve/themes/ 2>/dev/null || true
 mkdir -p ~/.deepsteve/mods
 cp -r mods/* ~/.deepsteve/mods/ 2>/dev/null || true
+
+# Install deps if package.json changed
+if ! diff -q package.json ~/.deepsteve/package.json.prev &>/dev/null; then
+    (cd ~/.deepsteve && npm install --omit=dev 2>&1 | tail -1)
+    cp package.json ~/.deepsteve/package.json.prev
+fi
+
+# Register deepsteve as MCP server with Claude Code (idempotent)
+if command -v claude &>/dev/null; then
+    claude mcp add --transport http deepsteve http://localhost:3000/mcp 2>/dev/null || true
+fi
 
 # Signal the server to tell browsers to reload (only with --refresh)
 if [ "$REFRESH" = 1 ]; then

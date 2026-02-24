@@ -12,6 +12,7 @@ const ACTIVE_VIEW_KEY = 'deepsteve-active-mod-view'; // Which mod view is curren
 
 let allMods = [];          // [{ id, name, description, entry, toolbar }]
 let enabledMods = new Set(); // mod IDs that are enabled
+let hasExplicitModPrefs = false; // true if user has saved mod prefs before
 let activeViewId = null;   // mod ID currently showing in the iframe (or null)
 let iframe = null;
 let modContainer = null;
@@ -38,11 +39,17 @@ const PANEL_STORAGE_KEY = 'deepsteve-panel-width';
 function init(appHooks) {
   hooks = appHooks;
 
-  // Create mod container (sibling of #terminals)
+  // Wrap #terminals in a row container for side-by-side panel layout
+  const terminals = document.getElementById('terminals');
+  const contentRow = document.createElement('div');
+  contentRow.id = 'content-row';
+  terminals.parentNode.insertBefore(contentRow, terminals);
+  contentRow.appendChild(terminals);
+
+  // Create mod container (fullscreen mod view, sibling of content-row)
   modContainer = document.createElement('div');
   modContainer.id = 'mod-container';
-  const terminals = document.getElementById('terminals');
-  terminals.parentNode.insertBefore(modContainer, terminals.nextSibling);
+  contentRow.parentNode.insertBefore(modContainer, contentRow.nextSibling);
 
   // Create back button (in #tabs, after layout-toggle)
   backBtn = document.createElement('button');
@@ -52,15 +59,14 @@ function init(appHooks) {
   const layoutToggle = document.getElementById('layout-toggle');
   layoutToggle.parentNode.insertBefore(backBtn, layoutToggle.nextSibling);
 
-  // Create panel container and resizer (inserted after #terminals)
-  const terminals = document.getElementById('terminals');
+  // Create panel resizer and container (inside content-row, after #terminals)
   panelResizer = document.createElement('div');
   panelResizer.id = 'panel-resizer';
-  terminals.parentNode.insertBefore(panelResizer, terminals.nextSibling);
+  contentRow.appendChild(panelResizer);
 
   panelContainer = document.createElement('div');
   panelContainer.id = 'panel-container';
-  panelResizer.parentNode.insertBefore(panelContainer, panelResizer.nextSibling);
+  contentRow.appendChild(panelContainer);
 
   // Restore saved panel width
   try {
@@ -72,8 +78,12 @@ function init(appHooks) {
 
   // Load enabled mods from localStorage
   try {
-    const saved = JSON.parse(localStorage.getItem(STORAGE_KEY));
-    if (Array.isArray(saved)) enabledMods = new Set(saved);
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (raw !== null) {
+      hasExplicitModPrefs = true;
+      const saved = JSON.parse(raw);
+      if (Array.isArray(saved)) enabledMods = new Set(saved);
+    }
   } catch {}
 }
 
@@ -157,11 +167,21 @@ async function loadAvailableMods() {
     modsMenu.classList.remove('open');
   });
 
-  // Create toolbar buttons for enabled mods
+  // Create toolbar buttons for enabled non-panel mods
   for (const mod of allMods) {
-    if (enabledMods.has(mod.id)) {
+    if (enabledMods.has(mod.id) && mod.display !== 'panel') {
       _createToolbarButton(mod);
     }
+  }
+
+  // Auto-enable panel mods on first visit only (no saved prefs yet)
+  if (!hasExplicitModPrefs) {
+    for (const mod of allMods) {
+      if (mod.display === 'panel') {
+        enabledMods.add(mod.id);
+      }
+    }
+    _saveEnabledMods();
   }
 
   // Auto-show the last active view if its mod is still enabled
@@ -169,6 +189,13 @@ async function loadAvailableMods() {
   if (savedViewId && enabledMods.has(savedViewId)) {
     const mod = allMods.find(m => m.id === savedViewId);
     if (mod) _showMod(mod);
+  }
+
+  // Auto-open enabled panel mods
+  for (const mod of allMods) {
+    if (enabledMods.has(mod.id) && mod.display === 'panel') {
+      _showPanelMod(mod);
+    }
   }
 }
 
@@ -211,16 +238,20 @@ function _renderModsMenu() {
 
       if (cb.checked) {
         enabledMods.add(modId);
-        _createToolbarButton(mod);
+        if (mod.display === 'panel') {
+          _showPanelMod(mod);
+        } else {
+          _createToolbarButton(mod);
+        }
       } else {
         enabledMods.delete(modId);
-        _removeToolbarButton(modId);
-        // If this mod's view is active, deactivate it
-        if (activeViewId === modId) {
-          _hideMod();
-        }
-        if (activePanelId === modId) {
+        if (mod.display === 'panel') {
           _hidePanelMod();
+        } else {
+          _removeToolbarButton(modId);
+          if (activeViewId === modId) {
+            _hideMod();
+          }
         }
       }
       _saveEnabledMods();
@@ -306,6 +337,8 @@ function _setupPanelResizer() {
     isDragging = true;
     document.body.style.cursor = 'col-resize';
     document.body.style.userSelect = 'none';
+    // Block iframe from stealing mouse events during drag
+    if (panelIframe) panelIframe.style.pointerEvents = 'none';
     e.preventDefault();
   });
 
@@ -322,6 +355,7 @@ function _setupPanelResizer() {
       isDragging = false;
       document.body.style.cursor = '';
       document.body.style.userSelect = '';
+      if (panelIframe) panelIframe.style.pointerEvents = '';
       localStorage.setItem(PANEL_STORAGE_KEY, panelWidth);
       window.dispatchEvent(new Event('resize'));
     }
@@ -361,12 +395,12 @@ function _showPanelMod(mod) {
   });
 
   // Show panel + resizer
-  panelContainer.style.display = '';
+  panelContainer.style.display = 'block';
   panelContainer.style.width = panelWidth + 'px';
-  panelResizer.style.display = '';
+  panelResizer.style.display = 'block';
 
   // Ensure terminals stay visible
-  document.getElementById('terminals').style.display = '';
+  document.getElementById('terminals').style.display = 'block';
 
   // Trigger resize so terminal refits to smaller width
   window.dispatchEvent(new Event('resize'));
@@ -422,7 +456,10 @@ function _createToolbarButton(mod) {
   btn.dataset.modId = mod.id;
 
   btn.addEventListener('click', () => {
-    if (activeViewId === mod.id) {
+    if (mod.display === 'panel') {
+      // Panel mods toggle via _showPanelMod (which handles its own toggle)
+      _showPanelMod(mod);
+    } else if (activeViewId === mod.id) {
       _hideMod();
     } else {
       _showMod(mod);

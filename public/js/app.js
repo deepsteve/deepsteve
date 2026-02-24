@@ -444,10 +444,9 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
   };
 
   ws.onerror = () => {
-    if (existingId) {
-      SessionStore.removeSession(getWindowId(), existingId);
-      TabSessions.remove(existingId);
-    }
+    // Don't wipe session storage on WS error — the server might just be restarting.
+    // Sessions will be cleaned up if the server responds with 'gone' on reconnect.
+    console.log('[ws] error for session', existingId, '— keeping in storage for reconnect');
   };
 
   ws.onreconnecting = () => {
