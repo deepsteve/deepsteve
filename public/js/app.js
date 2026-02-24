@@ -14,11 +14,11 @@ import { initLiveReload } from './live-reload.js';
 import { ModManager } from './mod-manager.js';
 
 // Configuration
-const MAX_TAB_TITLE_LENGTH = 50;
+let maxIssueTitleLength = 25;
 
 function truncateTitle(title) {
-  if (title.length <= MAX_TAB_TITLE_LENGTH) return title;
-  return title.slice(0, MAX_TAB_TITLE_LENGTH - 1) + '…';
+  if (title.length <= maxIssueTitleLength) return title;
+  return title.slice(0, maxIssueTitleLength) + '…';
 }
 
 // Active sessions in memory
@@ -266,6 +266,7 @@ settingsBtn?.addEventListener('click', async () => {
     fetch('/api/version').then(r => r.json()).catch(() => ({ current: '?', latest: null, updateAvailable: false }))
   ]);
   const currentProfile = settingsData.shellProfile || '~/.zshrc';
+  const currentMaxTitle = settingsData.maxIssueTitleLength || 25;
   const themes = themesData.themes || [];
   const activeTheme = themesData.active || '';
 
@@ -302,6 +303,13 @@ settingsBtn?.addEventListener('click', async () => {
           Place .css files in ~/.deepsteve/themes/ to add themes.
         </p>
         <select class="theme-select" id="theme-select">${themeOptions}</select>
+      </div>
+      <div class="settings-section">
+        <h3>Issue Title Length</h3>
+        <p style="font-size: 13px; color: var(--ds-text-secondary); margin-bottom: 8px;">
+          Max characters to display for GitHub issue titles in tabs.
+        </p>
+        <input type="number" id="max-issue-title-length" min="10" max="200" value="${currentMaxTitle}" style="width: 80px; padding: 4px 8px; border-radius: 4px; border: 1px solid var(--ds-border); background: var(--ds-bg-secondary); color: var(--ds-text-primary);">
       </div>
       <div class="settings-section">
         <h3>Version</h3>
@@ -349,11 +357,13 @@ settingsBtn?.addEventListener('click', async () => {
   overlay.querySelector('#settings-save').onclick = async () => {
     const selected = overlay.querySelector('input[name="profile"]:checked').value;
     const shellProfile = selected === 'custom' ? customInput.value : selected;
+    const newMaxTitle = Number(overlay.querySelector('#max-issue-title-length').value) || 25;
     await fetch('/api/settings', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ shellProfile })
+      body: JSON.stringify({ shellProfile, maxIssueTitleLength: newMaxTitle })
     });
+    maxIssueTitleLength = Math.max(10, Math.min(200, newMaxTitle));
     overlay.remove();
   };
   overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
@@ -888,11 +898,14 @@ async function init() {
   // Auto-reload browser when server restarts (restart.sh, node --watch, etc.)
   initLiveReload();
 
-  // Load active theme before creating any terminals (prevents color flash)
+  // Load settings before creating any terminals (prevents color flash, applies title length)
   try {
     const settingsData = await fetch('/api/settings').then(r => r.json());
     if (settingsData.themeCSS) {
       applyTheme(settingsData.themeCSS);
+    }
+    if (settingsData.maxIssueTitleLength) {
+      maxIssueTitleLength = settingsData.maxIssueTitleLength;
     }
   } catch {}
 
