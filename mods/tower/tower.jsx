@@ -95,6 +95,7 @@ function Computer({ x, y, screenColor, sessionName, waiting, onClick }) {
 
   return (
     <g onClick={onClick} style={{ cursor: onClick ? "pointer" : "default" }}>
+      {sessionName && <title>{sessionName}</title>}
       {/* Monitor */}
       <rect x={x} y={y} width={monW} height={monH} rx={p} fill={PALETTE.computer.body} />
       <rect x={x + p} y={y + p} width={monW - 2 * p} height={monH - 4 * p} fill={PALETTE.computer.screen} />
