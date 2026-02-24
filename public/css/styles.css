@@ -341,3 +341,13 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
 .mod-setting-toggle { flex-shrink: 0; margin-top: 2px; accent-color: var(--ds-accent-green); cursor: pointer; width: 16px; height: 16px; }
 .mod-setting-label { font-size: 13px; color: var(--ds-text-primary); cursor: pointer; }
 .mod-setting-desc { font-size: 12px; color: var(--ds-text-secondary); margin-top: 2px; }
+
+/* Empty state (no tabs open) */
+#empty-state { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 0; user-select: none; background: #0d0d0d; animation: empty-state-fade-in 0.4s ease-out; }
+#empty-state.hidden { display: none; }
+#empty-state pre { margin: 0; font-family: monospace; line-height: 1.1; }
+#empty-state .empty-state-icon { color: var(--ds-accent-blue); opacity: 0.7; font-size: 14px; }
+#empty-state .empty-state-title { color: var(--ds-accent-blue); opacity: 0.4; font-size: 12px; margin-top: 8px; }
+#empty-state .empty-state-hint { color: var(--ds-text-secondary); font-size: 13px; margin-top: 20px; opacity: 0.6; }
+#empty-state .empty-state-hint kbd { background: var(--ds-bg-tertiary); border: 1px solid var(--ds-border); border-radius: 3px; padding: 2px 6px; font-family: inherit; font-size: 12px; }
+@keyframes empty-state-fade-in { from { opacity: 0; } to { opacity: 1; } }

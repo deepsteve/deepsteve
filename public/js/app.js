@@ -158,6 +158,11 @@ function updateTitle() {
   document.title = count > 0 ? `(${count}) deepsteve` : 'deepsteve';
 }
 
+function updateEmptyState() {
+  const el = document.getElementById('empty-state');
+  if (el) el.classList.toggle('hidden', sessions.size > 0);
+}
+
 /**
  * Build a session list for the mod bridge API
  */
@@ -537,6 +542,7 @@ function initTerminal(id, ws, cwd, initialName, { hasScrollback = false, pending
   };
 
   TabManager.addTab(id, name, tabCallbacks);
+  updateEmptyState();
   switchTo(id);
 
   // Save to both storages — TabSessions is per-tab truth, SessionStore is for cross-tab
@@ -633,6 +639,8 @@ function killSession(id) {
       activeId = null;
     }
   }
+
+  updateEmptyState();
 
   // Notify mods of session list change
   ModManager.notifySessionsChanged(getSessionList());
