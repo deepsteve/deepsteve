@@ -153,11 +153,6 @@ window.addEventListener('focus', () => {
   if (activeId) clearNotification(activeId);
 });
 
-function updateEmptyState() {
-  const el = document.getElementById('empty-state');
-  if (el) el.style.display = sessions.size === 0 ? '' : 'none';
-}
-
 function updateTitle() {
   const count = [...sessions.values()].filter(s => s.waitingForInput).length;
   document.title = count > 0 ? `(${count}) deepsteve` : 'deepsteve';
