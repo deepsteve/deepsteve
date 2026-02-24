@@ -9,6 +9,7 @@
 
 const STORAGE_KEY = 'deepsteve-enabled-mods'; // Set of enabled mod IDs
 const ACTIVE_VIEW_KEY = 'deepsteve-active-mod-view'; // Which mod view is currently showing
+const ACTIVE_PANEL_KEY = 'deepsteve-active-panel-mod'; // Which panel mod is currently showing
 
 let allMods = [];          // [{ id, name, description, entry, toolbar }]
 let enabledMods = new Set(); // mod IDs that are enabled
@@ -193,12 +194,11 @@ async function loadAvailableMods() {
     if (mod) _showMod(mod);
   }
 
-  // Auto-open the first enabled panel mod (only one panel can be active at a time)
-  for (const mod of allMods) {
-    if (enabledMods.has(mod.id) && mod.display === 'panel') {
-      _showPanelMod(mod);
-      break;
-    }
+  // Restore the last active panel mod
+  const savedPanelId = localStorage.getItem(ACTIVE_PANEL_KEY);
+  if (savedPanelId && enabledMods.has(savedPanelId)) {
+    const mod = allMods.find(m => m.id === savedPanelId && m.display === 'panel');
+    if (mod) _showPanelMod(mod);
   }
 }
 
@@ -381,6 +381,7 @@ function _showPanelMod(mod) {
   }
 
   activePanelId = mod.id;
+  localStorage.setItem(ACTIVE_PANEL_KEY, mod.id);
 
   // Update toolbar button states
   for (const [id, btn] of toolbarButtons) {
@@ -417,6 +418,7 @@ function _showPanelMod(mod) {
 function _hidePanelMod() {
   const hiddenModId = activePanelId;
   activePanelId = null;
+  localStorage.removeItem(ACTIVE_PANEL_KEY);
   taskCallbacks = [];
   browserEvalCallbacks = [];
   browserConsoleCallbacks = [];
