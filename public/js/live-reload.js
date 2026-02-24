@@ -6,7 +6,7 @@
  * On normal restart, the WS drops and we silently reconnect without refreshing.
  */
 
-export function initLiveReload() {
+export function initLiveReload({ onMessage } = {}) {
   let ws;
   let shouldReload = false;
   let intentionallyClosed = false;
@@ -19,6 +19,8 @@ export function initLiveReload() {
         const msg = JSON.parse(e.data);
         if (msg.type === 'reload') {
           shouldReload = true;
+        } else if (onMessage) {
+          onMessage(msg);
         }
       } catch {}
     };
