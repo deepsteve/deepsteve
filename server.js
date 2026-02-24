@@ -250,6 +250,9 @@ function saveState() {
   }
 }
 
+// Periodic state save to survive crashes (saveState() is normally only triggered on SIGTERM)
+setInterval(() => saveState(), 30000);
+
 async function shutdown(signal) {
   log(`Received ${signal}, saving state...`);
   saveState();

@@ -47,6 +47,45 @@ function saveFloors(floors) {
   localStorage.setItem(FLOORS_STORAGE_KEY, JSON.stringify(floors));
 }
 
+const CWD_MAP_KEY = "tower-mod-session-cwds";
+
+function loadCwdMap() {
+  try { return JSON.parse(localStorage.getItem(CWD_MAP_KEY)) || {}; } catch { return {}; }
+}
+function saveCwdMap(map) {
+  localStorage.setItem(CWD_MAP_KEY, JSON.stringify(map));
+}
+
+// Replace stale floor session IDs with current sessions that have the same cwd
+function reconcileFloors(sessions, floors) {
+  const liveIds = new Set(sessions.map(s => s.id));
+  const cwdMap = loadCwdMap();
+
+  // Collect all currently-assigned IDs across all floors
+  const allAssigned = new Set();
+  for (const f of floors) for (const sid of (f.sessionIds || [])) allAssigned.add(sid);
+
+  let changed = false;
+  const updated = floors.map(floor => {
+    const newIds = (floor.sessionIds || []).map(sid => {
+      if (liveIds.has(sid)) return sid; // Still alive
+      const cwd = cwdMap[sid];
+      if (!cwd) return sid; // No record — keep as-is (will render as dead)
+      // Find a session with same cwd that isn't already assigned to any floor
+      const match = sessions.find(s => s.cwd === cwd && !allAssigned.has(s.id));
+      if (match) {
+        changed = true;
+        allAssigned.add(match.id); // Prevent double-assigning
+        return match.id;
+      }
+      return sid; // No match found — keep stale ID (will render as dead)
+    });
+    return { ...floor, sessionIds: newIds };
+  });
+
+  return changed ? updated : null;
+}
+
 function PixelText({ text, x, y, size = 12, color = "#fff", align = "left" }) {
   return (
     <text
@@ -169,6 +208,56 @@ function Computer({ x, y, screenColor, sessionName, waiting, onClick }) {
   );
 }
 
+function DeadComputer({ x, y, sessionName, onUnassign }) {
+  const p = PIXEL;
+  const monW = 24 * p;
+  const monH = 18 * p;
+
+  return (
+    <g style={{ cursor: "pointer" }} onClick={onUnassign}>
+      {/* Monitor */}
+      <rect x={x} y={y} width={monW} height={monH} rx={p} fill="#2a2a3a" opacity={0.5} />
+      <rect x={x + p} y={y + p} width={monW - 2 * p} height={monH - 4 * p} fill="#1a0a0a" />
+
+      {/* Error static lines */}
+      {[0, 1, 2, 3].map(i => (
+        <rect key={i} x={x + 2.5 * p} y={y + 2.5 * p + i * 2.5 * p}
+          width={monW - 5 * p} height={1.5 * p} fill="#ff1744" opacity={0.15} rx={0.5} />
+      ))}
+
+      {/* Red X error icon */}
+      <line x1={x + monW / 2 - 3 * p} y1={y + monH / 2 - 4 * p}
+        x2={x + monW / 2 + 3 * p} y2={y + monH / 2 + 2 * p}
+        stroke="#ff1744" strokeWidth={2} opacity={0.8} />
+      <line x1={x + monW / 2 + 3 * p} y1={y + monH / 2 - 4 * p}
+        x2={x + monW / 2 - 3 * p} y2={y + monH / 2 + 2 * p}
+        stroke="#ff1744" strokeWidth={2} opacity={0.8} />
+
+      {/* Monitor stand */}
+      <rect x={x + monW / 2 - 2 * p} y={y + monH} width={4 * p} height={2 * p} fill="#2a2a3a" opacity={0.5} />
+      <rect x={x + monW / 2 - 4 * p} y={y + monH + 2 * p} width={8 * p} height={p} fill="#2a2a3a" opacity={0.5} />
+
+      {/* Keyboard (dimmed) */}
+      <rect x={x - p} y={y + monH + 3.5 * p} width={monW + 2 * p} height={4 * p} rx={p} fill="#1a1a2a" opacity={0.4} />
+
+      {/* Error indicator dot */}
+      <circle cx={x + monW - 2 * p} cy={y - 1.5 * p} r={3 * p} fill="#ff1744" opacity={0.8}>
+        <animate attributeName="opacity" values="0.8;0.3;0.8" dur="2s" repeatCount="indefinite" />
+      </circle>
+
+      {/* Session name label */}
+      <PixelText
+        text={sessionName.length > 10 ? sessionName.slice(0, 9) + "\u2026" : sessionName}
+        x={x + monW / 2}
+        y={y + monH + 9 * p}
+        size={7}
+        color="#ff1744"
+        align="center"
+      />
+    </g>
+  );
+}
+
 function Person({ x, y, colorIdx = 0, facing = "right" }) {
   const p = PIXEL;
   const skinColor = PALETTE.person[colorIdx % PALETTE.person.length];
@@ -199,7 +288,7 @@ function Person({ x, y, colorIdx = 0, facing = "right" }) {
   );
 }
 
-function Floor({ floorData, sessions: floorSessions, y, width, isSelected, onClick, floorNum }) {
+function Floor({ floorData, sessions: floorSessions, y, width, isSelected, onClick, floorNum, onUnassignSession }) {
   const p = PIXEL;
   const floorH = 42 * p;
   const wallInset = 12 * p;
@@ -239,6 +328,20 @@ function Floor({ floorData, sessions: floorSessions, y, width, isSelected, onCli
       {floorSessions.slice(0, 4).map((session, i) => {
         const cx = wallInset + 16 * p + i * computerSpacing;
         const cy = y + 14 * p;
+        if (session.dead) {
+          return (
+            <g key={session.id}>
+              <DeadComputer
+                x={cx} y={cy}
+                sessionName={session.name}
+                onUnassign={(e) => {
+                  e.stopPropagation();
+                  if (onUnassignSession) onUnassignSession(session.id);
+                }}
+              />
+            </g>
+          );
+        }
         return (
           <g key={session.id}>
             <Computer
@@ -369,6 +472,26 @@ function TowerApp() {
         clearInterval(poll);
         unsubSessions = window.deepsteve.onSessionsChanged((list) => {
           setSessions(list);
+
+          // Update cwd map with current session data
+          const cwdMap = loadCwdMap();
+          const liveIds = new Set(list.map(s => s.id));
+          for (const s of list) {
+            if (s.cwd) cwdMap[s.id] = s.cwd;
+          }
+          // Prune entries for sessions no longer live and no longer in any floor assignment
+          setFloors(currentFloors => {
+            const allFloorIds = new Set();
+            for (const f of currentFloors) for (const sid of (f.sessionIds || [])) allFloorIds.add(sid);
+            for (const id of Object.keys(cwdMap)) {
+              if (!liveIds.has(id) && !allFloorIds.has(id)) delete cwdMap[id];
+            }
+            saveCwdMap(cwdMap);
+
+            // Run reconciliation — remap stale IDs by matching cwd
+            const reconciled = reconcileFloors(list, currentFloors);
+            return reconciled || currentFloors;
+          });
         });
         if (window.deepsteve.onSettingsChanged) {
           unsubSettings = window.deepsteve.onSettingsChanged((settings) => {
@@ -400,7 +523,15 @@ function TowerApp() {
 
   const getFloorSessions = useCallback((floor) => {
     const ids = floor.sessionIds || [];
-    return ids.map(id => sessions.find(s => s.id === id)).filter(Boolean);
+    const cwdMap = loadCwdMap();
+    return ids.map(id => {
+      const live = sessions.find(s => s.id === id);
+      if (live) return live;
+      // Dead session — return a marker object
+      const cwd = cwdMap[id];
+      const name = cwd ? cwd.split("/").pop() : "Lost session";
+      return { id, name, dead: true, cwd };
+    });
   }, [sessions]);
 
   const p = PIXEL;
@@ -548,6 +679,7 @@ function TowerApp() {
                 isSelected={selectedFloor === floor.id}
                 onClick={() => setSelectedFloor(selectedFloor === floor.id ? null : floor.id)}
                 floorNum={floors.length - idx}
+                onUnassignSession={(sessionId) => unassignSession(floor.id, sessionId)}
               />
             ))}
 
@@ -662,9 +794,13 @@ function TowerApp() {
               {getFloorSessions(selectedData).map(s => (
                 <div key={s.id} style={{
                   display: "flex", justifyContent: "space-between", alignItems: "center",
-                  background: "rgba(0,0,0,0.3)", borderRadius: 4, padding: "6px 8px", marginBottom: 4, fontSize: 10,
+                  background: s.dead ? "rgba(255,23,68,0.1)" : "rgba(0,0,0,0.3)",
+                  border: s.dead ? "1px solid rgba(255,23,68,0.3)" : "1px solid transparent",
+                  borderRadius: 4, padding: "6px 8px", marginBottom: 4, fontSize: 10,
                 }}>
-                  <span style={{ color: "#e0e0e0" }}>{s.name}</span>
+                  <span style={{ color: s.dead ? "#ff1744" : "#e0e0e0" }}>
+                    {s.dead ? "\u26A0 " : ""}{s.name}
+                  </span>
                   <button onClick={() => unassignSession(selectedData.id, s.id)} style={{
                     background: "transparent", border: "none", color: "#f85149", cursor: "pointer",
                     fontFamily: '"Press Start 2P", monospace', fontSize: 10,
