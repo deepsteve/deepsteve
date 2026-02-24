@@ -507,13 +507,11 @@ function _loadPanelMod(mod) {
 function _showPanel() {
   if (!visiblePanelId) return;
 
-  // Show panel + resizer
-  panelContainer.style.display = 'block';
-  panelContainer.style.width = panelWidth + 'px';
-  panelResizer.style.display = 'block';
-
-  // Ensure terminals stay visible (but not if a fullscreen mod is showing)
+  // Don't show panel/resizer if a fullscreen mod is active
   if (!modViewVisible) {
+    panelContainer.style.display = 'block';
+    panelContainer.style.width = panelWidth + 'px';
+    panelResizer.style.display = 'block';
     document.getElementById('terminals').style.display = 'block';
   }
 
@@ -690,6 +688,17 @@ function _hideMod() {
   modContainer.style.display = 'none';
   backBtn.style.display = 'none';
   modViewVisible = false;
+
+  // Restore panel UI
+  if (panelTabs.size > 0) {
+    panelTabsContainer.style.display = 'flex';
+  }
+  if (visiblePanelId) {
+    panelContainer.style.display = 'block';
+    panelContainer.style.width = panelWidth + 'px';
+    panelResizer.style.display = 'block';
+    window.dispatchEvent(new Event('resize'));
+  }
 }
 
 /**
@@ -711,6 +720,11 @@ function showModView() {
   modContainer.style.display = 'flex';
   backBtn.style.display = 'none';
   modViewVisible = true;
+
+  // Hide panel UI so it doesn't occupy space above the fullscreen mod
+  panelContainer.style.display = 'none';
+  panelResizer.style.display = 'none';
+  panelTabsContainer.style.display = 'none';
 }
 
 /**
@@ -720,6 +734,17 @@ function showTerminalForSession(id) {
   modContainer.style.display = 'none';
   document.getElementById('terminals').style.display = '';
   modViewVisible = false;
+
+  // Restore panel UI
+  if (panelTabs.size > 0) {
+    panelTabsContainer.style.display = 'flex';
+  }
+  if (visiblePanelId) {
+    panelContainer.style.display = 'block';
+    panelContainer.style.width = panelWidth + 'px';
+    panelResizer.style.display = 'block';
+    window.dispatchEvent(new Event('resize'));
+  }
 
   // Show back button with mod name
   if (activeViewId) {
