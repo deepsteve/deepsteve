@@ -193,10 +193,11 @@ async function loadAvailableMods() {
     if (mod) _showMod(mod);
   }
 
-  // Auto-open enabled panel mods
+  // Auto-open the first enabled panel mod (only one panel can be active at a time)
   for (const mod of allMods) {
     if (enabledMods.has(mod.id) && mod.display === 'panel') {
       _showPanelMod(mod);
+      break;
     }
   }
 }
@@ -401,8 +402,10 @@ function _showPanelMod(mod) {
   panelContainer.style.width = panelWidth + 'px';
   panelResizer.style.display = 'block';
 
-  // Ensure terminals stay visible
-  document.getElementById('terminals').style.display = 'block';
+  // Ensure terminals stay visible (but not if a fullscreen mod is showing)
+  if (!modViewVisible) {
+    document.getElementById('terminals').style.display = 'block';
+  }
 
   // Trigger resize so terminal refits to smaller width
   window.dispatchEvent(new Event('resize'));
