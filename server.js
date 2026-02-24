@@ -27,8 +27,21 @@ app.use((req, res, next) => {
   express.json()(req, res, next);
 });
 
+// Settings defaults (single source of truth for wand template + plan mode)
+const SETTINGS_DEFAULTS = {
+  wandPlanMode: true,
+  wandPromptTemplate: `I need you to work on GitHub issue #{{number}}: "{{title}}"
+Labels: {{labels}}
+URL: {{url}}
+
+Issue description:
+{{body}}
+
+Please read the issue carefully, understand the codebase context, and implement the changes needed.`
+};
+
 // Load settings
-let settings = { shellProfile: '~/.zshrc', maxIssueTitleLength: 25 };
+let settings = { shellProfile: '~/.zshrc', maxIssueTitleLength: 25, ...SETTINGS_DEFAULTS };
 try {
   if (fs.existsSync(SETTINGS_FILE)) {
     settings = { ...settings, ...JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8')) };
@@ -154,11 +167,29 @@ function wireShellOutput(id) {
       e.waitingForInput = true;
       const stateMsg = JSON.stringify({ type: 'state', waiting: true });
       e.clients.forEach((c) => c.send(stateMsg));
-      if (e.initialPrompt) {
-        const prompt = e.initialPrompt;
-        e.initialPrompt = null;
+
+      // Step 2 of plan mode: /plan was sent, now send the actual prompt
+      if (e.pendingPlanPrompt) {
+        const prompt = e.pendingPlanPrompt;
+        e.pendingPlanPrompt = null;
         e.waitingForInput = false;
         setTimeout(() => submitToShell(e.shell, prompt), 500);
+        return;
+      }
+
+      if (e.initialPrompt) {
+        const prompt = e.initialPrompt;
+        const planMode = e.planMode || false;
+        e.initialPrompt = null;
+        e.planMode = false;
+        e.waitingForInput = false;
+        if (planMode) {
+          // Step 1: send /plan first, then the prompt on the next BEL
+          e.pendingPlanPrompt = prompt;
+          setTimeout(() => submitToShell(e.shell, '/plan'), 500);
+        } else {
+          setTimeout(() => submitToShell(e.shell, prompt), 500);
+        }
       }
     }
   });
@@ -370,6 +401,8 @@ app.get('/api/settings', (req, res) => {
   res.json({ ...settings, themeCSS });
 });
 
+app.get('/api/settings/defaults', (req, res) => res.json(SETTINGS_DEFAULTS));
+
 app.post('/api/settings', (req, res) => {
   const { shellProfile, maxIssueTitleLength } = req.body;
   if (shellProfile !== undefined) {
@@ -379,6 +412,14 @@ app.post('/api/settings', (req, res) => {
   if (maxIssueTitleLength !== undefined) {
     settings.maxIssueTitleLength = Math.max(10, Math.min(200, Number(maxIssueTitleLength) || 25));
     log(`Settings updated: maxIssueTitleLength=${settings.maxIssueTitleLength}`);
+  }
+  if (req.body.wandPlanMode !== undefined) {
+    settings.wandPlanMode = !!req.body.wandPlanMode;
+    log(`Settings updated: wandPlanMode=${settings.wandPlanMode}`);
+  }
+  if (req.body.wandPromptTemplate !== undefined) {
+    settings.wandPromptTemplate = String(req.body.wandPromptTemplate);
+    log(`Settings updated: wandPromptTemplate (${settings.wandPromptTemplate.length} chars)`);
   }
   saveSettings();
   res.json(settings);
@@ -643,7 +684,7 @@ wss.on('connection', (ws, req) => {
       const parsed = JSON.parse(str);
       if (parsed.type === 'resize') { entry.shell.resize(parsed.cols, parsed.rows); return; }
       if (parsed.type === 'redraw') { entry.shell.write('\x0c'); return; } // Ctrl+L
-      if (parsed.type === 'initialPrompt') { entry.initialPrompt = parsed.text; return; }
+      if (parsed.type === 'initialPrompt') { entry.initialPrompt = parsed.text; entry.planMode = parsed.planMode || false; return; }
       if (parsed.type === 'rename') { entry.name = parsed.name || null; return; }
     } catch {}
     // User sent input - update activity and clear waiting state
