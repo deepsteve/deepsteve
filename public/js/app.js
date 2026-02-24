@@ -559,6 +559,10 @@ function initTerminal(id, ws, cwd, initialName, { hasScrollback = false, pending
       if (hasScrollback) {
         // Scroll to bottom after scrollback replay so user sees latest output
         term.scrollToBottom();
+        // Hide the host terminal cursor — Claude Code renders its own cursor
+        // via Ink. The original DECTCEM hide sequence from session start may
+        // have been trimmed from the scrollback circular buffer.
+        term.write('\x1b[?25l');
       } else {
         // No scrollback — request a Ctrl+L redraw from the PTY
         ws.send(JSON.stringify({ type: 'redraw' }));
