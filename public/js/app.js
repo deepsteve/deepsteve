@@ -25,6 +25,9 @@ function truncateTitle(title) {
 const sessions = new Map();
 let activeId = null;
 
+// Dedup set for browser-eval/console requests (each tab processes once)
+const processedBrowserRequests = new Set();
+
 /**
  * Per-tab session persistence via sessionStorage.
  * This is the authoritative source for "what sessions does THIS tab have."
@@ -437,6 +440,18 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
         }
       } else if (msg.type === 'tasks') {
         ModManager.notifyTasksChanged(msg.tasks);
+      } else if (msg.type === 'browser-eval-request') {
+        if (!processedBrowserRequests.has(msg.requestId)) {
+          processedBrowserRequests.add(msg.requestId);
+          setTimeout(() => processedBrowserRequests.delete(msg.requestId), 15000);
+          ModManager.notifyBrowserEvalRequest(msg);
+        }
+      } else if (msg.type === 'browser-console-request') {
+        if (!processedBrowserRequests.has(msg.requestId)) {
+          processedBrowserRequests.add(msg.requestId);
+          setTimeout(() => processedBrowserRequests.delete(msg.requestId), 15000);
+          ModManager.notifyBrowserConsoleRequest(msg);
+        }
       }
     } catch (err) {
       console.error('Error handling control message:', err);

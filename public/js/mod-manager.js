@@ -29,6 +29,8 @@ let panelResizer = null;
 let panelIframe = null;
 let activePanelId = null;  // mod ID of active panel (or null)
 let taskCallbacks = [];    // callbacks for task broadcasts
+let browserEvalCallbacks = [];     // callbacks for browser-eval-request
+let browserConsoleCallbacks = [];  // callbacks for browser-console-request
 let panelWidth = 360;
 const MIN_PANEL_WIDTH = 200;
 const PANEL_STORAGE_KEY = 'deepsteve-panel-width';
@@ -413,6 +415,8 @@ function _hidePanelMod() {
   const hiddenModId = activePanelId;
   activePanelId = null;
   taskCallbacks = [];
+  browserEvalCallbacks = [];
+  browserConsoleCallbacks = [];
   if (hiddenModId) {
     settingsCallbacks = settingsCallbacks.filter(e => e.modId !== hiddenModId);
   }
@@ -620,6 +624,24 @@ function notifyTasksChanged(tasks) {
 }
 
 /**
+ * Notify panel mods of a browser-eval request (called from app.js on WS broadcast).
+ */
+function notifyBrowserEvalRequest(req) {
+  for (const cb of browserEvalCallbacks) {
+    try { cb(req); } catch (e) { console.error('Browser eval callback error:', e); }
+  }
+}
+
+/**
+ * Notify panel mods of a browser-console request (called from app.js on WS broadcast).
+ */
+function notifyBrowserConsoleRequest(req) {
+  for (const cb of browserConsoleCallbacks) {
+    try { cb(req); } catch (e) { console.error('Browser console callback error:', e); }
+  }
+}
+
+/**
  * Check if the mod view is currently visible.
  */
 function isModViewVisible() {
@@ -682,7 +704,19 @@ function _injectBridgeAPI(iframeEl) {
         return () => {
           taskCallbacks = taskCallbacks.filter(fn => fn !== cb);
         };
-      }
+      },
+      onBrowserEvalRequest(cb) {
+        browserEvalCallbacks.push(cb);
+        return () => {
+          browserEvalCallbacks = browserEvalCallbacks.filter(fn => fn !== cb);
+        };
+      },
+      onBrowserConsoleRequest(cb) {
+        browserConsoleCallbacks.push(cb);
+        return () => {
+          browserConsoleCallbacks = browserConsoleCallbacks.filter(fn => fn !== cb);
+        };
+      },
     };
   } catch (e) {
     console.error('Failed to inject bridge API:', e);
@@ -709,6 +743,8 @@ export const ModManager = {
   showTerminalForSession,
   notifySessionsChanged,
   notifyTasksChanged,
+  notifyBrowserEvalRequest,
+  notifyBrowserConsoleRequest,
   isModViewVisible,
   isModActive,
   handleModChanged,

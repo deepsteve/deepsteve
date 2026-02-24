@@ -1,0 +1,12 @@
+{
+  "name": "Console",
+  "description": "Browser console passthrough for Claude sessions",
+  "entry": "index.html",
+  "display": "panel",
+  "panel": { "position": "right", "defaultWidth": 400, "minWidth": 200 },
+  "toolbar": { "label": "Console" },
+  "tools": [
+    { "name": "browser_eval", "description": "Execute JavaScript in the browser context" },
+    { "name": "browser_console", "description": "Read captured browser console entries" }
+  ]
+}
