@@ -129,13 +129,6 @@ async function initMCP(context) {
       // Stale session — nothing to clean up, just ack
       res.status(200).end();
     }
-<<<<<<< Updated upstream
-=======
-    const { transport } = sessions.get(sessionId);
-    await transport.handleRequest(req, res, req.body);
-    sessions.delete(sessionId);
-    log(`MCP: session ${sessionId} deleted`);
->>>>>>> Stashed changes
   });
 
   log(`MCP: server initialized with ${Object.keys(modTools).length} tools`);

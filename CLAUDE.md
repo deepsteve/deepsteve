@@ -6,8 +6,10 @@ Web UI for running multiple Claude Code instances in browser tabs using real PTY
 
 ### Restart the daemon after making changes:
 ```bash
-./restart.sh
+./restart.sh            # silent restart — browser reconnects via WebSocket
+./restart.sh --refresh  # restart + force browser page reload
 ```
+Use `--refresh` when changes affect anything the browser loads (frontend JS/CSS/HTML, server endpoints, settings). Plain `./restart.sh` only restarts the server process — open browser tabs just silently reconnect their WebSocket, so they keep running old frontend code and won't see new server-side behavior until the page is reloaded.
 
 ### View logs:
 ```bash
@@ -119,4 +121,4 @@ The frontend is split into ES modules under `public/js/`:
 - Mods: `mods/<name>/mod.json` + `index.html`
 - LaunchAgent: `~/Library/LaunchAgents/com.deepsteve.plist`
 
-**Important:** After editing repo files, run `./restart.sh` to sync and restart.
+**Important:** After editing repo files, run `./restart.sh --refresh` to sync, restart, and reload browser tabs.
