@@ -11,6 +11,7 @@ export function createWebSocket(options = {}) {
   if (options.worktree) params.set('worktree', options.worktree);
   if (options.cols) params.set('cols', options.cols);
   if (options.rows) params.set('rows', options.rows);
+  if (options.name) params.set('name', options.name);
 
   let url = 'ws://' + location.host + '?' + params;
   let ws = new WebSocket(url);
