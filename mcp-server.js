@@ -21,7 +21,7 @@ async function initMCP(context) {
     const entries = fs.readdirSync(MODS_DIR, { withFileTypes: true });
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
-      const toolsPath = path.join(MODS_DIR, entry.name, 'tools.js');
+      const toolsPath = path.resolve(MODS_DIR, entry.name, 'tools.js');
       if (!fs.existsSync(toolsPath)) continue;
 
       try {
@@ -76,7 +76,7 @@ async function initMCP(context) {
     if (sessionId && sessions.has(sessionId)) {
       // Existing session — route to its transport
       const { transport } = sessions.get(sessionId);
-      await transport.handleRequest(req, res);
+      await transport.handleRequest(req, res, req.body);
       return;
     }
 
@@ -97,7 +97,7 @@ async function initMCP(context) {
       return origSetHeader(name, value);
     };
 
-    await transport.handleRequest(req, res);
+    await transport.handleRequest(req, res, req.body);
 
     if (capturedSessionId) {
       sessions.set(capturedSessionId, { server, transport });
@@ -114,7 +114,7 @@ async function initMCP(context) {
       return;
     }
     const { transport } = sessions.get(sessionId);
-    await transport.handleRequest(req, res);
+    await transport.handleRequest(req, res, req.body);
   });
 
   // DELETE /mcp — session teardown
@@ -129,6 +129,13 @@ async function initMCP(context) {
       // Stale session — nothing to clean up, just ack
       res.status(200).end();
     }
+<<<<<<< Updated upstream
+=======
+    const { transport } = sessions.get(sessionId);
+    await transport.handleRequest(req, res, req.body);
+    sessions.delete(sessionId);
+    log(`MCP: session ${sessionId} deleted`);
+>>>>>>> Stashed changes
   });
 
   log(`MCP: server initialized with ${Object.keys(modTools).length} tools`);
