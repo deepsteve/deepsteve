@@ -301,8 +301,14 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
 #mod-container iframe { width: 100%; height: 100%; border: none; }
 
 /* Panel container (side panel for panel-mode mods) */
-#panel-container { display: none; flex-shrink: 0; width: 360px; overflow: hidden; border-left: 1px solid var(--ds-border); }
-#panel-container iframe { width: 100%; height: 100%; border: none; }
+#panel-container { display: none; flex-shrink: 0; width: 360px; overflow: hidden; border-left: 1px solid var(--ds-border); position: relative; }
+#panel-container iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: none; }
+
+/* Panel tabs (right edge vertical tab strip) */
+#panel-tabs { display: none; flex-direction: column; flex-shrink: 0; background: var(--ds-bg-secondary); border-left: 1px solid var(--ds-border); }
+.panel-tab { writing-mode: vertical-rl; padding: 12px 6px; background: transparent; border: none; border-left: 2px solid transparent; color: var(--ds-text-secondary); font-size: 12px; cursor: pointer; white-space: nowrap; }
+.panel-tab:hover { color: var(--ds-text-primary); background: var(--ds-bg-tertiary); }
+.panel-tab.active { color: var(--ds-accent-blue); border-left-color: var(--ds-accent-blue); background: var(--ds-bg-tertiary); }
 
 /* Panel resizer */
 #panel-resizer { display: none; width: 4px; background: var(--ds-border); cursor: col-resize; flex-shrink: 0; transition: background 0.15s; }
