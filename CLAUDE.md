@@ -62,10 +62,11 @@ deepsteve runs as a macOS LaunchAgent daemon that serves a web UI for managing m
 ### Session Persistence
 
 When daemon restarts:
-1. SIGTERM triggers `saveState()` → writes shell IDs + cwds to `state.json`
-2. On startup, loads `state.json`
-3. When client reconnects with saved ID, spawns `claude -c` in saved cwd
-4. Claude Code resumes the previous conversation
+1. SIGTERM triggers `saveState()` → writes shell IDs + cwds + claudeSessionIds to `state.json`
+2. `stateFrozen` flag prevents shell `onExit` handlers from overwriting state.json during shutdown
+3. On startup, loads `state.json`
+4. When client reconnects with saved ID, spawns `claude --resume <claudeSessionId>` in saved cwd
+5. If `--resume` fails (exits within 5s), falls back to `claude -c --fork-session --session-id <newUUID>`
 
 ### Terminal I/O Flow
 
@@ -78,12 +79,44 @@ Key input handling:
 - Shift+Enter: intercepted, sends `\x1b[13;2u` (CSI u encoding)
 - Resize: FitAddon calculates cols/rows, sends JSON message to server
 
+### Gotchas and Non-Obvious Behavior
+
+- **Ink input parsing**: `shell.write("text\r")` doesn't work for submitting to Claude. Text and `\r` must be sent separately with a 1s delay (`submitToShell()`), because Ink only recognizes Enter when `\r` arrives as its own stdin read.
+- **BEL detection**: The server detects `\x07` (BEL) in PTY output to know Claude is waiting for input. This drives the `waitingForInput` state, browser notifications, and auto-submission of `initialPrompt`.
+- **Graceful shutdown**: The shutdown sequence tries `/exit` first (with Ctrl+C interrupt if Claude is busy), waits 8s, then SIGTERM, then 2s more, then SIGKILL. Process group kills (`-pid`) are attempted first for child process cleanup.
+- **Two-tier session storage on client**: `TabSessions` (sessionStorage) is the authoritative per-tab source that survives page refresh. `SessionStore` (localStorage) is for cross-tab/window coordination (orphan detection, restore modal). Both must be kept in sync.
+- **Orphan detection**: Uses BroadcastChannel for cross-tab heartbeats. When a new tab opens and finds localStorage windows with no heartbeat response within 1.5s, those sessions are offered for restore.
+- **Scrollback buffer**: Each shell keeps a ~100KB circular buffer. On reconnect/restore, the full buffer is replayed to the terminal before any new output, so you see history.
+- **`restart.sh` runs in background**: It re-execs itself with `nohup` so the terminal returns immediately. Use `--refresh` flag to force browser page reload (vs silent WebSocket reconnect).
+- **`release.sh` generates `install.sh`**: The installer is a single self-contained bash script with all source files embedded as heredocs (text) or base64 (images). Binary images are base64-encoded.
+- **node-pty**: Uses `.removeListener()` not `.off()`. Must `delete env.CLAUDECODE` when spawning nested Claude instances.
+- **LaunchAgent PATH**: `execSync` uses `/bin/sh` without Homebrew paths. Commands like `gh` and `git` must be wrapped in `zsh -l -c '...'` to get the user's full PATH.
+- **Worktrees**: Sessions can be created with a `--worktree <name>` flag that's passed through to Claude Code. The worktree name is persisted in state.json for restore.
+
+### Frontend Module Structure
+
+The frontend is split into ES modules under `public/js/`:
+- `app.js` — Main entry, session lifecycle, settings/issue picker modals
+- `ws-client.js` — WebSocket wrapper with auto-reconnect (1s interval)
+- `tab-manager.js` — Tab bar UI (create, switch, close, rename, badges)
+- `terminal.js` — xterm.js setup, fit, Shift+Enter handling
+- `session-store.js` — localStorage multi-window session persistence
+- `window-manager.js` — BroadcastChannel heartbeats, orphan detection
+- `layout-manager.js` — Horizontal/vertical tab layout toggle + resizer
+- `dir-picker.js` — Directory browser modal for choosing cwd
+- `window-restore-modal.js` — Modal for adopting orphaned sessions
+- `live-reload.js` — Dedicated WS for hot reload on `restart.sh --refresh`
+- `mod-manager.js` — Mod system: iframe views with bridge API (`deepsteve.getSessions()`, etc.)
+
 ### File Locations
 
 - Repo: `/Users/michael/github/deepsteve-experimental/`
 - Install: `~/.deepsteve/`
 - Logs: `~/Library/Logs/deepsteve.log`, `~/Library/Logs/deepsteve.error.log`
 - State: `~/.deepsteve/state.json`
+- Settings: `~/.deepsteve/settings.json`
+- Themes: `~/.deepsteve/themes/*.css` (watched with `fs.watch()` for live reload of active theme)
+- Mods: `mods/<name>/mod.json` + `index.html`
 - LaunchAgent: `~/Library/LaunchAgents/com.deepsteve.plist`
 
 **Important:** After editing repo files, run `./restart.sh` to sync and restart.
