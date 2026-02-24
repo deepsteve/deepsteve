@@ -4,17 +4,21 @@
  *
  * Two UI concepts:
  *  1. "Mods" dropdown (right side, near Sessions) — lists available mods with enable/disable toggles
- *  2. Mod toolbar buttons (left side, near wand) — registered by enabled mods via mod.json "toolbar" field
+ *  2. Panel tabs (right edge) — vertical tabs for switching between enabled panel mods
+ *
+ * Panel mods all stay loaded (iframes alive) so MCP tools keep working.
+ * Only one panel is visible at a time; clicking a different tab switches to it.
  */
 
 const STORAGE_KEY = 'deepsteve-enabled-mods'; // Set of enabled mod IDs
 const ACTIVE_VIEW_KEY = 'deepsteve-active-mod-view'; // Which mod view is currently showing
 const PANEL_VISIBLE_KEY = 'deepsteve-panel-visible'; // Whether the panel is shown
+const ACTIVE_PANEL_KEY = 'deepsteve-active-panel'; // Which panel tab is active
 
 let allMods = [];          // [{ id, name, description, entry, toolbar }]
 let enabledMods = new Set(); // mod IDs that are enabled
 let hasExplicitModPrefs = false; // true if user has saved mod prefs before
-let activeViewId = null;   // mod ID currently showing in the iframe (or null)
+let activeViewId = null;   // mod ID currently showing in the fullscreen iframe (or null)
 let iframe = null;
 let modContainer = null;
 let backBtn = null;
@@ -24,14 +28,16 @@ let modViewVisible = false;
 let toolbarButtons = new Map(); // modId → button element
 let settingsCallbacks = [];     // [{modId, cb}] — notified on settings change
 
-// Panel mode state
+// Panel mode state — multi-panel
 let panelContainer = null;
 let panelResizer = null;
-let panelIframe = null;
-let activePanelId = null;  // mod ID of active panel (or null)
-let taskCallbacks = [];    // callbacks for task broadcasts
-let browserEvalCallbacks = [];     // callbacks for browser-eval-request
-let browserConsoleCallbacks = [];  // callbacks for browser-console-request
+let panelMods = new Map();       // modId → { iframe, mod }
+let visiblePanelId = null;       // which panel is currently VISIBLE (or null)
+let panelTabsContainer = null;   // #panel-tabs DOM element
+let panelTabs = new Map();       // modId → tab button element
+let taskCallbacks = [];          // [{modId, cb}] — callbacks for task broadcasts
+let browserEvalCallbacks = [];   // [{modId, cb}] — callbacks for browser-eval-request
+let browserConsoleCallbacks = []; // [{modId, cb}] — callbacks for browser-console-request
 let panelWidth = 360;
 const MIN_PANEL_WIDTH = 200;
 const PANEL_STORAGE_KEY = 'deepsteve-panel-width';
@@ -70,6 +76,11 @@ function init(appHooks) {
   panelContainer = document.createElement('div');
   panelContainer.id = 'panel-container';
   contentRow.appendChild(panelContainer);
+
+  // Create panel tabs strip (inside content-row, after panel container)
+  panelTabsContainer = document.createElement('div');
+  panelTabsContainer.id = 'panel-tabs';
+  contentRow.appendChild(panelTabsContainer);
 
   // Restore saved panel width
   try {
@@ -194,17 +205,24 @@ async function loadAvailableMods() {
     if (mod) _showMod(mod);
   }
 
-  // Load enabled panel mods (iframe always created so MCP tools work).
-  // Only show the panel UI if it was previously visible.
+  // Load ALL enabled panel mods (not just the first one)
   const panelWasVisible = localStorage.getItem(PANEL_VISIBLE_KEY) !== 'false';
+  const savedActivePanelId = localStorage.getItem(ACTIVE_PANEL_KEY);
+  let firstPanelId = null;
+
   for (const mod of allMods) {
     if (enabledMods.has(mod.id) && mod.display === 'panel') {
       _loadPanelMod(mod);
-      if (panelWasVisible) {
-        _showPanel();
-      }
-      break;
+      if (!firstPanelId) firstPanelId = mod.id;
     }
+  }
+
+  // Restore which panel was active, or default to first
+  if (panelWasVisible && panelMods.size > 0) {
+    const restoreId = (savedActivePanelId && panelMods.has(savedActivePanelId))
+      ? savedActivePanelId
+      : firstPanelId;
+    if (restoreId) _switchToPanel(restoreId);
   }
 }
 
@@ -248,14 +266,15 @@ function _renderModsMenu() {
       if (cb.checked) {
         enabledMods.add(modId);
         if (mod.display === 'panel') {
-          _showPanelMod(mod);
+          _loadPanelMod(mod);
+          _switchToPanel(mod.id);
         } else {
           _createToolbarButton(mod);
         }
       } else {
         enabledMods.delete(modId);
         if (mod.display === 'panel') {
-          _unloadPanelMod();
+          _unloadPanelMod(modId);
         } else {
           _removeToolbarButton(modId);
           if (activeViewId === modId) {
@@ -346,15 +365,18 @@ function _setupPanelResizer() {
     isDragging = true;
     document.body.style.cursor = 'col-resize';
     document.body.style.userSelect = 'none';
-    // Block iframe from stealing mouse events during drag
-    if (panelIframe) panelIframe.style.pointerEvents = 'none';
+    // Block ALL panel iframes from stealing mouse events during drag
+    for (const [, entry] of panelMods) {
+      entry.iframe.style.pointerEvents = 'none';
+    }
     e.preventDefault();
   });
 
   document.addEventListener('mousemove', (e) => {
     if (!isDragging) return;
-    // Panel is on the right: width = viewport right edge - mouse X
-    const newWidth = window.innerWidth - e.clientX;
+    // Panel is on the right: width = viewport right edge - mouse X - panel tabs width
+    const tabsWidth = panelTabsContainer.offsetWidth || 0;
+    const newWidth = window.innerWidth - e.clientX - tabsWidth;
     panelWidth = Math.max(MIN_PANEL_WIDTH, Math.min(newWidth, window.innerWidth * 0.6));
     panelContainer.style.width = panelWidth + 'px';
   });
@@ -364,49 +386,126 @@ function _setupPanelResizer() {
       isDragging = false;
       document.body.style.cursor = '';
       document.body.style.userSelect = '';
-      if (panelIframe) panelIframe.style.pointerEvents = '';
+      for (const [, entry] of panelMods) {
+        entry.iframe.style.pointerEvents = '';
+      }
       localStorage.setItem(PANEL_STORAGE_KEY, panelWidth);
       window.dispatchEvent(new Event('resize'));
     }
   });
 }
 
+// ─── Panel tab management ────────────────────────────────────────────
+
 /**
- * Load a panel mod's iframe (creates it hidden if panel not visible).
+ * Create a panel tab button for a mod.
+ */
+function _createPanelTab(mod) {
+  if (panelTabs.has(mod.id)) return;
+
+  const btn = document.createElement('button');
+  btn.className = 'panel-tab';
+  btn.textContent = mod.toolbar?.label || mod.name;
+  btn.title = mod.description || mod.name;
+  btn.dataset.modId = mod.id;
+
+  btn.addEventListener('click', () => {
+    _togglePanelTab(mod.id);
+  });
+
+  panelTabsContainer.appendChild(btn);
+  panelTabs.set(mod.id, btn);
+
+  // Show the tabs strip if we have panel tabs
+  if (panelTabs.size > 0) {
+    panelTabsContainer.style.display = 'flex';
+  }
+}
+
+/**
+ * Remove a panel tab button.
+ */
+function _removePanelTab(modId) {
+  const btn = panelTabs.get(modId);
+  if (btn) {
+    btn.remove();
+    panelTabs.delete(modId);
+  }
+
+  // Hide tabs strip if no more panel tabs
+  if (panelTabs.size === 0) {
+    panelTabsContainer.style.display = 'none';
+  }
+}
+
+/**
+ * Toggle a panel tab: if it's already visible, collapse; otherwise switch to it.
+ */
+function _togglePanelTab(modId) {
+  if (visiblePanelId === modId) {
+    // Same tab clicked while visible → collapse
+    _hidePanel();
+  } else {
+    // Different tab or panel collapsed → switch to it
+    _switchToPanel(modId);
+  }
+}
+
+/**
+ * Switch the visible panel to a specific mod.
+ */
+function _switchToPanel(modId) {
+  if (!panelMods.has(modId)) return;
+
+  // Hide all panel iframes
+  for (const [id, entry] of panelMods) {
+    entry.iframe.style.display = id === modId ? '' : 'none';
+  }
+
+  visiblePanelId = modId;
+
+  // Update tab active states
+  for (const [id, btn] of panelTabs) {
+    btn.classList.toggle('active', id === modId);
+  }
+
+  _showPanel();
+
+  localStorage.setItem(ACTIVE_PANEL_KEY, modId);
+}
+
+// ─── Panel lifecycle ─────────────────────────────────────────────────
+
+/**
+ * Load a panel mod's iframe.
  * Called when mod is enabled. The iframe stays alive until the mod is disabled.
  */
 function _loadPanelMod(mod) {
   // Already loaded
-  if (activePanelId === mod.id && panelIframe) return;
-
-  // Clean up existing panel if different mod
-  if (activePanelId) {
-    _unloadPanelMod();
-  }
-
-  activePanelId = mod.id;
+  if (panelMods.has(mod.id)) return;
 
   // Create panel iframe
   const entry = mod.entry || 'index.html';
-  panelIframe = document.createElement('iframe');
-  panelIframe.src = `/mods/${mod.id}/${entry}`;
-  panelIframe.setAttribute('sandbox', 'allow-scripts allow-same-origin');
-  panelContainer.appendChild(panelIframe);
-  panelIframe.addEventListener('load', () => {
-    _injectBridgeAPI(panelIframe);
+  const iframeEl = document.createElement('iframe');
+  iframeEl.src = `/mods/${mod.id}/${entry}`;
+  iframeEl.setAttribute('sandbox', 'allow-scripts allow-same-origin');
+  iframeEl.style.display = 'none'; // Hidden until switched to
+  panelContainer.appendChild(iframeEl);
+  iframeEl.addEventListener('load', () => {
+    _injectBridgeAPI(iframeEl, mod.id);
   });
+
+  panelMods.set(mod.id, { iframe: iframeEl, mod });
+
+  // Create panel tab
+  _createPanelTab(mod);
 }
 
 /**
- * Show the panel UI (make the already-loaded iframe visible).
+ * Show the panel UI (container + resizer visible).
  */
 function _showPanel() {
-  if (!activePanelId) return;
-
-  // Update toolbar button states
-  for (const [id, btn] of toolbarButtons) {
-    btn.classList.toggle('active', id === activePanelId);
-  }
+  if (!visiblePanelId) return;
 
   // Show panel + resizer
   panelContainer.style.display = 'block';
@@ -425,11 +524,13 @@ function _showPanel() {
 }
 
 /**
- * Hide the panel UI but keep the iframe alive.
+ * Hide the panel UI but keep all iframes alive.
  */
 function _hidePanel() {
-  // Clear toolbar button states for panel mod
-  for (const [, btn] of toolbarButtons) {
+  visiblePanelId = null;
+
+  // Clear tab active states
+  for (const [, btn] of panelTabs) {
     btn.classList.remove('active');
   }
 
@@ -438,63 +539,48 @@ function _hidePanel() {
   panelResizer.style.display = 'none';
 
   localStorage.setItem(PANEL_VISIBLE_KEY, 'false');
+  localStorage.removeItem(ACTIVE_PANEL_KEY);
 
   // Trigger resize so terminal refits to full width
   window.dispatchEvent(new Event('resize'));
 }
 
 /**
- * Toggle panel visibility for a mod. If mod not loaded, loads it first.
- */
-function _showPanelMod(mod) {
-  if (activePanelId === mod.id) {
-    // Toggle visibility
-    const isVisible = panelContainer.style.display !== 'none';
-    if (isVisible) {
-      _hidePanel();
-    } else {
-      _showPanel();
-    }
-    return;
-  }
-
-  // Different mod or none loaded — load and show
-  _loadPanelMod(mod);
-  _showPanel();
-}
-
-/**
- * Fully unload a panel mod (destroy iframe, clear callbacks).
+ * Fully unload a panel mod (destroy iframe, clear callbacks, remove tab).
  * Called when the mod is disabled.
  */
-function _unloadPanelMod() {
-  const hiddenModId = activePanelId;
-  activePanelId = null;
-  taskCallbacks = [];
-  browserEvalCallbacks = [];
-  browserConsoleCallbacks = [];
-  if (hiddenModId) {
-    settingsCallbacks = settingsCallbacks.filter(e => e.modId !== hiddenModId);
+function _unloadPanelMod(modId) {
+  const entry = panelMods.get(modId);
+  if (!entry) return;
+
+  // Remove iframe
+  entry.iframe.remove();
+  panelMods.delete(modId);
+
+  // Remove tab
+  _removePanelTab(modId);
+
+  // Filter out callbacks for this mod
+  taskCallbacks = taskCallbacks.filter(e => e.modId !== modId);
+  browserEvalCallbacks = browserEvalCallbacks.filter(e => e.modId !== modId);
+  browserConsoleCallbacks = browserConsoleCallbacks.filter(e => e.modId !== modId);
+  settingsCallbacks = settingsCallbacks.filter(e => e.modId !== modId);
+  sessionCallbacks = sessionCallbacks.filter(e => e.modId !== modId);
+
+  // If it was the visible panel, switch to another or collapse
+  if (visiblePanelId === modId) {
+    const remaining = [...panelMods.keys()];
+    if (remaining.length > 0) {
+      _switchToPanel(remaining[0]);
+    } else {
+      visiblePanelId = null;
+      panelContainer.style.display = 'none';
+      panelResizer.style.display = 'none';
+      localStorage.removeItem(PANEL_VISIBLE_KEY);
+      localStorage.removeItem(ACTIVE_PANEL_KEY);
+      window.dispatchEvent(new Event('resize'));
+    }
   }
-
-  if (panelIframe) {
-    panelIframe.remove();
-    panelIframe = null;
-  }
-
-  // Clear toolbar button states for panel mod
-  for (const [, btn] of toolbarButtons) {
-    btn.classList.remove('active');
-  }
-
-  // Hide panel container + resizer
-  panelContainer.style.display = 'none';
-  panelResizer.style.display = 'none';
-
-  localStorage.removeItem(PANEL_VISIBLE_KEY);
-
-  // Trigger resize so terminal refits to full width
-  window.dispatchEvent(new Event('resize'));
 }
 
 /**
@@ -511,10 +597,7 @@ function _createToolbarButton(mod) {
   btn.dataset.modId = mod.id;
 
   btn.addEventListener('click', () => {
-    if (mod.display === 'panel') {
-      // Panel mods toggle via _showPanelMod (which handles its own toggle)
-      _showPanelMod(mod);
-    } else if (activeViewId === mod.id) {
+    if (activeViewId === mod.id) {
       _hideMod();
     } else {
       _showMod(mod);
@@ -550,9 +633,8 @@ function _removeToolbarButton(modId) {
 function _showMod(mod) {
   const display = mod.display || 'fullscreen';
 
-  // Panel mods use a side panel instead of replacing the terminal
+  // Panel mods are handled by panel tabs, not fullscreen view
   if (display === 'panel') {
-    _showPanelMod(mod);
     return;
   }
 
@@ -577,7 +659,7 @@ function _showMod(mod) {
     iframe.setAttribute('sandbox', 'allow-scripts allow-same-origin');
     modContainer.appendChild(iframe);
     iframe.addEventListener('load', () => {
-      _injectBridgeAPI(iframe);
+      _injectBridgeAPI(iframe, mod.id);
     });
   }
 
@@ -588,17 +670,10 @@ function _showMod(mod) {
  * Hide the active mod view, return to terminals.
  */
 function _hideMod() {
-  // Check if the mod being hidden is a panel mod
-  const mod = allMods.find(m => m.id === activeViewId || m.id === activePanelId);
-  if (mod && mod.display === 'panel') {
-    _hidePanel();
-    return;
-  }
-
   const hiddenModId = activeViewId;
   activeViewId = null;
   localStorage.removeItem(ACTIVE_VIEW_KEY);
-  sessionCallbacks = [];
+  sessionCallbacks = sessionCallbacks.filter(e => e.modId !== hiddenModId);
   if (hiddenModId) {
     settingsCallbacks = settingsCallbacks.filter(e => e.modId !== hiddenModId);
   }
@@ -657,11 +732,11 @@ function showTerminalForSession(id) {
 }
 
 /**
- * Notify the active mod that sessions have changed.
+ * Notify mods that sessions have changed.
  */
 function notifySessionsChanged(sessionList) {
-  for (const cb of sessionCallbacks) {
-    try { cb(sessionList); } catch (e) { console.error('Mod callback error:', e); }
+  for (const entry of sessionCallbacks) {
+    try { entry.cb(sessionList); } catch (e) { console.error('Mod callback error:', e); }
   }
 }
 
@@ -669,8 +744,8 @@ function notifySessionsChanged(sessionList) {
  * Notify panel mods that tasks have changed (called from app.js on WS broadcast).
  */
 function notifyTasksChanged(tasks) {
-  for (const cb of taskCallbacks) {
-    try { cb(tasks); } catch (e) { console.error('Task callback error:', e); }
+  for (const entry of taskCallbacks) {
+    try { entry.cb(tasks); } catch (e) { console.error('Task callback error:', e); }
   }
 }
 
@@ -678,8 +753,8 @@ function notifyTasksChanged(tasks) {
  * Notify panel mods of a browser-eval request (called from app.js on WS broadcast).
  */
 function notifyBrowserEvalRequest(req) {
-  for (const cb of browserEvalCallbacks) {
-    try { cb(req); } catch (e) { console.error('Browser eval callback error:', e); }
+  for (const entry of browserEvalCallbacks) {
+    try { entry.cb(req); } catch (e) { console.error('Browser eval callback error:', e); }
   }
 }
 
@@ -687,8 +762,8 @@ function notifyBrowserEvalRequest(req) {
  * Notify panel mods of a browser-console request (called from app.js on WS broadcast).
  */
 function notifyBrowserConsoleRequest(req) {
-  for (const cb of browserConsoleCallbacks) {
-    try { cb(req); } catch (e) { console.error('Browser console callback error:', e); }
+  for (const entry of browserConsoleCallbacks) {
+    try { entry.cb(req); } catch (e) { console.error('Browser console callback error:', e); }
   }
 }
 
@@ -707,9 +782,11 @@ function isModActive() {
 }
 
 /**
- * Inject the deepsteve bridge API into the mod iframe.
+ * Inject the deepsteve bridge API into a mod iframe.
+ * @param {HTMLIFrameElement} iframeEl - The iframe element
+ * @param {string} modId - The mod ID that owns this iframe
  */
-function _injectBridgeAPI(iframeEl) {
+function _injectBridgeAPI(iframeEl, modId) {
   try {
     iframeEl.contentWindow.deepsteve = {
       getSessions() {
@@ -719,10 +796,11 @@ function _injectBridgeAPI(iframeEl) {
         showTerminalForSession(id);
       },
       onSessionsChanged(cb) {
-        sessionCallbacks.push(cb);
+        const entry = { modId, cb };
+        sessionCallbacks.push(entry);
         try { cb(hooks.getSessions()); } catch {}
         return () => {
-          sessionCallbacks = sessionCallbacks.filter(fn => fn !== cb);
+          sessionCallbacks = sessionCallbacks.filter(e => e !== entry);
         };
       },
       createSession(cwd) {
@@ -732,11 +810,10 @@ function _injectBridgeAPI(iframeEl) {
         hooks.killSession(id);
       },
       getSettings() {
-        const mod = allMods.find(m => m.id === (activeViewId || activePanelId));
+        const mod = allMods.find(m => m.id === modId);
         return mod ? _loadModSettings(mod) : {};
       },
       onSettingsChanged(cb) {
-        const modId = activeViewId || activePanelId;
         const entry = { modId, cb };
         settingsCallbacks.push(entry);
         // Fire immediately with current values
@@ -747,25 +824,28 @@ function _injectBridgeAPI(iframeEl) {
         };
       },
       onTasksChanged(cb) {
-        taskCallbacks.push(cb);
+        const entry = { modId, cb };
+        taskCallbacks.push(entry);
         // Fire immediately with current tasks from server
         fetch('/api/tasks').then(r => r.json()).then(data => {
           try { cb(data.tasks || []); } catch {}
         }).catch(() => {});
         return () => {
-          taskCallbacks = taskCallbacks.filter(fn => fn !== cb);
+          taskCallbacks = taskCallbacks.filter(e => e !== entry);
         };
       },
       onBrowserEvalRequest(cb) {
-        browserEvalCallbacks.push(cb);
+        const entry = { modId, cb };
+        browserEvalCallbacks.push(entry);
         return () => {
-          browserEvalCallbacks = browserEvalCallbacks.filter(fn => fn !== cb);
+          browserEvalCallbacks = browserEvalCallbacks.filter(e => e !== entry);
         };
       },
       onBrowserConsoleRequest(cb) {
-        browserConsoleCallbacks.push(cb);
+        const entry = { modId, cb };
+        browserConsoleCallbacks.push(entry);
         return () => {
-          browserConsoleCallbacks = browserConsoleCallbacks.filter(fn => fn !== cb);
+          browserConsoleCallbacks = browserConsoleCallbacks.filter(e => e !== entry);
         };
       },
     };
@@ -782,8 +862,16 @@ function handleModChanged(modId) {
   if (activeViewId === modId && iframe) {
     iframe.src = iframe.src.replace(/(\?v=\d+)?$/, `?v=${Date.now()}`);
   }
-  if (activePanelId === modId && panelIframe) {
-    panelIframe.src = panelIframe.src.replace(/(\?v=\d+)?$/, `?v=${Date.now()}`);
+  const panelEntry = panelMods.get(modId);
+  if (panelEntry) {
+    // Clear stale callbacks for this mod before reload triggers re-injection
+    taskCallbacks = taskCallbacks.filter(e => e.modId !== modId);
+    browserEvalCallbacks = browserEvalCallbacks.filter(e => e.modId !== modId);
+    browserConsoleCallbacks = browserConsoleCallbacks.filter(e => e.modId !== modId);
+    settingsCallbacks = settingsCallbacks.filter(e => e.modId !== modId);
+    sessionCallbacks = sessionCallbacks.filter(e => e.modId !== modId);
+
+    panelEntry.iframe.src = panelEntry.iframe.src.replace(/(\?v=\d+)?$/, `?v=${Date.now()}`);
   }
 }
 
