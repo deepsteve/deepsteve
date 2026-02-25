@@ -170,13 +170,9 @@ function wireShellOutput(id) {
 
       if (e.initialPrompt) {
         const prompt = e.initialPrompt;
-        const planMode = e.planMode || false;
         e.initialPrompt = null;
-        e.planMode = false;
         e.waitingForInput = false;
-        // Prepend "/plan " to enter plan mode in a single submission
-        const text = planMode ? '/plan ' + prompt : prompt;
-        setTimeout(() => submitToShell(e.shell, text), 500);
+        setTimeout(() => submitToShell(e.shell, prompt), 500);
       }
     }
   });
@@ -577,6 +573,7 @@ wss.on('connection', (ws, req) => {
   if (cwd.startsWith('~')) cwd = path.join(os.homedir(), cwd.slice(1));
   const createNew = url.searchParams.get('new') === '1';
   const worktree = url.searchParams.get('worktree');
+  const planMode = url.searchParams.get('planMode') === '1';
   const name = url.searchParams.get('name');
   const initialCols = parseInt(url.searchParams.get('cols')) || 120;
   const initialRows = parseInt(url.searchParams.get('rows')) || 40;
@@ -644,6 +641,7 @@ wss.on('connection', (ws, req) => {
     id = randomUUID().slice(0, 8);
     const claudeSessionId = randomUUID();  // Full UUID for Claude's --session-id
     const claudeArgs = ['--session-id', claudeSessionId];
+    if (planMode) claudeArgs.push('--permission-mode', 'plan');
     if (worktree) claudeArgs.push('--worktree', worktree);
     log(`[WS] Creating NEW shell: oldId=${oldId}, newId=${id}, claudeSession=${claudeSessionId}, worktree=${worktree || 'none'}, cwd=${cwd}`);
     const shell = spawnClaude(claudeArgs, cwd, { cols: initialCols, rows: initialRows });
@@ -677,7 +675,7 @@ wss.on('connection', (ws, req) => {
       const parsed = JSON.parse(str);
       if (parsed.type === 'resize') { entry.shell.resize(parsed.cols, parsed.rows); return; }
       if (parsed.type === 'redraw') { entry.shell.write('\x0c'); return; } // Ctrl+L
-      if (parsed.type === 'initialPrompt') { entry.initialPrompt = parsed.text; entry.planMode = parsed.planMode || false; return; }
+      if (parsed.type === 'initialPrompt') { entry.initialPrompt = parsed.text; return; }
       if (parsed.type === 'rename') { entry.name = parsed.name || null; return; }
     } catch {}
     // User sent input - update activity and clear waiting state

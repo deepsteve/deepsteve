@@ -12,6 +12,7 @@ export function createWebSocket(options = {}) {
   if (options.cols) params.set('cols', options.cols);
   if (options.rows) params.set('rows', options.rows);
   if (options.name) params.set('name', options.name);
+  if (options.planMode) params.set('planMode', '1');
 
   let url = 'ws://' + location.host + '?' + params;
   let ws = new WebSocket(url);

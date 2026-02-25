@@ -421,7 +421,7 @@ function getWindowId() {
  */
 function createSession(cwd, existingId = null, isNew = false, opts = {}) {
   const { cols, rows } = measureTerminalSize();
-  const ws = createWebSocket({ id: existingId, cwd, isNew, worktree: opts.worktree, name: opts.name, cols, rows });
+  const ws = createWebSocket({ id: existingId, cwd, isNew, worktree: opts.worktree, name: opts.name, planMode: opts.planMode, cols, rows });
 
   // Buffer terminal data that arrives before the terminal is created
   let pendingData = [];
@@ -460,7 +460,7 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
           const sessionName = opts.name || msg.name;
           initTerminal(msg.id, ws, cwd, sessionName, { hasScrollback, pendingData });
           if (opts.initialPrompt) {
-            ws.sendJSON({ type: 'initialPrompt', text: opts.initialPrompt, planMode: opts.planMode || false });
+            ws.sendJSON({ type: 'initialPrompt', text: opts.initialPrompt });
           }
         }
       } else if (msg.type === 'gone') {
