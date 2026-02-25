@@ -33,25 +33,25 @@ const PROJECT_COLORS = [
   { name: "purple", screen: "#b388ff", glow: "rgba(179,136,255,0.15)" },
 ];
 
-const FLOORS_STORAGE_KEY = "tower-mod-floors";
+const FLOORS_KEY = "floors";
+const CWD_MAP_KEY = "session-cwds";
 
 function loadFloors() {
   try {
-    const raw = localStorage.getItem(FLOORS_STORAGE_KEY);
+    const raw = localStorage.getItem(FLOORS_KEY);
     if (raw) return JSON.parse(raw);
   } catch {}
   return [];
 }
 
 function saveFloors(floors) {
-  localStorage.setItem(FLOORS_STORAGE_KEY, JSON.stringify(floors));
+  localStorage.setItem(FLOORS_KEY, JSON.stringify(floors));
 }
-
-const CWD_MAP_KEY = "tower-mod-session-cwds";
 
 function loadCwdMap() {
   try { return JSON.parse(localStorage.getItem(CWD_MAP_KEY)) || {}; } catch { return {}; }
 }
+
 function saveCwdMap(map) {
   localStorage.setItem(CWD_MAP_KEY, JSON.stringify(map));
 }

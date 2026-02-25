@@ -50,7 +50,48 @@ const STATE_FILE = path.join(os.homedir(), '.deepsteve', 'state.json');
 const SETTINGS_FILE = path.join(os.homedir(), '.deepsteve', 'settings.json');
 const app = express();
 app.use(express.static('public'));
-app.use('/mods', express.static('mods'));
+// Serve mods with CSP + storage scoping injected into HTML before any mod scripts run.
+const MOD_ALLOWED_SCRIPTS = [
+  'https://cdn.jsdelivr.net/npm/react@18/',
+  'https://cdn.jsdelivr.net/npm/react-dom@18/',
+  'https://cdn.jsdelivr.net/npm/@babel/standalone/',
+];
+const MOD_ALLOWED_STYLES = [
+  'https://fonts.googleapis.com/',
+];
+const MOD_ALLOWED_FONTS = [
+  'https://fonts.gstatic.com/',
+];
+function _modCspMiddleware(req, res, next) {
+  const scriptSrc = ["'self'", "'unsafe-inline'", ...MOD_ALLOWED_SCRIPTS].join(' ');
+  const styleSrc = ["'self'", "'unsafe-inline'", ...MOD_ALLOWED_STYLES].join(' ');
+  const fontSrc = ["'self'", ...MOD_ALLOWED_FONTS].join(' ');
+  res.setHeader('Content-Security-Policy',
+    `script-src ${scriptSrc}; style-src ${styleSrc}; font-src ${fontSrc}; connect-src 'self'`);
+  next();
+}
+// For HTML files: inject a storage-scoping preamble so it runs before any mod scripts.
+// For everything else: serve static as-is.
+const _modStatic = express.static('mods');
+function _modHtmlHandler(req, res, next) {
+  if (!req.path.endsWith('.html') && !req.path.endsWith('/')) return _modStatic(req, res, next);
+  // Extract modId from first path segment: /mods/:modId/...
+  const modId = req.path.split('/').filter(Boolean)[0];
+  if (!modId) return _modStatic(req, res, next);
+  const filePath = path.join(__dirname, 'mods', req.path);
+  const htmlPath = filePath.endsWith('.html') ? filePath : path.join(filePath, 'index.html');
+  try {
+    const html = fs.readFileSync(htmlPath, 'utf8');
+    const preamble = `<script>(function(){var p="mod:${modId}:";function s(n){var r=window[n];var o={getItem:function(k){return r.getItem(p+k)},setItem:function(k,v){r.setItem(p+k,String(v))},removeItem:function(k){r.removeItem(p+k)},clear:function(){var d=[];for(var i=0;i<r.length;i++){var k=r.key(i);if(k.indexOf(p)===0)d.push(k)}for(var j=0;j<d.length;j++)r.removeItem(d[j])},key:function(idx){var c=0;for(var i=0;i<r.length;i++){var k=r.key(i);if(k.indexOf(p)===0){if(c===idx)return k.slice(p.length);c++}}return null},get length(){var c=0;for(var i=0;i<r.length;i++){if(r.key(i).indexOf(p)===0)c++}return c}};Object.defineProperty(window,n,{get:function(){return o},configurable:false})}s("localStorage");s("sessionStorage")})()</script>`;
+    // Inject right after <head> (or at the very start if no <head>)
+    const injected = html.replace(/(<head[^>]*>)/i, '$1' + preamble)
+      || preamble + html;
+    res.type('html').send(injected);
+  } catch {
+    _modStatic(req, res, next);
+  }
+}
+app.use('/mods', _modCspMiddleware, _modHtmlHandler);
 app.use((req, res, next) => {
   if (req.path === '/mcp') return next(); // MCP SDK parses its own body
   express.json()(req, res, next);
