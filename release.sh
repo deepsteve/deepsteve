@@ -6,6 +6,10 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
+NODE_VERSION="22.14.0"
+NODE_SHA256_ARM64="e9404633bc02a5162c5c573b1e2490f5fb44648345d64a958b17e325729a5e42"
+NODE_SHA256_X64="6698587713ab565a94a360e091df9f6d91c8fadda6d00f0cf6526e9b40bed250"
+
 OUT="install.sh"
 
 # --- Preamble ---
@@ -19,9 +23,27 @@ if ! command -v node &>/dev/null; then
     brew install node
   else
     ARCH=$(uname -m); [ "$ARCH" = "arm64" ] || ARCH="x64"
+    NODE_VERSION="__NODE_VERSION__"
+    if [ "$ARCH" = "arm64" ]; then
+      NODE_SHA256="__NODE_SHA256_ARM64__"
+    else
+      NODE_SHA256="__NODE_SHA256_X64__"
+    fi
     NODE_DIR="$HOME/.deepsteve/node"
     mkdir -p "$NODE_DIR"
-    curl -fsSL "https://nodejs.org/dist/v22.14.0/node-v22.14.0-darwin-${ARCH}.tar.gz" | tar xz -C "$NODE_DIR" --strip-components=1
+    NODE_TGZ=$(mktemp)
+    trap 'rm -f "$NODE_TGZ"' EXIT
+    curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-darwin-${ARCH}.tar.gz" -o "$NODE_TGZ"
+    ACTUAL_SHA256=$(shasum -a 256 "$NODE_TGZ" | awk '{print $1}')
+    if [ "$ACTUAL_SHA256" != "$NODE_SHA256" ]; then
+      echo "ERROR: Node.js checksum verification failed!" >&2
+      echo "  Expected: $NODE_SHA256" >&2
+      echo "  Got:      $ACTUAL_SHA256" >&2
+      rm -f "$NODE_TGZ"
+      exit 1
+    fi
+    tar xz -C "$NODE_DIR" --strip-components=1 < "$NODE_TGZ"
+    rm -f "$NODE_TGZ"
     export PATH="$NODE_DIR/bin:$PATH"
   fi
 fi
@@ -36,6 +58,10 @@ mkdir -p "$INSTALL_DIR/themes"
 mkdir -p "$HOME/Library/LaunchAgents"
 
 PREAMBLE
+
+sed -i '' "s/__NODE_VERSION__/$NODE_VERSION/g" "$OUT"
+sed -i '' "s/__NODE_SHA256_ARM64__/$NODE_SHA256_ARM64/g" "$OUT"
+sed -i '' "s/__NODE_SHA256_X64__/$NODE_SHA256_X64/g" "$OUT"
 
 # --- Embed text files as heredocs ---
 
