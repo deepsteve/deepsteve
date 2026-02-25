@@ -2,7 +2,7 @@
   "name": "Console",
   "version": "0.1.0",
   "minDeepsteveVersion": "0.1.0",
-  "description": "Browser console passthrough for Claude sessions",
+  "description": "Browser console passthrough for terminal sessions",
   "entry": "index.html",
   "display": "panel",
   "panel": { "position": "right", "defaultWidth": 400, "minWidth": 200 },

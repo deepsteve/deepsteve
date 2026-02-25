@@ -2,7 +2,7 @@
   "name": "Tasks",
   "version": "0.1.0",
   "minDeepsteveVersion": "0.1.0",
-  "description": "Task list for human actions, populated by Claude sessions",
+  "description": "Task list for human actions, populated by sessions",
   "entry": "index.html",
   "display": "panel",
   "panel": { "position": "right", "defaultWidth": 360, "minWidth": 200 },
