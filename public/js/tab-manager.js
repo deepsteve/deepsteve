@@ -63,6 +63,7 @@ document.addEventListener('contextmenu', (e) => {
 // Tab scroll arrow state
 let arrowStart = null;
 let arrowEnd = null;
+let arrowsContainer = null;
 let tabsList = null;
 
 function isVertical() {
@@ -70,7 +71,7 @@ function isVertical() {
 }
 
 function updateTabArrows() {
-  if (!tabsList || !arrowStart || !arrowEnd) return;
+  if (!tabsList || !arrowStart || !arrowEnd || !arrowsContainer) return;
 
   const vertical = isVertical();
   const scrollPos = vertical ? tabsList.scrollTop : tabsList.scrollLeft;
@@ -81,22 +82,26 @@ function updateTabArrows() {
   const atStart = scrollPos <= 1;
   const atEnd = scrollPos + clientSize >= scrollSize - 1;
 
-  arrowStart.style.display = hasOverflow && !atStart ? 'flex' : 'none';
-  arrowEnd.style.display = hasOverflow && !atEnd ? 'flex' : 'none';
+  arrowsContainer.classList.toggle('visible', hasOverflow);
+  arrowStart.classList.toggle('disabled', atStart);
+  arrowEnd.classList.toggle('disabled', atEnd);
 }
 
 export function initTabArrows() {
   arrowStart = document.getElementById('tabs-arrow-start');
   arrowEnd = document.getElementById('tabs-arrow-end');
+  arrowsContainer = document.getElementById('tabs-arrows');
   tabsList = document.getElementById('tabs-list');
-  if (!arrowStart || !arrowEnd || !tabsList) return;
+  if (!arrowStart || !arrowEnd || !arrowsContainer || !tabsList) return;
 
   arrowStart.addEventListener('click', () => {
+    if (arrowStart.classList.contains('disabled')) return;
     const amount = isVertical() ? { top: -150 } : { left: -150 };
     tabsList.scrollBy({ ...amount, behavior: 'smooth' });
   });
 
   arrowEnd.addEventListener('click', () => {
+    if (arrowEnd.classList.contains('disabled')) return;
     const amount = isVertical() ? { top: 150 } : { left: 150 };
     tabsList.scrollBy({ ...amount, behavior: 'smooth' });
   });

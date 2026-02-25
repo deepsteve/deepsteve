@@ -11,6 +11,8 @@ Web UI for running multiple Claude Code instances in browser tabs using real PTY
 ```
 Use `--refresh` when changes affect anything the browser loads (frontend JS/CSS/HTML, server endpoints, settings). Plain `./restart.sh` only restarts the server process — open browser tabs just silently reconnect their WebSocket, so they keep running old frontend code and won't see new server-side behavior until the page is reloaded.
 
+**Worktree sessions:** `./restart.sh` must be run from the main repo checkout — it copies files from the repo root to `~/.deepsteve/`. Worktree directories are not used for deployment, so edits made in a worktree won't take effect until they're merged to the main branch and `./restart.sh` is run from there.
+
 ### View logs:
 ```bash
 tail -f ~/Library/Logs/deepsteve.log
@@ -93,7 +95,7 @@ Key input handling:
 - **`release.sh` generates `install.sh`**: The installer is a single self-contained bash script with all source files embedded as heredocs (text) or base64 (images). Binary images are base64-encoded.
 - **node-pty**: Uses `.removeListener()` not `.off()`. Must `delete env.CLAUDECODE` when spawning nested Claude instances.
 - **LaunchAgent PATH**: `execSync` uses `/bin/sh` without Homebrew paths. Commands like `gh` and `git` must be wrapped in `zsh -l -c '...'` to get the user's full PATH.
-- **Worktrees**: Sessions can be created with a `--worktree <name>` flag that's passed through to Claude Code. The worktree name is persisted in state.json for restore.
+- **Worktrees**: Sessions can be created with a `--worktree <name>` flag that's passed through to Claude Code. The worktree name is persisted in state.json for restore. `./restart.sh` only deploys from the main repo checkout — it does NOT copy worktree contents to `~/.deepsteve/`. Merge changes to main first, then restart from the main repo.
 
 ### Frontend Module Structure
 
