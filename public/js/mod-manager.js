@@ -222,7 +222,19 @@ async function loadAvailableMods() {
     const restoreId = (savedActivePanelId && panelMods.has(savedActivePanelId))
       ? savedActivePanelId
       : firstPanelId;
-    if (restoreId) _switchToPanel(restoreId);
+    if (restoreId) {
+      _switchToPanel(restoreId);
+      // If fullscreen mod is active, panel DOM won't be shown yet —
+      // _hideMod() will restore it when exiting fullscreen.
+      // But if no fullscreen mod, verify the DOM is actually visible.
+      if (!modViewVisible) {
+        requestAnimationFrame(() => {
+          if (visiblePanelId && panelContainer.style.display === 'none') {
+            _showPanel();
+          }
+        });
+      }
+    }
   }
 }
 
@@ -688,6 +700,11 @@ function _hideMod() {
   modContainer.style.display = 'none';
   backBtn.style.display = 'none';
   modViewVisible = false;
+
+  // Restore panel if it was logically visible while fullscreen mod was active
+  if (visiblePanelId) {
+    _showPanel();
+  }
 }
 
 /**
@@ -718,6 +735,11 @@ function showTerminalForSession(id) {
   modContainer.style.display = 'none';
   document.getElementById('content-row').style.display = '';
   modViewVisible = false;
+
+  // Restore panel if it was logically visible
+  if (visiblePanelId) {
+    _showPanel();
+  }
 
   // Show back button with mod name
   if (activeViewId) {
