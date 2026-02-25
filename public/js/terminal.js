@@ -89,6 +89,7 @@ export function setupTerminalIO(term, ws, { onUserInput } = {}) {
     scrollToBottom() {
       userScrolledUp = false;
       term.scrollToBottom();
+      term.refresh(0, term.rows - 1);
     }
   };
 }
