@@ -212,7 +212,7 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
 #new-btn:active { background: var(--ds-accent-green-active); }
 
 /* Wand button — lighter than neutral buttons to stand out */
-#wand-btn { padding: 4px 10px; background: #474e57; border: none; color: var(--ds-text-primary); border-radius: 4px; cursor: pointer; font-size: 13px; margin-left: 4px; user-select: none; flex-shrink: 0; }
+#wand-btn { padding: 4px 10px; background: #474e57; border: none; color: var(--ds-text-primary); border-radius: 4px; cursor: pointer; font-size: 13px; margin-left: 4px; user-select: none; flex-shrink: 0; filter: saturate(2) brightness(1.4); }
 #wand-btn:hover { background: #545d68; }
 #wand-btn:active { background: #3d444d; }
 
