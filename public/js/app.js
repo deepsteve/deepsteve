@@ -542,6 +542,7 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
       session.container.classList.remove('reconnecting');
       // ResizeObserver handles fit; just request redraw from server
       ws.send(JSON.stringify({ type: 'redraw' }));
+      session.scrollControl.scrollToBottom();
     }
   };
 
@@ -653,8 +654,10 @@ function switchTo(id) {
 
     requestAnimationFrame(() => {
       fitTerminal(session.term, session.fit, session.ws);
-      session.scrollControl.scrollToBottom();
       session.term.focus();
+      requestAnimationFrame(() => {
+        session.scrollControl.scrollToBottom();
+      });
     });
   }
 }

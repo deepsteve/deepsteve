@@ -245,6 +245,7 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
   inset: 0;
   background: var(--ds-reconnect-overlay);
   z-index: 10;
+  pointer-events: none;
 }
 .terminal-container.reconnecting::after {
   content: 'Reconnecting...';
@@ -262,6 +263,7 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
   z-index: 11;
   box-shadow: 0 0 20px var(--ds-reconnect-glow);
   animation: pulse 1.5s ease-in-out infinite;
+  pointer-events: none;
 }
 @keyframes pulse {
   0%, 100% { opacity: 1; }
@@ -273,6 +275,7 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
   inset: 0;
   background: var(--ds-reconnect-overlay);
   z-index: 10;
+  pointer-events: none;
 }
 .terminal-container.refreshing::after {
   content: 'Refreshing...';
@@ -290,6 +293,7 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
   z-index: 11;
   box-shadow: 0 0 20px var(--ds-refresh-glow);
   animation: pulse 1.5s ease-in-out infinite;
+  pointer-events: none;
 }
 
 /* Modal */
