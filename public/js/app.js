@@ -154,10 +154,17 @@ function applyTheme(css) {
   }
 }
 
-// Clear notifications for the active session when the window regains focus
+// When the browser tab regains visibility, re-sync scroll position.
+// scrollToBottom() calls from onWriteParsed may have been no-ops while
+// the tab was hidden (browsers skip layout for background tabs), so the
+// viewport can fall behind even though userScrolledUp is false.
 document.addEventListener('visibilitychange', () => {
   if (!document.hidden && activeId) {
     clearNotification(activeId);
+    const session = sessions.get(activeId);
+    if (session?.scrollControl) {
+      session.scrollControl.nudgeToBottom();
+    }
   }
 });
 window.addEventListener('focus', () => {

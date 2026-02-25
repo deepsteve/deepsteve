@@ -90,6 +90,12 @@ export function setupTerminalIO(term, ws, { onUserInput } = {}) {
       userScrolledUp = false;
       term.scrollToBottom();
       term.refresh(0, term.rows - 1);
+    },
+    /** Re-sync viewport to bottom if user hasn't intentionally scrolled up. */
+    nudgeToBottom() {
+      if (!userScrolledUp) {
+        term.scrollToBottom();
+      }
     }
   };
 }
