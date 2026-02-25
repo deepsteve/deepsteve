@@ -71,6 +71,10 @@ export function setupTerminalIO(term, ws, { onUserInput, container } = {}) {
   // userScrolledUp flag. Wheel events only fire from actual user input.
   let userScrolledUp = false;
 
+  // During transitions (tab switch, reconnect, scrollback replay), suppress
+  // auto-scroll from onWriteParsed and wheel state tracking to prevent races.
+  let suppressAutoScroll = false;
+
   // Floating scroll-to-bottom button
   const scrollBtn = document.createElement('button');
   scrollBtn.className = 'scroll-to-bottom';
@@ -87,6 +91,7 @@ export function setupTerminalIO(term, ws, { onUserInput, container } = {}) {
 
   term.element.addEventListener('wheel', () => {
     requestAnimationFrame(() => {
+      if (suppressAutoScroll) return;
       const buf = term.buffer.active;
       const atBottom = buf.baseY <= buf.viewportY;
       userScrolledUp = !atBottom;
@@ -95,6 +100,7 @@ export function setupTerminalIO(term, ws, { onUserInput, container } = {}) {
   }, { passive: true });
 
   term.onWriteParsed(() => {
+    if (suppressAutoScroll) return;
     if (!userScrolledUp) {
       term.scrollToBottom();
       scrollBtn.classList.remove('visible');
@@ -103,16 +109,21 @@ export function setupTerminalIO(term, ws, { onUserInput, container } = {}) {
 
   return {
     scrollToBottom() {
+      suppressAutoScroll = false;
       userScrolledUp = false;
       term.scrollToBottom();
       term.refresh(0, term.rows - 1);
       scrollBtn.classList.remove('visible');
+    },
+    setSuppressAutoScroll(value) {
+      suppressAutoScroll = value;
     }
   };
 }
 
 export function fitTerminal(term, fit, ws) {
   fit.fit();
+  term.scrollLines(0); // Force viewport sync — eliminates RAF race with fit's internal viewport update
   ws.send(JSON.stringify({
     type: 'resize',
     cols: term.cols,
@@ -133,6 +144,7 @@ export function observeTerminalResize(container, term, fit, ws) {
     clearTimeout(debounceTimer);
     debounceTimer = setTimeout(() => {
       fit.fit();
+      term.scrollLines(0); // Force viewport sync after resize
       ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
     }, 100);
   });

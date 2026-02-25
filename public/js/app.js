@@ -540,9 +540,11 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
     if (entry) {
       const [, session] = entry;
       session.container.classList.remove('reconnecting');
+      // Suppress auto-scroll during redraw to prevent onWriteParsed races
+      session.scrollControl.setSuppressAutoScroll(true);
       // ResizeObserver handles fit; just request redraw from server
       ws.send(JSON.stringify({ type: 'redraw' }));
-      session.scrollControl.scrollToBottom();
+      session.scrollControl.scrollToBottom(); // clears suppressAutoScroll
     }
   };
 
@@ -572,6 +574,10 @@ function initTerminal(id, ws, cwd, initialName, { hasScrollback = false, pending
 
   // Store session in memory
   sessions.set(id, { term, fit, ws, container, cwd, name, waitingForInput: false, scrollControl });
+
+  // Suppress auto-scroll during init to prevent onWriteParsed races with
+  // buffered data flush and scrollback replay
+  scrollControl.setSuppressAutoScroll(true);
 
   // Flush any buffered data that arrived before the terminal was created
   for (const data of pendingData) {
@@ -607,12 +613,13 @@ function initTerminal(id, ws, cwd, initialName, { hasScrollback = false, pending
   // One-time init after first fit (which happens in switchTo's rAF above)
   requestAnimationFrame(() => {
     if (hasScrollback) {
-      scrollControl.scrollToBottom();
+      scrollControl.scrollToBottom(); // clears suppressAutoScroll
       // Hide the host terminal cursor — Claude Code renders its own cursor
       // via Ink. The original DECTCEM hide sequence from session start may
       // have been trimmed from the scrollback circular buffer.
       term.write('\x1b[?25l');
     } else {
+      scrollControl.setSuppressAutoScroll(false); // no scrollback — clear explicitly
       ws.send(JSON.stringify({ type: 'redraw' }));
     }
   });
@@ -647,6 +654,8 @@ function switchTo(id) {
   ActiveTab.set(id);
   const session = sessions.get(id);
   if (session) {
+    // Suppress auto-scroll during tab switch to prevent onWriteParsed races
+    session.scrollControl.setSuppressAutoScroll(true);
     session.container.classList.add('active');
     TabManager.setActive(id);
     // Clear badge and notification when switching to this tab
@@ -657,7 +666,7 @@ function switchTo(id) {
       fitTerminal(session.term, session.fit, session.ws);
       session.term.focus();
       requestAnimationFrame(() => {
-        session.scrollControl.scrollToBottom();
+        session.scrollControl.scrollToBottom(); // clears suppressAutoScroll
       });
     });
   }
