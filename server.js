@@ -635,23 +635,24 @@ wss.on('connection', (ws, req) => {
       // Restore this session with --resume flag using saved Claude session ID
       const restored = savedState[id];
       cwd = restored.cwd;
-      const claudeSessionId = restored.claudeSessionId;
+      const oldClaudeSessionId = restored.claudeSessionId;
+      const newClaudeSessionId = randomUUID();
       const savedWorktree = restored.worktree || null;
-      log(`Restoring session ${id} in ${cwd} (claude session: ${claudeSessionId}, worktree: ${savedWorktree || 'none'})`);
+      log(`Restoring session ${id} in ${cwd} (old claude session: ${oldClaudeSessionId}, new claude session: ${newClaudeSessionId}, worktree: ${savedWorktree || 'none'})`);
       const ptySize = { cols: initialCols, rows: initialRows };
-      const resumeArgs = claudeSessionId
-        ? ['--resume', claudeSessionId]
-        : ['-c'];  // fallback for old sessions without claudeSessionId
+      const resumeArgs = oldClaudeSessionId
+        ? ['--resume', oldClaudeSessionId, '--session-id', newClaudeSessionId]
+        : ['-c', '--session-id', newClaudeSessionId];
       if (savedWorktree) resumeArgs.push('--worktree', savedWorktree);
       const shell = spawnClaude(resumeArgs, cwd, ptySize);
       const startTime = Date.now();
       const restoredName = name || restored.name || null;
-      shells.set(id, { shell, clients: new Set(), cwd, claudeSessionId, worktree: savedWorktree, name: restoredName, restored: true, waitingForInput: false, lastActivity: Date.now() });
+      shells.set(id, { shell, clients: new Set(), cwd, claudeSessionId: newClaudeSessionId, worktree: savedWorktree, name: restoredName, restored: true, waitingForInput: false, lastActivity: Date.now() });
       wireShellOutput(id);
       shell.onExit(() => {
         if (shuttingDown) return;  // Don't overwrite state file during shutdown
         const elapsed = Date.now() - startTime;
-        if (elapsed < 5000 && claudeSessionId) {
+        if (elapsed < 5000 && oldClaudeSessionId) {
           // --resume failed quickly, fall back to continuing last conversation
           log(`Session ${id} exited after ${elapsed}ms, --resume likely failed. Falling back to -c`);
           const newClaudeSessionId = randomUUID();
