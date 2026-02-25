@@ -433,6 +433,28 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
   pointer-events: none;
 }
 .file-drop-zone.visible { opacity: 1; }
+/* Scroll-to-bottom floating button */
+.scroll-to-bottom {
+  position: absolute;
+  bottom: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 5;
+  padding: 4px 16px;
+  background: var(--ds-bg-secondary);
+  border: 1px solid var(--ds-border);
+  border-radius: 16px;
+  color: var(--ds-text-secondary);
+  font-size: 14px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+  pointer-events: none;
+  box-shadow: 0 2px 8px var(--ds-shadow);
+}
+.scroll-to-bottom.visible { opacity: 1; pointer-events: auto; }
+.scroll-to-bottom:hover { background: var(--ds-bg-tertiary); color: var(--ds-text-primary); border-color: var(--ds-accent-blue); }
+
 .file-drop-zone-content {
   background: var(--ds-bg-secondary);
   color: var(--ds-text-bright);
