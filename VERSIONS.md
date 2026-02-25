@@ -3,7 +3,7 @@
 ## Installing
 
 ```bash
-curl -fsSL https://github.com/deepsteve/deepsteve/releases/latest/download/install.sh | bash
+curl -fsSL deepsteve.com/install.sh | bash
 ```
 
 ## Updating

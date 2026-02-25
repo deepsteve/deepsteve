@@ -23,7 +23,7 @@ Run multiple Claude Code sessions side-by-side in your browser, each with full t
 ## Quick Install
 
 ```bash
-curl -fsSL https://github.com/deepsteve/deepsteve/releases/latest/download/install.sh | bash
+curl -fsSL deepsteve.com/install.sh | bash
 ```
 
 ## Requirements
