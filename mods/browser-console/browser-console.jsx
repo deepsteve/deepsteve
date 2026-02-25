@@ -138,104 +138,159 @@ function ConsolePanel() {
   }, [entries]);
 
   useEffect(() => {
-    if (!window.deepsteve) return;
-
+    let unsubEval = null;
+    let unsubConsole = null;
     const parentWin = parent.window;
-    const originals = {};
+    const parentDoc = parent.document;
     const levels = ['log', 'warn', 'error', 'info', 'debug'];
+    const cleanups = [];
 
-    // Patch parent console methods to capture output
-    for (const level of levels) {
-      originals[level] = parentWin.console[level];
-      parentWin.console[level] = (...args) => {
-        // Call original
-        originals[level].apply(parentWin.console, args);
-
-        // Capture entry
-        const serialized = args.map(a => safeSerialize(a));
-        const entry = {
-          level,
-          args: serialized,
-          text: formatArgs(serialized),
-          timestamp: Date.now(),
-        };
-
-        entriesRef.current.push(entry);
-        // Circular buffer
-        if (entriesRef.current.length > MAX_ENTRIES) {
-          entriesRef.current = entriesRef.current.slice(-MAX_ENTRIES);
-        }
-        setEntries([...entriesRef.current]);
-      };
+    function addEntry(level, text) {
+      const entry = { level, text, timestamp: Date.now() };
+      entriesRef.current.push(entry);
+      if (entriesRef.current.length > MAX_ENTRIES) {
+        entriesRef.current = entriesRef.current.slice(-MAX_ENTRIES);
+      }
+      setEntries([...entriesRef.current]);
     }
 
-    // Handle browser_eval requests
-    const unsubEval = window.deepsteve.onBrowserEvalRequest(async (req) => {
-      let result, error;
-      try {
-        // Create function in parent scope for full DOM access
-        const fn = new parentWin.Function(req.code);
-        result = fn();
-        // Await if promise
-        if (result && typeof result.then === 'function') {
-          result = await result;
-        }
-        result = safeSerialize(result);
-        if (result === undefined) result = 'undefined';
-      } catch (e) {
-        error = e.message || String(e);
-      }
-
-      try {
-        await fetch('/api/browser-console/result', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ requestId: req.requestId, result, error }),
-        });
-      } catch (e) {
-        originals.error.call(parentWin.console, '[browser-console] Failed to POST eval result:', e);
-      }
-    });
-
-    // Handle browser_console requests
-    const unsubConsole = window.deepsteve.onBrowserConsoleRequest(async (req) => {
-      let filtered = entriesRef.current;
-
-      if (req.level && req.level !== 'all') {
-        filtered = filtered.filter(e => e.level === req.level);
-      }
-      if (req.search) {
-        const s = req.search.toLowerCase();
-        filtered = filtered.filter(e => e.text.toLowerCase().includes(s));
-      }
-
-      // Most recent first, limited
-      const limit = req.limit || 50;
-      const sliced = filtered.slice(-limit).reverse();
-
-      const result = sliced.map(e => {
-        const time = new Date(e.timestamp).toISOString();
-        return `[${time}] [${e.level}] ${e.text}`;
-      }).join('\n') || '(no console entries captured)';
-
-      try {
-        await fetch('/api/browser-console/result', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ requestId: req.requestId, result }),
-        });
-      } catch (e) {
-        originals.error.call(parentWin.console, '[browser-console] Failed to POST console result:', e);
-      }
-    });
-
-    // Cleanup: restore original console methods
-    return () => {
+    function setupCapture() {
+      // 1. Patch console.* on parent window to capture application logs
+      const origConsole = {};
       for (const level of levels) {
-        parentWin.console[level] = originals[level];
+        origConsole[level] = parentWin.console[level];
+        parentWin.console[level] = (...args) => {
+          origConsole[level].apply(parentWin.console, args);
+          addEntry(level, formatArgs(args.map(a => safeSerialize(a))));
+        };
       }
-      unsubEval();
-      unsubConsole();
+      cleanups.push(() => {
+        for (const level of levels) parentWin.console[level] = origConsole[level];
+      });
+
+      // 2. Uncaught JS errors (window.onerror fires for runtime errors)
+      const onError = (event) => {
+        // Resource load errors (img, script, link) — event.target is the element
+        if (event.target && event.target !== parentWin) {
+          const el = event.target;
+          const tag = el.tagName?.toLowerCase() || '?';
+          const src = el.src || el.href || '';
+          if (src) addEntry('error', `Failed to load <${tag}>: ${src}`);
+          return;
+        }
+        // JS runtime errors
+        const { message, filename, lineno, colno } = event;
+        const loc = filename ? ` (${filename}:${lineno}:${colno})` : '';
+        addEntry('error', `${message}${loc}`);
+      };
+      // Use capture phase to catch resource load errors (they don't bubble)
+      parentWin.addEventListener('error', onError, true);
+      cleanups.push(() => parentWin.removeEventListener('error', onError, true));
+
+      // 3. Unhandled promise rejections
+      const onRejection = (event) => {
+        const reason = event.reason;
+        const text = reason instanceof Error
+          ? `Unhandled rejection: ${reason.message}\n${reason.stack || ''}`
+          : `Unhandled rejection: ${String(reason)}`;
+        addEntry('error', text);
+      };
+      parentWin.addEventListener('unhandledrejection', onRejection);
+      cleanups.push(() => parentWin.removeEventListener('unhandledrejection', onRejection));
+
+      // 4. CSP violations
+      const onCSP = (event) => {
+        addEntry('error', `CSP violation: ${event.violatedDirective} — blocked ${event.blockedURI || 'inline'}`);
+      };
+      parentDoc.addEventListener('securitypolicyviolation', onCSP);
+      cleanups.push(() => parentDoc.removeEventListener('securitypolicyviolation', onCSP));
+
+      // 5. Wrap WebSocket to capture connection errors
+      const OrigWebSocket = parentWin.WebSocket;
+      parentWin.WebSocket = function(...args) {
+        const ws = new OrigWebSocket(...args);
+        ws.addEventListener('error', () => {
+          addEntry('error', `WebSocket error: ${args[0]}`);
+        });
+        ws.addEventListener('close', (e) => {
+          if (e.code !== 1000 && e.code !== 1005) {
+            addEntry('warn', `WebSocket closed: ${args[0]} (code ${e.code}${e.reason ? ', ' + e.reason : ''})`);
+          }
+        });
+        return ws;
+      };
+      parentWin.WebSocket.prototype = OrigWebSocket.prototype;
+      // Preserve static properties (CONNECTING, OPEN, CLOSING, CLOSED)
+      Object.keys(OrigWebSocket).forEach(k => { parentWin.WebSocket[k] = OrigWebSocket[k]; });
+      cleanups.push(() => { parentWin.WebSocket = OrigWebSocket; });
+
+      // 6. Handle browser_eval MCP requests
+      unsubEval = window.deepsteve.onBrowserEvalRequest(async (req) => {
+        let result, error;
+        try {
+          const fn = new parentWin.Function(req.code);
+          result = fn();
+          if (result && typeof result.then === 'function') result = await result;
+          result = safeSerialize(result);
+          if (result === undefined) result = 'undefined';
+        } catch (e) {
+          error = e.message || String(e);
+        }
+        try {
+          await fetch('/api/browser-console/result', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ requestId: req.requestId, result, error }),
+          });
+        } catch {}
+      });
+
+      // 7. Handle browser_console MCP requests
+      unsubConsole = window.deepsteve.onBrowserConsoleRequest(async (req) => {
+        let filtered = entriesRef.current;
+        if (req.level && req.level !== 'all') {
+          filtered = filtered.filter(e => e.level === req.level);
+        }
+        if (req.search) {
+          const s = req.search.toLowerCase();
+          filtered = filtered.filter(e => e.text.toLowerCase().includes(s));
+        }
+        const limit = req.limit || 50;
+        const sliced = filtered.slice(-limit).reverse();
+        const result = sliced.map(e => {
+          const time = new Date(e.timestamp).toISOString();
+          return `[${time}] [${e.level}] ${e.text}`;
+        }).join('\n') || '(no console entries captured)';
+        try {
+          await fetch('/api/browser-console/result', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ requestId: req.requestId, result }),
+          });
+        } catch {}
+      });
+    }
+
+    // Bridge API is injected by the parent after iframe load event,
+    // so it may not be available yet when this effect runs. Poll for it.
+    if (window.deepsteve) {
+      setupCapture();
+    } else {
+      let attempts = 0;
+      const poll = setInterval(() => {
+        if (window.deepsteve) {
+          clearInterval(poll);
+          setupCapture();
+        } else if (++attempts > 100) {
+          clearInterval(poll);
+        }
+      }, 100);
+    }
+
+    return () => {
+      for (const fn of cleanups) { try { fn(); } catch {} }
+      if (unsubEval) unsubEval();
+      if (unsubConsole) unsubConsole();
     };
   }, []);
 

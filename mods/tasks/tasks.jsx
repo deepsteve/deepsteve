@@ -106,11 +106,31 @@ function TasksPanel() {
   const [tagFilter, setTagFilter] = useState('all');
 
   useEffect(() => {
-    if (!window.deepsteve) return;
-    const unsub = window.deepsteve.onTasksChanged((newTasks) => {
-      setTasks(newTasks || []);
-    });
-    return unsub;
+    let unsub = null;
+
+    function setup() {
+      unsub = window.deepsteve.onTasksChanged((newTasks) => {
+        setTasks(newTasks || []);
+      });
+    }
+
+    // Bridge API is injected by the parent after iframe load event,
+    // so it may not be available yet when this effect runs. Poll for it.
+    if (window.deepsteve) {
+      setup();
+    } else {
+      let attempts = 0;
+      const poll = setInterval(() => {
+        if (window.deepsteve) {
+          clearInterval(poll);
+          setup();
+        } else if (++attempts > 100) {
+          clearInterval(poll);
+        }
+      }, 100);
+    }
+
+    return () => { if (unsub) unsub(); };
   }, []);
 
   const toggleStatus = useCallback(async (id, newStatus) => {
