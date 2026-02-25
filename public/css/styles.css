@@ -46,7 +46,7 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
 #sidebar-resizer { display: none; }
 
 /* Tab styling */
-.tab { padding: 6px 12px; background: var(--ds-bg-tertiary); border: 1px solid var(--ds-border); border-radius: 6px 6px 0 0; cursor: pointer; color: var(--ds-text-secondary); font-size: 13px; display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+.tab { padding: 6px 12px; background: var(--ds-bg-tertiary); border: 1px solid var(--ds-border); border-radius: 6px 6px 0 0; cursor: pointer; color: var(--ds-text-secondary); font-size: 13px; display: flex; align-items: center; gap: 6px; flex-shrink: 0; max-width: 200px; }
 .tab.active { background: var(--ds-bg-primary); color: var(--ds-text-bright); border-bottom-color: var(--ds-bg-primary); }
 .tab .close { opacity: 0.5; cursor: pointer; font-size: 11px; }
 .tab .close:hover { opacity: 1; color: var(--ds-accent-red); }
@@ -183,12 +183,12 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
 .context-menu-item:hover { background: var(--ds-bg-tertiary); }
 
 /* Buttons */
-#new-btn { padding: 4px 10px; background: var(--ds-accent-green); border: none; color: white; border-radius: 4px; cursor: pointer; font-size: 13px; margin-left: 4px; user-select: none; }
+#new-btn { padding: 4px 10px; background: var(--ds-accent-green); border: none; color: white; border-radius: 4px; cursor: pointer; font-size: 13px; margin-left: 4px; user-select: none; flex-shrink: 0; }
 #new-btn:hover { background: var(--ds-accent-green-hover); }
 #new-btn:active { background: var(--ds-accent-green-active); }
 
 /* Wand button — lighter than neutral buttons to stand out */
-#wand-btn { padding: 4px 10px; background: #474e57; border: none; color: var(--ds-text-primary); border-radius: 4px; cursor: pointer; font-size: 13px; margin-left: 4px; user-select: none; }
+#wand-btn { padding: 4px 10px; background: #474e57; border: none; color: var(--ds-text-primary); border-radius: 4px; cursor: pointer; font-size: 13px; margin-left: 4px; user-select: none; flex-shrink: 0; }
 #wand-btn:hover { background: #545d68; }
 #wand-btn:active { background: #3d444d; }
 

@@ -102,6 +102,7 @@ export const TabManager = {
   addTab(sessionId, name, callbacks) {
     const tab = this.createTab(sessionId, name, callbacks);
     document.getElementById('tabs-list').appendChild(tab);
+    tab.scrollIntoView({ block: 'nearest', inline: 'nearest' });
     return tab;
   },
 
@@ -132,6 +133,7 @@ export const TabManager = {
     const tab = document.getElementById('tab-' + sessionId);
     if (tab) {
       tab.classList.add('active');
+      tab.scrollIntoView({ block: 'nearest', inline: 'nearest' });
     }
   },
 
