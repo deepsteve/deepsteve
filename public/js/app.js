@@ -56,6 +56,16 @@ const TabSessions = {
   }
 };
 
+/**
+ * Persist the active tab ID in sessionStorage so it survives page refresh.
+ */
+const ActiveTab = {
+  KEY: 'deepsteve-active-tab',
+  get() { return sessionStorage.getItem(this.KEY); },
+  set(id) { sessionStorage.setItem(this.KEY, id); },
+  clear() { sessionStorage.removeItem(this.KEY); }
+};
+
 // Prevent accidental browser navigation (back/forward)
 window.addEventListener('popstate', (e) => {
   // Push state back to prevent navigation
@@ -568,7 +578,15 @@ function initTerminal(id, ws, cwd, initialName, { hasScrollback = false, pending
 
   TabManager.addTab(id, name, tabCallbacks);
   updateEmptyState();
-  switchTo(id);
+
+  // If a previously active tab is saved (e.g. across refresh), prefer it over
+  // the just-created session. This ensures the user's last-viewed tab is restored.
+  const savedActiveId = ActiveTab.get();
+  if (savedActiveId && savedActiveId !== id && sessions.has(savedActiveId)) {
+    switchTo(savedActiveId);
+  } else {
+    switchTo(id);
+  }
 
   // Save to both storages — TabSessions is per-tab truth, SessionStore is for cross-tab
   TabSessions.add({ id, cwd, name });
@@ -618,6 +636,7 @@ function switchTo(id) {
 
   // Activate new
   activeId = id;
+  ActiveTab.set(id);
   const session = sessions.get(id);
   if (session) {
     session.container.classList.add('active');
@@ -659,6 +678,7 @@ function killSession(id) {
       switchTo(next);
     } else {
       activeId = null;
+      ActiveTab.clear();
     }
   }
 
