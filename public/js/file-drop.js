@@ -66,6 +66,10 @@ export function initFileDrop({ getActiveSession: getter }) {
   getActiveSession = getter;
   const terminals = document.getElementById('terminals');
 
+  // Prevent browser from navigating to dropped files anywhere on the page
+  document.addEventListener('dragover', (e) => { if (hasFiles(e)) e.preventDefault(); });
+  document.addEventListener('drop', (e) => { if (hasFiles(e)) e.preventDefault(); });
+
   terminals.addEventListener('dragenter', (e) => {
     if (!hasFiles(e)) return;
     e.preventDefault();
