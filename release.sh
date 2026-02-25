@@ -142,6 +142,8 @@ embed_text "uninstall.sh" "uninstall.sh"
   echo '        <string>production</string>'
   echo '        <key>PORT</key>'
   echo '        <string>3000</string>'
+  echo '        <key>DEEPSTEVE_BIND</key>'
+  echo '        <string>127.0.0.1</string>'
   echo '        <key>PATH</key>'
   echo '        <string>$INSTALL_DIR/node/bin:$HOME/.local/bin:$(dirname $NODE_PATH):/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>'
   echo '    </dict>'
