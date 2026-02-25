@@ -560,7 +560,8 @@ function initTerminal(id, ws, cwd, initialName, { hasScrollback = false, pending
 
   const { term, fit } = createTerminal(container);
   const scrollControl = setupTerminalIO(term, ws, {
-    onUserInput: () => clearNotification(id)
+    onUserInput: () => clearNotification(id),
+    container
   });
 
   // Get saved name or generate default

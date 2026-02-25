@@ -32,7 +32,7 @@ export function updateTerminalTheme(term) {
   term.options.theme = { ...term.options.theme, background: bg };
 }
 
-export function setupTerminalIO(term, ws, { onUserInput } = {}) {
+export function setupTerminalIO(term, ws, { onUserInput, container } = {}) {
   // Note: ws.onmessage is set in app.js to handle JSON control messages
   // and route terminal data here via term.write()
 
@@ -71,17 +71,33 @@ export function setupTerminalIO(term, ws, { onUserInput } = {}) {
   // userScrolledUp flag. Wheel events only fire from actual user input.
   let userScrolledUp = false;
 
+  // Floating scroll-to-bottom button
+  const scrollBtn = document.createElement('button');
+  scrollBtn.className = 'scroll-to-bottom';
+  scrollBtn.textContent = '\u2193';
+  scrollBtn.setAttribute('aria-label', 'Scroll to bottom');
+  if (container) container.appendChild(scrollBtn);
+
+  scrollBtn.addEventListener('click', () => {
+    userScrolledUp = false;
+    term.scrollToBottom();
+    scrollBtn.classList.remove('visible');
+    term.focus();
+  });
+
   term.element.addEventListener('wheel', () => {
     requestAnimationFrame(() => {
       const buf = term.buffer.active;
       const atBottom = buf.baseY <= buf.viewportY;
       userScrolledUp = !atBottom;
+      scrollBtn.classList.toggle('visible', userScrolledUp);
     });
   }, { passive: true });
 
   term.onWriteParsed(() => {
     if (!userScrolledUp) {
       term.scrollToBottom();
+      scrollBtn.classList.remove('visible');
     }
   });
 
@@ -90,6 +106,7 @@ export function setupTerminalIO(term, ws, { onUserInput } = {}) {
       userScrolledUp = false;
       term.scrollToBottom();
       term.refresh(0, term.rows - 1);
+      scrollBtn.classList.remove('visible');
     }
   };
 }
