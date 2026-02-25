@@ -592,7 +592,7 @@ app.get('/api/issues', (req, res) => {
   }
 });
 
-const server = app.listen(PORT);
+const server = app.listen(PORT, '127.0.0.1');
 const shells = new Map();
 const wss = new WebSocketServer({ server });
 
