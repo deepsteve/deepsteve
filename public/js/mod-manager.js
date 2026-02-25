@@ -38,6 +38,7 @@ let panelTabs = new Map();       // modId → tab button element
 let taskCallbacks = [];          // [{modId, cb}] — callbacks for task broadcasts
 let browserEvalCallbacks = [];   // [{modId, cb}] — callbacks for browser-eval-request
 let browserConsoleCallbacks = []; // [{modId, cb}] — callbacks for browser-console-request
+let deepsteveVersion = null;   // set from /api/mods response
 let panelWidth = 360;
 const MIN_PANEL_WIDTH = 200;
 const PANEL_STORAGE_KEY = 'deepsteve-panel-width';
@@ -157,6 +158,7 @@ async function loadAvailableMods() {
     const res = await fetch('/api/mods');
     const data = await res.json();
     allMods = data.mods || [];
+    deepsteveVersion = data.deepsteveVersion || null;
   } catch { return; }
 
   if (allMods.length === 0) return;
@@ -181,9 +183,14 @@ async function loadAvailableMods() {
     modsMenu.classList.remove('open');
   });
 
+  // Remove incompatible mods from enabledMods (in case they were enabled before)
+  for (const mod of allMods) {
+    if (mod.compatible === false) enabledMods.delete(mod.id);
+  }
+
   // Create toolbar buttons for enabled non-panel mods
   for (const mod of allMods) {
-    if (enabledMods.has(mod.id) && mod.display !== 'panel') {
+    if (enabledMods.has(mod.id) && mod.display !== 'panel' && mod.compatible !== false) {
       _createToolbarButton(mod);
     }
   }
@@ -211,7 +218,7 @@ async function loadAvailableMods() {
   let firstPanelId = null;
 
   for (const mod of allMods) {
-    if (enabledMods.has(mod.id) && mod.display === 'panel') {
+    if (enabledMods.has(mod.id) && mod.display === 'panel' && mod.compatible !== false) {
       _loadPanelMod(mod);
       if (!firstPanelId) firstPanelId = mod.id;
     }
@@ -250,17 +257,19 @@ function _renderModsMenu() {
 
   modsMenu.innerHTML = allMods.map(mod => {
     const enabled = enabledMods.has(mod.id);
+    const incompatible = mod.compatible === false;
     const hasSettings = mod.settings && mod.settings.length > 0;
     return `
-      <div class="dropdown-item mod-toggle-item" data-id="${mod.id}">
+      <div class="dropdown-item mod-toggle-item${incompatible ? ' mod-incompatible' : ''}" data-id="${mod.id}">
         <div class="session-info">
           <span class="session-name">${mod.name}</span>
-          <span class="session-status">${mod.description || ''}</span>
+          <span class="session-status">${mod.description || ''} <span class="mod-version">v${mod.version}</span></span>
+          ${incompatible ? `<span class="mod-warning">Requires deepsteve v${mod.minDeepsteveVersion}+</span>` : ''}
         </div>
         <div style="display:flex;align-items:center;gap:4px">
           ${hasSettings ? `<button class="mod-settings-btn" data-id="${mod.id}" title="Settings">&#9881;</button>` : ''}
           <label class="mod-toggle-label" data-id="${mod.id}">
-            <input type="checkbox" ${enabled ? 'checked' : ''} data-id="${mod.id}">
+            <input type="checkbox" ${enabled ? 'checked' : ''} ${incompatible ? 'disabled' : ''} data-id="${mod.id}">
           </label>
         </div>
       </div>
@@ -273,7 +282,7 @@ function _renderModsMenu() {
       e.stopPropagation();
       const modId = cb.dataset.id;
       const mod = allMods.find(m => m.id === modId);
-      if (!mod) return;
+      if (!mod || mod.compatible === false) return;
 
       if (cb.checked) {
         enabledMods.add(modId);
@@ -302,6 +311,7 @@ function _renderModsMenu() {
   modsMenu.querySelectorAll('.mod-toggle-item').forEach(item => {
     item.addEventListener('click', (e) => {
       if (e.target.tagName === 'INPUT' || e.target.closest('.mod-settings-btn')) return;
+      if (item.classList.contains('mod-incompatible')) return;
       const cb = item.querySelector('input[type="checkbox"]');
       cb.checked = !cb.checked;
       cb.dispatchEvent(new Event('change', { bubbles: true }));
@@ -809,6 +819,9 @@ function isModActive() {
 function _injectBridgeAPI(iframeEl, modId) {
   try {
     iframeEl.contentWindow.deepsteve = {
+      getDeepsteveVersion() {
+        return deepsteveVersion;
+      },
       getSessions() {
         return hooks.getSessions();
       },
