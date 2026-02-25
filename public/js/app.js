@@ -12,6 +12,7 @@ import { showWindowRestoreModal } from './window-restore-modal.js';
 import { LayoutManager } from './layout-manager.js';
 import { initLiveReload } from './live-reload.js';
 import { ModManager } from './mod-manager.js';
+import { initFileDrop } from './file-drop.js';
 
 // Configuration
 let maxIssueTitleLength = 25;
@@ -963,6 +964,16 @@ async function init() {
     focusSession: switchTo,
     createSession: (cwd) => createSession(cwd, null, true),
     killSession: killSession,
+  });
+
+  // File drag-and-drop upload
+  initFileDrop({
+    getActiveSession: () => {
+      if (!activeId) return null;
+      const s = sessions.get(activeId);
+      if (!s) return null;
+      return { id: activeId, cwd: s.cwd, container: s.container, ws: s.ws };
+    }
   });
 
   // Auto-reload browser when server restarts (restart.sh, node --watch, etc.)

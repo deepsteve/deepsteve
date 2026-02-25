@@ -27,6 +27,38 @@ app.use((req, res, next) => {
   express.json()(req, res, next);
 });
 
+// File upload endpoint — writes to /tmp/deepsteve-drops/ and returns the full path
+const DROPS_DIR = path.join(os.tmpdir(), 'deepsteve-drops');
+try { fs.mkdirSync(DROPS_DIR, { recursive: true }); } catch {}
+
+app.put('/api/upload/:filename', express.raw({ type: '*/*', limit: '50mb' }), (req, res) => {
+  const { filename } = req.params;
+
+  const safe = path.basename(filename);
+  if (safe !== filename) return res.status(400).json({ error: 'Invalid filename' });
+  if (safe.length > 255) return res.status(400).json({ error: 'Filename too long' });
+  if (/[\x00-\x1f]/.test(safe)) return res.status(400).json({ error: 'Invalid characters in filename' });
+
+  // Deduplicate: screenshot.png → screenshot-1.png, screenshot-2.png, ...
+  let destPath = path.join(DROPS_DIR, safe);
+  if (fs.existsSync(destPath)) {
+    const ext = path.extname(safe);
+    const base = safe.slice(0, safe.length - ext.length);
+    let i = 1;
+    while (fs.existsSync(path.join(DROPS_DIR, `${base}-${i}${ext}`))) i++;
+    destPath = path.join(DROPS_DIR, `${base}-${i}${ext}`);
+  }
+
+  try {
+    fs.writeFileSync(destPath, req.body);
+    log(`Drop: ${path.basename(destPath)} (${req.body.length} bytes) → ${destPath}`);
+    res.json({ ok: true, path: destPath });
+  } catch (e) {
+    log(`Drop failed: ${e.message}`);
+    res.status(500).json({ error: 'Write failed: ' + e.message });
+  }
+});
+
 // Settings defaults (single source of truth for wand template + plan mode)
 const SETTINGS_DEFAULTS = {
   wandPlanMode: true,
