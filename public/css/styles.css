@@ -34,7 +34,8 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
 
 /* Tabs - horizontal layout (default) */
 #tabs { display: flex; gap: 2px; padding: 4px 8px; background: var(--ds-bg-secondary); align-items: center; flex-shrink: 0; }
-#tabs-list { display: contents; }
+#tabs-list { display: flex; gap: 2px; overflow-x: auto; min-width: 0; scrollbar-width: none; }
+#tabs-list::-webkit-scrollbar { display: none; }
 #tabs-spacer { flex: 1; }
 
 /* Layout toggle button */
@@ -45,7 +46,7 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
 #sidebar-resizer { display: none; }
 
 /* Tab styling */
-.tab { padding: 6px 12px; background: var(--ds-bg-tertiary); border: 1px solid var(--ds-border); border-radius: 6px 6px 0 0; cursor: pointer; color: var(--ds-text-secondary); font-size: 13px; display: flex; align-items: center; gap: 6px; }
+.tab { padding: 6px 12px; background: var(--ds-bg-tertiary); border: 1px solid var(--ds-border); border-radius: 6px 6px 0 0; cursor: pointer; color: var(--ds-text-secondary); font-size: 13px; display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
 .tab.active { background: var(--ds-bg-primary); color: var(--ds-text-bright); border-bottom-color: var(--ds-bg-primary); }
 .tab .close { opacity: 0.5; cursor: pointer; font-size: 11px; }
 .tab .close:hover { opacity: 1; color: var(--ds-accent-red); }
