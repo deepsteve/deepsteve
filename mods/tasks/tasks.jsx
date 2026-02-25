@@ -8,52 +8,119 @@ const PRIORITY_COLORS = {
 
 const STATUS_OPTIONS = ['all', 'pending', 'in-progress', 'done'];
 
+function renderOlGroup(items) {
+  const result = [];
+  let i = 0;
+  const baseIndent = items[0].indent;
+  while (i < items.length) {
+    const item = items[i];
+    if (item.indent > baseIndent) {
+      // Collect all consecutive items with indent > baseIndent as a nested group
+      const nested = [];
+      while (i < items.length && items[i].indent > baseIndent) {
+        nested.push(items[i]);
+        i++;
+      }
+      // Append nested <ol> inside the previous <li>
+      if (result.length > 0) {
+        const prev = result[result.length - 1];
+        result[result.length - 1] = (
+          <li key={prev.key} style={{ padding: '1px 0' }}>
+            {prev.props.children}
+            {renderOlGroup(nested)}
+          </li>
+        );
+      } else {
+        // Nested items with no parent — render them as a standalone nested list
+        result.push(renderOlGroup(nested));
+      }
+    } else {
+      result.push(
+        <li key={item.lineIndex} style={{ padding: '1px 0' }}>{item.text}</li>
+      );
+      i++;
+    }
+  }
+  return (
+    <ol style={{ margin: '2px 0', paddingLeft: 20, listStyleType: 'decimal' }}>
+      {result}
+    </ol>
+  );
+}
+
 function renderDescription(description, onCheckToggle) {
   if (!description) return null;
   const lines = description.split('\n');
   const checklistRe = /^- \[([ xX])\] (.*)$/;
-  const hasChecklist = lines.some(l => checklistRe.test(l));
+  const orderedRe = /^(\s*)(\d+)\.\s+(.*)$/;
 
-  if (!hasChecklist) {
-    return (
-      <div style={{ fontSize: 12, color: '#8b949e', marginTop: 3, wordBreak: 'break-word' }}>
-        {description}
-      </div>
+  const elements = [];
+  let olBuffer = [];
+
+  function flushOl() {
+    if (olBuffer.length === 0) return;
+    elements.push(
+      <React.Fragment key={`ol-${olBuffer[0].lineIndex}`}>
+        {renderOlGroup(olBuffer)}
+      </React.Fragment>
+    );
+    olBuffer = [];
+  }
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+
+    // Ordered list item
+    const olMatch = line.match(orderedRe);
+    if (olMatch) {
+      olBuffer.push({ indent: olMatch[1].length, text: olMatch[3], lineIndex: i });
+      continue;
+    }
+
+    // Flush any pending OL items before rendering a non-OL line
+    flushOl();
+
+    // Checkbox line
+    const checkMatch = line.match(checklistRe);
+    if (checkMatch) {
+      const checked = checkMatch[1] !== ' ';
+      const text = checkMatch[2];
+      elements.push(
+        <label key={i} style={{
+          display: 'flex',
+          alignItems: 'flex-start',
+          gap: 5,
+          padding: '1px 0',
+          cursor: 'pointer',
+        }}>
+          <input
+            type="checkbox"
+            checked={checked}
+            onChange={() => onCheckToggle(i)}
+            style={{ marginTop: 2, accentColor: '#238636', cursor: 'pointer', flexShrink: 0 }}
+          />
+          <span style={{
+            textDecoration: checked ? 'line-through' : 'none',
+            opacity: checked ? 0.6 : 1,
+          }}>
+            {text}
+          </span>
+        </label>
+      );
+      continue;
+    }
+
+    // Plain text or empty line
+    elements.push(
+      line ? <div key={i}>{line}</div> : <div key={i} style={{ height: 4 }} />
     );
   }
 
+  flushOl();
+
   return (
     <div style={{ fontSize: 12, color: '#8b949e', marginTop: 3, wordBreak: 'break-word' }}>
-      {lines.map((line, i) => {
-        const m = line.match(checklistRe);
-        if (!m) {
-          return line ? <div key={i}>{line}</div> : <div key={i} style={{ height: 4 }} />;
-        }
-        const checked = m[1] !== ' ';
-        const text = m[2];
-        return (
-          <label key={i} style={{
-            display: 'flex',
-            alignItems: 'flex-start',
-            gap: 5,
-            padding: '1px 0',
-            cursor: 'pointer',
-          }}>
-            <input
-              type="checkbox"
-              checked={checked}
-              onChange={() => onCheckToggle(i)}
-              style={{ marginTop: 2, accentColor: '#238636', cursor: 'pointer', flexShrink: 0 }}
-            />
-            <span style={{
-              textDecoration: checked ? 'line-through' : 'none',
-              opacity: checked ? 0.6 : 1,
-            }}>
-              {text}
-            </span>
-          </label>
-        );
-      })}
+      {elements}
     </div>
   );
 }
