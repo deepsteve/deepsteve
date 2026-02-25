@@ -146,6 +146,9 @@ launchctl load "$PLIST_PATH"
 
 echo "deepsteve installed and running at http://localhost:3000"
 echo "To uninstall: ~/.deepsteve/uninstall.sh"
+echo ""
+echo "⚠️  Security: DeepSteve has no authentication. It is localhost-only."
+echo "   Do not expose port 3000 to a network or the public internet."
 POSTAMBLE
 
 chmod +x "$OUT"

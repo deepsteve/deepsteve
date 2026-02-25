@@ -8,6 +8,8 @@ Run multiple Claude Code sessions side-by-side in your browser, each with full t
 
 **Requires macOS.** deepsteve uses macOS LaunchAgents for daemon management and macOS-specific paths for logs and state.
 
+> **Security notice:** DeepSteve has no authentication, no CORS restrictions, and no WebSocket origin checking. It is designed for **localhost use only**. Do not expose it to a network or the public internet.
+
 ## Features
 
 - **Multiple sessions** - Open as many Claude Code instances as you need in separate tabs

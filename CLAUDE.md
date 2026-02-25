@@ -83,6 +83,10 @@ Key input handling:
 - Shift+Enter: intercepted, sends `\x1b[13;2u` (CSI u encoding)
 - Resize: FitAddon calculates cols/rows, sends JSON message to server
 
+### Security
+
+DeepSteve has **no authentication, no CORS, and no WebSocket origin checking**. It is designed for localhost use only. The server binds to all interfaces (`0.0.0.0`) — do not expose port 3000 to untrusted networks. All API endpoints, the MCP endpoint, and WebSocket connections are unauthenticated.
+
 ### Gotchas and Non-Obvious Behavior
 
 - **Ink input parsing**: `shell.write("text\r")` doesn't work for submitting to Claude. Text and `\r` must be sent separately with a 1s delay (`submitToShell()`), because Ink only recognizes Enter when `\r` arrives as its own stdin read.
