@@ -1,4 +1,4 @@
-const { useState, useCallback, useRef } = React;
+const { useState, useCallback, useRef, useEffect } = React;
 
 function ScreenshotsPanel() {
   const [imageDataUrl, setImageDataUrl] = useState(null);
@@ -54,6 +54,38 @@ function ScreenshotsPanel() {
     a.click();
     showStatus('Downloaded', 'success');
   }, [imageDataUrl, showStatus]);
+
+  // Handle MCP screenshot_capture requests
+  useEffect(() => {
+    if (!window.deepsteve?.onScreenshotCaptureRequest) return;
+    return window.deepsteve.onScreenshotCaptureRequest(async (req) => {
+      const { requestId, selector } = req;
+      try {
+        const el = parent.document.querySelector(selector);
+        if (!el) {
+          await fetch('/api/screenshots/result', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ requestId, error: `Element not found: ${selector}` }),
+          });
+          return;
+        }
+        const dataUrl = await window.modernScreenshot.domToPng(el);
+        setImageDataUrl(dataUrl);
+        await fetch('/api/screenshots/result', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ requestId, dataUrl }),
+        });
+      } catch (e) {
+        await fetch('/api/screenshots/result', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ requestId, error: e.message }),
+        });
+      }
+    });
+  }, []);
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100vh' }}>

@@ -520,6 +520,12 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
           setTimeout(() => processedBrowserRequests.delete(msg.requestId), 15000);
           ModManager.notifyBrowserConsoleRequest(msg);
         }
+      } else if (msg.type === 'screenshot-capture-request') {
+        if (!processedBrowserRequests.has(msg.requestId)) {
+          processedBrowserRequests.add(msg.requestId);
+          setTimeout(() => processedBrowserRequests.delete(msg.requestId), 60000);
+          ModManager.notifyScreenshotCaptureRequest(msg);
+        }
       }
     } catch (err) {
       console.error('Error handling control message:', err);

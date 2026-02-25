@@ -38,6 +38,7 @@ let panelTabs = new Map();       // modId → tab button element
 let taskCallbacks = [];          // [{modId, cb}] — callbacks for task broadcasts
 let browserEvalCallbacks = [];   // [{modId, cb}] — callbacks for browser-eval-request
 let browserConsoleCallbacks = []; // [{modId, cb}] — callbacks for browser-console-request
+let screenshotCaptureCallbacks = []; // [{modId, cb}] — callbacks for screenshot-capture-request
 let deepsteveVersion = null;   // set from /api/mods response
 let panelWidth = 360;
 const MIN_PANEL_WIDTH = 200;
@@ -584,6 +585,7 @@ function _unloadPanelMod(modId) {
   taskCallbacks = taskCallbacks.filter(e => e.modId !== modId);
   browserEvalCallbacks = browserEvalCallbacks.filter(e => e.modId !== modId);
   browserConsoleCallbacks = browserConsoleCallbacks.filter(e => e.modId !== modId);
+  screenshotCaptureCallbacks = screenshotCaptureCallbacks.filter(e => e.modId !== modId);
   settingsCallbacks = settingsCallbacks.filter(e => e.modId !== modId);
   sessionCallbacks = sessionCallbacks.filter(e => e.modId !== modId);
 
@@ -798,6 +800,15 @@ function notifyBrowserConsoleRequest(req) {
 }
 
 /**
+ * Notify panel mods of a screenshot-capture request (called from app.js on WS broadcast).
+ */
+function notifyScreenshotCaptureRequest(req) {
+  for (const entry of screenshotCaptureCallbacks) {
+    try { entry.cb(req); } catch (e) { console.error('Screenshot capture callback error:', e); }
+  }
+}
+
+/**
  * Check if the mod view is currently visible.
  */
 function isModViewVisible() {
@@ -881,6 +892,13 @@ function _injectBridgeAPI(iframeEl, modId) {
           browserConsoleCallbacks = browserConsoleCallbacks.filter(e => e !== entry);
         };
       },
+      onScreenshotCaptureRequest(cb) {
+        const entry = { modId, cb };
+        screenshotCaptureCallbacks.push(entry);
+        return () => {
+          screenshotCaptureCallbacks = screenshotCaptureCallbacks.filter(e => e !== entry);
+        };
+      },
     };
   } catch (e) {
     console.error('Failed to inject bridge API:', e);
@@ -901,6 +919,7 @@ function handleModChanged(modId) {
     taskCallbacks = taskCallbacks.filter(e => e.modId !== modId);
     browserEvalCallbacks = browserEvalCallbacks.filter(e => e.modId !== modId);
     browserConsoleCallbacks = browserConsoleCallbacks.filter(e => e.modId !== modId);
+    screenshotCaptureCallbacks = screenshotCaptureCallbacks.filter(e => e.modId !== modId);
     settingsCallbacks = settingsCallbacks.filter(e => e.modId !== modId);
     sessionCallbacks = sessionCallbacks.filter(e => e.modId !== modId);
 
@@ -917,6 +936,7 @@ export const ModManager = {
   notifyTasksChanged,
   notifyBrowserEvalRequest,
   notifyBrowserConsoleRequest,
+  notifyScreenshotCaptureRequest,
   isModViewVisible,
   isModActive,
   handleModChanged,
