@@ -277,11 +277,13 @@ async function refreshSessionsDropdown() {
 const settingsBtn = document.getElementById('settings-btn');
 
 settingsBtn?.addEventListener('click', async () => {
-  const [settingsData, themesData, versionData, defaultsData] = await Promise.all([
+  const [settingsData, themesData, versionData, defaultsData, engineData, tmuxCheck] = await Promise.all([
     fetch('/api/settings').then(r => r.json()),
     fetch('/api/themes').then(r => r.json()),
     fetch('/api/version').then(r => r.json()).catch(() => ({ current: '?', latest: null, updateAvailable: false })),
-    fetch('/api/settings/defaults').then(r => r.json()).catch(() => ({}))
+    fetch('/api/settings/defaults').then(r => r.json()).catch(() => ({})),
+    fetch('/api/engine').then(r => r.json()).catch(() => ({ current: 'pty', configured: 'pty' })),
+    fetch('/api/engine/tmux-check').then(r => r.json()).catch(() => ({ available: false, version: null }))
   ]);
   const currentProfile = settingsData.shellProfile || '~/.zshrc';
   const currentMaxTitle = settingsData.maxIssueTitleLength || 25;
@@ -289,6 +291,8 @@ settingsBtn?.addEventListener('click', async () => {
   const currentWandTemplate = settingsData.wandPromptTemplate || defaultsData.wandPromptTemplate || '';
   const themes = themesData.themes || [];
   const activeTheme = themesData.active || '';
+  const currentEngine = engineData.configured || 'pty';
+  const runningEngine = engineData.current || 'pty';
 
   const themeOptions = ['<option value="">Default</option>']
     .concat(themes.map(t => `<option value="${escapeHtml(t)}" ${t === activeTheme ? 'selected' : ''}>${escapeHtml(t)}</option>`))
@@ -323,6 +327,24 @@ settingsBtn?.addEventListener('click', async () => {
           Place .css files in ~/.deepsteve/themes/ to add themes.
         </p>
         <select class="theme-select" id="theme-select">${themeOptions}</select>
+      </div>
+      <div class="settings-section">
+        <h3>Engine</h3>
+        <p style="font-size: 13px; color: var(--ds-text-secondary); margin-bottom: 8px;">
+          Backend for running Claude Code sessions.
+        </p>
+        <div class="settings-option">
+          <input type="radio" name="engine" id="engine-pty" value="pty" ${currentEngine === 'pty' ? 'checked' : ''}>
+          <label for="engine-pty">node-pty (default)</label>
+        </div>
+        <div class="settings-option">
+          <input type="radio" name="engine" id="engine-tmux" value="tmux" ${currentEngine === 'tmux' ? 'checked' : ''} ${!tmuxCheck.available ? 'disabled' : ''}>
+          <label for="engine-tmux" style="${!tmuxCheck.available ? 'opacity: 0.5;' : ''}">tmux${tmuxCheck.available ? ` (${escapeHtml(tmuxCheck.version)})` : ''}</label>
+        </div>
+        ${!tmuxCheck.available ? '<p style="font-size: 12px; color: var(--ds-text-secondary); margin-top: 4px;">tmux is not installed. Install it with <code>brew install tmux</code> to enable this option.</p>' : ''}
+        <div id="engine-restart-warning" style="display: none; margin-top: 8px; padding: 6px 10px; background: rgba(255, 180, 0, 0.15); border: 1px solid rgba(255, 180, 0, 0.3); border-radius: 4px; font-size: 12px; color: var(--ds-text-primary);">
+          Restart required to switch engine.
+        </div>
       </div>
       <div class="settings-section">
         <h3>Issue Title Length</h3>
@@ -376,6 +398,18 @@ settingsBtn?.addEventListener('click', async () => {
   });
   customInput.disabled = overlay.querySelector('#profile-custom:checked') === null;
 
+  // Engine radio: show restart warning when configured differs from running
+  const restartWarning = overlay.querySelector('#engine-restart-warning');
+  overlay.querySelectorAll('input[name="engine"]').forEach(radio => {
+    radio.addEventListener('change', () => {
+      restartWarning.style.display = radio.value !== runningEngine ? 'block' : 'none';
+    });
+  });
+  // Show warning on load if already mismatched
+  if (currentEngine !== runningEngine) {
+    restartWarning.style.display = 'block';
+  }
+
   // Live preview: apply theme immediately on select change
   const themeSelect = overlay.querySelector('#theme-select');
   themeSelect.addEventListener('change', async () => {
@@ -402,10 +436,11 @@ settingsBtn?.addEventListener('click', async () => {
     const newMaxTitle = Number(overlay.querySelector('#max-issue-title-length').value) || 25;
     const wandPlanMode = overlay.querySelector('#wand-plan-mode').checked;
     const wandPromptTemplate = overlay.querySelector('#wand-prompt-template').value;
+    const selectedEngine = overlay.querySelector('input[name="engine"]:checked').value;
     await fetch('/api/settings', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ shellProfile, maxIssueTitleLength: newMaxTitle, wandPlanMode, wandPromptTemplate })
+      body: JSON.stringify({ shellProfile, maxIssueTitleLength: newMaxTitle, wandPlanMode, wandPromptTemplate, engine: selectedEngine })
     });
     maxIssueTitleLength = Math.max(10, Math.min(200, newMaxTitle));
     overlay.remove();

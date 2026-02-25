@@ -1,5 +1,5 @@
 const express = require('express');
-const pty = require('node-pty');
+const { createEngine } = require('./engines/engine');
 const { WebSocketServer } = require('ws');
 const { randomUUID } = require('crypto');
 const { execSync } = require('child_process');
@@ -143,15 +143,18 @@ Please read the issue carefully, understand the codebase context, and implement 
 };
 
 // Load settings
-let settings = { shellProfile: '~/.zshrc', maxIssueTitleLength: 25, ...SETTINGS_DEFAULTS };
+let settings = { shellProfile: '~/.zshrc', maxIssueTitleLength: 25, engine: 'pty', ...SETTINGS_DEFAULTS };
 try {
   if (fs.existsSync(SETTINGS_FILE)) {
     settings = { ...settings, ...JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8')) };
-    log(`Loaded settings: shellProfile=${settings.shellProfile}`);
+    log(`Loaded settings: shellProfile=${settings.shellProfile}, engine=${settings.engine}`);
   }
 } catch (e) {
   console.error('Failed to load settings:', e.message);
 }
+
+// Create engine instance (pty or tmux, with fallback)
+const engine = createEngine(settings, log);
 
 function saveSettings() {
   try {
@@ -216,19 +219,6 @@ function broadcastTheme(name, css) {
       client.send(msg);
     }
   }
-}
-
-// Spawn claude with full login shell environment (like iTerm does)
-function spawnClaude(args, cwd, { cols = 120, rows = 40 } = {}) {
-  // Use login shell (-l) which properly sources /etc/zprofile, ~/.zprofile, ~/.zshrc
-  const quoted = args.map(a => `'${a.replace(/'/g, "'\\''")}'`).join(' ');
-  return pty.spawn('zsh', ['-l', '-c', `claude ${quoted}`], {
-    name: 'xterm-256color',
-    cols,
-    rows,
-    cwd,
-    env: process.env
-  });
 }
 
 function validateWorktree(value) {
@@ -407,11 +397,20 @@ async function shutdown(signal) {
 
   const entries = [...shells.entries()];
   if (entries.length === 0) {
+    engine.dispose();
     log('No active shells, exiting');
     process.exit(0);
   }
 
-  // Phase 1: Gracefully exit all shells so Claude persists sessions.
+  // tmux engine: sessions survive daemon restarts — just detach and exit
+  if (engine.name === 'tmux') {
+    log(`tmux engine: detaching ${entries.length} sessions (they persist in tmux)`);
+    engine.dispose();
+    log('Shutdown complete');
+    process.exit(0);
+  }
+
+  // pty engine: gracefully exit all shells so Claude persists sessions.
   // Only send /exit when Claude is at the input prompt (waitingForInput).
   // If busy, Ctrl+C first to interrupt, then /exit once it returns to prompt.
   log(`Gracefully exiting ${entries.length} shells...`);
@@ -521,8 +520,29 @@ app.post('/api/settings', (req, res) => {
     settings.wandPromptTemplate = String(req.body.wandPromptTemplate);
     log(`Settings updated: wandPromptTemplate (${settings.wandPromptTemplate.length} chars)`);
   }
+  if (req.body.engine !== undefined) {
+    const valid = ['pty', 'tmux'];
+    if (valid.includes(req.body.engine)) {
+      settings.engine = req.body.engine;
+      log(`Settings updated: engine=${settings.engine} (restart required to take effect)`);
+    }
+  }
   saveSettings();
   res.json(settings);
+});
+
+// --- Engine info ---
+app.get('/api/engine', (req, res) => {
+  res.json({ current: engine.name, configured: settings.engine || 'pty' });
+});
+
+app.get('/api/engine/tmux-check', (req, res) => {
+  try {
+    const { checkTmux } = require('./engines/tmux-engine');
+    res.json(checkTmux());
+  } catch {
+    res.json({ available: false, version: null });
+  }
 });
 
 app.get('/api/themes', (req, res) => {
@@ -718,43 +738,56 @@ wss.on('connection', (ws, req) => {
       const savedWorktree = validateWorktree(restored.worktree);
       log(`Restoring session ${id} in ${cwd} (claude session: ${claudeSessionId}, worktree: ${savedWorktree || 'none'})`);
       const ptySize = { cols: initialCols, rows: initialRows };
-      const resumeArgs = claudeSessionId
-        ? ['--resume', claudeSessionId]
-        : ['-c'];
-      if (savedWorktree) resumeArgs.push('--worktree', savedWorktree);
-      const shell = spawnClaude(resumeArgs, cwd, ptySize);
-      const startTime = Date.now();
       const restoredName = name || restored.name || null;
-      shells.set(id, { shell, clients: new Set(), cwd, claudeSessionId, worktree: savedWorktree, name: restoredName, restored: true, waitingForInput: false, lastActivity: Date.now() });
-      wireShellOutput(id);
-      shell.onExit(() => {
-        if (shuttingDown) return;  // Don't overwrite state file during shutdown
-        const elapsed = Date.now() - startTime;
-        if (elapsed < 5000 && claudeSessionId) {
-          // --resume failed quickly, fall back to continuing last conversation
-          log(`Session ${id} exited after ${elapsed}ms, --resume likely failed. Falling back to -c`);
-          const newClaudeSessionId = randomUUID();
-          const entry = shells.get(id);
-          const fallbackArgs = ['-c', '--fork-session', '--session-id', newClaudeSessionId];
-          if (entry && entry.worktree) fallbackArgs.push('--worktree', entry.worktree);
-          const fallbackShell = spawnClaude(fallbackArgs, cwd, { cols: initialCols, rows: initialRows });
-          if (entry) {
-            entry.shell = fallbackShell;
-            entry.claudeSessionId = newClaudeSessionId;
-            entry.killed = false;
-            entry.scrollback = [];
-            entry.scrollbackSize = 0;
-            wireShellOutput(id);
-            fallbackShell.onExit(() => { if (!shuttingDown) { shells.delete(id); saveState(); } });
+
+      // For tmux engine, try to reattach to a surviving tmux session first
+      const reattached = engine.reattach(id, ptySize);
+      if (reattached) {
+        log(`Reattached to surviving tmux session ${id}`);
+        shells.set(id, { shell: reattached, clients: new Set(), cwd, claudeSessionId, worktree: savedWorktree, name: restoredName, restored: true, waitingForInput: false, lastActivity: Date.now() });
+        wireShellOutput(id);
+        reattached.onExit(() => { if (!shuttingDown) { shells.delete(id); saveState(); } });
+        delete savedState[id];
+        saveState();
+      } else {
+        // Spawn fresh session with --resume
+        const resumeArgs = claudeSessionId
+          ? ['--resume', claudeSessionId]
+          : ['-c'];
+        if (savedWorktree) resumeArgs.push('--worktree', savedWorktree);
+        const shell = engine.spawn(id, resumeArgs, cwd, ptySize);
+        const startTime = Date.now();
+        shells.set(id, { shell, clients: new Set(), cwd, claudeSessionId, worktree: savedWorktree, name: restoredName, restored: true, waitingForInput: false, lastActivity: Date.now() });
+        wireShellOutput(id);
+        shell.onExit(() => {
+          if (shuttingDown) return;  // Don't overwrite state file during shutdown
+          const elapsed = Date.now() - startTime;
+          if (elapsed < 5000 && claudeSessionId) {
+            // --resume failed quickly, fall back to continuing last conversation
+            log(`Session ${id} exited after ${elapsed}ms, --resume likely failed. Falling back to -c`);
+            const newClaudeSessionId = randomUUID();
+            const entry = shells.get(id);
+            const fallbackArgs = ['-c', '--fork-session', '--session-id', newClaudeSessionId];
+            if (entry && entry.worktree) fallbackArgs.push('--worktree', entry.worktree);
+            const fallbackShell = engine.spawn(id, fallbackArgs, cwd, { cols: initialCols, rows: initialRows });
+            if (entry) {
+              entry.shell = fallbackShell;
+              entry.claudeSessionId = newClaudeSessionId;
+              entry.killed = false;
+              entry.scrollback = [];
+              entry.scrollbackSize = 0;
+              wireShellOutput(id);
+              fallbackShell.onExit(() => { if (!shuttingDown) { shells.delete(id); saveState(); } });
+              saveState();
+            }
+          } else {
+            shells.delete(id);
             saveState();
           }
-        } else {
-          shells.delete(id);
-          saveState();
-        }
-      });
-      delete savedState[id];
-      saveState();
+        });
+        delete savedState[id];
+        saveState();
+      }
     } else {
       ws.send(JSON.stringify({ type: 'gone', id }));
       ws.close();
@@ -770,7 +803,7 @@ wss.on('connection', (ws, req) => {
     if (planMode) claudeArgs.push('--permission-mode', 'plan');
     if (worktree) claudeArgs.push('--worktree', worktree);
     log(`[WS] Creating NEW shell: oldId=${oldId}, newId=${id}, claudeSession=${claudeSessionId}, worktree=${worktree || 'none'}, cwd=${cwd}`);
-    const shell = spawnClaude(claudeArgs, cwd, { cols: initialCols, rows: initialRows });
+    const shell = engine.spawn(id, claudeArgs, cwd, { cols: initialCols, rows: initialRows });
     shells.set(id, { shell, clients: new Set(), cwd, claudeSessionId, worktree: worktree || null, name: name || null, waitingForInput: false, lastActivity: Date.now() });
     wireShellOutput(id);
     shell.onExit(() => { if (!shuttingDown) { shells.delete(id); saveState(); } });

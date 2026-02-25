@@ -26,6 +26,8 @@ cd "$SCRIPT_DIR"
 cp package.json ~/.deepsteve/
 cp server.js ~/.deepsteve/
 cp mcp-server.js ~/.deepsteve/
+mkdir -p ~/.deepsteve/engines
+cp engines/*.js ~/.deepsteve/engines/
 cp -r public/* ~/.deepsteve/public/
 mkdir -p ~/.deepsteve/themes
 cp -n themes/*.css ~/.deepsteve/themes/ 2>/dev/null || true
