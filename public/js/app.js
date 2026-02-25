@@ -468,7 +468,7 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
         if (!existingSession) {
           // Use client-provided name, or fall back to server-persisted name
           const sessionName = opts.name || msg.name;
-          initTerminal(msg.id, ws, cwd, sessionName, { hasScrollback, pendingData });
+          initTerminal(msg.id, ws, cwd, sessionName, { hasScrollback, pendingData, restoreActive: opts.restoreActive });
           if (opts.initialPrompt) {
             ws.sendJSON({ type: 'initialPrompt', text: opts.initialPrompt });
           }
@@ -543,7 +543,7 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
 /**
  * Initialize a terminal after WebSocket connection is established
  */
-function initTerminal(id, ws, cwd, initialName, { hasScrollback = false, pendingData = [] } = {}) {
+function initTerminal(id, ws, cwd, initialName, { hasScrollback = false, pendingData = [], restoreActive = false } = {}) {
   const container = document.createElement('div');
   container.className = 'terminal-container';
   container.id = 'term-' + id;
@@ -579,11 +579,15 @@ function initTerminal(id, ws, cwd, initialName, { hasScrollback = false, pending
   TabManager.addTab(id, name, tabCallbacks);
   updateEmptyState();
 
-  // If a previously active tab is saved (e.g. across refresh), prefer it over
-  // the just-created session. This ensures the user's last-viewed tab is restored.
-  const savedActiveId = ActiveTab.get();
-  if (savedActiveId && savedActiveId !== id && sessions.has(savedActiveId)) {
-    switchTo(savedActiveId);
+  // On restore (page refresh), prefer the previously active tab over the
+  // just-created session. For new sessions, always switch to the new tab.
+  if (restoreActive) {
+    const savedActiveId = ActiveTab.get();
+    if (savedActiveId && savedActiveId !== id && sessions.has(savedActiveId)) {
+      switchTo(savedActiveId);
+    } else {
+      switchTo(id);
+    }
   } else {
     switchTo(id);
   }
@@ -1031,7 +1035,7 @@ async function init() {
     console.log('[init] Restoring from TabSessions');
     for (const { id, cwd } of tabSessions) {
       console.log('[init] Restoring session:', id, cwd);
-      createSession(cwd, id);
+      createSession(cwd, id, false, { restoreActive: true });
     }
   } else if (isExistingTab) {
     // Existing tab but TabSessions is empty — try localStorage as fallback
@@ -1040,7 +1044,7 @@ async function init() {
     if (savedSessions.length > 0) {
       for (const { id, cwd } of savedSessions) {
         console.log('[init] Restoring session (fallback):', id, cwd);
-        createSession(cwd, id);
+        createSession(cwd, id, false, { restoreActive: true });
       }
     } else {
       console.log('[init] No saved sessions, prompting for new');
@@ -1055,7 +1059,7 @@ async function init() {
         TabSessions.add(session);
       }
       for (const { id, cwd } of legacySessions) {
-        createSession(cwd, id);
+        createSession(cwd, id, false, { restoreActive: true });
       }
     } else {
       // Check for orphaned windows
@@ -1071,7 +1075,7 @@ async function init() {
             TabSessions.add(sess);
           }
           for (const { id, cwd } of sessions) {
-            createSession(cwd, id);
+            createSession(cwd, id, false, { restoreActive: true });
           }
         } else {
           // Start fresh
