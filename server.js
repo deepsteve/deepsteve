@@ -53,6 +53,7 @@ app.use(express.static('public'));
 app.use('/mods', express.static('mods'));
 app.use((req, res, next) => {
   if (req.path === '/mcp') return next(); // MCP SDK parses its own body
+  if (req.path === '/api/screenshots/result') return express.json({ limit: '50mb' })(req, res, next);
   express.json()(req, res, next);
 });
 
