@@ -63,10 +63,17 @@ export function setupTerminalIO(term, ws, { onUserInput } = {}) {
     return true;
   });
 
-  // Auto-scroll to bottom on new output, unless user has scrolled up
+  // Auto-scroll to bottom on new output, unless user has scrolled up.
+  // programmaticScroll guard prevents scrollToBottom() from resetting
+  // userScrolledUp via the onScroll handler (which would defeat scroll lock).
   let userScrolledUp = false;
+  let programmaticScroll = false;
 
   term.onScroll(() => {
+    if (programmaticScroll) {
+      programmaticScroll = false;
+      return;
+    }
     const buf = term.buffer.active;
     const atBottom = buf.baseY <= buf.viewportY;
     userScrolledUp = !atBottom;
@@ -74,9 +81,18 @@ export function setupTerminalIO(term, ws, { onUserInput } = {}) {
 
   term.onWriteParsed(() => {
     if (!userScrolledUp) {
+      programmaticScroll = true;
       term.scrollToBottom();
     }
   });
+
+  return {
+    scrollToBottom() {
+      userScrolledUp = false;
+      programmaticScroll = true;
+      term.scrollToBottom();
+    }
+  };
 }
 
 export function fitTerminal(term, fit, ws) {
