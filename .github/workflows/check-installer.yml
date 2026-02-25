@@ -1,0 +1,27 @@
+name: Check installer
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  check:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate install.sh
+        run: ./release.sh
+
+      - name: Verify install.sh exists and is executable
+        run: |
+          test -s install.sh || { echo "install.sh is empty or missing"; exit 1; }
+          test -x install.sh || { echo "install.sh is not executable"; exit 1; }
+
+      - name: Check embedded package.json matches source
+        run: |
+          # Extract the embedded package.json from the generated installer
+          sed -n "/cat > \"\\\$INSTALL_DIR\/package.json\"/,/^DEEPSTEVE_FILE_EOF$/{/cat >/d;/^DEEPSTEVE_FILE_EOF$/d;p;}" install.sh > /tmp/embedded-package.json
+          diff package.json /tmp/embedded-package.json || { echo "Embedded package.json differs from source — regenerate install.sh with ./release.sh"; exit 1; }
