@@ -440,9 +440,20 @@ app.post('/api/themes/active', (req, res) => {
 // --- Mods system ---
 const MODS_DIR = path.join(__dirname, 'mods');
 
+// Compare two semver strings (major.minor.patch). Returns -1, 0, or 1.
+function compareSemver(a, b) {
+  const pa = a.split('.').map(Number);
+  const pb = b.split('.').map(Number);
+  for (let i = 0; i < 3; i++) {
+    if ((pa[i] || 0) < (pb[i] || 0)) return -1;
+    if ((pa[i] || 0) > (pb[i] || 0)) return 1;
+  }
+  return 0;
+}
+
 app.get('/api/mods', (req, res) => {
   try {
-    if (!fs.existsSync(MODS_DIR)) return res.json({ mods: [] });
+    if (!fs.existsSync(MODS_DIR)) return res.json({ mods: [], deepsteveVersion: pkg.version });
     const entries = fs.readdirSync(MODS_DIR, { withFileTypes: true });
     const mods = [];
     for (const entry of entries) {
@@ -450,12 +461,14 @@ app.get('/api/mods', (req, res) => {
       const manifestPath = path.join(MODS_DIR, entry.name, 'mod.json');
       try {
         const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
-        mods.push({ id: entry.name, ...manifest });
+        if (!manifest.version) continue; // version is required
+        const compatible = !manifest.minDeepsteveVersion || compareSemver(pkg.version, manifest.minDeepsteveVersion) >= 0;
+        mods.push({ id: entry.name, compatible, ...manifest });
       } catch { /* skip dirs without valid mod.json */ }
     }
-    res.json({ mods });
+    res.json({ mods, deepsteveVersion: pkg.version });
   } catch (e) {
-    res.json({ mods: [] });
+    res.json({ mods: [], deepsteveVersion: pkg.version });
   }
 });
 

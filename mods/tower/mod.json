@@ -1,5 +1,7 @@
 {
   "name": "Tower",
+  "version": "0.1.0",
+  "minDeepsteveVersion": "0.1.0",
   "description": "Pixel art skyscraper view of your Claude sessions",
   "entry": "index.html",
   "toolbar": {

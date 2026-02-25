@@ -367,6 +367,12 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
 .mod-settings-btn { background: transparent; border: none; color: var(--ds-text-secondary); cursor: pointer; font-size: 14px; padding: 2px 6px; border-radius: 3px; line-height: 1; flex-shrink: 0; }
 .mod-settings-btn:hover { background: var(--ds-bg-tertiary); color: var(--ds-text-primary); }
 
+/* Mod versioning */
+.mod-incompatible { opacity: 0.5; }
+.mod-incompatible input[type="checkbox"] { pointer-events: none; }
+.mod-version { color: var(--ds-text-secondary); }
+.mod-warning { font-size: 11px; color: var(--ds-accent-red); margin-top: 2px; }
+
 /* Mod settings modal */
 .mod-setting-item { display: flex; align-items: flex-start; gap: 10px; padding: 12px 0; border-bottom: 1px solid var(--ds-border); }
 .mod-setting-item:last-child { border-bottom: none; }
