@@ -311,6 +311,8 @@ async function shutdown(signal) {
     for (const ws of reloadClients) {
       try { ws.send(JSON.stringify({ type: 'reload' })); } catch {}
     }
+    // Give the reload message time to flush before tearing down connections
+    await new Promise((r) => setTimeout(r, 200));
   }
   stateFrozen = true;  // Prevent onExit/onClose handlers from overwriting state file
 
