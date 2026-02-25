@@ -194,6 +194,18 @@ function wireShellOutput(id) {
     while (e.scrollbackSize > SCROLLBACK_SIZE && e.scrollback.length > 1) {
       e.scrollbackSize -= e.scrollback.shift().length;
     }
+    // Detect claude --resume <UUID> in PTY output to track the actual session ID.
+    // Claude prints this line when a session exits (including /exit, /clear, shutdown).
+    // Strip ANSI escapes before matching so dim/bold wrappers don't interfere.
+    const plain = data.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '');
+    const resumeMatch = plain.match(/claude --resume ([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/);
+    if (resumeMatch) {
+      const newSessionId = resumeMatch[1];
+      if (newSessionId !== e.claudeSessionId) {
+        log(`Session ${id} claude session updated: ${e.claudeSessionId} → ${newSessionId}`);
+        e.claudeSessionId = newSessionId;
+      }
+    }
     e.clients.forEach((c) => c.send(data));
     if (data.includes('\x07') && !e.waitingForInput) {
       e.waitingForInput = true;
@@ -364,6 +376,22 @@ async function shutdown(signal) {
   const deadline = Date.now() + 8000;
   while (alive.size > 0 && Date.now() < deadline) {
     await new Promise(r => setTimeout(r, 200));
+  }
+
+  // Final state save: capture session IDs updated from /exit output during shutdown.
+  // This bypasses stateFrozen since it's the authoritative final snapshot.
+  {
+    const state = {};
+    for (const [sid, sentry] of shells) {
+      state[sid] = { cwd: sentry.cwd, claudeSessionId: sentry.claudeSessionId, worktree: sentry.worktree || null, name: sentry.name || null, lastActivity: sentry.lastActivity || null };
+    }
+    const merged = { ...savedState, ...state };
+    try {
+      fs.writeFileSync(STATE_FILE, JSON.stringify(merged, null, 2));
+      log(`Final state save: ${Object.keys(merged).length} sessions`);
+    } catch (e) {
+      console.error('Failed final state save:', e.message);
+    }
   }
 
   if (alive.size === 0) {
