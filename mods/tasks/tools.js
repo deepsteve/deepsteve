@@ -155,6 +155,20 @@ function registerRoutes(app, context) {
     res.json({ task });
   });
 
+  app.post('/api/tasks/:id/description', (req, res) => {
+    const id = parseInt(req.params.id);
+    const { description } = req.body;
+    const task = tasks.find(t => t.id === id);
+    if (!task) return res.status(404).json({ error: 'Task not found' });
+    if (typeof description !== 'string') {
+      return res.status(400).json({ error: 'Invalid description' });
+    }
+    task.description = description;
+    saveTasks();
+    broadcastTasks();
+    res.json({ task });
+  });
+
   app.delete('/api/tasks/:id', (req, res) => {
     const id = parseInt(req.params.id);
     const idx = tasks.findIndex(t => t.id === id);

@@ -8,8 +8,69 @@ const PRIORITY_COLORS = {
 
 const STATUS_OPTIONS = ['all', 'pending', 'in-progress', 'done'];
 
-function TaskItem({ task, onToggle, onDelete }) {
+function renderDescription(description, onCheckToggle) {
+  if (!description) return null;
+  const lines = description.split('\n');
+  const checklistRe = /^- \[([ xX])\] (.*)$/;
+  const hasChecklist = lines.some(l => checklistRe.test(l));
+
+  if (!hasChecklist) {
+    return (
+      <div style={{ fontSize: 12, color: '#8b949e', marginTop: 3, wordBreak: 'break-word' }}>
+        {description}
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ fontSize: 12, color: '#8b949e', marginTop: 3, wordBreak: 'break-word' }}>
+      {lines.map((line, i) => {
+        const m = line.match(checklistRe);
+        if (!m) {
+          return line ? <div key={i}>{line}</div> : <div key={i} style={{ height: 4 }} />;
+        }
+        const checked = m[1] !== ' ';
+        const text = m[2];
+        return (
+          <label key={i} style={{
+            display: 'flex',
+            alignItems: 'flex-start',
+            gap: 5,
+            padding: '1px 0',
+            cursor: 'pointer',
+          }}>
+            <input
+              type="checkbox"
+              checked={checked}
+              onChange={() => onCheckToggle(i)}
+              style={{ marginTop: 2, accentColor: '#238636', cursor: 'pointer', flexShrink: 0 }}
+            />
+            <span style={{
+              textDecoration: checked ? 'line-through' : 'none',
+              opacity: checked ? 0.6 : 1,
+            }}>
+              {text}
+            </span>
+          </label>
+        );
+      })}
+    </div>
+  );
+}
+
+function TaskItem({ task, onToggle, onDelete, onDescriptionUpdate }) {
   const isDone = task.status === 'done';
+
+  const handleCheckToggle = useCallback((lineIndex) => {
+    const lines = task.description.split('\n');
+    const checklistRe = /^- \[([ xX])\] (.*)$/;
+    const m = lines[lineIndex].match(checklistRe);
+    if (!m) return;
+    const checked = m[1] !== ' ';
+    lines[lineIndex] = `- [${checked ? ' ' : 'x'}] ${m[2]}`;
+    onDescriptionUpdate(task.id, lines.join('\n'));
+  }, [task.id, task.description, onDescriptionUpdate]);
+
   return (
     <div style={{
       padding: '10px 12px',
@@ -34,11 +95,7 @@ function TaskItem({ task, onToggle, onDelete }) {
         }}>
           {task.title}
         </div>
-        {task.description && (
-          <div style={{ fontSize: 12, color: '#8b949e', marginTop: 3, wordBreak: 'break-word' }}>
-            {task.description}
-          </div>
-        )}
+        {renderDescription(task.description, handleCheckToggle)}
         <div style={{ display: 'flex', gap: 6, marginTop: 4, flexWrap: 'wrap' }}>
           {task.priority && (
             <span style={{
@@ -130,6 +187,18 @@ function TasksPanel() {
       await fetch(`/api/tasks/${id}`, { method: 'DELETE' });
     } catch (e) {
       console.error('Failed to delete task:', e);
+    }
+  }, []);
+
+  const updateDescription = useCallback(async (id, description) => {
+    try {
+      await fetch(`/api/tasks/${id}/description`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ description }),
+      });
+    } catch (e) {
+      console.error('Failed to update description:', e);
     }
   }, []);
 
@@ -225,6 +294,7 @@ function TasksPanel() {
               task={task}
               onToggle={toggleStatus}
               onDelete={deleteTask}
+              onDescriptionUpdate={updateDescription}
             />
           ))
         )}
