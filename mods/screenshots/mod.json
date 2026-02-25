@@ -1,0 +1,10 @@
+{
+  "name": "Screenshots",
+  "version": "0.1.0",
+  "minDeepsteveVersion": "0.1.0",
+  "description": "Capture terminal screenshots as PNG images",
+  "entry": "index.html",
+  "display": "panel",
+  "panel": { "position": "right", "defaultWidth": 360, "minWidth": 200 },
+  "toolbar": { "label": "Screenshots" }
+}
