@@ -942,6 +942,9 @@ async function init() {
   initLiveReload({
     onMessage: (msg) => {
       if (msg.type === 'theme') applyTheme(msg.css || '');
+    },
+    onReloadPending: () => {
+      document.querySelectorAll('.terminal-container').forEach(el => el.classList.add('refreshing'));
     }
   });
 

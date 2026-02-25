@@ -6,7 +6,7 @@
  * On normal restart, the WS drops and we silently reconnect without refreshing.
  */
 
-export function initLiveReload({ onMessage } = {}) {
+export function initLiveReload({ onMessage, onReloadPending } = {}) {
   let ws;
   let shouldReload = false;
   let intentionallyClosed = false;
@@ -20,6 +20,7 @@ export function initLiveReload({ onMessage } = {}) {
         if (msg.type === 'reload') {
           shouldReload = true;
           window.__deepsteveReloadPending = true;
+          if (onReloadPending) onReloadPending();
         } else if (onMessage) {
           onMessage(msg);
         }
