@@ -6,9 +6,38 @@ const { execSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const net = require('net');
 const { initMCP } = require('./mcp-server');
 
 const PORT = process.env.PORT || 3000;
+
+function parseBindAddress() {
+  const args = process.argv.slice(2);
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === '--bind' && args[i + 1]) return args[i + 1];
+    if (args[i].startsWith('--bind=')) return args[i].slice(7);
+  }
+  return null;
+}
+
+const BIND = parseBindAddress() || process.env.DEEPSTEVE_BIND || '127.0.0.1';
+
+if (!net.isIP(BIND)) {
+  console.error(`Error: '${BIND}' is not a valid IP address. Use --bind <address> with a valid IPv4 or IPv6 address.`);
+  process.exit(1);
+}
+
+if (BIND !== '127.0.0.1' && BIND !== '::1') {
+  console.error('');
+  console.error('  ╔══════════════════════════════════════════════════════════════╗');
+  console.error('  ║  WARNING: Binding to ' + BIND.padEnd(39) + '║');
+  console.error('  ║                                                              ║');
+  console.error('  ║  deepsteve will be accessible from other machines on your    ║');
+  console.error('  ║  network. There is NO authentication — anyone who can reach  ║');
+  console.error('  ║  this address can control your Claude Code sessions.         ║');
+  console.error('  ╚══════════════════════════════════════════════════════════════╝');
+  console.error('');
+}
 const SCROLLBACK_SIZE = 100 * 1024; // 100KB circular buffer per shell
 const RELOAD_FLAG = path.join(os.homedir(), '.deepsteve', '.reload');
 const reloadClients = new Set(); // WebSocket connections for live-reload
@@ -592,7 +621,9 @@ app.get('/api/issues', (req, res) => {
   }
 });
 
-const server = app.listen(PORT, '127.0.0.1');
+const server = app.listen(PORT, BIND, () => {
+  log(`Server listening on ${BIND}:${PORT}`);
+});
 const shells = new Map();
 const wss = new WebSocketServer({ server });
 
