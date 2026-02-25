@@ -550,7 +550,7 @@ function initTerminal(id, ws, cwd, initialName, { hasScrollback = false, pending
   document.getElementById('terminals').appendChild(container);
 
   const { term, fit } = createTerminal(container);
-  setupTerminalIO(term, ws, {
+  const scrollControl = setupTerminalIO(term, ws, {
     onUserInput: () => clearNotification(id)
   });
 
@@ -561,7 +561,7 @@ function initTerminal(id, ws, cwd, initialName, { hasScrollback = false, pending
   const name = savedSession?.name || initialName || getDefaultTabName(cwd);
 
   // Store session in memory
-  sessions.set(id, { term, fit, ws, container, cwd, name, waitingForInput: false });
+  sessions.set(id, { term, fit, ws, container, cwd, name, waitingForInput: false, scrollControl });
 
   // Flush any buffered data that arrived before the terminal was created
   for (const data of pendingData) {
@@ -603,7 +603,7 @@ function initTerminal(id, ws, cwd, initialName, { hasScrollback = false, pending
   // One-time init after first fit (which happens in switchTo's rAF above)
   requestAnimationFrame(() => {
     if (hasScrollback) {
-      term.scrollToBottom();
+      scrollControl.scrollToBottom();
       // Hide the host terminal cursor — Claude Code renders its own cursor
       // via Ink. The original DECTCEM hide sequence from session start may
       // have been trimmed from the scrollback circular buffer.
@@ -651,7 +651,7 @@ function switchTo(id) {
 
     requestAnimationFrame(() => {
       fitTerminal(session.term, session.fit, session.ws);
-      session.term.scrollToBottom();
+      session.scrollControl.scrollToBottom();
       session.term.focus();
     });
   }
