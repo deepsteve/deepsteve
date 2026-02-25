@@ -116,6 +116,12 @@ export function setupTerminalIO(term, ws, { onUserInput, container } = {}) {
     scrollToBottom,
     setSuppressAutoScroll(value) {
       suppressAutoScroll = value;
+    },
+    /** Re-sync viewport to bottom if user hasn't intentionally scrolled up. */
+    nudgeToBottom() {
+      if (!userScrolledUp) {
+        term.scrollToBottom();
+      }
     }
   };
 }
