@@ -64,24 +64,23 @@ export function setupTerminalIO(term, ws, { onUserInput } = {}) {
   });
 
   // Auto-scroll to bottom on new output, unless user has scrolled up.
-  // programmaticScroll guard prevents scrollToBottom() from resetting
-  // userScrolledUp via the onScroll handler (which would defeat scroll lock).
+  // We track user scroll intent via wheel events rather than onScroll,
+  // because Ink (Claude Code's UI) periodically clears and re-renders
+  // the screen, resetting the scroll buffer. Those buffer resets fire
+  // onScroll with atBottom=true, which would incorrectly clear the
+  // userScrolledUp flag. Wheel events only fire from actual user input.
   let userScrolledUp = false;
-  let programmaticScroll = false;
 
-  term.onScroll(() => {
-    if (programmaticScroll) {
-      programmaticScroll = false;
-      return;
-    }
-    const buf = term.buffer.active;
-    const atBottom = buf.baseY <= buf.viewportY;
-    userScrolledUp = !atBottom;
-  });
+  term.element.addEventListener('wheel', () => {
+    requestAnimationFrame(() => {
+      const buf = term.buffer.active;
+      const atBottom = buf.baseY <= buf.viewportY;
+      userScrolledUp = !atBottom;
+    });
+  }, { passive: true });
 
   term.onWriteParsed(() => {
     if (!userScrolledUp) {
-      programmaticScroll = true;
       term.scrollToBottom();
     }
   });
@@ -89,7 +88,6 @@ export function setupTerminalIO(term, ws, { onUserInput } = {}) {
   return {
     scrollToBottom() {
       userScrolledUp = false;
-      programmaticScroll = true;
       term.scrollToBottom();
     }
   };
