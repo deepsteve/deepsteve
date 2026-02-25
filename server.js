@@ -168,28 +168,15 @@ function wireShellOutput(id) {
       const stateMsg = JSON.stringify({ type: 'state', waiting: true });
       e.clients.forEach((c) => c.send(stateMsg));
 
-      // Step 2 of plan mode: /plan was sent, now send the actual prompt
-      if (e.pendingPlanPrompt) {
-        const prompt = e.pendingPlanPrompt;
-        e.pendingPlanPrompt = null;
-        e.waitingForInput = false;
-        setTimeout(() => submitToShell(e.shell, prompt), 500);
-        return;
-      }
-
       if (e.initialPrompt) {
         const prompt = e.initialPrompt;
         const planMode = e.planMode || false;
         e.initialPrompt = null;
         e.planMode = false;
         e.waitingForInput = false;
-        if (planMode) {
-          // Step 1: send /plan first, then the prompt on the next BEL
-          e.pendingPlanPrompt = prompt;
-          setTimeout(() => submitToShell(e.shell, '/plan'), 500);
-        } else {
-          setTimeout(() => submitToShell(e.shell, prompt), 500);
-        }
+        // Prepend "/plan " to enter plan mode in a single submission
+        const text = planMode ? '/plan ' + prompt : prompt;
+        setTimeout(() => submitToShell(e.shell, text), 500);
       }
     }
   });
