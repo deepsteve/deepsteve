@@ -211,13 +211,13 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
 #new-btn:hover { background: var(--ds-accent-green-hover); }
 #new-btn:active { background: var(--ds-accent-green-active); }
 
-/* Wand button — dark background for emoji contrast */
-#wand-btn { padding: 4px 10px; background: #1e293b; border: none; color: var(--ds-text-primary); border-radius: 4px; cursor: pointer; font-size: 13px; margin-left: 4px; user-select: none; flex-shrink: 0; }
-#wand-btn:hover { background: #2a3a50; }
-#wand-btn:active { background: #162032; }
+/* Issue picker button — dark background for emoji contrast */
+#issue-btn { padding: 4px 10px; background: #1a1a2e; border: none; color: var(--ds-text-primary); border-radius: 4px; cursor: pointer; font-size: 13px; margin-left: 4px; user-select: none; flex-shrink: 0; }
+#issue-btn:hover { background: #2a2a44; }
+#issue-btn:active { background: #121222; }
 
-/* Vertical layout wand button */
-#app-container.vertical-layout #wand-btn { width: 100%; margin: 4px 0 0 0; }
+/* Vertical layout issue button */
+#app-container.vertical-layout #issue-btn { width: 100%; margin: 4px 0 0 0; }
 
 /* Issue picker */
 .issue-list { background: var(--ds-bg-primary); border: 1px solid var(--ds-border); border-radius: 4px; max-height: 360px; overflow-y: auto; margin-bottom: 16px; }

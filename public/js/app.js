@@ -1052,9 +1052,9 @@ async function init() {
     if (!holdMenuOpen) clearTimeout(holdTimer);
   });
 
-  // Wire up wand button
-  const wandBtn = document.getElementById('wand-btn');
-  if (wandBtn) wandBtn.onclick = showIssuePicker;
+  // Wire up issue button
+  const issueBtn = document.getElementById('issue-btn');
+  if (issueBtn) issueBtn.onclick = showIssuePicker;
 
   // Check if this is an existing tab BEFORE starting heartbeat (which creates window ID)
   const isExistingTab = WindowManager.hasExistingWindowId();

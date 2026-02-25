@@ -624,9 +624,9 @@ function _createToolbarButton(mod) {
     }
   });
 
-  // Insert after wand button
-  const wandBtn = document.getElementById('wand-btn');
-  wandBtn.parentNode.insertBefore(btn, wandBtn.nextSibling);
+  // Insert after issue button
+  const issueBtn = document.getElementById('issue-btn');
+  issueBtn.parentNode.insertBefore(btn, issueBtn.nextSibling);
 
   // If this mod is currently the active view, mark it
   if (activeViewId === mod.id) {
