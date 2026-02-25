@@ -82,10 +82,16 @@ export function setupTerminalIO(term, ws, { onUserInput, container } = {}) {
   scrollBtn.setAttribute('aria-label', 'Scroll to bottom');
   if (container) container.appendChild(scrollBtn);
 
-  scrollBtn.addEventListener('click', () => {
+  function scrollToBottom() {
+    suppressAutoScroll = false;
     userScrolledUp = false;
     term.scrollToBottom();
+    term.refresh(0, term.rows - 1);
     scrollBtn.classList.remove('visible');
+  }
+
+  scrollBtn.addEventListener('click', () => {
+    scrollToBottom();
     term.focus();
   });
 
@@ -102,19 +108,12 @@ export function setupTerminalIO(term, ws, { onUserInput, container } = {}) {
   term.onWriteParsed(() => {
     if (suppressAutoScroll) return;
     if (!userScrolledUp) {
-      term.scrollToBottom();
-      scrollBtn.classList.remove('visible');
+      scrollToBottom();
     }
   });
 
   return {
-    scrollToBottom() {
-      suppressAutoScroll = false;
-      userScrolledUp = false;
-      term.scrollToBottom();
-      term.refresh(0, term.rows - 1);
-      scrollBtn.classList.remove('visible');
-    },
+    scrollToBottom,
     setSuppressAutoScroll(value) {
       suppressAutoScroll = value;
     }
