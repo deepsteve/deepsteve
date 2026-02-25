@@ -414,6 +414,11 @@ async function shutdown(signal) {
     await new Promise(r => setTimeout(r, 200));
   }
 
+  // Wait for pending PTY onData callbacks to drain — the `--resume <UUID>` line
+  // arrives from /exit output after the shell process exits, so we need a tick
+  // for those callbacks to update claudeSessionId before we save.
+  await new Promise(r => setTimeout(r, 500));
+
   // Final state save: capture session IDs updated from /exit output during shutdown.
   // This bypasses stateFrozen since it's the authoritative final snapshot.
   {
