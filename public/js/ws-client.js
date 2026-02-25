@@ -81,7 +81,7 @@ export function createWebSocket(options = {}) {
 
     ws.onclose = (e) => {
       // Start reconnecting if not already
-      if (!isReconnecting && !e.wasClean) {
+      if (!isReconnecting && !e.wasClean && !window.__deepsteveReloadPending) {
         isReconnecting = true;
         if (wrapper.onreconnecting) wrapper.onreconnecting();
 
@@ -101,7 +101,7 @@ export function createWebSocket(options = {}) {
   ws.onmessage = (e) => { if (wrapper.onmessage) wrapper.onmessage(e); };
   ws.onerror = (e) => { if (wrapper.onerror) wrapper.onerror(e); };
   ws.onclose = (e) => {
-    if (!isReconnecting && !e.wasClean) {
+    if (!isReconnecting && !e.wasClean && !window.__deepsteveReloadPending) {
       isReconnecting = true;
       if (wrapper.onreconnecting) wrapper.onreconnecting();
 

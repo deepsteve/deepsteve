@@ -62,6 +62,21 @@ export function setupTerminalIO(term, ws, { onUserInput } = {}) {
     }
     return true;
   });
+
+  // Auto-scroll to bottom on new output, unless user has scrolled up
+  let userScrolledUp = false;
+
+  term.onScroll(() => {
+    const buf = term.buffer.active;
+    const atBottom = buf.baseY <= buf.viewportY;
+    userScrolledUp = !atBottom;
+  });
+
+  term.onWriteParsed(() => {
+    if (!userScrolledUp) {
+      term.scrollToBottom();
+    }
+  });
 }
 
 export function fitTerminal(term, fit, ws) {
@@ -71,6 +86,27 @@ export function fitTerminal(term, fit, ws) {
     cols: term.cols,
     rows: term.rows
   }));
+}
+
+/**
+ * Create a ResizeObserver that auto-fits the terminal when its container changes size.
+ * Handles window resize, layout toggle, mod panel open/close.
+ * Tab switching is handled by switchTo() calling fitTerminal() directly.
+ */
+export function observeTerminalResize(container, term, fit, ws) {
+  let debounceTimer = null;
+
+  const observer = new ResizeObserver(() => {
+    if (container.clientWidth === 0 || container.clientHeight === 0) return;
+    clearTimeout(debounceTimer);
+    debounceTimer = setTimeout(() => {
+      fit.fit();
+      ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
+    }, 100);
+  });
+
+  observer.observe(container);
+  return observer;
 }
 
 /**

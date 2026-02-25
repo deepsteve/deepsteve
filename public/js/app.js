@@ -5,7 +5,7 @@
 import { SessionStore } from './session-store.js';
 import { WindowManager } from './window-manager.js';
 import { TabManager, getDefaultTabName } from './tab-manager.js';
-import { createTerminal, setupTerminalIO, fitTerminal, measureTerminalSize, updateTerminalTheme } from './terminal.js';
+import { createTerminal, setupTerminalIO, fitTerminal, observeTerminalResize, measureTerminalSize, updateTerminalTheme } from './terminal.js';
 import { createWebSocket } from './ws-client.js';
 import { showDirectoryPicker } from './dir-picker.js';
 import { showWindowRestoreModal } from './window-restore-modal.js';
@@ -524,13 +524,8 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
     if (entry) {
       const [, session] = entry;
       session.container.classList.remove('reconnecting');
-      // Refit and request redraw from server
-      requestAnimationFrame(() => {
-        session.fit.fit();
-        const { cols, rows } = session.term;
-        ws.send(JSON.stringify({ type: 'resize', cols, rows }));
-        ws.send(JSON.stringify({ type: 'redraw' }));
-      });
+      // ResizeObserver handles fit; just request redraw from server
+      ws.send(JSON.stringify({ type: 'redraw' }));
     }
   };
 }
@@ -579,28 +574,20 @@ function initTerminal(id, ws, cwd, initialName, { hasScrollback = false, pending
   TabSessions.add({ id, cwd, name });
   SessionStore.addSession(windowId, { id, cwd, name });
 
-  // Fit terminal after layout is complete (double-rAF ensures layout has happened)
-  requestAnimationFrame(() => {
-    requestAnimationFrame(() => {
-      fitTerminal(term, fit, ws);
-      if (hasScrollback) {
-        // Scroll to bottom after scrollback replay so user sees latest output
-        term.scrollToBottom();
-        // Hide the host terminal cursor — Claude Code renders its own cursor
-        // via Ink. The original DECTCEM hide sequence from session start may
-        // have been trimmed from the scrollback circular buffer.
-        term.write('\x1b[?25l');
-      } else {
-        // No scrollback — request a Ctrl+L redraw from the PTY
-        ws.send(JSON.stringify({ type: 'redraw' }));
-      }
-    });
-  });
+  // ResizeObserver handles window resize, layout toggle, mod panel.
+  // Tab switching is handled by switchTo() calling fitTerminal() directly.
+  sessions.get(id).resizeObserver = observeTerminalResize(container, term, fit, ws);
 
-  // Handle window resize
-  window.addEventListener('resize', () => {
-    if (activeId === id) {
-      fitTerminal(term, fit, ws);
+  // One-time init after first fit (which happens in switchTo's rAF above)
+  requestAnimationFrame(() => {
+    if (hasScrollback) {
+      term.scrollToBottom();
+      // Hide the host terminal cursor — Claude Code renders its own cursor
+      // via Ink. The original DECTCEM hide sequence from session start may
+      // have been trimmed from the scrollback circular buffer.
+      term.write('\x1b[?25l');
+    } else {
+      ws.send(JSON.stringify({ type: 'redraw' }));
     }
   });
 
@@ -640,11 +627,9 @@ function switchTo(id) {
     clearNotification(id);
 
     requestAnimationFrame(() => {
-      requestAnimationFrame(() => {
-        fitTerminal(session.term, session.fit, session.ws);
-        session.term.scrollToBottom();
-        session.term.focus();
-      });
+      fitTerminal(session.term, session.fit, session.ws);
+      session.term.scrollToBottom();
+      session.term.focus();
     });
   }
 }
@@ -656,6 +641,7 @@ function killSession(id) {
   const session = sessions.get(id);
   if (!session) return;
 
+  if (session.resizeObserver) session.resizeObserver.disconnect();
   session.ws.close();
   session.term.dispose();
   session.container.remove();
