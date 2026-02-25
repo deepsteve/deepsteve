@@ -34,8 +34,19 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
 
 /* Tabs - horizontal layout (default) */
 #tabs { display: flex; gap: 2px; padding: 4px 8px; background: var(--ds-bg-secondary); align-items: center; flex-shrink: 0; }
+#tabs-list-wrapper { position: relative; display: flex; min-width: 0; align-items: center; }
 #tabs-list { display: flex; gap: 2px; overflow-x: auto; min-width: 0; scrollbar-width: none; }
 #tabs-list::-webkit-scrollbar { display: none; }
+
+/* Tab scroll arrows */
+.tabs-arrow { display: none; align-items: center; justify-content: center; position: absolute; top: 0; bottom: 0; width: 24px; padding: 0; border: none; cursor: pointer; z-index: 10; color: var(--ds-text-secondary); font-size: 14px; }
+.tabs-arrow:hover { color: var(--ds-text-bright); }
+#tabs-arrow-start { left: 0; background: linear-gradient(to right, var(--ds-bg-secondary) 60%, transparent); }
+#tabs-arrow-end { right: 0; background: linear-gradient(to left, var(--ds-bg-secondary) 60%, transparent); }
+.tabs-arrow::after { font-family: system-ui; }
+#tabs-arrow-start::after { content: '\2039'; }
+#tabs-arrow-end::after { content: '\203A'; }
+
 #tabs-spacer { flex: 1; }
 
 /* Layout toggle button */
@@ -67,14 +78,35 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
   border-right: 1px solid var(--ds-border);
 }
 
+#app-container.vertical-layout #tabs-list-wrapper {
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
 #app-container.vertical-layout #tabs-list {
   display: flex;
   flex-direction: column;
   gap: 4px;
   flex: 1;
   overflow-y: auto;
+  overflow-x: hidden;
   min-height: 0;
 }
+
+#app-container.vertical-layout .tabs-arrow {
+  position: absolute;
+  left: 0;
+  right: 0;
+  width: auto;
+  height: 20px;
+  top: auto;
+  bottom: auto;
+}
+#app-container.vertical-layout #tabs-arrow-start { top: 0; background: linear-gradient(to bottom, var(--ds-bg-secondary) 60%, transparent); }
+#app-container.vertical-layout #tabs-arrow-end { bottom: 0; background: linear-gradient(to top, var(--ds-bg-secondary) 60%, transparent); }
+#app-container.vertical-layout #tabs-arrow-start::after { content: '\25B2'; }
+#app-container.vertical-layout #tabs-arrow-end::after { content: '\25BC'; }
 
 #app-container.vertical-layout #tabs-spacer { display: none; }
 

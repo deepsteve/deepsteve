@@ -60,6 +60,53 @@ document.addEventListener('contextmenu', (e) => {
   if (!e.target.closest('.tab')) hideContextMenu();
 });
 
+// Tab scroll arrow state
+let arrowStart = null;
+let arrowEnd = null;
+let tabsList = null;
+
+function isVertical() {
+  return document.getElementById('app-container')?.classList.contains('vertical-layout');
+}
+
+function updateTabArrows() {
+  if (!tabsList || !arrowStart || !arrowEnd) return;
+
+  const vertical = isVertical();
+  const scrollPos = vertical ? tabsList.scrollTop : tabsList.scrollLeft;
+  const scrollSize = vertical ? tabsList.scrollHeight : tabsList.scrollWidth;
+  const clientSize = vertical ? tabsList.clientHeight : tabsList.clientWidth;
+
+  const hasOverflow = scrollSize > clientSize + 1; // 1px tolerance
+  const atStart = scrollPos <= 1;
+  const atEnd = scrollPos + clientSize >= scrollSize - 1;
+
+  arrowStart.style.display = hasOverflow && !atStart ? 'flex' : 'none';
+  arrowEnd.style.display = hasOverflow && !atEnd ? 'flex' : 'none';
+}
+
+export function initTabArrows() {
+  arrowStart = document.getElementById('tabs-arrow-start');
+  arrowEnd = document.getElementById('tabs-arrow-end');
+  tabsList = document.getElementById('tabs-list');
+  if (!arrowStart || !arrowEnd || !tabsList) return;
+
+  arrowStart.addEventListener('click', () => {
+    const amount = isVertical() ? { top: -150 } : { left: -150 };
+    tabsList.scrollBy({ ...amount, behavior: 'smooth' });
+  });
+
+  arrowEnd.addEventListener('click', () => {
+    const amount = isVertical() ? { top: 150 } : { left: 150 };
+    tabsList.scrollBy({ ...amount, behavior: 'smooth' });
+  });
+
+  tabsList.addEventListener('scroll', updateTabArrows);
+  window.addEventListener('resize', updateTabArrows);
+
+  updateTabArrows();
+}
+
 export function getDefaultTabName(cwd) {
   if (!cwd) return 'shell';
   return cwd.split('/').filter(Boolean).pop() || 'root';
@@ -103,6 +150,7 @@ export const TabManager = {
     const tab = this.createTab(sessionId, name, callbacks);
     document.getElementById('tabs-list').appendChild(tab);
     tab.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    updateTabArrows();
     return tab;
   },
 
@@ -111,6 +159,7 @@ export const TabManager = {
    */
   removeTab(sessionId) {
     document.getElementById('tab-' + sessionId)?.remove();
+    updateTabArrows();
   },
 
   /**

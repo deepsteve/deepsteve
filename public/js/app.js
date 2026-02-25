@@ -4,7 +4,7 @@
 
 import { SessionStore } from './session-store.js';
 import { WindowManager } from './window-manager.js';
-import { TabManager, getDefaultTabName } from './tab-manager.js';
+import { TabManager, getDefaultTabName, initTabArrows } from './tab-manager.js';
 import { createTerminal, setupTerminalIO, fitTerminal, observeTerminalResize, measureTerminalSize, updateTerminalTheme } from './terminal.js';
 import { createWebSocket } from './ws-client.js';
 import { showDirectoryPicker } from './dir-picker.js';
@@ -953,6 +953,9 @@ async function showIssuePicker() {
 async function init() {
   // Initialize layout manager
   LayoutManager.init();
+
+  // Initialize tab scroll arrows
+  initTabArrows();
 
   // Initialize mod system
   ModManager.init({
