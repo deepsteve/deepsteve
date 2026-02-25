@@ -299,6 +299,12 @@ async function shutdown(signal) {
   }
   stateFrozen = true;  // Prevent onExit/onClose handlers from overwriting state file
 
+  // Stop accepting new connections so clients can't reconnect to the dying server.
+  // Without this, clients reconnect during the ~8s graceful shutdown window,
+  // then get disconnected again when the process exits (causing a double reconnect).
+  server.close();
+  wss.close();
+
   // Disconnect all client WebSockets so no user input can reach PTYs during shutdown.
   // Clients will show "Reconnecting..." overlay and block all keystrokes.
   for (const [, entry] of shells) {

@@ -19,6 +19,7 @@ export function initLiveReload({ onMessage } = {}) {
         const msg = JSON.parse(e.data);
         if (msg.type === 'reload') {
           shouldReload = true;
+          window.__deepsteveReloadPending = true;
         } else if (onMessage) {
           onMessage(msg);
         }
