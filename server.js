@@ -151,14 +151,21 @@ function broadcastTheme(name, css) {
 // Spawn claude with full login shell environment (like iTerm does)
 function spawnClaude(args, cwd, { cols = 120, rows = 40 } = {}) {
   // Use login shell (-l) which properly sources /etc/zprofile, ~/.zprofile, ~/.zshrc
-  const shellCmd = `claude ${args.join(' ')}`;
-  return pty.spawn('zsh', ['-l', '-c', shellCmd], {
+  const quoted = args.map(a => `'${a.replace(/'/g, "'\\''")}'`).join(' ');
+  return pty.spawn('zsh', ['-l', '-c', `claude ${quoted}`], {
     name: 'xterm-256color',
     cols,
     rows,
     cwd,
     env: process.env
   });
+}
+
+function validateWorktree(value) {
+  if (typeof value !== 'string') return null;
+  if (value.length === 0 || value.length > 128) return null;
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(value)) return null;
+  return value;
 }
 
 /**
@@ -619,7 +626,7 @@ wss.on('connection', (ws, req) => {
   let cwd = url.searchParams.get('cwd') || process.env.HOME;
   if (cwd.startsWith('~')) cwd = path.join(os.homedir(), cwd.slice(1));
   const createNew = url.searchParams.get('new') === '1';
-  const worktree = url.searchParams.get('worktree');
+  const worktree = validateWorktree(url.searchParams.get('worktree'));
   const planMode = url.searchParams.get('planMode') === '1';
   const name = url.searchParams.get('name');
   const initialCols = parseInt(url.searchParams.get('cols')) || 120;
@@ -637,7 +644,7 @@ wss.on('connection', (ws, req) => {
       cwd = restored.cwd;
       const oldClaudeSessionId = restored.claudeSessionId;
       const newClaudeSessionId = randomUUID();
-      const savedWorktree = restored.worktree || null;
+      const savedWorktree = validateWorktree(restored.worktree);
       log(`Restoring session ${id} in ${cwd} (old claude session: ${oldClaudeSessionId}, new claude session: ${newClaudeSessionId}, worktree: ${savedWorktree || 'none'})`);
       const ptySize = { cols: initialCols, rows: initialRows };
       const resumeArgs = oldClaudeSessionId
