@@ -75,6 +75,12 @@ export function setupTerminalIO(term, ws, { onUserInput, container } = {}) {
   // auto-scroll from onWriteParsed and wheel state tracking to prevent races.
   let suppressAutoScroll = false;
 
+  // Generation counter: bumped on every programmatic scrollToBottom().
+  // Wheel rAF callbacks capture the generation when scheduled and ignore
+  // themselves if a programmatic scroll happened since — prevents a stale
+  // rAF from overwriting userScrolledUp after scrollToBottom() cleared it.
+  let scrollGen = 0;
+
   // Floating scroll-to-bottom button
   const scrollBtn = document.createElement('button');
   scrollBtn.className = 'scroll-to-bottom';
@@ -85,6 +91,7 @@ export function setupTerminalIO(term, ws, { onUserInput, container } = {}) {
   function scrollToBottom() {
     suppressAutoScroll = false;
     userScrolledUp = false;
+    scrollGen++;
     term.scrollToBottom();
     term.refresh(0, term.rows - 1);
     scrollBtn.classList.remove('visible');
@@ -96,8 +103,10 @@ export function setupTerminalIO(term, ws, { onUserInput, container } = {}) {
   });
 
   term.element.addEventListener('wheel', () => {
+    const gen = scrollGen;
     requestAnimationFrame(() => {
       if (suppressAutoScroll) return;
+      if (gen !== scrollGen) return; // programmatic scroll happened since — ignore
       const buf = term.buffer.active;
       const atBottom = buf.baseY <= buf.viewportY;
       userScrolledUp = !atBottom;
