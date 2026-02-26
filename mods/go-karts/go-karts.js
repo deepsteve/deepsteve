@@ -769,7 +769,8 @@ function animate(now) {
     const laneOffset = isPlayer && k.laneOffset != null ? k.laneOffset : (k.lane - (kartCount - 1) / 2) * 1.2;
     const pos = trackPos3D(k.angle, laneOffset);
     k.mesh.position.copy(pos);
-    k.mesh.rotation.y = k.angle - Math.PI / 2;
+    const tan = trackTangent(k.angle);
+    k.mesh.rotation.y = Math.atan2(-tan.z, tan.x);
     k.label.position.set(pos.x, 1.8, pos.z);
     updateLabel(k.label._ctx, k.name, k.lane, k.lap, k.finished);
     k.label.material.map.needsUpdate = true;
