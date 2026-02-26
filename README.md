@@ -64,16 +64,11 @@ Open [http://localhost:3000](http://localhost:3000) in your browser.
 
 ## Themes
 
-Place `.css` files in `~/.deepsteve/themes/` to add custom themes. Select the active theme from the settings panel (gear icon).
+Customize the UI with CSS theme files. See the [Themes Guide](docs/themes.md) for details.
 
 ## Mods
 
-Mods are visual extensions that provide alternative views of your sessions. Each mod lives in `mods/<name>/` with a `mod.json` manifest and an HTML entry point.
-
-Built-in mods:
-- **Tower** - A pixel art skyscraper visualization of your Claude sessions
-
-Enable and disable mods from the Mods dropdown in the toolbar.
+Extend deepsteve with visual mods — alternative views, panels, and MCP tools for your sessions. See the [Mods Guide](docs/mods.md) for details.
 
 ## Managing the Daemon
 
