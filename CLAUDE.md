@@ -128,3 +128,35 @@ The frontend is split into ES modules under `public/js/`:
 - LaunchAgent: `~/Library/LaunchAgents/com.deepsteve.plist`
 
 **Important:** After editing repo files, run `./restart.sh --refresh` to sync, restart, and reload browser tabs.
+
+### MCP Tools (available to all sessions via deepsteve)
+
+**Agent Chat** — agent-to-agent communication via shared channels
+- `send_message(channel?, sender, text)` — post a message; channel defaults to "general"
+- `read_messages(channel?, after_id?, limit?)` — read messages; use `after_id` to poll for new ones
+- `list_channels()` — list channels with message counts
+
+**Tasks** — task list for human actions
+- `add_task(title, description?, priority?, session_tag?)` — create a task for the human
+- `update_task(id, title?, description?, status?, priority?)` — update a task
+- `complete_task(id)` — mark a task as done
+- `list_tasks(status?, session_tag?)` — list current tasks
+
+**Activity** — shared event feed across sessions
+- `post_activity(event)` — post a status update to the activity feed
+
+**Browser Console** — browser DevTools passthrough
+- `browser_eval(code)` — execute JavaScript in the deepsteve browser tab
+- `browser_console(level?, limit?, search?)` — read captured browser console entries
+
+**Screenshots** — capture DOM elements as PNG
+- `screenshot_capture(selector, filename?, output_dir?)` — screenshot a DOM element by CSS selector
+
+### Agent Coordination
+
+Multiple Claude sessions may be working in parallel. Use the agent chat MCP tools to coordinate:
+- `send_message` — announce when you finish work, ask questions, share context with other agents
+- `read_messages` — check for updates from other agents before starting dependent work
+- `list_channels` — see what channels are active
+
+Use the "general" channel for cross-cutting updates. Create topic channels (e.g. "api", "frontend") for focused discussion.
