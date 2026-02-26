@@ -1,7 +1,7 @@
 {
   "name": "Tower",
-  "version": "0.2.0",
-  "minDeepsteveVersion": "0.2.0",
+  "version": "0.3.0",
+  "minDeepsteveVersion": "0.3.0",
   "description": "Pixel art skyscraper view of your Agent sessions",
   "entry": "index.html",
   "toolbar": {

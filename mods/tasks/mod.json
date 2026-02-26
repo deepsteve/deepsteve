@@ -1,7 +1,7 @@
 {
   "name": "Tasks",
-  "version": "0.2.0",
-  "minDeepsteveVersion": "0.2.0",
+  "version": "0.3.0",
+  "minDeepsteveVersion": "0.3.0",
   "description": "Task list for human actions, populated by Agent sessions",
   "entry": "index.html",
   "display": "panel",
