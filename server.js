@@ -641,6 +641,7 @@ app.post('/api/themes/active', (req, res) => {
 
 // --- Mods system ---
 const MODS_DIR = path.join(__dirname, 'mods');
+const BUILTIN_MODS = new Set(['browser-console', 'tasks', 'screenshots', 'go-karts', 'tower']);
 
 // Compare two semver strings (major.minor.patch). Returns -1, 0, or 1.
 function compareSemver(a, b) {
@@ -665,12 +666,142 @@ app.get('/api/mods', (req, res) => {
         const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
         if (!manifest.version) continue; // version is required
         const compatible = !manifest.minDeepsteveVersion || compareSemver(pkg.version, manifest.minDeepsteveVersion) >= 0;
-        mods.push({ id: entry.name, compatible, ...manifest });
+        const source = BUILTIN_MODS.has(entry.name) ? 'built-in' : 'official';
+        mods.push({ id: entry.name, source, compatible, ...manifest });
       } catch { /* skip dirs without valid mod.json */ }
     }
     res.json({ mods, deepsteveVersion: pkg.version });
   } catch (e) {
     res.json({ mods: [], deepsteveVersion: pkg.version });
+  }
+});
+
+// Catalog: fetch remote mod catalog with caching
+let catalogCache = null;
+let catalogCacheTime = 0;
+const CATALOG_TTL = 5 * 60 * 1000; // 5 minutes
+
+app.get('/api/mods/catalog', async (req, res) => {
+  const now = Date.now();
+  if (catalogCache && (now - catalogCacheTime) < CATALOG_TTL) {
+    return res.json(catalogCache);
+  }
+  try {
+    const resp = await fetch('https://raw.githubusercontent.com/deepsteve/deepsteve-mods/main/catalog.json', {
+      signal: AbortSignal.timeout(10000)
+    });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const catalog = await resp.json();
+
+    // Read installed mods to annotate catalog entries
+    const installedMods = new Map();
+    try {
+      if (fs.existsSync(MODS_DIR)) {
+        for (const entry of fs.readdirSync(MODS_DIR, { withFileTypes: true })) {
+          if (!entry.isDirectory()) continue;
+          try {
+            const manifest = JSON.parse(fs.readFileSync(path.join(MODS_DIR, entry.name, 'mod.json'), 'utf8'));
+            if (manifest.version) installedMods.set(entry.name, manifest.version);
+          } catch {}
+        }
+      }
+    } catch {}
+
+    const annotated = (catalog.mods || []).map(mod => {
+      const installed = installedMods.has(mod.id);
+      const installedVersion = installed ? installedMods.get(mod.id) : null;
+      const updateAvailable = installed && mod.version ? compareSemver(mod.version, installedVersion) > 0 : false;
+      const compatible = !mod.minDeepsteveVersion || compareSemver(pkg.version, mod.minDeepsteveVersion) >= 0;
+      return { ...mod, installed, installedVersion, updateAvailable, compatible };
+    });
+
+    const result = { mods: annotated };
+    catalogCache = result;
+    catalogCacheTime = now;
+    res.json(result);
+  } catch (e) {
+    log(`Catalog fetch failed: ${e.message}`);
+    res.json({ mods: [] });
+  }
+});
+
+// Install a mod from a remote tarball
+app.post('/api/mods/install', async (req, res) => {
+  const { id, downloadUrl } = req.body;
+  if (!id || !downloadUrl) return res.status(400).json({ error: 'id and downloadUrl required' });
+
+  // Validate mod ID is filesystem-safe
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(id) || id.length > 128) {
+    return res.status(400).json({ error: 'Invalid mod ID' });
+  }
+  if (BUILTIN_MODS.has(id)) {
+    return res.status(400).json({ error: 'Cannot overwrite built-in mod' });
+  }
+
+  const modDir = path.join(MODS_DIR, id);
+  const tmpFile = path.join(os.tmpdir(), `deepsteve-mod-${id}-${Date.now()}.tar.gz`);
+
+  try {
+    // Download tarball
+    const resp = await fetch(downloadUrl, { signal: AbortSignal.timeout(30000) });
+    if (!resp.ok) throw new Error(`Download failed: HTTP ${resp.status}`);
+    const buffer = Buffer.from(await resp.arrayBuffer());
+    fs.writeFileSync(tmpFile, buffer);
+
+    // Create mod directory and extract
+    fs.mkdirSync(modDir, { recursive: true });
+    execSync(`tar xzf '${tmpFile}' -C '${modDir}' --strip-components=1`, { timeout: 10000 });
+
+    // Validate mod.json exists
+    const manifestPath = path.join(modDir, 'mod.json');
+    if (!fs.existsSync(manifestPath)) {
+      fs.rmSync(modDir, { recursive: true, force: true });
+      throw new Error('Invalid mod: no mod.json found');
+    }
+
+    // Write source marker
+    fs.writeFileSync(path.join(modDir, '.source'), 'official');
+
+    // Refresh file watchers
+    watchModDirs();
+
+    log(`Installed mod: ${id}`);
+    res.json({ ok: true, id });
+  } catch (e) {
+    log(`Mod install failed (${id}): ${e.message}`);
+    res.status(500).json({ error: e.message });
+  } finally {
+    try { fs.unlinkSync(tmpFile); } catch {}
+  }
+});
+
+// Uninstall a mod
+app.post('/api/mods/uninstall', (req, res) => {
+  const { id } = req.body;
+  if (!id) return res.status(400).json({ error: 'id required' });
+
+  if (BUILTIN_MODS.has(id)) {
+    return res.status(400).json({ error: 'Cannot uninstall built-in mod' });
+  }
+
+  const modDir = path.join(MODS_DIR, id);
+  if (!fs.existsSync(modDir)) {
+    return res.status(404).json({ error: 'Mod not found' });
+  }
+
+  // Safety: ensure modDir is inside MODS_DIR
+  if (!path.resolve(modDir).startsWith(path.resolve(MODS_DIR) + path.sep)) {
+    return res.status(400).json({ error: 'Invalid mod path' });
+  }
+
+  try {
+    fs.rmSync(modDir, { recursive: true, force: true });
+    watchModDirs();
+    log(`Uninstalled mod: ${id}`);
+    res.json({ ok: true, id });
+  } catch (e) {
+    log(`Mod uninstall failed (${id}): ${e.message}`);
+    res.status(500).json({ error: e.message });
   }
 });
 

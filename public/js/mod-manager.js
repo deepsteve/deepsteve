@@ -160,7 +160,7 @@ function _notifySettingsChanged(modId) {
 }
 
 /**
- * Fetch available mods from server, show the Mods dropdown, and create toolbar buttons.
+ * Fetch available mods from server, show the Mods button, and create toolbar buttons.
  */
 async function loadAvailableMods() {
   try {
@@ -172,24 +172,14 @@ async function loadAvailableMods() {
 
   if (allMods.length === 0) return;
 
-  // Show the Mods dropdown
-  const modsDropdown = document.getElementById('mods-dropdown');
-  modsDropdown.style.display = '';
-
-  // Wire up dropdown toggle
+  // Show the Mods button
   const modsBtn = document.getElementById('mods-btn');
-  const modsMenu = document.getElementById('mods-menu');
+  modsBtn.style.display = '';
 
+  // Wire up button to open marketplace modal
   modsBtn.addEventListener('click', (e) => {
     e.stopPropagation();
-    modsMenu.classList.toggle('open');
-    if (modsMenu.classList.contains('open')) {
-      _renderModsMenu();
-    }
-  });
-
-  document.addEventListener('click', () => {
-    modsMenu.classList.remove('open');
+    _showMarketplaceModal();
   });
 
   // Remove incompatible mods from enabledMods (in case they were enabled before)
@@ -255,46 +245,198 @@ async function loadAvailableMods() {
 }
 
 /**
- * Render the mods dropdown menu with enable/disable toggles.
+ * Show the marketplace modal with mod cards, search, and filters.
  */
-function _renderModsMenu() {
-  const modsMenu = document.getElementById('mods-menu');
-  if (allMods.length === 0) {
-    modsMenu.innerHTML = '<div class="dropdown-empty">No mods available</div>';
-    return;
+async function _showMarketplaceModal() {
+  // Fetch installed mods and catalog in parallel
+  let catalogMods = [];
+  try {
+    const [modsRes, catalogRes] = await Promise.all([
+      fetch('/api/mods').then(r => r.json()).catch(() => null),
+      fetch('/api/mods/catalog').then(r => r.json()).catch(() => ({ mods: [] }))
+    ]);
+    if (modsRes) {
+      allMods = modsRes.mods || [];
+      deepsteveVersion = modsRes.deepsteveVersion || null;
+    }
+    catalogMods = catalogRes.mods || [];
+  } catch {}
+
+  // Merge: installed mods first, then catalog-only mods
+  const installedIds = new Set(allMods.map(m => m.id));
+  const catalogOnly = catalogMods.filter(m => !installedIds.has(m.id));
+
+  // Build unified list — installed mods get their catalog info merged
+  const unifiedMods = allMods.map(mod => {
+    const catEntry = catalogMods.find(c => c.id === mod.id);
+    return {
+      ...mod,
+      catalogVersion: catEntry?.version || null,
+      downloadUrl: catEntry?.downloadUrl || null,
+      updateAvailable: catEntry?.updateAvailable || false,
+    };
+  });
+  for (const cat of catalogOnly) {
+    unifiedMods.push({
+      ...cat,
+      source: 'official',
+      catalogVersion: cat.version,
+    });
   }
 
-  modsMenu.innerHTML = allMods.map(mod => {
-    const enabled = enabledMods.has(mod.id);
-    const incompatible = mod.compatible === false;
-    const hasSettings = mod.settings && mod.settings.length > 0;
-    return `
-      <div class="dropdown-item mod-toggle-item${incompatible ? ' mod-incompatible' : ''}" data-id="${mod.id}">
-        <div class="session-info">
-          <span class="session-name">${mod.name}</span>
-          <span class="session-status">${mod.description || ''} <span class="mod-version">v${mod.version}</span></span>
-          ${incompatible ? `<span class="mod-warning">Requires deepsteve v${mod.minDeepsteveVersion}+</span>` : ''}
-        </div>
-        <div style="display:flex;align-items:center;gap:4px">
-          ${hasSettings ? `<button class="mod-settings-btn" data-id="${mod.id}" title="Settings">&#9881;</button>` : ''}
-          <label class="mod-toggle-label" data-id="${mod.id}">
-            <input type="checkbox" ${enabled ? 'checked' : ''} ${incompatible ? 'disabled' : ''} data-id="${mod.id}">
-          </label>
-        </div>
-      </div>
-    `;
-  }).join('');
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
 
-  // Wire up toggles
-  modsMenu.querySelectorAll('input[type="checkbox"]').forEach(cb => {
-    cb.addEventListener('change', (e) => {
+  const modal = document.createElement('div');
+  modal.className = 'modal marketplace-modal';
+
+  // Header
+  const header = document.createElement('div');
+  header.className = 'marketplace-header';
+  header.innerHTML = `<h2>Mods</h2><div class="marketplace-search"><input type="text" placeholder="Search mods..."></div>`;
+
+  // Filters
+  const filters = document.createElement('div');
+  filters.className = 'marketplace-filters';
+  const filterNames = ['All', 'Enabled', 'Panel', 'Fullscreen'];
+  for (const name of filterNames) {
+    const pill = document.createElement('button');
+    pill.className = 'filter-pill' + (name === 'All' ? ' active' : '');
+    pill.textContent = name;
+    pill.dataset.filter = name.toLowerCase();
+    filters.appendChild(pill);
+  }
+
+  // List
+  const list = document.createElement('div');
+  list.className = 'marketplace-list';
+
+  // Footer
+  const footer = document.createElement('div');
+  footer.className = 'modal-buttons';
+  footer.innerHTML = '<button class="btn-secondary" data-close>Close</button>';
+
+  modal.appendChild(header);
+  modal.appendChild(filters);
+  modal.appendChild(list);
+  modal.appendChild(footer);
+  overlay.appendChild(modal);
+  document.body.appendChild(overlay);
+
+  // State
+  let activeFilter = 'all';
+  let searchQuery = '';
+  let searchTimeout = null;
+
+  function renderCards() {
+    const q = searchQuery.toLowerCase();
+    const filtered = unifiedMods.filter(mod => {
+      // Search filter
+      if (q) {
+        const name = (mod.name || mod.id || '').toLowerCase();
+        const desc = (mod.description || '').toLowerCase();
+        if (!name.includes(q) && !desc.includes(q)) return false;
+      }
+      // Category filter
+      if (activeFilter === 'enabled') return enabledMods.has(mod.id);
+      if (activeFilter === 'panel') return mod.display === 'panel';
+      if (activeFilter === 'fullscreen') return mod.display !== 'panel';
+      return true;
+    });
+
+    if (filtered.length === 0) {
+      list.innerHTML = '<div class="marketplace-empty">No mods match your search</div>';
+      return;
+    }
+
+    list.innerHTML = '';
+    for (const mod of filtered) {
+      list.appendChild(_createModCard(mod, overlay));
+    }
+  }
+
+  // Search input
+  const searchInput = header.querySelector('input');
+  searchInput.addEventListener('input', () => {
+    clearTimeout(searchTimeout);
+    searchTimeout = setTimeout(() => {
+      searchQuery = searchInput.value;
+      renderCards();
+    }, 150);
+  });
+
+  // Filter pills
+  filters.querySelectorAll('.filter-pill').forEach(pill => {
+    pill.addEventListener('click', () => {
+      filters.querySelector('.filter-pill.active')?.classList.remove('active');
+      pill.classList.add('active');
+      activeFilter = pill.dataset.filter;
+      renderCards();
+    });
+  });
+
+  // Close
+  const close = () => overlay.remove();
+  footer.querySelector('[data-close]').addEventListener('click', close);
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+
+  // Render initial cards
+  renderCards();
+  searchInput.focus();
+}
+
+/**
+ * Create a mod card element for the marketplace.
+ */
+function _createModCard(mod, marketplaceOverlay) {
+  const card = document.createElement('div');
+  card.className = 'mod-card' + (mod.compatible === false ? ' mod-card-incompatible' : '');
+
+  const isInstalled = allMods.some(m => m.id === mod.id);
+  const isEnabled = enabledMods.has(mod.id);
+  const isBuiltIn = mod.source === 'built-in';
+  const hasSettings = mod.settings && mod.settings.length > 0;
+  const badgeClass = isBuiltIn ? 'built-in' : 'official';
+  const badgeText = isBuiltIn ? 'Built-in' : 'Official';
+
+  // Header row
+  const header = document.createElement('div');
+  header.className = 'mod-card-header';
+
+  const info = document.createElement('div');
+  info.className = 'mod-card-info';
+  info.innerHTML = `<span class="mod-card-name">${mod.name || mod.id}</span><span class="mod-badge ${badgeClass}">${badgeText}</span><span class="mod-card-version">v${mod.version || '?'}</span>`;
+
+  const actions = document.createElement('div');
+  actions.className = 'mod-card-actions';
+
+  if (hasSettings && isInstalled) {
+    const gearBtn = document.createElement('button');
+    gearBtn.className = 'mod-settings-btn';
+    gearBtn.innerHTML = '&#9881;';
+    gearBtn.title = 'Settings';
+    gearBtn.addEventListener('click', (e) => {
       e.stopPropagation();
-      const modId = cb.dataset.id;
-      const mod = allMods.find(m => m.id === modId);
-      if (!mod || mod.compatible === false) return;
+      _showSettingsModal(mod);
+    });
+    actions.appendChild(gearBtn);
+  }
 
-      if (cb.checked) {
-        enabledMods.add(modId);
+  if (isInstalled) {
+    const toggle = document.createElement('label');
+    toggle.className = 'mod-card-toggle';
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.checked = isEnabled;
+    checkbox.disabled = mod.compatible === false;
+    const slider = document.createElement('span');
+    slider.className = 'toggle-slider';
+    toggle.appendChild(checkbox);
+    toggle.appendChild(slider);
+
+    checkbox.addEventListener('change', () => {
+      if (checkbox.checked) {
+        enabledMods.add(mod.id);
         if (mod.display === 'panel') {
           _loadPanelMod(mod);
           _switchToPanel(mod.id);
@@ -302,39 +444,142 @@ function _renderModsMenu() {
           _createToolbarButton(mod);
         }
       } else {
-        enabledMods.delete(modId);
+        enabledMods.delete(mod.id);
         if (mod.display === 'panel') {
-          _unloadPanelMod(modId);
+          _unloadPanelMod(mod.id);
         } else {
-          _removeToolbarButton(modId);
-          if (activeViewId === modId) {
+          _removeToolbarButton(mod.id);
+          if (activeViewId === mod.id) {
             _hideMod();
           }
         }
       }
       _saveEnabledMods();
     });
-  });
 
-  // Clicking the row toggles the checkbox
-  modsMenu.querySelectorAll('.mod-toggle-item').forEach(item => {
-    item.addEventListener('click', (e) => {
-      if (e.target.tagName === 'INPUT' || e.target.closest('.mod-settings-btn')) return;
-      if (item.classList.contains('mod-incompatible')) return;
-      const cb = item.querySelector('input[type="checkbox"]');
-      cb.checked = !cb.checked;
-      cb.dispatchEvent(new Event('change', { bubbles: true }));
-    });
-  });
+    actions.appendChild(toggle);
+  }
 
-  // Wire up gear buttons
-  modsMenu.querySelectorAll('.mod-settings-btn').forEach(btn => {
-    btn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      const mod = allMods.find(m => m.id === btn.dataset.id);
-      if (mod) _showSettingsModal(mod);
-    });
-  });
+  header.appendChild(info);
+  header.appendChild(actions);
+  card.appendChild(header);
+
+  // Description
+  if (mod.description) {
+    const desc = document.createElement('div');
+    desc.className = 'mod-card-description';
+    desc.textContent = mod.description;
+    card.appendChild(desc);
+  }
+
+  // Incompatible warning
+  if (mod.compatible === false) {
+    const warn = document.createElement('div');
+    warn.className = 'mod-card-description';
+    warn.style.color = 'var(--ds-accent-red)';
+    warn.textContent = `Requires deepsteve v${mod.minDeepsteveVersion}+`;
+    card.appendChild(warn);
+  }
+
+  // Footer for non-built-in mods (install/uninstall/update)
+  if (!isBuiltIn) {
+    const footer = document.createElement('div');
+    footer.className = 'mod-card-footer';
+
+    if (isInstalled) {
+      // Update button (if available)
+      if (mod.updateAvailable && mod.downloadUrl) {
+        const updateBtn = document.createElement('button');
+        updateBtn.className = 'btn-update';
+        updateBtn.textContent = `Update to v${mod.catalogVersion}`;
+        updateBtn.addEventListener('click', async () => {
+          updateBtn.disabled = true;
+          updateBtn.textContent = 'Updating...';
+          try {
+            const res = await fetch('/api/mods/install', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ id: mod.id, downloadUrl: mod.downloadUrl })
+            });
+            if (!res.ok) throw new Error((await res.json()).error);
+            // Re-open marketplace to refresh
+            marketplaceOverlay.remove();
+            _showMarketplaceModal();
+          } catch (e) {
+            updateBtn.textContent = 'Update failed';
+            setTimeout(() => { updateBtn.textContent = `Update to v${mod.catalogVersion}`; updateBtn.disabled = false; }, 2000);
+          }
+        });
+        footer.appendChild(updateBtn);
+      }
+
+      // Uninstall button
+      const uninstallBtn = document.createElement('button');
+      uninstallBtn.className = 'btn-uninstall';
+      uninstallBtn.textContent = 'Uninstall';
+      uninstallBtn.addEventListener('click', async () => {
+        // Disable mod first if enabled
+        if (enabledMods.has(mod.id)) {
+          enabledMods.delete(mod.id);
+          if (mod.display === 'panel') {
+            _unloadPanelMod(mod.id);
+          } else {
+            _removeToolbarButton(mod.id);
+            if (activeViewId === mod.id) _hideMod();
+          }
+          _saveEnabledMods();
+        }
+        uninstallBtn.disabled = true;
+        uninstallBtn.textContent = 'Removing...';
+        try {
+          const res = await fetch('/api/mods/uninstall', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id: mod.id })
+          });
+          if (!res.ok) throw new Error((await res.json()).error);
+          marketplaceOverlay.remove();
+          _showMarketplaceModal();
+        } catch (e) {
+          uninstallBtn.textContent = 'Failed';
+          setTimeout(() => { uninstallBtn.textContent = 'Uninstall'; uninstallBtn.disabled = false; }, 2000);
+        }
+      });
+      footer.appendChild(uninstallBtn);
+    } else if (mod.downloadUrl) {
+      // Install button
+      const installBtn = document.createElement('button');
+      installBtn.className = 'btn-install';
+      installBtn.textContent = 'Install';
+      if (mod.compatible === false) installBtn.disabled = true;
+      installBtn.addEventListener('click', async () => {
+        installBtn.disabled = true;
+        installBtn.classList.add('loading');
+        installBtn.textContent = 'Installing...';
+        try {
+          const res = await fetch('/api/mods/install', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id: mod.id, downloadUrl: mod.downloadUrl })
+          });
+          if (!res.ok) throw new Error((await res.json()).error);
+          marketplaceOverlay.remove();
+          _showMarketplaceModal();
+        } catch (e) {
+          installBtn.classList.remove('loading');
+          installBtn.textContent = 'Install failed';
+          setTimeout(() => { installBtn.textContent = 'Install'; installBtn.disabled = false; }, 2000);
+        }
+      });
+      footer.appendChild(installBtn);
+    }
+
+    if (footer.children.length > 0) {
+      card.appendChild(footer);
+    }
+  }
+
+  return card;
 }
 
 /**
@@ -369,9 +614,6 @@ function _showSettingsModal(mod) {
 
   overlay.appendChild(modal);
   document.body.appendChild(overlay);
-
-  // Close dropdown
-  document.getElementById('mods-menu').classList.remove('open');
 
   // Live-save on change
   modal.querySelectorAll('.mod-setting-toggle').forEach(toggle => {
