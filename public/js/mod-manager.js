@@ -37,6 +37,7 @@ let panelTabsContainer = null;   // #panel-tabs DOM element
 let panelTabs = new Map();       // modId → tab button element
 let taskCallbacks = [];          // [{modId, cb}] — callbacks for task broadcasts
 let activityCallbacks = [];      // [{modId, cb}] — callbacks for activity events
+let agentChatCallbacks = [];     // [{modId, cb}] — callbacks for agent-chat broadcasts
 let browserEvalCallbacks = [];   // [{modId, cb}] — callbacks for browser-eval-request
 let browserConsoleCallbacks = []; // [{modId, cb}] — callbacks for browser-console-request
 let screenshotCaptureCallbacks = []; // [{modId, cb}] — callbacks for screenshot-capture-request
@@ -834,6 +835,7 @@ function _unloadPanelMod(modId) {
   // Filter out callbacks for this mod
   taskCallbacks = taskCallbacks.filter(e => e.modId !== modId);
   activityCallbacks = activityCallbacks.filter(e => e.modId !== modId);
+  agentChatCallbacks = agentChatCallbacks.filter(e => e.modId !== modId);
   browserEvalCallbacks = browserEvalCallbacks.filter(e => e.modId !== modId);
   browserConsoleCallbacks = browserConsoleCallbacks.filter(e => e.modId !== modId);
   screenshotCaptureCallbacks = screenshotCaptureCallbacks.filter(e => e.modId !== modId);
@@ -1043,6 +1045,15 @@ function notifyActivityChanged(event) {
 }
 
 /**
+ * Notify panel mods that agent chat has changed (called from app.js on WS broadcast).
+ */
+function notifyAgentChatChanged(channels) {
+  for (const entry of agentChatCallbacks) {
+    try { entry.cb(channels); } catch (e) { console.error('Agent chat callback error:', e); }
+  }
+}
+
+/**
  * Notify panel mods of a browser-eval request (called from app.js on WS broadcast).
  */
 function notifyBrowserEvalRequest(req) {
@@ -1152,6 +1163,17 @@ function _injectBridgeAPI(iframeEl, modId) {
           activityCallbacks = activityCallbacks.filter(e => e !== entry);
         };
       },
+      onAgentChatChanged(cb) {
+        const entry = { modId, cb };
+        agentChatCallbacks.push(entry);
+        // Fire immediately with current data from server
+        fetch('/api/agent-chat').then(r => r.json()).then(d => {
+          try { cb(d.channels || {}); } catch {}
+        }).catch(() => {});
+        return () => {
+          agentChatCallbacks = agentChatCallbacks.filter(e => e !== entry);
+        };
+      },
       onBrowserEvalRequest(cb) {
         const entry = { modId, cb };
         browserEvalCallbacks.push(entry);
@@ -1198,6 +1220,7 @@ function handleModChanged(modId) {
     // Clear stale callbacks for this mod before reload triggers re-injection
     taskCallbacks = taskCallbacks.filter(e => e.modId !== modId);
     activityCallbacks = activityCallbacks.filter(e => e.modId !== modId);
+    agentChatCallbacks = agentChatCallbacks.filter(e => e.modId !== modId);
     browserEvalCallbacks = browserEvalCallbacks.filter(e => e.modId !== modId);
     browserConsoleCallbacks = browserConsoleCallbacks.filter(e => e.modId !== modId);
     screenshotCaptureCallbacks = screenshotCaptureCallbacks.filter(e => e.modId !== modId);
@@ -1216,6 +1239,7 @@ export const ModManager = {
   notifySessionsChanged,
   notifyTasksChanged,
   notifyActivityChanged,
+  notifyAgentChatChanged,
   notifyBrowserEvalRequest,
   notifyBrowserConsoleRequest,
   notifyScreenshotCaptureRequest,

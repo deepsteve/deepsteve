@@ -524,6 +524,8 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
         ModManager.notifyActivityChanged(msg.event);
       } else if (msg.type === 'activity-cleared') {
         ModManager.notifyActivityChanged(null);
+      } else if (msg.type === 'agent-chat') {
+        ModManager.notifyAgentChatChanged(msg.channels);
       } else if (msg.type === 'browser-eval-request') {
         if (!processedBrowserRequests.has(msg.requestId)) {
           processedBrowserRequests.add(msg.requestId);
