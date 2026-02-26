@@ -8,6 +8,15 @@ https://deepsteve.com
 
 Run multiple Claude Code sessions side-by-side in your browser, each with full terminal capabilities and persistent conversation history.
 
+<p align="center">
+  <img src="screenshots/screenshot-31-hero.png" alt="deepsteve — full app with tabs and tasks panel" width="800">
+</p>
+
+<p align="center">
+  <img src="screenshots/screenshot-33-tasks-panel.png" alt="Terminal with tasks panel" width="400">
+  <img src="screenshots/screenshot-35-issue-picker.png" alt="GitHub issue picker modal" width="400">
+</p>
+
 **Requires macOS.** deepsteve uses macOS LaunchAgents for daemon management and macOS-specific paths for logs and state.
 
 > **Security notice:** DeepSteve has no authentication, no CORS restrictions, and no WebSocket origin checking. It is designed for **localhost use only**. Do not expose it to a network or the public internet.
