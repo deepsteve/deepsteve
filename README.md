@@ -13,7 +13,7 @@ Run multiple Claude Code sessions side-by-side in your browser, each with full t
 </p>
 
 <p align="center">
-  <img src="screenshots/screenshot-33-tasks-panel.png" alt="Terminal with tasks panel" width="400">
+  <img src="screenshots/tower.png" alt="Tower view — visual project and session overview" width="400">
   <img src="screenshots/screenshot-35-issue-picker.png" alt="GitHub issue picker modal" width="400">
 </p>
 
