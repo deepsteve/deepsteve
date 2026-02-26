@@ -15,6 +15,28 @@ function senderColor(name) {
   return colors[Math.abs(hash) % colors.length];
 }
 
+function renderMentions(text) {
+  const parts = text.split(/(@[\w-]+)/g);
+  return parts.map((part, i) => {
+    if (part.startsWith('@') && part.length > 1) {
+      const name = part.slice(1);
+      const color = senderColor(name);
+      return (
+        <span key={i} style={{
+          color,
+          fontWeight: 600,
+          background: `${color}18`,
+          borderRadius: 3,
+          padding: '0 3px',
+        }}>
+          {part}
+        </span>
+      );
+    }
+    return part;
+  });
+}
+
 function Message({ msg }) {
   const color = senderColor(msg.sender);
   return (
@@ -46,10 +68,22 @@ function Message({ msg }) {
         whiteSpace: 'pre-wrap',
         lineHeight: 1.4,
       }}>
-        {msg.text}
+        {renderMentions(msg.text)}
       </div>
     </div>
   );
+}
+
+function notifyMention(msg, myName) {
+  if (!myName || msg.sender === myName) return;
+  const mentionPattern = new RegExp(`@${myName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i');
+  if (!mentionPattern.test(msg.text)) return;
+  if (Notification.permission === 'granted' && document.hidden) {
+    new Notification(`${msg.sender} mentioned you`, {
+      body: msg.text.slice(0, 200),
+      tag: `chat-mention-${msg.id}`,
+    });
+  }
 }
 
 function ChatPanel() {
@@ -59,12 +93,43 @@ function ChatPanel() {
   const [senderName, setSenderName] = useState('Human');
   const messagesEndRef = useRef(null);
   const prevMessageCountRef = useRef(0);
+  const senderNameRef = useRef(senderName);
+  const seenMessageIdsRef = useRef(new Set());
+
+  // Keep ref in sync so the callback closure always has the latest name
+  useEffect(() => { senderNameRef.current = senderName; }, [senderName]);
+
+  // Clear badge when tab regains focus
+  useEffect(() => {
+    const onVisible = () => {
+      if (!document.hidden) window.deepsteve?.setPanelBadge(null);
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
+  }, []);
 
   useEffect(() => {
     let unsub = null;
 
     function setup() {
       unsub = window.deepsteve.onAgentChatChanged((newChannels) => {
+        // Check new messages for @mentions — fire browser notifications + panel badge
+        let hasMention = false;
+        for (const ch of Object.values(newChannels || {})) {
+          for (const msg of (ch.messages || [])) {
+            if (!seenMessageIdsRef.current.has(msg.id)) {
+              seenMessageIdsRef.current.add(msg.id);
+              notifyMention(msg, senderNameRef.current);
+              if (msg.sender !== senderNameRef.current) {
+                const pat = new RegExp(`@${senderNameRef.current.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i');
+                if (pat.test(msg.text)) hasMention = true;
+              }
+            }
+          }
+        }
+        if (hasMention && document.hidden) {
+          window.deepsteve?.setPanelBadge('!');
+        }
         setChannels(newChannels || {});
       });
     }
@@ -99,6 +164,10 @@ function ChatPanel() {
     const text = input.trim();
     if (!text) return;
     setInput('');
+    // Request notification permission on first send
+    if (Notification.permission === 'default') {
+      Notification.requestPermission();
+    }
     try {
       await fetch(`/api/agent-chat/${encodeURIComponent(activeChannel)}/messages`, {
         method: 'POST',

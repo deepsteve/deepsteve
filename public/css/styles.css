@@ -387,9 +387,11 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
 
 /* Panel tabs (right edge vertical tab strip) */
 #panel-tabs { display: none; flex-direction: column; flex-shrink: 0; background: var(--ds-bg-secondary); border-left: 1px solid var(--ds-border); }
-.panel-tab { writing-mode: vertical-rl; padding: 12px 6px; background: transparent; border: none; border-left: 2px solid transparent; color: var(--ds-text-secondary); font-size: 12px; cursor: pointer; white-space: nowrap; }
+.panel-tab { writing-mode: vertical-rl; padding: 12px 6px; background: transparent; border: none; border-left: 2px solid transparent; color: var(--ds-text-secondary); font-size: 12px; cursor: pointer; white-space: nowrap; position: relative; }
 .panel-tab:hover { color: var(--ds-text-primary); background: var(--ds-bg-tertiary); }
 .panel-tab.active { color: var(--ds-accent-blue); border-left-color: var(--ds-accent-blue); background: var(--ds-bg-tertiary); }
+.panel-tab-badge { display: none; position: absolute; top: 6px; right: 2px; min-width: 8px; height: 8px; background: var(--ds-accent-red, #f85149); border-radius: 50%; font-size: 0; }
+.panel-tab-badge.visible { display: block; }
 
 /* Panel resizer */
 #panel-resizer { display: none; width: 4px; background: var(--ds-border); cursor: col-resize; flex-shrink: 0; transition: background 0.15s; }
