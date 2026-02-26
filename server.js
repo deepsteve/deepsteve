@@ -240,6 +240,21 @@ function wireShellOutput(id) {
       if (newSessionId !== e.claudeSessionId) {
         log(`Session ${id} claude session updated: ${e.claudeSessionId} → ${newSessionId}`);
         e.claudeSessionId = newSessionId;
+        // During shutdown, saveState() is blocked by stateFrozen and the process may be
+        // killed before the final save block runs. Write the updated ID to disk immediately
+        // so it survives even if the process is killed mid-shutdown.
+        if (shuttingDown) {
+          try {
+            const current = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+            if (current[id]) {
+              current[id].claudeSessionId = newSessionId;
+              fs.writeFileSync(STATE_FILE, JSON.stringify(current, null, 2));
+              log(`Session ${id} patched state.json during shutdown`);
+            }
+          } catch (err) {
+            console.error('Failed to patch state.json during shutdown:', err.message);
+          }
+        }
       }
     }
     e.clients.forEach((c) => c.send(data));
