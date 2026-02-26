@@ -55,6 +55,10 @@ NODE_PATH=$(which node)
 mkdir -p "$INSTALL_DIR/public/js"
 mkdir -p "$INSTALL_DIR/public/css"
 mkdir -p "$INSTALL_DIR/themes"
+mkdir -p "$INSTALL_DIR/mods/browser-console"
+mkdir -p "$INSTALL_DIR/mods/screenshots"
+mkdir -p "$INSTALL_DIR/mods/tasks"
+mkdir -p "$INSTALL_DIR/mods/tower"
 mkdir -p "$HOME/Library/LaunchAgents"
 
 PREAMBLE
@@ -78,6 +82,7 @@ embed_text() {
 # Core files
 embed_text "package.json" "package.json"
 embed_text "server.js" "server.js"
+embed_text "mcp-server.js" "mcp-server.js"
 
 # Public files
 embed_text "public/index.html" "public/index.html"
@@ -95,6 +100,13 @@ done
 # Theme CSS files
 for theme in themes/*.css; do
   embed_text "$theme" "$theme"
+done
+
+# Mod files
+for moddir in mods/*/; do
+  for f in "$moddir"*; do
+    [ -f "$f" ] && embed_text "$f" "$f"
+  done
 done
 
 # --- Embed binary files as base64 ---
@@ -168,6 +180,10 @@ npm install
 
 # Fix node-pty spawn-helper permissions
 find "$INSTALL_DIR/node_modules/node-pty" -name "spawn-helper" -exec chmod +x {} \;
+
+if command -v claude &>/dev/null; then
+    claude mcp add --transport http deepsteve http://localhost:3000/mcp 2>/dev/null || true
+fi
 
 launchctl unload "$PLIST_PATH" 2>/dev/null
 launchctl load "$PLIST_PATH"
