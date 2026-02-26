@@ -40,18 +40,84 @@ let originalTermNext = null;
 
 const kartState = {};
 
+// ── Pickup items ─────────────────────────────────────────────────────────────
+
+const ITEM_TYPES = {
+  burst:      { label: 'BURST',      color: 0xff9800, css: 'burst',      duration: 2 },
+  slippery:   { label: 'SLIPPERY',   color: 0x4caf50, css: 'slippery',   duration: 5 },
+  projectile: { label: 'PROJECTILE', color: 0x42a5f5, css: 'projectile', duration: 2 },
+};
+const ITEM_TYPE_KEYS = Object.keys(ITEM_TYPES);
+const PICKUP_COUNT = 8;
+const PICKUP_RADIUS = 1.2;
+
+let pickupItems = []; // { angle, laneOffset, type, mesh, hidden, respawnAt }
+let hazards = [];     // { angle, laneOffset, mesh, expiresAt }
+let effectFlashTimeout = null;
+
 // ── WASD input state ─────────────────────────────────────────────────────────
 
-const input = { w: false, a: false, s: false, d: false };
+const input = { w: false, a: false, s: false, d: false, space: false };
 
 window.addEventListener('keydown', (e) => {
   const k = e.key.toLowerCase();
   if (k in input) input[k] = true;
+  if (k === ' ') input.space = true;
+  startAudio();
 });
 window.addEventListener('keyup', (e) => {
   const k = e.key.toLowerCase();
   if (k in input) input[k] = false;
+  if (k === ' ') input.space = false;
 });
+
+// ── Audio (procedural engine via Web Audio) ─────────────────────────────────
+
+let audioCtx = null, oscSaw = null, oscSq = null, gainNode = null, filterNode = null;
+
+function startAudio() {
+  if (audioCtx) return;
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  filterNode = audioCtx.createBiquadFilter();
+  filterNode.type = 'lowpass';
+  filterNode.frequency.value = 300;
+  filterNode.Q.value = 2;
+  filterNode.connect(audioCtx.destination);
+
+  gainNode = audioCtx.createGain();
+  gainNode.gain.value = 0;
+  gainNode.connect(filterNode);
+
+  oscSaw = audioCtx.createOscillator();
+  oscSaw.type = 'sawtooth';
+  oscSaw.frequency.value = 65;
+  oscSaw.connect(gainNode);
+  oscSaw.start();
+
+  oscSq = audioCtx.createOscillator();
+  oscSq.type = 'square';
+  oscSq.frequency.value = 130;
+  const sqGain = audioCtx.createGain();
+  sqGain.gain.value = 0.3;
+  oscSq.connect(sqGain);
+  sqGain.connect(gainNode);
+  oscSq.start();
+}
+
+function updateEngineAudio() {
+  if (!audioCtx || !gainNode) return;
+  if (viewMode !== MODE_COCKPIT || !followId || !kartState[followId]) {
+    gainNode.gain.linearRampToValueAtTime(0, audioCtx.currentTime + 0.1);
+    return;
+  }
+  const k = kartState[followId];
+  const t = Math.min(Math.max(k.speed / (k.baseSpeed * 1.3), 0), 1); // 0..1
+  const freq = 65 + t * 135; // 65-200 Hz
+  oscSaw.frequency.linearRampToValueAtTime(freq, audioCtx.currentTime + 0.05);
+  oscSq.frequency.linearRampToValueAtTime(freq * 2, audioCtx.currentTime + 0.05);
+  filterNode.frequency.linearRampToValueAtTime(300 + t * 800, audioCtx.currentTime + 0.05);
+  gainNode.gain.linearRampToValueAtTime(0.03 + t * 0.07, audioCtx.currentTime + 0.05);
+}
 
 // ── Three.js setup ──────────────────────────────────────────────────────────
 
@@ -85,92 +151,70 @@ const cockpitGroup = new THREE.Group();
 cockpitGroup.visible = false;
 scene.add(cockpitGroup);
 
-// Steering wheel
+// Cockpit body parts (recolored to match player's kart in enterCockpit)
+const cockpitBodyParts = [];
+
+// Hood / nose cone — visible as the kart body at bottom of screen
 {
-  const wheelRing = new THREE.Mesh(
-    new THREE.TorusGeometry(0.15, 0.02, 8, 24),
-    new THREE.MeshPhongMaterial({ color: 0x222222, shininess: 40 })
-  );
-  wheelRing.rotation.x = -Math.PI * 0.35;
-  wheelRing.position.set(0, 0.55, 0.25);
-  cockpitGroup.add(wheelRing);
+  const hoodMat = new THREE.MeshPhongMaterial({ color: 0xe53935, shininess: 60 });
+  const hood = new THREE.Mesh(new THREE.BoxGeometry(0.9, 0.06, 0.7), hoodMat);
+  hood.position.set(0, -0.35, -1.1);
+  cockpitGroup.add(hood);
+  cockpitBodyParts.push(hood);
 
-  // Steering column
-  const col = new THREE.Mesh(
-    new THREE.CylinderGeometry(0.02, 0.02, 0.3, 8),
-    new THREE.MeshPhongMaterial({ color: 0x333333 })
-  );
-  col.rotation.x = -Math.PI * 0.35;
-  col.position.set(0, 0.42, 0.3);
-  cockpitGroup.add(col);
-
-  // Cross-bar
-  const bar = new THREE.Mesh(
-    new THREE.BoxGeometry(0.18, 0.015, 0.015),
-    new THREE.MeshPhongMaterial({ color: 0x333333 })
-  );
-  bar.rotation.x = -Math.PI * 0.35;
-  bar.position.set(0, 0.55, 0.25);
-  cockpitGroup.add(bar);
+  const nose = new THREE.Mesh(new THREE.BoxGeometry(0.7, 0.05, 0.35), hoodMat);
+  nose.position.set(0, -0.34, -1.5);
+  cockpitGroup.add(nose);
+  cockpitBodyParts.push(nose);
 }
 
-// Dashboard body (dark plastic)
+// Side fairings — colored panels framing the view
 {
-  const dash = new THREE.Mesh(
-    new THREE.BoxGeometry(1.2, 0.12, 0.5),
-    new THREE.MeshPhongMaterial({ color: 0x1a1a1a, shininess: 20 })
-  );
-  dash.position.set(0, 0.38, 0.35);
+  const fairingMat = new THREE.MeshPhongMaterial({ color: 0xe53935, shininess: 50 });
+  const leftFairing = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.22, 0.7), fairingMat);
+  leftFairing.position.set(-0.5, -0.25, -0.85);
+  cockpitGroup.add(leftFairing);
+  cockpitBodyParts.push(leftFairing);
+
+  const rightFairing = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.22, 0.7), fairingMat);
+  rightFairing.position.set(0.5, -0.25, -0.85);
+  cockpitGroup.add(rightFairing);
+  cockpitBodyParts.push(rightFairing);
+}
+
+// Dashboard — dark box behind the steering wheel
+{
+  const dashMat = new THREE.MeshPhongMaterial({ color: 0x1a1a1a, shininess: 20 });
+  const dash = new THREE.Mesh(new THREE.BoxGeometry(0.95, 0.1, 0.25), dashMat);
+  dash.position.set(0, -0.28, -0.55);
   cockpitGroup.add(dash);
 }
 
-// Dashboard screen bezel (right side — this is where the terminal goes)
-// We use a 3D frame that visually matches where the CSS terminal overlay sits
+// Steering wheel — torus tilted toward the player
 {
-  // Screen frame on the right dashboard
-  const bezelMat = new THREE.MeshPhongMaterial({ color: 0x111111, shininess: 30 });
+  const wheelMat = new THREE.MeshPhongMaterial({ color: 0x222222, shininess: 40 });
+  const wheelRing = new THREE.Mesh(new THREE.TorusGeometry(0.12, 0.018, 8, 24), wheelMat);
+  wheelRing.rotation.x = Math.PI * 0.3;
+  wheelRing.position.set(0, -0.20, -0.65);
+  cockpitGroup.add(wheelRing);
 
-  // Back plate
-  const backPlate = new THREE.Mesh(
-    new THREE.BoxGeometry(0.5, 0.35, 0.02),
-    bezelMat
-  );
-  backPlate.position.set(0.38, 0.56, 0.28);
-  backPlate.rotation.y = -0.2;
-  backPlate.rotation.x = -0.15;
-  cockpitGroup.add(backPlate);
+  const colMat = new THREE.MeshPhongMaterial({ color: 0x333333 });
+  const col = new THREE.Mesh(new THREE.CylinderGeometry(0.015, 0.015, 0.18, 8), colMat);
+  col.rotation.x = Math.PI * 0.3;
+  col.position.set(0, -0.26, -0.58);
+  cockpitGroup.add(col);
 
-  // Border strips (top, bottom, left, right)
-  const borderMat = new THREE.MeshPhongMaterial({ color: 0x333333, shininess: 40 });
-  const borders = [
-    { s: [0.52, 0.02, 0.03], p: [0.38, 0.74, 0.27] }, // top
-    { s: [0.52, 0.02, 0.03], p: [0.38, 0.39, 0.29] }, // bottom
-    { s: [0.02, 0.37, 0.03], p: [0.12, 0.56, 0.28] }, // left
-    { s: [0.02, 0.37, 0.03], p: [0.64, 0.56, 0.28] }, // right
-  ];
-  for (const b of borders) {
-    const m = new THREE.Mesh(new THREE.BoxGeometry(...b.s), borderMat);
-    m.position.set(...b.p);
-    m.rotation.y = -0.2;
-    m.rotation.x = -0.15;
-    cockpitGroup.add(m);
-  }
+  const bar = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.012, 0.012), colMat);
+  bar.rotation.x = Math.PI * 0.3;
+  bar.position.set(0, -0.20, -0.65);
+  cockpitGroup.add(bar);
 }
 
-// Kart body sides (visible edges of the kart from cockpit)
+// Floor — flat surface at the bottom
 {
-  const sideMat = new THREE.MeshPhongMaterial({ color: 0x444444, shininess: 20 });
-  // Left side panel
-  const leftPanel = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.2, 0.8), sideMat);
-  leftPanel.position.set(-0.6, 0.3, 0.15);
-  cockpitGroup.add(leftPanel);
-  // Right side panel
-  const rightPanel = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.2, 0.8), sideMat);
-  rightPanel.position.set(0.6, 0.3, 0.15);
-  cockpitGroup.add(rightPanel);
-  // Floor
-  const floor = new THREE.Mesh(new THREE.BoxGeometry(1.2, 0.03, 0.8), sideMat);
-  floor.position.set(0, 0.18, 0.15);
+  const floorMat = new THREE.MeshPhongMaterial({ color: 0x333333, shininess: 10 });
+  const floor = new THREE.Mesh(new THREE.BoxGeometry(1.0, 0.02, 0.7), floorMat);
+  floor.position.set(0, -0.45, -0.65);
   cockpitGroup.add(floor);
 }
 
@@ -380,6 +424,171 @@ function trackTangent(angle) {
   return new THREE.Vector3(TRACK_RX * Math.sin(angle), 0, -TRACK_RZ * Math.cos(angle)).normalize();
 }
 
+// ── Pickup items: spawn, collect, use, visuals ──────────────────────────────
+
+function createPickupMesh(type) {
+  const info = ITEM_TYPES[type];
+  const mat = new THREE.MeshPhongMaterial({ color: info.color, emissive: info.color, emissiveIntensity: 0.4, shininess: 80 });
+  let geo;
+  if (type === 'burst') geo = new THREE.OctahedronGeometry(0.35);
+  else if (type === 'slippery') geo = new THREE.SphereGeometry(0.3, 12, 12);
+  else geo = new THREE.ConeGeometry(0.25, 0.5, 8);
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.castShadow = true;
+  scene.add(mesh);
+  return mesh;
+}
+
+function spawnPickups() {
+  for (const p of pickupItems) scene.remove(p.mesh);
+  pickupItems = [];
+  for (let i = 0; i < PICKUP_COUNT; i++) {
+    const angle = (i / PICKUP_COUNT) * Math.PI * 2;
+    const laneOffset = (Math.random() - 0.5) * (TRACK_WIDTH - 2);
+    const type = ITEM_TYPE_KEYS[i % ITEM_TYPE_KEYS.length];
+    const mesh = createPickupMesh(type);
+    pickupItems.push({ angle, laneOffset, type, mesh, hidden: false, respawnAt: 0 });
+  }
+}
+
+function clearHazards() {
+  for (const h of hazards) scene.remove(h.mesh);
+  hazards = [];
+}
+
+function createHazardMesh() {
+  const geo = new THREE.CircleGeometry(0.8, 16);
+  const mat = new THREE.MeshBasicMaterial({ color: 0x4caf50, transparent: true, opacity: 0.45, side: THREE.DoubleSide });
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.rotation.x = -Math.PI / 2;
+  scene.add(mesh);
+  return mesh;
+}
+
+function updatePickupVisuals(now) {
+  for (const p of pickupItems) {
+    if (p.hidden) {
+      p.mesh.visible = false;
+      if (p.respawnAt && now / 1000 > p.respawnAt) {
+        p.hidden = false;
+        p.respawnAt = 0;
+      }
+      continue;
+    }
+    p.mesh.visible = true;
+    const pos = trackPos3D(p.angle, p.laneOffset);
+    p.mesh.position.set(pos.x, 0.5 + Math.sin(now / 400 + p.angle * 3) * 0.15, pos.z);
+    p.mesh.rotation.y += 0.02;
+  }
+  // Expire hazards
+  for (let i = hazards.length - 1; i >= 0; i--) {
+    if (raceElapsed > hazards[i].expiresAt) {
+      scene.remove(hazards[i].mesh);
+      hazards.splice(i, 1);
+    }
+  }
+}
+
+function checkPickupCollisions(now) {
+  if (raceState !== RACE_RUNNING) return;
+  for (const [id, k] of Object.entries(kartState)) {
+    if (k.finished) continue;
+    const kartCount = Object.keys(kartState).length;
+    const isPlayer = viewMode === MODE_COCKPIT && id === followId;
+    const laneOffset = isPlayer && k.laneOffset != null ? k.laneOffset : (k.lane - (kartCount - 1) / 2) * 1.2;
+    const kPos = trackPos3D(k.angle, laneOffset);
+
+    // Collect pickups
+    for (const p of pickupItems) {
+      if (p.hidden || k.heldItem) continue;
+      const pPos = trackPos3D(p.angle, p.laneOffset);
+      if (kPos.distanceTo(pPos) < PICKUP_RADIUS) {
+        k.heldItem = p.type;
+        p.hidden = true;
+        p.respawnAt = raceElapsed + 5;
+        if (isPlayer) updateHUD();
+      }
+    }
+
+    // Hazard collision
+    for (let i = hazards.length - 1; i >= 0; i--) {
+      const h = hazards[i];
+      const hPos = trackPos3D(h.angle, h.laneOffset);
+      if (kPos.distanceTo(hPos) < 1.0 && (!k.activeEffect || k.activeEffect.type !== 'spinout')) {
+        k.activeEffect = { type: 'spinout', expiresAt: raceElapsed + 1.5 };
+        scene.remove(h.mesh);
+        hazards.splice(i, 1);
+      }
+    }
+
+    // AI item use
+    if (!isPlayer && k.heldItem && Math.random() < 0.02) {
+      useItem(id, k);
+    }
+  }
+}
+
+function useItem(id, k) {
+  if (!k.heldItem) return;
+  const type = k.heldItem;
+  k.heldItem = null;
+
+  if (type === 'burst') {
+    k.activeEffect = { type: 'burst', expiresAt: raceElapsed + ITEM_TYPES.burst.duration };
+  } else if (type === 'slippery') {
+    const kartCount = Object.keys(kartState).length;
+    const isPlayer = viewMode === MODE_COCKPIT && id === followId;
+    const laneOffset = isPlayer && k.laneOffset != null ? k.laneOffset : (k.lane - (kartCount - 1) / 2) * 1.2;
+    hazards.push({
+      angle: k.angle,
+      laneOffset,
+      mesh: createHazardMesh(),
+      expiresAt: raceElapsed + ITEM_TYPES.slippery.duration,
+    });
+    const hPos = trackPos3D(k.angle, laneOffset);
+    hazards[hazards.length - 1].mesh.position.set(hPos.x, 0.03, hPos.z);
+  } else if (type === 'projectile') {
+    // Hit nearest kart ahead
+    let bestDist = Infinity, targetId = null;
+    const kartCount = Object.keys(kartState).length;
+    const isPlayer = viewMode === MODE_COCKPIT && id === followId;
+    const myLane = isPlayer && k.laneOffset != null ? k.laneOffset : (k.lane - (kartCount - 1) / 2) * 1.2;
+    const myPos = trackPos3D(k.angle, myLane);
+    const myTan = trackTangent(k.angle);
+
+    for (const [oid, ok] of Object.entries(kartState)) {
+      if (oid === id || ok.finished) continue;
+      const oLane = (viewMode === MODE_COCKPIT && oid === followId && ok.laneOffset != null) ? ok.laneOffset : (ok.lane - (kartCount - 1) / 2) * 1.2;
+      const oPos = trackPos3D(ok.angle, oLane);
+      const diff = oPos.clone().sub(myPos);
+      const ahead = diff.dot(myTan);
+      if (ahead > 0 && ahead < bestDist) {
+        bestDist = ahead;
+        targetId = oid;
+      }
+    }
+    if (targetId) {
+      kartState[targetId].activeEffect = { type: 'hit', expiresAt: raceElapsed + ITEM_TYPES.projectile.duration };
+    }
+  }
+
+  if (viewMode === MODE_COCKPIT && id === followId) {
+    showEffectFlash(ITEM_TYPES[type].label);
+    updateHUD();
+  }
+}
+
+function showEffectFlash(text) {
+  if (effectFlashTimeout) clearTimeout(effectFlashTimeout);
+  let el = document.getElementById('effect-hud');
+  if (el) el.remove();
+  el = document.createElement('div');
+  el.id = 'effect-hud';
+  el.textContent = text + '!';
+  document.getElementById('hud').appendChild(el);
+  effectFlashTimeout = setTimeout(() => { el.remove(); effectFlashTimeout = null; }, 600);
+}
+
 // ── Deepsteve bridge ────────────────────────────────────────────────────────
 
 function initBridge() {
@@ -420,6 +629,7 @@ function syncKarts() {
         lap: 0, prevAngle: START_ANGLE,
         finished: false, finishTime: null,
         lane: laneIdx, mesh, label, name: s.name,
+        heldItem: null, activeEffect: null,
       };
       laneIdx++;
     }
@@ -486,6 +696,7 @@ function updateCamera() {
 // ── Cockpit mode ────────────────────────────────────────────────────────────
 
 function enterCockpit(sessionId) {
+  startAudio();
   followId = sessionId;
   viewMode = MODE_COCKPIT;
 
@@ -506,6 +717,12 @@ function enterCockpit(sessionId) {
 
   // Hide the followed kart's mesh (we're inside it)
   if (k) k.mesh.visible = false;
+
+  // Recolor cockpit body to match player's kart
+  if (k) {
+    const bodyColor = KART_COLORS[k.lane % KART_COLORS.length].body;
+    for (const part of cockpitBodyParts) part.material.color.setHex(bodyColor);
+  }
 
   cockpitGroup.visible = true;
   showTerminal(sessionId);
@@ -693,15 +910,23 @@ function startRace() {
       workingMult: 1.15 + Math.random() * 0.10,
       lap: 0, prevAngle: START_ANGLE + i * 0.06,
       finished: false, finishTime: null, lane: i,
+      heldItem: null, activeEffect: null,
     });
     // Re-init lane offset if player is in this kart
     if (viewMode === MODE_COCKPIT && followId === s.id) {
       const kartCount = sessions.length;
       k.laneOffset = (i - (kartCount - 1) / 2) * 1.2;
       k.mesh.visible = false;
+      // Snap camera to new position to avoid lerp drift
+      const pos = trackPos3D(k.angle, k.laneOffset);
+      const tangent = trackTangent(k.angle);
+      cockpitCamPos.set(pos.x - tangent.x * 0.1, 0.9, pos.z - tangent.z * 0.1);
+      cockpitCamLook.set(pos.x + tangent.x * 8, 0.7, pos.z + tangent.z * 8);
     }
   });
   results = []; raceElapsed = 0;
+  clearHazards();
+  spawnPickups();
   raceState = RACE_COUNTDOWN; countdown = 3;
   updateHUD();
 
@@ -726,6 +951,19 @@ function updatePhysics(now, dt) {
     allFinished = false;
 
     const isPlayer = viewMode === MODE_COCKPIT && id === followId;
+
+    // Player item use (spacebar, consume on press)
+    if (isPlayer && input.space && k.heldItem) {
+      input.space = false; // consume the press
+      useItem(id, k);
+    }
+
+    // Expire active effects
+    if (k.activeEffect && raceElapsed > k.activeEffect.expiresAt) {
+      k.activeEffect = null;
+      if (isPlayer) updateHUD();
+    }
+
     if (isPlayer) {
       // WASD: W = gas, S = brake, A/D = steer (adjust lane offset)
       const gas = input.w ? 1 : 0;
@@ -743,6 +981,13 @@ function updatePhysics(now, dt) {
       k.speed += (k.baseSpeed * mult + wobble - k.speed) * 3 * dt;
     }
 
+    // Apply item effects to speed
+    if (k.activeEffect) {
+      if (k.activeEffect.type === 'burst') k.speed *= 1.8;
+      else if (k.activeEffect.type === 'hit') k.speed *= 0.4;
+      else if (k.activeEffect.type === 'spinout') k.speed *= 0.2;
+    }
+
     const prev = k.angle;
     k.angle -= k.speed * dt * 0.02;
     while (k.angle < -Math.PI) k.angle += 2 * Math.PI;
@@ -752,6 +997,8 @@ function updatePhysics(now, dt) {
       if (k.lap >= TOTAL_LAPS) { k.finished = true; k.finishTime = raceElapsed; finishOrder.push({ id, time: raceElapsed }); }
     }
   }
+
+  checkPickupCollisions(now);
 
   if (allFinished || finishOrder.length === Object.keys(kartState).length) {
     finishOrder.sort((a, b) => a.time - b.time);
@@ -788,7 +1035,9 @@ function animate(now) {
     k.label.visible = !(viewMode === MODE_COCKPIT && id === followId);
   }
 
+  updatePickupVisuals(now);
   updateCamera();
+  updateEngineAudio();
 
   if (raceState === RACE_RUNNING && Math.floor(now / 200) !== Math.floor((now - 16) / 200)) {
     updateHUD();
@@ -877,13 +1126,20 @@ function updateHUD() {
     html += `<div id="winner-overlay"><div class="winner-name">${esc(wn)}</div><div class="wins">WINS!</div><div class="time">${results[0].time.toFixed(2)}s</div></div>`;
   }
 
-  // Cockpit: lap display (bottom-left)
+  // Cockpit: lap display + item HUD (bottom-left)
   if (viewMode === MODE_COCKPIT && followId && kartState[followId]) {
     const k = kartState[followId];
     if (raceState === RACE_RUNNING && !k.finished) {
       html += `<div id="cockpit-hud">`;
       html += `<div class="lap-display">LAP <span style="color:#ffd700">${k.lap + 1}</span>/${TOTAL_LAPS}</div>`;
       html += `</div>`;
+      if (k.heldItem) {
+        const info = ITEM_TYPES[k.heldItem];
+        html += `<div id="item-hud">`;
+        html += `<div class="item-name ${info.css}">${info.label}</div>`;
+        html += `<div class="item-hint">SPACE to use</div>`;
+        html += `</div>`;
+      }
     }
   }
 

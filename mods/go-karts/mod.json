@@ -1,6 +1,6 @@
 {
   "name": "Go Karts",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "minDeepsteveVersion": "0.2.0",
   "description": "3D go-kart racing with your Claude sessions",
   "entry": "index.html",
