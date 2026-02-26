@@ -1,7 +1,7 @@
 {
   "name": "Console",
-  "version": "0.1.0",
-  "minDeepsteveVersion": "0.1.0",
+  "version": "0.2.0",
+  "minDeepsteveVersion": "0.2.0",
   "description": "Browser console passthrough for Agent sessions",
   "entry": "index.html",
   "display": "panel",
