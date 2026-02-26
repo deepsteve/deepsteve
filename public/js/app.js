@@ -520,6 +520,8 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
         }
       } else if (msg.type === 'tasks') {
         ModManager.notifyTasksChanged(msg.tasks);
+      } else if (msg.type === 'agent-chat') {
+        ModManager.notifyAgentChatChanged(msg.channels);
       } else if (msg.type === 'browser-eval-request') {
         if (!processedBrowserRequests.has(msg.requestId)) {
           processedBrowserRequests.add(msg.requestId);
