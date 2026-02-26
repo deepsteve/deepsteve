@@ -690,9 +690,16 @@ function startRace() {
     Object.assign(k, {
       angle: START_ANGLE + i * 0.06, speed: 0,
       baseSpeed: 8 + Math.random() * 5, wobble: Math.random() * 1000,
+      workingMult: 1.15 + Math.random() * 0.10,
       lap: 0, prevAngle: START_ANGLE + i * 0.06,
       finished: false, finishTime: null, lane: i,
     });
+    // Re-init lane offset if player is in this kart
+    if (viewMode === MODE_COCKPIT && followId === s.id) {
+      const kartCount = sessions.length;
+      k.laneOffset = (i - (kartCount - 1) / 2) * 1.2;
+      k.mesh.visible = false;
+    }
   });
   results = []; raceElapsed = 0;
   raceState = RACE_COUNTDOWN; countdown = 3;
@@ -725,14 +732,15 @@ function updatePhysics(now, dt) {
       const brake = input.s ? 1 : 0;
       const targetSpeed = k.baseSpeed * (0.3 + gas * 0.9) * (1 - brake * 0.7);
       k.speed += (targetSpeed - k.speed) * 4 * dt;
-      if (input.a) k.laneOffset = (k.laneOffset || 0) + 3.0 * dt;
-      if (input.d) k.laneOffset = (k.laneOffset || 0) - 3.0 * dt;
+      if (input.a) k.laneOffset = (k.laneOffset || 0) - 3.0 * dt;
+      if (input.d) k.laneOffset = (k.laneOffset || 0) + 3.0 * dt;
       const maxOff = TRACK_WIDTH / 2 - 0.5;
       k.laneOffset = Math.max(-maxOff, Math.min(maxOff, k.laneOffset || 0));
     } else {
-      const boost = (sm[id] && !sm[id].waitingForInput) ? 1.5 : 0;
-      const wobble = Math.sin(now / 600 + k.wobble) * 1.0;
-      k.speed += (k.baseSpeed + wobble + boost - k.speed) * 3 * dt;
+      const working = sm[id] && !sm[id].waitingForInput;
+      const mult = working ? (k.workingMult || 1.2) : 0.9;
+      const wobble = Math.sin(now / 600 + k.wobble) * 0.5;
+      k.speed += (k.baseSpeed * mult + wobble - k.speed) * 3 * dt;
     }
 
     const prev = k.angle;
@@ -749,6 +757,7 @@ function updatePhysics(now, dt) {
     finishOrder.sort((a, b) => a.time - b.time);
     results = finishOrder.map((f, i) => ({ id: f.id, name: sm[f.id]?.name || '???', time: f.time, position: i + 1 }));
     raceState = RACE_FINISHED;
+    updateHUD();
   }
 }
 
