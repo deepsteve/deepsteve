@@ -64,11 +64,17 @@ export function setupTerminalIO(term, ws, { onUserInput, container } = {}) {
   });
 
   // Auto-scroll to bottom on new output, unless user has scrolled up.
-  // We track user scroll intent via wheel events rather than onScroll,
-  // because Ink (Claude Code's UI) periodically clears and re-renders
-  // the screen, resetting the scroll buffer. Those buffer resets fire
-  // onScroll with atBottom=true, which would incorrectly clear the
-  // userScrolledUp flag. Wheel events only fire from actual user input.
+  //
+  // We detect user scroll intent via wheel events (direction-aware) and
+  // the DOM viewport's scroll position. We avoid xterm's onScroll and
+  // buffer.baseY/viewportY because:
+  // - Ink (Claude Code's UI) periodically clears and re-renders the screen,
+  //   resetting the scroll buffer, which fires misleading onScroll events.
+  // - During active output, baseY increases between the wheel event and the
+  //   rAF check, so the user can never "catch up" to the bottom — the flag
+  //   gets stuck as true.
+  // The DOM viewport's scrollTop/scrollHeight is the ground truth for what
+  // the user actually sees.
   let userScrolledUp = false;
 
   // During transitions (tab switch, reconnect, scrollback replay), suppress
@@ -102,15 +108,42 @@ export function setupTerminalIO(term, ws, { onUserInput, container } = {}) {
     term.focus();
   });
 
-  term.element.addEventListener('wheel', () => {
+  // Use the DOM viewport element for scroll position checks.
+  // xterm renders .xterm-viewport as the scrollable container.
+  const viewport = container?.querySelector('.xterm-viewport');
+
+  // Track scroll direction via wheel deltaY.
+  // - Scroll up (deltaY < 0): set userScrolledUp = true
+  // - Scroll down (deltaY > 0): check if viewport is near bottom → clear flag
+  // A small tolerance (half a row height, ~10px) handles sub-pixel rounding
+  // and the race where new output arrives between the wheel event and rAF.
+  const BOTTOM_TOLERANCE = 10;
+
+  term.element.addEventListener('wheel', (e) => {
     const gen = scrollGen;
+    const scrollingDown = e.deltaY > 0;
     requestAnimationFrame(() => {
       if (suppressAutoScroll) return;
       if (gen !== scrollGen) return; // programmatic scroll happened since — ignore
-      const buf = term.buffer.active;
-      const atBottom = buf.baseY <= buf.viewportY;
-      userScrolledUp = !atBottom;
-      scrollBtn.classList.toggle('visible', userScrolledUp);
+      if (scrollingDown && viewport) {
+        // User is scrolling toward the bottom — check DOM viewport position
+        const gap = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight;
+        if (gap <= BOTTOM_TOLERANCE) {
+          userScrolledUp = false;
+          scrollBtn.classList.remove('visible');
+          return;
+        }
+      }
+      if (!scrollingDown) {
+        // Scrolling up — always mark as scrolled up (unless already at top
+        // with no scrollback, in which case there's nothing to scroll)
+        if (viewport && viewport.scrollTop > 0) {
+          userScrolledUp = true;
+          scrollBtn.classList.add('visible');
+        }
+        return;
+      }
+      // Scrolling down but not yet at bottom — keep current state
     });
   }, { passive: true });
 
