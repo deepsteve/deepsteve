@@ -182,7 +182,7 @@ npm install
 find "$INSTALL_DIR/node_modules/node-pty" -name "spawn-helper" -exec chmod +x {} \;
 
 if command -v claude &>/dev/null; then
-    claude mcp add --transport http deepsteve http://localhost:3000/mcp 2>/dev/null || true
+    claude mcp add --scope user --transport http deepsteve http://localhost:3000/mcp 2>/dev/null || true
 fi
 
 launchctl unload "$PLIST_PATH" 2>/dev/null
