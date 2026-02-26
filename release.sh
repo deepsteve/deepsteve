@@ -59,6 +59,7 @@ mkdir -p "$INSTALL_DIR/mods/browser-console"
 mkdir -p "$INSTALL_DIR/mods/screenshots"
 mkdir -p "$INSTALL_DIR/mods/tasks"
 mkdir -p "$INSTALL_DIR/mods/tower"
+mkdir -p "$INSTALL_DIR/mods/go-karts"
 mkdir -p "$HOME/Library/LaunchAgents"
 
 PREAMBLE

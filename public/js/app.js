@@ -193,6 +193,18 @@ function getSessionList() {
   }));
 }
 
+// Expose session internals for mods that need direct terminal access (e.g. reparenting)
+window.__deepsteve = {
+  fitSession(id) {
+    const s = sessions.get(id);
+    if (s) fitTerminal(s.term, s.fit, s.ws);
+  },
+  getTerminalContainer(id) {
+    const s = sessions.get(id);
+    return s ? s.container : null;
+  },
+};
+
 // Sessions dropdown
 const sessionsBtn = document.getElementById('sessions-btn');
 const sessionsMenu = document.getElementById('sessions-menu');
