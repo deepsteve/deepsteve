@@ -42,6 +42,88 @@ const SCROLLBACK_SIZE = 100 * 1024; // 100KB circular buffer per shell
 const RELOAD_FLAG = path.join(os.homedir(), '.deepsteve', '.reload');
 const reloadClients = new Set(); // WebSocket connections for live-reload
 
+// --- Activity feed ---
+const ACTIVITY_MAX = 500;
+const activityEvents = [];
+let activityNextId = 1;
+const activityDebounce = new Map(); // shellId → { lastFileEvents: Map<path, ts>, errorCount, errorWindowStart }
+
+function addActivityEvent(event) {
+  event.id = activityNextId++;
+  if (!event.timestamp) event.timestamp = Date.now();
+  if (!event.level) event.level = 'info';
+  activityEvents.push(event);
+  while (activityEvents.length > ACTIVITY_MAX) activityEvents.shift();
+  broadcast({ type: 'activity', event });
+}
+
+function getActivityDebounce(shellId) {
+  if (!activityDebounce.has(shellId)) {
+    activityDebounce.set(shellId, { lastFileEvents: new Map(), errorCount: 0, errorWindowStart: 0 });
+  }
+  return activityDebounce.get(shellId);
+}
+
+function detectActivityEvents(shellId, plainText) {
+  const entry = shells.get(shellId);
+  if (!entry) return;
+  const sessionName = entry.name || shellId;
+  const now = Date.now();
+  const debounce = getActivityDebounce(shellId);
+
+  // File operations: "Wrote to /path", "Created /path", "Modified /path", "Deleted /path"
+  const fileRe = /(?:Wrote to|Created|Modified|Deleted)\s+(\S+)/g;
+  let m;
+  while ((m = fileRe.exec(plainText)) !== null) {
+    const filePath = m[1];
+    const lastTs = debounce.lastFileEvents.get(filePath);
+    if (lastTs && now - lastTs < 2000) continue; // 2s debounce per file
+    debounce.lastFileEvents.set(filePath, now);
+    const op = m[0].split(/\s/)[0]; // "Wrote" -> just the verb
+    const shortPath = filePath.split('/').slice(-2).join('/');
+    addActivityEvent({ type: 'file', sessionId: shellId, sessionName, message: `${op === 'Wrote' ? 'Modified' : op} ${shortPath}` });
+  }
+
+  // Git: commit lines like "[branch hash] message"
+  const commitRe = /\[(\S+)\s+([0-9a-f]{7,})\]\s+(.+)/;
+  const commitMatch = plainText.match(commitRe);
+  if (commitMatch) {
+    addActivityEvent({ type: 'git', sessionId: shellId, sessionName, message: `Committed ${commitMatch[2]} "${commitMatch[3].slice(0, 60)}"` });
+  }
+
+  // Git: branch switch
+  if (/Switched to (?:a new )?branch/.test(plainText)) {
+    const branchMatch = plainText.match(/Switched to (?:a new )?branch '([^']+)'/);
+    if (branchMatch) {
+      addActivityEvent({ type: 'git', sessionId: shellId, sessionName, message: `Switched to branch '${branchMatch[1]}'` });
+    }
+  }
+
+  // Git: push
+  if (/(?:->|→)\s+\S+/.test(plainText) && /push/i.test(plainText)) {
+    addActivityEvent({ type: 'git', sessionId: shellId, sessionName, message: 'Pushed to remote' });
+  }
+
+  // Errors: lines containing Error:, error:, FAIL, failed (rate limited: max 5 per 10s per session)
+  const errorRe = /(?:Error:|error:|FAIL|failed)/i;
+  if (errorRe.test(plainText)) {
+    if (now - debounce.errorWindowStart > 10000) {
+      debounce.errorCount = 0;
+      debounce.errorWindowStart = now;
+    }
+    if (debounce.errorCount < 5) {
+      debounce.errorCount++;
+      // Extract a short error snippet
+      const lines = plainText.split('\n');
+      const errorLine = lines.find(l => errorRe.test(l)) || '';
+      const snippet = errorLine.trim().slice(0, 120);
+      if (snippet) {
+        addActivityEvent({ type: 'error', level: 'error', sessionId: shellId, sessionName, message: snippet });
+      }
+    }
+  }
+}
+
 function log(...args) {
   const ts = new Date().toISOString().slice(11, 23);
   console.log(`[${ts}]`, ...args);
@@ -234,6 +316,7 @@ function wireShellOutput(id) {
     // Claude prints this line when a session exits (including /exit, /clear, shutdown).
     // Strip ANSI escapes before matching so dim/bold wrappers don't interfere.
     const plain = data.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '');
+    detectActivityEvents(id, plain);
     const resumeMatch = plain.match(/claude --resume ([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/);
     if (resumeMatch) {
       const newSessionId = resumeMatch[1];
@@ -262,6 +345,7 @@ function wireShellOutput(id) {
       e.waitingForInput = true;
       const stateMsg = JSON.stringify({ type: 'state', waiting: true });
       e.clients.forEach((c) => c.send(stateMsg));
+      addActivityEvent({ type: 'state', sessionId: id, sessionName: e.name || id, message: 'Waiting for input' });
 
       if (e.initialPrompt) {
         const prompt = e.initialPrompt;
@@ -602,6 +686,7 @@ app.post('/api/shells/killall', (req, res) => {
     killed.push({ id, pid: entry.shell.pid });
     killShell(entry, id);
     shells.delete(id);
+    activityDebounce.delete(id);
   }
   res.json({ killed });
 });
@@ -614,6 +699,7 @@ app.delete('/api/shells/:id', (req, res) => {
     const entry = shells.get(id);
     killShell(entry, id);
     shells.delete(id);
+    activityDebounce.delete(id);
     log(`Killed active shell ${id}`);
     saveState();
     return res.json({ killed: id, status: 'active' });
@@ -752,11 +838,12 @@ wss.on('connection', (ws, req) => {
             entry.scrollback = [];
             entry.scrollbackSize = 0;
             wireShellOutput(id);
-            fallbackShell.onExit(() => { if (!shuttingDown) { shells.delete(id); saveState(); } });
+            fallbackShell.onExit(() => { if (!shuttingDown) { shells.delete(id); activityDebounce.delete(id); saveState(); } });
             saveState();
           }
         } else {
           shells.delete(id);
+          activityDebounce.delete(id);
           saveState();
         }
       });
@@ -780,8 +867,9 @@ wss.on('connection', (ws, req) => {
     const shell = spawnClaude(claudeArgs, cwd, { cols: initialCols, rows: initialRows });
     shells.set(id, { shell, clients: new Set(), cwd, claudeSessionId, worktree: worktree || null, name: name || null, waitingForInput: false, lastActivity: Date.now() });
     wireShellOutput(id);
-    shell.onExit(() => { if (!shuttingDown) { shells.delete(id); saveState(); } });
+    shell.onExit(() => { if (!shuttingDown) { shells.delete(id); activityDebounce.delete(id); saveState(); } });
     saveState();
+    addActivityEvent({ type: 'state', sessionId: id, sessionName: name || id, message: 'Session started' });
   }
 
   const entry = shells.get(id);
@@ -817,6 +905,7 @@ wss.on('connection', (ws, req) => {
       entry.waitingForInput = false;
       const stateMsg = JSON.stringify({ type: 'state', waiting: false });
       entry.clients.forEach((c) => c.send(stateMsg));
+      addActivityEvent({ type: 'state', sessionId: id, sessionName: entry.name || id, message: 'Working...' });
     }
     entry.shell.write(str);
   });
@@ -831,6 +920,7 @@ wss.on('connection', (ws, req) => {
           savedState[id] = { cwd: entry.cwd, claudeSessionId: entry.claudeSessionId, worktree: entry.worktree || null, name: entry.name || null, lastActivity: entry.lastActivity || null };
           killShell(entry, id);
           shells.delete(id);
+          activityDebounce.delete(id);
           saveState();
         }
       }, 30000);
@@ -847,7 +937,7 @@ function broadcast(msg) {
 }
 
 // Initialize MCP server (async, ~100ms for dynamic import)
-initMCP({ app, shells, wss, broadcast, log, MODS_DIR }).catch(e => log('MCP init failed:', e.message));
+initMCP({ app, shells, wss, broadcast, log, MODS_DIR, addActivityEvent, activityEvents }).catch(e => log('MCP init failed:', e.message));
 
 // Watch themes directory for changes and broadcast to clients
 let themeWatchDebounce = null;

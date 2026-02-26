@@ -520,6 +520,10 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
         }
       } else if (msg.type === 'tasks') {
         ModManager.notifyTasksChanged(msg.tasks);
+      } else if (msg.type === 'activity') {
+        ModManager.notifyActivityChanged(msg.event);
+      } else if (msg.type === 'activity-cleared') {
+        ModManager.notifyActivityChanged(null);
       } else if (msg.type === 'browser-eval-request') {
         if (!processedBrowserRequests.has(msg.requestId)) {
           processedBrowserRequests.add(msg.requestId);

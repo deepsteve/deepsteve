@@ -1,0 +1,16 @@
+{
+  "name": "Activity",
+  "version": "0.2.0",
+  "minDeepsteveVersion": "0.2.0",
+  "description": "Reverse-chronological feed of events from all sessions",
+  "entry": "index.html",
+  "display": "panel",
+  "panel": { "position": "right", "defaultWidth": 360, "minWidth": 200 },
+  "toolbar": { "label": "Activity" },
+  "tools": [
+    { "name": "post_activity", "description": "Post a status update to the activity feed" }
+  ],
+  "settings": [
+    { "key": "showTicker", "type": "boolean", "label": "Show ticker bar", "description": "Show latest events in a bar above the tabs", "default": false }
+  ]
+}
