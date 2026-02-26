@@ -4,6 +4,8 @@
 
 # deepsteve
 
+https://deepsteve.com
+
 Run multiple Claude Code sessions side-by-side in your browser, each with full terminal capabilities and persistent conversation history.
 
 **Requires macOS.** deepsteve uses macOS LaunchAgents for daemon management and macOS-specific paths for logs and state.
