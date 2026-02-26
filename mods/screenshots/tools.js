@@ -76,11 +76,24 @@ function registerRoutes(app, context) {
         content: [{ type: 'text', text: `Error: ${error}` }],
       });
     } else {
+      // Validate data URL before writing to disk
+      if (typeof dataUrl !== 'string' || !dataUrl.startsWith('data:image/png;base64,')) {
+        pending.resolve({
+          content: [{ type: 'text', text: 'Error: Invalid or missing dataUrl — expected a data:image/png;base64,… string' }],
+        });
+        return res.status(400).json({ error: 'Invalid dataUrl' });
+      }
       try {
-        // Strip data URL prefix and write binary PNG
-        const base64 = dataUrl.replace(/^data:image\/png;base64,/, '');
+        const base64 = dataUrl.slice('data:image/png;base64,'.length);
+        const buf = Buffer.from(base64, 'base64');
+        if (buf.length === 0) {
+          pending.resolve({
+            content: [{ type: 'text', text: 'Error: Screenshot data decoded to an empty buffer' }],
+          });
+          return res.status(400).json({ error: 'Empty image data' });
+        }
         fs.mkdirSync(path.dirname(pending.outPath), { recursive: true });
-        fs.writeFileSync(pending.outPath, Buffer.from(base64, 'base64'));
+        fs.writeFileSync(pending.outPath, buf);
         pending.resolve({
           content: [{ type: 'text', text: `Screenshot saved to ${pending.outPath}` }],
         });
