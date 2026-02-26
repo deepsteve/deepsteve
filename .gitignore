@@ -2,3 +2,4 @@ node_modules/
 .claude/
 install.sh
 .DS_Store
+scratch/
