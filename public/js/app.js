@@ -266,6 +266,19 @@ async function refreshSessionsDropdown() {
       `;
     }).join('');
 
+    // Add "Clear disconnected" button if there are disconnected sessions
+    const disconnectedCount = allShells.filter(s => !connectedIds.has(s.id)).length;
+    if (disconnectedCount > 0) {
+      const clearBtn = document.createElement('div');
+      clearBtn.className = 'dropdown-clear-disconnected';
+      clearBtn.textContent = `Clear disconnected (${disconnectedCount})`;
+      clearBtn.addEventListener('click', async () => {
+        await fetch('/api/shells/clear-disconnected', { method: 'POST' });
+        await refreshSessionsDropdown();
+      });
+      sessionsMenu.appendChild(clearBtn);
+    }
+
     // Add click handlers to attach to non-connected sessions
     sessionsMenu.querySelectorAll('.dropdown-item.clickable').forEach(item => {
       item.addEventListener('click', (e) => {
