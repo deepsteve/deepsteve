@@ -41,6 +41,8 @@ let agentChatCallbacks = [];     // [{modId, cb}] — callbacks for agent-chat b
 let browserEvalCallbacks = [];   // [{modId, cb}] — callbacks for browser-eval-request
 let browserConsoleCallbacks = []; // [{modId, cb}] — callbacks for browser-console-request
 let screenshotCaptureCallbacks = []; // [{modId, cb}] — callbacks for screenshot-capture-request
+let activeSessionCallbacks = [];     // [{modId, cb}] — callbacks for active session changes
+let getActiveSessionIdFn = null;     // set from appHooks
 let tickerEl = null;           // #activity-ticker DOM element
 let deepsteveVersion = null;   // set from /api/mods response
 let panelWidth = 360;
@@ -52,6 +54,7 @@ const PANEL_STORAGE_KEY = 'deepsteve-panel-width';
  */
 function init(appHooks) {
   hooks = appHooks;
+  getActiveSessionIdFn = appHooks.getActiveSessionId || null;
 
   // Create activity ticker bar above #tabs
   const tabs = document.getElementById('tabs');
@@ -608,6 +611,17 @@ function _showSettingsModal(mod) {
           </div>
         </div>
       `;
+    } else if (s.type === 'number') {
+      html += `
+        <div class="mod-setting-item">
+          <div style="flex:1">
+            <div class="mod-setting-label">${s.label}</div>
+            ${s.description ? `<div class="mod-setting-desc">${s.description}</div>` : ''}
+            <input type="number" class="mod-setting-number" data-key="${s.key}" value="${settings[s.key] ?? s.default ?? 0}"
+              style="margin-top:4px;width:100px;padding:4px 6px;background:#0d1117;border:1px solid #30363d;border-radius:4px;color:#c9d1d9;font-size:12px;">
+          </div>
+        </div>
+      `;
     }
   }
   html += `<div class="modal-buttons"><button class="btn-secondary" data-close>Close</button></div>`;
@@ -620,6 +634,12 @@ function _showSettingsModal(mod) {
   modal.querySelectorAll('.mod-setting-toggle').forEach(toggle => {
     toggle.addEventListener('change', () => {
       _saveModSetting(mod.id, toggle.dataset.key, toggle.checked);
+    });
+  });
+  modal.querySelectorAll('.mod-setting-number').forEach(input => {
+    input.addEventListener('change', () => {
+      const val = parseInt(input.value, 10);
+      if (!isNaN(val)) _saveModSetting(mod.id, input.dataset.key, val);
     });
   });
 
@@ -846,6 +866,7 @@ function _unloadPanelMod(modId) {
   screenshotCaptureCallbacks = screenshotCaptureCallbacks.filter(e => e.modId !== modId);
   settingsCallbacks = settingsCallbacks.filter(e => e.modId !== modId);
   sessionCallbacks = sessionCallbacks.filter(e => e.modId !== modId);
+  activeSessionCallbacks = activeSessionCallbacks.filter(e => e.modId !== modId);
 
   // If it was the visible panel, switch to another or collapse
   if (visiblePanelId === modId) {
@@ -954,6 +975,7 @@ function _hideMod() {
   activeViewId = null;
   localStorage.removeItem(ACTIVE_VIEW_KEY);
   sessionCallbacks = sessionCallbacks.filter(e => e.modId !== hiddenModId);
+  activeSessionCallbacks = activeSessionCallbacks.filter(e => e.modId !== hiddenModId);
   if (hiddenModId) {
     settingsCallbacks = settingsCallbacks.filter(e => e.modId !== hiddenModId);
   }
@@ -1019,6 +1041,15 @@ function showTerminalForSession(id) {
   }
 
   hooks.focusSession(id);
+}
+
+/**
+ * Notify mods that the active session has changed.
+ */
+function notifyActiveSessionChanged(id) {
+  for (const entry of activeSessionCallbacks) {
+    try { entry.cb(id); } catch (e) { console.error('Active session callback error:', e); }
+  }
 }
 
 /**
@@ -1122,6 +1153,20 @@ function _injectBridgeAPI(iframeEl, modId) {
         try { cb(hooks.getSessions()); } catch {}
         return () => {
           sessionCallbacks = sessionCallbacks.filter(e => e !== entry);
+        };
+      },
+      getActiveSessionId() {
+        return getActiveSessionIdFn ? getActiveSessionIdFn() : null;
+      },
+      onActiveSessionChanged(cb) {
+        const entry = { modId, cb };
+        activeSessionCallbacks.push(entry);
+        // Fire immediately with current value
+        if (getActiveSessionIdFn) {
+          try { cb(getActiveSessionIdFn()); } catch {}
+        }
+        return () => {
+          activeSessionCallbacks = activeSessionCallbacks.filter(e => e !== entry);
         };
       },
       createSession(cwd) {
@@ -1244,6 +1289,7 @@ function handleModChanged(modId) {
     screenshotCaptureCallbacks = screenshotCaptureCallbacks.filter(e => e.modId !== modId);
     settingsCallbacks = settingsCallbacks.filter(e => e.modId !== modId);
     sessionCallbacks = sessionCallbacks.filter(e => e.modId !== modId);
+    activeSessionCallbacks = activeSessionCallbacks.filter(e => e.modId !== modId);
 
     panelEntry.iframe.src = panelEntry.iframe.src.replace(/(\?v=\d+)?$/, `?v=${Date.now()}`);
   }
@@ -1255,6 +1301,7 @@ export const ModManager = {
   showModView,
   showTerminalForSession,
   notifySessionsChanged,
+  notifyActiveSessionChanged,
   notifyTasksChanged,
   notifyActivityChanged,
   notifyAgentChatChanged,

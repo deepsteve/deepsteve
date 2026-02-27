@@ -696,6 +696,7 @@ function switchTo(id) {
   // Activate new
   activeId = id;
   ActiveTab.set(id);
+  ModManager.notifyActiveSessionChanged(id);
   const session = sessions.get(id);
   if (session) {
     // Suppress auto-scroll during tab switch to prevent onWriteParsed races
@@ -768,6 +769,7 @@ function killSession(id) {
     } else {
       activeId = null;
       ActiveTab.clear();
+      ModManager.notifyActiveSessionChanged(null);
     }
   }
 
@@ -1045,6 +1047,7 @@ async function init() {
   // Initialize mod system
   ModManager.init({
     getSessions: getSessionList,
+    getActiveSessionId: () => activeId,
     focusSession: switchTo,
     createSession: (cwd) => createSession(cwd, null, true),
     killSession: killSession,
