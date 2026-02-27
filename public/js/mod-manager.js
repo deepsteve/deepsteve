@@ -36,14 +36,12 @@ let visiblePanelId = null;       // which panel is currently VISIBLE (or null)
 let panelTabsContainer = null;   // #panel-tabs DOM element
 let panelTabs = new Map();       // modId → tab button element
 let taskCallbacks = [];          // [{modId, cb}] — callbacks for task broadcasts
-let activityCallbacks = [];      // [{modId, cb}] — callbacks for activity events
 let agentChatCallbacks = [];     // [{modId, cb}] — callbacks for agent-chat broadcasts
 let browserEvalCallbacks = [];   // [{modId, cb}] — callbacks for browser-eval-request
 let browserConsoleCallbacks = []; // [{modId, cb}] — callbacks for browser-console-request
 let screenshotCaptureCallbacks = []; // [{modId, cb}] — callbacks for screenshot-capture-request
 let activeSessionCallbacks = [];     // [{modId, cb}] — callbacks for active session changes
 let getActiveSessionIdFn = null;     // set from appHooks
-let tickerEl = null;           // #activity-ticker DOM element
 let deepsteveVersion = null;   // set from /api/mods response
 let panelWidth = 360;
 const MIN_PANEL_WIDTH = 200;
@@ -55,12 +53,6 @@ const PANEL_STORAGE_KEY = 'deepsteve-panel-width';
 function init(appHooks) {
   hooks = appHooks;
   getActiveSessionIdFn = appHooks.getActiveSessionId || null;
-
-  // Create activity ticker bar above #tabs
-  const tabs = document.getElementById('tabs');
-  tickerEl = document.createElement('div');
-  tickerEl.id = 'activity-ticker';
-  tabs.parentNode.insertBefore(tickerEl, tabs);
 
   // Wrap #terminals in a row container for side-by-side panel layout
   const terminals = document.getElementById('terminals');
@@ -859,7 +851,6 @@ function _unloadPanelMod(modId) {
 
   // Filter out callbacks for this mod
   taskCallbacks = taskCallbacks.filter(e => e.modId !== modId);
-  activityCallbacks = activityCallbacks.filter(e => e.modId !== modId);
   agentChatCallbacks = agentChatCallbacks.filter(e => e.modId !== modId);
   browserEvalCallbacks = browserEvalCallbacks.filter(e => e.modId !== modId);
   browserConsoleCallbacks = browserConsoleCallbacks.filter(e => e.modId !== modId);
@@ -1071,16 +1062,6 @@ function notifyTasksChanged(tasks) {
 }
 
 /**
- * Notify panel mods of an activity event (called from app.js on WS broadcast).
- * Pass null to signal that activity was cleared.
- */
-function notifyActivityChanged(event) {
-  for (const entry of activityCallbacks) {
-    try { entry.cb(event); } catch (e) { console.error('Activity callback error:', e); }
-  }
-}
-
-/**
  * Notify panel mods that agent chat has changed (called from app.js on WS broadcast).
  */
 function notifyAgentChatChanged(channels) {
@@ -1200,19 +1181,6 @@ function _injectBridgeAPI(iframeEl, modId) {
           taskCallbacks = taskCallbacks.filter(e => e !== entry);
         };
       },
-      onActivityChanged(cb) {
-        const entry = { modId, cb };
-        activityCallbacks.push(entry);
-        // Fire immediately with current activity from server
-        fetch('/api/activity').then(r => r.json()).then(data => {
-          for (const event of (data.events || [])) {
-            try { cb(event); } catch {}
-          }
-        }).catch(() => {});
-        return () => {
-          activityCallbacks = activityCallbacks.filter(e => e !== entry);
-        };
-      },
       onAgentChatChanged(cb) {
         const entry = { modId, cb };
         agentChatCallbacks.push(entry);
@@ -1258,12 +1226,6 @@ function _injectBridgeAPI(iframeEl, modId) {
           badge.classList.remove('visible');
         }
       },
-      setTickerVisible(visible) {
-        if (tickerEl) tickerEl.classList.toggle('visible', !!visible);
-      },
-      setTickerContent(html) {
-        if (tickerEl) tickerEl.innerHTML = html;
-      },
     };
   } catch (e) {
     console.error('Failed to inject bridge API:', e);
@@ -1282,7 +1244,6 @@ function handleModChanged(modId) {
   if (panelEntry) {
     // Clear stale callbacks for this mod before reload triggers re-injection
     taskCallbacks = taskCallbacks.filter(e => e.modId !== modId);
-    activityCallbacks = activityCallbacks.filter(e => e.modId !== modId);
     agentChatCallbacks = agentChatCallbacks.filter(e => e.modId !== modId);
     browserEvalCallbacks = browserEvalCallbacks.filter(e => e.modId !== modId);
     browserConsoleCallbacks = browserConsoleCallbacks.filter(e => e.modId !== modId);
@@ -1303,7 +1264,6 @@ export const ModManager = {
   notifySessionsChanged,
   notifyActiveSessionChanged,
   notifyTasksChanged,
-  notifyActivityChanged,
   notifyAgentChatChanged,
   notifyBrowserEvalRequest,
   notifyBrowserConsoleRequest,
