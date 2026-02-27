@@ -896,9 +896,10 @@ function _createToolbarButton(mod) {
     }
   });
 
-  // Insert after issue button
-  const issueBtn = document.getElementById('issue-btn');
-  issueBtn.parentNode.insertBefore(btn, issueBtn.nextSibling);
+  // Insert at top of #tabs, right after the layout toggle button
+  const tabs = document.getElementById('tabs');
+  const layoutToggle = document.getElementById('layout-toggle');
+  tabs.insertBefore(btn, layoutToggle.nextSibling);
 
   // If this mod is currently the active view, mark it
   if (activeViewId === mod.id) {
