@@ -847,6 +847,30 @@ app.delete('/api/shells/:id', (req, res) => {
   res.status(404).json({ error: 'Session not found' });
 });
 
+app.post('/api/shells/clear-disconnected', (req, res) => {
+  const cleared = [];
+
+  // Remove saved sessions (no running PTY)
+  for (const id of Object.keys(savedState)) {
+    cleared.push(id);
+    delete savedState[id];
+  }
+
+  // Kill active shells with no connected clients
+  for (const [id, entry] of shells) {
+    if (entry.clients.size === 0) {
+      cleared.push(id);
+      killShell(entry, id);
+      shells.delete(id);
+      activityDebounce.delete(id);
+    }
+  }
+
+  if (cleared.length > 0) saveState();
+  log(`Cleared ${cleared.length} disconnected sessions: ${cleared.join(', ')}`);
+  res.json({ cleared });
+});
+
 app.post('/api/mkdir', require('express').json(), (req, res) => {
   let dir = req.body.path;
   if (!dir) return res.status(400).json({ error: 'path required' });
