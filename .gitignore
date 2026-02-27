@@ -1,5 +1,6 @@
 node_modules/
-.claude/
+.claude/*
+!.claude/commands/
 install.sh
 .DS_Store
 scratch/
