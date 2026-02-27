@@ -5,6 +5,30 @@ const { z } = require('zod');
 
 const CHAT_FILE = path.join(os.homedir(), '.deepsteve', 'agent-chat.json');
 
+function formatTimestamp(ts) {
+  const d = new Date(ts);
+  const now = new Date();
+  const time = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+
+  const today = new Date(now);
+  today.setHours(0, 0, 0, 0);
+  const msgDay = new Date(d);
+  msgDay.setHours(0, 0, 0, 0);
+  const diffDays = Math.round((today - msgDay) / 86400000);
+
+  if (diffDays === 0) return time;
+  if (diffDays === 1) return `Yesterday ${time}`;
+  if (diffDays < 7) {
+    const weekday = d.toLocaleDateString([], { weekday: 'short' });
+    return `${weekday} ${time}`;
+  }
+  const month = d.toLocaleDateString([], { month: 'short', day: 'numeric' });
+  if (d.getFullYear() !== now.getFullYear()) {
+    return `${month}, ${d.getFullYear()} ${time}`;
+  }
+  return `${month} ${time}`;
+}
+
 let data = { channels: {}, nextId: 1 };
 
 // Load existing data
@@ -91,8 +115,7 @@ function init(context) {
         }
 
         const formatted = messages.map(m => {
-          const time = new Date(m.timestamp).toLocaleTimeString();
-          return `[#${m.id} ${time}] ${m.sender}: ${m.text}`;
+          return `[#${m.id} ${formatTimestamp(m.timestamp)}] ${m.sender}: ${m.text}`;
         }).join('\n');
 
         return { content: [{ type: 'text', text: formatted }] };
@@ -112,7 +135,7 @@ function init(context) {
           const ch = data.channels[name];
           const count = ch.messages.length;
           const last = ch.messages[ch.messages.length - 1];
-          const lastTime = last ? new Date(last.timestamp).toLocaleTimeString() : 'n/a';
+          const lastTime = last ? formatTimestamp(last.timestamp) : 'n/a';
           const lastSender = last ? last.sender : '';
           return `#${name} — ${count} message${count !== 1 ? 's' : ''}, last: ${lastSender} at ${lastTime}`;
         });
