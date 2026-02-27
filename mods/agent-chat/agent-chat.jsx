@@ -90,7 +90,10 @@ function ChatPanel() {
   const [channels, setChannels] = useState({});
   const [activeChannel, setActiveChannel] = useState('general');
   const [input, setInput] = useState('');
-  const [senderName, setSenderName] = useState('Human');
+  const [senderName, setSenderName] = useState(() => {
+    try { return localStorage.getItem('deepsteve-chat-sender') || 'Human'; }
+    catch { return 'Human'; }
+  });
   const messagesEndRef = useRef(null);
   const prevMessageCountRef = useRef(0);
   const senderNameRef = useRef(senderName);
@@ -98,6 +101,12 @@ function ChatPanel() {
 
   // Keep ref in sync so the callback closure always has the latest name
   useEffect(() => { senderNameRef.current = senderName; }, [senderName]);
+
+  // Persist sender name to localStorage
+  useEffect(() => {
+    try { localStorage.setItem('deepsteve-chat-sender', senderName); }
+    catch {}
+  }, [senderName]);
 
   // Clear badge when tab regains focus
   useEffect(() => {
