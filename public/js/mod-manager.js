@@ -1224,6 +1224,9 @@ function _injectBridgeAPI(iframeEl, modId) {
       setTickerContent(html) {
         if (tickerEl) tickerEl.innerHTML = html;
       },
+      updateSetting(key, value) {
+        _saveModSetting(modId, key, value);
+      },
     };
   } catch (e) {
     console.error('Failed to inject bridge API:', e);
