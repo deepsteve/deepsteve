@@ -2,7 +2,26 @@ const { useState, useEffect, useCallback, useRef } = React;
 
 function formatTime(ts) {
   const d = new Date(ts);
-  return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  const now = new Date();
+  const time = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+
+  const today = new Date(now);
+  today.setHours(0, 0, 0, 0);
+  const msgDay = new Date(d);
+  msgDay.setHours(0, 0, 0, 0);
+  const diffDays = Math.round((today - msgDay) / 86400000);
+
+  if (diffDays === 0) return time;
+  if (diffDays === 1) return `Yesterday ${time}`;
+  if (diffDays < 7) {
+    const weekday = d.toLocaleDateString([], { weekday: 'short' });
+    return `${weekday} ${time}`;
+  }
+  const month = d.toLocaleDateString([], { month: 'short', day: 'numeric' });
+  if (d.getFullYear() !== now.getFullYear()) {
+    return `${month}, ${d.getFullYear()} ${time}`;
+  }
+  return `${month} ${time}`;
 }
 
 // Deterministic color from sender name
