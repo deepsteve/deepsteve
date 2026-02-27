@@ -1063,6 +1063,10 @@ async function init() {
   initLiveReload({
     onMessage: (msg) => {
       if (msg.type === 'theme') applyTheme(msg.css || '');
+      if (msg.type === 'open-session') {
+        // Server created a session (e.g. via /api/start-issue) — open a tab for it
+        createSession(msg.cwd, msg.id, false, { name: msg.name });
+      }
     },
     onReloadPending: () => {
       document.querySelectorAll('.terminal-container').forEach(el => el.classList.add('refreshing'));

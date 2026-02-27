@@ -897,6 +897,51 @@ app.get('/api/issues', (req, res) => {
   }
 });
 
+app.post('/api/start-issue', (req, res) => {
+  const { number, title, body, labels, url, cwd: rawCwd } = req.body;
+  if (!number || !title) return res.status(400).json({ error: 'number and title are required' });
+
+  let cwd = rawCwd || process.env.HOME;
+  if (cwd.startsWith('~')) cwd = path.join(os.homedir(), cwd.slice(1));
+
+  // Build prompt from wand template (same as frontend startIssue)
+  const vars = {
+    number,
+    title,
+    labels: Array.isArray(labels) ? labels.map(l => typeof l === 'string' ? l : l.name).join(', ') : (labels || 'none'),
+    url: url || '',
+    body: body ? String(body).slice(0, 2000) : '(no description)',
+  };
+  const prompt = settings.wandPromptTemplate.replace(/\{\{(\w+)\}\}/g, (_, key) => vars[key] ?? '');
+
+  const worktree = validateWorktree('github-issue-' + number);
+  const id = randomUUID().slice(0, 8);
+  const claudeSessionId = randomUUID();
+  const claudeArgs = ['--session-id', claudeSessionId];
+  if (settings.wandPlanMode) claudeArgs.push('--permission-mode', 'plan');
+  if (worktree) claudeArgs.push('--worktree', worktree);
+
+  const maxLen = settings.maxIssueTitleLength || 25;
+  const tabTitle = `#${number} ${title}`;
+  const name = tabTitle.length <= maxLen ? tabTitle : tabTitle.slice(0, maxLen) + '\u2026';
+
+  log(`[API] start-issue #${number}: id=${id}, worktree=${worktree}, cwd=${cwd}`);
+  const shell = spawnClaude(claudeArgs, cwd, { cols: 120, rows: 40 });
+  shells.set(id, { shell, clients: new Set(), cwd, claudeSessionId, worktree: worktree || null, name, initialPrompt: prompt, waitingForInput: false, lastActivity: Date.now() });
+  wireShellOutput(id);
+  watchClaudeSessionDir(id);
+  shell.onExit(() => { if (!shuttingDown) { unwatchClaudeSessionDir(id); shells.delete(id); saveState(); } });
+  saveState();
+
+  // Notify browsers to open the new session
+  const openMsg = JSON.stringify({ type: 'open-session', id, cwd, name });
+  for (const client of reloadClients) {
+    if (client.readyState === 1) client.send(openMsg);
+  }
+
+  res.json({ id, name, url: `http://localhost:${PORT}` });
+});
+
 const server = app.listen(PORT, BIND, () => {
   log(`Server listening on ${BIND}:${PORT}`);
 });
