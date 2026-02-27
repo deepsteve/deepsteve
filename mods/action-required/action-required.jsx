@@ -1,10 +1,5 @@
 const { useState, useEffect, useCallback, useRef, useMemo } = React;
 
-// ─── Constants ───────────────────────────────────────────────────────
-
-const IDLE_TIMEOUT = 30000;    // streak resets after 30s idle
-const COMBO_THRESHOLD = 5000;  // combo for responses under 5s
-
 // ─── Helpers ─────────────────────────────────────────────────────────
 
 function formatWaitTime(ms) {
@@ -16,10 +11,51 @@ function formatWaitTime(ms) {
   return rem > 0 ? `${m}m ${rem}s` : `${m}m`;
 }
 
-function formatAvgTime(times) {
-  if (times.length === 0) return '--';
-  const avg = times.reduce((a, b) => a + b, 0) / times.length;
-  return formatWaitTime(avg);
+// ─── Toggle Switch ──────────────────────────────────────────────────
+
+function ToggleSwitch({ on, onToggle }) {
+  return (
+    <div
+      onClick={onToggle}
+      style={{
+        padding: '12px 16px',
+        borderBottom: '1px solid rgba(255,255,255,0.06)',
+        display: 'flex',
+        alignItems: 'center',
+        gap: 12,
+        cursor: 'pointer',
+        userSelect: 'none',
+      }}
+    >
+      <div style={{
+        width: 44,
+        height: 24,
+        borderRadius: 12,
+        background: on ? '#238636' : '#30363d',
+        position: 'relative',
+        transition: 'background 0.2s',
+        flexShrink: 0,
+      }}>
+        <div style={{
+          width: 18,
+          height: 18,
+          borderRadius: '50%',
+          background: '#f0f6fc',
+          position: 'absolute',
+          top: 3,
+          left: on ? 23 : 3,
+          transition: 'left 0.2s',
+        }} />
+      </div>
+      <span style={{
+        fontSize: 14,
+        fontWeight: 600,
+        color: on ? '#3fb950' : '#8b949e',
+      }}>
+        Auto-cycle {on ? 'ON' : 'OFF'}
+      </span>
+    </div>
+  );
 }
 
 // ─── Queue Item ──────────────────────────────────────────────────────
@@ -27,7 +63,6 @@ function formatAvgTime(times) {
 function QueueItem({ session, waitingSince, isActive, onFocus }) {
   const [, setTick] = useState(0);
 
-  // Live-update wait time every second
   useEffect(() => {
     const timer = setInterval(() => setTick(t => t + 1), 1000);
     return () => clearInterval(timer);
@@ -77,95 +112,32 @@ function QueueItem({ session, waitingSince, isActive, onFocus }) {
   );
 }
 
-// ─── Stats Bar ───────────────────────────────────────────────────────
-
-function StatsBar({ stats }) {
-  const { streak, bestStreak, comboMultiplier, responseTimes } = stats;
-
-  return (
-    <div style={{
-      display: 'flex',
-      alignItems: 'center',
-      gap: 12,
-      padding: '8px 12px',
-      borderBottom: '1px solid rgba(255,255,255,0.06)',
-      fontSize: 12,
-      color: '#8b949e',
-    }}>
-      {/* Streak */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 3 }} title={`Best: ${bestStreak}`}>
-        <span style={{ fontSize: 14 }}>{streak > 0 ? '\uD83D\uDD25' : '\u2022'}</span>
-        <span style={{ color: streak > 0 ? '#f0883e' : '#484f58', fontWeight: 600, fontVariantNumeric: 'tabular-nums' }}>
-          {streak}
-        </span>
-      </div>
-
-      {/* Combo */}
-      {comboMultiplier > 1 && (
-        <div style={{ display: 'flex', alignItems: 'center', gap: 2 }} title="Fast response combo">
-          <span style={{ color: '#d2a8ff', fontWeight: 700, fontSize: 13 }}>{comboMultiplier}x</span>
-        </div>
-      )}
-
-      {/* Average response time */}
-      <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 4 }}>
-        <span style={{ fontSize: 10, color: '#484f58' }}>avg</span>
-        <span style={{ fontVariantNumeric: 'tabular-nums' }}>{formatAvgTime(responseTimes)}</span>
-      </div>
-    </div>
-  );
-}
-
-// ─── All Clear State ─────────────────────────────────────────────────
-
-function AllClear({ stats }) {
-  return (
-    <div style={{
-      padding: 32,
-      textAlign: 'center',
-      color: '#8b949e',
-    }}>
-      <div style={{ fontSize: 28, marginBottom: 8, opacity: 0.6 }}>{'\u2713'}</div>
-      <div style={{ fontSize: 14, fontWeight: 600, color: '#3fb950', marginBottom: 16 }}>All clear</div>
-      {stats.totalActions > 0 && (
-        <div style={{ fontSize: 12, lineHeight: 1.8 }}>
-          <div>Actions: <span style={{ color: '#c9d1d9' }}>{stats.totalActions}</span></div>
-          <div>Best streak: <span style={{ color: '#c9d1d9' }}>{stats.bestStreak}</span></div>
-          <div>Avg response: <span style={{ color: '#c9d1d9' }}>{formatAvgTime(stats.responseTimes)}</span></div>
-        </div>
-      )}
-    </div>
-  );
-}
-
 // ─── Main Panel ──────────────────────────────────────────────────────
 
 function ActionRequiredPanel() {
   const [sessions, setSessions] = useState([]);
   const [activeSessionId, setActiveSessionId] = useState(null);
-  const [settings, setSettings] = useState({ autoSwitch: true, switchDelay: 200 });
-  const [stats, setStats] = useState({
-    streak: 0,
-    bestStreak: 0,
-    totalActions: 0,
-    responseTimes: [],
-    comboMultiplier: 1,
-    lastActionTime: 0,
-  });
+  const [settings, setSettings] = useState({ autoSwitch: true, switchDelay: 100 });
+  const [streak, setStreak] = useState(0);
+  const [totalHandled, setTotalHandled] = useState(0);
 
   // Refs for tracking state across callbacks
   const waitingSinceRef = useRef(new Map());    // sessionId → timestamp
   const prevSessionsRef = useRef([]);           // previous sessions snapshot
-  const activeIdRef = useRef(null);             // current activeSessionId
+  const activeIdRef = useRef(null);
   const settingsRef = useRef(settings);
-  const statsRef = useRef(stats);
   const autoSwitchTimerRef = useRef(null);
-  const isAutoSwitchingRef = useRef(false);     // flag to distinguish auto-switch from manual
+  const isAutoSwitchingRef = useRef(false);
+  const streakRef = useRef(0);
+  const totalHandledRef = useRef(0);
+  // Track whether current tab was reached via auto-cycle (for streak counting)
+  const arrivedViaAutoCycleRef = useRef(false);
 
   // Keep refs in sync
   useEffect(() => { activeIdRef.current = activeSessionId; }, [activeSessionId]);
   useEffect(() => { settingsRef.current = settings; }, [settings]);
-  useEffect(() => { statsRef.current = stats; }, [stats]);
+  useEffect(() => { streakRef.current = streak; }, [streak]);
+  useEffect(() => { totalHandledRef.current = totalHandled; }, [totalHandled]);
 
   // Derive queue: sessions waiting for input, sorted by wait start time (oldest first)
   const queue = useMemo(() => {
@@ -188,26 +160,36 @@ function ActionRequiredPanel() {
   useEffect(() => {
     if (!window.deepsteve) return;
 
-    // Get initial active session ID
     if (window.deepsteve.getActiveSessionId) {
       setActiveSessionId(window.deepsteve.getActiveSessionId());
     }
 
-    // Subscribe to active session changes
     if (window.deepsteve.onActiveSessionChanged) {
       return window.deepsteve.onActiveSessionChanged((id) => {
-        // If this change came from our auto-switch, don't cancel anything
+        // Auto-switch initiated by us — don't cancel, mark as auto-arrived
         if (isAutoSwitchingRef.current) {
           isAutoSwitchingRef.current = false;
+          arrivedViaAutoCycleRef.current = true;
           setActiveSessionId(id);
           return;
         }
 
-        // Manual switch — cancel any pending auto-switch
+        // Manual switch — cancel any pending auto-switch and turn off auto-cycle
         if (autoSwitchTimerRef.current) {
           clearTimeout(autoSwitchTimerRef.current);
           autoSwitchTimerRef.current = null;
         }
+
+        // Reset streak on manual switch and turn off auto-cycle
+        if (settingsRef.current.autoSwitch) {
+          setStreak(0);
+          streakRef.current = 0;
+          arrivedViaAutoCycleRef.current = false;
+          if (window.deepsteve.updateSetting) {
+            window.deepsteve.updateSetting('autoSwitch', false);
+          }
+        }
+
         setActiveSessionId(id);
       });
     }
@@ -223,18 +205,12 @@ function ActionRequiredPanel() {
       const now = Date.now();
       const currentActiveId = activeIdRef.current;
       const currentSettings = settingsRef.current;
-      const currentStats = statsRef.current;
-
-      // Capture waitStart for the active session BEFORE updating timestamps
-      const activeWaitStart = waitingSinceRef.current.get(currentActiveId);
 
       // Track waitingSince timestamps
       for (const s of sessionList) {
         if (s.waitingForInput && !waitingSinceRef.current.has(s.id)) {
-          // Just started waiting
           waitingSinceRef.current.set(s.id, now);
         } else if (!s.waitingForInput && waitingSinceRef.current.has(s.id)) {
-          // Stopped waiting — remove tracking
           waitingSinceRef.current.delete(s.id);
         }
       }
@@ -249,29 +225,20 @@ function ActionRequiredPanel() {
       const prevActive = prevMap.get(currentActiveId);
       const currActive = sessionList.find(s => s.id === currentActiveId);
       if (prevActive?.waitingForInput && currActive && !currActive.waitingForInput) {
-        // Record action — use the waitStart captured before we deleted it
-        const responseTime = activeWaitStart ? now - activeWaitStart : 0;
+        // Count this as a handled tab
+        const newTotal = totalHandledRef.current + 1;
+        setTotalHandled(newTotal);
+        totalHandledRef.current = newTotal;
 
-        const isIdle = currentStats.lastActionTime > 0 && (now - currentStats.lastActionTime) > IDLE_TIMEOUT;
-        const isFast = responseTime < COMBO_THRESHOLD;
-        const newStreak = isIdle ? 1 : currentStats.streak + 1;
-        const newCombo = (isIdle || !isFast) ? 1 : currentStats.comboMultiplier + 1;
-        const newTimes = [...currentStats.responseTimes.slice(-49), responseTime]; // keep last 50
-
-        const newStats = {
-          streak: newStreak,
-          bestStreak: Math.max(currentStats.bestStreak, newStreak),
-          totalActions: currentStats.totalActions + 1,
-          responseTimes: newTimes,
-          comboMultiplier: newCombo,
-          lastActionTime: now,
-        };
-        setStats(newStats);
-        statsRef.current = newStats;
+        // Streak: increment if we arrived here via auto-cycle (or it's the first one)
+        if (arrivedViaAutoCycleRef.current || streakRef.current === 0) {
+          const newStreak = streakRef.current + 1;
+          setStreak(newStreak);
+          streakRef.current = newStreak;
+        }
 
         // Auto-switch to next waiting tab
         if (currentSettings.autoSwitch) {
-          // Find next in queue (excluding the one we just handled)
           const nextWaiting = sessionList
             .filter(s => s.waitingForInput && s.id !== currentActiveId)
             .sort((a, b) => {
@@ -281,10 +248,9 @@ function ActionRequiredPanel() {
             })[0];
 
           if (nextWaiting && window.deepsteve) {
-            // Cancel any existing timer
             if (autoSwitchTimerRef.current) clearTimeout(autoSwitchTimerRef.current);
 
-            const delay = Math.max(100, Math.min(500, currentSettings.switchDelay || 200));
+            const delay = Math.max(100, Math.min(500, currentSettings.switchDelay || 100));
             autoSwitchTimerRef.current = setTimeout(() => {
               autoSwitchTimerRef.current = null;
               isAutoSwitchingRef.current = true;
@@ -306,18 +272,18 @@ function ActionRequiredPanel() {
     };
   }, []);
 
-  // Idle detection: reset streak if no action for 30s
-  useEffect(() => {
-    if (stats.lastActionTime === 0) return;
-    const remaining = IDLE_TIMEOUT - (Date.now() - stats.lastActionTime);
-    if (remaining <= 0) return;
-
-    const timer = setTimeout(() => {
-      setStats(prev => prev.streak > 0 ? { ...prev, streak: 0, comboMultiplier: 1 } : prev);
-    }, remaining + 100); // small buffer
-
-    return () => clearTimeout(timer);
-  }, [stats.lastActionTime]);
+  const handleToggle = useCallback(() => {
+    const newValue = !settingsRef.current.autoSwitch;
+    if (window.deepsteve?.updateSetting) {
+      window.deepsteve.updateSetting('autoSwitch', newValue);
+    }
+    // Reset streak when toggling on
+    if (newValue) {
+      setStreak(0);
+      streakRef.current = 0;
+      arrivedViaAutoCycleRef.current = false;
+    }
+  }, []);
 
   const handleFocus = useCallback((id) => {
     if (window.deepsteve) {
@@ -334,7 +300,6 @@ function ActionRequiredPanel() {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100vh' }}>
-      {/* Pulse animation */}
       <style>{`
         @keyframes pulse {
           0%, 100% { opacity: 1; }
@@ -346,8 +311,34 @@ function ActionRequiredPanel() {
         }
       `}</style>
 
-      {/* Stats bar */}
-      {stats.totalActions > 0 && <StatsBar stats={stats} />}
+      {/* Toggle */}
+      <ToggleSwitch on={settings.autoSwitch} onToggle={handleToggle} />
+
+      {/* Stats row */}
+      {totalHandled > 0 && (
+        <div style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 16,
+          padding: '8px 16px',
+          borderBottom: '1px solid rgba(255,255,255,0.06)',
+          fontSize: 13,
+          color: '#8b949e',
+        }}>
+          {streak > 0 && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+              <span style={{ fontWeight: 700, fontSize: 18, color: '#f0883e', fontVariantNumeric: 'tabular-nums' }}>
+                {streak}
+              </span>
+              <span>streak</span>
+            </div>
+          )}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginLeft: streak > 0 ? 0 : 'auto' }}>
+            <span style={{ fontVariantNumeric: 'tabular-nums', color: '#c9d1d9' }}>{totalHandled}</span>
+            <span>handled</span>
+          </div>
+        </div>
+      )}
 
       {/* Queue header */}
       <div style={{
@@ -355,23 +346,16 @@ function ActionRequiredPanel() {
         borderBottom: '1px solid rgba(255,255,255,0.06)',
         flexShrink: 0,
       }}>
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-          <div style={{ fontSize: 14, fontWeight: 600, color: '#f0f6fc' }}>
-            {queueDepth > 0 ? (
-              <>
-                <span>{queueDepth} tab{queueDepth !== 1 ? 's' : ''} waiting</span>
-                <span style={{ fontSize: 12, color: '#8b949e', fontWeight: 400, marginLeft: 6 }}>
-                  {settings.autoSwitch ? 'auto' : 'manual'}
-                </span>
-              </>
-            ) : (
-              'Action Required'
-            )}
-          </div>
+        <div style={{ fontSize: 14, fontWeight: 600, color: '#f0f6fc' }}>
+          {queueDepth > 0 ? (
+            <span>{queueDepth} tab{queueDepth !== 1 ? 's' : ''} waiting</span>
+          ) : (
+            'No tabs waiting'
+          )}
         </div>
       </div>
 
-      {/* Queue list or all-clear */}
+      {/* Queue list */}
       <div style={{
         flex: 1,
         overflowY: 'auto',
@@ -379,7 +363,9 @@ function ActionRequiredPanel() {
         animation: queueDepth > 2 ? 'border-pulse 3s ease-in-out infinite' : 'none',
       }}>
         {queueDepth === 0 ? (
-          <AllClear stats={stats} />
+          <div style={{ padding: 32, textAlign: 'center', color: '#484f58', fontSize: 13 }}>
+            Tabs needing input will appear here
+          </div>
         ) : (
           queue.map(session => (
             <QueueItem

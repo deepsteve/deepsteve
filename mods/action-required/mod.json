@@ -1,14 +1,14 @@
 {
   "name": "Action Required",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "minDeepsteveVersion": "0.2.0",
-  "description": "Auto-cycle through tabs needing input with gamified queue",
+  "description": "Auto-cycle through tabs needing input — toggle on, keep pressing Enter",
   "entry": "index.html",
   "display": "panel",
   "panel": { "position": "right", "defaultWidth": 320, "minWidth": 200 },
   "toolbar": { "label": "Action Required" },
   "settings": [
-    { "key": "autoSwitch", "type": "boolean", "label": "Auto-switch tabs", "description": "Automatically switch to next waiting tab after input is sent", "default": true },
-    { "key": "switchDelay", "type": "number", "label": "Switch delay (ms)", "description": "Delay before auto-switching to next tab (100-500ms)", "default": 200 }
+    { "key": "autoSwitch", "type": "boolean", "label": "Auto-cycle tabs", "description": "Automatically switch to next waiting tab after input is sent", "default": true },
+    { "key": "switchDelay", "type": "number", "label": "Switch delay (ms)", "description": "Delay before auto-switching to next tab (100-500ms)", "default": 100 }
   ]
 }

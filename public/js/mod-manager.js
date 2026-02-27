@@ -1226,6 +1226,9 @@ function _injectBridgeAPI(iframeEl, modId) {
           badge.classList.remove('visible');
         }
       },
+      updateSetting(key, value) {
+        _saveModSetting(modId, key, value);
+      },
     };
   } catch (e) {
     console.error('Failed to inject bridge API:', e);
