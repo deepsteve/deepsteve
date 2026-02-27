@@ -322,7 +322,7 @@ settingsBtn?.addEventListener('click', async () => {
   const themes = themesData.themes || [];
   const activeTheme = themesData.active || '';
 
-  const themeOptions = ['<option value="">Default</option>']
+  const themeOptions = ['<option value="">None</option>']
     .concat(themes.map(t => `<option value="${escapeHtml(t)}" ${t === activeTheme ? 'selected' : ''}>${escapeHtml(t)}</option>`))
     .join('');
 

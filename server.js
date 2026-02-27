@@ -172,6 +172,7 @@ app.put('/api/upload/:filename', express.raw({ type: '*/*', limit: '50mb' }), (r
 
 // Settings defaults (single source of truth for wand template + plan mode)
 const SETTINGS_DEFAULTS = {
+  activeTheme: 'retro-monitor',
   wandPlanMode: true,
   wandPromptTemplate: `I need you to work on GitHub issue #{{number}}: "{{title}}"
 Labels: {{labels}}
@@ -277,6 +278,72 @@ function validateWorktree(value) {
   if (value.length === 0 || value.length > 128) return null;
   if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(value)) return null;
   return value;
+}
+
+// --- Claude session directory watcher ---
+// Watches ~/.claude/projects/<project>/ for .jsonl file changes to detect
+// session forks (e.g., plan mode exit creates a new session). Updates
+// claudeSessionId so the next restart resumes the correct session.
+
+const CLAUDE_PROJECTS_DIR = path.join(os.homedir(), '.claude', 'projects');
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+function claudeProjectDir(cwd, worktree) {
+  // Claude Code stores sessions in a directory named after the resolved cwd.
+  // For worktree sessions, the cwd is <repo>/.claude/worktrees/<name>.
+  let resolvedCwd = cwd;
+  if (worktree) {
+    resolvedCwd = path.join(cwd, '.claude', 'worktrees', worktree);
+  }
+  // Claude's project dir name: cwd with path separators replaced by dashes, leading dash
+  const dirName = resolvedCwd.replace(/\//g, '-');
+  return path.join(CLAUDE_PROJECTS_DIR, dirName);
+}
+
+function watchClaudeSessionDir(shellId) {
+  const entry = shells.get(shellId);
+  if (!entry) return;
+
+  const projectDir = claudeProjectDir(entry.cwd, entry.worktree);
+
+  // Ensure the directory exists before watching
+  try { fs.mkdirSync(projectDir, { recursive: true }); } catch {}
+
+  let watcher;
+  try {
+    watcher = fs.watch(projectDir, (eventType, filename) => {
+      if (!filename || !filename.endsWith('.jsonl')) return;
+      const sessionId = filename.replace('.jsonl', '');
+      if (!UUID_RE.test(sessionId)) return;
+
+      const e = shells.get(shellId);
+      if (!e || sessionId === e.claudeSessionId) return;
+
+      // Verify the new file references our current session (forks include the parent sessionId)
+      try {
+        const newFile = path.join(projectDir, filename);
+        const head = fs.readFileSync(newFile, 'utf8').slice(0, 4096);
+        if (!head.includes(e.claudeSessionId)) return;
+
+        log(`Session ${shellId} detected session fork via fs.watch: ${e.claudeSessionId} → ${sessionId}`);
+        e.claudeSessionId = sessionId;
+        saveState();
+      } catch {}
+    });
+  } catch (err) {
+    log(`Failed to watch Claude session dir for ${shellId}: ${err.message}`);
+    return;
+  }
+
+  entry.sessionDirWatcher = watcher;
+}
+
+function unwatchClaudeSessionDir(shellId) {
+  const entry = shells.get(shellId);
+  if (entry && entry.sessionDirWatcher) {
+    entry.sessionDirWatcher.close();
+    entry.sessionDirWatcher = null;
+  }
 }
 
 /**
@@ -975,7 +1042,9 @@ wss.on('connection', (ws, req) => {
       const restoredName = name || restored.name || null;
       shells.set(id, { shell, clients: new Set(), cwd, claudeSessionId, worktree: savedWorktree, name: restoredName, restored: true, waitingForInput: false, lastActivity: Date.now() });
       wireShellOutput(id);
+      watchClaudeSessionDir(id);
       shell.onExit(() => {
+        unwatchClaudeSessionDir(id);
         if (shuttingDown) return;  // Don't overwrite state file during shutdown
         const elapsed = Date.now() - startTime;
         if (elapsed < 5000 && claudeSessionId) {
@@ -993,7 +1062,8 @@ wss.on('connection', (ws, req) => {
             entry.scrollback = [];
             entry.scrollbackSize = 0;
             wireShellOutput(id);
-            fallbackShell.onExit(() => { if (!shuttingDown) { shells.delete(id); activityDebounce.delete(id); saveState(); } });
+            watchClaudeSessionDir(id);
+            fallbackShell.onExit(() => { if (!shuttingDown) { unwatchClaudeSessionDir(id); shells.delete(id); activityDebounce.delete(id); saveState(); } });
             saveState();
           }
         } else {
@@ -1022,7 +1092,8 @@ wss.on('connection', (ws, req) => {
     const shell = spawnClaude(claudeArgs, cwd, { cols: initialCols, rows: initialRows });
     shells.set(id, { shell, clients: new Set(), cwd, claudeSessionId, worktree: worktree || null, name: name || null, waitingForInput: false, lastActivity: Date.now() });
     wireShellOutput(id);
-    shell.onExit(() => { if (!shuttingDown) { shells.delete(id); activityDebounce.delete(id); saveState(); } });
+    watchClaudeSessionDir(id);
+    shell.onExit(() => { if (!shuttingDown) { unwatchClaudeSessionDir(id); shells.delete(id); activityDebounce.delete(id); saveState(); } });
     saveState();
     addActivityEvent({ type: 'state', sessionId: id, sessionName: name || id, message: 'Session started' });
   }
