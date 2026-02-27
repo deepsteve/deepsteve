@@ -682,6 +682,11 @@ function _createPanelTab(mod) {
   btn.title = mod.description || mod.name;
   btn.dataset.modId = mod.id;
 
+  // Badge element for unread notifications
+  const badge = document.createElement('span');
+  badge.className = 'panel-tab-badge';
+  btn.appendChild(badge);
+
   btn.addEventListener('click', () => {
     _togglePanelTab(mod.id);
   });
@@ -1172,6 +1177,19 @@ function _injectBridgeAPI(iframeEl, modId) {
         return () => {
           screenshotCaptureCallbacks = screenshotCaptureCallbacks.filter(e => e !== entry);
         };
+      },
+      setPanelBadge(text) {
+        const tab = panelTabs.get(modId);
+        if (!tab) return;
+        const badge = tab.querySelector('.panel-tab-badge');
+        if (!badge) return;
+        if (text) {
+          badge.textContent = text;
+          badge.classList.add('visible');
+        } else {
+          badge.textContent = '';
+          badge.classList.remove('visible');
+        }
       },
       setTickerVisible(visible) {
         if (tickerEl) tickerEl.classList.toggle('visible', !!visible);
