@@ -1136,8 +1136,8 @@ async function init() {
     getActiveSessionId: () => activeId,
     focusSession: switchTo,
     createSession: (cwd, opts) => createSession(cwd, null, true, opts),
-    killSession: async (id) => {
-      if (await confirmCloseSession(id)) killSession(id);
+    killSession: async (id, opts) => {
+      if (opts?.force || await confirmCloseSession(id)) killSession(id);
     },
   });
 

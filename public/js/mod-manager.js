@@ -1345,8 +1345,8 @@ function _injectBridgeAPI(iframeEl, modId) {
       createSession(cwd, opts) {
         return hooks.createSession(cwd, opts);
       },
-      killSession(id) {
-        hooks.killSession(id);
+      killSession(id, opts) {
+        hooks.killSession(id, opts);
       },
       getSettings() {
         const mod = allMods.find(m => m.id === modId);
