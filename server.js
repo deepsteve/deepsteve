@@ -555,12 +555,14 @@ const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, 'package.json'), 'ut
 app.get('/api/version', async (req, res) => {
   const current = pkg.version;
   try {
-    const resp = await fetch('https://deepsteve.com/versions/stable', {
+    const resp = await fetch('https://api.github.com/repos/deepsteve/deepsteve/releases/latest', {
+      headers: { Accept: 'application/vnd.github+json' },
       signal: AbortSignal.timeout(5000)
     });
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-    const latest = (await resp.text()).trim();
-    const updateAvailable = latest !== current;
+    const release = await resp.json();
+    const latest = release.tag_name.replace(/^v/, '');
+    const updateAvailable = compareSemver(current, latest) < 0;
     res.json({ current, latest, updateAvailable });
   } catch (e) {
     log(`Version check failed: ${e.message}`);
