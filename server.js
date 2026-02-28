@@ -841,6 +841,13 @@ app.delete('/api/shells/:id', (req, res) => {
   res.status(404).json({ error: 'Session not found' });
 });
 
+app.get('/api/shells/:id/state', (req, res) => {
+  const id = req.params.id;
+  const entry = shells.get(id);
+  if (!entry) return res.status(404).json({ error: 'Shell not found' });
+  res.json({ waitingForInput: entry.waitingForInput || false });
+});
+
 app.post('/api/shells/clear-disconnected', (req, res) => {
   const cleared = [];
 
