@@ -336,6 +336,16 @@ function wireShellOutput(id) {
         e.waitingForInput = false;
         setTimeout(() => submitToShell(e.shell, prompt), 500);
       }
+    } else if (!data.includes('\x07') && e.waitingForInput) {
+      // PTY produced non-BEL output while we thought Claude was waiting —
+      // means a tool was auto-approved or Claude continued on its own.
+      // Strip ANSI escape sequences and check for substantive content.
+      const stripped = data.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').replace(/[\s\x07]/g, '');
+      if (stripped.length > 0) {
+        e.waitingForInput = false;
+        const stateMsg = JSON.stringify({ type: 'state', waiting: false });
+        e.clients.forEach((c) => c.send(stateMsg));
+      }
     }
   });
 }

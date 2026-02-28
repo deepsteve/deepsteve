@@ -1,12 +1,5 @@
 const { useState, useEffect, useCallback, useRef, useMemo } = React;
 
-// ─── Constants ───────────────────────────────────────────────────────
-
-// Minimum time a tab must have been waiting before a waiting→not-waiting
-// transition triggers auto-switch. Filters out rapid flips from tool
-// auto-approvals and internal Claude Code state changes.
-const MIN_WAIT_FOR_SWITCH = 2000;
-
 // ─── Helpers ─────────────────────────────────────────────────────────
 
 function formatWaitTime(ms) {
@@ -222,9 +215,6 @@ function ActionRequiredPanel() {
       const currentActiveId = activeIdRef.current;
       const currentSettings = settingsRef.current;
 
-      // Capture waitStart for the active session BEFORE updating timestamps
-      const activeWaitStart = waitingSinceRef.current.get(currentActiveId);
-
       // Track waitingSince timestamps
       for (const s of sessionList) {
         if (s.waitingForInput && !waitingSinceRef.current.has(s.id)) {
@@ -240,17 +230,16 @@ function ActionRequiredPanel() {
         if (!currentIds.has(id)) waitingSinceRef.current.delete(id);
       }
 
-      // Detect: active session flipped from waiting → not waiting
-      const prevActive = prevMap.get(currentActiveId);
-      const currActive = sessionList.find(s => s.id === currentActiveId);
-      if (prevActive?.waitingForInput && currActive && !currActive.waitingForInput) {
-        // Only treat as real input if the tab was waiting long enough.
-        // Quick flips (< MIN_WAIT_FOR_SWITCH) are tool auto-approvals / internal state changes.
-        const waitDuration = activeWaitStart ? now - activeWaitStart : 0;
+      if (currentSettings.autoSwitch) {
+        const currActive = sessionList.find(s => s.id === currentActiveId);
+        const activeIsWaiting = currActive?.waitingForInput;
 
-        if (currentSettings.autoSwitch && waitDuration >= MIN_WAIT_FOR_SWITCH) {
-          const next = findNextWaiting(sessionList, currentActiveId);
-          if (next) scheduleAutoSwitch(next.id);
+        if (!activeIsWaiting) {
+          // Active tab is NOT waiting — switch to a tab that IS waiting
+          const next = findNextWaiting(sessionList, null);
+          if (next && !autoSwitchTimerRef.current) {
+            scheduleAutoSwitch(next.id);
+          }
         }
       }
 
