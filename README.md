@@ -26,10 +26,11 @@ Run multiple AI agent sessions side-by-side in your browser, each with full term
 - **Multiple sessions** - Open as many Claude Code instances as you need in separate tabs
 - **Real terminal emulation** - Full PTY support via xterm.js, not a fake terminal
 - **Session persistence** - Conversations survive server restarts and page refreshes
-- **Directory picker** - Start each session in any working directory
+- **GitHub issue picker** - Pick an issue from any repo and launch a session with a worktree and prompt
+- **Agent coordination** - MCP tools let sessions chat, share tasks, and coordinate work
 - **Runs as a daemon** - Always available in the background on your Mac
 - **Themes** - Customize the UI with CSS files in `~/.deepsteve/themes/`
-- **Mods** - Extend deepsteve with visual mods (e.g. the pixel art Tower view)
+- **Mods** - Extend deepsteve with mods for task tracking, screenshots, agent chat, and more
 
 ## Quick Install
 

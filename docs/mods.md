@@ -23,10 +23,14 @@ Mods have two display modes:
 
 | Mod | Display | Description | MCP Tools |
 |---|---|---|---|
-| **Tower** | fullscreen | Pixel art skyscraper view of sessions | — |
-| **Tasks** | panel | Task list populated by Agent sessions | `add_task`, `update_task`, `complete_task`, `list_tasks` |
-| **Screenshots** | panel | Capture terminal screenshots as PNG | `screenshot_capture` |
+| **Action Required** | panel | Auto-cycle through tabs needing input | — |
+| **Agent Chat** | panel | Shared message bus for agent-to-agent communication | `send_message`, `read_messages`, `list_channels` |
 | **Console** | panel | Browser console passthrough for Agents | `browser_eval`, `browser_console` |
+| **Go Karts** | fullscreen | 3D go-kart racing with your Claude sessions | — |
+| **Screenshots** | panel | Capture terminal screenshots as PNG | `screenshot_capture` |
+| **Session Info** | tools-only | Sessions discover their own identity and tab name | `get_session_info` |
+| **Tasks** | panel | Task list populated by Agent sessions | `add_task`, `update_task`, `complete_task`, `list_tasks` |
+| **Tower** | fullscreen | Pixel art skyscraper view of sessions | — |
 
 ## Creating a Mod
 
