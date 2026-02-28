@@ -506,7 +506,7 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
         if (!existingSession) {
           // Use client-provided name, or fall back to server-persisted name
           const sessionName = opts.name || msg.name;
-          initTerminal(msg.id, ws, cwd, sessionName, { hasScrollback, pendingData, restoreActive: opts.restoreActive });
+          initTerminal(msg.id, ws, cwd, sessionName, { hasScrollback, pendingData, restoreActive: opts.restoreActive || opts.background });
           resolveReady(msg.id);
           if (opts.initialPrompt) {
             ws.sendJSON({ type: 'initialPrompt', text: opts.initialPrompt });
