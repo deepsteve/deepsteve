@@ -6,31 +6,32 @@ Mods are extensions that add visual views and MCP tools to deepsteve. They run i
 
 ### Enable/Disable
 
-Open the **Mods** dropdown in the toolbar to see all available mods. Toggle the checkbox to enable or disable each mod. Panel mods are auto-enabled on first visit.
+Open the **Mods** dropdown in the toolbar to see all available mods. Toggle the checkbox to enable or disable each mod. Mods with `enabledByDefault: true` are auto-enabled on first visit.
 
 ### Per-Mod Settings
 
-Mods can define boolean settings. Click the gear icon next to a mod in the dropdown to configure it. Settings are saved immediately to localStorage.
+Mods can define settings (boolean or number). Click the gear icon next to a mod in the dropdown to configure it. Settings are saved immediately to localStorage.
 
 ### Display Modes
 
-Mods have two display modes:
+Mods have three display modes:
 
 - **Fullscreen** — activated via a toolbar button, replaces the terminal view. Clicking a session in the mod switches back to the terminal with a back button to return. Only one fullscreen mod iframe exists at a time; it's created on show and destroyed on hide.
 - **Panel** — docked to the right side of the terminal area, with tabs if multiple panel mods are enabled. A drag handle allows resizing. Panel iframes stay alive even when hidden, so MCP tools keep working.
+- **Tools-only** — no UI, no iframe, no toolbar button. Only provides MCP tools to sessions. Omit both `display` and `entry` from `mod.json`.
 
 ### Built-in Mods
 
-| Mod | Display | Description | MCP Tools |
-|---|---|---|---|
-| **Action Required** | panel | Auto-cycle through tabs needing input | — |
-| **Agent Chat** | panel | Shared message bus for agent-to-agent communication | `send_message`, `read_messages`, `list_channels` |
-| **Console** | panel | Browser console passthrough for Agents | `browser_eval`, `browser_console` |
-| **Go Karts** | fullscreen | 3D go-kart racing with your Claude sessions | — |
-| **Screenshots** | panel | Capture terminal screenshots as PNG | `screenshot_capture` |
-| **Session Info** | tools-only | Sessions discover their own identity and tab name | `get_session_info` |
-| **Tasks** | panel | Task list populated by Agent sessions | `add_task`, `update_task`, `complete_task`, `list_tasks` |
-| **Tower** | fullscreen | Pixel art skyscraper view of sessions | — |
+| Mod | Display | Default | Description | MCP Tools |
+|---|---|---|---|---|
+| **Action Required** | panel | on | Auto-cycle through tabs needing input | — |
+| **Agent Chat** | panel | off | Shared message bus for agent-to-agent communication | `send_message`, `read_messages`, `list_channels` |
+| **Console** | panel | off | Browser console passthrough for Agents | `browser_eval`, `browser_console` |
+| **Go Karts** | fullscreen | off | 3D go-kart racing with your Claude sessions | — |
+| **Screenshots** | panel | off | Capture terminal screenshots as PNG | `screenshot_capture` |
+| **Session Info** | tools-only | on | Sessions discover their own identity and tab name | `get_session_info` |
+| **Tasks** | panel | on | Task list populated by Agent sessions | `add_task`, `update_task`, `complete_task`, `list_tasks` |
+| **Tower** | fullscreen | off | Pixel art skyscraper view of sessions | — |
 
 ## Creating a Mod
 
@@ -39,7 +40,7 @@ Mods have two display modes:
 ```
 mods/<name>/
   mod.json       # Manifest (required)
-  index.html     # Entry point (required)
+  index.html     # Entry point (required unless tools-only)
   tools.js       # MCP tools (optional)
 ```
 
@@ -48,16 +49,17 @@ mods/<name>/
 | Field | Type | Required | Description |
 |---|---|---|---|
 | `name` | string | yes | Display name |
-| `version` | string | yes | Semver version (e.g. `"0.2.0"`) |
+| `version` | string | yes | Semver version (e.g. `"0.3.0"`) |
 | `minDeepsteveVersion` | string | no | Minimum compatible deepsteve version. Incompatible mods are shown but disabled. |
 | `description` | string | no | Short description shown in the Mods dropdown |
-| `entry` | string | no | HTML entry point, defaults to `"index.html"` |
-| `display` | string | no | `"panel"` for docked panel, omit for fullscreen (default) |
+| `enabledByDefault` | boolean | no | If `true`, mod is enabled on first visit without user action |
+| `entry` | string | no | HTML entry point, defaults to `"index.html"`. Omit for tools-only mods. |
+| `display` | string | no | `"panel"` for docked panel. Omit for fullscreen (default) or tools-only mods. |
 | `panel.position` | string | no | `"right"` (only value currently supported) |
 | `panel.defaultWidth` | number | no | Initial panel width in pixels |
 | `panel.minWidth` | number | no | Minimum panel width when resizing |
-| `toolbar.label` | string | no | Label for the toolbar button (fullscreen mods only) |
-| `settings` | array | no | Per-mod boolean settings (see below) |
+| `toolbar.label` | string | no | Label shown in the toolbar button (fullscreen mods) or panel tab (panel mods) |
+| `settings` | array | no | Per-mod settings (see below) |
 | `tools` | array | no | MCP tool declarations (see [MCP Tools](#mcp-tools-toolsjs)) |
 
 **Settings entries:**
@@ -72,6 +74,8 @@ mods/<name>/
 }
 ```
 
+Supported types: `"boolean"` (rendered as a checkbox) and `"number"` (rendered as a number input).
+
 **Tool entries:**
 
 ```json
@@ -83,8 +87,8 @@ mods/<name>/
 ```json
 {
   "name": "Tower",
-  "version": "0.2.0",
-  "minDeepsteveVersion": "0.2.0",
+  "version": "0.4.0",
+  "minDeepsteveVersion": "0.3.0",
   "description": "Pixel art skyscraper view of your Agent sessions",
   "entry": "index.html",
   "toolbar": {
@@ -107,9 +111,10 @@ mods/<name>/
 ```json
 {
   "name": "Tasks",
-  "version": "0.2.0",
-  "minDeepsteveVersion": "0.2.0",
+  "version": "0.4.0",
+  "minDeepsteveVersion": "0.3.0",
   "description": "Task list for human actions, populated by Agent sessions",
+  "enabledByDefault": true,
   "entry": "index.html",
   "display": "panel",
   "panel": { "position": "right", "defaultWidth": 360, "minWidth": 200 },
@@ -126,12 +131,27 @@ mods/<name>/
 }
 ```
 
+### Example: Tools-Only Mod (Session Info)
+
+```json
+{
+  "name": "Session Info",
+  "version": "0.4.0",
+  "minDeepsteveVersion": "0.3.0",
+  "enabledByDefault": true,
+  "description": "MCP tool for sessions to discover their own identity and tab name",
+  "tools": [
+    { "name": "get_session_info", "description": "Get session metadata by deepsteve session ID" }
+  ]
+}
+```
+
 ## Bridge API (`deepsteve.*`)
 
 Every mod iframe gets a `deepsteve` object injected on its `window` after load. This is the only interface between mods and the host application.
 
 ### `getDeepsteveVersion()`
-Returns the deepsteve version string (e.g. `"0.2.0"`).
+Returns the deepsteve version string (e.g. `"0.3.0"`).
 
 ### `getSessions()`
 Returns an array of session objects with the current state of all sessions.
