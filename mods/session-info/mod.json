@@ -1,0 +1,9 @@
+{
+  "name": "Session Info",
+  "version": "0.1.0",
+  "enabledByDefault": true,
+  "description": "MCP tool for sessions to discover their own identity and tab name",
+  "tools": [
+    { "name": "get_session_info", "description": "Get session metadata by deepsteve session ID" }
+  ]
+}

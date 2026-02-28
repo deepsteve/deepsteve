@@ -179,15 +179,16 @@ function broadcastTheme(name, css) {
 }
 
 // Spawn claude with full login shell environment (like iTerm does)
-function spawnClaude(args, cwd, { cols = 120, rows = 40 } = {}) {
+function spawnClaude(args, cwd, { cols = 120, rows = 40, env: extraEnv } = {}) {
   // Use login shell (-l) which properly sources /etc/zprofile, ~/.zprofile, ~/.zshrc
   const quoted = args.map(a => `'${a.replace(/'/g, "'\\''")}'`).join(' ');
+  const env = extraEnv ? { ...process.env, ...extraEnv } : process.env;
   return pty.spawn('zsh', ['-l', '-c', `claude ${quoted}`], {
     name: 'xterm-256color',
     cols,
     rows,
     cwd,
-    env: process.env
+    env
   });
 }
 
@@ -636,7 +637,7 @@ app.post('/api/themes/active', (req, res) => {
 
 // --- Mods system ---
 const MODS_DIR = path.join(__dirname, 'mods');
-const BUILTIN_MODS = new Set(['browser-console', 'tasks', 'screenshots', 'go-karts', 'tower']);
+const BUILTIN_MODS = new Set(['browser-console', 'tasks', 'screenshots', 'go-karts', 'tower', 'session-info']);
 
 // Compare two semver strings (major.minor.patch). Returns -1, 0, or 1.
 function compareSemver(a, b) {
@@ -951,7 +952,7 @@ app.post('/api/start-issue', (req, res) => {
   const name = tabTitle.length <= maxLen ? tabTitle : tabTitle.slice(0, maxLen) + '\u2026';
 
   log(`[API] start-issue #${number}: id=${id}, worktree=${worktree}, cwd=${cwd}`);
-  const shell = spawnClaude(claudeArgs, cwd, { cols: 120, rows: 40 });
+  const shell = spawnClaude(claudeArgs, cwd, { cols: 120, rows: 40, env: { DEEPSTEVE_SESSION_ID: id } });
   shells.set(id, { shell, clients: new Set(), cwd, claudeSessionId, worktree: worktree || null, name, initialPrompt: prompt, waitingForInput: false, lastActivity: Date.now() });
   wireShellOutput(id);
   watchClaudeSessionDir(id);
@@ -1020,7 +1021,7 @@ wss.on('connection', (ws, req) => {
         ? ['--resume', claudeSessionId]
         : ['-c'];
       if (savedWorktree) resumeArgs.push('--worktree', savedWorktree);
-      const shell = spawnClaude(resumeArgs, cwd, ptySize);
+      const shell = spawnClaude(resumeArgs, cwd, { ...ptySize, env: { DEEPSTEVE_SESSION_ID: id } });
       const startTime = Date.now();
       const restoredName = name || restored.name || null;
       shells.set(id, { shell, clients: new Set(), cwd, claudeSessionId, worktree: savedWorktree, name: restoredName, restored: true, waitingForInput: false, lastActivity: Date.now() });
@@ -1037,7 +1038,7 @@ wss.on('connection', (ws, req) => {
           const entry = shells.get(id);
           const fallbackArgs = ['-c', '--fork-session', '--session-id', newClaudeSessionId];
           if (entry && entry.worktree) fallbackArgs.push('--worktree', entry.worktree);
-          const fallbackShell = spawnClaude(fallbackArgs, cwd, { cols: initialCols, rows: initialRows });
+          const fallbackShell = spawnClaude(fallbackArgs, cwd, { cols: initialCols, rows: initialRows, env: { DEEPSTEVE_SESSION_ID: id } });
           if (entry) {
             entry.shell = fallbackShell;
             entry.claudeSessionId = newClaudeSessionId;
@@ -1071,7 +1072,7 @@ wss.on('connection', (ws, req) => {
     if (planMode) claudeArgs.push('--permission-mode', 'plan');
     if (worktree) claudeArgs.push('--worktree', worktree);
     log(`[WS] Creating NEW shell: oldId=${oldId}, newId=${id}, claudeSession=${claudeSessionId}, worktree=${worktree || 'none'}, cwd=${cwd}`);
-    const shell = spawnClaude(claudeArgs, cwd, { cols: initialCols, rows: initialRows });
+    const shell = spawnClaude(claudeArgs, cwd, { cols: initialCols, rows: initialRows, env: { DEEPSTEVE_SESSION_ID: id } });
     shells.set(id, { shell, clients: new Set(), cwd, claudeSessionId, worktree: worktree || null, name: name || null, waitingForInput: false, lastActivity: Date.now() });
     wireShellOutput(id);
     watchClaudeSessionDir(id);
