@@ -185,7 +185,7 @@ async function loadAvailableMods() {
 
   // Create toolbar buttons for enabled non-panel mods
   for (const mod of allMods) {
-    if (enabledMods.has(mod.id) && mod.display !== 'panel' && mod.compatible !== false) {
+    if (enabledMods.has(mod.id) && mod.entry && mod.display !== 'panel' && mod.compatible !== false) {
       _createToolbarButton(mod);
     }
   }
@@ -924,6 +924,9 @@ function _removeToolbarButton(modId) {
  * Show a mod's iframe view.
  */
 function _showMod(mod) {
+  // Tools-only mods have no entry point — nothing to show
+  if (!mod.entry) return;
+
   const display = mod.display || 'fullscreen';
 
   // Panel mods are handled by panel tabs, not fullscreen view
