@@ -1,7 +1,7 @@
 {
   "name": "Session Info",
-  "version": "0.3.0",
-  "minDeepsteveVersion": "0.3.0",
+  "version": "0.4.0",
+  "minDeepsteveVersion": "0.4.0",
   "enabledByDefault": true,
   "description": "MCP tool for sessions to discover their own identity and tab name",
   "tools": [

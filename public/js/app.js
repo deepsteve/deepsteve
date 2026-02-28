@@ -941,14 +941,16 @@ async function showIssuePicker() {
   }
 
   // Fetch issues and settings in parallel
-  let issues, wandPlanMode, wandPromptTemplate;
+  let issues, wandPlanMode, wandPromptTemplate, hasMore;
   try {
     const [issuesRes, settingsData] = await Promise.all([
       fetch('/api/issues?cwd=' + encodeURIComponent(gitRoot)),
       fetch('/api/settings').then(r => r.json())
     ]);
     if (!issuesRes.ok) throw new Error((await issuesRes.json()).error || 'Failed to fetch issues');
-    issues = (await issuesRes.json()).issues;
+    const issuesData = await issuesRes.json();
+    issues = issuesData.issues;
+    hasMore = issuesData.hasMore;
     wandPlanMode = settingsData.wandPlanMode !== undefined ? settingsData.wandPlanMode : true;
     wandPromptTemplate = settingsData.wandPromptTemplate || '';
     if (settingsData.maxIssueTitleLength) maxIssueTitleLength = settingsData.maxIssueTitleLength;
@@ -964,17 +966,7 @@ async function showIssuePicker() {
     <div class="modal" style="width: 520px;">
       <h2>Pick a GitHub Issue</h2>
       ${issues.length === 0 ? '<div class="issue-empty">No open issues found</div>' : `
-        <div class="issue-list">${issues.map(issue => `
-          <div class="issue-item" data-number="${issue.number}">
-            <span class="issue-number">#${issue.number}</span>
-            <div>
-              <div class="issue-title">${escapeHtml(issue.title)}</div>
-              ${issue.labels && issue.labels.length > 0 ? `
-                <div class="issue-labels">${issue.labels.map(l => `<span class="issue-label">${escapeHtml(l.name)}</span>`).join('')}</div>
-              ` : ''}
-            </div>
-          </div>
-        `).join('')}</div>
+        <div class="issue-list"></div>
       `}
       <div class="modal-buttons">
         <button class="btn-secondary" id="issue-cancel">Cancel</button>
@@ -985,9 +977,10 @@ async function showIssuePicker() {
   document.body.appendChild(overlay);
 
   let selectedIssue = null;
+  let currentPage = 1;
+  let loading = false;
 
-  // Issue selection
-  overlay.querySelectorAll('.issue-item').forEach(item => {
+  function bindIssueItem(item) {
     item.addEventListener('click', () => {
       overlay.querySelectorAll('.issue-item').forEach(i => i.classList.remove('selected'));
       item.classList.add('selected');
@@ -999,7 +992,57 @@ async function showIssuePicker() {
       selectedIssue = issues.find(i => i.number === parseInt(item.dataset.number));
       startIssue();
     });
-  });
+  }
+
+  function renderIssues(issuesToRender) {
+    const list = overlay.querySelector('.issue-list');
+    if (!list) return;
+    for (const issue of issuesToRender) {
+      const el = document.createElement('div');
+      el.className = 'issue-item';
+      el.dataset.number = issue.number;
+      el.innerHTML = `
+        <span class="issue-number">#${issue.number}</span>
+        <div>
+          <div class="issue-title">${escapeHtml(issue.title)}</div>
+          ${issue.labels && issue.labels.length > 0 ? `
+            <div class="issue-labels">${issue.labels.map(l => `<span class="issue-label">${escapeHtml(l.name)}</span>`).join('')}</div>
+          ` : ''}
+        </div>
+      `;
+      list.appendChild(el);
+      bindIssueItem(el);
+    }
+  }
+
+  async function loadMore() {
+    if (loading || !hasMore) return;
+    loading = true;
+    currentPage++;
+    try {
+      const res = await fetch(`/api/issues?cwd=${encodeURIComponent(gitRoot)}&page=${currentPage}`);
+      if (!res.ok) return;
+      const data = await res.json();
+      issues = issues.concat(data.issues);
+      hasMore = data.hasMore;
+      renderIssues(data.issues);
+    } finally {
+      loading = false;
+    }
+  }
+
+  // Render initial issues
+  renderIssues(issues);
+
+  // Infinite scroll
+  const issueList = overlay.querySelector('.issue-list');
+  if (issueList) {
+    issueList.addEventListener('scroll', () => {
+      if (issueList.scrollTop + issueList.clientHeight >= issueList.scrollHeight - 40) {
+        loadMore();
+      }
+    });
+  }
 
   function startIssue() {
     if (!selectedIssue) return;

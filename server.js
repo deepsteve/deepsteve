@@ -883,7 +883,7 @@ app.get('/api/dirs', (req, res) => {
   } catch { dirToList = path.dirname(absPath); prefix = path.basename(absPath); }
   try {
     const entries = fs.readdirSync(dirToList, { withFileTypes: true });
-    const dirs = entries.filter(e => e.isDirectory() && !e.name.startsWith('.')).filter(e => !prefix || e.name.toLowerCase().startsWith(prefix.toLowerCase())).sort((a,b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase())).map(e => path.join(dirToList, e.name)).slice(0, 20);
+    const dirs = entries.filter(e => e.isDirectory() && !e.name.startsWith('.')).filter(e => !prefix || e.name.toLowerCase().startsWith(prefix.toLowerCase())).sort((a,b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase())).map(e => path.join(dirToList, e.name));
     res.json({ dirs });
   } catch { res.json({ dirs: [] }); }
 });
@@ -902,9 +902,14 @@ app.get('/api/git-root', (req, res) => {
 app.get('/api/issues', (req, res) => {
   let cwd = req.query.cwd || process.env.HOME;
   if (cwd.startsWith('~')) cwd = path.join(os.homedir(), cwd.slice(1));
+  const page = Math.max(1, parseInt(req.query.page) || 1);
+  const perPage = 30;
   try {
-    const out = execSync("zsh -l -c 'gh issue list --json number,title,body,labels,url --limit 30'", { cwd, encoding: 'utf8', timeout: 15000 });
-    res.json({ issues: JSON.parse(out) });
+    const limit = perPage * page;
+    const out = execSync(`zsh -l -c 'gh issue list --json number,title,body,labels,url --limit ${limit}'`, { cwd, encoding: 'utf8', timeout: 15000 });
+    const all = JSON.parse(out);
+    const pageIssues = all.slice((page - 1) * perPage);
+    res.json({ issues: pageIssues, hasMore: pageIssues.length === perPage });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }

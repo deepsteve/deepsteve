@@ -1,7 +1,7 @@
 {
   "name": "Action Required",
-  "version": "0.3.0",
-  "minDeepsteveVersion": "0.3.0",
+  "version": "0.4.0",
+  "minDeepsteveVersion": "0.4.0",
   "description": "Auto-cycle through tabs needing input — toggle on, keep pressing Enter",
   "enabledByDefault": true,
   "entry": "index.html",
