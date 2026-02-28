@@ -10,9 +10,9 @@ Steps:
 
 2. **Get the current branch name**: Run `git branch --show-current`.
 
-3. **Find the main worktree path**: Run `git worktree list --porcelain` and parse the output to find the worktree entry whose `branch` line is `branch refs/heads/main`. Extract its `worktree` path. If no worktree has `main` checked out, tell the user and stop.
+3. **Find the main worktree path**: Run `git worktree list --porcelain | awk '/^worktree /{path=substr($0,10)} /^branch refs\/heads\/main$/{print path}'` — this outputs exactly one line: the path of the worktree with `main` checked out. If the output is empty, tell the user no worktree has `main` checked out and stop.
 
-4. **Check for uncommitted changes**: Run `git status --porcelain` in the current worktree. If there are uncommitted changes, warn the user and stop — ask them to commit or stash first.
+4. **Commit uncommitted changes**: Run `git status --porcelain` in the current worktree. If there are uncommitted changes, commit them using `/commit` before proceeding.
 
 5. **Merge**: Run `git -C <main-worktree-path> merge <branch-name> --no-edit` to merge the worktree branch into main from the main worktree's directory. Do NOT use `git checkout main` — main is checked out in a different worktree.
 
