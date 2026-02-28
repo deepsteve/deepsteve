@@ -830,7 +830,7 @@ function AgentGame() {
         ? buildGuesserPrompt(config.names, config.names[config.guesserIdx], config.tier)
         : buildHinterPrompt(config.names[i], config.names[config.guesserIdx], config.names, config.tier);
 
-      const sessionId = await bridge.createSession(cwd, { name: tabName, initialPrompt: prompt });
+      const sessionId = await bridge.createSession(cwd, { name: tabName, initialPrompt: prompt, background: true });
       ids.push(sessionId);
       setSpawnProgress(i + 1);
     }
