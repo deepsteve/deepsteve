@@ -392,7 +392,7 @@ function ChatMessage({ msg }) {
   );
 }
 
-function GameBoard({ names, guesserIdx, messages, sessions, sessionIds, tier, round, totalScore, onEndRound }) {
+function GameBoard({ names, guesserIdx, messages, sessions, sessionIds, tier, round, totalScore, onEndRound, guessResult }) {
   const endRef = useRef(null);
   const prevCount = useRef(0);
   const t = tierInfo(tier);
@@ -471,6 +471,20 @@ function GameBoard({ names, guesserIdx, messages, sessions, sessionIds, tier, ro
           <span style={{ color: TEXT, fontWeight: 500 }}>#agent-game</span>
           <span style={{ fontSize: 11 }}>{messages.length} message{messages.length !== 1 ? 's' : ''}</span>
         </div>
+        {guessResult && (
+          <div style={{
+            padding: '10px 14px', flexShrink: 0,
+            background: guessResult.correct ? '#7ee78715' : '#f8514915',
+            borderBottom: `1px solid ${guessResult.correct ? '#7ee78730' : '#f8514930'}`,
+            display: 'flex', alignItems: 'center', gap: 8,
+            animation: 'ag-fadeIn 0.3s ease-out',
+          }}>
+            <span style={{ fontSize: 16 }}>{guessResult.correct ? '\u2713' : '\u2717'}</span>
+            <span style={{ fontSize: 13, color: guessResult.correct ? '#7ee787' : '#f85149', fontWeight: 600 }}>
+              {guessResult.correct ? 'Correct guess!' : 'Wrong guess!'} Showing results soon...
+            </span>
+          </div>
+        )}
         <div style={{ flex: 1, overflowY: 'auto' }}>
           {messages.length === 0 ? (
             <div style={{ padding: 40, textAlign: 'center', color: TEXT_DIM, fontSize: 13 }}>
@@ -740,10 +754,12 @@ function AgentGame() {
   const namesRef = useRef(names);
   const guesserIdxRef = useRef(guesserIdx);
   const tierRef = useRef(tier);
+  const guessResultRef = useRef(guessResult);
   useEffect(() => { phaseRef.current = phase; }, [phase]);
   useEffect(() => { namesRef.current = names; }, [names]);
   useEffect(() => { guesserIdxRef.current = guesserIdx; }, [guesserIdx]);
   useEffect(() => { tierRef.current = tier; }, [tier]);
+  useEffect(() => { guessResultRef.current = guessResult; }, [guessResult]);
 
   // Bridge init + style injection
   useEffect(() => {
@@ -770,8 +786,8 @@ function AgentGame() {
       const gameMessages = channels[CHANNEL]?.messages || [];
       setMessages(gameMessages);
 
-      // Guess detection
-      if (phaseRef.current !== 'PLAYING') return;
+      // Guess detection (skip if already detected or not playing)
+      if (phaseRef.current !== 'PLAYING' || guessResultRef.current) return;
       for (let i = gameMessages.length - 1; i >= Math.max(0, gameMessages.length - 5); i--) {
         const msg = gameMessages[i];
         if (msg.sender !== '???') continue;
@@ -783,8 +799,10 @@ function AgentGame() {
           const correct = guess.toLowerCase() === answer.toLowerCase();
           const t = tierInfo(tierRef.current);
           const score = correct ? (100 + Math.max(0, 50 - gameMessages.length)) * t.multiplier : 0;
-          setGuessResult({ guess: rawGuess, answer, correct, score, messageCount: gameMessages.length });
-          setPhase('REVEAL');
+          const result = { guess: rawGuess, answer, correct, score, messageCount: gameMessages.length };
+          setGuessResult(result);
+          // Stay on game board for 10s so user can watch the conversation react
+          setTimeout(() => setPhase('REVEAL'), 10000);
           break;
         }
       }
@@ -848,7 +866,7 @@ function AgentGame() {
 
   // Cleanup helper
   const cleanup = useCallback(async () => {
-    sessionIds.forEach(id => bridge.killSession(id));
+    sessionIds.forEach(id => bridge.killSession(id, { force: true }));
     setSessionIds([]);
     localStorage.removeItem(STORAGE_KEY);
     await fetch(`/api/agent-chat/${CHANNEL}`, { method: 'DELETE' }).catch(() => {});
@@ -901,6 +919,7 @@ function AgentGame() {
         names={names} guesserIdx={guesserIdx} messages={messages}
         sessions={sessions} sessionIds={sessionIds} tier={tier}
         round={round} totalScore={totalScore} onEndRound={handleEndRound}
+        guessResult={guessResult}
       />;
     case 'REVEAL':
       return <RevealScreen
