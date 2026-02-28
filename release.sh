@@ -55,17 +55,16 @@ NODE_PATH=$(which node)
 mkdir -p "$INSTALL_DIR/public/js"
 mkdir -p "$INSTALL_DIR/public/css"
 mkdir -p "$INSTALL_DIR/themes"
-mkdir -p "$INSTALL_DIR/mods/browser-console"
-mkdir -p "$INSTALL_DIR/mods/screenshots"
-mkdir -p "$INSTALL_DIR/mods/tasks"
-mkdir -p "$INSTALL_DIR/mods/tower"
-mkdir -p "$INSTALL_DIR/mods/go-karts"
-mkdir -p "$INSTALL_DIR/mods/session-info"
-mkdir -p "$INSTALL_DIR/mods/agent-chat"
-mkdir -p "$INSTALL_DIR/mods/action-required"
 mkdir -p "$HOME/Library/LaunchAgents"
 
 PREAMBLE
+
+# Generate mkdir for each mod directory
+for moddir in mods/*/; do
+  modname=$(basename "$moddir")
+  echo "mkdir -p \"\$INSTALL_DIR/mods/$modname\"" >> "$OUT"
+done
+echo "" >> "$OUT"
 
 sed -i '' "s/__NODE_VERSION__/$NODE_VERSION/g" "$OUT"
 sed -i '' "s/__NODE_SHA256_ARM64__/$NODE_SHA256_ARM64/g" "$OUT"
