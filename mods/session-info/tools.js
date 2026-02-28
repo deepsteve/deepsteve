@@ -19,6 +19,8 @@ function init(context) {
             name: entry.name || null,
             cwd: entry.cwd,
             worktree: entry.worktree || null,
+            createdAt: entry.createdAt || null,
+            elapsedMs: entry.createdAt ? Date.now() - entry.createdAt : null,
           }, null, 2) }]
         };
       },

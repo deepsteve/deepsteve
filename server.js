@@ -424,7 +424,7 @@ function saveState() {
   }
   const state = {};
   for (const [id, entry] of shells) {
-    state[id] = { cwd: entry.cwd, claudeSessionId: entry.claudeSessionId, worktree: entry.worktree || null, name: entry.name || null, lastActivity: entry.lastActivity || null };
+    state[id] = { cwd: entry.cwd, claudeSessionId: entry.claudeSessionId, worktree: entry.worktree || null, name: entry.name || null, lastActivity: entry.lastActivity || null, createdAt: entry.createdAt || null };
   }
   // Merge with any saved state that wasn't reconnected yet
   const merged = { ...savedState, ...state };
@@ -969,7 +969,7 @@ app.post('/api/start-issue', (req, res) => {
 
   log(`[API] start-issue #${number}: id=${id}, worktree=${worktree}, cwd=${cwd}`);
   const shell = spawnClaude(claudeArgs, cwd, { cols: 120, rows: 40, env: { DEEPSTEVE_SESSION_ID: id } });
-  shells.set(id, { shell, clients: new Set(), cwd, claudeSessionId, worktree: worktree || null, name, initialPrompt: prompt, waitingForInput: false, lastActivity: Date.now() });
+  shells.set(id, { shell, clients: new Set(), cwd, claudeSessionId, worktree: worktree || null, name, initialPrompt: prompt, waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now() });
   wireShellOutput(id);
   watchClaudeSessionDir(id);
   shell.onExit(() => { if (!shuttingDown) { unwatchClaudeSessionDir(id); shells.delete(id); saveState(); } });
@@ -1040,7 +1040,7 @@ wss.on('connection', (ws, req) => {
       const shell = spawnClaude(resumeArgs, cwd, { ...ptySize, env: { DEEPSTEVE_SESSION_ID: id } });
       const startTime = Date.now();
       const restoredName = name || restored.name || null;
-      shells.set(id, { shell, clients: new Set(), cwd, claudeSessionId, worktree: savedWorktree, name: restoredName, restored: true, waitingForInput: false, lastActivity: Date.now() });
+      shells.set(id, { shell, clients: new Set(), cwd, claudeSessionId, worktree: savedWorktree, name: restoredName, restored: true, waitingForInput: false, lastActivity: Date.now(), createdAt: restored.createdAt || Date.now() });
       wireShellOutput(id);
       watchClaudeSessionDir(id);
       shell.onExit(() => {
@@ -1089,7 +1089,7 @@ wss.on('connection', (ws, req) => {
     if (worktree) claudeArgs.push('--worktree', worktree);
     log(`[WS] Creating NEW shell: oldId=${oldId}, newId=${id}, claudeSession=${claudeSessionId}, worktree=${worktree || 'none'}, cwd=${cwd}`);
     const shell = spawnClaude(claudeArgs, cwd, { cols: initialCols, rows: initialRows, env: { DEEPSTEVE_SESSION_ID: id } });
-    shells.set(id, { shell, clients: new Set(), cwd, claudeSessionId, worktree: worktree || null, name: name || null, waitingForInput: false, lastActivity: Date.now() });
+    shells.set(id, { shell, clients: new Set(), cwd, claudeSessionId, worktree: worktree || null, name: name || null, waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now() });
     wireShellOutput(id);
     watchClaudeSessionDir(id);
     shell.onExit(() => { if (!shuttingDown) { unwatchClaudeSessionDir(id); shells.delete(id); saveState(); } });
