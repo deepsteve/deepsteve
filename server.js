@@ -916,13 +916,26 @@ app.post('/api/start-issue', (req, res) => {
   let cwd = rawCwd || process.env.HOME;
   if (cwd.startsWith('~')) cwd = path.join(os.homedir(), cwd.slice(1));
 
+  // Fetch issue details from GitHub if not provided in request body
+  let issueBody = body, issueLabels = labels, issueUrl = url;
+  if (!issueBody) {
+    try {
+      const gh = JSON.parse(execSync(`zsh -l -c 'gh issue view ${Number(number)} --json body,labels,url'`, { cwd, encoding: 'utf8', timeout: 15000 }));
+      issueBody = gh.body;
+      issueLabels = issueLabels || gh.labels;
+      issueUrl = issueUrl || gh.url;
+    } catch (e) {
+      log(`[API] start-issue: failed to fetch issue #${number} from GitHub: ${e.message}`);
+    }
+  }
+
   // Build prompt from wand template (same as frontend startIssue)
   const vars = {
     number,
     title,
-    labels: Array.isArray(labels) ? labels.map(l => typeof l === 'string' ? l : l.name).join(', ') : (labels || 'none'),
-    url: url || '',
-    body: body ? String(body).slice(0, 2000) : '(no description)',
+    labels: Array.isArray(issueLabels) ? issueLabels.map(l => typeof l === 'string' ? l : l.name).join(', ') : (issueLabels || 'none'),
+    url: issueUrl || '',
+    body: issueBody ? String(issueBody).slice(0, 2000) : '(no description)',
   };
   const prompt = settings.wandPromptTemplate.replace(/\{\{(\w+)\}\}/g, (_, key) => vars[key] ?? '');
 
