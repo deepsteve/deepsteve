@@ -790,6 +790,9 @@ function killSession(id) {
   const session = sessions.get(id);
   if (!session) return;
 
+  // Tell server to kill the shell immediately (fire-and-forget)
+  fetch(`/api/shells/${id}`, { method: 'DELETE' }).catch(() => {});
+
   if (session.resizeObserver) session.resizeObserver.disconnect();
   session.ws.close();
   session.term.dispose();
