@@ -85,7 +85,7 @@ Key input handling:
 
 ### Security
 
-DeepSteve has **no authentication, no CORS, and no WebSocket origin checking**. It is designed for localhost use only. The server binds to all interfaces (`0.0.0.0`) — do not expose port 3000 to untrusted networks. All API endpoints, the MCP endpoint, and WebSocket connections are unauthenticated.
+DeepSteve has **no authentication, no CORS, and no WebSocket origin checking**. It is designed for localhost use only. The server binds to `127.0.0.1` by default (overridable with `--bind`). All API endpoints, the MCP endpoint, and WebSocket connections are unauthenticated.
 
 ### Gotchas and Non-Obvious Behavior
 

@@ -59,7 +59,8 @@ If you've cloned the repo:
 
 Open [http://localhost:3000](http://localhost:3000) in your browser.
 
-- Click **+** to create a new Claude Code session
+- Click **+** to create a new Claude Code session in any directory
+- Click the **GitHub icon** to pick an issue — deepsteve creates a worktree and starts a session with the issue as a prompt
 - Right-click a tab to rename it
 - Use **Shift+Enter** for multi-line input
 
@@ -74,17 +75,11 @@ Extend deepsteve with visual mods — alternative views, panels, and MCP tools f
 ## Managing the Daemon
 
 ```bash
-# Restart after making changes
-launchctl unload ~/Library/LaunchAgents/com.deepsteve.plist && launchctl load ~/Library/LaunchAgents/com.deepsteve.plist
+./restart.sh            # restart (browser tabs silently reconnect)
+./restart.sh --refresh  # restart + force browser reload
 
-# View logs
-tail -f ~/Library/Logs/deepsteve.log
-
-# Stop
-launchctl unload ~/Library/LaunchAgents/com.deepsteve.plist
-
-# Check status
-launchctl list | grep deepsteve
+tail -f ~/Library/Logs/deepsteve.log   # view logs
+launchctl list | grep deepsteve        # check status
 ```
 
 ## Security
