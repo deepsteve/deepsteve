@@ -1,5 +1,12 @@
 const { useState, useEffect, useCallback, useRef, useMemo } = React;
 
+// ─── Constants ───────────────────────────────────────────────────────
+
+// Minimum time a tab must have been waiting before a waiting→not-waiting
+// transition triggers auto-switch. Filters out rapid flips from tool
+// auto-approvals and internal Claude Code state changes.
+const MIN_WAIT_FOR_SWITCH = 2000;
+
 // ─── Helpers ─────────────────────────────────────────────────────────
 
 function formatWaitTime(ms) {
@@ -118,8 +125,6 @@ function ActionRequiredPanel() {
   const [sessions, setSessions] = useState([]);
   const [activeSessionId, setActiveSessionId] = useState(null);
   const [settings, setSettings] = useState({ autoSwitch: true, switchDelay: 100 });
-  const [streak, setStreak] = useState(0);
-  const [totalHandled, setTotalHandled] = useState(0);
 
   // Refs for tracking state across callbacks
   const waitingSinceRef = useRef(new Map());    // sessionId → timestamp
@@ -128,16 +133,10 @@ function ActionRequiredPanel() {
   const settingsRef = useRef(settings);
   const autoSwitchTimerRef = useRef(null);
   const isAutoSwitchingRef = useRef(false);
-  const streakRef = useRef(0);
-  const totalHandledRef = useRef(0);
-  // Track whether current tab was reached via auto-cycle (for streak counting)
-  const arrivedViaAutoCycleRef = useRef(false);
 
   // Keep refs in sync
   useEffect(() => { activeIdRef.current = activeSessionId; }, [activeSessionId]);
   useEffect(() => { settingsRef.current = settings; }, [settings]);
-  useEffect(() => { streakRef.current = streak; }, [streak]);
-  useEffect(() => { totalHandledRef.current = totalHandled; }, [totalHandled]);
 
   // Derive queue: sessions waiting for input, sorted by wait start time (oldest first)
   const queue = useMemo(() => {
@@ -149,6 +148,28 @@ function ActionRequiredPanel() {
         return aTime - bTime;
       });
   }, [sessions]);
+
+  // Helper: find next waiting session (oldest first), excluding a given id
+  function findNextWaiting(sessionList, excludeId) {
+    return sessionList
+      .filter(s => s.waitingForInput && s.id !== excludeId)
+      .sort((a, b) => {
+        const aTime = waitingSinceRef.current.get(a.id) || Infinity;
+        const bTime = waitingSinceRef.current.get(b.id) || Infinity;
+        return aTime - bTime;
+      })[0] || null;
+  }
+
+  // Helper: schedule an auto-switch to a session
+  function scheduleAutoSwitch(targetId) {
+    if (autoSwitchTimerRef.current) clearTimeout(autoSwitchTimerRef.current);
+    const delay = Math.max(100, Math.min(500, settingsRef.current.switchDelay || 100));
+    autoSwitchTimerRef.current = setTimeout(() => {
+      autoSwitchTimerRef.current = null;
+      isAutoSwitchingRef.current = true;
+      window.deepsteve.focusSession(targetId);
+    }, delay);
+  }
 
   // ── Bridge: settings ──
   useEffect(() => {
@@ -166,10 +187,9 @@ function ActionRequiredPanel() {
 
     if (window.deepsteve.onActiveSessionChanged) {
       return window.deepsteve.onActiveSessionChanged((id) => {
-        // Auto-switch initiated by us — don't cancel, mark as auto-arrived
+        // Auto-switch initiated by us — don't cancel
         if (isAutoSwitchingRef.current) {
           isAutoSwitchingRef.current = false;
-          arrivedViaAutoCycleRef.current = true;
           setActiveSessionId(id);
           return;
         }
@@ -180,11 +200,7 @@ function ActionRequiredPanel() {
           autoSwitchTimerRef.current = null;
         }
 
-        // Reset streak on manual switch and turn off auto-cycle
         if (settingsRef.current.autoSwitch) {
-          setStreak(0);
-          streakRef.current = 0;
-          arrivedViaAutoCycleRef.current = false;
           if (window.deepsteve.updateSetting) {
             window.deepsteve.updateSetting('autoSwitch', false);
           }
@@ -206,6 +222,9 @@ function ActionRequiredPanel() {
       const currentActiveId = activeIdRef.current;
       const currentSettings = settingsRef.current;
 
+      // Capture waitStart for the active session BEFORE updating timestamps
+      const activeWaitStart = waitingSinceRef.current.get(currentActiveId);
+
       // Track waitingSince timestamps
       for (const s of sessionList) {
         if (s.waitingForInput && !waitingSinceRef.current.has(s.id)) {
@@ -221,42 +240,17 @@ function ActionRequiredPanel() {
         if (!currentIds.has(id)) waitingSinceRef.current.delete(id);
       }
 
-      // Detect: active session flipped from waiting → not waiting (user submitted input)
+      // Detect: active session flipped from waiting → not waiting
       const prevActive = prevMap.get(currentActiveId);
       const currActive = sessionList.find(s => s.id === currentActiveId);
       if (prevActive?.waitingForInput && currActive && !currActive.waitingForInput) {
-        // Count this as a handled tab
-        const newTotal = totalHandledRef.current + 1;
-        setTotalHandled(newTotal);
-        totalHandledRef.current = newTotal;
+        // Only treat as real input if the tab was waiting long enough.
+        // Quick flips (< MIN_WAIT_FOR_SWITCH) are tool auto-approvals / internal state changes.
+        const waitDuration = activeWaitStart ? now - activeWaitStart : 0;
 
-        // Streak: increment if we arrived here via auto-cycle (or it's the first one)
-        if (arrivedViaAutoCycleRef.current || streakRef.current === 0) {
-          const newStreak = streakRef.current + 1;
-          setStreak(newStreak);
-          streakRef.current = newStreak;
-        }
-
-        // Auto-switch to next waiting tab
-        if (currentSettings.autoSwitch) {
-          const nextWaiting = sessionList
-            .filter(s => s.waitingForInput && s.id !== currentActiveId)
-            .sort((a, b) => {
-              const aTime = waitingSinceRef.current.get(a.id) || Infinity;
-              const bTime = waitingSinceRef.current.get(b.id) || Infinity;
-              return aTime - bTime;
-            })[0];
-
-          if (nextWaiting && window.deepsteve) {
-            if (autoSwitchTimerRef.current) clearTimeout(autoSwitchTimerRef.current);
-
-            const delay = Math.max(100, Math.min(500, currentSettings.switchDelay || 100));
-            autoSwitchTimerRef.current = setTimeout(() => {
-              autoSwitchTimerRef.current = null;
-              isAutoSwitchingRef.current = true;
-              window.deepsteve.focusSession(nextWaiting.id);
-            }, delay);
-          }
+        if (currentSettings.autoSwitch && waitDuration >= MIN_WAIT_FOR_SWITCH) {
+          const next = findNextWaiting(sessionList, currentActiveId);
+          if (next) scheduleAutoSwitch(next.id);
         }
       }
 
@@ -277,11 +271,27 @@ function ActionRequiredPanel() {
     if (window.deepsteve?.updateSetting) {
       window.deepsteve.updateSetting('autoSwitch', newValue);
     }
-    // Reset streak when toggling on
+
     if (newValue) {
-      setStreak(0);
-      streakRef.current = 0;
-      arrivedViaAutoCycleRef.current = false;
+      // Toggling ON: immediately jump to first waiting tab
+      const sessions = window.deepsteve?.getSessions() || [];
+      const next = sessions
+        .filter(s => s.waitingForInput)
+        .sort((a, b) => {
+          const aTime = waitingSinceRef.current.get(a.id) || Infinity;
+          const bTime = waitingSinceRef.current.get(b.id) || Infinity;
+          return aTime - bTime;
+        })[0];
+      if (next) {
+        isAutoSwitchingRef.current = true;
+        window.deepsteve.focusSession(next.id);
+      }
+    } else {
+      // Toggling OFF: cancel any pending auto-switch
+      if (autoSwitchTimerRef.current) {
+        clearTimeout(autoSwitchTimerRef.current);
+        autoSwitchTimerRef.current = null;
+      }
     }
   }, []);
 
@@ -313,32 +323,6 @@ function ActionRequiredPanel() {
 
       {/* Toggle */}
       <ToggleSwitch on={settings.autoSwitch} onToggle={handleToggle} />
-
-      {/* Stats row */}
-      {totalHandled > 0 && (
-        <div style={{
-          display: 'flex',
-          alignItems: 'center',
-          gap: 16,
-          padding: '8px 16px',
-          borderBottom: '1px solid rgba(255,255,255,0.06)',
-          fontSize: 13,
-          color: '#8b949e',
-        }}>
-          {streak > 0 && (
-            <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-              <span style={{ fontWeight: 700, fontSize: 18, color: '#f0883e', fontVariantNumeric: 'tabular-nums' }}>
-                {streak}
-              </span>
-              <span>streak</span>
-            </div>
-          )}
-          <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginLeft: streak > 0 ? 0 : 'auto' }}>
-            <span style={{ fontVariantNumeric: 'tabular-nums', color: '#c9d1d9' }}>{totalHandled}</span>
-            <span>handled</span>
-          </div>
-        </div>
-      )}
 
       {/* Queue header */}
       <div style={{
