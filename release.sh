@@ -60,6 +60,7 @@ mkdir -p "$INSTALL_DIR/mods/screenshots"
 mkdir -p "$INSTALL_DIR/mods/tasks"
 mkdir -p "$INSTALL_DIR/mods/tower"
 mkdir -p "$INSTALL_DIR/mods/go-karts"
+mkdir -p "$INSTALL_DIR/mods/session-info"
 mkdir -p "$HOME/Library/LaunchAgents"
 
 PREAMBLE
