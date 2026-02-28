@@ -51,6 +51,8 @@ const ITEM_TYPE_KEYS = Object.keys(ITEM_TYPES);
 const PICKUP_COUNT = 8;
 const PICKUP_RADIUS = 1.2;
 
+const ITEMS_ENABLED = false; // flip to true to re-enable pickup items
+
 let pickupItems = []; // { angle, laneOffset, type, mesh, hidden, respawnAt }
 let hazards = [];     // { angle, laneOffset, mesh, expiresAt }
 let effectFlashTimeout = null;
@@ -413,6 +415,11 @@ function roundRect(ctx, x, y, w, h, r) {
 
 // ── Track helpers ───────────────────────────────────────────────────────────
 
+// Reusable scratch vectors — never return these from public API
+const _v1 = new THREE.Vector3();
+const _v2 = new THREE.Vector3();
+const _v3 = new THREE.Vector3();
+
 function trackPos3D(angle, laneOffset = 0) {
   return new THREE.Vector3(
     (TRACK_RX + laneOffset) * Math.cos(angle), 0,
@@ -420,8 +427,18 @@ function trackPos3D(angle, laneOffset = 0) {
   );
 }
 
+/** Write track position into `out` — zero allocations. */
+function trackPos3DTo(out, angle, laneOffset = 0) {
+  return out.set((TRACK_RX + laneOffset) * Math.cos(angle), 0, (TRACK_RZ + laneOffset) * Math.sin(angle));
+}
+
 function trackTangent(angle) {
   return new THREE.Vector3(TRACK_RX * Math.sin(angle), 0, -TRACK_RZ * Math.cos(angle)).normalize();
+}
+
+/** Write track tangent into `out` — zero allocations. */
+function trackTangentTo(out, angle) {
+  return out.set(TRACK_RX * Math.sin(angle), 0, -TRACK_RZ * Math.cos(angle)).normalize();
 }
 
 // ── Pickup items: spawn, collect, use, visuals ──────────────────────────────
@@ -466,6 +483,7 @@ function createHazardMesh() {
 }
 
 function updatePickupVisuals(now) {
+  if (!ITEMS_ENABLED) return;
   for (const p of pickupItems) {
     if (p.hidden) {
       p.mesh.visible = false;
@@ -476,8 +494,8 @@ function updatePickupVisuals(now) {
       continue;
     }
     p.mesh.visible = true;
-    const pos = trackPos3D(p.angle, p.laneOffset);
-    p.mesh.position.set(pos.x, 0.5 + Math.sin(now / 400 + p.angle * 3) * 0.15, pos.z);
+    trackPos3DTo(_v1, p.angle, p.laneOffset);
+    p.mesh.position.set(_v1.x, 0.5 + Math.sin(now / 400 + p.angle * 3) * 0.15, _v1.z);
     p.mesh.rotation.y += 0.02;
   }
   // Expire hazards
@@ -490,31 +508,34 @@ function updatePickupVisuals(now) {
 }
 
 function checkPickupCollisions(now) {
-  if (raceState !== RACE_RUNNING) return;
+  if (!ITEMS_ENABLED || raceState !== RACE_RUNNING) return;
+  const kartCount = Object.keys(kartState).length;
   for (const [id, k] of Object.entries(kartState)) {
     if (k.finished) continue;
-    const kartCount = Object.keys(kartState).length;
     const isPlayer = viewMode === MODE_COCKPIT && id === followId;
     const laneOffset = isPlayer && k.laneOffset != null ? k.laneOffset : (k.lane - (kartCount - 1) / 2) * 1.2;
-    const kPos = trackPos3D(k.angle, laneOffset);
+    trackPos3DTo(_v1, k.angle, laneOffset);
 
     // Collect pickups
-    for (const p of pickupItems) {
-      if (p.hidden || k.heldItem) continue;
-      const pPos = trackPos3D(p.angle, p.laneOffset);
-      if (kPos.distanceTo(pPos) < PICKUP_RADIUS) {
-        k.heldItem = p.type;
-        p.hidden = true;
-        p.respawnAt = raceElapsed + 5;
-        if (isPlayer) updateHUD();
+    if (!k.heldItem) {
+      for (const p of pickupItems) {
+        if (p.hidden) continue;
+        trackPos3DTo(_v2, p.angle, p.laneOffset);
+        if (_v1.distanceTo(_v2) < PICKUP_RADIUS) {
+          k.heldItem = p.type;
+          p.hidden = true;
+          p.respawnAt = raceElapsed + 5;
+          if (isPlayer) updateHUD();
+          break;
+        }
       }
     }
 
     // Hazard collision
     for (let i = hazards.length - 1; i >= 0; i--) {
       const h = hazards[i];
-      const hPos = trackPos3D(h.angle, h.laneOffset);
-      if (kPos.distanceTo(hPos) < 1.0 && (!k.activeEffect || k.activeEffect.type !== 'spinout')) {
+      trackPos3DTo(_v2, h.angle, h.laneOffset);
+      if (_v1.distanceTo(_v2) < 1.0 && (!k.activeEffect || k.activeEffect.type !== 'spinout')) {
         k.activeEffect = { type: 'spinout', expiresAt: raceElapsed + 1.5 };
         scene.remove(h.mesh);
         hazards.splice(i, 1);
@@ -926,7 +947,7 @@ function startRace() {
   });
   results = []; raceElapsed = 0;
   clearHazards();
-  spawnPickups();
+  if (ITEMS_ENABLED) spawnPickups();
   raceState = RACE_COUNTDOWN; countdown = 3;
   updateHUD();
 
@@ -953,7 +974,7 @@ function updatePhysics(now, dt) {
     const isPlayer = viewMode === MODE_COCKPIT && id === followId;
 
     // Player item use (spacebar, consume on press)
-    if (isPlayer && input.space && k.heldItem) {
+    if (ITEMS_ENABLED && isPlayer && input.space && k.heldItem) {
       input.space = false; // consume the press
       useItem(id, k);
     }
