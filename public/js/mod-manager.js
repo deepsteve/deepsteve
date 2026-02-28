@@ -190,10 +190,10 @@ async function loadAvailableMods() {
     }
   }
 
-  // Auto-enable panel mods on first visit only (no saved prefs yet)
+  // Auto-enable panel mods and tools-only mods on first visit (no saved prefs yet)
   if (!hasExplicitModPrefs) {
     for (const mod of allMods) {
-      if (mod.display === 'panel') {
+      if (mod.display === 'panel' || (mod.tools && !mod.display)) {
         enabledMods.add(mod.id);
       }
     }
