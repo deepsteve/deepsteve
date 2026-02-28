@@ -47,6 +47,100 @@ let panelWidth = 360;
 const MIN_PANEL_WIDTH = 200;
 const PANEL_STORAGE_KEY = 'deepsteve-panel-width';
 
+// ─── Dependency helpers ──────────────────────────────────────────────
+
+/**
+ * Return transitive dependency list for a mod in load order (deepest first).
+ * Throws on circular dependency.
+ */
+function _getRequiredMods(modId, visited = new Set()) {
+  if (visited.has(modId)) {
+    throw new Error(`Circular dependency: ${[...visited, modId].join(' → ')}`);
+  }
+  const mod = allMods.find(m => m.id === modId);
+  if (!mod || !mod.requires || mod.requires.length === 0) return [];
+  visited.add(modId);
+  const result = [];
+  for (const depId of mod.requires) {
+    // Recurse into dep's own deps first (deepest first)
+    for (const transitive of _getRequiredMods(depId, new Set(visited))) {
+      if (!result.includes(transitive)) result.push(transitive);
+    }
+    if (!result.includes(depId)) result.push(depId);
+  }
+  return result;
+}
+
+/**
+ * Return array of currently-enabled mod IDs that depend (directly or transitively) on the given mod.
+ */
+function _getDependents(modId) {
+  const dependents = [];
+  for (const mod of allMods) {
+    if (!enabledMods.has(mod.id)) continue;
+    if (mod.id === modId) continue;
+    try {
+      const deps = _getRequiredMods(mod.id);
+      if (deps.includes(modId)) dependents.push(mod.id);
+    } catch {
+      // Circular dep — skip
+    }
+  }
+  return dependents;
+}
+
+/**
+ * Check whether all requirements for a mod are satisfiable.
+ * Returns { satisfied, missing[], disabled[], error? }
+ */
+function _checkRequirements(modId) {
+  let deps;
+  try {
+    deps = _getRequiredMods(modId);
+  } catch (e) {
+    return { satisfied: false, missing: [], disabled: [], error: e.message };
+  }
+  const missing = [];  // not installed at all
+  const disabled = []; // installed but not enabled
+  for (const depId of deps) {
+    const installed = allMods.find(m => m.id === depId);
+    if (!installed) {
+      missing.push(depId);
+    } else if (!enabledMods.has(depId)) {
+      disabled.push(depId);
+    }
+  }
+  return { satisfied: missing.length === 0, missing, disabled };
+}
+
+/**
+ * Show a brief dependency notice on a mod card that auto-fades after 4s.
+ * type: 'info' | 'error'
+ */
+function _showDepNotice(card, message, type) {
+  // Remove any existing notice on this card
+  const existing = card.querySelector('.mod-dep-notice');
+  if (existing) existing.remove();
+
+  const notice = document.createElement('div');
+  notice.className = `mod-dep-notice mod-dep-notice-${type}`;
+  notice.textContent = message;
+  card.appendChild(notice);
+  setTimeout(() => notice.remove(), 4000);
+}
+
+/**
+ * Refresh all checkbox toggle states in the marketplace modal to match enabledMods.
+ * Requires card.dataset.modId on each card.
+ */
+function _refreshCardToggles(overlay) {
+  for (const card of overlay.querySelectorAll('.mod-card[data-mod-id]')) {
+    const id = card.dataset.modId;
+    const cb = card.querySelector('.mod-card-toggle input[type="checkbox"]');
+    if (cb) cb.checked = enabledMods.has(id);
+  }
+}
+
 /**
  * Initialize the mod system — creates DOM elements.
  */
@@ -194,6 +288,13 @@ async function loadAvailableMods() {
   if (!hasExplicitModPrefs) {
     for (const mod of allMods) {
       if (mod.enabledByDefault && mod.compatible !== false) {
+        // Also auto-enable transitive dependencies
+        try {
+          for (const depId of _getRequiredMods(mod.id)) {
+            const depMod = allMods.find(m => m.id === depId);
+            if (depMod && depMod.compatible !== false) enabledMods.add(depId);
+          }
+        } catch {} // skip on circular dep
         enabledMods.add(mod.id);
       }
     }
@@ -387,6 +488,7 @@ async function _showMarketplaceModal() {
 function _createModCard(mod, marketplaceOverlay) {
   const card = document.createElement('div');
   card.className = 'mod-card' + (mod.compatible === false ? ' mod-card-incompatible' : '');
+  card.dataset.modId = mod.id;
 
   const isInstalled = allMods.some(m => m.id === mod.id);
   const isEnabled = enabledMods.has(mod.id);
@@ -424,7 +526,8 @@ function _createModCard(mod, marketplaceOverlay) {
     const checkbox = document.createElement('input');
     checkbox.type = 'checkbox';
     checkbox.checked = isEnabled;
-    checkbox.disabled = mod.compatible === false;
+    const reqCheck = _checkRequirements(mod.id);
+    checkbox.disabled = mod.compatible === false || reqCheck.missing.length > 0;
     const slider = document.createElement('span');
     slider.className = 'toggle-slider';
     toggle.appendChild(checkbox);
@@ -432,14 +535,59 @@ function _createModCard(mod, marketplaceOverlay) {
 
     checkbox.addEventListener('change', () => {
       if (checkbox.checked) {
+        // ── Enable: check dependencies first ──
+        const req = _checkRequirements(mod.id);
+        if (req.error) {
+          checkbox.checked = false;
+          _showDepNotice(card, req.error, 'error');
+          return;
+        }
+        if (req.missing.length > 0) {
+          checkbox.checked = false;
+          _showDepNotice(card, `Missing: ${req.missing.join(', ')}`, 'error');
+          return;
+        }
+        // Auto-enable disabled dependencies
+        const alsoEnabled = [];
+        for (const depId of req.disabled) {
+          const depMod = allMods.find(m => m.id === depId);
+          if (!depMod) continue;
+          enabledMods.add(depId);
+          if (depMod.display === 'panel') {
+            _loadPanelMod(depMod);
+          } else if (depMod.entry) {
+            _createToolbarButton(depMod);
+          }
+          alsoEnabled.push(depMod.name || depId);
+        }
+        // Enable the mod itself
         enabledMods.add(mod.id);
         if (mod.display === 'panel') {
           _loadPanelMod(mod);
           _switchToPanel(mod.id);
-        } else {
+        } else if (mod.entry) {
           _createToolbarButton(mod);
         }
+        if (alsoEnabled.length > 0) {
+          _showDepNotice(card, `Also enabled: ${alsoEnabled.join(', ')}`, 'info');
+          _refreshCardToggles(marketplaceOverlay);
+        }
       } else {
+        // ── Disable: cascade-disable dependents first ──
+        const dependents = _getDependents(mod.id);
+        const alsoDisabled = [];
+        for (const depId of dependents) {
+          const depMod = allMods.find(m => m.id === depId);
+          enabledMods.delete(depId);
+          if (depMod?.display === 'panel') {
+            _unloadPanelMod(depId);
+          } else {
+            _removeToolbarButton(depId);
+            if (activeViewId === depId) _hideMod();
+          }
+          alsoDisabled.push(depMod?.name || depId);
+        }
+        // Disable the mod itself
         enabledMods.delete(mod.id);
         if (mod.display === 'panel') {
           _unloadPanelMod(mod.id);
@@ -448,6 +596,10 @@ function _createModCard(mod, marketplaceOverlay) {
           if (activeViewId === mod.id) {
             _hideMod();
           }
+        }
+        if (alsoDisabled.length > 0) {
+          _showDepNotice(card, `Also disabled: ${alsoDisabled.join(', ')}`, 'info');
+          _refreshCardToggles(marketplaceOverlay);
         }
       }
       _saveEnabledMods();
@@ -466,6 +618,32 @@ function _createModCard(mod, marketplaceOverlay) {
     desc.className = 'mod-card-description';
     desc.textContent = mod.description;
     card.appendChild(desc);
+  }
+
+  // Dependency tags
+  if (mod.requires && mod.requires.length > 0) {
+    const depsRow = document.createElement('div');
+    depsRow.className = 'mod-card-deps';
+    depsRow.textContent = 'Requires: ';
+    for (const depId of mod.requires) {
+      const depMod = allMods.find(m => m.id === depId);
+      const tag = document.createElement('span');
+      if (!depMod) {
+        tag.className = 'dep-tag dep-tag-red';
+        tag.textContent = depId;
+        tag.title = 'Not installed';
+      } else if (!enabledMods.has(depId)) {
+        tag.className = 'dep-tag dep-tag-orange';
+        tag.textContent = depMod.name || depId;
+        tag.title = 'Installed but disabled — will be auto-enabled';
+      } else {
+        tag.className = 'dep-tag dep-tag-green';
+        tag.textContent = depMod.name || depId;
+        tag.title = 'Enabled';
+      }
+      depsRow.appendChild(tag);
+    }
+    card.appendChild(depsRow);
   }
 
   // Incompatible warning
@@ -514,8 +692,18 @@ function _createModCard(mod, marketplaceOverlay) {
       uninstallBtn.className = 'btn-uninstall';
       uninstallBtn.textContent = 'Uninstall';
       uninstallBtn.addEventListener('click', async () => {
-        // Disable mod first if enabled
+        // Cascade-disable dependents, then disable mod itself
         if (enabledMods.has(mod.id)) {
+          for (const depId of _getDependents(mod.id)) {
+            const depMod = allMods.find(m => m.id === depId);
+            enabledMods.delete(depId);
+            if (depMod?.display === 'panel') {
+              _unloadPanelMod(depId);
+            } else {
+              _removeToolbarButton(depId);
+              if (activeViewId === depId) _hideMod();
+            }
+          }
           enabledMods.delete(mod.id);
           if (mod.display === 'panel') {
             _unloadPanelMod(mod.id);
