@@ -1342,8 +1342,8 @@ function _injectBridgeAPI(iframeEl, modId) {
           activeSessionCallbacks = activeSessionCallbacks.filter(e => e !== entry);
         };
       },
-      createSession(cwd) {
-        hooks.createSession(cwd);
+      createSession(cwd, opts) {
+        return hooks.createSession(cwd, opts);
       },
       killSession(id) {
         hooks.killSession(id);
