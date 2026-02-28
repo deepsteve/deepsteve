@@ -1,0 +1,12 @@
+{
+  "name": "Agent Game",
+  "version": "0.4.0",
+  "minDeepsteveVersion": "0.4.0",
+  "description": "Who Am I? party game — agents chat while one guesses their identity",
+  "enabledByDefault": false,
+  "entry": "index.html",
+  "requires": ["agent-chat"],
+  "toolbar": {
+    "label": "Agent Game"
+  }
+}
