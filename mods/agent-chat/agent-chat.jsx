@@ -117,6 +117,13 @@ function ChatPanel() {
   const prevMessageCountRef = useRef(0);
   const senderNameRef = useRef(senderName);
   const seenMessageIdsRef = useRef(new Set());
+  const lastReadIdRef = useRef((() => {
+    try {
+      const saved = localStorage.getItem('deepsteve-chat-last-read');
+      return saved ? JSON.parse(saved) : {};
+    } catch { return {}; }
+  })());
+  const [unreadMarkers, setUnreadMarkers] = useState({});
 
   // Keep ref in sync so the callback closure always has the latest name
   useEffect(() => { senderNameRef.current = senderName; }, [senderName]);
@@ -127,14 +134,28 @@ function ChatPanel() {
     catch {}
   }, [senderName]);
 
-  // Clear badge when tab regains focus
+  // Mark current channel as read + clear badge when tab regains focus
   useEffect(() => {
     const onVisible = () => {
-      if (!document.hidden) window.deepsteve?.setPanelBadge(null);
+      if (!document.hidden) {
+        window.deepsteve?.setPanelBadge(null);
+        markChannelRead(activeChannel);
+      }
     };
     document.addEventListener('visibilitychange', onVisible);
     return () => document.removeEventListener('visibilitychange', onVisible);
-  }, []);
+  }, [activeChannel]);
+
+  function markChannelRead(ch) {
+    const msgs = channels[ch]?.messages;
+    if (!msgs || msgs.length === 0) return;
+    const maxId = msgs[msgs.length - 1].id;
+    if (lastReadIdRef.current[ch] === maxId) return;
+    lastReadIdRef.current[ch] = maxId;
+    setUnreadMarkers(prev => ({ ...prev, [ch]: undefined }));
+    try { localStorage.setItem('deepsteve-chat-last-read', JSON.stringify(lastReadIdRef.current)); }
+    catch {}
+  }
 
   useEffect(() => {
     let unsub = null;
@@ -158,6 +179,15 @@ function ChatPanel() {
         if (hasMention && document.hidden) {
           window.deepsteve?.setPanelBadge('!');
         }
+        // Compute unread divider positions per channel
+        const newMarkers = {};
+        for (const [ch, data] of Object.entries(newChannels || {})) {
+          const lastRead = lastReadIdRef.current[ch] || 0;
+          const msgs = data.messages || [];
+          const firstUnread = msgs.find(m => m.id > lastRead);
+          if (firstUnread) newMarkers[ch] = firstUnread.id;
+        }
+        setUnreadMarkers(newMarkers);
         setChannels(newChannels || {});
       });
     }
@@ -179,11 +209,15 @@ function ChatPanel() {
     return () => { if (unsub) unsub(); };
   }, []);
 
-  // Auto-scroll when new messages arrive
+  // Auto-scroll when new messages arrive; mark channel read if visible
   useEffect(() => {
     const msgs = channels[activeChannel]?.messages || [];
     if (msgs.length > prevMessageCountRef.current) {
       messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+      if (!document.hidden) {
+        // Small delay so the divider flashes briefly before clearing
+        setTimeout(() => markChannelRead(activeChannel), 1500);
+      }
     }
     prevMessageCountRef.current = msgs.length;
   }, [channels, activeChannel]);
@@ -288,7 +322,10 @@ function ChatPanel() {
             return (
               <button
                 key={name}
-                onClick={() => setActiveChannel(name)}
+                onClick={() => {
+                  if (!document.hidden) markChannelRead(name);
+                  setActiveChannel(name);
+                }}
                 style={{
                   padding: '3px 8px',
                   fontSize: 11,
@@ -333,7 +370,23 @@ function ChatPanel() {
             <span style={{ fontSize: 11 }}>Agents can send messages via the send_message MCP tool.</span>
           </div>
         ) : (
-          messages.map(msg => <Message key={msg.id} msg={msg} />)
+          messages.map(msg => (
+            <React.Fragment key={msg.id}>
+              {unreadMarkers[activeChannel] === msg.id && (
+                <div style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 8,
+                  padding: '4px 12px',
+                }}>
+                  <div style={{ flex: 1, height: 1, background: '#f85149' }} />
+                  <span style={{ fontSize: 10, color: '#f85149', fontWeight: 600, whiteSpace: 'nowrap' }}>NEW</span>
+                  <div style={{ flex: 1, height: 1, background: '#f85149' }} />
+                </div>
+              )}
+              <Message msg={msg} />
+            </React.Fragment>
+          ))
         )}
         <div ref={messagesEndRef} />
       </div>
