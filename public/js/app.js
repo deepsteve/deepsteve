@@ -296,6 +296,7 @@ async function refreshSessionsDropdown() {
       btn.addEventListener('click', async (e) => {
         e.stopPropagation();
         const id = btn.dataset.id;
+        if (!(await confirmCloseSession(id))) return;
         await fetch(`/api/shells/${id}`, { method: 'DELETE' });
         await refreshSessionsDropdown();
       });
@@ -628,7 +629,9 @@ function initTerminal(id, ws, cwd, initialName, { hasScrollback = false, pending
   // Add tab UI with callbacks
   const tabCallbacks = {
     onSwitch: (sessionId) => switchTo(sessionId),
-    onClose: (sessionId) => killSession(sessionId),
+    onClose: async (sessionId) => {
+      if (await confirmCloseSession(sessionId)) killSession(sessionId);
+    },
     onRename: (sessionId) => renameSession(sessionId)
   };
 
@@ -740,8 +743,49 @@ function restoreSessions(sessionList) {
 }
 
 /**
- * Kill a session and clean up
+ * Show confirmation dialog if agent is busy. Returns true if close should proceed.
+ * For locally-connected sessions, checks in-memory state. For server-only sessions
+ * (dropdown), fetches state from the server.
  */
+function confirmCloseSession(id) {
+  // Check local session first (tab is connected in this window)
+  const session = sessions.get(id);
+  const isIdle = session ? session.waitingForInput : null;
+
+  if (isIdle === null) {
+    // No local session — fetch from server
+    return fetch(`/api/shells/${id}/state`)
+      .then(r => r.ok ? r.json() : { waitingForInput: true })
+      .then(data => data.waitingForInput ? true : showCloseConfirmDialog())
+      .catch(() => true); // on error, allow close
+  }
+
+  if (isIdle) return Promise.resolve(true);
+  return showCloseConfirmDialog();
+}
+
+function showCloseConfirmDialog() {
+  return new Promise(resolve => {
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay';
+    overlay.innerHTML = `
+      <div class="modal">
+        <h2>Close running session?</h2>
+        <p style="font-size:13px;color:var(--ds-text-secondary);margin-bottom:16px;">This agent is still running. Closing will terminate it immediately.</p>
+        <div class="modal-buttons">
+          <button class="btn-secondary" id="close-confirm-cancel">Cancel</button>
+          <button class="btn-danger" id="close-confirm-ok">Close anyway</button>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+
+    const cleanup = (result) => { overlay.remove(); resolve(result); };
+    overlay.querySelector('#close-confirm-cancel').onclick = () => cleanup(false);
+    overlay.querySelector('#close-confirm-ok').onclick = () => cleanup(true);
+    overlay.onclick = (e) => { if (e.target === overlay) cleanup(false); };
+  });
+}
+
 function killSession(id) {
   const session = sessions.get(id);
   if (!session) return;
@@ -1089,7 +1133,9 @@ async function init() {
     getActiveSessionId: () => activeId,
     focusSession: switchTo,
     createSession: (cwd) => createSession(cwd, null, true),
-    killSession: killSession,
+    killSession: async (id) => {
+      if (await confirmCloseSession(id)) killSession(id);
+    },
   });
 
   // File drag-and-drop upload

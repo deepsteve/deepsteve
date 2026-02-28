@@ -323,6 +323,8 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
 .modal .btn-primary:hover { background: var(--ds-accent-green-hover); }
 .modal .btn-secondary { background: var(--ds-bg-tertiary); color: var(--ds-text-primary); }
 .modal .btn-secondary:hover { background: var(--ds-border); }
+.modal .btn-danger { background: var(--ds-accent-red); color: white; border-color: var(--ds-accent-red); }
+.modal .btn-danger:hover { background: #da3633; }
 
 /* Settings modal */
 .settings-option { display: flex; align-items: center; gap: 8px; padding: 8px 0; }
