@@ -34,11 +34,17 @@ function senderColor(name) {
   return colors[Math.abs(hash) % colors.length];
 }
 
+function buildMentionPattern(name) {
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`@"${escaped}"|@${escaped}\\b`, 'i');
+}
+
 function renderMentions(text) {
-  const parts = text.split(/(@[\w-]+)/g);
+  const parts = text.split(/(@"[^"]+"|@[\w-]+)/g);
   return parts.map((part, i) => {
     if (part.startsWith('@') && part.length > 1) {
-      const name = part.slice(1);
+      const quoted = part.startsWith('@"') && part.endsWith('"');
+      const name = quoted ? part.slice(2, -1) : part.slice(1);
       const color = senderColor(name);
       return (
         <span key={i} style={{
@@ -48,7 +54,7 @@ function renderMentions(text) {
           borderRadius: 3,
           padding: '0 3px',
         }}>
-          {part}
+          @{name}
         </span>
       );
     }
@@ -95,8 +101,7 @@ function Message({ msg }) {
 
 function notifyMention(msg, myName) {
   if (!myName || msg.sender === myName) return;
-  const mentionPattern = new RegExp(`@${myName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i');
-  if (!mentionPattern.test(msg.text)) return;
+  if (!buildMentionPattern(myName).test(msg.text)) return;
   if (Notification.permission === 'granted' && document.hidden) {
     new Notification(`${msg.sender} mentioned you`, {
       body: msg.text.slice(0, 200),
@@ -170,8 +175,7 @@ function ChatPanel() {
               seenMessageIdsRef.current.add(msg.id);
               notifyMention(msg, senderNameRef.current);
               if (msg.sender !== senderNameRef.current) {
-                const pat = new RegExp(`@${senderNameRef.current.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i');
-                if (pat.test(msg.text)) hasMention = true;
+                if (buildMentionPattern(senderNameRef.current).test(msg.text)) hasMention = true;
               }
             }
           }
