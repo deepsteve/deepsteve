@@ -823,6 +823,10 @@ app.delete('/api/shells/:id', (req, res) => {
   // Check active shells
   if (shells.has(id)) {
     const entry = shells.get(id);
+    if (entry.killTimer) {
+      clearTimeout(entry.killTimer);
+      entry.killTimer = null;
+    }
     killShell(entry, id);
     shells.delete(id);
     log(`Killed active shell ${id}`);
