@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "minDeepsteveVersion": "0.2.0",
   "description": "Shared message bus for agent-to-agent communication",
+  "enabledByDefault": false,
   "entry": "index.html",
   "display": "panel",
   "panel": { "position": "right", "defaultWidth": 360, "minWidth": 200 },

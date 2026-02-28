@@ -3,6 +3,7 @@
   "version": "0.3.0",
   "minDeepsteveVersion": "0.3.0",
   "description": "Task list for human actions, populated by Agent sessions",
+  "enabledByDefault": true,
   "entry": "index.html",
   "display": "panel",
   "panel": { "position": "right", "defaultWidth": 360, "minWidth": 200 },

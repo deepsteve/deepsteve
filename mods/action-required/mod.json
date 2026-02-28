@@ -3,6 +3,7 @@
   "version": "0.3.0",
   "minDeepsteveVersion": "0.2.0",
   "description": "Auto-cycle through tabs needing input — toggle on, keep pressing Enter",
+  "enabledByDefault": true,
   "entry": "index.html",
   "display": "panel",
   "panel": { "position": "right", "defaultWidth": 320, "minWidth": 200 },

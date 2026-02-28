@@ -3,6 +3,7 @@
   "version": "0.3.0",
   "minDeepsteveVersion": "0.3.0",
   "description": "Browser console passthrough for Agent sessions",
+  "enabledByDefault": false,
   "entry": "index.html",
   "display": "panel",
   "panel": { "position": "right", "defaultWidth": 400, "minWidth": 200 },
