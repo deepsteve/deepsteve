@@ -5,6 +5,12 @@
 import { SessionStore } from './session-store.js';
 import { WindowManager } from './window-manager.js';
 
+// Long-press drag reorder state
+const LONG_PRESS_MS = 400;
+const MOVE_THRESHOLD = 5;
+let dragState = null;
+let suppressNextClick = false;
+
 // Tab context menu configuration
 const contextMenuItems = [
   { label: 'Rename', action: (id, callbacks) => callbacks.onRename?.(id) }
@@ -70,6 +76,76 @@ function isVertical() {
   return document.getElementById('app-container')?.classList.contains('vertical-layout');
 }
 
+function startDrag(tabEl, sessionId, callbacks) {
+  dragState = { tabEl, sessionId, callbacks };
+  tabEl.classList.add('dragging');
+  const list = document.getElementById('tabs-list');
+  list.classList.add('tab-drag-active');
+  document.body.style.cursor = 'grabbing';
+  document.body.style.userSelect = 'none';
+
+  document.addEventListener('mousemove', onDragMove);
+  document.addEventListener('touchmove', onDragMove, { passive: false });
+  document.addEventListener('mouseup', endDrag);
+  document.addEventListener('touchend', endDrag);
+  document.addEventListener('visibilitychange', endDrag);
+}
+
+function onDragMove(e) {
+  if (!dragState) return;
+  e.preventDefault();
+  const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+  const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+  handleDragMove(clientX, clientY);
+}
+
+function handleDragMove(clientX, clientY) {
+  if (!dragState) return;
+  const list = document.getElementById('tabs-list');
+  const vertical = isVertical();
+  const tabs = [...list.children];
+
+  for (const tab of tabs) {
+    if (tab === dragState.tabEl) continue;
+    const rect = tab.getBoundingClientRect();
+    const mid = vertical ? rect.top + rect.height / 2 : rect.left + rect.width / 2;
+    const pos = vertical ? clientY : clientX;
+
+    if (pos < mid) {
+      list.insertBefore(dragState.tabEl, tab);
+      return;
+    }
+  }
+  // Past all tabs — move to end
+  list.appendChild(dragState.tabEl);
+}
+
+function endDrag() {
+  if (!dragState) return;
+  const { tabEl, callbacks } = dragState;
+
+  tabEl.classList.remove('dragging');
+  const list = document.getElementById('tabs-list');
+  list.classList.remove('tab-drag-active');
+  document.body.style.cursor = '';
+  document.body.style.userSelect = '';
+
+  document.removeEventListener('mousemove', onDragMove);
+  document.removeEventListener('touchmove', onDragMove);
+  document.removeEventListener('mouseup', endDrag);
+  document.removeEventListener('touchend', endDrag);
+  document.removeEventListener('visibilitychange', endDrag);
+
+  if (tabEl.parentNode) {
+    const orderedIds = [...list.children].map(t => t.id.replace('tab-', ''));
+    callbacks.onReorder?.(orderedIds);
+  }
+
+  suppressNextClick = true;
+  setTimeout(() => { suppressNextClick = false; }, 0);
+  dragState = null;
+}
+
 function updateTabArrows() {
   if (!tabsList || !arrowStart || !arrowEnd || !arrowsContainer) return;
 
@@ -132,6 +208,7 @@ export const TabManager = {
     `;
 
     tab.querySelector('.tab-label').addEventListener('click', () => {
+      if (suppressNextClick) return;
       callbacks.onSwitch?.(sessionId);
     });
 
@@ -144,6 +221,51 @@ export const TabManager = {
       e.preventDefault();
       showContextMenu(e.clientX, e.clientY, sessionId, callbacks);
     });
+
+    // Long-press to drag reorder
+    const onPointerDown = (e) => {
+      // Ignore close button, right-click
+      if (e.target.closest('.close')) return;
+      if (e.button && e.button !== 0) return;
+
+      const startX = e.touches ? e.touches[0].clientX : e.clientX;
+      const startY = e.touches ? e.touches[0].clientY : e.clientY;
+      let moved = false;
+
+      const onMove = (me) => {
+        const cx = me.touches ? me.touches[0].clientX : me.clientX;
+        const cy = me.touches ? me.touches[0].clientY : me.clientY;
+        if (Math.abs(cx - startX) > MOVE_THRESHOLD || Math.abs(cy - startY) > MOVE_THRESHOLD) {
+          moved = true;
+          cancel();
+        }
+      };
+
+      const timer = setTimeout(() => {
+        cleanup();
+        startDrag(tab, sessionId, callbacks);
+      }, LONG_PRESS_MS);
+
+      const cancel = () => {
+        clearTimeout(timer);
+        cleanup();
+      };
+
+      const cleanup = () => {
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('touchmove', onMove);
+        document.removeEventListener('mouseup', cancel);
+        document.removeEventListener('touchend', cancel);
+      };
+
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('touchmove', onMove, { passive: true });
+      document.addEventListener('mouseup', cancel);
+      document.addEventListener('touchend', cancel);
+    };
+
+    tab.addEventListener('mousedown', onPointerDown);
+    tab.addEventListener('touchstart', onPointerDown, { passive: true });
 
     return tab;
   },
