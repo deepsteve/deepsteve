@@ -1498,43 +1498,75 @@ function updateTerminalStation_tick() {
 const KEYBOARD_RANGE = 3.5; // distance to terminal station to trigger keyboard
 let vrKeyboardActive = false;
 let vrKeyboardEl = null;
+let vrKeyboardPrevValue = ''; // track previous value to diff (Quest overwrites on each key)
 
-// Create a hidden textarea — focusing it on Quest triggers the system keyboard
+// Quest WebXR system keyboard: calling .focus() on a text input triggers it.
+// Quirk: each keypress overwrites the entire value, so we diff against previous.
+// Ref: https://developers.meta.com/horizon/documentation/web/webxr-keyboard/
+// IMPORTANT: textarea must be in the TOP-LEVEL document (parent), not the iframe,
+// because Quest's system keyboard only activates for inputs in the main browsing context.
 {
-  vrKeyboardEl = document.createElement('textarea');
+  const parentDoc = parent.document;
+  // Remove any leftover from previous mod load
+  const existing = parentDoc.getElementById('vr-keyboard-input');
+  if (existing) existing.remove();
+
+  vrKeyboardEl = parentDoc.createElement('textarea');
   vrKeyboardEl.id = 'vr-keyboard-input';
   vrKeyboardEl.autocomplete = 'off';
   vrKeyboardEl.autocapitalize = 'off';
   vrKeyboardEl.spellcheck = false;
   vrKeyboardEl.style.cssText = `
-    position: fixed; bottom: 0; left: 0; width: 1px; height: 1px;
-    opacity: 0.01; font-size: 16px; z-index: 9999;
+    position: fixed; bottom: 10px; left: 50%; transform: translateX(-50%);
+    width: 300px; height: 40px; font-size: 16px; z-index: 9999;
+    background: #0d1117; color: #00ff88; border: 2px solid #00ff44;
+    border-radius: 6px; padding: 8px; opacity: 0;
+    pointer-events: none; transition: opacity 0.3s;
   `;
-  document.body.appendChild(vrKeyboardEl);
+  vrKeyboardEl.placeholder = 'Type here...';
+  parentDoc.body.appendChild(vrKeyboardEl);
 
-  // Forward every keystroke to the session's WebSocket
+  // On Quest, each keypress may overwrite the value. We diff to find new chars.
+  // The oninput event is the only reliable way to read keyboard input.
   vrKeyboardEl.addEventListener('input', () => {
-    if (!termStationSessionId || !vrKeyboardEl.value) return;
-    const data = vrKeyboardEl.value;
-    vrKeyboardEl.value = '';
-    try {
-      parent.window.__deepsteve.writeSession(termStationSessionId, data);
-    } catch (e) { /* bridge not ready */ }
+    if (!termStationSessionId) return;
+    const current = vrKeyboardEl.value;
+    if (current === vrKeyboardPrevValue) return;
+
+    // Find what changed — Quest may overwrite, so check if it's a simple append
+    if (current.startsWith(vrKeyboardPrevValue)) {
+      // Normal append — send the new characters
+      const newChars = current.slice(vrKeyboardPrevValue.length);
+      if (newChars) {
+        try { parent.window.__deepsteve.writeSession(termStationSessionId, newChars); } catch (e) {}
+      }
+    } else if (current.length < vrKeyboardPrevValue.length) {
+      // Deletion — send backspace for each deleted character
+      const delCount = vrKeyboardPrevValue.length - current.length;
+      for (let i = 0; i < delCount; i++) {
+        try { parent.window.__deepsteve.writeSession(termStationSessionId, '\x7f'); } catch (e) {}
+      }
+    } else {
+      // Full overwrite (Quest quirk) — clear and resend
+      // Send backspaces for old content then new content
+      for (let i = 0; i < vrKeyboardPrevValue.length; i++) {
+        try { parent.window.__deepsteve.writeSession(termStationSessionId, '\x7f'); } catch (e) {}
+      }
+      if (current) {
+        try { parent.window.__deepsteve.writeSession(termStationSessionId, current); } catch (e) {}
+      }
+    }
+    vrKeyboardPrevValue = current;
   });
 
-  // Handle Enter key specifically (input event doesn't always fire for Enter)
+  // Handle Enter and Backspace via keydown (may not fire on Quest, but works on desktop)
   vrKeyboardEl.addEventListener('keydown', (e) => {
     if (!termStationSessionId) return;
     if (e.key === 'Enter') {
       e.preventDefault();
-      try {
-        parent.window.__deepsteve.writeSession(termStationSessionId, '\r');
-      } catch (e2) { /* bridge not ready */ }
-    } else if (e.key === 'Backspace') {
-      e.preventDefault();
-      try {
-        parent.window.__deepsteve.writeSession(termStationSessionId, '\x7f');
-      } catch (e2) { /* bridge not ready */ }
+      try { parent.window.__deepsteve.writeSession(termStationSessionId, '\r'); } catch (e2) {}
+      vrKeyboardEl.value = '';
+      vrKeyboardPrevValue = '';
     }
   });
 }
@@ -1543,12 +1575,13 @@ function updateVRKeyboard() {
   if (!renderer.xr.isPresenting || !termStationSessionId || viewMode !== MODE_FIRST) {
     if (vrKeyboardActive) {
       vrKeyboardEl.blur();
+      vrKeyboardEl.style.opacity = '0';
+      vrKeyboardEl.style.pointerEvents = 'none';
       vrKeyboardActive = false;
     }
     return;
   }
 
-  // Get player world position
   const playerPos = followId && monkeyState[followId] ? monkeyState[followId].pos : null;
   if (!playerPos) return;
 
@@ -1557,11 +1590,16 @@ function updateVRKeyboard() {
   const dist = Math.sqrt(dx * dx + dz * dz);
 
   if (dist < KEYBOARD_RANGE && !vrKeyboardActive) {
+    vrKeyboardEl.style.opacity = '1';
+    vrKeyboardEl.style.pointerEvents = 'auto';
+    vrKeyboardEl.value = '';
+    vrKeyboardPrevValue = '';
     vrKeyboardEl.focus();
     vrKeyboardActive = true;
   } else if (dist >= KEYBOARD_RANGE + 1 && vrKeyboardActive) {
-    // Hysteresis: don't dismiss until 1m further than trigger distance
     vrKeyboardEl.blur();
+    vrKeyboardEl.style.opacity = '0';
+    vrKeyboardEl.style.pointerEvents = 'none';
     vrKeyboardActive = false;
   }
 }
