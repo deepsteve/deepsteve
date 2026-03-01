@@ -1436,38 +1436,39 @@ function showTermPlaceholder(msg, color = '#00ff88') {
   termStationTexture.needsUpdate = true;
 }
 
-// Load CanvasAddon script into parent (once)
-let _canvasAddonClass = null;
-function loadCanvasAddon() {
-  if (_canvasAddonClass) return Promise.resolve(_canvasAddonClass);
-  if (parent.window.CanvasAddon) {
-    _canvasAddonClass = parent.window.CanvasAddon.CanvasAddon;
-    return Promise.resolve(_canvasAddonClass);
+// Mirror terminal: one reusable offscreen xterm + CanvasAddon, no extra WebSocket.
+// Data comes from the real terminal via onWriteParsed hook.
+let _mirrorDisposable = null; // onWriteParsed subscription to dispose when switching
+
+function ensureMirrorTerminal() {
+  if (termMirrorTerm) return;
+  const parentDoc = parent.document;
+  const Terminal = parent.window.Terminal;
+  const CanvasAddon = parent.window.CanvasAddon?.CanvasAddon;
+  if (!Terminal || !CanvasAddon) {
+    termLogMsg('ERROR: Terminal or CanvasAddon not loaded', '#ff4444');
+    return;
   }
-  return new Promise((resolve, reject) => {
-    const s = parent.document.createElement('script');
-    s.src = 'https://cdn.jsdelivr.net/npm/xterm-addon-canvas@0.5.0/lib/xterm-addon-canvas.js';
-    s.onload = () => { _canvasAddonClass = parent.window.CanvasAddon.CanvasAddon; resolve(_canvasAddonClass); };
-    s.onerror = () => reject(new Error('Failed to load CanvasAddon CDN'));
-    parent.document.head.appendChild(s);
-  });
+  let container = parentDoc.getElementById('monkey-term-mirror');
+  if (!container) {
+    container = parentDoc.createElement('div');
+    container.id = 'monkey-term-mirror';
+    // Off-screen but visible (has layout) so CanvasAddon renders
+    container.style.cssText = 'position:fixed; left:-9999px; top:0; width:800px; height:400px; overflow:hidden;';
+    parentDoc.body.appendChild(container);
+  }
+  termMirrorTerm = new Terminal({ fontSize: 14, cols: 80, rows: 24 });
+  termMirrorTerm.open(container);
+  termMirrorTerm.loadAddon(new CanvasAddon());
+  termMirrorCanvas = container.querySelector('canvas');
 }
 
-// Build WebSocket URL for mirror connection to existing session
-function getMirrorWsUrl(sessionId) {
-  const loc = parent.window.location;
-  const proto = loc.protocol === 'https:' ? 'wss:' : 'ws:';
-  return proto + '//' + loc.host + '/ws?id=' + sessionId;
-}
-
-async function updateTerminalStation(sessionId) {
+function updateTerminalStation(sessionId) {
   termLog.length = 0;
   termLogMsg('[updateTerminalStation] id=' + sessionId);
 
-  // Tear down previous mirror terminal
-  if (termMirrorWs) { try { termMirrorWs.close(); } catch (e) {} termMirrorWs = null; }
-  if (termMirrorTerm) { try { termMirrorTerm.dispose(); } catch (e) {} termMirrorTerm = null; }
-  termMirrorCanvas = null;
+  // Unsubscribe from previous terminal's output
+  if (_mirrorDisposable) { _mirrorDisposable.dispose(); _mirrorDisposable = null; }
 
   termStationSessionId = sessionId;
   if (!sessionId) {
@@ -1476,63 +1477,55 @@ async function updateTerminalStation(sessionId) {
   }
 
   try {
-    // 1. Load CanvasAddon
-    termLogMsg('  loading CanvasAddon...');
-    const CanvasAddon = await loadCanvasAddon();
-    termLogMsg('  CanvasAddon loaded');
-
-    // 2. Create offscreen container in parent doc (visible but off-screen so IntersectionObserver doesn't skip rendering)
-    const parentDoc = parent.document;
-    let container = parentDoc.getElementById('monkey-term-mirror');
-    if (!container) {
-      container = parentDoc.createElement('div');
-      container.id = 'monkey-term-mirror';
-      container.style.cssText = 'position:fixed; left:-9999px; top:0; width:800px; height:400px; overflow:hidden;';
-      parentDoc.body.appendChild(container);
+    const bridge = parent.window.__deepsteve;
+    if (!bridge || typeof bridge.getTerminal !== 'function') {
+      termLogMsg('ERROR: bridge missing — refresh page', '#ff4444');
+      return;
     }
-    container.innerHTML = '';
-    termLogMsg('  mirror container ready');
+    const srcTerm = bridge.getTerminal(sessionId);
+    if (!srcTerm) {
+      termLogMsg('ERROR: no terminal for ' + sessionId, '#ff4444');
+      return;
+    }
 
-    // 3. Create new Terminal using parent's already-loaded Terminal class
-    const Terminal = parent.window.Terminal;
-    if (!Terminal) { termLogMsg('ERROR: Terminal class missing', '#ff4444'); return; }
-    termMirrorTerm = new Terminal({ fontSize: 14, cols: 80, rows: 24 });
-    termMirrorTerm.open(container);
-    termLogMsg('  mirror terminal created');
+    ensureMirrorTerminal();
+    if (!termMirrorCanvas) {
+      termLogMsg('ERROR: mirror canvas missing', '#ff4444');
+      return;
+    }
 
-    // 4. Attach CanvasAddon — container is off-screen but has layout, so it renders
-    const addon = new CanvasAddon();
-    termMirrorTerm.loadAddon(addon);
-    termLogMsg('  CanvasAddon attached');
+    // Clear mirror and seed with current buffer content
+    termMirrorTerm.reset();
+    const buf = srcTerm.buffer.active;
+    for (let i = 0; i < buf.length; i++) {
+      const line = buf.getLine(i);
+      if (line) {
+        const text = line.translateToString(true);
+        termMirrorTerm.write(text + (i < buf.length - 1 ? '\r\n' : ''));
+      }
+    }
+    termLogMsg('  seeded ' + buf.length + ' lines from buffer');
 
-    // 5. Find canvas
-    termMirrorCanvas = container.querySelector('canvas');
-    termLogMsg('  canvas: ' + (termMirrorCanvas ? termMirrorCanvas.width + 'x' + termMirrorCanvas.height : 'MISSING'));
-    if (!termMirrorCanvas) { termLogMsg('ERROR: no canvas', '#ff4444'); return; }
-
-    // 6. Connect WebSocket to same session — server broadcasts PTY output to all clients
-    const wsUrl = getMirrorWsUrl(sessionId);
-    termLogMsg('  connecting ws...');
-    termMirrorWs = new WebSocket(wsUrl);
-    termMirrorWs.onmessage = (ev) => {
-      if (typeof ev.data === 'string') {
-        if (ev.data[0] !== '{') {
-          termMirrorTerm.write(ev.data);
-        } else {
-          try {
-            const msg = JSON.parse(ev.data);
-            if (msg.scrollback) termMirrorTerm.write(msg.scrollback);
-          } catch (e) {}
+    // Subscribe to future output from the real terminal
+    _mirrorDisposable = srcTerm.onWriteParsed(() => {
+      // Re-sync last N visible rows on each write
+      const mb = termMirrorTerm.buffer.active;
+      const sb = srcTerm.buffer.active;
+      // Just write the raw data — but onWriteParsed doesn't give us the data.
+      // Instead, snapshot visible rows from source terminal.
+      termMirrorTerm.reset();
+      for (let i = 0; i < sb.length; i++) {
+        const line = sb.getLine(i);
+        if (line) {
+          const text = line.translateToString(true);
+          termMirrorTerm.write(text + (i < sb.length - 1 ? '\r\n' : ''));
         }
       }
-    };
-    termMirrorWs.onopen = () => {
-      termLogMsg('  ws connected — terminal live', '#00ff88');
-      termStationTexture.image = termMirrorCanvas;
-      termStationTexture.needsUpdate = true;
-    };
-    termMirrorWs.onerror = () => termLogMsg('  ws error', '#ff4444');
-    termMirrorWs.onclose = () => termLogMsg('  ws closed', '#ff8800');
+    });
+
+    termStationTexture.image = termMirrorCanvas;
+    termStationTexture.needsUpdate = true;
+    termLogMsg('SUCCESS: mirror terminal live', '#00ff88');
   } catch (e) {
     termLogMsg('EXCEPTION: ' + e.message, '#ff4444');
     termLogMsg('  ' + (e.stack || '').split('\n')[1]?.trim(), '#ff8800');
