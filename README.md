@@ -88,6 +88,20 @@ launchctl list | grep deepsteve        # check status
 - No authentication — anyone with local access to the machine can use it
 - Each session runs Claude Code with the permissions of the user who installed deepsteve
 
+## Running on Meta Quest (WebXR)
+
+If you want to run DeepSteve on a Meta Quest and use any WebXR mods (like Monkey Code), you'll need to work around the fact that WebXR only allows secure contexts.
+
+1. Start the server bound to all interfaces:
+
+```bash
+cd ~/.deepsteve && node server.js --bind 0.0.0.0
+```
+
+2. On your Quest's browser, go to `chrome://flags/#unsafely-treat-insecure-origin-as-secure` and add your laptop's address (e.g. `http://192.168.1.100:3000`) to the list.
+
+3. Navigate to `http://your-laptops-ip-address:3000` on the Quest.
+
 ## Contributing
 
 Bug reports and feature requests are welcome on [GitHub Issues](https://github.com/deepsteve/deepsteve/issues). Pull requests are welcome.
