@@ -382,8 +382,9 @@ const platformDefs = [
 }
 
 // Terminal station — standalone in open area (away from platforms/ramps)
+const TERM_X = -5, TERM_Z = 16;
 {
-  const TX = -5, TZ = 16; // open area near south edge of arena
+  const TX = TERM_X, TZ = TERM_Z;
 
   const termPlat = new THREE.Mesh(
     new THREE.BoxGeometry(5, 0.3, 5),
@@ -1487,6 +1488,81 @@ function updateTerminalStation_tick() {
   _termStationTickCount++;
   if (_termStationTickCount % 12 === 0 && termStationSessionId) {
     _renderTermStation();
+  }
+  // Check proximity to terminal station for keyboard
+  updateVRKeyboard();
+}
+
+// ── VR Keyboard (Quest system keyboard via focused textarea) ────────────────
+
+const KEYBOARD_RANGE = 3.5; // distance to terminal station to trigger keyboard
+let vrKeyboardActive = false;
+let vrKeyboardEl = null;
+
+// Create a hidden textarea — focusing it on Quest triggers the system keyboard
+{
+  vrKeyboardEl = document.createElement('textarea');
+  vrKeyboardEl.id = 'vr-keyboard-input';
+  vrKeyboardEl.autocomplete = 'off';
+  vrKeyboardEl.autocapitalize = 'off';
+  vrKeyboardEl.spellcheck = false;
+  vrKeyboardEl.style.cssText = `
+    position: fixed; bottom: 0; left: 0; width: 1px; height: 1px;
+    opacity: 0.01; font-size: 16px; z-index: 9999;
+  `;
+  document.body.appendChild(vrKeyboardEl);
+
+  // Forward every keystroke to the session's WebSocket
+  vrKeyboardEl.addEventListener('input', () => {
+    if (!termStationSessionId || !vrKeyboardEl.value) return;
+    const data = vrKeyboardEl.value;
+    vrKeyboardEl.value = '';
+    try {
+      parent.window.__deepsteve.writeSession(termStationSessionId, data);
+    } catch (e) { /* bridge not ready */ }
+  });
+
+  // Handle Enter key specifically (input event doesn't always fire for Enter)
+  vrKeyboardEl.addEventListener('keydown', (e) => {
+    if (!termStationSessionId) return;
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      try {
+        parent.window.__deepsteve.writeSession(termStationSessionId, '\r');
+      } catch (e2) { /* bridge not ready */ }
+    } else if (e.key === 'Backspace') {
+      e.preventDefault();
+      try {
+        parent.window.__deepsteve.writeSession(termStationSessionId, '\x7f');
+      } catch (e2) { /* bridge not ready */ }
+    }
+  });
+}
+
+function updateVRKeyboard() {
+  if (!renderer.xr.isPresenting || !termStationSessionId || viewMode !== MODE_FIRST) {
+    if (vrKeyboardActive) {
+      vrKeyboardEl.blur();
+      vrKeyboardActive = false;
+    }
+    return;
+  }
+
+  // Get player world position
+  const playerPos = followId && monkeyState[followId] ? monkeyState[followId].pos : null;
+  if (!playerPos) return;
+
+  const dx = playerPos.x - TERM_X;
+  const dz = playerPos.z - TERM_Z;
+  const dist = Math.sqrt(dx * dx + dz * dz);
+
+  if (dist < KEYBOARD_RANGE && !vrKeyboardActive) {
+    vrKeyboardEl.focus();
+    vrKeyboardActive = true;
+  } else if (dist >= KEYBOARD_RANGE + 1 && vrKeyboardActive) {
+    // Hysteresis: don't dismiss until 1m further than trigger distance
+    vrKeyboardEl.blur();
+    vrKeyboardActive = false;
   }
 }
 

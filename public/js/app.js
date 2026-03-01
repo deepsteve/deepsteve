@@ -203,6 +203,10 @@ window.__deepsteve = {
     const s = sessions.get(id);
     return s ? s.container : null;
   },
+  writeSession(id, data) {
+    const s = sessions.get(id);
+    if (s) s.ws.send(data);
+  },
 };
 
 // Sessions dropdown
