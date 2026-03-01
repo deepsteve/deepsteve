@@ -12,7 +12,8 @@ export function initLiveReload({ onMessage, onReloadPending } = {}) {
   let intentionallyClosed = false;
 
   function connect() {
-    ws = new WebSocket('ws://' + location.host + '?action=reload');
+    const wsProto = location.protocol === 'https:' ? 'wss://' : 'ws://';
+    ws = new WebSocket(wsProto + location.host + '?action=reload');
 
     ws.onmessage = (e) => {
       try {
