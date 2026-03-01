@@ -1,0 +1,11 @@
+{
+  "name": "Monkey Code",
+  "version": "0.4.0",
+  "minDeepsteveVersion": "0.4.0",
+  "description": "Gorilla Tag in WebXR — swing around as a monkey and tag your Claude sessions",
+  "enabledByDefault": false,
+  "entry": "index.html",
+  "toolbar": {
+    "label": "Monkey Code"
+  }
+}

@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
+  <style>
+    * { margin: 0; box-sizing: border-box; }
+    body { background: #000; height: 100vh; overflow: hidden; }
+    #scene { width: 100%; height: 100%; }
+    #hud {
+      position: absolute; top: 0; left: 0; right: 0; bottom: 0;
+      pointer-events: none;
+      font-family: 'Press Start 2P', monospace;
+    }
+    #hud > * { pointer-events: auto; }
+    #header {
+      position: absolute; top: 0; left: 0; right: 0;
+      display: flex; justify-content: space-between; align-items: center;
+      padding: 14px 20px;
+      background: linear-gradient(180deg, rgba(0,0,0,0.6) 0%, transparent 100%);
+    }
+    #header h1 {
+      font-size: 16px; color: #fff; letter-spacing: 2px;
+      text-shadow: 2px 2px 0 #000, 0 0 10px rgba(80,255,80,0.5);
+    }
+    #header .monkey-count { font-size: 10px; color: #8f8; text-shadow: 1px 1px 0 #000; }
+    .hud-btn {
+      border: 3px solid #fff; border-radius: 6px; color: #fff;
+      font-family: 'Press Start 2P', monospace; font-size: 11px;
+      padding: 8px 16px; cursor: pointer;
+      text-shadow: 1px 1px 0 #000; box-shadow: 0 2px 8px rgba(0,0,0,0.4);
+    }
+    .hud-btn.back { background: #555; font-size: 9px; padding: 6px 12px; }
+    #it-flash {
+      position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+      font-size: 48px; color: #ff4444;
+      text-shadow: 4px 4px 0 #000, 0 0 40px rgba(255,0,0,0.6);
+      animation: itFlash 0.4s ease-out forwards;
+      pointer-events: none;
+    }
+    @keyframes itFlash {
+      0% { opacity: 1; transform: translate(-50%, -50%) scale(1.5); }
+      100% { opacity: 0; transform: translate(-50%, -50%) scale(1); }
+    }
+    #scoreboard {
+      position: absolute; bottom: 12px; left: 12px;
+      background: rgba(0,0,0,0.75); border: 2px solid #8f8;
+      border-radius: 8px; padding: 10px 14px; min-width: 210px;
+    }
+    #scoreboard .title { font-size: 10px; color: #8f8; margin-bottom: 8px; text-shadow: 1px 1px 0 #000; }
+    #scoreboard .row {
+      display: flex; align-items: center; gap: 8px; padding: 3px 0;
+      border-bottom: 1px solid rgba(255,255,255,0.1);
+    }
+    #scoreboard .row:last-child { border-bottom: none; }
+    #scoreboard .pos { font-size: 10px; width: 22px; text-align: right; }
+    #scoreboard .dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+    #scoreboard .name {
+      font-size: 9px; color: #fff; flex: 1;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100px;
+    }
+    #scoreboard .stat { font-size: 9px; color: #aaa; }
+    #scoreboard .it-badge {
+      font-size: 7px; color: #ff4444; background: rgba(255,0,0,0.15);
+      border: 1px solid #ff4444; border-radius: 3px; padding: 1px 4px;
+    }
+    #scoreboard .row.active { background: rgba(80,255,80,0.15); border-radius: 4px; }
+    #no-monkeys {
+      position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+      text-align: center; color: #fff; text-shadow: 2px 2px 0 #000;
+    }
+    #no-monkeys .big { font-size: 18px; margin-bottom: 12px; }
+    #no-monkeys .small { font-size: 10px; color: #ccc; }
+    #hint {
+      position: absolute; bottom: 20px; left: 50%; transform: translateX(-50%);
+      font-size: 11px; color: #fff; text-shadow: 1px 1px 0 #000;
+      background: rgba(0,0,0,0.5); padding: 8px 16px; border-radius: 6px;
+      animation: hintPulse 2s ease-in-out infinite;
+    }
+    @keyframes hintPulse {
+      0%, 100% { opacity: 0.7; }
+      50% { opacity: 1; }
+    }
+    #physics-panel {
+      position: absolute; top: 60px; right: 12px;
+      background: rgba(0,0,0,0.8); border: 2px solid #666;
+      border-radius: 8px; padding: 0; font-size: 9px; color: #ccc;
+      min-width: 200px; overflow: hidden;
+    }
+    #physics-panel .panel-header {
+      padding: 8px 12px; cursor: pointer; user-select: none;
+      background: rgba(255,255,255,0.05); border-bottom: 1px solid #444;
+      display: flex; justify-content: space-between; align-items: center;
+    }
+    #physics-panel .panel-header:hover { background: rgba(255,255,255,0.1); }
+    #physics-panel .panel-body { padding: 8px 12px; }
+    #physics-panel .slider-row {
+      display: flex; align-items: center; gap: 6px; margin: 4px 0;
+    }
+    #physics-panel .slider-row label { width: 70px; font-size: 8px; text-align: right; }
+    #physics-panel .slider-row input[type="range"] { flex: 1; height: 4px; }
+    #physics-panel .slider-row .val { width: 36px; font-size: 8px; text-align: left; color: #8f8; }
+  </style>
+</head>
+<body>
+  <canvas id="scene"></canvas>
+  <div id="hud"></div>
+
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.171.0/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.171.0/examples/jsm/"
+    }
+  }
+  </script>
+  <script type="module" src="monkey-code.js"></script>
+</body>
+</html>
