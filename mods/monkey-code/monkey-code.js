@@ -57,8 +57,9 @@ let termStationMesh = null;       // THREE.Mesh with terminal texture
 let termStationTexture = null;    // THREE.CanvasTexture
 let termStationCanvas = null;     // off-screen canvas for placeholder
 let termStationSessionId = null;  // currently displayed session
-let termStationCanvasAddon = null; // CanvasAddon instance attached to xterm
-let canvasAddonClass = null;      // CanvasAddon constructor (loaded from CDN)
+let termMirrorTerm = null;        // mirror xterm.js Terminal instance
+let termMirrorWs = null;          // mirror WebSocket connection
+let termMirrorCanvas = null;      // CanvasAddon's canvas element
 
 const monkeyState = {};        // id → { mesh, vel, pos, onGround, score, ... }
 const _v1 = new THREE.Vector3();
@@ -1064,7 +1065,8 @@ function updateVRLocomotion(m, dt) {
     }
   }
 
-  // ── 2. Thumbstick locomotion (left stick = smooth move, right stick button = jump) ──
+  // ── 2. Thumbstick locomotion (left stick = smooth move, A/X button = jump) ──
+  let vrJumpBtnPressed = false;
   if (session) {
     for (const source of session.inputSources) {
       if (!source.gamepad) continue;
@@ -1078,37 +1080,31 @@ function updateVRLocomotion(m, dt) {
         const moveSpeed = 6;
 
         if (Math.abs(stickX) > deadzone || Math.abs(stickY) > deadzone) {
-          // Get camera forward projected onto XZ plane
           camera.getWorldDirection(_v1);
           _v1.y = 0;
           _v1.normalize();
-
-          // Right vector = cross product of forward and up
           _v2.crossVectors(_v1, _v3.set(0, 1, 0)).normalize();
-
-          // stickY negative = push forward, positive = pull back
           const targetX = (_v1.x * -stickY + _v2.x * stickX) * moveSpeed;
           const targetZ = (_v1.z * -stickY + _v2.z * stickX) * moveSpeed;
-
-          // Smooth blend toward target velocity
           m.vel.x += (targetX - m.vel.x) * 5 * dt;
           m.vel.z += (targetZ - m.vel.z) * 5 * dt;
         }
+      }
 
-        // A/X button (index 4) or thumbstick press (index 3) = jump
-        const jumpBtn = (source.gamepad.buttons.length > 4 && source.gamepad.buttons[4].pressed) ||
-                        (source.gamepad.buttons.length > 3 && source.gamepad.buttons[3].pressed);
-        if (jumpBtn) {
-          if (m.onGround && vrThumbstickJumpReady) {
-            m.vel.y = 6 * PHYSICS.jumpMultiplier;
-            playJump();
-            vrThumbstickJumpReady = false;
-          }
-        } else {
-          vrThumbstickJumpReady = true;
-        }
+      // A/X button (index 4) or thumbstick press (index 3) — check both controllers
+      if ((source.gamepad.buttons.length > 4 && source.gamepad.buttons[4].pressed) ||
+          (source.gamepad.buttons.length > 3 && source.gamepad.buttons[3].pressed)) {
+        vrJumpBtnPressed = true;
       }
     }
+  }
+  // Apply button jump after checking all controllers
+  if (vrJumpBtnPressed && m.onGround && vrThumbstickJumpReady) {
+    m.vel.y = 6 * PHYSICS.jumpMultiplier;
+    playJump();
+    vrThumbstickJumpReady = false;
+  } else if (!vrJumpBtnPressed) {
+    vrThumbstickJumpReady = true;
   }
 
   // ── 3. Smooth Gorilla Tag arm-swing locomotion ──
@@ -1399,28 +1395,37 @@ renderer.xr.addEventListener('sessionend', () => {
 
 // ── Terminal Station (physical screen in arena) ──────────────────────────
 
-// Load CanvasAddon from CDN into parent document (once)
-async function loadCanvasAddon() {
-  if (canvasAddonClass) return canvasAddonClass;
-  const parentDoc = parent.document;
-  // Check if already loaded
-  if (parent.window.CanvasAddon) {
-    canvasAddonClass = parent.window.CanvasAddon.CanvasAddon;
-    return canvasAddonClass;
+// Log lines displayed on the terminal station screen for VR debugging
+const termLog = [];
+
+function termLogMsg(msg, color = '#00ff88') {
+  termLog.push({ msg, color, t: Date.now() });
+  if (termLog.length > 20) termLog.shift();
+  _drawTermLog();
+}
+
+function _drawTermLog() {
+  if (!termStationCanvas || !termStationTexture) return;
+  termStationTexture.image = termStationCanvas;
+  const ctx = termStationCanvas.getContext('2d');
+  ctx.fillStyle = '#0d1117';
+  ctx.fillRect(0, 0, termStationCanvas.width, termStationCanvas.height);
+  ctx.textAlign = 'left';
+  const fontSize = 16;
+  const lineHeight = fontSize + 6;
+  const pad = 12;
+  for (let i = 0; i < termLog.length; i++) {
+    ctx.fillStyle = termLog[i].color;
+    ctx.font = fontSize + 'px monospace';
+    ctx.fillText(termLog[i].msg, pad, pad + (i + 1) * lineHeight);
   }
-  return new Promise((resolve, reject) => {
-    const script = parentDoc.createElement('script');
-    script.src = 'https://cdn.jsdelivr.net/npm/xterm-addon-canvas@0.5.0/lib/xterm-addon-canvas.js';
-    script.onload = () => {
-      canvasAddonClass = parent.window.CanvasAddon.CanvasAddon;
-      resolve(canvasAddonClass);
-    };
-    script.onerror = () => reject(new Error('Failed to load CanvasAddon'));
-    parentDoc.head.appendChild(script);
-  });
+  termStationTexture.needsUpdate = true;
 }
 
 function showTermPlaceholder(msg, color = '#00ff88') {
+  termLog.length = 0;
+  if (!termStationCanvas || !termStationTexture) return;
+  termStationTexture.image = termStationCanvas;
   const ctx = termStationCanvas.getContext('2d');
   ctx.fillStyle = '#0d1117';
   ctx.fillRect(0, 0, termStationCanvas.width, termStationCanvas.height);
@@ -1431,54 +1436,111 @@ function showTermPlaceholder(msg, color = '#00ff88') {
   termStationTexture.needsUpdate = true;
 }
 
-async function updateTerminalStation(sessionId) {
-  // Detach previous CanvasAddon if switching sessions
-  if (termStationCanvasAddon) {
-    try { termStationCanvasAddon.dispose(); } catch (e) {}
-    termStationCanvasAddon = null;
+// Load CanvasAddon script into parent (once)
+let _canvasAddonClass = null;
+function loadCanvasAddon() {
+  if (_canvasAddonClass) return Promise.resolve(_canvasAddonClass);
+  if (parent.window.CanvasAddon) {
+    _canvasAddonClass = parent.window.CanvasAddon.CanvasAddon;
+    return Promise.resolve(_canvasAddonClass);
   }
+  return new Promise((resolve, reject) => {
+    const s = parent.document.createElement('script');
+    s.src = 'https://cdn.jsdelivr.net/npm/xterm-addon-canvas@0.5.0/lib/xterm-addon-canvas.js';
+    s.onload = () => { _canvasAddonClass = parent.window.CanvasAddon.CanvasAddon; resolve(_canvasAddonClass); };
+    s.onerror = () => reject(new Error('Failed to load CanvasAddon CDN'));
+    parent.document.head.appendChild(s);
+  });
+}
+
+// Build WebSocket URL for mirror connection to existing session
+function getMirrorWsUrl(sessionId) {
+  const loc = parent.window.location;
+  const proto = loc.protocol === 'https:' ? 'wss:' : 'ws:';
+  return proto + '//' + loc.host + '/ws?id=' + sessionId;
+}
+
+async function updateTerminalStation(sessionId) {
+  termLog.length = 0;
+  termLogMsg('[updateTerminalStation] id=' + sessionId);
+
+  // Tear down previous mirror terminal
+  if (termMirrorWs) { try { termMirrorWs.close(); } catch (e) {} termMirrorWs = null; }
+  if (termMirrorTerm) { try { termMirrorTerm.dispose(); } catch (e) {} termMirrorTerm = null; }
+  termMirrorCanvas = null;
 
   termStationSessionId = sessionId;
   if (!sessionId) {
     showTermPlaceholder('MONKEY CODE TERMINAL');
-    // Reset texture source back to placeholder canvas
-    termStationTexture.image = termStationCanvas;
-    termStationTexture.needsUpdate = true;
     return;
   }
 
-  showTermPlaceholder('Loading terminal...');
-
   try {
-    const Addon = await loadCanvasAddon();
-    const term = parent.window.__deepsteve.getTerminal(sessionId);
-    if (!term) {
-      showTermPlaceholder('NO TERMINAL: ' + sessionId, '#ff4444');
-      return;
+    // 1. Load CanvasAddon
+    termLogMsg('  loading CanvasAddon...');
+    const CanvasAddon = await loadCanvasAddon();
+    termLogMsg('  CanvasAddon loaded');
+
+    // 2. Create offscreen container in parent doc (visible but off-screen so IntersectionObserver doesn't skip rendering)
+    const parentDoc = parent.document;
+    let container = parentDoc.getElementById('monkey-term-mirror');
+    if (!container) {
+      container = parentDoc.createElement('div');
+      container.id = 'monkey-term-mirror';
+      container.style.cssText = 'position:fixed; left:-9999px; top:0; width:800px; height:400px; overflow:hidden;';
+      parentDoc.body.appendChild(container);
     }
+    container.innerHTML = '';
+    termLogMsg('  mirror container ready');
 
-    termStationCanvasAddon = new Addon();
-    term.loadAddon(termStationCanvasAddon);
+    // 3. Create new Terminal using parent's already-loaded Terminal class
+    const Terminal = parent.window.Terminal;
+    if (!Terminal) { termLogMsg('ERROR: Terminal class missing', '#ff4444'); return; }
+    termMirrorTerm = new Terminal({ fontSize: 14, cols: 80, rows: 24 });
+    termMirrorTerm.open(container);
+    termLogMsg('  mirror terminal created');
 
-    // CanvasAddon renders to a canvas inside the terminal container.
-    // Find it — it's the canvas element created by the addon.
-    const termContainer = parent.document.getElementById('term-' + sessionId);
-    const addonCanvas = termContainer?.querySelector('canvas');
-    if (addonCanvas) {
-      // Point the Three.js texture at the real xterm canvas
-      termStationTexture.image = addonCanvas;
+    // 4. Attach CanvasAddon — container is off-screen but has layout, so it renders
+    const addon = new CanvasAddon();
+    termMirrorTerm.loadAddon(addon);
+    termLogMsg('  CanvasAddon attached');
+
+    // 5. Find canvas
+    termMirrorCanvas = container.querySelector('canvas');
+    termLogMsg('  canvas: ' + (termMirrorCanvas ? termMirrorCanvas.width + 'x' + termMirrorCanvas.height : 'MISSING'));
+    if (!termMirrorCanvas) { termLogMsg('ERROR: no canvas', '#ff4444'); return; }
+
+    // 6. Connect WebSocket to same session — server broadcasts PTY output to all clients
+    const wsUrl = getMirrorWsUrl(sessionId);
+    termLogMsg('  connecting ws...');
+    termMirrorWs = new WebSocket(wsUrl);
+    termMirrorWs.onmessage = (ev) => {
+      if (typeof ev.data === 'string') {
+        if (ev.data[0] !== '{') {
+          termMirrorTerm.write(ev.data);
+        } else {
+          try {
+            const msg = JSON.parse(ev.data);
+            if (msg.scrollback) termMirrorTerm.write(msg.scrollback);
+          } catch (e) {}
+        }
+      }
+    };
+    termMirrorWs.onopen = () => {
+      termLogMsg('  ws connected — terminal live', '#00ff88');
+      termStationTexture.image = termMirrorCanvas;
       termStationTexture.needsUpdate = true;
-    } else {
-      showTermPlaceholder('Canvas not found', '#ff4444');
-    }
+    };
+    termMirrorWs.onerror = () => termLogMsg('  ws error', '#ff4444');
+    termMirrorWs.onclose = () => termLogMsg('  ws closed', '#ff8800');
   } catch (e) {
-    showTermPlaceholder('Error: ' + e.message, '#ff4444');
+    termLogMsg('EXCEPTION: ' + e.message, '#ff4444');
+    termLogMsg('  ' + (e.stack || '').split('\n')[1]?.trim(), '#ff8800');
   }
 }
 
 function updateTerminalStation_tick() {
-  // Just mark texture as needing update — the CanvasAddon renders to its canvas automatically
-  if (termStationSessionId && termStationCanvasAddon) {
+  if (termMirrorCanvas && termStationSessionId) {
     termStationTexture.needsUpdate = true;
   }
   // Check proximity to terminal station for keyboard
@@ -1599,43 +1661,48 @@ function updateVRKeyboard() {
 // ── Enter / Exit first person ───────────────────────────────────────────────
 
 function enterFirstPerson(sessionId) {
-  startAudio();
-  startAmbient();
-  followId = sessionId;
-  viewMode = MODE_FIRST;
+  try {
+    termLogMsg('[enterFirstPerson] id=' + sessionId);
+    startAudio();
+    startAmbient();
+    followId = sessionId;
+    viewMode = MODE_FIRST;
 
-  const m = monkeyState[sessionId];
-  if (m) {
-    m.mesh.visible = false;
-    m.label.visible = false;
-    mouseYaw = m.mesh.rotation.y;
-    mousePitch = 0;
-  }
+    // Update terminal station FIRST
+    updateTerminalStation(sessionId);
 
-  // If no one is "it" yet, make a random AI monkey "it"
-  if (!itMonkeyId) {
-    const otherIds = Object.keys(monkeyState).filter(id => id !== sessionId);
-    if (otherIds.length > 0) {
-      itMonkeyId = otherIds[Math.floor(Math.random() * otherIds.length)];
-      lastTagTime = performance.now() / 1000;
-      // Update all labels
-      for (const [lid, lm] of Object.entries(monkeyState)) {
-        const sess = sessions.find(s => s.id === lid);
-        updateLabel(lm.label._ctx, sess ? sess.name : lid, lm.colorIdx, lid === itMonkeyId, lm.score);
-        lm.label.material.map.needsUpdate = true;
+    const m = monkeyState[sessionId];
+    if (m) {
+      m.mesh.visible = false;
+      m.label.visible = false;
+      mouseYaw = m.mesh.rotation.y;
+      mousePitch = 0;
+    }
+
+    if (!itMonkeyId) {
+      const otherIds = Object.keys(monkeyState).filter(id => id !== sessionId);
+      if (otherIds.length > 0) {
+        itMonkeyId = otherIds[Math.floor(Math.random() * otherIds.length)];
+        lastTagTime = performance.now() / 1000;
+        for (const [lid, lm] of Object.entries(monkeyState)) {
+          try {
+            const sess = sessions.find(s => s.id === lid);
+            updateLabel(lm.label._ctx, sess ? sess.name : lid, lm.colorIdx, lid === itMonkeyId, lm.score);
+            lm.label.material.map.needsUpdate = true;
+          } catch (e) { /* label update is non-critical */ }
+        }
       }
     }
-  }
 
-  // Update terminal station screen (works in all modes)
-  updateTerminalStation(sessionId);
-
-  // On desktop: also show DOM overlay terminal
-  if (!renderer.xr.isPresenting) {
-    showTerminal(sessionId);
+    if (!renderer.xr.isPresenting) {
+      showTerminal(sessionId);
+    }
+    onResize();
+    updateHUD();
+  } catch (e) {
+    termLogMsg('enterFirstPerson CRASHED: ' + e.message, '#ff4444');
+    termLogMsg('  ' + (e.stack || '').split('\n')[1]?.trim(), '#ff8800');
   }
-  onResize();
-  updateHUD();
 }
 
 function exitFirstPerson() {
