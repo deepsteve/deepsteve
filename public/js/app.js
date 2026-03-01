@@ -632,7 +632,14 @@ function initTerminal(id, ws, cwd, initialName, { hasScrollback = false, pending
     onClose: async (sessionId) => {
       if (await confirmCloseSession(sessionId)) killSession(sessionId);
     },
-    onRename: (sessionId) => renameSession(sessionId)
+    onRename: (sessionId) => renameSession(sessionId),
+    onReorder: (orderedIds) => {
+      const tabList = TabSessions.get();
+      const reordered = orderedIds.map(id => tabList.find(s => s.id === id)).filter(Boolean);
+      TabSessions.save(reordered);
+      SessionStore.reorderSessions(getWindowId(), orderedIds);
+      ModManager.notifySessionsChanged(getSessionList());
+    }
   };
 
   TabManager.addTab(id, name, tabCallbacks);

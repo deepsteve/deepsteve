@@ -65,6 +65,9 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
 .tab .badge { width: 8px; height: 8px; background: var(--ds-accent-blue); border-radius: 50%; display: none; flex-shrink: 0; }
 .tab .badge.visible { display: inline-block; }
 .tab .tab-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tab.dragging { opacity: 0.7; z-index: 10; }
+#tabs-list.tab-drag-active { user-select: none; }
+#tabs-list.tab-drag-active .tab:not(.dragging) { pointer-events: none; }
 
 /* Vertical layout mode */
 #app-container.vertical-layout { flex-direction: row; }

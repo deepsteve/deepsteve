@@ -87,6 +87,19 @@ export const SessionStore = {
   },
 
   /**
+   * Reorder sessions in a window to match the given ID order
+   */
+  reorderSessions(windowId, orderedIds) {
+    const storage = getStorage();
+    if (storage.windows?.[windowId]) {
+      const sessions = storage.windows[windowId].sessions;
+      const reordered = orderedIds.map(id => sessions.find(s => s.id === id)).filter(Boolean);
+      storage.windows[windowId].sessions = reordered;
+      setStorage(storage);
+    }
+  },
+
+  /**
    * Move a session from one window to another
    */
   moveSession(fromWindowId, toWindowId, sessionId) {
