@@ -13,6 +13,13 @@ const ORPHAN_DETECTION_TIMEOUT = 1500;
 let channel = null;
 let heartbeatTimer = null;
 let currentWindowId = null;
+let uiChannel = null;
+const claimedEvents = new Set();
+
+function addClaimedEvent(eventId) {
+  claimedEvents.add(eventId);
+  setTimeout(() => claimedEvents.delete(eventId), 10000);
+}
 
 function generateWindowId() {
   return 'win-' + Math.random().toString(36).substring(2, 10);
@@ -153,6 +160,23 @@ export const WindowManager = {
       channel.close();
       channel = null;
     }
+  },
+
+  /**
+   * Try to claim a UI event so only one window handles it.
+   * Returns true if this window won the claim.
+   */
+  tryClaimEvent(eventId) {
+    if (!uiChannel) {
+      uiChannel = new BroadcastChannel('deepsteve-ui-events');
+      uiChannel.onmessage = (e) => {
+        if (e.data.type === 'claimed') addClaimedEvent(e.data.eventId);
+      };
+    }
+    if (claimedEvents.has(eventId)) return false;
+    addClaimedEvent(eventId);
+    uiChannel.postMessage({ type: 'claimed', eventId });
+    return true;
   },
 
   /**

@@ -1153,10 +1153,15 @@ async function init() {
 
   // Auto-reload browser when server restarts (restart.sh, node --watch, etc.)
   initLiveReload({
-    onMessage: (msg) => {
+    onMessage: async (msg) => {
       if (msg.type === 'theme') applyTheme(msg.css || '');
       if (msg.type === 'open-session') {
         // Server created a session (e.g. via /api/start-issue) — open a tab for it
+        // Dedup across windows: focused window claims immediately, others wait 50ms
+        if (msg.eventId) {
+          if (!document.hasFocus()) await new Promise(r => setTimeout(r, 50));
+          if (!WindowManager.tryClaimEvent(msg.eventId)) return;
+        }
         createSession(msg.cwd, msg.id, false, { name: msg.name });
       }
     },

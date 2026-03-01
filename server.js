@@ -975,8 +975,8 @@ app.post('/api/start-issue', (req, res) => {
   shell.onExit(() => { if (!shuttingDown) { unwatchClaudeSessionDir(id); shells.delete(id); saveState(); } });
   saveState();
 
-  // Notify browsers to open the new session
-  const openMsg = JSON.stringify({ type: 'open-session', id, cwd, name });
+  // Notify browsers to open the new session (eventId for cross-window dedup)
+  const openMsg = JSON.stringify({ type: 'open-session', id, cwd, name, eventId: randomUUID().slice(0, 8) });
   for (const client of reloadClients) {
     if (client.readyState === 1) client.send(openMsg);
   }
