@@ -1465,7 +1465,6 @@ function ensureMirrorTerminal() {
 
 function updateTerminalStation(sessionId) {
   termLog.length = 0;
-  termLogMsg('[updateTerminalStation] id=' + sessionId);
 
   // Unsubscribe from previous terminal's output
   if (_mirrorDisposable) { _mirrorDisposable.dispose(); _mirrorDisposable = null; }
@@ -1504,7 +1503,6 @@ function updateTerminalStation(sessionId) {
         termMirrorTerm.write(text + (i < buf.length - 1 ? '\r\n' : ''));
       }
     }
-    termLogMsg('  seeded ' + buf.length + ' lines from buffer');
 
     // Subscribe to future output from the real terminal
     _mirrorDisposable = srcTerm.onWriteParsed(() => {
@@ -1525,7 +1523,7 @@ function updateTerminalStation(sessionId) {
 
     termStationTexture.image = termMirrorCanvas;
     termStationTexture.needsUpdate = true;
-    termLogMsg('SUCCESS: mirror terminal live', '#00ff88');
+    // Don't call termLogMsg here — it would repoint texture back at debug canvas
   } catch (e) {
     termLogMsg('EXCEPTION: ' + e.message, '#ff4444');
     termLogMsg('  ' + (e.stack || '').split('\n')[1]?.trim(), '#ff8800');
