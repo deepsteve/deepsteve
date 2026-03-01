@@ -126,6 +126,7 @@ function ActionRequiredPanel() {
   const settingsRef = useRef(settings);
   const autoSwitchTimerRef = useRef(null);
   const isAutoSwitchingRef = useRef(false);
+  const pollIntervalRef = useRef(null);
 
   // Keep refs in sync
   useEffect(() => { activeIdRef.current = activeSessionId; }, [activeSessionId]);
@@ -248,12 +249,41 @@ function ActionRequiredPanel() {
     });
   }, []);
 
-  // Cancel auto-switch timer on unmount
+  // Cancel timers on unmount
   useEffect(() => {
     return () => {
       if (autoSwitchTimerRef.current) clearTimeout(autoSwitchTimerRef.current);
+      if (pollIntervalRef.current) clearInterval(pollIntervalRef.current);
     };
   }, []);
+
+  // Poll for waiting tabs independently of events
+  useEffect(() => {
+    if (settings.autoSwitch) {
+      pollIntervalRef.current = setInterval(() => {
+        const sessionList = window.deepsteve?.getSessions() || [];
+        const currentActiveId = activeIdRef.current;
+        const currActive = sessionList.find(s => s.id === currentActiveId);
+        if (!currActive?.waitingForInput) {
+          const next = findNextWaiting(sessionList, null);
+          if (next && !autoSwitchTimerRef.current) {
+            scheduleAutoSwitch(next.id);
+          }
+        }
+      }, 10000);
+    } else {
+      if (pollIntervalRef.current) {
+        clearInterval(pollIntervalRef.current);
+        pollIntervalRef.current = null;
+      }
+    }
+    return () => {
+      if (pollIntervalRef.current) {
+        clearInterval(pollIntervalRef.current);
+        pollIntervalRef.current = null;
+      }
+    };
+  }, [settings.autoSwitch]);
 
   const handleToggle = useCallback(() => {
     const newValue = !settingsRef.current.autoSwitch;
