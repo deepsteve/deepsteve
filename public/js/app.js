@@ -207,6 +207,10 @@ window.__deepsteve = {
     const s = sessions.get(id);
     if (s) s.ws.send(data);
   },
+  getTerminal(id) {
+    const s = sessions.get(id);
+    return s ? s.term : null;
+  },
 };
 
 // Sessions dropdown

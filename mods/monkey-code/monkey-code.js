@@ -55,9 +55,10 @@ const vrSelectionRaycaster = new THREE.Raycaster();
 // Terminal station (physical screen in arena)
 let termStationMesh = null;       // THREE.Mesh with terminal texture
 let termStationTexture = null;    // THREE.CanvasTexture
-let termStationCanvas = null;     // off-screen canvas for fallback/debug
+let termStationCanvas = null;     // off-screen canvas for placeholder
 let termStationSessionId = null;  // currently displayed session
-let termStationDebugMsg = '';     // debug message shown on screen
+let termStationCanvasAddon = null; // CanvasAddon instance attached to xterm
+let canvasAddonClass = null;      // CanvasAddon constructor (loaded from CDN)
 
 const monkeyState = {};        // id → { mesh, vel, pos, onGround, score, ... }
 const _v1 = new THREE.Vector3();
@@ -1398,96 +1399,87 @@ renderer.xr.addEventListener('sessionend', () => {
 
 // ── Terminal Station (physical screen in arena) ──────────────────────────
 
-function updateTerminalStation(sessionId) {
-  termStationSessionId = sessionId;
-  termStationDebugMsg = '';
-  // Force immediate redraw
-  _renderTermStation();
+// Load CanvasAddon from CDN into parent document (once)
+async function loadCanvasAddon() {
+  if (canvasAddonClass) return canvasAddonClass;
+  const parentDoc = parent.document;
+  // Check if already loaded
+  if (parent.window.CanvasAddon) {
+    canvasAddonClass = parent.window.CanvasAddon.CanvasAddon;
+    return canvasAddonClass;
+  }
+  return new Promise((resolve, reject) => {
+    const script = parentDoc.createElement('script');
+    script.src = 'https://cdn.jsdelivr.net/npm/xterm-addon-canvas@0.5.0/lib/xterm-addon-canvas.js';
+    script.onload = () => {
+      canvasAddonClass = parent.window.CanvasAddon.CanvasAddon;
+      resolve(canvasAddonClass);
+    };
+    script.onerror = () => reject(new Error('Failed to load CanvasAddon'));
+    parentDoc.head.appendChild(script);
+  });
 }
 
-// Scrape text from xterm.js DOM rows and draw onto our canvas
-function _renderTermStation() {
+function showTermPlaceholder(msg, color = '#00ff88') {
   const ctx = termStationCanvas.getContext('2d');
   ctx.fillStyle = '#0d1117';
-  ctx.fillRect(0, 0, 1024, 512);
-
-  if (!termStationSessionId) {
-    ctx.fillStyle = '#00ff88';
-    ctx.font = 'bold 28px monospace';
-    ctx.textAlign = 'center';
-    ctx.fillText('MONKEY CODE TERMINAL', 512, 200);
-    ctx.font = '18px monospace';
-    ctx.fillText('Select a monkey to view its terminal', 512, 260);
-    termStationTexture.needsUpdate = true;
-    return;
-  }
-
-  const termContainer = parent.document.getElementById('term-' + termStationSessionId);
-  if (!termContainer) {
-    ctx.fillStyle = '#ff4444';
-    ctx.font = 'bold 24px monospace';
-    ctx.textAlign = 'center';
-    ctx.fillText('NO TERMINAL: ' + termStationSessionId, 512, 200);
-    termStationTexture.needsUpdate = true;
-    return;
-  }
-
-  // xterm.js 5.x DOM renderer: rows are in .xterm-rows, each row is a <div>
-  // with <span> children containing styled text
-  const rows = termContainer.querySelectorAll('.xterm-rows > div');
-  if (!rows || rows.length === 0) {
-    ctx.fillStyle = '#ffaa00';
-    ctx.font = '18px monospace';
-    ctx.textAlign = 'center';
-    ctx.fillText('Terminal loading...', 512, 200);
-    termStationTexture.needsUpdate = true;
-    return;
-  }
-
-  // Draw terminal text onto canvas
-  ctx.textAlign = 'left';
-  const fontSize = 11;
-  const lineHeight = fontSize + 3;
-  const maxRows = Math.floor(500 / lineHeight);
-  const startRow = Math.max(0, rows.length - maxRows);
-  const pad = 8;
-
-  for (let i = startRow; i < rows.length; i++) {
-    const row = rows[i];
-    const y = pad + (i - startRow) * lineHeight + fontSize;
-    let x = pad;
-
-    // Walk through spans to get colored text
-    const spans = row.querySelectorAll('span');
-    if (spans.length === 0) {
-      // Plain text row
-      ctx.fillStyle = '#c9d1d9';
-      ctx.font = fontSize + 'px monospace';
-      ctx.fillText(row.textContent || '', x, y);
-    } else {
-      for (const span of spans) {
-        const text = span.textContent || '';
-        if (!text) continue;
-        // Try to get the computed color
-        const style = parent.getComputedStyle(span);
-        ctx.fillStyle = style.color || '#c9d1d9';
-        const weight = style.fontWeight;
-        ctx.font = (weight === 'bold' || parseInt(weight) >= 700 ? 'bold ' : '') + fontSize + 'px monospace';
-        ctx.fillText(text, x, y);
-        x += ctx.measureText(text).width;
-      }
-    }
-  }
-
+  ctx.fillRect(0, 0, termStationCanvas.width, termStationCanvas.height);
+  ctx.fillStyle = color;
+  ctx.font = 'bold 24px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText(msg, termStationCanvas.width / 2, termStationCanvas.height / 2);
   termStationTexture.needsUpdate = true;
 }
 
-let _termStationTickCount = 0;
+async function updateTerminalStation(sessionId) {
+  // Detach previous CanvasAddon if switching sessions
+  if (termStationCanvasAddon) {
+    try { termStationCanvasAddon.dispose(); } catch (e) {}
+    termStationCanvasAddon = null;
+  }
+
+  termStationSessionId = sessionId;
+  if (!sessionId) {
+    showTermPlaceholder('MONKEY CODE TERMINAL');
+    // Reset texture source back to placeholder canvas
+    termStationTexture.image = termStationCanvas;
+    termStationTexture.needsUpdate = true;
+    return;
+  }
+
+  showTermPlaceholder('Loading terminal...');
+
+  try {
+    const Addon = await loadCanvasAddon();
+    const term = parent.window.__deepsteve.getTerminal(sessionId);
+    if (!term) {
+      showTermPlaceholder('NO TERMINAL: ' + sessionId, '#ff4444');
+      return;
+    }
+
+    termStationCanvasAddon = new Addon();
+    term.loadAddon(termStationCanvasAddon);
+
+    // CanvasAddon renders to a canvas inside the terminal container.
+    // Find it — it's the canvas element created by the addon.
+    const termContainer = parent.document.getElementById('term-' + sessionId);
+    const addonCanvas = termContainer?.querySelector('canvas');
+    if (addonCanvas) {
+      // Point the Three.js texture at the real xterm canvas
+      termStationTexture.image = addonCanvas;
+      termStationTexture.needsUpdate = true;
+    } else {
+      showTermPlaceholder('Canvas not found', '#ff4444');
+    }
+  } catch (e) {
+    showTermPlaceholder('Error: ' + e.message, '#ff4444');
+  }
+}
+
 function updateTerminalStation_tick() {
-  // Redraw terminal text ~5 times per second (every 12 frames at 60fps)
-  _termStationTickCount++;
-  if (_termStationTickCount % 12 === 0 && termStationSessionId) {
-    _renderTermStation();
+  // Just mark texture as needing update — the CanvasAddon renders to its canvas automatically
+  if (termStationSessionId && termStationCanvasAddon) {
+    termStationTexture.needsUpdate = true;
   }
   // Check proximity to terminal station for keyboard
   updateVRKeyboard();
