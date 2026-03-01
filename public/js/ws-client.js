@@ -14,7 +14,8 @@ export function createWebSocket(options = {}) {
   if (options.name) params.set('name', options.name);
   if (options.planMode) params.set('planMode', '1');
 
-  let url = 'ws://' + location.host + '?' + params;
+  const wsProto = location.protocol === 'https:' ? 'wss://' : 'ws://';
+  let url = wsProto + location.host + '?' + params;
   let ws = new WebSocket(url);
   let reconnectTimer = null;
   let isReconnecting = false;
@@ -47,7 +48,7 @@ export function createWebSocket(options = {}) {
       if (options.cwd) p.set('cwd', options.cwd);
       if (options.cols) p.set('cols', options.cols);
       if (options.rows) p.set('rows', options.rows);
-      url = 'ws://' + location.host + '?' + p;
+      url = wsProto + location.host + '?' + p;
     },
 
     // Event handlers - set by caller
