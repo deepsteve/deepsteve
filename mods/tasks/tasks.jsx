@@ -125,7 +125,7 @@ function renderDescription(description, onCheckToggle) {
   );
 }
 
-function TaskItem({ task, onToggle, onDelete, onDescriptionUpdate }) {
+function TaskItem({ task, compact, onToggle, onDelete, onDescriptionUpdate }) {
   const isDone = task.status === 'done';
 
   const handleCheckToggle = useCallback((lineIndex) => {
@@ -140,7 +140,7 @@ function TaskItem({ task, onToggle, onDelete, onDescriptionUpdate }) {
 
   return (
     <div style={{
-      padding: '10px 12px',
+      padding: compact ? '5px 12px' : '10px 12px',
       borderBottom: '1px solid rgba(255,255,255,0.06)',
       opacity: isDone ? 0.5 : 1,
       display: 'flex',
@@ -162,45 +162,47 @@ function TaskItem({ task, onToggle, onDelete, onDescriptionUpdate }) {
         }}>
           {task.title}
         </div>
-        {renderDescription(task.description, handleCheckToggle)}
-        <div style={{ display: 'flex', gap: 6, marginTop: 4, flexWrap: 'wrap' }}>
-          {task.priority && (
-            <span style={{
-              fontSize: 10,
-              padding: '1px 6px',
-              borderRadius: 8,
-              background: 'rgba(255,255,255,0.06)',
-              color: PRIORITY_COLORS[task.priority] || '#8b949e',
-              border: `1px solid ${PRIORITY_COLORS[task.priority] || '#30363d'}33`,
-            }}>
-              {task.priority}
-            </span>
-          )}
-          {task.session_tag && (
-            <span style={{
-              fontSize: 10,
-              padding: '1px 6px',
-              borderRadius: 8,
-              background: 'rgba(88,166,255,0.1)',
-              color: '#58a6ff',
-              border: '1px solid rgba(88,166,255,0.2)',
-            }}>
-              {task.session_tag}
-            </span>
-          )}
-          {task.status === 'in-progress' && (
-            <span style={{
-              fontSize: 10,
-              padding: '1px 6px',
-              borderRadius: 8,
-              background: 'rgba(240,136,62,0.1)',
-              color: '#f0883e',
-              border: '1px solid rgba(240,136,62,0.2)',
-            }}>
-              in progress
-            </span>
-          )}
-        </div>
+        {!compact && renderDescription(task.description, handleCheckToggle)}
+        {!compact && (
+          <div style={{ display: 'flex', gap: 6, marginTop: 4, flexWrap: 'wrap' }}>
+            {task.priority && (
+              <span style={{
+                fontSize: 10,
+                padding: '1px 6px',
+                borderRadius: 8,
+                background: 'rgba(255,255,255,0.06)',
+                color: PRIORITY_COLORS[task.priority] || '#8b949e',
+                border: `1px solid ${PRIORITY_COLORS[task.priority] || '#30363d'}33`,
+              }}>
+                {task.priority}
+              </span>
+            )}
+            {task.session_tag && (
+              <span style={{
+                fontSize: 10,
+                padding: '1px 6px',
+                borderRadius: 8,
+                background: 'rgba(88,166,255,0.1)',
+                color: '#58a6ff',
+                border: '1px solid rgba(88,166,255,0.2)',
+              }}>
+                {task.session_tag}
+              </span>
+            )}
+            {task.status === 'in-progress' && (
+              <span style={{
+                fontSize: 10,
+                padding: '1px 6px',
+                borderRadius: 8,
+                background: 'rgba(240,136,62,0.1)',
+                color: '#f0883e',
+                border: '1px solid rgba(240,136,62,0.2)',
+              }}>
+                in progress
+              </span>
+            )}
+          </div>
+        )}
       </div>
       <button
         onClick={() => onDelete(task.id)}
@@ -228,13 +230,28 @@ function TasksPanel() {
   const [tasks, setTasks] = useState([]);
   const [filter, setFilter] = useState('all');
   const [tagFilter, setTagFilter] = useState('all');
+  const [compactView, setCompactView] = useState(false);
 
   useEffect(() => {
-    let unsub = null;
+    let unsubTasks = null;
+    let unsubSettings = null;
 
     function setup() {
-      unsub = window.deepsteve.onTasksChanged((newTasks) => {
+      unsubTasks = window.deepsteve.onTasksChanged((newTasks) => {
         setTasks(newTasks || []);
+      });
+
+      // Restore persisted settings
+      const settings = window.deepsteve.getSettings();
+      if (settings.compactView != null) setCompactView(settings.compactView);
+      if (settings.statusFilter != null) setFilter(settings.statusFilter);
+      if (settings.tagFilter != null) setTagFilter(settings.tagFilter);
+
+      // React to settings changes (e.g. toggled from settings panel)
+      unsubSettings = window.deepsteve.onSettingsChanged((settings) => {
+        if (settings.compactView != null) setCompactView(settings.compactView);
+        if (settings.statusFilter != null) setFilter(settings.statusFilter);
+        if (settings.tagFilter != null) setTagFilter(settings.tagFilter);
       });
     }
 
@@ -254,7 +271,10 @@ function TasksPanel() {
       }, 100);
     }
 
-    return () => { if (unsub) unsub(); };
+    return () => {
+      if (unsubTasks) unsubTasks();
+      if (unsubSettings) unsubSettings();
+    };
   }, []);
 
   const toggleStatus = useCallback(async (id, newStatus) => {
@@ -289,6 +309,24 @@ function TasksPanel() {
     }
   }, []);
 
+  const handleFilterChange = useCallback((s) => {
+    setFilter(s);
+    if (window.deepsteve) window.deepsteve.updateSetting('statusFilter', s);
+  }, []);
+
+  const handleTagFilterChange = useCallback((t) => {
+    setTagFilter(t);
+    if (window.deepsteve) window.deepsteve.updateSetting('tagFilter', t);
+  }, []);
+
+  const toggleCompactView = useCallback(() => {
+    setCompactView(prev => {
+      const next = !prev;
+      if (window.deepsteve) window.deepsteve.updateSetting('compactView', next);
+      return next;
+    });
+  }, []);
+
   // Get unique session tags for filter dropdown
   const tags = [...new Set(tasks.map(t => t.session_tag).filter(Boolean))];
 
@@ -309,13 +347,31 @@ function TasksPanel() {
         borderBottom: '1px solid rgba(255,255,255,0.06)',
         flexShrink: 0,
       }}>
-        <div style={{ fontSize: 14, fontWeight: 600, color: '#f0f6fc', marginBottom: 8 }}>
-          Tasks
-          {tasks.length > 0 && (
-            <span style={{ fontSize: 12, color: '#8b949e', fontWeight: 400, marginLeft: 6 }}>
-              {tasks.filter(t => t.status !== 'done').length} pending
-            </span>
-          )}
+        <div style={{ fontSize: 14, fontWeight: 600, color: '#f0f6fc', marginBottom: 8, display: 'flex', alignItems: 'center' }}>
+          <span>
+            Tasks
+            {tasks.length > 0 && (
+              <span style={{ fontSize: 12, color: '#8b949e', fontWeight: 400, marginLeft: 6 }}>
+                {tasks.filter(t => t.status !== 'done').length} pending
+              </span>
+            )}
+          </span>
+          <button
+            onClick={toggleCompactView}
+            style={{
+              marginLeft: 'auto',
+              background: 'none',
+              border: 'none',
+              color: compactView ? '#58a6ff' : '#8b949e',
+              cursor: 'pointer',
+              fontSize: 14,
+              padding: '0 2px',
+              lineHeight: 1,
+            }}
+            title={compactView ? 'Expand view' : 'Compact view'}
+          >
+            &#9776;
+          </button>
         </div>
 
         {/* Status filter */}
@@ -323,7 +379,7 @@ function TasksPanel() {
           {STATUS_OPTIONS.map(s => (
             <button
               key={s}
-              onClick={() => setFilter(s)}
+              onClick={() => handleFilterChange(s)}
               style={{
                 padding: '3px 8px',
                 fontSize: 11,
@@ -343,7 +399,7 @@ function TasksPanel() {
         {tags.length > 0 && (
           <select
             value={tagFilter}
-            onChange={e => setTagFilter(e.target.value)}
+            onChange={e => handleTagFilterChange(e.target.value)}
             style={{
               width: '100%',
               padding: '4px 8px',
@@ -379,6 +435,7 @@ function TasksPanel() {
             <TaskItem
               key={task.id}
               task={task}
+              compact={compactView}
               onToggle={toggleStatus}
               onDelete={deleteTask}
               onDescriptionUpdate={updateDescription}
