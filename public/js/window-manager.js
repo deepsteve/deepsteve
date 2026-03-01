@@ -9,13 +9,31 @@ const WINDOW_ID_KEY = 'deepsteve-window-id';
 const CHANNEL_NAME = 'deepsteve-windows';
 const HEARTBEAT_INTERVAL = 5000;
 const ORPHAN_DETECTION_TIMEOUT = 1500;
+const LIVE_WINDOW_STALE_MS = 15000;
 
 let channel = null;
 let heartbeatTimer = null;
 let currentWindowId = null;
 
+// Live window tracking — continuously updated from BroadcastChannel messages
+// Key: windowId, Value: { windowId, sessions: [{id, name}], lastSeen }
+const liveWindows = new Map();
+
+// Callbacks set by app.js
+let sessionsProvider = null;
+let receiveSessionCallback = null;
+
 function generateWindowId() {
   return 'win-' + Math.random().toString(36).substring(2, 10);
+}
+
+function pruneStaleWindows() {
+  const now = Date.now();
+  for (const [id, entry] of liveWindows) {
+    if (now - entry.lastSeen > LIVE_WINDOW_STALE_MS) {
+      liveWindows.delete(id);
+    }
+  }
 }
 
 export const WindowManager = {
@@ -117,15 +135,41 @@ export const WindowManager = {
       channel = new BroadcastChannel(CHANNEL_NAME);
 
       channel.onmessage = (event) => {
-        if (event.data.type === 'roll-call') {
-          // Respond to roll call
-          channel.postMessage({ type: 'present', windowId: this.getWindowId() });
+        const { data } = event;
+        const myId = this.getWindowId();
+
+        if (data.type === 'roll-call') {
+          // Respond to roll call with session metadata
+          channel.postMessage({
+            type: 'present',
+            windowId: myId,
+            sessions: sessionsProvider ? sessionsProvider() : []
+          });
+        } else if ((data.type === 'present' || data.type === 'heartbeat') && data.windowId !== myId) {
+          // Track other live windows
+          liveWindows.set(data.windowId, {
+            windowId: data.windowId,
+            sessions: data.sessions || [],
+            lastSeen: Date.now()
+          });
+        } else if (data.type === 'closing' && data.windowId !== myId) {
+          liveWindows.delete(data.windowId);
+        } else if (data.type === 'send-session' && data.targetWindowId === myId) {
+          // Another window is sending us a session
+          if (receiveSessionCallback) {
+            receiveSessionCallback(data.session);
+          }
         }
       };
     }
 
     const sendHeartbeat = () => {
-      channel.postMessage({ type: 'heartbeat', windowId: this.getWindowId() });
+      channel.postMessage({
+        type: 'heartbeat',
+        windowId: this.getWindowId(),
+        sessions: sessionsProvider ? sessionsProvider() : []
+      });
+      pruneStaleWindows();
     };
 
     // Send initial heartbeat
@@ -139,6 +183,9 @@ export const WindowManager = {
     window.addEventListener('beforeunload', () => {
       channel.postMessage({ type: 'closing', windowId: this.getWindowId() });
     });
+
+    // Send a roll-call to populate liveWindows immediately
+    channel.postMessage({ type: 'roll-call' });
   },
 
   /**
@@ -165,5 +212,42 @@ export const WindowManager = {
     this.stopHeartbeat();
     currentWindowId = null;
     sessionStorage.removeItem(WINDOW_ID_KEY);
+  },
+
+  /**
+   * Register a callback that returns current sessions as [{id, name}]
+   */
+  setSessionsProvider(fn) {
+    sessionsProvider = fn;
+  },
+
+  /**
+   * Get list of other live windows (excludes self, excludes stale).
+   * Returns synchronously from cache.
+   */
+  getLiveWindows() {
+    pruneStaleWindows();
+    return [...liveWindows.values()];
+  },
+
+  /**
+   * Send a session to another window via BroadcastChannel
+   */
+  sendSessionToWindow(targetWindowId, session) {
+    if (channel) {
+      channel.postMessage({
+        type: 'send-session',
+        targetWindowId,
+        session,
+        fromWindowId: this.getWindowId()
+      });
+    }
+  },
+
+  /**
+   * Register handler for incoming sessions from other windows
+   */
+  onSessionReceived(callback) {
+    receiveSessionCallback = callback;
   }
 };

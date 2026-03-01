@@ -639,7 +639,9 @@ function initTerminal(id, ws, cwd, initialName, { hasScrollback = false, pending
       TabSessions.save(reordered);
       SessionStore.reorderSessions(getWindowId(), orderedIds);
       ModManager.notifySessionsChanged(getSessionList());
-    }
+    },
+    getLiveWindows: () => WindowManager.getLiveWindows(),
+    onSendToWindow: (sessionId, targetWindowId) => sendToWindow(sessionId, targetWindowId)
   };
 
   TabManager.addTab(id, name, tabCallbacks);
@@ -826,6 +828,50 @@ function killSession(id) {
   updateEmptyState();
 
   // Notify mods of session list change
+  ModManager.notifySessionsChanged(getSessionList());
+}
+
+/**
+ * Send a session to another browser window.
+ * Like killSession() but does NOT send DELETE to server — the shell stays alive
+ * and the target window adopts it via createSession().
+ */
+function sendToWindow(id, targetWindowId) {
+  const session = sessions.get(id);
+  if (!session) return;
+
+  // Send session data to target window via BroadcastChannel
+  WindowManager.sendSessionToWindow(targetWindowId, {
+    id,
+    cwd: session.cwd,
+    name: session.name
+  });
+
+  // Clean up locally (no server DELETE — shell stays alive for 30s grace period)
+  if (session.resizeObserver) session.resizeObserver.disconnect();
+  session.ws.close();
+  session.term.dispose();
+  session.container.remove();
+
+  TabManager.removeTab(id);
+  sessions.delete(id);
+
+  SessionStore.removeSession(getWindowId(), id);
+  TabSessions.remove(id);
+
+  // Switch to next available session
+  if (activeId === id) {
+    const next = sessions.keys().next().value;
+    if (next) {
+      switchTo(next);
+    } else {
+      activeId = null;
+      ActiveTab.clear();
+      ModManager.notifyActiveSessionChanged(null);
+    }
+  }
+
+  updateEmptyState();
   ModManager.notifySessionsChanged(getSessionList());
 }
 
@@ -1223,6 +1269,17 @@ async function init() {
 
   // Now get/create window ID and start heartbeat
   const windowId = WindowManager.getWindowId();
+
+  // Register sessions provider so heartbeats include session metadata
+  WindowManager.setSessionsProvider(() =>
+    [...sessions.entries()].map(([id, s]) => ({ id, name: s.name || getDefaultTabName(s.cwd) }))
+  );
+
+  // Handle sessions sent from other windows
+  WindowManager.onSessionReceived((session) => {
+    createSession(session.cwd, session.id, false, { name: session.name });
+  });
+
   WindowManager.startHeartbeat();
 
   // TabSessions (sessionStorage) is the authoritative per-tab source.

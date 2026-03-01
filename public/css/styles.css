@@ -212,6 +212,12 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
 .context-menu { position: fixed; background: var(--ds-bg-secondary); border: 1px solid var(--ds-border); border-radius: 6px; padding: 4px 0; min-width: 140px; z-index: 200; box-shadow: 0 8px 24px var(--ds-shadow); }
 .context-menu-item { padding: 8px 12px; cursor: pointer; font-size: 13px; color: var(--ds-text-primary); }
 .context-menu-item:hover { background: var(--ds-bg-tertiary); }
+.context-menu-item.disabled { color: var(--ds-text-secondary); opacity: 0.5; cursor: default; }
+.context-menu-item.disabled:hover { background: transparent; }
+.context-menu-has-submenu { position: relative; }
+.context-menu-arrow { float: right; margin-left: 12px; font-size: 10px; }
+.context-menu-arrow::after { content: '\25B6'; }
+.context-submenu { position: absolute; left: 100%; top: -4px; margin-left: 2px; }
 
 /* Buttons */
 #new-btn { padding: 4px 10px; background: var(--ds-accent-green); border: none; color: white; border-radius: 4px; cursor: pointer; font-size: 13px; margin-left: 4px; user-select: none; flex-shrink: 0; }

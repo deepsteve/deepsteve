@@ -2,21 +2,20 @@
  * Tab UI management for terminal tabs
  */
 
-import { SessionStore } from './session-store.js';
-import { WindowManager } from './window-manager.js';
-
 // Long-press drag reorder state
 const LONG_PRESS_MS = 400;
 const MOVE_THRESHOLD = 5;
 let dragState = null;
 let suppressNextClick = false;
 
-// Tab context menu configuration
-const contextMenuItems = [
-  { label: 'Rename', action: (id, callbacks) => callbacks.onRename?.(id) }
-];
-
 let contextMenu = null;
+
+function buildWindowLabel(win) {
+  const names = win.sessions.map(s => s.name).filter(Boolean);
+  if (names.length === 0) return win.windowId;
+  if (names.length <= 3) return names.join(', ');
+  return names.slice(0, 3).join(', ') + ` +${names.length - 3}`;
+}
 
 function showContextMenu(x, y, sessionId, callbacks) {
   hideContextMenu();
@@ -25,16 +24,66 @@ function showContextMenu(x, y, sessionId, callbacks) {
   menu.className = 'context-menu';
   menu.id = 'tab-context-menu';
 
-  contextMenuItems.forEach(item => {
-    const el = document.createElement('div');
-    el.className = 'context-menu-item';
-    el.textContent = item.label;
-    el.onclick = () => {
-      hideContextMenu();
-      item.action(sessionId, callbacks);
-    };
-    menu.appendChild(el);
-  });
+  // Rename item
+  const renameEl = document.createElement('div');
+  renameEl.className = 'context-menu-item';
+  renameEl.textContent = 'Rename';
+  renameEl.onclick = () => {
+    hideContextMenu();
+    callbacks.onRename?.(sessionId);
+  };
+  menu.appendChild(renameEl);
+
+  // Send to Window item with submenu
+  const liveWindows = callbacks.getLiveWindows ? callbacks.getLiveWindows() : [];
+  const sendEl = document.createElement('div');
+  sendEl.className = 'context-menu-item';
+
+  if (liveWindows.length === 0) {
+    sendEl.classList.add('disabled');
+    sendEl.textContent = 'Send to Window';
+  } else {
+    sendEl.classList.add('context-menu-has-submenu');
+    sendEl.innerHTML = 'Send to Window <span class="context-menu-arrow"></span>';
+
+    // Build submenu on mouseenter
+    let submenu = null;
+    sendEl.addEventListener('mouseenter', () => {
+      if (submenu) return;
+      submenu = document.createElement('div');
+      submenu.className = 'context-menu context-submenu';
+
+      for (const win of liveWindows) {
+        const winEl = document.createElement('div');
+        winEl.className = 'context-menu-item';
+        winEl.textContent = buildWindowLabel(win);
+        winEl.onclick = () => {
+          hideContextMenu();
+          callbacks.onSendToWindow?.(sessionId, win.windowId);
+        };
+        submenu.appendChild(winEl);
+      }
+
+      sendEl.appendChild(submenu);
+
+      // Flip left if off-screen right
+      const subRect = submenu.getBoundingClientRect();
+      if (subRect.right > window.innerWidth) {
+        submenu.style.left = 'auto';
+        submenu.style.right = '100%';
+        submenu.style.marginLeft = '0';
+        submenu.style.marginRight = '2px';
+      }
+    });
+
+    sendEl.addEventListener('mouseleave', () => {
+      if (submenu) {
+        submenu.remove();
+        submenu = null;
+      }
+    });
+  }
+  menu.appendChild(sendEl);
 
   menu.style.left = x + 'px';
   menu.style.top = y + 'px';
