@@ -12,18 +12,6 @@ for arg in "$@"; do
     esac
 done
 
-# Confirm --refresh with 3-second countdown (only in foreground)
-if [[ "$REFRESH" = 1 && "$1" != "--bg" ]]; then
-    printf '\n⚠️  Refresh DeepSteve (current running agents will get killed, some work may be lost)\n\n'
-    for i in 3 2 1; do
-        printf '\rPress Enter to confirm (available in %ds)... ' "$i"
-        sleep 1
-    done
-    printf '\rPress Enter to confirm...                        '
-    read -r
-    printf '\n'
-fi
-
 # Re-exec in background if not already
 if [[ "$1" != "--bg" ]]; then
     nohup "$0" --bg "$SCRIPT_DIR" $([ "$REFRESH" = 1 ] && echo --refresh) >/dev/null 2>&1 &
