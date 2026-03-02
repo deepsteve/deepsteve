@@ -516,7 +516,7 @@ function createMonkeyMesh(colorIdx) {
   const rightPupil = new THREE.Mesh(pupilGeo, pupilMat);
   rightPupil.position.set(0.15, 1.65, 0.29); group.add(rightPupil);
 
-  // Upper arms (long, monkey-style)
+  // Upper arms (gorilla-long)
   const armGeo = new THREE.BoxGeometry(0.18, 0.55, 0.18);
   const leftUpperArm = new THREE.Mesh(armGeo, bodyMat);
   leftUpperArm.position.set(-0.5, 0.95, 0); leftUpperArm.castShadow = true; group.add(leftUpperArm);
@@ -1041,7 +1041,7 @@ function updateDesktopMovement(m, dt) {
   }
 }
 
-// ── VR arm-swing locomotion + snap turn ──────────────────────────────────────
+// ── VR Gorilla Tag locomotion + snap turn ───────────────────────────────────
 
 let vrSnapTurnCooldown = false;
 let vrJumpedThisPush = [false, false]; // per-hand jump flag to prevent multi-frame jumps
@@ -1107,7 +1107,7 @@ function updateVRLocomotion(m, dt) {
     vrThumbstickJumpReady = true;
   }
 
-  // ── 3. Smooth arm-swing locomotion ──
+  // ── 3. Smooth Gorilla Tag arm-swing locomotion ──
   // Both hands accumulate acceleration; applied once per frame for smooth movement.
   // Uses acceleration (+=) not assignment (=) so alternating arms blend smoothly.
   const accelRate = 14;
@@ -1141,7 +1141,7 @@ function updateVRLocomotion(m, dt) {
 
     const speed = hand.vel.length();
 
-    // Only apply force when hand is touching/near a surface
+    // Only apply force when hand is touching/near a surface (Gorilla Tag style)
     const touching = isTouchingSurface(_v1);
 
     if (touching && speed > 0.8) {
@@ -1424,8 +1424,7 @@ function _drawTermLog() {
 
 function showTermPlaceholder(msg, color = '#00ff88') {
   termLog.length = 0;
-  if (!termStationCanvas || !termStationTexture) return;
-  termStationTexture.image = termStationCanvas;
+  if (!termStationCanvas || !termStationMesh) return;
   const ctx = termStationCanvas.getContext('2d');
   ctx.fillStyle = '#0d1117';
   ctx.fillRect(0, 0, termStationCanvas.width, termStationCanvas.height);
@@ -1433,7 +1432,10 @@ function showTermPlaceholder(msg, color = '#00ff88') {
   ctx.font = 'bold 24px monospace';
   ctx.textAlign = 'center';
   ctx.fillText(msg, termStationCanvas.width / 2, termStationCanvas.height / 2);
+  // Swap back to placeholder texture (no dispose — safe during XR frames)
+  termStationMesh.material.map = termStationTexture;
   termStationTexture.needsUpdate = true;
+  termStationMesh.material.needsUpdate = true;
 }
 
 // Mirror terminal: one reusable offscreen xterm + CanvasAddon.
@@ -1446,21 +1448,32 @@ function ensureMirrorTerminal() {
   const Terminal = parent.window.Terminal;
   const CanvasAddon = parent.window.CanvasAddon?.CanvasAddon;
   if (!Terminal || !CanvasAddon) {
-    termLogMsg('ERROR: Terminal or CanvasAddon not loaded', '#ff4444');
+    console.warn('[MonkeyCode] Terminal or CanvasAddon not loaded yet');
     return;
   }
   let container = parentDoc.getElementById('monkey-term-mirror');
   if (!container) {
     container = parentDoc.createElement('div');
     container.id = 'monkey-term-mirror';
-    // Off-screen but visible (has layout) so CanvasAddon renders
-    container.style.cssText = 'position:fixed; left:-9999px; top:0; width:800px; height:400px; overflow:hidden;';
+    // On-screen (so IntersectionObserver considers it visible and CanvasAddon renders)
+    // but behind everything and non-interactive
+    container.style.cssText = 'position:fixed; left:0; top:0; width:800px; height:400px; overflow:hidden; z-index:-1; pointer-events:none; opacity:0.01;';
     parentDoc.body.appendChild(container);
   }
   termMirrorTerm = new Terminal({ fontSize: 14, cols: 80, rows: 24 });
   termMirrorTerm.open(container);
   termMirrorTerm.loadAddon(new CanvasAddon());
   termMirrorCanvas = container.querySelector('canvas');
+}
+
+// Pre-create mirror terminal at startup so it's ready before VR starts
+ensureMirrorTerminal();
+
+// Pre-create texture for the mirror canvas (avoids dispose/recreate during XR)
+let termMirrorTexture = null;
+if (termMirrorCanvas) {
+  termMirrorTexture = new THREE.CanvasTexture(termMirrorCanvas);
+  termMirrorTexture.minFilter = THREE.LinearFilter;
 }
 
 function updateTerminalStation(sessionId) {
@@ -1508,9 +1521,11 @@ function updateTerminalStation(sessionId) {
       termMirrorTerm.write(data);
     });
 
-    termStationTexture.image = termMirrorCanvas;
-    termStationTexture.needsUpdate = true;
-    // Don't call termLogMsg here — it would repoint texture back at debug canvas
+    // Swap to pre-created mirror texture (no dispose — safe during XR frames)
+    if (termMirrorTexture) {
+      termStationMesh.material.map = termMirrorTexture;
+      termStationMesh.material.needsUpdate = true;
+    }
   } catch (e) {
     termLogMsg('EXCEPTION: ' + e.message, '#ff4444');
     termLogMsg('  ' + (e.stack || '').split('\n')[1]?.trim(), '#ff8800');
@@ -1518,8 +1533,8 @@ function updateTerminalStation(sessionId) {
 }
 
 function updateTerminalStation_tick() {
-  if (termMirrorCanvas && termStationSessionId) {
-    termStationTexture.needsUpdate = true;
+  if (termMirrorTexture && termStationSessionId) {
+    termMirrorTexture.needsUpdate = true;
   }
   updateVRKeyboard();
 }

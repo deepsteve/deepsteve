@@ -2,8 +2,7 @@
  * Tab UI management for terminal tabs
  */
 
-// Long-press drag reorder state
-const LONG_PRESS_MS = 400;
+// Drag reorder state
 const MOVE_THRESHOLD = 5;
 let dragState = null;
 let suppressNextClick = false;
@@ -126,9 +125,29 @@ function isVertical() {
 }
 
 function startDrag(tabEl, sessionId, callbacks) {
-  dragState = { tabEl, sessionId, callbacks };
-  tabEl.classList.add('dragging');
   const list = document.getElementById('tabs-list');
+  const rect = tabEl.getBoundingClientRect();
+
+  // Create floating clone that follows the cursor
+  const ghost = tabEl.cloneNode(true);
+  ghost.className = 'tab tab-drag-ghost';
+  ghost.style.position = 'fixed';
+  ghost.style.left = rect.left + 'px';
+  ghost.style.top = rect.top + 'px';
+  ghost.style.width = rect.width + 'px';
+  ghost.style.zIndex = '9999';
+  ghost.style.pointerEvents = 'none';
+  ghost.style.transition = 'none';
+  document.body.appendChild(ghost);
+
+  // Offset from cursor to tab origin
+  dragState = {
+    tabEl, sessionId, callbacks, ghost,
+    offsetX: rect.left,
+    offsetY: rect.top,
+  };
+
+  tabEl.classList.add('dragging');
   list.classList.add('tab-drag-active');
   document.body.style.cursor = 'grabbing';
   document.body.style.userSelect = 'none';
@@ -145,13 +164,18 @@ function onDragMove(e) {
   e.preventDefault();
   const clientX = e.touches ? e.touches[0].clientX : e.clientX;
   const clientY = e.touches ? e.touches[0].clientY : e.clientY;
-  handleDragMove(clientX, clientY);
-}
 
-function handleDragMove(clientX, clientY) {
-  if (!dragState) return;
-  const list = document.getElementById('tabs-list');
+  // Move ghost to follow cursor
+  const { ghost } = dragState;
   const vertical = isVertical();
+  if (vertical) {
+    ghost.style.top = (clientY - ghost.offsetHeight / 2) + 'px';
+  } else {
+    ghost.style.left = (clientX - ghost.offsetWidth / 2) + 'px';
+  }
+
+  // Reorder real tabs based on cursor position
+  const list = document.getElementById('tabs-list');
   const tabs = [...list.children];
 
   for (const tab of tabs) {
@@ -171,8 +195,9 @@ function handleDragMove(clientX, clientY) {
 
 function endDrag() {
   if (!dragState) return;
-  const { tabEl, callbacks } = dragState;
+  const { tabEl, callbacks, ghost } = dragState;
 
+  ghost.remove();
   tabEl.classList.remove('dragging');
   const list = document.getElementById('tabs-list');
   list.classList.remove('tab-drag-active');
@@ -256,10 +281,7 @@ export const TabManager = {
       <span class="close">&#10005;</span>
     `;
 
-    tab.querySelector('.tab-label').addEventListener('click', () => {
-      if (suppressNextClick) return;
-      callbacks.onSwitch?.(sessionId);
-    });
+    // Click-to-switch is handled by onPointerDown below (click if no drag)
 
     tab.querySelector('.close').addEventListener('click', (e) => {
       e.stopPropagation();
@@ -271,7 +293,7 @@ export const TabManager = {
       showContextMenu(e.clientX, e.clientY, sessionId, callbacks);
     });
 
-    // Long-press to drag reorder
+    // Drag to reorder — starts on move past threshold, click if no drag
     const onPointerDown = (e) => {
       // Ignore close button, right-click
       if (e.target.closest('.close')) return;
@@ -279,38 +301,39 @@ export const TabManager = {
 
       const startX = e.touches ? e.touches[0].clientX : e.clientX;
       const startY = e.touches ? e.touches[0].clientY : e.clientY;
-      let moved = false;
+      let dragging = false;
 
       const onMove = (me) => {
         const cx = me.touches ? me.touches[0].clientX : me.clientX;
         const cy = me.touches ? me.touches[0].clientY : me.clientY;
-        if (Math.abs(cx - startX) > MOVE_THRESHOLD || Math.abs(cy - startY) > MOVE_THRESHOLD) {
-          moved = true;
-          cancel();
+        if (!dragging) {
+          if (Math.abs(cx - startX) > MOVE_THRESHOLD || Math.abs(cy - startY) > MOVE_THRESHOLD) {
+            dragging = true;
+            startDrag(tab, sessionId, callbacks);
+          }
         }
+        // Once dragging, onDragMove handles the rest via its own listener
       };
 
-      const timer = setTimeout(() => {
+      const onUp = () => {
         cleanup();
-        startDrag(tab, sessionId, callbacks);
-      }, LONG_PRESS_MS);
-
-      const cancel = () => {
-        clearTimeout(timer);
-        cleanup();
+        if (!dragging) {
+          // No drag happened — treat as click to switch
+          callbacks.onSwitch?.(sessionId);
+        }
       };
 
       const cleanup = () => {
         document.removeEventListener('mousemove', onMove);
         document.removeEventListener('touchmove', onMove);
-        document.removeEventListener('mouseup', cancel);
-        document.removeEventListener('touchend', cancel);
+        document.removeEventListener('mouseup', onUp);
+        document.removeEventListener('touchend', onUp);
       };
 
       document.addEventListener('mousemove', onMove);
       document.addEventListener('touchmove', onMove, { passive: true });
-      document.addEventListener('mouseup', cancel);
-      document.addEventListener('touchend', cancel);
+      document.addEventListener('mouseup', onUp);
+      document.addEventListener('touchend', onUp);
     };
 
     tab.addEventListener('mousedown', onPointerDown);
