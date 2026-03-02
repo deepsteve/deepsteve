@@ -90,11 +90,14 @@ window.addEventListener('mouseup', () => { input.click = false; });
 // Mouse look (pointer lock)
 let mouseYaw = 0, mousePitch = 0;
 const canvas = document.getElementById('scene');
+canvas.tabIndex = -1; // Make focusable so iframe receives keyboard events
+canvas.style.outline = 'none'; // No focus ring
 
 canvas.addEventListener('click', () => {
   if (viewMode === MODE_FIRST && !document.pointerLockElement) {
     canvas.requestPointerLock();
   }
+  canvas.focus();
 });
 
 document.addEventListener('pointerlockchange', () => {
@@ -1555,9 +1558,19 @@ function updateTerminalStation(sessionId) {
   }
 }
 
+let _lastMirrorRefresh = 0;
+
 function updateTerminalStation_tick() {
   if (termMirrorTexture && termStationSessionId) {
     termMirrorTexture.needsUpdate = true;
+  }
+  // Throttled refresh to force CanvasAddon to render new data to canvas (~4/sec)
+  if (termMirrorTerm && termStationSessionId) {
+    const now = performance.now();
+    if (now - _lastMirrorRefresh > 250) {
+      _lastMirrorRefresh = now;
+      termMirrorTerm.refresh(0, termMirrorTerm.rows - 1);
+    }
   }
   updateVRKeyboard();
 }
@@ -1720,6 +1733,7 @@ function enterFirstPerson(sessionId) {
 
     if (!renderer.xr.isPresenting) {
       showTerminal(sessionId);
+      canvas.focus(); // Ensure iframe receives keyboard events for WASD
       onResize();
     }
     updateHUD();
