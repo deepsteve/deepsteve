@@ -121,7 +121,7 @@ Please read the issue carefully, understand the codebase context, and implement 
 };
 
 // Load settings
-let settings = { shellProfile: '~/.zshrc', maxIssueTitleLength: 25, ...SETTINGS_DEFAULTS };
+let settings = { shellProfile: '~/.zshrc', maxIssueTitleLength: 25, cmdTabSwitch: false, ...SETTINGS_DEFAULTS };
 try {
   if (fs.existsSync(SETTINGS_FILE)) {
     settings = { ...settings, ...JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8')) };
@@ -726,6 +726,10 @@ app.post('/api/settings', (req, res) => {
   if (req.body.wandPromptTemplate !== undefined) {
     settings.wandPromptTemplate = String(req.body.wandPromptTemplate);
     log(`Settings updated: wandPromptTemplate (${settings.wandPromptTemplate.length} chars)`);
+  }
+  if (req.body.cmdTabSwitch !== undefined) {
+    settings.cmdTabSwitch = !!req.body.cmdTabSwitch;
+    log(`Settings updated: cmdTabSwitch=${settings.cmdTabSwitch}`);
   }
   saveSettings();
   res.json(settings);
