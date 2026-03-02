@@ -662,6 +662,9 @@ function initTerminal(id, ws, cwd, initialName, { hasScrollback = false, pending
   // Flush any buffered data that arrived before the terminal was created
   for (const data of pendingData) {
     term.write(data);
+    // Also notify data listeners (e.g. VR mirror terminal)
+    const listeners = window.__deepsteve._dataListeners?.get(id);
+    if (listeners) for (const cb of listeners) try { cb(data); } catch {}
   }
   pendingData.length = 0;
 
