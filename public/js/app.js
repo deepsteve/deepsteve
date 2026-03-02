@@ -1318,7 +1318,7 @@ async function init() {
     if (!holdMenuOpen) clearTimeout(holdTimer);
   });
 
-  document.getElementById('empty-state')?.addEventListener('click', () => quickNewSession());
+  document.getElementById('empty-state-btn')?.addEventListener('click', () => quickNewSession());
 
   // Wire up issue button
   const issueBtn = document.getElementById('issue-btn');
