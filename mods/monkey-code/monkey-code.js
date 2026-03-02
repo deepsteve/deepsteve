@@ -1457,7 +1457,7 @@ function ensureMirrorTerminal() {
     container.id = 'monkey-term-mirror';
     // On-screen (so IntersectionObserver considers it visible and CanvasAddon renders)
     // but behind everything and non-interactive
-    container.style.cssText = 'position:fixed; left:0; top:0; width:800px; height:400px; overflow:hidden; z-index:-1; pointer-events:none; opacity:0.01;';
+    container.style.cssText = 'position:fixed; left:0; top:0; width:1600px; height:800px; overflow:hidden; z-index:-1; pointer-events:none; opacity:0.01;';
     parentDoc.body.appendChild(container);
   }
   termMirrorTerm = new Terminal({ fontSize: 14, cols: 80, rows: 24 });
@@ -1506,6 +1506,18 @@ function updateTerminalStation(sessionId) {
       return;
     }
 
+    // Match mirror terminal dimensions to source terminal
+    if (termMirrorTerm.cols !== srcTerm.cols || termMirrorTerm.rows !== srcTerm.rows) {
+      termMirrorTerm.resize(srcTerm.cols, srcTerm.rows);
+      // Update canvas reference after resize (CanvasAddon may recreate it)
+      const newCanvas = termMirrorTerm.element?.closest('#monkey-term-mirror')?.querySelector('canvas');
+      if (newCanvas && newCanvas !== termMirrorCanvas) {
+        termMirrorCanvas = newCanvas;
+        termMirrorTexture = new THREE.CanvasTexture(termMirrorCanvas);
+        termMirrorTexture.minFilter = THREE.LinearFilter;
+      }
+    }
+
     // Seed mirror with current buffer content
     termMirrorTerm.reset();
     const buf = srcTerm.buffer.active;
@@ -1515,6 +1527,11 @@ function updateTerminalStation(sessionId) {
       if (line) lines.push(line.translateToString(true));
     }
     if (lines.length) termMirrorTerm.write(lines.join('\r\n'));
+
+    // Force CanvasAddon to render after IntersectionObserver has fired
+    setTimeout(() => {
+      if (termMirrorTerm) termMirrorTerm.refresh(0, termMirrorTerm.rows - 1);
+    }, 150);
 
     // Subscribe to raw output data — piped from parent's WS handler
     _mirrorUnsub = bridge.onSessionData(sessionId, (data) => {
@@ -1588,9 +1605,17 @@ let vrKeyboardPrevValue = ''; // track previous value to diff (Quest overwrites 
     // Find what changed — Quest may overwrite, so check if it's a simple append
     if (current.startsWith(vrKeyboardPrevValue)) {
       // Normal append — send the new characters
-      const newChars = current.slice(vrKeyboardPrevValue.length);
+      let newChars = current.slice(vrKeyboardPrevValue.length);
       if (newChars) {
+        // Translate newlines to carriage returns (Enter in textarea adds \n, PTY expects \r)
+        newChars = newChars.replace(/\n/g, '\r');
         try { parent.window.__deepsteve.writeSession(termStationSessionId, newChars); } catch (e) {}
+        // Strip newlines from textarea so they don't accumulate
+        if (current.includes('\n')) {
+          vrKeyboardEl.value = current.replace(/\n/g, '');
+          vrKeyboardPrevValue = vrKeyboardEl.value;
+          return;
+        }
       }
     } else if (current.length < vrKeyboardPrevValue.length) {
       // Deletion — send backspace for each deleted character
@@ -1605,10 +1630,12 @@ let vrKeyboardPrevValue = ''; // track previous value to diff (Quest overwrites 
         try { parent.window.__deepsteve.writeSession(termStationSessionId, '\x7f'); } catch (e) {}
       }
       if (current) {
-        try { parent.window.__deepsteve.writeSession(termStationSessionId, current); } catch (e) {}
+        try { parent.window.__deepsteve.writeSession(termStationSessionId, current.replace(/\n/g, '\r')); } catch (e) {}
       }
     }
-    vrKeyboardPrevValue = current;
+    // Strip newlines from tracked value so they don't accumulate
+    vrKeyboardEl.value = current.replace(/\n/g, '');
+    vrKeyboardPrevValue = vrKeyboardEl.value;
   });
 
   // Handle Enter and Backspace via keydown (may not fire on Quest, but works on desktop)
