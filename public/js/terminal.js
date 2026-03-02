@@ -87,6 +87,12 @@ export function setupTerminalIO(term, ws, { onUserInput, container } = {}) {
   // rAF from overwriting userScrolledUp after scrollToBottom() cleared it.
   let scrollGen = 0;
 
+  // Fallback: detect when user is stuck scrolling down during active output.
+  // If the gap to bottom doesn't decrease across consecutive down-scroll rAFs,
+  // the bottom is receding faster than the user can scroll — force-snap.
+  let stuckDownCount = 0;
+  let prevDownGap = Infinity;
+
   // Floating scroll-to-bottom button
   const scrollBtn = document.createElement('button');
   scrollBtn.className = 'scroll-to-bottom';
@@ -97,6 +103,8 @@ export function setupTerminalIO(term, ws, { onUserInput, container } = {}) {
   function scrollToBottom() {
     suppressAutoScroll = false;
     userScrolledUp = false;
+    stuckDownCount = 0;
+    prevDownGap = Infinity;
     scrollGen++;
     term.scrollToBottom();
     term.refresh(0, term.rows - 1);
@@ -118,6 +126,7 @@ export function setupTerminalIO(term, ws, { onUserInput, container } = {}) {
   // A small tolerance (half a row height, ~10px) handles sub-pixel rounding
   // and the race where new output arrives between the wheel event and rAF.
   const BOTTOM_TOLERANCE = 10;
+  const STUCK_DOWN_THRESHOLD = 3;
 
   term.element.addEventListener('wheel', (e) => {
     const gen = scrollGen;
@@ -125,25 +134,41 @@ export function setupTerminalIO(term, ws, { onUserInput, container } = {}) {
     requestAnimationFrame(() => {
       if (suppressAutoScroll) return;
       if (gen !== scrollGen) return; // programmatic scroll happened since — ignore
-      if (scrollingDown && viewport) {
-        // User is scrolling toward the bottom — check DOM viewport position
-        const gap = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight;
-        if (gap <= BOTTOM_TOLERANCE) {
-          userScrolledUp = false;
-          scrollBtn.classList.remove('visible');
-          return;
-        }
-      }
+
       if (!scrollingDown) {
-        // Scrolling up — always mark as scrolled up (unless already at top
-        // with no scrollback, in which case there's nothing to scroll)
+        stuckDownCount = 0;
+        prevDownGap = Infinity;
         if (viewport && viewport.scrollTop > 0) {
           userScrolledUp = true;
           scrollBtn.classList.add('visible');
         }
         return;
       }
-      // Scrolling down but not yet at bottom — keep current state
+
+      // Scrolling down
+      if (!viewport) return;
+      const gap = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight;
+      if (gap <= BOTTOM_TOLERANCE) {
+        userScrolledUp = false;
+        stuckDownCount = 0;
+        prevDownGap = Infinity;
+        scrollBtn.classList.remove('visible');
+        return;
+      }
+
+      // Not at bottom — check if stuck (gap not closing across consecutive down-scrolls)
+      if (gap >= prevDownGap) {
+        stuckDownCount++;
+        if (stuckDownCount >= STUCK_DOWN_THRESHOLD) {
+          stuckDownCount = 0;
+          prevDownGap = Infinity;
+          scrollToBottom();
+          return;
+        }
+      } else {
+        stuckDownCount = 0;
+      }
+      prevDownGap = gap;
     });
   }, { passive: true });
 
