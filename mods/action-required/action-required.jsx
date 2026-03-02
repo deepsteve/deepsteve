@@ -117,25 +117,32 @@ function QueueItem({ session, waitingSince, isActive, onFocus }) {
 function ActionRequiredPanel() {
   const [sessions, setSessions] = useState([]);
   const [activeSessionId, setActiveSessionId] = useState(null);
-  const [settings, setSettings] = useState({ autoSwitch: true, switchDelay: 100 });
+  const [settings, setSettings] = useState({ autoSwitch: true, switchDelay: 100, debounceDelay: 100 });
 
   // Refs for tracking state across callbacks
   const waitingSinceRef = useRef(new Map());    // sessionId → timestamp
-  const prevSessionsRef = useRef([]);           // previous sessions snapshot
   const activeIdRef = useRef(null);
   const settingsRef = useRef(settings);
   const autoSwitchTimerRef = useRef(null);
   const isAutoSwitchingRef = useRef(false);
   const pollIntervalRef = useRef(null);
 
+  // Debounce refs
+  const pendingTimersRef = useRef(new Map());   // sessionId → setTimeout ID
+  const visibleSetRef = useRef(new Set());      // session IDs that passed debounce
+  const debounceDurationRef = useRef(100);
+
   // Keep refs in sync
   useEffect(() => { activeIdRef.current = activeSessionId; }, [activeSessionId]);
   useEffect(() => { settingsRef.current = settings; }, [settings]);
+  useEffect(() => {
+    debounceDurationRef.current = Math.max(50, Math.min(500, settings.debounceDelay || 100));
+  }, [settings.debounceDelay]);
 
-  // Derive queue: sessions waiting for input, sorted by wait start time (oldest first)
+  // Derive queue: sessions waiting AND visible (past debounce), sorted by wait start time
   const queue = useMemo(() => {
     return sessions
-      .filter(s => s.waitingForInput)
+      .filter(s => s.waitingForInput && visibleSetRef.current.has(s.id))
       .sort((a, b) => {
         const aTime = waitingSinceRef.current.get(a.id) || Infinity;
         const bTime = waitingSinceRef.current.get(b.id) || Infinity;
@@ -143,10 +150,10 @@ function ActionRequiredPanel() {
       });
   }, [sessions]);
 
-  // Helper: find next waiting session (oldest first), excluding a given id
-  function findNextWaiting(sessionList, excludeId) {
+  // Helper: find next visible (debounced) waiting session, excluding a given id
+  function findNextVisible(sessionList, excludeId) {
     return sessionList
-      .filter(s => s.waitingForInput && s.id !== excludeId)
+      .filter(s => s.waitingForInput && visibleSetRef.current.has(s.id) && s.id !== excludeId)
       .sort((a, b) => {
         const aTime = waitingSinceRef.current.get(a.id) || Infinity;
         const bTime = waitingSinceRef.current.get(b.id) || Infinity;
@@ -205,13 +212,11 @@ function ActionRequiredPanel() {
     }
   }, []);
 
-  // ── Bridge: session changes (core auto-switch logic) ──
+  // ── Bridge: session changes (core auto-switch logic with debounce) ──
   useEffect(() => {
     if (!window.deepsteve) return;
 
     return window.deepsteve.onSessionsChanged((sessionList) => {
-      const prev = prevSessionsRef.current;
-      const prevMap = new Map(prev.map(s => [s.id, s]));
       const now = Date.now();
       const currentActiveId = activeIdRef.current;
       const currentSettings = settingsRef.current;
@@ -225,26 +230,77 @@ function ActionRequiredPanel() {
         }
       }
 
-      // Clean up removed sessions
+      // Clean up removed sessions from all tracking maps/sets
       const currentIds = new Set(sessionList.map(s => s.id));
       for (const id of waitingSinceRef.current.keys()) {
         if (!currentIds.has(id)) waitingSinceRef.current.delete(id);
       }
+      for (const id of visibleSetRef.current) {
+        if (!currentIds.has(id)) visibleSetRef.current.delete(id);
+      }
+      for (const [id, timerId] of pendingTimersRef.current) {
+        if (!currentIds.has(id)) {
+          clearTimeout(timerId);
+          pendingTimersRef.current.delete(id);
+        }
+      }
 
+      // Debounce gate for each session
+      for (const s of sessionList) {
+        const isVisible = visibleSetRef.current.has(s.id);
+        const isPending = pendingTimersRef.current.has(s.id);
+
+        if (s.waitingForInput && !isVisible && !isPending) {
+          // New waiting session — start debounce timer
+          const timerId = setTimeout(() => {
+            pendingTimersRef.current.delete(s.id);
+            // Re-check: is the session still waiting?
+            const latest = window.deepsteve?.getSessions() || [];
+            const current = latest.find(x => x.id === s.id);
+            if (current?.waitingForInput) {
+              visibleSetRef.current.add(s.id);
+              setSessions([...latest]); // trigger re-render
+
+              // Check auto-switch for the newly promoted session
+              if (settingsRef.current.autoSwitch) {
+                const active = latest.find(x => x.id === activeIdRef.current);
+                if (!active?.waitingForInput || !visibleSetRef.current.has(active.id)) {
+                  const next = findNextVisible(latest, null);
+                  if (next && !autoSwitchTimerRef.current) {
+                    scheduleAutoSwitch(next.id);
+                  }
+                }
+              }
+            }
+          }, debounceDurationRef.current);
+          pendingTimersRef.current.set(s.id, timerId);
+        } else if (!s.waitingForInput) {
+          // Session stopped waiting
+          if (isPending) {
+            // Still in debounce window — cancel silently (never shown)
+            clearTimeout(pendingTimersRef.current.get(s.id));
+            pendingTimersRef.current.delete(s.id);
+          }
+          if (isVisible) {
+            // Was visible — remove normally
+            visibleSetRef.current.delete(s.id);
+          }
+        }
+      }
+
+      // Auto-switch: only consider visible (debounced) sessions
       if (currentSettings.autoSwitch) {
         const currActive = sessionList.find(s => s.id === currentActiveId);
-        const activeIsWaiting = currActive?.waitingForInput;
+        const activeIsVisible = currActive?.waitingForInput && visibleSetRef.current.has(currActive.id);
 
-        if (!activeIsWaiting) {
-          // Active tab is NOT waiting — switch to a tab that IS waiting
-          const next = findNextWaiting(sessionList, null);
+        if (!activeIsVisible) {
+          const next = findNextVisible(sessionList, null);
           if (next && !autoSwitchTimerRef.current) {
             scheduleAutoSwitch(next.id);
           }
         }
       }
 
-      prevSessionsRef.current = sessionList;
       setSessions(sessionList);
     });
   }, []);
@@ -254,6 +310,10 @@ function ActionRequiredPanel() {
     return () => {
       if (autoSwitchTimerRef.current) clearTimeout(autoSwitchTimerRef.current);
       if (pollIntervalRef.current) clearInterval(pollIntervalRef.current);
+      for (const timerId of pendingTimersRef.current.values()) {
+        clearTimeout(timerId);
+      }
+      pendingTimersRef.current.clear();
     };
   }, []);
 
@@ -264,8 +324,8 @@ function ActionRequiredPanel() {
         const sessionList = window.deepsteve?.getSessions() || [];
         const currentActiveId = activeIdRef.current;
         const currActive = sessionList.find(s => s.id === currentActiveId);
-        if (!currActive?.waitingForInput) {
-          const next = findNextWaiting(sessionList, null);
+        if (!currActive?.waitingForInput || !visibleSetRef.current.has(currActive.id)) {
+          const next = findNextVisible(sessionList, null);
           if (next && !autoSwitchTimerRef.current) {
             scheduleAutoSwitch(next.id);
           }
@@ -292,15 +352,9 @@ function ActionRequiredPanel() {
     }
 
     if (newValue) {
-      // Toggling ON: immediately jump to first waiting tab
+      // Toggling ON: immediately jump to first visible waiting tab
       const sessions = window.deepsteve?.getSessions() || [];
-      const next = sessions
-        .filter(s => s.waitingForInput)
-        .sort((a, b) => {
-          const aTime = waitingSinceRef.current.get(a.id) || Infinity;
-          const bTime = waitingSinceRef.current.get(b.id) || Infinity;
-          return aTime - bTime;
-        })[0];
+      const next = findNextVisible(sessions, null);
       if (next) {
         isAutoSwitchingRef.current = true;
         window.deepsteve.focusSession(next.id);
