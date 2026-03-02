@@ -203,6 +203,8 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
 .dropdown-item.clickable { cursor: pointer; }
 .dropdown-item.clickable:hover { background: var(--ds-bg-tertiary); }
 .dropdown-item.connected { background: var(--ds-bg-tertiary); }
+.dropdown-item.closed { opacity: 0.6; }
+.dropdown-item .session-status.closed { color: var(--ds-text-muted); }
 .dropdown-empty { padding: 12px; text-align: center; color: var(--ds-text-secondary); font-size: 13px; }
 .dropdown-clear-disconnected { padding: 8px 12px; font-size: 12px; color: var(--ds-accent-red); text-align: center; cursor: pointer; border-bottom: 1px solid var(--ds-border); }
 .dropdown-clear-disconnected:hover { background: var(--ds-bg-tertiary); }

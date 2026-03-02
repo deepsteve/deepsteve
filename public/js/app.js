@@ -262,16 +262,26 @@ async function refreshSessionsDropdown() {
     // Get IDs of sessions connected in THIS tab
     const connectedIds = new Set(sessions.keys());
 
+    // Sort: active/connected first, then saved, then closed last
+    const statusOrder = { active: 0, saved: 1, closed: 2 };
+    allShells.sort((a, b) => {
+      const aConnected = connectedIds.has(a.id);
+      const bConnected = connectedIds.has(b.id);
+      if (aConnected !== bConnected) return aConnected ? -1 : 1;
+      return (statusOrder[a.status] || 0) - (statusOrder[b.status] || 0);
+    });
+
     sessionsMenu.innerHTML = allShells.map(shell => {
       const isConnected = connectedIds.has(shell.id);
+      const isClosed = shell.status === 'closed';
       const name = sessions.get(shell.id)?.name || shell.name || getDefaultTabName(shell.cwd);
       const staleness = !isConnected && shell.lastActivity ? formatRelativeTime(shell.lastActivity) : '';
-      const statusText = isConnected ? 'connected' : (staleness || (shell.status === 'saved' ? 'saved' : 'not connected'));
-      const statusClass = isConnected ? 'active' : '';
+      const statusText = isConnected ? 'connected' : (isClosed ? (staleness ? `closed ${staleness}` : 'closed') : (staleness || (shell.status === 'saved' ? 'saved' : 'not connected')));
+      const statusClass = isConnected ? 'active' : (isClosed ? 'closed' : '');
       const canClose = !isConnected;
 
       return `
-        <div class="dropdown-item ${isConnected ? 'connected' : 'clickable'}" data-id="${shell.id}" data-cwd="${shell.cwd}" data-name="${escapeHtml(name)}">
+        <div class="dropdown-item ${isConnected ? 'connected' : 'clickable'} ${isClosed ? 'closed' : ''}" data-id="${shell.id}" data-cwd="${shell.cwd}" data-name="${escapeHtml(name)}">
           <div class="session-info">
             <span class="session-name">${name}</span>
             <span class="session-status ${statusClass}">${statusText}</span>
