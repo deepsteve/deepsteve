@@ -47,6 +47,20 @@ let itMonkeyId = null;         // who is "it"
 let lastTagTime = 0;           // timestamp of last tag
 let physPanelOpen = false;
 
+// VR monkey selection panel
+let vrSelectionPanel = null;     // THREE.Group holding the card grid
+let vrSelectionCards = [];       // { mesh, sessionId } for raycasting
+const vrSelectionRaycaster = new THREE.Raycaster();
+
+// Terminal station (physical screen in arena)
+let termStationMesh = null;       // THREE.Mesh with terminal texture
+let termStationTexture = null;    // THREE.CanvasTexture
+let termStationCanvas = null;     // off-screen canvas for placeholder
+let termStationSessionId = null;  // currently displayed session
+let termMirrorTerm = null;        // mirror xterm.js Terminal instance
+let termMirrorWs = null;          // mirror WebSocket connection
+let termMirrorCanvas = null;      // CanvasAddon's canvas element
+
 const monkeyState = {};        // id → { mesh, vel, pos, onGround, score, ... }
 const _v1 = new THREE.Vector3();
 const _v2 = new THREE.Vector3();
@@ -324,57 +338,116 @@ const platformDefs = [
   }
 }
 
-// Ramps connecting some platforms
-const rampDefs = [
-  { from: [-12, 0, -10], to: [-12, 1.5, -10], angle: 0, len: 5 },
-  { from: [10, 0, -12], to: [10, 2.5, -12], angle: Math.PI / 4, len: 6 },
-  { from: [0, 0, 5], to: [0, 3.5, 0], angle: 0, len: 8 },
-  { from: [-8, 0, 15], to: [-8, 2, 12], angle: 0, len: 5 },
-  { from: [14, 0, 12], to: [14, 1, 8], angle: 0, len: 6 },
-];
-
+// Ramps connecting ground to platforms
+// Each ramp: ground start (x,z) → platform edge (x,z) at platform height
+// Platforms: [-12,1.5,-10], [10,2.5,-12], [0,3.5,0], [-8,2,12], [14,1,8]
 {
   const rampMat = new THREE.MeshLambertMaterial({ color: 0x8b7355 });
-  for (const r of rampDefs) {
-    const h = r.to[1];
-    const len = r.len;
-    const rampAngle = Math.atan2(h, len);
-    const geo = new THREE.BoxGeometry(3, 0.3, len);
+
+  // Build a ramp from ground (gx,0,gz) up to (px,h,pz)
+  function buildRamp(gx, gz, px, h, pz) {
+    const dx = px - gx, dz = pz - gz;
+    const hDist = Math.sqrt(dx * dx + dz * dz); // horizontal length
+    const fullLen = Math.sqrt(hDist * hDist + h * h); // hypotenuse
+    const tiltAngle = Math.atan2(h, hDist);
+    const yawAngle = Math.atan2(dx, dz); // rotation around Y
+
+    const geo = new THREE.BoxGeometry(2.5, 0.25, fullLen);
     const mesh = new THREE.Mesh(geo, rampMat);
-    mesh.position.set(r.from[0], h / 2, (r.from[2] + r.to[2]) / 2);
-    mesh.rotation.x = rampAngle;
-    mesh.rotation.y = r.angle;
+    const cx = (gx + px) / 2, cz = (gz + pz) / 2, cy = h / 2;
+    mesh.position.set(cx, cy, cz);
+    mesh.rotation.order = 'YXZ';
+    mesh.rotation.y = yawAngle;
+    mesh.rotation.x = -tiltAngle;
     mesh.castShadow = true;
     mesh.receiveShadow = true;
     scene.add(mesh);
-    // Approximate ramp as series of stair-step colliders for simplicity
-    const steps = 4;
+
+    // Stair-step colliders along the ramp
+    const steps = 6;
     for (let i = 0; i < steps; i++) {
       const t = (i + 0.5) / steps;
-      const sy = h * t;
-      const sz = r.from[2] + (r.to[2] - r.from[2]) * t;
-      const sx = r.from[0] + (r.to[0] - r.from[0]) * t;
-      addCollider(sx, sy, sz, 3, 0.4, len / steps);
+      addCollider(gx + dx * t, h * t, gz + dz * t, 2.5, 0.4, hDist / steps);
     }
   }
+
+  // Ramp to platform at (-12, 1.5, -10) from south side
+  buildRamp(-12, -5, -12, 1.5, -8);
+  // Ramp to platform at (10, 2.5, -12) from south side
+  buildRamp(10, -6, 10, 2.5, -10);
+  // Ramp to center platform (0, 3.5, 0) from south
+  buildRamp(0, 6, 0, 3.5, 2);
+  // Ramp to platform at (-8, 2, 12) from north side
+  buildRamp(-8, 16, -8, 2, 13);
+  // Ramp to platform at (14, 1, 8) from south side
+  buildRamp(14, 12, 14, 1, 9.5);
 }
 
-// Terminal station (glowing green platform)
+// Terminal station — standalone in open area (away from platforms/ramps)
+const TERM_X = -5, TERM_Z = 16;
 {
+  const TX = TERM_X, TZ = TERM_Z;
+
   const termPlat = new THREE.Mesh(
     new THREE.BoxGeometry(5, 0.3, 5),
     new THREE.MeshPhongMaterial({ color: 0x00cc66, emissive: 0x00cc66, emissiveIntensity: 0.3 })
   );
-  termPlat.position.set(0, 0.15, 0);
+  termPlat.position.set(TX, 0.15, TZ);
   scene.add(termPlat);
 
-  // Glowing pillar
+  // Glowing pillar (shorter to match lower screen)
   const pillar = new THREE.Mesh(
-    new THREE.CylinderGeometry(0.15, 0.15, 2, 8),
+    new THREE.CylinderGeometry(0.15, 0.15, 1.2, 8),
     new THREE.MeshPhongMaterial({ color: 0x00ff88, emissive: 0x00ff88, emissiveIntensity: 0.5 })
   );
-  pillar.position.set(0, 1, 0);
+  pillar.position.set(TX, 0.6, TZ);
   scene.add(pillar);
+
+  // Terminal screen (standing monitor)
+  {
+    termStationCanvas = document.createElement('canvas');
+    termStationCanvas.width = 1024;
+    termStationCanvas.height = 512;
+    const ctx = termStationCanvas.getContext('2d');
+    ctx.fillStyle = '#0d1117';
+    ctx.fillRect(0, 0, 1024, 512);
+    ctx.fillStyle = '#00ff88';
+    ctx.font = 'bold 28px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('MONKEY CODE TERMINAL', 512, 200);
+    ctx.font = '18px monospace';
+    ctx.fillText('Select a monkey to view its terminal', 512, 260);
+
+    termStationTexture = new THREE.CanvasTexture(termStationCanvas);
+    termStationTexture.minFilter = THREE.LinearFilter;
+
+    // Screen: 2.5m wide x 1.5m tall, at eye level, rotated to face -Z (into arena)
+    termStationMesh = new THREE.Mesh(
+      new THREE.PlaneGeometry(2.5, 1.5),
+      new THREE.MeshBasicMaterial({ map: termStationTexture })
+    );
+    termStationMesh.position.set(TX, 1.5, TZ);
+    termStationMesh.rotation.y = Math.PI; // face toward arena center
+    scene.add(termStationMesh);
+
+    // Green border frame
+    const border = new THREE.Mesh(
+      new THREE.PlaneGeometry(2.6, 1.6),
+      new THREE.MeshBasicMaterial({ color: 0x00ff44 })
+    );
+    border.position.set(TX, 1.5, TZ + 0.01);
+    border.rotation.y = Math.PI;
+    scene.add(border);
+
+    // Dark back panel
+    const back = new THREE.Mesh(
+      new THREE.PlaneGeometry(2.6, 1.6),
+      new THREE.MeshBasicMaterial({ color: 0x111111 })
+    );
+    back.position.set(TX, 1.5, TZ + 0.02);
+    back.rotation.y = Math.PI;
+    scene.add(back);
+  }
 }
 
 // Trees
@@ -550,7 +623,7 @@ function roundRect(ctx, x, y, w, h, r) {
 const MONKEY_RADIUS = 0.35;
 const MONKEY_HEIGHT = 1.8;
 
-function resolveCollisions(pos, vel) {
+function resolveCollisions(pos, vel, isPlayer) {
   // Monkey as AABB
   const mMin = { x: pos.x - MONKEY_RADIUS, y: pos.y, z: pos.z - MONKEY_RADIUS };
   const mMax = { x: pos.x + MONKEY_RADIUS, y: pos.y + MONKEY_HEIGHT, z: pos.z + MONKEY_RADIUS };
@@ -591,14 +664,24 @@ function resolveCollisions(pos, vel) {
       } else {
         pos.x = c.max.x + MONKEY_RADIUS;
       }
-      vel.x *= -PHYSICS.bounciness;
+      // Player: just stop at walls (no bounce = no oscillation)
+      // AI: slight bounce for liveliness
+      if (isPlayer) {
+        vel.x = 0;
+      } else {
+        vel.x *= -PHYSICS.bounciness;
+      }
     } else {
       if (pos.z < (c.min.z + c.max.z) / 2) {
         pos.z = c.min.z - MONKEY_RADIUS;
       } else {
         pos.z = c.max.z + MONKEY_RADIUS;
       }
-      vel.z *= -PHYSICS.bounciness;
+      if (isPlayer) {
+        vel.z = 0;
+      } else {
+        vel.z *= -PHYSICS.bounciness;
+      }
     }
   }
 
@@ -607,7 +690,7 @@ function resolveCollisions(pos, vel) {
 
 // Check if a position is near any surface (for VR hand touch detection)
 function isTouchingSurface(worldPos) {
-  const margin = 0.15;
+  const margin = 0.4; // generous reach so you don't need to clip into geometry
   for (const c of colliders) {
     if (worldPos.x >= c.min.x - margin && worldPos.x <= c.max.x + margin &&
         worldPos.y >= c.min.y - margin && worldPos.y <= c.max.y + margin &&
@@ -842,7 +925,7 @@ function updatePhysics(dt, now) {
 
     // Collision resolution
     const wasOnGround = m.onGround;
-    m.onGround = resolveCollisions(m.pos, m.vel);
+    m.onGround = resolveCollisions(m.pos, m.vel, isPlayer);
 
     // Land sound
     if (!wasOnGround && m.onGround && isPlayer) playLand();
@@ -958,16 +1041,86 @@ function updateDesktopMovement(m, dt) {
   }
 }
 
-// ── VR arm-swing locomotion ─────────────────────────────────────────────────
+// ── VR Gorilla Tag locomotion + snap turn ───────────────────────────────────
+
+let vrSnapTurnCooldown = false;
+let vrJumpedThisPush = [false, false]; // per-hand jump flag to prevent multi-frame jumps
+let vrThumbstickJumpReady = true; // debounce for thumbstick jump
 
 function updateVRLocomotion(m, dt) {
-  // Track each hand's velocity and surface contact
-  let appliedForce = false;
-  for (const hand of vrHands) {
-    // Get world position of controller
+  const session = renderer.xr.getSession();
+
+  // ── 1. Snap turn via right thumbstick ──
+  if (session) {
+    for (const source of session.inputSources) {
+      if (!source.gamepad || source.handedness !== 'right') continue;
+      const axes = source.gamepad.axes;
+      if (axes.length < 4) continue;
+      const stickX = axes[2];
+      if (Math.abs(stickX) > 0.6 && !vrSnapTurnCooldown) {
+        cameraRig.rotateY(stickX > 0 ? -Math.PI / 6 : Math.PI / 6);
+        vrSnapTurnCooldown = true;
+      }
+      if (Math.abs(stickX) < 0.3) vrSnapTurnCooldown = false;
+    }
+  }
+
+  // ── 2. Thumbstick locomotion (left stick = smooth move, A/X button = jump) ──
+  let vrJumpBtnPressed = false;
+  if (session) {
+    for (const source of session.inputSources) {
+      if (!source.gamepad) continue;
+      const axes = source.gamepad.axes;
+      if (axes.length < 4) continue;
+
+      if (source.handedness === 'left') {
+        const stickX = axes[2];
+        const stickY = axes[3];
+        const deadzone = 0.15;
+        const moveSpeed = 6;
+
+        if (Math.abs(stickX) > deadzone || Math.abs(stickY) > deadzone) {
+          camera.getWorldDirection(_v1);
+          _v1.y = 0;
+          _v1.normalize();
+          _v2.crossVectors(_v1, _v3.set(0, 1, 0)).normalize();
+          const targetX = (_v1.x * -stickY + _v2.x * stickX) * moveSpeed;
+          const targetZ = (_v1.z * -stickY + _v2.z * stickX) * moveSpeed;
+          m.vel.x += (targetX - m.vel.x) * 5 * dt;
+          m.vel.z += (targetZ - m.vel.z) * 5 * dt;
+        }
+      }
+
+      // A/X button (index 4) or thumbstick press (index 3) — check both controllers
+      if ((source.gamepad.buttons.length > 4 && source.gamepad.buttons[4].pressed) ||
+          (source.gamepad.buttons.length > 3 && source.gamepad.buttons[3].pressed)) {
+        vrJumpBtnPressed = true;
+      }
+    }
+  }
+  // Apply button jump after checking all controllers
+  if (vrJumpBtnPressed && m.onGround && vrThumbstickJumpReady) {
+    m.vel.y = 6 * PHYSICS.jumpMultiplier;
+    playJump();
+    vrThumbstickJumpReady = false;
+  } else if (!vrJumpBtnPressed) {
+    vrThumbstickJumpReady = true;
+  }
+
+  // ── 3. Smooth Gorilla Tag arm-swing locomotion ──
+  // Both hands accumulate acceleration; applied once per frame for smooth movement.
+  // Uses acceleration (+=) not assignment (=) so alternating arms blend smoothly.
+  const accelRate = 14;
+  let totalPushX = 0;
+  let totalPushZ = 0;
+  let shouldJump = false;
+  let jumpStrength = 0;
+
+  for (let hi = 0; hi < vrHands.length; hi++) {
+    const hand = vrHands[hi];
     hand.controller.getWorldPosition(_v1);
 
-    // Compute velocity from position diff
+    // Compute instantaneous velocity
     _v2.subVectors(_v1, hand.prevPos).divideScalar(dt || 1 / 72);
 
     // Store in ring buffer
@@ -986,24 +1139,41 @@ function updateVRLocomotion(m, dt) {
     }
     hand.vel.divideScalar(VR_VEL_FRAMES);
 
-    // Check if hand is touching a surface
+    const speed = hand.vel.length();
+
+    // Only apply force when hand is touching/near a surface (Gorilla Tag style)
     const touching = isTouchingSurface(_v1);
 
-    if (touching) {
-      // Apply inverted velocity as force (gorilla tag mechanic)
-      const force = hand.vel.length() * PHYSICS.jumpMultiplier;
-      if (force > 0.5) {
-        m.vel.x -= hand.vel.x * PHYSICS.jumpMultiplier * 2;
-        m.vel.y -= hand.vel.y * PHYSICS.jumpMultiplier * 2;
-        m.vel.z -= hand.vel.z * PHYSICS.jumpMultiplier * 2;
-        appliedForce = true;
+    if (touching && speed > 0.8) {
+      // Accumulate push: opposite of hand horizontal velocity
+      totalPushX -= hand.vel.x;
+      totalPushZ -= hand.vel.z;
+
+      // Jump from strong downward hand motion — only once per push
+      if (hand.vel.y < -2.0 && m.onGround && !vrJumpedThisPush[hi]) {
+        shouldJump = true;
+        jumpStrength = Math.max(jumpStrength, Math.min(6 * PHYSICS.jumpMultiplier, -hand.vel.y * PHYSICS.jumpMultiplier * 1.2));
+        vrJumpedThisPush[hi] = true;
       }
+    } else {
+      // Hand left the surface — reset jump flag for next contact
+      vrJumpedThisPush[hi] = false;
     }
 
     hand.prevPos.copy(_v1);
   }
 
-  if (appliedForce) playJump();
+  // Apply accumulated push as smooth acceleration (not direct velocity set)
+  if (totalPushX !== 0 || totalPushZ !== 0) {
+    m.vel.x += totalPushX * accelRate * dt;
+    m.vel.z += totalPushZ * accelRate * dt;
+  }
+
+  // Apply jump if triggered (only once, not every frame)
+  if (shouldJump) {
+    m.vel.y = jumpStrength;
+    playJump();
+  }
 }
 
 // ── Camera ──────────────────────────────────────────────────────────────────
@@ -1013,11 +1183,10 @@ const orbitDist = 35;
 
 function updateCamera() {
   if (renderer.xr.isPresenting) {
-    // VR mode: move camera rig to follow player
     if (followId && monkeyState[followId]) {
       const m = monkeyState[followId];
       cameraRig.position.copy(m.pos);
-      cameraRig.position.y += 1.5; // eye height
+      // Do NOT add 1.5 — the VR headset already tracks head height
     }
     return;
   }
@@ -1066,44 +1235,455 @@ canvas.addEventListener('mousemove', (e) => {
   }
 });
 
+// ── VR Monkey Selection Panel ──────────────────────────────────────────────
+
+function createVRSelectionPanel() {
+  removeVRSelectionPanel();
+  if (sessions.length === 0) return;
+
+  vrSelectionPanel = new THREE.Group();
+  vrSelectionCards = [];
+
+  const cols = Math.min(sessions.length, 3);
+  const rows = Math.ceil(sessions.length / cols);
+  const cardW = 0.4, cardH = 0.5, gap = 0.08;
+  const totalW = cols * cardW + (cols - 1) * gap;
+  const totalH = rows * cardH + (rows - 1) * gap;
+
+  // Title
+  const titleCanvas = document.createElement('canvas');
+  titleCanvas.width = 512; titleCanvas.height = 64;
+  const tCtx = titleCanvas.getContext('2d');
+  tCtx.fillStyle = 'rgba(0,0,0,0.85)';
+  tCtx.fillRect(0, 0, 512, 64);
+  tCtx.fillStyle = '#8f8';
+  tCtx.font = '24px "Press Start 2P", monospace';
+  tCtx.textAlign = 'center'; tCtx.textBaseline = 'middle';
+  tCtx.fillText('CHOOSE YOUR MONKEY', 256, 32);
+  const titleTex = new THREE.CanvasTexture(titleCanvas);
+  const titleMesh = new THREE.Mesh(
+    new THREE.PlaneGeometry(totalW + 0.2, 0.2),
+    new THREE.MeshBasicMaterial({ map: titleTex })
+  );
+  titleMesh.position.set(0, totalH / 2 + 0.2, 0);
+  vrSelectionPanel.add(titleMesh);
+
+  for (let i = 0; i < sessions.length; i++) {
+    const s = sessions[i];
+    const col = i % cols;
+    const row = Math.floor(i / cols);
+    const x = (col - (cols - 1) / 2) * (cardW + gap);
+    const y = ((rows - 1) / 2 - row) * (cardH + gap);
+
+    const colorIdx = monkeyState[s.id] ? monkeyState[s.id].colorIdx : i;
+    const color = MONKEY_COLORS[colorIdx % MONKEY_COLORS.length];
+
+    // Card canvas
+    const canvas = document.createElement('canvas');
+    canvas.width = 256; canvas.height = 320;
+    const ctx = canvas.getContext('2d');
+
+    // Background
+    ctx.fillStyle = 'rgba(13,17,23,0.9)';
+    ctx.fillRect(0, 0, 256, 320);
+    ctx.strokeStyle = color.hex; ctx.lineWidth = 4;
+    ctx.strokeRect(2, 2, 252, 316);
+
+    // Color swatch (monkey preview circle)
+    ctx.fillStyle = color.hex;
+    ctx.beginPath(); ctx.arc(128, 120, 50, 0, Math.PI * 2); ctx.fill();
+
+    // Monkey face on swatch
+    ctx.fillStyle = '#deb887';
+    ctx.beginPath(); ctx.arc(128, 130, 25, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#111';
+    ctx.beginPath(); ctx.arc(115, 118, 6, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(141, 118, 6, 0, Math.PI * 2); ctx.fill();
+
+    // Name
+    const name = s.name.length > 10 ? s.name.slice(0, 9) + '\u2026' : s.name;
+    ctx.fillStyle = '#fff';
+    ctx.font = '18px "Press Start 2P", monospace';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(name, 128, 220);
+
+    // "SELECT" hint
+    ctx.fillStyle = '#8f8';
+    ctx.font = '14px "Press Start 2P", monospace';
+    ctx.fillText('SELECT', 128, 280);
+
+    const tex = new THREE.CanvasTexture(canvas);
+    const cardMesh = new THREE.Mesh(
+      new THREE.PlaneGeometry(cardW, cardH),
+      new THREE.MeshBasicMaterial({ map: tex, side: THREE.DoubleSide })
+    );
+    cardMesh.position.set(x, y, 0);
+    vrSelectionPanel.add(cardMesh);
+    vrSelectionCards.push({ mesh: cardMesh, sessionId: s.id });
+  }
+
+  // Position panel 2m in front of camera rig at eye level
+  vrSelectionPanel.position.set(0, 1.5, -2);
+  cameraRig.add(vrSelectionPanel);
+}
+
+function removeVRSelectionPanel() {
+  if (vrSelectionPanel) {
+    cameraRig.remove(vrSelectionPanel);
+    vrSelectionPanel.traverse(child => {
+      if (child.geometry) child.geometry.dispose();
+      if (child.material) {
+        if (child.material.map) child.material.map.dispose();
+        child.material.dispose();
+      }
+    });
+    vrSelectionPanel = null;
+    vrSelectionCards = [];
+  }
+}
+
+const _selMat4 = new THREE.Matrix4();
+function checkVRSelectionRaycast(controller) {
+  if (!vrSelectionPanel || vrSelectionCards.length === 0) return;
+  _selMat4.identity().extractRotation(controller.matrixWorld);
+  vrSelectionRaycaster.ray.origin.setFromMatrixPosition(controller.matrixWorld);
+  vrSelectionRaycaster.ray.direction.set(0, 0, -1).applyMatrix4(_selMat4);
+
+  const meshes = vrSelectionCards.map(c => c.mesh);
+  const hits = vrSelectionRaycaster.intersectObjects(meshes);
+  if (hits.length > 0) {
+    const card = vrSelectionCards.find(c => c.mesh === hits[0].object);
+    if (card) {
+      removeVRSelectionPanel();
+      enterFirstPerson(card.sessionId);
+    }
+  }
+}
+
+// Controller laser pointers for selection mode
+const laserGeo = new THREE.BufferGeometry().setFromPoints([
+  new THREE.Vector3(0, 0, 0),
+  new THREE.Vector3(0, 0, -5)
+]);
+const laserMat = new THREE.LineBasicMaterial({ color: 0x00ff88, linewidth: 2 });
+const laser0 = new THREE.Line(laserGeo, laserMat);
+const laser1 = new THREE.Line(laserGeo.clone(), laserMat);
+laser0.visible = false;
+laser1.visible = false;
+controller0.add(laser0);
+controller1.add(laser1);
+
+function updateVRLasers() {
+  const show = vrSelectionPanel !== null;
+  laser0.visible = show;
+  laser1.visible = show;
+}
+
+// Wire controller select events for VR panel selection
+controller0.addEventListener('selectstart', () => checkVRSelectionRaycast(controller0));
+controller1.addEventListener('selectstart', () => checkVRSelectionRaycast(controller1));
+
+// Show selection panel when entering VR without a monkey selected
+renderer.xr.addEventListener('sessionstart', () => {
+  if (!followId) {
+    setTimeout(() => createVRSelectionPanel(), 500); // slight delay for XR to settle
+  }
+});
+renderer.xr.addEventListener('sessionend', () => {
+  removeVRSelectionPanel();
+});
+
+// ── Terminal Station (physical screen in arena) ──────────────────────────
+
+// Log lines displayed on the terminal station screen for VR debugging
+const termLog = [];
+
+function termLogMsg(msg, color = '#00ff88') {
+  termLog.push({ msg, color, t: Date.now() });
+  if (termLog.length > 20) termLog.shift();
+  _drawTermLog();
+}
+
+function _drawTermLog() {
+  if (!termStationCanvas || !termStationTexture) return;
+  termStationTexture.image = termStationCanvas;
+  const ctx = termStationCanvas.getContext('2d');
+  ctx.fillStyle = '#0d1117';
+  ctx.fillRect(0, 0, termStationCanvas.width, termStationCanvas.height);
+  ctx.textAlign = 'left';
+  const fontSize = 16;
+  const lineHeight = fontSize + 6;
+  const pad = 12;
+  for (let i = 0; i < termLog.length; i++) {
+    ctx.fillStyle = termLog[i].color;
+    ctx.font = fontSize + 'px monospace';
+    ctx.fillText(termLog[i].msg, pad, pad + (i + 1) * lineHeight);
+  }
+  termStationTexture.needsUpdate = true;
+}
+
+function showTermPlaceholder(msg, color = '#00ff88') {
+  termLog.length = 0;
+  if (!termStationCanvas || !termStationTexture) return;
+  termStationTexture.image = termStationCanvas;
+  const ctx = termStationCanvas.getContext('2d');
+  ctx.fillStyle = '#0d1117';
+  ctx.fillRect(0, 0, termStationCanvas.width, termStationCanvas.height);
+  ctx.fillStyle = color;
+  ctx.font = 'bold 24px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText(msg, termStationCanvas.width / 2, termStationCanvas.height / 2);
+  termStationTexture.needsUpdate = true;
+}
+
+// Mirror terminal: one reusable offscreen xterm + CanvasAddon.
+// Data piped from parent's onSessionData bridge (raw WS output forwarding).
+let _mirrorUnsub = null; // unsubscribe function for data listener
+
+function ensureMirrorTerminal() {
+  if (termMirrorTerm) return;
+  const parentDoc = parent.document;
+  const Terminal = parent.window.Terminal;
+  const CanvasAddon = parent.window.CanvasAddon?.CanvasAddon;
+  if (!Terminal || !CanvasAddon) {
+    termLogMsg('ERROR: Terminal or CanvasAddon not loaded', '#ff4444');
+    return;
+  }
+  let container = parentDoc.getElementById('monkey-term-mirror');
+  if (!container) {
+    container = parentDoc.createElement('div');
+    container.id = 'monkey-term-mirror';
+    // Off-screen but visible (has layout) so CanvasAddon renders
+    container.style.cssText = 'position:fixed; left:-9999px; top:0; width:800px; height:400px; overflow:hidden;';
+    parentDoc.body.appendChild(container);
+  }
+  termMirrorTerm = new Terminal({ fontSize: 14, cols: 80, rows: 24 });
+  termMirrorTerm.open(container);
+  termMirrorTerm.loadAddon(new CanvasAddon());
+  termMirrorCanvas = container.querySelector('canvas');
+}
+
+function updateTerminalStation(sessionId) {
+  termLog.length = 0;
+
+  // Unsubscribe from previous session's data
+  if (_mirrorUnsub) { _mirrorUnsub(); _mirrorUnsub = null; }
+
+  termStationSessionId = sessionId;
+  if (!sessionId) {
+    showTermPlaceholder('MONKEY CODE TERMINAL');
+    return;
+  }
+
+  try {
+    const bridge = parent.window.__deepsteve;
+    if (!bridge || typeof bridge.getTerminal !== 'function') {
+      termLogMsg('ERROR: bridge missing — refresh page', '#ff4444');
+      return;
+    }
+    const srcTerm = bridge.getTerminal(sessionId);
+    if (!srcTerm) {
+      termLogMsg('ERROR: no terminal for ' + sessionId, '#ff4444');
+      return;
+    }
+
+    ensureMirrorTerminal();
+    if (!termMirrorCanvas) {
+      termLogMsg('ERROR: mirror canvas missing', '#ff4444');
+      return;
+    }
+
+    // Seed mirror with current buffer content
+    termMirrorTerm.reset();
+    const buf = srcTerm.buffer.active;
+    const lines = [];
+    for (let i = 0; i < buf.length; i++) {
+      const line = buf.getLine(i);
+      if (line) lines.push(line.translateToString(true));
+    }
+    if (lines.length) termMirrorTerm.write(lines.join('\r\n'));
+
+    // Subscribe to raw output data — piped from parent's WS handler
+    _mirrorUnsub = bridge.onSessionData(sessionId, (data) => {
+      termMirrorTerm.write(data);
+    });
+
+    termStationTexture.image = termMirrorCanvas;
+    termStationTexture.needsUpdate = true;
+    // Don't call termLogMsg here — it would repoint texture back at debug canvas
+  } catch (e) {
+    termLogMsg('EXCEPTION: ' + e.message, '#ff4444');
+    termLogMsg('  ' + (e.stack || '').split('\n')[1]?.trim(), '#ff8800');
+  }
+}
+
+function updateTerminalStation_tick() {
+  if (termMirrorCanvas && termStationSessionId) {
+    termStationTexture.needsUpdate = true;
+  }
+  // Check proximity to terminal station for keyboard
+  updateVRKeyboard();
+}
+
+// ── VR Keyboard (Quest system keyboard via focused textarea) ────────────────
+
+const KEYBOARD_RANGE = 3.5; // distance to terminal station to trigger keyboard
+let vrKeyboardActive = false;
+let vrKeyboardEl = null;
+let vrKeyboardPrevValue = ''; // track previous value to diff (Quest overwrites on each key)
+
+// Quest WebXR system keyboard: calling .focus() on a text input triggers it.
+// Quirk: each keypress overwrites the entire value, so we diff against previous.
+// Ref: https://developers.meta.com/horizon/documentation/web/webxr-keyboard/
+// IMPORTANT: textarea must be in the TOP-LEVEL document (parent), not the iframe,
+// because Quest's system keyboard only activates for inputs in the main browsing context.
+{
+  const parentDoc = parent.document;
+  // Remove any leftover from previous mod load
+  const existing = parentDoc.getElementById('vr-keyboard-input');
+  if (existing) existing.remove();
+
+  vrKeyboardEl = parentDoc.createElement('textarea');
+  vrKeyboardEl.id = 'vr-keyboard-input';
+  vrKeyboardEl.autocomplete = 'off';
+  vrKeyboardEl.autocapitalize = 'off';
+  vrKeyboardEl.spellcheck = false;
+  vrKeyboardEl.style.cssText = `
+    position: fixed; bottom: 10px; left: 50%; transform: translateX(-50%);
+    width: 300px; height: 40px; font-size: 16px; z-index: 9999;
+    background: #0d1117; color: #00ff88; border: 2px solid #00ff44;
+    border-radius: 6px; padding: 8px; opacity: 0;
+    pointer-events: none; transition: opacity 0.3s;
+  `;
+  vrKeyboardEl.placeholder = 'Type here...';
+  parentDoc.body.appendChild(vrKeyboardEl);
+
+  // On Quest, each keypress may overwrite the value. We diff to find new chars.
+  // The oninput event is the only reliable way to read keyboard input.
+  vrKeyboardEl.addEventListener('input', () => {
+    if (!termStationSessionId) return;
+    const current = vrKeyboardEl.value;
+    if (current === vrKeyboardPrevValue) return;
+
+    // Find what changed — Quest may overwrite, so check if it's a simple append
+    if (current.startsWith(vrKeyboardPrevValue)) {
+      // Normal append — send the new characters
+      const newChars = current.slice(vrKeyboardPrevValue.length);
+      if (newChars) {
+        try { parent.window.__deepsteve.writeSession(termStationSessionId, newChars); } catch (e) {}
+      }
+    } else if (current.length < vrKeyboardPrevValue.length) {
+      // Deletion — send backspace for each deleted character
+      const delCount = vrKeyboardPrevValue.length - current.length;
+      for (let i = 0; i < delCount; i++) {
+        try { parent.window.__deepsteve.writeSession(termStationSessionId, '\x7f'); } catch (e) {}
+      }
+    } else {
+      // Full overwrite (Quest quirk) — clear and resend
+      // Send backspaces for old content then new content
+      for (let i = 0; i < vrKeyboardPrevValue.length; i++) {
+        try { parent.window.__deepsteve.writeSession(termStationSessionId, '\x7f'); } catch (e) {}
+      }
+      if (current) {
+        try { parent.window.__deepsteve.writeSession(termStationSessionId, current); } catch (e) {}
+      }
+    }
+    vrKeyboardPrevValue = current;
+  });
+
+  // Handle Enter and Backspace via keydown (may not fire on Quest, but works on desktop)
+  vrKeyboardEl.addEventListener('keydown', (e) => {
+    if (!termStationSessionId) return;
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      try { parent.window.__deepsteve.writeSession(termStationSessionId, '\r'); } catch (e2) {}
+      vrKeyboardEl.value = '';
+      vrKeyboardPrevValue = '';
+    }
+  });
+}
+
+function updateVRKeyboard() {
+  if (!renderer.xr.isPresenting || !termStationSessionId || viewMode !== MODE_FIRST) {
+    if (vrKeyboardActive) {
+      vrKeyboardEl.blur();
+      vrKeyboardEl.style.opacity = '0';
+      vrKeyboardEl.style.pointerEvents = 'none';
+      vrKeyboardActive = false;
+    }
+    return;
+  }
+
+  const playerPos = followId && monkeyState[followId] ? monkeyState[followId].pos : null;
+  if (!playerPos) return;
+
+  const dx = playerPos.x - TERM_X;
+  const dz = playerPos.z - TERM_Z;
+  const dist = Math.sqrt(dx * dx + dz * dz);
+
+  if (dist < KEYBOARD_RANGE && !vrKeyboardActive) {
+    vrKeyboardEl.style.opacity = '1';
+    vrKeyboardEl.style.pointerEvents = 'auto';
+    vrKeyboardEl.value = '';
+    vrKeyboardPrevValue = '';
+    vrKeyboardEl.focus();
+    vrKeyboardActive = true;
+  } else if (dist >= KEYBOARD_RANGE + 1 && vrKeyboardActive) {
+    vrKeyboardEl.blur();
+    vrKeyboardEl.style.opacity = '0';
+    vrKeyboardEl.style.pointerEvents = 'none';
+    vrKeyboardActive = false;
+  }
+}
+
 // ── Enter / Exit first person ───────────────────────────────────────────────
 
 function enterFirstPerson(sessionId) {
-  startAudio();
-  startAmbient();
-  followId = sessionId;
-  viewMode = MODE_FIRST;
+  try {
+    startAudio();
+    startAmbient();
+    followId = sessionId;
+    viewMode = MODE_FIRST;
 
-  const m = monkeyState[sessionId];
-  if (m) {
-    m.mesh.visible = false;
-    m.label.visible = false;
-    mouseYaw = m.mesh.rotation.y;
-    mousePitch = 0;
-  }
+    // Defer terminal setup out of XR frame to avoid blocking the animation loop
+    setTimeout(() => updateTerminalStation(sessionId), 0);
 
-  // If no one is "it" yet, make a random AI monkey "it"
-  if (!itMonkeyId) {
-    const otherIds = Object.keys(monkeyState).filter(id => id !== sessionId);
-    if (otherIds.length > 0) {
-      itMonkeyId = otherIds[Math.floor(Math.random() * otherIds.length)];
-      lastTagTime = performance.now() / 1000;
-      // Update all labels
-      for (const [lid, lm] of Object.entries(monkeyState)) {
-        const sess = sessions.find(s => s.id === lid);
-        updateLabel(lm.label._ctx, sess ? sess.name : lid, lm.colorIdx, lid === itMonkeyId, lm.score);
-        lm.label.material.map.needsUpdate = true;
+    const m = monkeyState[sessionId];
+    if (m) {
+      m.mesh.visible = false;
+      m.label.visible = false;
+      mouseYaw = m.mesh.rotation.y;
+      mousePitch = 0;
+    }
+
+    if (!itMonkeyId) {
+      const otherIds = Object.keys(monkeyState).filter(id => id !== sessionId);
+      if (otherIds.length > 0) {
+        itMonkeyId = otherIds[Math.floor(Math.random() * otherIds.length)];
+        lastTagTime = performance.now() / 1000;
+        for (const [lid, lm] of Object.entries(monkeyState)) {
+          try {
+            const sess = sessions.find(s => s.id === lid);
+            updateLabel(lm.label._ctx, sess ? sess.name : lid, lm.colorIdx, lid === itMonkeyId, lm.score);
+            lm.label.material.map.needsUpdate = true;
+          } catch (e) { /* label update is non-critical */ }
+        }
       }
     }
-  }
 
-  showTerminal(sessionId);
-  onResize();
-  updateHUD();
+    if (!renderer.xr.isPresenting) {
+      showTerminal(sessionId);
+      onResize();
+    }
+    updateHUD();
+  } catch (e) {
+    console.error('[MonkeyCode] enterFirstPerson error:', e);
+  }
 }
 
 function exitFirstPerson() {
   if (document.pointerLockElement) document.exitPointerLock();
+  updateTerminalStation(null);
   if (followId && monkeyState[followId]) {
     monkeyState[followId].mesh.visible = true;
     monkeyState[followId].label.visible = true;
@@ -1111,8 +1691,13 @@ function exitFirstPerson() {
   hideTerminal();
   followId = null;
   viewMode = MODE_ORBIT;
-  onResize();
+  if (!renderer.xr.isPresenting) onResize();
   updateHUD();
+
+  // In VR, re-show the selection panel so user can pick another monkey
+  if (renderer.xr.isPresenting) {
+    setTimeout(() => createVRSelectionPanel(), 300);
+  }
 }
 
 // ── Terminal (real xterm.js reparented) ──────────────────────────────────────
@@ -1499,6 +2084,8 @@ function animate(timestamp) {
 
   updatePhysics(dt, now);
   updateCamera();
+  updateTerminalStation_tick();
+  updateVRLasers();
 
   // Show/hide monkeys in first person
   for (const [id, m] of Object.entries(monkeyState)) {
