@@ -480,7 +480,7 @@ function getWindowId() {
  */
 function createSession(cwd, existingId = null, isNew = false, opts = {}) {
   const { cols, rows } = measureTerminalSize();
-  const ws = createWebSocket({ id: existingId, cwd, isNew, worktree: opts.worktree, name: opts.name, planMode: opts.planMode, cols, rows });
+  const ws = createWebSocket({ id: existingId, cwd, isNew, worktree: opts.worktree, name: opts.name, planMode: opts.planMode, cols, rows, windowId: getWindowId() });
 
   // Promise that resolves when the session is fully initialized (terminal created)
   let resolveReady;
@@ -1228,12 +1228,16 @@ async function init() {
 
   // Auto-reload browser when server restarts (restart.sh, node --watch, etc.)
   initLiveReload({
+    windowId: getWindowId(),
     onMessage: async (msg) => {
       if (msg.type === 'theme') applyTheme(msg.css || '');
       if (msg.type === 'open-session') {
         // Server created a session (e.g. via /api/start-issue) — open a tab for it
-        // Dedup across windows: focused window claims immediately, others wait 50ms
-        if (msg.eventId) {
+        // If targeted to a specific window, only that window opens it
+        if (msg.windowId) {
+          if (msg.windowId !== getWindowId()) return;
+        } else if (msg.eventId) {
+          // Broadcast to all: focused window claims immediately, others wait 50ms
           if (!document.hasFocus()) await new Promise(r => setTimeout(r, 50));
           if (!WindowManager.tryClaimEvent(msg.eventId)) return;
         }

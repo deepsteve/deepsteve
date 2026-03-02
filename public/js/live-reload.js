@@ -6,14 +6,15 @@
  * On normal restart, the WS drops and we silently reconnect without refreshing.
  */
 
-export function initLiveReload({ onMessage, onReloadPending } = {}) {
+export function initLiveReload({ onMessage, onReloadPending, windowId } = {}) {
   let ws;
   let shouldReload = false;
   let intentionallyClosed = false;
 
   function connect() {
     const wsProto = location.protocol === 'https:' ? 'wss://' : 'ws://';
-    ws = new WebSocket(wsProto + location.host + '?action=reload');
+    const params = 'action=reload' + (windowId ? '&windowId=' + encodeURIComponent(windowId) : '');
+    ws = new WebSocket(wsProto + location.host + '?' + params);
 
     ws.onmessage = (e) => {
       try {
