@@ -169,13 +169,16 @@ function ChatPanel() {
       unsub = window.deepsteve.onAgentChatChanged((newChannels) => {
         // Check new messages for @mentions — fire browser notifications + panel badge
         let hasMention = false;
-        for (const ch of Object.values(newChannels || {})) {
+        for (const [chName, ch] of Object.entries(newChannels || {})) {
+          const lastRead = lastReadIdRef.current[chName] || 0;
           for (const msg of (ch.messages || [])) {
             if (!seenMessageIdsRef.current.has(msg.id)) {
               seenMessageIdsRef.current.add(msg.id);
-              notifyMention(msg, senderNameRef.current);
-              if (msg.sender !== senderNameRef.current) {
-                if (buildMentionPattern(senderNameRef.current).test(msg.text)) hasMention = true;
+              if (msg.id > lastRead) {
+                notifyMention(msg, senderNameRef.current);
+                if (msg.sender !== senderNameRef.current) {
+                  if (buildMentionPattern(senderNameRef.current).test(msg.text)) hasMention = true;
+                }
               }
             }
           }
