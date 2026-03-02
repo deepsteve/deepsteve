@@ -516,6 +516,13 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
     try {
       if (msg.type === 'session') {
         assignedId = msg.id;
+        // Reject unexpected duplicates: another window already has this session
+        if (msg.existingClients > 0 && !opts.allowDuplicate) {
+          console.log(`[createSession] Rejecting duplicate session ${msg.id} (${msg.existingClients} existing client(s))`);
+          ws.close();
+          resolveReady(null);
+          return;
+        }
         // Update reconnect URL to use the assigned session ID
         ws.setSessionId(msg.id);
         hasScrollback = msg.scrollback || false;
@@ -753,12 +760,23 @@ function switchTo(id) {
  * then selects the right tab once — avoiding the race where the last session
  * to connect wins.
  */
-function restoreSessions(sessionList) {
+function restoreSessions(sessionList, opts = {}) {
   const savedActiveId = ActiveTab.get();
+  const allowDuplicate = opts.allowDuplicate !== undefined ? opts.allowDuplicate : true;
   const promises = sessionList.map(({ id, cwd }) =>
-    createSession(cwd, id, false, { restoreActive: true })
+    createSession(cwd, id, false, { restoreActive: true, allowDuplicate })
   );
-  Promise.all(promises).then(() => {
+  Promise.all(promises).then((results) => {
+    // Clean up storage for sessions that were rejected (null result = duplicate)
+    results.forEach((resolvedId, i) => {
+      if (resolvedId === null) {
+        const { id } = sessionList[i];
+        console.log('[restore] Session', id, 'rejected (duplicate), cleaning up storage');
+        SessionStore.removeSession(getWindowId(), id);
+        TabSessions.remove(id);
+      }
+    });
+
     const target = savedActiveId && sessions.has(savedActiveId)
       ? savedActiveId
       : sessions.keys().next().value;
@@ -821,8 +839,10 @@ function killSession(id) {
   const session = sessions.get(id);
   if (!session) return;
 
-  // Tell server to kill the shell immediately (fire-and-forget)
-  fetch(`/api/shells/${id}`, { method: 'DELETE' }).catch(() => {});
+  // Tell server to close this client's connection to the shell.
+  // If no other clients are connected, the server kills the shell immediately.
+  // If other clients remain, the shell stays alive for them.
+  try { session.ws.sendJSON({ type: 'close-session' }); } catch {}
 
   if (session.resizeObserver) session.resizeObserver.disconnect();
   session.ws.close();
@@ -1237,7 +1257,7 @@ async function init() {
           if (!document.hasFocus()) await new Promise(r => setTimeout(r, 50));
           if (!WindowManager.tryClaimEvent(msg.eventId)) return;
         }
-        createSession(msg.cwd, msg.id, false, { name: msg.name });
+        createSession(msg.cwd, msg.id, false, { name: msg.name, allowDuplicate: true });
       }
     },
     onReloadPending: () => {
@@ -1304,7 +1324,7 @@ async function init() {
 
   // Handle sessions sent from other windows
   WindowManager.onSessionReceived((session) => {
-    createSession(session.cwd, session.id, false, { name: session.name });
+    createSession(session.cwd, session.id, false, { name: session.name, allowDuplicate: true });
   });
 
   WindowManager.startHeartbeat();
@@ -1351,7 +1371,7 @@ async function init() {
           for (const sess of claimed) {
             TabSessions.add(sess);
           }
-          restoreSessions(claimed);
+          restoreSessions(claimed, { allowDuplicate: false });
         } else {
           // Start fresh
           await promptRepoSession();
