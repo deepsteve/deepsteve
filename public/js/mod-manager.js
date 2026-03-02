@@ -395,7 +395,7 @@ async function _showMarketplaceModal() {
   // Filters
   const filters = document.createElement('div');
   filters.className = 'marketplace-filters';
-  const filterNames = ['All', 'Enabled', 'Panel', 'Fullscreen'];
+  const filterNames = ['All', 'Enabled', 'Panel', 'Fullscreen', 'Games'];
   for (const name of filterNames) {
     const pill = document.createElement('button');
     pill.className = 'filter-pill' + (name === 'All' ? ' active' : '');
@@ -432,12 +432,14 @@ async function _showMarketplaceModal() {
       if (q) {
         const name = (mod.name || mod.id || '').toLowerCase();
         const desc = (mod.description || '').toLowerCase();
-        if (!name.includes(q) && !desc.includes(q)) return false;
+        const tags = (mod.tags || []).join(' ').toLowerCase();
+        if (!name.includes(q) && !desc.includes(q) && !tags.includes(q)) return false;
       }
       // Category filter
       if (activeFilter === 'enabled') return enabledMods.has(mod.id);
       if (activeFilter === 'panel') return mod.display === 'panel';
       if (activeFilter === 'fullscreen') return mod.display !== 'panel';
+      if (activeFilter === 'games') return mod.tags && mod.tags.includes('games');
       return true;
     });
 

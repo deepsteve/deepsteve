@@ -4,6 +4,7 @@
   "minDeepsteveVersion": "0.4.0",
   "description": "3D go-kart racing with your Claude sessions",
   "enabledByDefault": false,
+  "tags": ["games"],
   "entry": "index.html",
   "toolbar": {
     "label": "Go Karts"

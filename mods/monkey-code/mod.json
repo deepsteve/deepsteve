@@ -5,6 +5,7 @@
   "description": "A monkey tagging game in WebXR. Works with a Mac running DeepSteve, connected over HTTPS. See the <a href=\"https://github.com/deepsteve/deepsteve\">README</a> for setup instructions.",
   "experimental": true,
   "enabledByDefault": false,
+  "tags": ["games"],
   "entry": "index.html",
   "toolbar": {
     "label": "Monkey Code"
