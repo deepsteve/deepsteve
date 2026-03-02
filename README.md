@@ -30,7 +30,7 @@ Run multiple AI agent sessions side-by-side in your browser, each with full term
 - **Agent coordination** - MCP tools let sessions chat, share tasks, and coordinate work
 - **Runs as a daemon** - Always available in the background on your Mac
 - **Themes** - Customize the UI with CSS files in `~/.deepsteve/themes/`
-- **Mods** - Extend deepsteve with mods for task tracking, screenshots, agent chat, and more
+- **Mods** - Extend deepsteve with mods for task tracking, agent chat, browser reflection (yes, deepsteve can see itself), or [create your own](docs/mods.md)
 
 ## Quick Install
 
@@ -90,17 +90,19 @@ launchctl list | grep deepsteve        # check status
 
 ## Running on Meta Quest (WebXR)
 
-If you want to run DeepSteve on a Meta Quest and use any WebXR mods (like Monkey Code), you'll need to work around the fact that WebXR only allows secure contexts.
+WebXR requires a secure context (HTTPS). DeepSteve has built-in HTTPS support for this:
 
-1. Start the server bound to all interfaces:
+1. Start the server with HTTPS enabled, bound to all interfaces:
 
 ```bash
-cd ~/.deepsteve && node server.js --bind 0.0.0.0
+cd ~/.deepsteve && node server.js --bind 0.0.0.0 --https
 ```
 
-2. On your Quest's browser, go to `chrome://flags/#unsafely-treat-insecure-origin-as-secure` and add your laptop's address (e.g. `http://192.168.1.100:3000`) to the list.
+2. Navigate to `https://<your-laptop-ip>:3443` on the Quest browser. The server logs will show the exact URL to use.
 
-3. Navigate to `http://your-laptops-ip-address:3000` on the Quest.
+3. On first connect you'll see a certificate warning — accept it to proceed. (Install [mkcert](https://github.com/FiloSottile/mkcert) on your laptop for locally-trusted certificates with no warnings.)
+
+Certificates are auto-generated at startup and stored in `~/.deepsteve/certs/`. They regenerate automatically when your LAN IP changes.
 
 ## Contributing
 
