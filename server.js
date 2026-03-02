@@ -824,6 +824,10 @@ app.delete('/api/shells/:id', (req, res) => {
   // Check active shells
   if (shells.has(id)) {
     const entry = shells.get(id);
+    // Refuse to kill if other clients are connected (unless force=1)
+    if (!req.query.force && entry.clients.size > 0) {
+      return res.status(409).json({ error: 'Session has connected clients', clients: entry.clients.size });
+    }
     if (entry.killTimer) {
       clearTimeout(entry.killTimer);
       entry.killTimer = null;
@@ -1139,11 +1143,12 @@ wss.on('connection', (ws, req) => {
     clearTimeout(entry.killTimer);
     entry.killTimer = null;
   }
+  const existingClients = entry.clients.size;
   entry.clients.add(ws);
   if (windowId) entry.windowId = windowId;
   const hasScrollback = entry.scrollback && entry.scrollback.length > 0;
-  log(`[WS] Sending session response: id=${id}, restored=${entry.restored || false}, scrollback=${hasScrollback ? entry.scrollbackSize + 'B' : 'none'}`);
-  ws.send(JSON.stringify({ type: 'session', id, restored: entry.restored || false, cwd: entry.cwd, name: entry.name || null, scrollback: hasScrollback }));
+  log(`[WS] Sending session response: id=${id}, restored=${entry.restored || false}, scrollback=${hasScrollback ? entry.scrollbackSize + 'B' : 'none'}, existingClients=${existingClients}`);
+  ws.send(JSON.stringify({ type: 'session', id, restored: entry.restored || false, cwd: entry.cwd, name: entry.name || null, scrollback: hasScrollback, existingClients }));
 
   // Send buffered scrollback so the client can render the terminal immediately
   if (hasScrollback) {
@@ -1160,6 +1165,19 @@ wss.on('connection', (ws, req) => {
       if (parsed.type === 'redraw') { entry.shell.write('\x0c'); return; } // Ctrl+L
       if (parsed.type === 'initialPrompt') { entry.initialPrompt = parsed.text; return; }
       if (parsed.type === 'rename') { entry.name = parsed.name || null; return; }
+      if (parsed.type === 'close-session') {
+        entry.clients.delete(ws);
+        ws.close();
+        if (entry.clients.size === 0) {
+          log(`[WS] close-session: last client detached from ${id}, killing shell`);
+          killShell(entry, id);
+          shells.delete(id);
+          saveState();
+        } else {
+          log(`[WS] close-session: client detached from ${id}, ${entry.clients.size} client(s) remain`);
+        }
+        return;
+      }
     } catch {}
     // User sent input - update activity and clear waiting state
     entry.lastActivity = Date.now();
@@ -1172,6 +1190,7 @@ wss.on('connection', (ws, req) => {
   });
 
   ws.on('close', () => {
+    if (!shells.has(id)) return; // already killed by close-session
     entry.clients.delete(ws);
     if (entry.clients.size === 0) {
       // Grace period to allow reconnect on refresh
