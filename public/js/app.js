@@ -211,6 +211,13 @@ window.__deepsteve = {
     const s = sessions.get(id);
     return s ? s.term : null;
   },
+  // Subscribe to raw terminal output data for a session. Returns unsubscribe function.
+  _dataListeners: new Map(),
+  onSessionData(id, callback) {
+    if (!this._dataListeners.has(id)) this._dataListeners.set(id, new Set());
+    this._dataListeners.get(id).add(callback);
+    return () => { this._dataListeners.get(id)?.delete(callback); };
+  },
 };
 
 // Sessions dropdown
@@ -482,6 +489,7 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
   // Buffer terminal data that arrives before the terminal is created
   let pendingData = [];
   let hasScrollback = false;
+  let assignedId = null; // session ID assigned by server
 
   ws.onmessage = (e) => {
     // Try to parse as JSON control message
@@ -493,6 +501,11 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
       const session = [...sessions.values()].find(s => s.ws === ws);
       if (session) {
         session.term.write(e.data);
+        // Forward to data listeners (e.g. VR mirror terminal)
+        if (assignedId) {
+          const listeners = window.__deepsteve._dataListeners?.get(assignedId);
+          if (listeners) for (const cb of listeners) try { cb(e.data); } catch {}
+        }
       } else {
         pendingData.push(e.data);
       }
@@ -502,6 +515,7 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
     // Valid JSON - handle control messages (never write to terminal)
     try {
       if (msg.type === 'session') {
+        assignedId = msg.id;
         // Update reconnect URL to use the assigned session ID
         ws.setSessionId(msg.id);
         hasScrollback = msg.scrollback || false;

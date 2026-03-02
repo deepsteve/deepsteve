@@ -1436,9 +1436,9 @@ function showTermPlaceholder(msg, color = '#00ff88') {
   termStationTexture.needsUpdate = true;
 }
 
-// Mirror terminal: one reusable offscreen xterm + CanvasAddon, no extra WebSocket.
-// Data comes from the real terminal via onWriteParsed hook.
-let _mirrorDisposable = null; // onWriteParsed subscription to dispose when switching
+// Mirror terminal: one reusable offscreen xterm + CanvasAddon.
+// Data piped from parent's onSessionData bridge (raw WS output forwarding).
+let _mirrorUnsub = null; // unsubscribe function for data listener
 
 function ensureMirrorTerminal() {
   if (termMirrorTerm) return;
@@ -1466,8 +1466,8 @@ function ensureMirrorTerminal() {
 function updateTerminalStation(sessionId) {
   termLog.length = 0;
 
-  // Unsubscribe from previous terminal's output
-  if (_mirrorDisposable) { _mirrorDisposable.dispose(); _mirrorDisposable = null; }
+  // Unsubscribe from previous session's data
+  if (_mirrorUnsub) { _mirrorUnsub(); _mirrorUnsub = null; }
 
   termStationSessionId = sessionId;
   if (!sessionId) {
@@ -1493,32 +1493,19 @@ function updateTerminalStation(sessionId) {
       return;
     }
 
-    // Clear mirror and seed with current buffer content
+    // Seed mirror with current buffer content
     termMirrorTerm.reset();
     const buf = srcTerm.buffer.active;
+    const lines = [];
     for (let i = 0; i < buf.length; i++) {
       const line = buf.getLine(i);
-      if (line) {
-        const text = line.translateToString(true);
-        termMirrorTerm.write(text + (i < buf.length - 1 ? '\r\n' : ''));
-      }
+      if (line) lines.push(line.translateToString(true));
     }
+    if (lines.length) termMirrorTerm.write(lines.join('\r\n'));
 
-    // Subscribe to future output from the real terminal
-    _mirrorDisposable = srcTerm.onWriteParsed(() => {
-      // Re-sync last N visible rows on each write
-      const mb = termMirrorTerm.buffer.active;
-      const sb = srcTerm.buffer.active;
-      // Just write the raw data — but onWriteParsed doesn't give us the data.
-      // Instead, snapshot visible rows from source terminal.
-      termMirrorTerm.reset();
-      for (let i = 0; i < sb.length; i++) {
-        const line = sb.getLine(i);
-        if (line) {
-          const text = line.translateToString(true);
-          termMirrorTerm.write(text + (i < sb.length - 1 ? '\r\n' : ''));
-        }
-      }
+    // Subscribe to raw output data — piped from parent's WS handler
+    _mirrorUnsub = bridge.onSessionData(sessionId, (data) => {
+      termMirrorTerm.write(data);
     });
 
     termStationTexture.image = termMirrorCanvas;
