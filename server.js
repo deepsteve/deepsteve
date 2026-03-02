@@ -823,7 +823,7 @@ app.post('/api/mods/uninstall', (req, res) => {
 
 app.get('/api/shells', (req, res) => {
   const active = [...shells.entries()].map(([id, entry]) => ({ id, pid: entry.shell.pid, cwd: entry.cwd, name: entry.name || null, status: 'active', lastActivity: entry.lastActivity || null }));
-  const saved = Object.entries(savedState).map(([id, entry]) => ({ id, cwd: entry.cwd, name: entry.name || null, status: 'saved', lastActivity: entry.lastActivity || null }));
+  const saved = Object.entries(savedState).map(([id, entry]) => ({ id, cwd: entry.cwd, name: entry.name || null, status: entry.closed ? 'closed' : 'saved', lastActivity: entry.lastActivity || null }));
   res.json({ shells: [...active, ...saved] });
 });
 
@@ -851,17 +851,31 @@ app.delete('/api/shells/:id', (req, res) => {
       clearTimeout(entry.killTimer);
       entry.killTimer = null;
     }
+    savedState[id] = {
+      cwd: entry.cwd, claudeSessionId: entry.claudeSessionId,
+      worktree: entry.worktree || null, name: entry.name || null,
+      lastActivity: entry.lastActivity || null, createdAt: entry.createdAt || null,
+      closed: true
+    };
     killShell(entry, id);
     shells.delete(id);
-    log(`Killed active shell ${id}`);
+    log(`Killed active shell ${id}, preserved as closed`);
     saveState();
     return res.json({ killed: id, status: 'active' });
   }
 
-  // Check saved state
+  // Check saved state — already-closed sessions are permanently deleted
   if (savedState[id]) {
-    delete savedState[id];
-    log(`Removed saved session ${id}`);
+    const wasClosed = savedState[id].closed;
+    if (wasClosed) {
+      delete savedState[id];
+      log(`Permanently removed closed session ${id}`);
+      saveState();
+      return res.json({ killed: id, status: 'closed' });
+    }
+    // Non-closed saved session: mark as closed instead of deleting
+    savedState[id].closed = true;
+    log(`Marked saved session ${id} as closed`);
     saveState();
     return res.json({ killed: id, status: 'saved' });
   }
@@ -1189,6 +1203,12 @@ wss.on('connection', (ws, req) => {
         ws.close();
         if (entry.clients.size === 0) {
           log(`[WS] close-session: last client detached from ${id}, killing shell`);
+          savedState[id] = {
+            cwd: entry.cwd, claudeSessionId: entry.claudeSessionId,
+            worktree: entry.worktree || null, name: entry.name || null,
+            lastActivity: entry.lastActivity || null, createdAt: entry.createdAt || null,
+            closed: true
+          };
           killShell(entry, id);
           shells.delete(id);
           saveState();
