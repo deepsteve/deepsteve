@@ -14,6 +14,15 @@ done
 
 # Re-exec in background if not already
 if [[ "$1" != "--bg" ]]; then
+    # If --refresh, ask browser for confirmation before restarting
+    if [ "$REFRESH" = 1 ]; then
+        RESULT=$(curl -s -m 120 -X POST http://localhost:3000/api/request-restart 2>/dev/null | grep -o '"result":"[^"]*"' | cut -d'"' -f4)
+        if [ "$RESULT" != "confirmed" ]; then
+            echo "Restart cancelled."
+            exit 0
+        fi
+    fi
+
     nohup "$0" --bg "$SCRIPT_DIR" $([ "$REFRESH" = 1 ] && echo --refresh) >/dev/null 2>&1 &
     disown
     echo "Restarting in background..."

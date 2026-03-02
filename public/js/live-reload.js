@@ -5,16 +5,17 @@
  * { type: 'reload' } during shutdown only when restart.sh --refresh is used.
  * On normal restart, the WS drops and we silently reconnect without refreshing.
  *
- * When a reload message arrives, we show a browser confirmation modal via
- * onShowReloadConfirm (returns Promise<boolean>). The actual reload is deferred
- * until the user confirms. Session WebSockets reconnect normally while the
- * user decides — __deepsteveReloadPending is only set after confirmation.
+ * Restart confirmation flow (restart.sh --refresh):
+ * 1. Server sends { type: 'confirm-restart' } BEFORE restarting
+ * 2. Browser shows modal via onShowRestartConfirm (returns Promise<boolean>)
+ * 3. Browser sends { type: 'restart-confirmed' } or { type: 'restart-declined' }
+ * 4. If confirmed, server proceeds with restart. Browser auto-refreshes on reconnect.
  */
 
-export function initLiveReload({ onMessage, onShowReloadConfirm, windowId } = {}) {
+export function initLiveReload({ onMessage, onShowRestartConfirm, windowId } = {}) {
   let ws;
   let intentionallyClosed = false;
-  let userDecisionPromise = null;
+  let restartConfirmed = false;
 
   function connect() {
     const wsProto = location.protocol === 'https:' ? 'wss://' : 'ws://';
@@ -24,16 +25,26 @@ export function initLiveReload({ onMessage, onShowReloadConfirm, windowId } = {}
     ws.onmessage = (e) => {
       try {
         const msg = JSON.parse(e.data);
-        if (msg.type === 'reload') {
-          // If a decision is already pending, ignore duplicate reload messages
-          if (userDecisionPromise) return;
-          // Show confirmation modal — don't set __deepsteveReloadPending yet
-          // so session WebSockets reconnect normally while user decides
-          if (onShowReloadConfirm) {
-            userDecisionPromise = onShowReloadConfirm();
+        if (msg.type === 'confirm-restart') {
+          // Server is asking for restart confirmation (pre-restart)
+          if (onShowRestartConfirm) {
+            onShowRestartConfirm().then(confirmed => {
+              if (confirmed) {
+                restartConfirmed = true;
+                ws.send(JSON.stringify({ type: 'restart-confirmed' }));
+              } else {
+                ws.send(JSON.stringify({ type: 'restart-declined' }));
+              }
+            });
           } else {
-            // No confirm callback — auto-confirm (backwards compat)
-            userDecisionPromise = Promise.resolve(true);
+            // No confirm callback — auto-confirm
+            restartConfirmed = true;
+            ws.send(JSON.stringify({ type: 'restart-confirmed' }));
+          }
+        } else if (msg.type === 'reload') {
+          // Legacy reload message (during shutdown) — auto-refresh if restart was confirmed
+          if (restartConfirmed) {
+            window.__deepsteveReloadPending = true;
           }
         } else if (onMessage) {
           onMessage(msg);
@@ -43,19 +54,11 @@ export function initLiveReload({ onMessage, onShowReloadConfirm, windowId } = {}
 
     ws.onclose = () => {
       if (intentionallyClosed) return;
-      if (userDecisionPromise) {
-        // User is deciding — wait for their choice
-        userDecisionPromise.then(confirmed => {
-          userDecisionPromise = null;
-          if (confirmed) {
-            console.log('[live-reload] user confirmed refresh, waiting for restart...');
-            window.__deepsteveReloadPending = true;
-            pollUntilReady();
-          } else {
-            console.log('[live-reload] user skipped refresh, reconnecting silently...');
-            reconnectSilently();
-          }
-        });
+      if (restartConfirmed) {
+        // User already confirmed restart — go straight to polling for server
+        console.log('[live-reload] restart confirmed, waiting for server to come back...');
+        window.__deepsteveReloadPending = true;
+        pollUntilReady();
       } else {
         console.log('[live-reload] server went away, reconnecting silently...');
         reconnectSilently();

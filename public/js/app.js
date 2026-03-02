@@ -851,24 +851,24 @@ function showCloseConfirmDialog() {
   });
 }
 
-function showReloadConfirmDialog() {
+function showRestartConfirmDialog() {
   return new Promise(resolve => {
     const overlay = document.createElement('div');
     overlay.className = 'modal-overlay';
     overlay.innerHTML = `
       <div class="modal">
-        <h2>Refresh DeepSteve?</h2>
-        <p style="font-size:13px;color:var(--ds-text-secondary);margin-bottom:16px;">Refreshing will reload the page and interrupt any running agents. Sessions will be restored on reconnect.</p>
+        <h2>Restart DeepSteve?</h2>
+        <p style="font-size:13px;color:var(--ds-text-secondary);margin-bottom:16px;">This will restart the server and reload the page. Running agents will be interrupted but sessions will be restored.</p>
         <div class="modal-buttons">
-          <button class="btn-secondary" id="reload-confirm-cancel">Skip refresh</button>
-          <button class="btn-primary" id="reload-confirm-ok">Refresh</button>
+          <button class="btn-secondary" id="restart-confirm-cancel">Cancel</button>
+          <button class="btn-primary" id="restart-confirm-ok">Restart</button>
         </div>
       </div>`;
     document.body.appendChild(overlay);
 
     const cleanup = (result) => { overlay.remove(); resolve(result); };
-    overlay.querySelector('#reload-confirm-cancel').onclick = () => cleanup(false);
-    overlay.querySelector('#reload-confirm-ok').onclick = () => cleanup(true);
+    overlay.querySelector('#restart-confirm-cancel').onclick = () => cleanup(false);
+    overlay.querySelector('#restart-confirm-ok').onclick = () => cleanup(true);
     overlay.onclick = (e) => { if (e.target === overlay) cleanup(false); };
     const onKey = (e) => {
       if (e.key === 'Enter') { e.preventDefault(); document.removeEventListener('keydown', onKey); cleanup(true); }
@@ -1307,7 +1307,7 @@ async function init() {
         createSession(msg.cwd, msg.id, false, { name: msg.name, allowDuplicate: true });
       }
     },
-    onShowReloadConfirm: () => showReloadConfirmDialog()
+    onShowRestartConfirm: () => showRestartConfirmDialog()
   });
 
   // Load settings before creating any terminals (prevents color flash, applies title length)
