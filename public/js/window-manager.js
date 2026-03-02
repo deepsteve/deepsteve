@@ -14,14 +14,6 @@ const LIVE_WINDOW_STALE_MS = 15000;
 let channel = null;
 let heartbeatTimer = null;
 let currentWindowId = null;
-let uiChannel = null;
-const claimedEvents = new Set();
-
-function addClaimedEvent(eventId) {
-  claimedEvents.add(eventId);
-  setTimeout(() => claimedEvents.delete(eventId), 10000);
-}
-
 // Live window tracking — continuously updated from BroadcastChannel messages
 // Key: windowId, Value: { windowId, sessions: [{id, name}], lastSeen }
 const liveWindows = new Map();
@@ -207,23 +199,6 @@ export const WindowManager = {
       channel.close();
       channel = null;
     }
-  },
-
-  /**
-   * Try to claim a UI event so only one window handles it.
-   * Returns true if this window won the claim.
-   */
-  tryClaimEvent(eventId) {
-    if (!uiChannel) {
-      uiChannel = new BroadcastChannel('deepsteve-ui-events');
-      uiChannel.onmessage = (e) => {
-        if (e.data.type === 'claimed') addClaimedEvent(e.data.eventId);
-      };
-    }
-    if (claimedEvents.has(eventId)) return false;
-    addClaimedEvent(eventId);
-    uiChannel.postMessage({ type: 'claimed', eventId });
-    return true;
   },
 
   /**

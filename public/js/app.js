@@ -1296,14 +1296,7 @@ async function init() {
       if (msg.type === 'theme') applyTheme(msg.css || '');
       if (msg.type === 'open-session') {
         // Server created a session (e.g. via /api/start-issue) — open a tab for it
-        // If targeted to a specific window, only that window opens it
-        if (msg.windowId) {
-          if (msg.windowId !== getWindowId()) return;
-        } else if (msg.eventId) {
-          // Broadcast to all: focused window claims immediately, others wait 50ms
-          if (!document.hasFocus()) await new Promise(r => setTimeout(r, 50));
-          if (!WindowManager.tryClaimEvent(msg.eventId)) return;
-        }
+        if (msg.windowId && msg.windowId !== getWindowId()) return;
         createSession(msg.cwd, msg.id, false, { name: msg.name, allowDuplicate: true });
       }
     },
