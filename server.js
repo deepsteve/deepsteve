@@ -1,8 +1,9 @@
 const express = require('express');
+const https = require('https');
 const pty = require('node-pty');
 const { WebSocketServer } = require('ws');
 const { randomUUID } = require('crypto');
-const { execSync, exec } = require('child_process');
+const { execSync, execFileSync, exec } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
@@ -21,6 +22,22 @@ function parseBindAddress() {
 }
 
 const BIND = parseBindAddress() || process.env.DEEPSTEVE_BIND || '127.0.0.1';
+
+// HTTPS support (opt-in)
+function parseCLIFlag(name) {
+  return process.argv.includes('--' + name);
+}
+function parseCLIValue(name) {
+  const args = process.argv.slice(2);
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === '--' + name && args[i + 1]) return args[i + 1];
+    if (args[i].startsWith('--' + name + '=')) return args[i].slice(name.length + 3);
+  }
+  return null;
+}
+const HTTPS_ENABLED = parseCLIFlag('https') || process.env.DEEPSTEVE_HTTPS === '1';
+const HTTPS_PORT = parseInt(parseCLIValue('https-port') || process.env.DEEPSTEVE_HTTPS_PORT) || 3443;
+const CERTS_DIR = path.join(os.homedir(), '.deepsteve', 'certs');
 
 if (!net.isIP(BIND)) {
   console.error(`Error: '${BIND}' is not a valid IP address. Use --bind <address> with a valid IPv4 or IPv6 address.`);
@@ -129,6 +146,94 @@ function getShellProfilePath() {
   return p;
 }
 
+// --- HTTPS certificate management ---
+
+function getLanAddresses() {
+  const ifaces = os.networkInterfaces();
+  const addrs = new Set(['localhost', '127.0.0.1']);
+  for (const [, entries] of Object.entries(ifaces)) {
+    for (const entry of entries) {
+      if (entry.family !== 'IPv4') continue;
+      if (BIND === '0.0.0.0' || BIND === entry.address) {
+        addrs.add(entry.address);
+      }
+    }
+  }
+  return [...addrs];
+}
+
+function certsMatchCurrentIPs() {
+  const metaFile = path.join(CERTS_DIR, 'meta.json');
+  try {
+    const meta = JSON.parse(fs.readFileSync(metaFile, 'utf8'));
+    const currentIPs = getLanAddresses().sort().join(',');
+    const savedIPs = (meta.sans || []).sort().join(',');
+    if (currentIPs !== savedIPs) return false;
+    // Check if cert files exist
+    if (!fs.existsSync(path.join(CERTS_DIR, 'key.pem'))) return false;
+    if (!fs.existsSync(path.join(CERTS_DIR, 'cert.pem'))) return false;
+    // Check expiry — regenerate if within 7 days
+    if (meta.expires && Date.now() > meta.expires - 7 * 24 * 60 * 60 * 1000) return false;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function ensureCerts() {
+  if (certsMatchCurrentIPs()) {
+    const meta = JSON.parse(fs.readFileSync(path.join(CERTS_DIR, 'meta.json'), 'utf8'));
+    log(`HTTPS: Using existing certificates (${meta.method}, expires ${new Date(meta.expires).toISOString().slice(0, 10)})`);
+    return {
+      key: fs.readFileSync(path.join(CERTS_DIR, 'key.pem')),
+      cert: fs.readFileSync(path.join(CERTS_DIR, 'cert.pem'))
+    };
+  }
+
+  fs.mkdirSync(CERTS_DIR, { recursive: true });
+  const sans = getLanAddresses();
+  log(`HTTPS: Generating certificates for: ${sans.join(', ')}`);
+
+  // Try mkcert first (locally-trusted, no browser warnings)
+  try {
+    execFileSync('mkcert', [
+      '-key-file', path.join(CERTS_DIR, 'key.pem'),
+      '-cert-file', path.join(CERTS_DIR, 'cert.pem'),
+      ...sans
+    ], { stdio: 'pipe', timeout: 15000 });
+    const expires = Date.now() + 365 * 24 * 60 * 60 * 1000; // mkcert default ~2y, estimate 1y
+    fs.writeFileSync(path.join(CERTS_DIR, 'meta.json'), JSON.stringify({ method: 'mkcert', sans, expires, generated: Date.now() }));
+    fs.chmodSync(path.join(CERTS_DIR, 'key.pem'), 0o600);
+    log('HTTPS: Certificates generated with mkcert (locally-trusted, no browser warnings)');
+    return {
+      key: fs.readFileSync(path.join(CERTS_DIR, 'key.pem')),
+      cert: fs.readFileSync(path.join(CERTS_DIR, 'cert.pem'))
+    };
+  } catch (e) {
+    log(`HTTPS: mkcert unavailable (${e.message.split('\n')[0]}), falling back to selfsigned`);
+  }
+
+  // Fallback: selfsigned package (self-signed, browser warning on first connect)
+  const selfsigned = require('selfsigned');
+  const altNames = sans.map(s => {
+    if (net.isIP(s)) return { type: 7, ip: s };
+    return { type: 2, value: s };
+  });
+  const attrs = [{ name: 'commonName', value: 'deepsteve' }];
+  const pems = await selfsigned.generate(attrs, {
+    days: 365,
+    keySize: 2048,
+    extensions: [{ name: 'subjectAltName', altNames }]
+  });
+  const expires = Date.now() + 365 * 24 * 60 * 60 * 1000;
+  fs.writeFileSync(path.join(CERTS_DIR, 'key.pem'), pems.private);
+  fs.writeFileSync(path.join(CERTS_DIR, 'cert.pem'), pems.cert);
+  fs.writeFileSync(path.join(CERTS_DIR, 'meta.json'), JSON.stringify({ method: 'selfsigned', sans, expires, generated: Date.now() }));
+  fs.chmodSync(path.join(CERTS_DIR, 'key.pem'), 0o600);
+  log('HTTPS: Certificates generated with selfsigned (self-signed, browser will show warning on first connect)');
+  return { key: pems.private, cert: pems.cert };
+}
+
 // --- Theme system ---
 const THEMES_DIR = path.join(os.homedir(), '.deepsteve', 'themes');
 const MAX_THEME_SIZE = 64 * 1024; // 64KB max per theme file
@@ -169,6 +274,11 @@ function broadcastTheme(name, css) {
   for (const client of wss.clients) {
     if (client.readyState === 1) { // WebSocket.OPEN
       client.send(msg);
+    }
+  }
+  if (httpsWss) {
+    for (const client of httpsWss.clients) {
+      if (client.readyState === 1) client.send(msg);
     }
   }
   // Also send to live-reload clients so tabs with no sessions still get theme updates
@@ -458,6 +568,7 @@ async function shutdown(signal) {
       // Remove from wss.clients so wss.close() won't terminate() this
       // connection (terminate() is a hard TCP drop that can discard data).
       wss.clients.delete(ws);
+      if (httpsWss) httpsWss.clients.delete(ws);
     }
     reloadClients.clear();
   }
@@ -468,6 +579,8 @@ async function shutdown(signal) {
   // then get disconnected again when the process exits (causing a double reconnect).
   server.close();
   wss.close();
+  if (httpsServer) httpsServer.close();
+  if (httpsWss) httpsWss.close();
 
   // Disconnect all client WebSockets so no user input can reach PTYs during shutdown.
   // Clients will show "Reconnecting..." overlay and block all keystrokes.
@@ -1035,12 +1148,38 @@ app.post('/api/start-issue', (req, res) => {
 });
 
 const server = app.listen(PORT, BIND, () => {
-  log(`Server listening on ${BIND}:${PORT}`);
+  log(`HTTP server listening on ${BIND}:${PORT}`);
 });
 const shells = new Map();
 const wss = new WebSocketServer({ server });
 
-wss.on('connection', (ws, req) => {
+// HTTPS server (created async if enabled)
+let httpsServer = null;
+let httpsWss = null;
+
+if (HTTPS_ENABLED) {
+  (async () => {
+    try {
+      const certs = await ensureCerts();
+      httpsServer = https.createServer({ key: certs.key, cert: certs.cert }, app);
+      httpsWss = new WebSocketServer({ server: httpsServer });
+      httpsWss.on('connection', handleWsConnection);
+      httpsServer.listen(HTTPS_PORT, BIND, () => {
+        const addrs = getLanAddresses().filter(a => a !== 'localhost' && a !== '127.0.0.1');
+        log(`HTTPS server listening on ${BIND}:${HTTPS_PORT} (WARNING: no authentication)`);
+        if (addrs.length > 0) {
+          log(`HTTPS: Connect from Quest/LAN at https://${addrs[0]}:${HTTPS_PORT}`);
+        }
+      });
+    } catch (e) {
+      console.error('Failed to start HTTPS server:', e.message);
+    }
+  })();
+}
+
+wss.on('connection', handleWsConnection);
+
+function handleWsConnection(ws, req) {
   const url = new URL(req.url, 'http://localhost');
   const action = url.searchParams.get('action');
   if (action === 'list') {
@@ -1230,13 +1369,18 @@ wss.on('connection', (ws, req) => {
       }, 30000);
     }
   });
-});
+}
 
 // Broadcast a JSON message to all connected browser WebSocket clients
 function broadcast(msg) {
   const data = typeof msg === 'string' ? msg : JSON.stringify(msg);
   for (const client of wss.clients) {
     if (client.readyState === 1) client.send(data);
+  }
+  if (httpsWss) {
+    for (const client of httpsWss.clients) {
+      if (client.readyState === 1) client.send(data);
+    }
   }
 }
 
