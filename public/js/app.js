@@ -851,6 +851,33 @@ function showCloseConfirmDialog() {
   });
 }
 
+function showReloadConfirmDialog() {
+  return new Promise(resolve => {
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay';
+    overlay.innerHTML = `
+      <div class="modal">
+        <h2>Refresh DeepSteve?</h2>
+        <p style="font-size:13px;color:var(--ds-text-secondary);margin-bottom:16px;">Refreshing will reload the page and interrupt any running agents. Sessions will be restored on reconnect.</p>
+        <div class="modal-buttons">
+          <button class="btn-secondary" id="reload-confirm-cancel">Skip refresh</button>
+          <button class="btn-primary" id="reload-confirm-ok">Refresh</button>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+
+    const cleanup = (result) => { overlay.remove(); resolve(result); };
+    overlay.querySelector('#reload-confirm-cancel').onclick = () => cleanup(false);
+    overlay.querySelector('#reload-confirm-ok').onclick = () => cleanup(true);
+    overlay.onclick = (e) => { if (e.target === overlay) cleanup(false); };
+    const onKey = (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); document.removeEventListener('keydown', onKey); cleanup(true); }
+      if (e.key === 'Escape') { e.preventDefault(); document.removeEventListener('keydown', onKey); cleanup(false); }
+    };
+    document.addEventListener('keydown', onKey);
+  });
+}
+
 function killSession(id) {
   const session = sessions.get(id);
   if (!session) return;
@@ -1280,9 +1307,7 @@ async function init() {
         createSession(msg.cwd, msg.id, false, { name: msg.name, allowDuplicate: true });
       }
     },
-    onReloadPending: () => {
-      document.querySelectorAll('.terminal-container').forEach(el => el.classList.add('refreshing'));
-    }
+    onShowReloadConfirm: () => showReloadConfirmDialog()
   });
 
   // Load settings before creating any terminals (prevents color flash, applies title length)
