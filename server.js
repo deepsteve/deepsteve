@@ -418,7 +418,12 @@ try {
 
 // Save state on shutdown
 let stateFrozen = false;  // Set during shutdown to prevent onExit handlers from overwriting
-function saveState() {
+let stateDirty = false;
+let saveTimer = null;
+
+function writeStateNow() {
+  stateDirty = false;
+  if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
   if (stateFrozen) {
     log(`[saveState] BLOCKED — state frozen during shutdown`);
     return;
@@ -438,12 +443,22 @@ function saveState() {
   }
 }
 
-// Periodic state save to survive crashes (saveState() is normally only triggered on SIGTERM)
-setInterval(() => saveState(), 30000);
+// Debounced wrapper — coalesces rapid-fire events into a single write after 2s
+function saveState() {
+  stateDirty = true;
+  if (saveTimer) return;
+  saveTimer = setTimeout(() => {
+    saveTimer = null;
+    writeStateNow();
+  }, 2000);
+}
+
+// Periodic state save to survive crashes — only writes when state has actually changed
+setInterval(() => { if (stateDirty) writeStateNow(); }, 30000);
 
 async function shutdown(signal) {
   log(`Received ${signal}, saving state...`);
-  saveState();
+  writeStateNow();
 
   // If .reload flag exists, tell all browsers to refresh after restart
   const shouldReload = fs.existsSync(RELOAD_FLAG);
