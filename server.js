@@ -451,9 +451,14 @@ async function shutdown(signal) {
     try { fs.unlinkSync(RELOAD_FLAG); } catch {}
     for (const ws of reloadClients) {
       try { ws.send(JSON.stringify({ type: 'reload' })); } catch {}
+      // Graceful close sends the buffered reload message then a close frame,
+      // guaranteeing the browser receives onmessage before onclose.
+      try { ws.close(); } catch {}
+      // Remove from wss.clients so wss.close() won't terminate() this
+      // connection (terminate() is a hard TCP drop that can discard data).
+      wss.clients.delete(ws);
     }
-    // Give the reload message time to flush before tearing down connections
-    await new Promise((r) => setTimeout(r, 200));
+    reloadClients.clear();
   }
   stateFrozen = true;  // Prevent onExit/onClose handlers from overwriting state file
 
