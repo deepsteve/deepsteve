@@ -738,11 +738,14 @@ function switchTo(id) {
     clearNotification(id);
 
     requestAnimationFrame(() => {
-      fitTerminal(session.term, session.fit, session.ws);
-      session.term.focus();
-      requestAnimationFrame(() => {
-        session.scrollControl.scrollToBottom(); // clears suppressAutoScroll
-      });
+      try {
+        fitTerminal(session.term, session.fit, session.ws);
+      } finally {
+        session.term.focus();
+        requestAnimationFrame(() => {
+          session.scrollControl.scrollToBottom(); // clears suppressAutoScroll
+        });
+      }
     });
   }
 }

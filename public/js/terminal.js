@@ -80,6 +80,7 @@ export function setupTerminalIO(term, ws, { onUserInput, container } = {}) {
   // During transitions (tab switch, reconnect, scrollback replay), suppress
   // auto-scroll from onWriteParsed and wheel state tracking to prevent races.
   let suppressAutoScroll = false;
+  let suppressTimer = null;
 
   // Generation counter: bumped on every programmatic scrollToBottom().
   // Wheel rAF callbacks capture the generation when scheduled and ignore
@@ -158,6 +159,10 @@ export function setupTerminalIO(term, ws, { onUserInput, container } = {}) {
     scrollToBottom,
     setSuppressAutoScroll(value) {
       suppressAutoScroll = value;
+      clearTimeout(suppressTimer);
+      if (value) {
+        suppressTimer = setTimeout(() => { suppressAutoScroll = false; }, 500);
+      }
     },
     /** Re-sync viewport to bottom if user hasn't intentionally scrolled up. */
     nudgeToBottom() {
