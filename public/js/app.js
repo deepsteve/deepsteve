@@ -13,6 +13,7 @@ import { LayoutManager } from './layout-manager.js';
 import { initLiveReload } from './live-reload.js';
 import { ModManager } from './mod-manager.js';
 import { initFileDrop } from './file-drop.js';
+import { init as initCmdTabSwitch, setEnabled as setCmdTabSwitchEnabled } from './cmd-tab-switch.js';
 
 // Configuration
 let maxIssueTitleLength = 25;
@@ -345,6 +346,7 @@ settingsBtn?.addEventListener('click', async () => {
   const currentMaxTitle = settingsData.maxIssueTitleLength || 25;
   const currentWandPlanMode = settingsData.wandPlanMode !== undefined ? settingsData.wandPlanMode : true;
   const currentWandTemplate = settingsData.wandPromptTemplate || defaultsData.wandPromptTemplate || '';
+  const currentCmdTabSwitch = !!settingsData.cmdTabSwitch;
   const themes = themesData.themes || [];
   const activeTheme = themesData.active || '';
 
@@ -405,6 +407,16 @@ settingsBtn?.addEventListener('click', async () => {
         </p>
       </div>
       <div class="settings-section">
+        <h3>Keyboard</h3>
+        <label style="font-size: 13px; color: var(--ds-text-primary); cursor: pointer; display: flex; align-items: center; gap: 8px;">
+          <input type="checkbox" id="cmd-tab-switch" ${currentCmdTabSwitch ? 'checked' : ''} style="accent-color: var(--ds-accent-green);">
+          Hold \u2318 to switch tabs (\u23181-9, \u2318&lt; \u2318&gt;)
+        </label>
+        <p style="font-size: 11px; color: var(--ds-text-secondary); margin-top: 4px;">
+          Hold Command for 1 second to activate, then press 1-9 to jump to a tab or &lt; / &gt; to cycle.
+        </p>
+      </div>
+      <div class="settings-section">
         <h3>Version</h3>
         <div class="version-info">
           <span>Version ${escapeHtml(versionData.current)}</span>
@@ -460,12 +472,14 @@ settingsBtn?.addEventListener('click', async () => {
     const newMaxTitle = Number(overlay.querySelector('#max-issue-title-length').value) || 25;
     const wandPlanMode = overlay.querySelector('#wand-plan-mode').checked;
     const wandPromptTemplate = overlay.querySelector('#wand-prompt-template').value;
+    const cmdTabSwitch = overlay.querySelector('#cmd-tab-switch').checked;
     await fetch('/api/settings', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ shellProfile, maxIssueTitleLength: newMaxTitle, wandPlanMode, wandPromptTemplate })
+      body: JSON.stringify({ shellProfile, maxIssueTitleLength: newMaxTitle, wandPlanMode, wandPromptTemplate, cmdTabSwitch })
     });
     maxIssueTitleLength = Math.max(10, Math.min(200, newMaxTitle));
+    setCmdTabSwitchEnabled(cmdTabSwitch);
     overlay.remove();
   };
   overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
@@ -1310,6 +1324,13 @@ async function init() {
     onShowReloadConfirm: () => showReloadConfirmDialog()
   });
 
+  // Initialize Cmd+N tab switching (capture-phase listeners, off by default)
+  initCmdTabSwitch({
+    getOrderedTabIds: () => [...document.querySelectorAll('#tabs-list .tab')].map(t => t.id.replace('tab-', '')),
+    getActiveTabId: () => activeId,
+    switchToTab: switchTo
+  });
+
   // Load settings before creating any terminals (prevents color flash, applies title length)
   try {
     const settingsData = await fetch('/api/settings').then(r => r.json());
@@ -1318,6 +1339,9 @@ async function init() {
     }
     if (settingsData.maxIssueTitleLength) {
       maxIssueTitleLength = settingsData.maxIssueTitleLength;
+    }
+    if (settingsData.cmdTabSwitch) {
+      setCmdTabSwitchEnabled(true);
     }
   } catch {}
 
