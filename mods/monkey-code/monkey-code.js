@@ -424,7 +424,7 @@ const TERM_X = -5, TERM_Z = 16;
     // Screen: 2.5m wide x 1.5m tall, at eye level, rotated to face -Z (into arena)
     termStationMesh = new THREE.Mesh(
       new THREE.PlaneGeometry(2.5, 1.5),
-      new THREE.MeshBasicMaterial({ map: termStationTexture })
+      new THREE.MeshBasicMaterial({ map: termStationTexture, side: THREE.DoubleSide })
     );
     termStationMesh.position.set(TX, 1.5, TZ);
     termStationMesh.rotation.y = Math.PI; // face toward arena center
@@ -1521,7 +1521,13 @@ function updateTerminalStation(sessionId) {
       termMirrorTerm.write(data);
     });
 
-    // Swap to pre-created mirror texture (no dispose — safe during XR frames)
+    // Create texture lazily if startup creation missed it (e.g. globals not ready yet)
+    if (!termMirrorTexture && termMirrorCanvas) {
+      termMirrorTexture = new THREE.CanvasTexture(termMirrorCanvas);
+      termMirrorTexture.minFilter = THREE.LinearFilter;
+    }
+
+    // Swap to mirror texture
     if (termMirrorTexture) {
       termStationMesh.material.map = termMirrorTexture;
       termStationMesh.material.needsUpdate = true;
@@ -2029,6 +2035,13 @@ function initBridge() {
         syncMonkeys();
         updateHUD();
       });
+      // Auto-update terminal station when active session changes
+      if (window.deepsteve.onActiveSessionChanged) {
+        window.deepsteve.onActiveSessionChanged((id) => {
+          if (viewMode === MODE_FIRST && followId && followId !== id) return; // don't override first-person choice
+          updateTerminalStation(id);
+        });
+      }
     } else if (++attempts > 100) clearInterval(poll);
   }, 100);
 }
