@@ -1068,8 +1068,15 @@ app.get('/api/issues', (req, res) => {
 });
 
 app.post('/api/start-issue', (req, res) => {
-  const { number, title, body, labels, url, cwd: rawCwd, windowId } = req.body;
+  const { number, title, body, labels, url, cwd: rawCwd, windowId: rawWindowId, sessionId } = req.body;
   if (!number || !title) return res.status(400).json({ error: 'number and title are required' });
+
+  // Resolve windowId: explicit value, or look up from caller's session
+  let windowId = rawWindowId;
+  if (!windowId && sessionId) {
+    const callerEntry = shells.get(sessionId);
+    if (callerEntry && callerEntry.windowId) windowId = callerEntry.windowId;
+  }
 
   let cwd = rawCwd || process.env.HOME;
   if (cwd.startsWith('~')) cwd = path.join(os.homedir(), cwd.slice(1));
@@ -1108,6 +1115,13 @@ app.post('/api/start-issue', (req, res) => {
   const tabTitle = `#${number} ${title}`;
   const name = tabTitle.length <= maxLen ? tabTitle : tabTitle.slice(0, maxLen) + '\u2026';
 
+  // Pre-flight: ensure we can deliver to a browser before spawning
+  const readyClients = [...reloadClients].filter(c => c.readyState === 1);
+  if (!windowId && readyClients.length > 1) {
+    log(`[API] start-issue: multiple browser windows open but no windowId resolved`);
+    return res.status(400).json({ error: 'Multiple browser windows open. Pass sessionId or windowId to target one.' });
+  }
+
   log(`[API] start-issue #${number}: id=${id}, worktree=${worktree}, cwd=${cwd}`);
   const shell = spawnClaude(claudeArgs, cwd, { cols: 120, rows: 40, env: { DEEPSTEVE_SESSION_ID: id } });
   shells.set(id, { shell, clients: new Set(), cwd, claudeSessionId, worktree: worktree || null, name, initialPrompt: prompt, waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now() });
@@ -1116,38 +1130,31 @@ app.post('/api/start-issue', (req, res) => {
   shell.onExit(() => { if (!shuttingDown) { unwatchClaudeSessionDir(id); shells.delete(id); saveState(); } });
   saveState();
 
-  // Notify browser(s) to open the new session
+  // Notify browser to open the new session
   let delivered = false;
   if (windowId) {
     // Targeted: send only to the matching reload client
     const openMsg = JSON.stringify({ type: 'open-session', id, cwd, name, windowId });
-    for (const client of reloadClients) {
-      if (client.readyState === 1 && client.windowId === windowId) {
+    for (const client of readyClients) {
+      if (client.windowId === windowId) {
         client.send(openMsg);
         delivered = true;
         break;
       }
     }
   }
-  if (!delivered) {
-    // Broadcast to all with eventId for cross-window dedup
-    const openMsg = JSON.stringify({ type: 'open-session', id, cwd, name, eventId: randomUUID().slice(0, 8) });
-    for (const client of reloadClients) {
-      if (client.readyState === 1) {
-        client.send(openMsg);
-        delivered = true;
-      }
-    }
+  if (!delivered && readyClients.length === 1) {
+    // Exactly one browser window — unambiguous delivery
+    readyClients[0].send(JSON.stringify({ type: 'open-session', id, cwd, name }));
+    delivered = true;
   }
-
-  // No browser open — queue message and open one
-  if (!delivered) {
-    const openMsg = JSON.stringify({ type: 'open-session', id, cwd, name });
-    pendingOpens.push(openMsg);
+  if (!delivered && readyClients.length === 0) {
+    // No browser open — queue message and open one
+    pendingOpens.push(JSON.stringify({ type: 'open-session', id, cwd, name }));
     log(`[API] start-issue: no browser open, queued open-session and launching browser`);
     exec(`open "http://localhost:${PORT}"`);
+    delivered = true;
   }
-
   res.json({ id, name, url: `http://localhost:${PORT}` });
 });
 

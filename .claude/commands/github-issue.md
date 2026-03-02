@@ -14,7 +14,7 @@ Steps:
    ```
    curl -s -X POST http://localhost:3000/api/start-issue \
      -H 'Content-Type: application/json' \
-     -d '{"number": <number>, "title": "<title>", "cwd": "<git root>"}'
+     -d '{"number": <number>, "title": "<title>", "cwd": "<git root>", "sessionId": "'$DEEPSTEVE_SESSION_ID'"}'
    ```
    For `cwd`, use `git rev-parse --show-toplevel`. Tell the user the tab has been opened.
 6. If the user says no, just confirm the issue was created and stop.
