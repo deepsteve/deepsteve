@@ -2,7 +2,7 @@
   "name": "Monkey Code",
   "version": "0.4.0",
   "minDeepsteveVersion": "0.4.0",
-  "description": "Gorilla Tag in WebXR — swing around as a monkey and tag your Claude sessions",
+  "description": "A monkey tagging game in WebXR. Works with a Mac running DeepSteve, connected over HTTPS. See the <a href=\"https://github.com/deepsteve/deepsteve\">README</a> for setup instructions.",
   "enabledByDefault": false,
   "entry": "index.html",
   "toolbar": {

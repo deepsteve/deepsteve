@@ -516,7 +516,7 @@ function createMonkeyMesh(colorIdx) {
   const rightPupil = new THREE.Mesh(pupilGeo, pupilMat);
   rightPupil.position.set(0.15, 1.65, 0.29); group.add(rightPupil);
 
-  // Upper arms (gorilla-long)
+  // Upper arms (long, monkey-style)
   const armGeo = new THREE.BoxGeometry(0.18, 0.55, 0.18);
   const leftUpperArm = new THREE.Mesh(armGeo, bodyMat);
   leftUpperArm.position.set(-0.5, 0.95, 0); leftUpperArm.castShadow = true; group.add(leftUpperArm);
@@ -1041,7 +1041,7 @@ function updateDesktopMovement(m, dt) {
   }
 }
 
-// ── VR Gorilla Tag locomotion + snap turn ───────────────────────────────────
+// ── VR arm-swing locomotion + snap turn ──────────────────────────────────────
 
 let vrSnapTurnCooldown = false;
 let vrJumpedThisPush = [false, false]; // per-hand jump flag to prevent multi-frame jumps
@@ -1107,7 +1107,7 @@ function updateVRLocomotion(m, dt) {
     vrThumbstickJumpReady = true;
   }
 
-  // ── 3. Smooth Gorilla Tag arm-swing locomotion ──
+  // ── 3. Smooth arm-swing locomotion ──
   // Both hands accumulate acceleration; applied once per frame for smooth movement.
   // Uses acceleration (+=) not assignment (=) so alternating arms blend smoothly.
   const accelRate = 14;
@@ -1141,7 +1141,7 @@ function updateVRLocomotion(m, dt) {
 
     const speed = hand.vel.length();
 
-    // Only apply force when hand is touching/near a surface (Gorilla Tag style)
+    // Only apply force when hand is touching/near a surface
     const touching = isTouchingSurface(_v1);
 
     if (touching && speed > 0.8) {
@@ -1342,12 +1342,12 @@ function removeVRSelectionPanel() {
   }
 }
 
+const _selMat4 = new THREE.Matrix4();
 function checkVRSelectionRaycast(controller) {
   if (!vrSelectionPanel || vrSelectionCards.length === 0) return;
-  const tempMatrix = new THREE.Matrix4();
-  tempMatrix.identity().extractRotation(controller.matrixWorld);
+  _selMat4.identity().extractRotation(controller.matrixWorld);
   vrSelectionRaycaster.ray.origin.setFromMatrixPosition(controller.matrixWorld);
-  vrSelectionRaycaster.ray.direction.set(0, 0, -1).applyMatrix4(tempMatrix);
+  vrSelectionRaycaster.ray.direction.set(0, 0, -1).applyMatrix4(_selMat4);
 
   const meshes = vrSelectionCards.map(c => c.mesh);
   const hits = vrSelectionRaycaster.intersectObjects(meshes);
@@ -1521,7 +1521,6 @@ function updateTerminalStation_tick() {
   if (termMirrorCanvas && termStationSessionId) {
     termStationTexture.needsUpdate = true;
   }
-  // Check proximity to terminal station for keyboard
   updateVRKeyboard();
 }
 
@@ -1603,8 +1602,6 @@ let vrKeyboardPrevValue = ''; // track previous value to diff (Quest overwrites 
   });
 }
 
-let vrKeyboardNearby = false; // within range of terminal
-
 function updateVRKeyboard() {
   if (!renderer.xr.isPresenting || !termStationSessionId || viewMode !== MODE_FIRST) {
     if (vrKeyboardActive) {
@@ -1613,7 +1610,6 @@ function updateVRKeyboard() {
       vrKeyboardEl.style.pointerEvents = 'none';
       vrKeyboardActive = false;
     }
-    vrKeyboardNearby = false;
     return;
   }
 
@@ -1624,40 +1620,18 @@ function updateVRKeyboard() {
   const dz = playerPos.z - TERM_Z;
   const dist = Math.sqrt(dx * dx + dz * dz);
 
-  const wasNearby = vrKeyboardNearby;
-  vrKeyboardNearby = dist < KEYBOARD_RANGE;
-
-  // Every time we enter range, focus the keyboard
-  if (vrKeyboardNearby && !wasNearby) {
+  if (dist < KEYBOARD_RANGE && !vrKeyboardActive) {
     vrKeyboardEl.style.opacity = '1';
     vrKeyboardEl.style.pointerEvents = 'auto';
     vrKeyboardEl.value = '';
     vrKeyboardPrevValue = '';
     vrKeyboardEl.focus();
     vrKeyboardActive = true;
-  } else if (!vrKeyboardNearby && wasNearby && vrKeyboardActive) {
+  } else if (dist >= KEYBOARD_RANGE + 1 && vrKeyboardActive) {
     vrKeyboardEl.blur();
     vrKeyboardEl.style.opacity = '0';
     vrKeyboardEl.style.pointerEvents = 'none';
     vrKeyboardActive = false;
-  }
-
-  // B button (index 5) re-triggers focus while nearby (workaround for Quest requiring user gesture)
-  if (vrKeyboardNearby && !vrKeyboardActive) {
-    const session = renderer.xr.getSession();
-    if (session) {
-      for (const source of session.inputSources) {
-        if (source.gamepad && source.gamepad.buttons.length > 5 && source.gamepad.buttons[5].pressed) {
-          vrKeyboardEl.style.opacity = '1';
-          vrKeyboardEl.style.pointerEvents = 'auto';
-          vrKeyboardEl.value = '';
-          vrKeyboardPrevValue = '';
-          vrKeyboardEl.focus();
-          vrKeyboardActive = true;
-          break;
-        }
-      }
-    }
   }
 }
 
@@ -1670,8 +1644,8 @@ function enterFirstPerson(sessionId) {
     followId = sessionId;
     viewMode = MODE_FIRST;
 
-    // Update terminal station FIRST
-    updateTerminalStation(sessionId);
+    // Defer terminal setup out of XR frame to avoid blocking the animation loop
+    setTimeout(() => updateTerminalStation(sessionId), 0);
 
     const m = monkeyState[sessionId];
     if (m) {
@@ -1698,8 +1672,8 @@ function enterFirstPerson(sessionId) {
 
     if (!renderer.xr.isPresenting) {
       showTerminal(sessionId);
+      onResize();
     }
-    onResize();
     updateHUD();
   } catch (e) {
     console.error('[MonkeyCode] enterFirstPerson error:', e);
@@ -1716,7 +1690,7 @@ function exitFirstPerson() {
   hideTerminal();
   followId = null;
   viewMode = MODE_ORBIT;
-  onResize();
+  if (!renderer.xr.isPresenting) onResize();
   updateHUD();
 
   // In VR, re-show the selection panel so user can pick another monkey
