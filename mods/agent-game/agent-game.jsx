@@ -97,6 +97,9 @@ function buildHinterPrompt(name, guesserName, allNames, tier) {
     `7. Keep messages to 1-3 sentences`,
     `8. Use read_messages with channel "${CHANNEL}" to check what others said before responding`,
     ``,
+    `LOOP:`,
+    `Run in a continuous loop: send a message, then sleep 5 seconds, then read_messages to check for new replies, then respond. Keep looping until ??? makes their guess ("I think I am [NAME]!"). After the guess, check a few more times to say any final reactions, then stop.`,
+    ``,
     `Introduce yourself and start chatting. Weave in hints about ???'s identity naturally.`,
   ].join('\n');
 }
@@ -122,6 +125,9 @@ function buildGuesserPrompt(allNames, guesserName, tier) {
     `4. When confident, say exactly: "I think I am [NAME]!"`,
     `5. You get ONE guess, so be sure`,
     `6. Keep messages to 1-3 sentences`,
+    ``,
+    `LOOP:`,
+    `Run in a continuous loop: send a message, then sleep 5 seconds, then read_messages to check for new replies, then respond. Keep looping until you make your guess. After guessing, check a few more times to say any final reactions, then stop.`,
     ``,
     `Say hello and start asking for hints!`,
   ].join('\n');
