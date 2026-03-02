@@ -327,38 +327,24 @@ function wireShellOutput(id) {
       }
     }
     e.clients.forEach((c) => c.send(data));
-    // Strip OSC sequences (\x1b]...\x07 or \x1b]...\x1b\\) before BEL detection —
-    // OSC terminators contain \x07 which would cause false "waiting for input" triggers.
-    const withoutOSC = data.replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '');
-    const hasBEL = withoutOSC.includes('\x07');
-    if (hasBEL && !e.waitingForInput) {
+    if (data.includes('\x07') && !e.waitingForInput) {
       e.waitingForInput = true;
-      // Debounce: delay the "waiting" broadcast so rapid BEL→output transitions
-      // (e.g. auto-approved tools) don't flicker in the UI.
-      if (e._waitingTimer) clearTimeout(e._waitingTimer);
-      e._waitingTimer = setTimeout(() => {
-        e._waitingTimer = null;
-        if (e.waitingForInput) {
-          const stateMsg = JSON.stringify({ type: 'state', waiting: true });
-          e.clients.forEach((c) => c.send(stateMsg));
-        }
-      }, 150);
+      const stateMsg = JSON.stringify({ type: 'state', waiting: true });
+      e.clients.forEach((c) => c.send(stateMsg));
 
       if (e.initialPrompt) {
         const prompt = e.initialPrompt;
         e.initialPrompt = null;
         e.waitingForInput = false;
-        if (e._waitingTimer) { clearTimeout(e._waitingTimer); e._waitingTimer = null; }
         setTimeout(() => submitToShell(e.shell, prompt), 500);
       }
-    } else if (!hasBEL && e.waitingForInput) {
+    } else if (!data.includes('\x07') && e.waitingForInput) {
       // PTY produced non-BEL output while we thought Claude was waiting —
       // means a tool was auto-approved or Claude continued on its own.
       // Strip ANSI escape sequences and check for substantive content.
-      const stripped = withoutOSC.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').replace(/[\s\x07]/g, '');
+      const stripped = data.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').replace(/[\s\x07]/g, '');
       if (stripped.length > 0) {
         e.waitingForInput = false;
-        if (e._waitingTimer) { clearTimeout(e._waitingTimer); e._waitingTimer = null; }
         const stateMsg = JSON.stringify({ type: 'state', waiting: false });
         e.clients.forEach((c) => c.send(stateMsg));
       }
@@ -1222,7 +1208,6 @@ wss.on('connection', (ws, req) => {
     entry.lastActivity = Date.now();
     if (entry.waitingForInput) {
       entry.waitingForInput = false;
-      if (entry._waitingTimer) { clearTimeout(entry._waitingTimer); entry._waitingTimer = null; }
       const stateMsg = JSON.stringify({ type: 'state', waiting: false });
       entry.clients.forEach((c) => c.send(stateMsg));
     }
