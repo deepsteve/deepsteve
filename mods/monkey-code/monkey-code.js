@@ -1603,6 +1603,8 @@ let vrKeyboardPrevValue = ''; // track previous value to diff (Quest overwrites 
   });
 }
 
+let vrKeyboardNearby = false; // within range of terminal
+
 function updateVRKeyboard() {
   if (!renderer.xr.isPresenting || !termStationSessionId || viewMode !== MODE_FIRST) {
     if (vrKeyboardActive) {
@@ -1611,6 +1613,7 @@ function updateVRKeyboard() {
       vrKeyboardEl.style.pointerEvents = 'none';
       vrKeyboardActive = false;
     }
+    vrKeyboardNearby = false;
     return;
   }
 
@@ -1621,18 +1624,40 @@ function updateVRKeyboard() {
   const dz = playerPos.z - TERM_Z;
   const dist = Math.sqrt(dx * dx + dz * dz);
 
-  if (dist < KEYBOARD_RANGE && !vrKeyboardActive) {
+  const wasNearby = vrKeyboardNearby;
+  vrKeyboardNearby = dist < KEYBOARD_RANGE;
+
+  // Every time we enter range, focus the keyboard
+  if (vrKeyboardNearby && !wasNearby) {
     vrKeyboardEl.style.opacity = '1';
     vrKeyboardEl.style.pointerEvents = 'auto';
     vrKeyboardEl.value = '';
     vrKeyboardPrevValue = '';
     vrKeyboardEl.focus();
     vrKeyboardActive = true;
-  } else if (dist >= KEYBOARD_RANGE + 1 && vrKeyboardActive) {
+  } else if (!vrKeyboardNearby && wasNearby && vrKeyboardActive) {
     vrKeyboardEl.blur();
     vrKeyboardEl.style.opacity = '0';
     vrKeyboardEl.style.pointerEvents = 'none';
     vrKeyboardActive = false;
+  }
+
+  // B button (index 5) re-triggers focus while nearby (workaround for Quest requiring user gesture)
+  if (vrKeyboardNearby && !vrKeyboardActive) {
+    const session = renderer.xr.getSession();
+    if (session) {
+      for (const source of session.inputSources) {
+        if (source.gamepad && source.gamepad.buttons.length > 5 && source.gamepad.buttons[5].pressed) {
+          vrKeyboardEl.style.opacity = '1';
+          vrKeyboardEl.style.pointerEvents = 'auto';
+          vrKeyboardEl.value = '';
+          vrKeyboardPrevValue = '';
+          vrKeyboardEl.focus();
+          vrKeyboardActive = true;
+          break;
+        }
+      }
+    }
   }
 }
 
@@ -1640,7 +1665,6 @@ function updateVRKeyboard() {
 
 function enterFirstPerson(sessionId) {
   try {
-    termLogMsg('[enterFirstPerson] id=' + sessionId);
     startAudio();
     startAmbient();
     followId = sessionId;
@@ -1678,8 +1702,7 @@ function enterFirstPerson(sessionId) {
     onResize();
     updateHUD();
   } catch (e) {
-    termLogMsg('enterFirstPerson CRASHED: ' + e.message, '#ff4444');
-    termLogMsg('  ' + (e.stack || '').split('\n')[1]?.trim(), '#ff8800');
+    console.error('[MonkeyCode] enterFirstPerson error:', e);
   }
 }
 
