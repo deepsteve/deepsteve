@@ -13,6 +13,7 @@ export function createWebSocket(options = {}) {
   if (options.rows) params.set('rows', options.rows);
   if (options.name) params.set('name', options.name);
   if (options.planMode) params.set('planMode', '1');
+  if (options.windowId) params.set('windowId', options.windowId);
 
   const wsProto = location.protocol === 'https:' ? 'wss://' : 'ws://';
   let url = wsProto + location.host + '?' + params;

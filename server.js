@@ -2,7 +2,7 @@ const express = require('express');
 const pty = require('node-pty');
 const { WebSocketServer } = require('ws');
 const { randomUUID } = require('crypto');
-const { execSync } = require('child_process');
+const { execSync, exec } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
@@ -41,6 +41,7 @@ if (BIND !== '127.0.0.1' && BIND !== '::1') {
 const SCROLLBACK_SIZE = 100 * 1024; // 100KB circular buffer per shell
 const RELOAD_FLAG = path.join(os.homedir(), '.deepsteve', '.reload');
 const reloadClients = new Set(); // WebSocket connections for live-reload
+const pendingOpens = []; // open-session messages waiting for a browser to connect
 
 function log(...args) {
   const ts = new Date().toISOString().slice(11, 23);
@@ -927,7 +928,7 @@ app.get('/api/issues', (req, res) => {
 });
 
 app.post('/api/start-issue', (req, res) => {
-  const { number, title, body, labels, url, cwd: rawCwd } = req.body;
+  const { number, title, body, labels, url, cwd: rawCwd, windowId } = req.body;
   if (!number || !title) return res.status(400).json({ error: 'number and title are required' });
 
   let cwd = rawCwd || process.env.HOME;
@@ -975,10 +976,36 @@ app.post('/api/start-issue', (req, res) => {
   shell.onExit(() => { if (!shuttingDown) { unwatchClaudeSessionDir(id); shells.delete(id); saveState(); } });
   saveState();
 
-  // Notify browsers to open the new session (eventId for cross-window dedup)
-  const openMsg = JSON.stringify({ type: 'open-session', id, cwd, name, eventId: randomUUID().slice(0, 8) });
-  for (const client of reloadClients) {
-    if (client.readyState === 1) client.send(openMsg);
+  // Notify browser(s) to open the new session
+  let delivered = false;
+  if (windowId) {
+    // Targeted: send only to the matching reload client
+    const openMsg = JSON.stringify({ type: 'open-session', id, cwd, name, windowId });
+    for (const client of reloadClients) {
+      if (client.readyState === 1 && client.windowId === windowId) {
+        client.send(openMsg);
+        delivered = true;
+        break;
+      }
+    }
+  }
+  if (!delivered) {
+    // Broadcast to all with eventId for cross-window dedup
+    const openMsg = JSON.stringify({ type: 'open-session', id, cwd, name, eventId: randomUUID().slice(0, 8) });
+    for (const client of reloadClients) {
+      if (client.readyState === 1) {
+        client.send(openMsg);
+        delivered = true;
+      }
+    }
+  }
+
+  // No browser open — queue message and open one
+  if (!delivered) {
+    const openMsg = JSON.stringify({ type: 'open-session', id, cwd, name });
+    pendingOpens.push(openMsg);
+    log(`[API] start-issue: no browser open, queued open-session and launching browser`);
+    exec(`open "http://localhost:${PORT}"`);
   }
 
   res.json({ id, name, url: `http://localhost:${PORT}` });
@@ -1004,8 +1031,17 @@ wss.on('connection', (ws, req) => {
   // On shutdown, if ~/.deepsteve/.reload flag exists, server sends { type: 'reload' }
   // telling browsers to refresh. Otherwise the WS just drops and clients silently reconnect.
   if (action === 'reload') {
+    ws.windowId = url.searchParams.get('windowId') || null;
     reloadClients.add(ws);
     ws.on('close', () => reloadClients.delete(ws));
+    // Flush any pending open-session messages to the newly connected browser
+    if (pendingOpens.length > 0) {
+      const toFlush = pendingOpens.splice(0);
+      for (const msg of toFlush) {
+        if (ws.readyState === 1) ws.send(msg);
+      }
+      log(`[WS] Flushed ${toFlush.length} pending open-session(s) to reload client`);
+    }
     return;
   }
 
@@ -1016,6 +1052,7 @@ wss.on('connection', (ws, req) => {
   const worktree = validateWorktree(url.searchParams.get('worktree'));
   const planMode = url.searchParams.get('planMode') === '1';
   const name = url.searchParams.get('name');
+  const windowId = url.searchParams.get('windowId') || null;
   const initialCols = parseInt(url.searchParams.get('cols')) || 120;
   const initialRows = parseInt(url.searchParams.get('rows')) || 40;
 
@@ -1103,6 +1140,7 @@ wss.on('connection', (ws, req) => {
     entry.killTimer = null;
   }
   entry.clients.add(ws);
+  if (windowId) entry.windowId = windowId;
   const hasScrollback = entry.scrollback && entry.scrollback.length > 0;
   log(`[WS] Sending session response: id=${id}, restored=${entry.restored || false}, scrollback=${hasScrollback ? entry.scrollbackSize + 'B' : 'none'}`);
   ws.send(JSON.stringify({ type: 'session', id, restored: entry.restored || false, cwd: entry.cwd, name: entry.name || null, scrollback: hasScrollback }));
