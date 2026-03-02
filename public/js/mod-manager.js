@@ -503,7 +503,9 @@ function _createModCard(mod, marketplaceOverlay) {
 
   const info = document.createElement('div');
   info.className = 'mod-card-info';
-  info.innerHTML = `<span class="mod-card-name">${mod.name || mod.id}</span><span class="mod-badge ${badgeClass}">${badgeText}</span><span class="mod-card-version">v${mod.version || '?'}</span>`;
+  info.innerHTML = `<span class="mod-card-name">${mod.name || mod.id}</span><span class="mod-badge ${badgeClass}">${badgeText}</span>` +
+    (mod.experimental ? `<span class="mod-badge experimental">Experimental</span>` : '') +
+    `<span class="mod-card-version">v${mod.version || '?'}</span>`;
 
   const actions = document.createElement('div');
   actions.className = 'mod-card-actions';
