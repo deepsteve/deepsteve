@@ -345,8 +345,8 @@ function claudeProjectDir(cwd, worktree) {
   if (worktree) {
     resolvedCwd = path.join(cwd, '.claude', 'worktrees', worktree);
   }
-  // Claude's project dir name: cwd with path separators replaced by dashes, leading dash
-  const dirName = resolvedCwd.replace(/\//g, '-');
+  // Claude Code encodes cwds by replacing all non-alphanumeric/non-dash chars with dashes
+  const dirName = resolvedCwd.replace(/[^a-zA-Z0-9-]/g, '-');
   return path.join(CLAUDE_PROJECTS_DIR, dirName);
 }
 
@@ -357,7 +357,11 @@ function watchClaudeSessionDir(shellId) {
   const projectDir = claudeProjectDir(entry.cwd, entry.worktree);
 
   // Ensure the directory exists before watching
-  try { fs.mkdirSync(projectDir, { recursive: true }); } catch {}
+  try { fs.mkdirSync(projectDir, { recursive: true }); } catch (err) {
+    log(`Session ${shellId} failed to create Claude session dir ${projectDir}: ${err.message}`);
+  }
+
+  log(`Session ${shellId} watching Claude session dir: ${projectDir}`);
 
   let watcher;
   try {
@@ -369,16 +373,36 @@ function watchClaudeSessionDir(shellId) {
       const e = shells.get(shellId);
       if (!e || sessionId === e.claudeSessionId) return;
 
+      log(`Session ${shellId} checking potential fork file: ${filename}`);
+
       // Verify the new file references our current session (forks include the parent sessionId)
       try {
         const newFile = path.join(projectDir, filename);
-        const head = fs.readFileSync(newFile, 'utf8').slice(0, 4096);
-        if (!head.includes(e.claudeSessionId)) return;
+        const head = fs.readFileSync(newFile, 'utf8').slice(0, 32768);
+        if (!head.includes(e.claudeSessionId)) {
+          log(`Session ${shellId} file ${filename} does not reference current session ${e.claudeSessionId}, skipping`);
+          return;
+        }
 
         log(`Session ${shellId} detected session fork via fs.watch: ${e.claudeSessionId} → ${sessionId}`);
         e.claudeSessionId = sessionId;
         saveState();
-      } catch {}
+      } catch (err) {
+        log(`Session ${shellId} fork check failed for ${filename}: ${err.message}, retrying in 200ms`);
+        setTimeout(() => {
+          try {
+            const e2 = shells.get(shellId);
+            if (!e2 || sessionId === e2.claudeSessionId) return;
+            const head = fs.readFileSync(path.join(projectDir, filename), 'utf8').slice(0, 32768);
+            if (!head.includes(e2.claudeSessionId)) return;
+            log(`Session ${shellId} detected fork (retry): ${e2.claudeSessionId} → ${sessionId}`);
+            e2.claudeSessionId = sessionId;
+            saveState();
+          } catch (retryErr) {
+            log(`Session ${shellId} fork retry failed for ${filename}: ${retryErr.message}`);
+          }
+        }, 200);
+      }
     });
   } catch (err) {
     log(`Failed to watch Claude session dir for ${shellId}: ${err.message}`);
