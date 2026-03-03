@@ -155,6 +155,15 @@ function applyTheme(css) {
   }
 }
 
+function applySettings(settings) {
+  if (settings.maxIssueTitleLength !== undefined) {
+    maxIssueTitleLength = settings.maxIssueTitleLength;
+  }
+  if (settings.cmdTabSwitch !== undefined) {
+    setCmdTabSwitchEnabled(settings.cmdTabSwitch);
+  }
+}
+
 // When the browser tab regains visibility, re-sync scroll position.
 // scrollToBottom() calls from onWriteParsed may have been no-ops while
 // the tab was hidden (browsers skip layout for background tabs), so the
@@ -570,6 +579,8 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
         TabSessions.remove(msg.id);
       } else if (msg.type === 'theme') {
         applyTheme(msg.css || '');
+      } else if (msg.type === 'settings') {
+        applySettings(msg);
       } else if (msg.type === 'mod-changed') {
         ModManager.handleModChanged(msg.modId);
       } else if (msg.type === 'state') {
@@ -1311,6 +1322,7 @@ async function init() {
     windowId: getWindowId(),
     onMessage: async (msg) => {
       if (msg.type === 'theme') applyTheme(msg.css || '');
+      if (msg.type === 'settings') applySettings(msg);
       if (msg.type === 'open-session') {
         // Server created a session (e.g. via /api/start-issue) — open a tab for it
         if (msg.windowId && msg.windowId !== getWindowId()) return;
