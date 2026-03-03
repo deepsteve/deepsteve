@@ -78,7 +78,8 @@ history.pushState(null, '', location.href);
 
 // Warn before leaving page with active sessions
 window.addEventListener('beforeunload', (e) => {
-  if (sessions.size > 0) {
+  const hasActiveSessions = [...sessions.values()].some(s => !s.waitingForInput);
+  if (hasActiveSessions) {
     e.preventDefault();
     e.returnValue = '';
     return '';
