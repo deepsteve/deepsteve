@@ -12,7 +12,19 @@ const TIMEOUT_MS = 30000; // 30s — screenshots can be slow
  * Initialize screenshot MCP tools.
  */
 function init(context) {
-  const { broadcast } = context;
+  const { broadcast, broadcastToWindow, shells } = context;
+
+  // Resolve session_id to a windowId, returning the send function
+  function resolveTarget(session_id) {
+    if (session_id) {
+      const shell = shells.get(session_id);
+      if (shell && shell.windowId) {
+        const windowId = shell.windowId;
+        return { send: (msg) => broadcastToWindow(windowId, { ...msg, targetWindowId: windowId }) };
+      }
+    }
+    return { send: broadcast };
+  }
 
   return {
     screenshot_capture: {
@@ -21,13 +33,15 @@ function init(context) {
         selector: z.string().describe('CSS selector for the element to capture (e.g. "#app-container", ".terminal-container.active")'),
         filename: z.string().optional().describe('Output filename (without extension). Defaults to "screenshot-<timestamp>".'),
         output_dir: z.string().optional().describe('Directory to save the PNG. Defaults to ~/Desktop.'),
+        session_id: z.string().optional().describe('DeepSteve session ID ($DEEPSTEVE_SESSION_ID). When provided, the command is sent only to the browser window that owns this session.'),
       },
-      handler: async ({ selector, filename, output_dir }) => {
+      handler: async ({ selector, filename, output_dir, session_id }) => {
         const requestId = randomUUID();
         const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
         const fname = (filename || `deepsteve-${ts}`) + '.png';
         const dir = output_dir || path.join(require('os').homedir(), 'Desktop');
         const outPath = path.join(dir, fname);
+        const { send } = resolveTarget(session_id);
 
         return new Promise((resolve) => {
           const timer = setTimeout(() => {
@@ -39,7 +53,7 @@ function init(context) {
 
           pendingRequests.set(requestId, { resolve, timer, outPath });
 
-          broadcast({
+          send({
             type: 'screenshot-capture-request',
             requestId,
             selector,

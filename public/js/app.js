@@ -590,18 +590,21 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
       } else if (msg.type === 'agent-chat') {
         ModManager.notifyAgentChatChanged(msg.channels);
       } else if (msg.type === 'browser-eval-request') {
+        if (msg.targetWindowId && msg.targetWindowId !== WindowManager.getWindowId()) return;
         if (!processedBrowserRequests.has(msg.requestId)) {
           processedBrowserRequests.add(msg.requestId);
           setTimeout(() => processedBrowserRequests.delete(msg.requestId), 15000);
           ModManager.notifyBrowserEvalRequest(msg);
         }
       } else if (msg.type === 'browser-console-request') {
+        if (msg.targetWindowId && msg.targetWindowId !== WindowManager.getWindowId()) return;
         if (!processedBrowserRequests.has(msg.requestId)) {
           processedBrowserRequests.add(msg.requestId);
           setTimeout(() => processedBrowserRequests.delete(msg.requestId), 15000);
           ModManager.notifyBrowserConsoleRequest(msg);
         }
       } else if (msg.type === 'screenshot-capture-request') {
+        if (msg.targetWindowId && msg.targetWindowId !== WindowManager.getWindowId()) return;
         if (!processedBrowserRequests.has(msg.requestId)) {
           processedBrowserRequests.add(msg.requestId);
           setTimeout(() => processedBrowserRequests.delete(msg.requestId), 60000);

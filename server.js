@@ -1395,8 +1395,24 @@ function broadcast(msg) {
   }
 }
 
+// Broadcast a JSON message to a specific window's WebSocket connections only
+function broadcastToWindow(windowId, msg) {
+  const data = typeof msg === 'string' ? msg : JSON.stringify(msg);
+  const sent = new Set();
+  for (const entry of shells.values()) {
+    if (entry.windowId === windowId) {
+      for (const client of entry.clients) {
+        if (client.readyState === 1 && !sent.has(client)) {
+          client.send(data);
+          sent.add(client);
+        }
+      }
+    }
+  }
+}
+
 // Initialize MCP server (async, ~100ms for dynamic import)
-initMCP({ app, shells, wss, broadcast, log, MODS_DIR }).catch(e => log('MCP init failed:', e.message));
+initMCP({ app, shells, wss, broadcast, broadcastToWindow, log, MODS_DIR }).catch(e => log('MCP init failed:', e.message));
 
 // Watch themes directory for changes and broadcast to clients
 let themeWatchDebounce = null;
