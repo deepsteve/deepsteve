@@ -220,7 +220,8 @@ function ChatPanel() {
   useEffect(() => {
     const msgs = channels[activeChannel]?.messages || [];
     if (msgs.length > prevMessageCountRef.current) {
-      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+      const isInitialLoad = prevMessageCountRef.current === 0;
+      messagesEndRef.current?.scrollIntoView({ behavior: isInitialLoad ? 'instant' : 'smooth' });
       if (!document.hidden) {
         // Small delay so the divider flashes briefly before clearing
         setTimeout(() => markChannelRead(activeChannel), 1500);
