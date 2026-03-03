@@ -1199,45 +1199,30 @@ async function showIssuePicker() {
     return;
   }
 
-  // Fetch issues and settings in parallel
-  let issues, wandPlanMode, wandPromptTemplate, hasMore;
-  try {
-    const [issuesRes, settingsData] = await Promise.all([
-      fetch('/api/issues?cwd=' + encodeURIComponent(gitRoot)),
-      fetch('/api/settings').then(r => r.json())
-    ]);
-    if (!issuesRes.ok) throw new Error((await issuesRes.json()).error || 'Failed to fetch issues');
-    const issuesData = await issuesRes.json();
-    issues = issuesData.issues;
-    hasMore = issuesData.hasMore;
-    wandPlanMode = settingsData.wandPlanMode !== undefined ? settingsData.wandPlanMode : true;
-    wandPromptTemplate = settingsData.wandPromptTemplate || '';
-    if (settingsData.maxIssueTitleLength) maxIssueTitleLength = settingsData.maxIssueTitleLength;
-  } catch (e) {
-    alert('Failed to fetch issues: ' + e.message);
-    return;
-  }
-
-  // Build modal
+  // Show modal immediately with loading state
   const overlay = document.createElement('div');
   overlay.className = 'modal-overlay';
   overlay.innerHTML = `
     <div class="modal" style="width: 520px;">
       <h2>Pick a GitHub Issue</h2>
-      ${issues.length === 0 ? '<div class="issue-empty">No open issues found</div>' : `
-        <div class="issue-list"></div>
-      `}
+      <div class="issue-list">
+        <div class="issue-loading">
+          <span class="issue-loading-text">Loading issues…</span>
+        </div>
+      </div>
       <div class="modal-buttons">
         <button class="btn-secondary" id="issue-cancel">Cancel</button>
-        ${issues.length > 0 ? '<button class="btn-primary" id="issue-start" disabled>Start</button>' : ''}
       </div>
     </div>
   `;
   document.body.appendChild(overlay);
+  overlay.querySelector('#issue-cancel').onclick = () => overlay.remove();
+  overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
 
+  let issues, wandPlanMode, wandPromptTemplate, hasMore;
   let selectedIssue = null;
   let currentPage = 1;
-  let loading = false;
+  let loadingMore = false;
 
   function bindIssueItem(item) {
     item.addEventListener('click', () => {
@@ -1275,8 +1260,8 @@ async function showIssuePicker() {
   }
 
   async function loadMore() {
-    if (loading || !hasMore) return;
-    loading = true;
+    if (loadingMore || !hasMore) return;
+    loadingMore = true;
     currentPage++;
     try {
       const res = await fetch(`/api/issues?cwd=${encodeURIComponent(gitRoot)}&page=${currentPage}`);
@@ -1286,21 +1271,8 @@ async function showIssuePicker() {
       hasMore = data.hasMore;
       renderIssues(data.issues);
     } finally {
-      loading = false;
+      loadingMore = false;
     }
-  }
-
-  // Render initial issues
-  renderIssues(issues);
-
-  // Infinite scroll
-  const issueList = overlay.querySelector('.issue-list');
-  if (issueList) {
-    issueList.addEventListener('scroll', () => {
-      if (issueList.scrollTop + issueList.clientHeight >= issueList.scrollHeight - 40) {
-        loadMore();
-      }
-    });
   }
 
   function startIssue() {
@@ -1326,10 +1298,65 @@ async function showIssuePicker() {
     });
   }
 
-  overlay.querySelector('#issue-cancel').onclick = () => overlay.remove();
-  const startBtn = overlay.querySelector('#issue-start');
-  if (startBtn) startBtn.onclick = startIssue;
-  overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
+  // Fetch issues and settings in background, update modal when done
+  async function fetchAndRender() {
+    try {
+      const [issuesRes, settingsData] = await Promise.all([
+        fetch('/api/issues?cwd=' + encodeURIComponent(gitRoot)),
+        fetch('/api/settings').then(r => r.json())
+      ]);
+      if (!issuesRes.ok) throw new Error((await issuesRes.json()).error || 'Failed to fetch issues');
+      const issuesData = await issuesRes.json();
+      issues = issuesData.issues;
+      hasMore = issuesData.hasMore;
+      wandPlanMode = settingsData.wandPlanMode !== undefined ? settingsData.wandPlanMode : true;
+      wandPromptTemplate = settingsData.wandPromptTemplate || '';
+      if (settingsData.maxIssueTitleLength) maxIssueTitleLength = settingsData.maxIssueTitleLength;
+
+      // Modal may have been dismissed while loading
+      if (!overlay.parentNode) return;
+
+      const list = overlay.querySelector('.issue-list');
+      if (issues.length === 0) {
+        list.outerHTML = '<div class="issue-empty">No open issues found</div>';
+      } else {
+        list.innerHTML = '';
+        renderIssues(issues);
+        list.addEventListener('scroll', () => {
+          if (list.scrollTop + list.clientHeight >= list.scrollHeight - 40) {
+            loadMore();
+          }
+        });
+        const buttons = overlay.querySelector('.modal-buttons');
+        const startBtn = document.createElement('button');
+        startBtn.className = 'btn-primary';
+        startBtn.id = 'issue-start';
+        startBtn.disabled = true;
+        startBtn.textContent = 'Start';
+        startBtn.onclick = startIssue;
+        buttons.appendChild(startBtn);
+      }
+    } catch (e) {
+      if (!overlay.parentNode) return;
+      const list = overlay.querySelector('.issue-list');
+      if (list) {
+        list.outerHTML = `
+          <div class="issue-error">
+            <div class="issue-error-message">${escapeHtml(e.message)}</div>
+            <button class="issue-retry" id="issue-retry">Retry</button>
+          </div>`;
+        overlay.querySelector('#issue-retry').onclick = () => {
+          const errorDiv = overlay.querySelector('.issue-error');
+          if (errorDiv) {
+            errorDiv.outerHTML = '<div class="issue-list"><div class="issue-loading"><span class="issue-loading-text">Loading issues…</span></div></div>';
+          }
+          fetchAndRender();
+        };
+      }
+    }
+  }
+
+  fetchAndRender();
 }
 
 /**
