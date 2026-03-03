@@ -591,6 +591,7 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
         if (entry) {
           const [sid, s] = entry;
           s.waitingForInput = msg.waiting;
+          s.scrollControl.syncViewport();
           TabManager.updateBadge(sid, msg.waiting && activeId !== sid);
           updateTitle();
           updateAppBadge();

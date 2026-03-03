@@ -81,8 +81,10 @@ export function setupTerminalIO(term, ws, { onUserInput, container } = {}) {
   // are no stale-position races with output or Ink re-renders.
   let state = 'AUTO';
   let suppressTimer = null;
+  let prevScrollTop = 0;
 
   const BOTTOM_TOLERANCE = 10;
+  const SNAP_TOLERANCE = 100; // ~5-6 lines — snap to bottom when user scrolls down near it
 
   // Floating scroll-to-bottom button
   const scrollBtn = document.createElement('button');
@@ -97,6 +99,7 @@ export function setupTerminalIO(term, ws, { onUserInput, container } = {}) {
     term.scrollToBottom();
     term.refresh(0, term.rows - 1);
     scrollBtn.classList.remove('visible');
+    if (viewport) prevScrollTop = viewport.scrollTop;
   }
 
   function suppressScroll() {
@@ -105,6 +108,7 @@ export function setupTerminalIO(term, ws, { onUserInput, container } = {}) {
     suppressTimer = setTimeout(() => {
       if (state === 'SUPPRESSED') state = 'AUTO';
     }, 500);
+    if (viewport) prevScrollTop = viewport.scrollTop;
   }
 
   scrollBtn.addEventListener('click', () => {
@@ -119,19 +123,30 @@ export function setupTerminalIO(term, ws, { onUserInput, container } = {}) {
   if (viewport) {
     viewport.addEventListener('scroll', () => {
       if (state === 'SUPPRESSED') return;
-      const gap = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight;
+
+      const scrollTop = viewport.scrollTop;
+      const scrolledUp = scrollTop < prevScrollTop;
+      prevScrollTop = scrollTop;
+
+      const gap = viewport.scrollHeight - scrollTop - viewport.clientHeight;
+
       if (gap <= BOTTOM_TOLERANCE) {
         state = 'AUTO';
         scrollBtn.classList.remove('visible');
-      } else {
+      } else if (scrolledUp) {
         state = 'USER_SCROLLED';
         scrollBtn.classList.add('visible');
+      } else if (state === 'USER_SCROLLED' && gap <= SNAP_TOLERANCE) {
+        scrollToBottom();
       }
+      // AUTO + !scrolledUp + gap>BOTTOM_TOLERANCE → stay AUTO (programmatic scroll racing with output)
+      // USER_SCROLLED + !scrolledUp + gap>SNAP → stay USER_SCROLLED (button already visible)
     }, { passive: true });
   }
 
   term.onWriteParsed(() => {
     if (state === 'AUTO') {
+      term.scrollLines(0); // Force viewport sync — Ink repaints can desync viewport (#188)
       if (!viewport) { term.scrollToBottom(); return; }
       const gap = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight;
       if (gap > BOTTOM_TOLERANCE) {
@@ -152,6 +167,10 @@ export function setupTerminalIO(term, ws, { onUserInput, container } = {}) {
           term.scrollToBottom();
         }
       }
+    },
+    /** Force xterm viewport layout sync — call after Ink repaints or state transitions. */
+    syncViewport() {
+      term.scrollLines(0);
     }
   };
 }
