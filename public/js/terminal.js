@@ -132,7 +132,11 @@ export function setupTerminalIO(term, ws, { onUserInput, container } = {}) {
 
   term.onWriteParsed(() => {
     if (state === 'AUTO') {
-      term.scrollToBottom();
+      if (!viewport) { term.scrollToBottom(); return; }
+      const gap = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight;
+      if (gap > BOTTOM_TOLERANCE) {
+        term.scrollToBottom();
+      }
     }
   });
 
@@ -142,7 +146,11 @@ export function setupTerminalIO(term, ws, { onUserInput, container } = {}) {
     /** Re-sync viewport to bottom if user hasn't intentionally scrolled up. */
     nudgeToBottom() {
       if (state === 'AUTO') {
-        term.scrollToBottom();
+        if (!viewport) { term.scrollToBottom(); return; }
+        const gap = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight;
+        if (gap > BOTTOM_TOLERANCE) {
+          term.scrollToBottom();
+        }
       }
     }
   };
