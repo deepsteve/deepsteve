@@ -167,6 +167,34 @@ export const SessionStore = {
     const storage = getStorage();
     storage.lastCwd = cwd;
     setStorage(storage);
+    // Also track in recentDirs
+    this.addRecentDir(cwd);
+  },
+
+  /**
+   * Recent directories (MRU-first, max 10)
+   */
+  getRecentDirs() {
+    return getStorage().recentDirs || [];
+  },
+
+  addRecentDir(path) {
+    if (!path || path === '~') return;
+    const storage = getStorage();
+    if (!storage.recentDirs) storage.recentDirs = [];
+    // Remove existing entry (dedup) then prepend
+    storage.recentDirs = storage.recentDirs.filter(d => d.path !== path);
+    storage.recentDirs.unshift({ path, lastUsed: Date.now() });
+    // Cap at 10
+    if (storage.recentDirs.length > 10) storage.recentDirs.length = 10;
+    setStorage(storage);
+  },
+
+  removeRecentDir(path) {
+    const storage = getStorage();
+    if (!storage.recentDirs) return;
+    storage.recentDirs = storage.recentDirs.filter(d => d.path !== path);
+    setStorage(storage);
   },
 
   /**

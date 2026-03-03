@@ -713,6 +713,7 @@ function initTerminal(id, ws, cwd, initialName, { hasScrollback = false, pending
   // Save to both storages — TabSessions is per-tab truth, SessionStore is for cross-tab
   TabSessions.add({ id, cwd, name });
   SessionStore.addSession(windowId, { id, cwd, name });
+  SessionStore.addRecentDir(cwd);
 
   // ResizeObserver handles window resize, layout toggle, mod panel.
   // Tab switching is handled by switchTo() calling fitTerminal() directly.
@@ -1006,7 +1007,7 @@ function quickNewSession() {
 }
 
 /**
- * Show long-press menu for new tab options
+ * Show dropdown menu for new tab options (recent repos + actions)
  */
 function showNewTabMenu(e) {
   // Remove any existing menu
@@ -1014,27 +1015,69 @@ function showNewTabMenu(e) {
 
   const menu = document.createElement('div');
   menu.className = 'new-tab-menu context-menu';
-  menu.innerHTML = `
+
+  // Build recent dirs section
+  const recentDirs = SessionStore.getRecentDirs();
+  let html = '';
+  if (recentDirs.length > 0) {
+    html += '<div class="context-menu-header">Recent</div>';
+    // Disambiguate duplicate leaf names by appending parent dir
+    const leafCounts = {};
+    for (const d of recentDirs) {
+      const leaf = d.path.split('/').pop();
+      leafCounts[leaf] = (leafCounts[leaf] || 0) + 1;
+    }
+    for (const d of recentDirs) {
+      const parts = d.path.split('/');
+      const leaf = parts.pop();
+      const label = leafCounts[leaf] > 1 && parts.length > 0
+        ? `${leaf} (${parts.pop()})`
+        : leaf;
+      html += `<div class="context-menu-item" data-action="recent" data-path="${d.path.replace(/"/g, '&quot;')}" title="${d.path.replace(/"/g, '&quot;')}">${label}</div>`;
+    }
+    html += '<div class="context-menu-separator"></div>';
+  }
+  html += `
     <div class="context-menu-item" data-action="issue">Pick issue...</div>
     <div class="context-menu-item" data-action="worktree">New worktree...</div>
     <div class="context-menu-item" data-action="repo">Change repo...</div>
   `;
+  menu.innerHTML = html;
 
-  const btn = e.target.closest('#new-btn');
+  // Position below the dropdown arrow button
+  const btn = e.target.closest('#new-btn-dropdown') || e.target.closest('#new-btn-group');
   const rect = btn.getBoundingClientRect();
-  menu.style.left = rect.left + 'px';
-  menu.style.top = (rect.bottom + 4) + 'px';
+  const isVertical = document.getElementById('app-container').classList.contains('vertical-layout');
+
+  if (isVertical) {
+    menu.style.left = (rect.right + 4) + 'px';
+    menu.style.top = rect.top + 'px';
+  } else {
+    menu.style.left = rect.left + 'px';
+    menu.style.top = (rect.bottom + 4) + 'px';
+  }
 
   document.body.appendChild(menu);
 
-  // Handle selection via mouseup (drag-release) or click
+  // Adjust if off-screen
+  const menuRect = menu.getBoundingClientRect();
+  if (menuRect.right > window.innerWidth) {
+    menu.style.left = (window.innerWidth - menuRect.width - 8) + 'px';
+  }
+  if (menuRect.bottom > window.innerHeight) {
+    menu.style.top = (window.innerHeight - menuRect.height - 8) + 'px';
+  }
+
+  // Handle selection
   const selectItem = async (ev) => {
     const item = ev.target.closest('.context-menu-item');
     if (!item) return;
     const action = item.dataset.action;
     menu.remove();
     cleanup();
-    if (action === 'issue') {
+    if (action === 'recent') {
+      createSession(item.dataset.path, null, true);
+    } else if (action === 'issue') {
       await showIssuePicker();
     } else if (action === 'worktree') {
       await promptWorktreeSession();
@@ -1043,7 +1086,6 @@ function showNewTabMenu(e) {
     }
   };
 
-  menu.addEventListener('mouseup', selectItem);
   menu.addEventListener('click', selectItem);
 
   // Close on click outside
@@ -1051,7 +1093,7 @@ function showNewTabMenu(e) {
     document.removeEventListener('mousedown', closeHandler);
   };
   const closeHandler = (ev) => {
-    if (!menu.contains(ev.target) && ev.target !== e.target) {
+    if (!menu.contains(ev.target) && ev.target !== btn) {
       menu.remove();
       cleanup();
     }
@@ -1341,33 +1383,10 @@ async function init() {
   // Load available mods (creates Mods button, auto-activates persisted mod)
   await ModManager.loadAvailableMods();
 
-  // Set up new button handler with long-press for menu
-  const newBtn = document.getElementById('new-btn');
-  let holdTimer = null;
-  let holdMenuOpen = false;
-
-  newBtn.addEventListener('mousedown', (e) => {
-    holdMenuOpen = false;
-    holdTimer = setTimeout(() => {
-      holdMenuOpen = true;
-      showNewTabMenu(e);
-    }, 500);
-  });
-
-  newBtn.addEventListener('mouseup', () => {
-    clearTimeout(holdTimer);
-    if (!holdMenuOpen) quickNewSession();
-  });
-
-  newBtn.addEventListener('mouseleave', () => {
-    if (!holdMenuOpen) clearTimeout(holdTimer);
-  });
-
+  // Split button: + creates tab, ▾ opens dropdown menu
+  document.getElementById('new-btn').addEventListener('click', () => quickNewSession());
+  document.getElementById('new-btn-dropdown').addEventListener('click', (e) => showNewTabMenu(e));
   document.getElementById('empty-state-btn')?.addEventListener('click', () => quickNewSession());
-
-  // Wire up issue button
-  const issueBtn = document.getElementById('issue-btn');
-  if (issueBtn) issueBtn.onclick = showIssuePicker;
 
   // Check if this is an existing tab BEFORE starting heartbeat (which creates window ID)
   const isExistingTab = WindowManager.hasExistingWindowId();
