@@ -16,7 +16,7 @@ function init(context) {
 
   return {
     screenshot_capture: {
-      description: 'Capture a screenshot of a DOM element in the deepsteve browser tab and save it as a PNG file. Returns the file path. Use CSS selectors to target specific elements (e.g. "#app-container", "#tabs", "#content-row"). Make sure the Screenshots mod is enabled in deepsteve.',
+      description: 'Capture a screenshot of a DOM element in the deepsteve management UI browser tab and save it as a PNG file. Returns the file path. IMPORTANT: This only captures elements from the deepsteve web interface itself — it cannot screenshot external websites, your project\'s frontend, or any other browser tab. Use CSS selectors to target deepsteve UI elements (e.g. "#app-container", "#tabs", "#content-row"). Make sure the Screenshots mod is enabled in deepsteve.',
       schema: {
         selector: z.string().describe('CSS selector for the element to capture (e.g. "#app-container", ".terminal-container.active")'),
         filename: z.string().optional().describe('Output filename (without extension). Defaults to "screenshot-<timestamp>".'),

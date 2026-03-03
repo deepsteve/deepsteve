@@ -148,12 +148,12 @@ The frontend is split into ES modules under `public/js/`:
 **Activity** — shared event feed across sessions
 - `post_activity(event)` — post a status update to the activity feed
 
-**Browser Console** — browser DevTools passthrough
-- `browser_eval(code)` — execute JavaScript in the deepsteve browser tab
-- `browser_console(level?, limit?, search?)` — read captured browser console entries
+**Browser Console** — deepsteve UI DevTools passthrough (does NOT access your project's website or any other browser tab)
+- `browser_eval(code)` — execute JavaScript in the deepsteve UI tab (not your project)
+- `browser_console(level?, limit?, search?)` — read console entries from the deepsteve UI tab (not your project)
 
-**Screenshots** — capture DOM elements as PNG
-- `screenshot_capture(selector, filename?, output_dir?)` — screenshot a DOM element by CSS selector
+**Screenshots** — capture deepsteve UI elements as PNG (does NOT access your project's website or any other browser tab)
+- `screenshot_capture(selector, filename?, output_dir?)` — screenshot a deepsteve UI element by CSS selector (not your project)
 
 **Session Info** — session self-discovery
 - `get_session_info(session_id)` — get session metadata (tab name, cwd, worktree) by deepsteve session ID. Pass `$DEEPSTEVE_SESSION_ID` env var value.

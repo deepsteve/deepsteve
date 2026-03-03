@@ -14,7 +14,7 @@ function init(context) {
 
   return {
     browser_eval: {
-      description: 'Execute JavaScript code in the deepsteve browser tab and return the result. Use this to inspect DOM state, check for errors, read element properties, or run any JS in the browser context.',
+      description: 'Execute JavaScript code in the deepsteve management UI browser tab and return the result. IMPORTANT: This runs in the deepsteve web interface only — it cannot access external websites, your project\'s frontend, or any other browser tab. Use this to inspect deepsteve\'s own DOM state (sessions, tabs, mods, layout), check for deepsteve UI errors, or read deepsteve element properties.',
       schema: {
         code: z.string().describe('JavaScript code to execute in the browser. Has full access to the DOM and page globals. Async code is supported (the return value is awaited).'),
       },
@@ -41,7 +41,7 @@ function init(context) {
     },
 
     browser_console: {
-      description: 'Read recent browser console entries (log, warn, error, info, debug) captured by the Console mod. Useful for debugging frontend issues without asking the user to check devtools.',
+      description: 'Read recent browser console entries (log, warn, error, info, debug) from the deepsteve management UI tab. IMPORTANT: This only captures console output from the deepsteve web interface itself — it cannot read console logs from external websites, your project\'s frontend, or any other browser tab. Useful for debugging deepsteve UI issues without asking the user to check devtools.',
       schema: {
         level: z.enum(['all', 'log', 'warn', 'error', 'info', 'debug']).optional().describe('Filter by log level. Defaults to "all".'),
         limit: z.number().optional().describe('Maximum number of entries to return (most recent first). Defaults to 50.'),
