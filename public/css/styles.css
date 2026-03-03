@@ -145,6 +145,11 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
   margin-top: 4px;
 }
 
+#app-container.vertical-layout #issue-btn {
+  width: 100%;
+  margin-top: 4px;
+}
+
 #app-container.vertical-layout .dropdown-btn {
   width: 100%;
 }
@@ -186,6 +191,10 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
 #app-container.vertical-layout #sidebar-resizer:hover {
   background: var(--ds-accent-blue);
 }
+
+/* Issue Button */
+#issue-btn { padding: 4px 8px; background: var(--ds-bg-tertiary); border: 1px solid var(--ds-border); color: var(--ds-text-secondary); border-radius: 4px; cursor: pointer; font-size: 15px; line-height: 1; }
+#issue-btn:hover { background: var(--ds-border); color: var(--ds-text-primary); }
 
 /* Sessions Dropdown */
 .dropdown { position: relative; }

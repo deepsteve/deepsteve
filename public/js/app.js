@@ -1080,7 +1080,6 @@ function showNewTabMenu(e) {
     html += '<div class="context-menu-separator"></div>';
   }
   html += `
-    <div class="context-menu-item" data-action="issue">Pick issue...</div>
     <div class="context-menu-item" data-action="worktree">New worktree...</div>
     <div class="context-menu-item" data-action="repo">Change repo...</div>
   `;
@@ -1119,8 +1118,6 @@ function showNewTabMenu(e) {
     cleanup();
     if (action === 'recent') {
       createSession(item.dataset.path, null, true);
-    } else if (action === 'issue') {
-      await showIssuePicker();
     } else if (action === 'worktree') {
       await promptWorktreeSession();
     } else if (action === 'repo') {
@@ -1457,6 +1454,7 @@ async function init() {
   // Split button: + creates tab, ▾ opens dropdown menu
   document.getElementById('new-btn').addEventListener('click', () => quickNewSession());
   document.getElementById('new-btn-dropdown').addEventListener('click', (e) => showNewTabMenu(e));
+  document.getElementById('issue-btn').addEventListener('click', () => showIssuePicker());
   document.getElementById('empty-state-btn')?.addEventListener('click', () => quickNewSession());
 
   // Check if this is an existing tab BEFORE starting heartbeat (which creates window ID)
