@@ -289,6 +289,25 @@ function broadcastTheme(name, css) {
   }
 }
 
+function broadcastSettings() {
+  const msg = JSON.stringify({
+    type: 'settings',
+    maxIssueTitleLength: settings.maxIssueTitleLength,
+    cmdTabSwitch: settings.cmdTabSwitch,
+  });
+  for (const client of wss.clients) {
+    if (client.readyState === 1) client.send(msg);
+  }
+  if (httpsWss) {
+    for (const client of httpsWss.clients) {
+      if (client.readyState === 1) client.send(msg);
+    }
+  }
+  for (const client of reloadClients) {
+    if (client.readyState === 1) client.send(msg);
+  }
+}
+
 // Spawn claude with full login shell environment (like iTerm does)
 function spawnClaude(args, cwd, { cols = 120, rows = 40, env: extraEnv } = {}) {
   // Use login shell (-l) which properly sources /etc/zprofile, ~/.zprofile, ~/.zshrc
@@ -732,6 +751,7 @@ app.post('/api/settings', (req, res) => {
     log(`Settings updated: cmdTabSwitch=${settings.cmdTabSwitch}`);
   }
   saveSettings();
+  broadcastSettings();
   res.json(settings);
 });
 
