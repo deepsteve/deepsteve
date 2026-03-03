@@ -574,6 +574,8 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
             ws.sendJSON({ type: 'initialPrompt', text: opts.initialPrompt });
           }
         }
+      } else if (msg.type === 'close-tab') {
+        if (assignedId) killSession(assignedId);
       } else if (msg.type === 'gone') {
         SessionStore.removeSession(getWindowId(), msg.id);
         TabSessions.remove(msg.id);

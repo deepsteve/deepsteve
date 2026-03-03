@@ -17,6 +17,10 @@ Steps:
 5. **Merge**: Run `git -C <main-worktree-path> merge <branch-name> --no-edit` to merge the worktree branch into main from the main worktree's directory. Do NOT use `git checkout main` — main is checked out in a different worktree.
 
 6. **Handle the result**:
-   - **Success**: Tell the user the branch was successfully merged into main. Show the merge output.
-   - **Conflict**: Show the user the conflict output. Run `git -C <main-worktree-path> merge --abort` to abort and leave main clean. Tell the user the merge was aborted due to conflicts and they need to resolve them manually.
-   - **Other failure**: Show the error output to the user.
+   - **Success**: Tell the user the branch was successfully merged into main. Show the merge output. Then continue to steps 7 and 8.
+   - **Conflict**: Show the user the conflict output. Run `git -C <main-worktree-path> merge --abort` to abort and leave main clean. Tell the user the merge was aborted due to conflicts and they need to resolve them manually. STOP here — do not proceed to steps 7 or 8.
+   - **Other failure**: Show the error output to the user. STOP here — do not proceed to steps 7 or 8.
+
+7. **Close the GitHub issue** (success only): Extract the issue number from the branch name obtained in step 2. If the branch name matches the pattern `*github-issue-<number>*`, run `gh issue close <number> --comment "Merged into main."`. If the branch name doesn't match this pattern, skip this step silently.
+
+8. **Close this terminal** (success only): Run `curl -s -X POST http://localhost:3000/api/shells/$DEEPSTEVE_SESSION_ID/close`. This must be the absolute last step — the session terminates after this.
