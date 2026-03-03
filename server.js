@@ -1007,6 +1007,28 @@ app.delete('/api/shells/:id', (req, res) => {
   res.status(404).json({ error: 'Session not found' });
 });
 
+app.post('/api/shells/:id/close', (req, res) => {
+  const id = req.params.id;
+  const entry = shells.get(id);
+  if (!entry) return res.status(404).json({ error: 'Shell not found' });
+
+  log(`[API] close: session ${id} closing itself`);
+
+  // Notify connected browser clients to close this tab
+  const closeMsg = JSON.stringify({ type: 'close-tab' });
+  entry.clients.forEach((c) => { try { c.send(closeMsg); } catch {} });
+
+  if (entry.killTimer) { clearTimeout(entry.killTimer); entry.killTimer = null; }
+
+  unwatchClaudeSessionDir(id);
+  killShell(entry, id);
+  shells.delete(id);
+  delete savedState[id];
+  saveState();
+
+  res.json({ closed: id });
+});
+
 app.get('/api/shells/:id/state', (req, res) => {
   const id = req.params.id;
   const entry = shells.get(id);
