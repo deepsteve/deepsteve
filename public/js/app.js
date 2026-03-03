@@ -158,7 +158,7 @@ function applyTheme(css) {
 // When the browser tab regains visibility, re-sync scroll position.
 // scrollToBottom() calls from onWriteParsed may have been no-ops while
 // the tab was hidden (browsers skip layout for background tabs), so the
-// viewport can fall behind even though userScrolledUp is false.
+// viewport can fall behind even though the scroll state is AUTO.
 document.addEventListener('visibilitychange', () => {
   if (!document.hidden && activeId) {
     clearNotification(activeId);
@@ -634,11 +634,10 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
     if (entry) {
       const [, session] = entry;
       session.container.classList.remove('reconnecting');
-      // Suppress auto-scroll during redraw to prevent onWriteParsed races
-      session.scrollControl.setSuppressAutoScroll(true);
+      session.scrollControl.suppressScroll();
       // ResizeObserver handles fit; just request redraw from server
       ws.send(JSON.stringify({ type: 'redraw' }));
-      session.scrollControl.scrollToBottom(); // clears suppressAutoScroll
+      session.scrollControl.scrollToBottom();
     }
   };
 
@@ -669,9 +668,9 @@ function initTerminal(id, ws, cwd, initialName, { hasScrollback = false, pending
   // Store session in memory
   sessions.set(id, { term, fit, ws, container, cwd, name, waitingForInput: false, scrollControl });
 
-  // Suppress auto-scroll during init to prevent onWriteParsed races with
+  // Suppress scroll during init to prevent onWriteParsed races with
   // buffered data flush and scrollback replay
-  scrollControl.setSuppressAutoScroll(true);
+  scrollControl.suppressScroll();
 
   // Flush any buffered data that arrived before the terminal was created
   for (const data of pendingData) {
@@ -721,13 +720,13 @@ function initTerminal(id, ws, cwd, initialName, { hasScrollback = false, pending
   // One-time init after first fit (which happens in switchTo's rAF above)
   requestAnimationFrame(() => {
     if (hasScrollback) {
-      scrollControl.scrollToBottom(); // clears suppressAutoScroll
+      scrollControl.scrollToBottom();
       // Hide the host terminal cursor — Claude Code renders its own cursor
       // via Ink. The original DECTCEM hide sequence from session start may
       // have been trimmed from the scrollback circular buffer.
       term.write('\x1b[?25l');
     } else {
-      scrollControl.setSuppressAutoScroll(false); // no scrollback — clear explicitly
+      scrollControl.scrollToBottom();
       ws.send(JSON.stringify({ type: 'redraw' }));
     }
   });
@@ -763,8 +762,7 @@ function switchTo(id) {
   ModManager.notifyActiveSessionChanged(id);
   const session = sessions.get(id);
   if (session) {
-    // Suppress auto-scroll during tab switch to prevent onWriteParsed races
-    session.scrollControl.setSuppressAutoScroll(true);
+    session.scrollControl.suppressScroll();
     session.container.classList.add('active');
     TabManager.setActive(id);
     // Clear badge and notification when switching to this tab
@@ -777,7 +775,7 @@ function switchTo(id) {
       } finally {
         session.term.focus();
         requestAnimationFrame(() => {
-          session.scrollControl.scrollToBottom(); // clears suppressAutoScroll
+          session.scrollControl.scrollToBottom();
         });
       }
     });

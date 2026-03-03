@@ -59,6 +59,7 @@ const SCROLLBACK_SIZE = 100 * 1024; // 100KB circular buffer per shell
 const RELOAD_FLAG = path.join(os.homedir(), '.deepsteve', '.reload');
 const reloadClients = new Set(); // WebSocket connections for live-reload
 const pendingOpens = []; // open-session messages waiting for a browser to connect
+let restartResolve = null; // resolve callback for pending /api/request-restart
 
 function log(...args) {
   const ts = new Date().toISOString().slice(11, 23);
@@ -1158,6 +1159,33 @@ app.post('/api/start-issue', (req, res) => {
   res.json({ id, name, url: `http://localhost:${PORT}` });
 });
 
+// restart.sh --refresh calls this before restarting. Server asks browser(s)
+// for confirmation, waits for response, then replies to curl.
+app.post('/api/request-restart', (req, res) => {
+  const clients = [...reloadClients].filter(c => c.readyState === 1);
+  if (clients.length === 0) {
+    // No browsers connected — auto-confirm
+    return res.json({ result: 'confirmed' });
+  }
+
+  // Send confirm-restart to all connected browsers
+  for (const ws of clients) {
+    try { ws.send(JSON.stringify({ type: 'confirm-restart' })); } catch {}
+  }
+
+  // Wait for a browser to respond (120s timeout matches curl -m 120)
+  const timeout = setTimeout(() => {
+    restartResolve = null;
+    res.json({ result: 'timeout' });
+  }, 115000);
+
+  restartResolve = (result) => {
+    clearTimeout(timeout);
+    restartResolve = null;
+    res.json({ result });
+  };
+});
+
 const server = app.listen(PORT, BIND, () => {
   log(`HTTP server listening on ${BIND}:${PORT}`);
 });
@@ -1207,6 +1235,16 @@ function handleWsConnection(ws, req) {
     ws.windowId = url.searchParams.get('windowId') || null;
     reloadClients.add(ws);
     ws.on('close', () => reloadClients.delete(ws));
+    ws.on('message', (msg) => {
+      try {
+        const parsed = JSON.parse(msg.toString());
+        if (parsed.type === 'restart-confirmed' && restartResolve) {
+          restartResolve('confirmed');
+        } else if (parsed.type === 'restart-declined' && restartResolve) {
+          restartResolve('declined');
+        }
+      } catch {}
+    });
     // Flush any pending open-session messages to the newly connected browser
     if (pendingOpens.length > 0) {
       const toFlush = pendingOpens.splice(0);
