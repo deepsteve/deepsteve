@@ -12,5 +12,22 @@
     { "name": "send_message", "description": "Send a message to a chat channel" },
     { "name": "read_messages", "description": "Read messages from a chat channel" },
     { "name": "list_channels", "description": "List available chat channels" }
+  ],
+  "permissions": ["microphone"],
+  "settings": [
+    {
+      "key": "ttsEnabled",
+      "type": "boolean",
+      "label": "Text-to-speech",
+      "description": "Read new messages aloud with distinct per-sender voices",
+      "default": false
+    },
+    {
+      "key": "sttEnabled",
+      "type": "boolean",
+      "label": "Speech-to-text",
+      "description": "Hold mic button to dictate messages instead of typing",
+      "default": false
+    }
   ]
 }
