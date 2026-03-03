@@ -10,10 +10,13 @@ const CHANNEL_NAME = 'deepsteve-windows';
 const HEARTBEAT_INTERVAL = 5000;
 const ORPHAN_DETECTION_TIMEOUT = 1500;
 const LIVE_WINDOW_STALE_MS = 15000;
+const SEND_SESSION_ACK_TIMEOUT = 2000;
 
 let channel = null;
 let heartbeatTimer = null;
 let currentWindowId = null;
+// Pending send-session acks: transferId → { resolve, reject, timer }
+const pendingTransfers = new Map();
 // Live window tracking — continuously updated from BroadcastChannel messages
 // Key: windowId, Value: { windowId, sessions: [{id, name}], lastSeen }
 const liveWindows = new Map();
@@ -158,6 +161,19 @@ export const WindowManager = {
           if (receiveSessionCallback) {
             receiveSessionCallback(data.session);
           }
+          // Ack back to sender so they know we received it
+          channel.postMessage({
+            type: 'send-session-ack',
+            transferId: data.transferId,
+            targetWindowId: data.fromWindowId
+          });
+        } else if (data.type === 'send-session-ack' && data.targetWindowId === myId) {
+          const pending = pendingTransfers.get(data.transferId);
+          if (pending) {
+            clearTimeout(pending.timer);
+            pendingTransfers.delete(data.transferId);
+            pending.resolve();
+          }
         }
       };
     }
@@ -230,17 +246,30 @@ export const WindowManager = {
   },
 
   /**
-   * Send a session to another window via BroadcastChannel
+   * Send a session to another window via BroadcastChannel.
+   * Returns a Promise that resolves when the target acks, or rejects on timeout.
    */
   sendSessionToWindow(targetWindowId, session) {
-    if (channel) {
+    if (!channel) return Promise.reject(new Error('No BroadcastChannel'));
+
+    const transferId = crypto.randomUUID();
+
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        pendingTransfers.delete(transferId);
+        reject(new Error('No ack from target window'));
+      }, SEND_SESSION_ACK_TIMEOUT);
+
+      pendingTransfers.set(transferId, { resolve, reject, timer });
+
       channel.postMessage({
         type: 'send-session',
+        transferId,
         targetWindowId,
         session,
         fromWindowId: this.getWindowId()
       });
-    }
+    });
   },
 
   /**

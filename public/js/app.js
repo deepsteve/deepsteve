@@ -935,18 +935,24 @@ function killSession(id) {
  * Like killSession() but does NOT send DELETE to server — the shell stays alive
  * and the target window adopts it via createSession().
  */
-function sendToWindow(id, targetWindowId) {
+async function sendToWindow(id, targetWindowId) {
   const session = sessions.get(id);
   if (!session) return;
 
-  // Send session data to target window via BroadcastChannel
-  WindowManager.sendSessionToWindow(targetWindowId, {
-    id,
-    cwd: session.cwd,
-    name: session.name
-  });
+  // Send session data and wait for ack from target window
+  try {
+    await WindowManager.sendSessionToWindow(targetWindowId, {
+      id,
+      cwd: session.cwd,
+      name: session.name
+    });
+  } catch (err) {
+    // Target window didn't ack — keep the session
+    console.warn(`Send to window failed: ${err.message}. Keeping session.`);
+    return;
+  }
 
-  // Clean up locally (no server DELETE — shell stays alive for 30s grace period)
+  // Ack received — clean up locally (no server DELETE — shell stays alive for 30s grace period)
   if (session.resizeObserver) session.resizeObserver.disconnect();
   session.ws.close();
   session.term.dispose();
