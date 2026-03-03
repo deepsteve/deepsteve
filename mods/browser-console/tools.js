@@ -10,16 +10,30 @@ const TIMEOUT_MS = 10000;
  * Initialize browser console MCP tools.
  */
 function init(context) {
-  const { broadcast } = context;
+  const { broadcast, broadcastToWindow, shells } = context;
+
+  // Resolve session_id to a windowId, returning the send function and optional targetWindowId
+  function resolveTarget(session_id) {
+    if (session_id) {
+      const shell = shells.get(session_id);
+      if (shell && shell.windowId) {
+        const windowId = shell.windowId;
+        return { send: (msg) => broadcastToWindow(windowId, { ...msg, targetWindowId: windowId }), targetWindowId: windowId };
+      }
+    }
+    return { send: broadcast };
+  }
 
   return {
     browser_eval: {
       description: 'Execute JavaScript code in the deepsteve management UI browser tab and return the result. IMPORTANT: This runs in the deepsteve web interface only — it cannot access external websites, your project\'s frontend, or any other browser tab. Use this to inspect deepsteve\'s own DOM state (sessions, tabs, mods, layout), check for deepsteve UI errors, or read deepsteve element properties.',
       schema: {
         code: z.string().describe('JavaScript code to execute in the browser. Has full access to the DOM and page globals. Async code is supported (the return value is awaited).'),
+        session_id: z.string().optional().describe('DeepSteve session ID ($DEEPSTEVE_SESSION_ID). When provided, the command is sent only to the browser window that owns this session.'),
       },
-      handler: async ({ code }) => {
+      handler: async ({ code, session_id }) => {
         const requestId = randomUUID();
+        const { send } = resolveTarget(session_id);
 
         return new Promise((resolve) => {
           const timer = setTimeout(() => {
@@ -31,7 +45,7 @@ function init(context) {
 
           pendingRequests.set(requestId, { resolve, timer });
 
-          broadcast({
+          send({
             type: 'browser-eval-request',
             requestId,
             code,
@@ -46,9 +60,11 @@ function init(context) {
         level: z.enum(['all', 'log', 'warn', 'error', 'info', 'debug']).optional().describe('Filter by log level. Defaults to "all".'),
         limit: z.number().optional().describe('Maximum number of entries to return (most recent first). Defaults to 50.'),
         search: z.string().optional().describe('Filter entries containing this substring (case-insensitive).'),
+        session_id: z.string().optional().describe('DeepSteve session ID ($DEEPSTEVE_SESSION_ID). When provided, the command is sent only to the browser window that owns this session.'),
       },
-      handler: async ({ level, limit, search }) => {
+      handler: async ({ level, limit, search, session_id }) => {
         const requestId = randomUUID();
+        const { send } = resolveTarget(session_id);
 
         return new Promise((resolve) => {
           const timer = setTimeout(() => {
@@ -60,7 +76,7 @@ function init(context) {
 
           pendingRequests.set(requestId, { resolve, timer });
 
-          broadcast({
+          send({
             type: 'browser-console-request',
             requestId,
             level: level || 'all',
