@@ -879,30 +879,52 @@ function showCloseConfirmDialog() {
 }
 
 function showRestartConfirmDialog() {
-  return new Promise(resolve => {
-    const overlay = document.createElement('div');
-    overlay.className = 'modal-overlay';
-    overlay.innerHTML = `
-      <div class="modal">
-        <h2>Restart DeepSteve?</h2>
-        <p style="font-size:13px;color:var(--ds-text-secondary);margin-bottom:16px;">This will restart the server and reload the page. Running agents will be interrupted but sessions will be restored.</p>
-        <div class="modal-buttons">
-          <button class="btn-secondary" id="restart-confirm-cancel">Cancel</button>
-          <button class="btn-primary" id="restart-confirm-ok">Restart</button>
-        </div>
-      </div>`;
-    document.body.appendChild(overlay);
+  let resolve;
+  const promise = new Promise(r => { resolve = r; });
 
-    const cleanup = (result) => { overlay.remove(); resolve(result); };
-    overlay.querySelector('#restart-confirm-cancel').onclick = () => cleanup(false);
-    overlay.querySelector('#restart-confirm-ok').onclick = () => cleanup(true);
-    overlay.onclick = (e) => { if (e.target === overlay) cleanup(false); };
-    const onKey = (e) => {
-      if (e.key === 'Enter') { e.preventDefault(); document.removeEventListener('keydown', onKey); cleanup(true); }
-      if (e.key === 'Escape') { e.preventDefault(); document.removeEventListener('keydown', onKey); cleanup(false); }
-    };
-    document.addEventListener('keydown', onKey);
-  });
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.innerHTML = `
+    <div class="modal">
+      <h2>Restart DeepSteve?</h2>
+      <p style="font-size:13px;color:var(--ds-text-secondary);margin-bottom:16px;">This will restart the server and reload the page. Running agents will be interrupted but sessions will be restored.</p>
+      <div class="modal-buttons">
+        <button class="btn-secondary" id="restart-confirm-cancel">Cancel</button>
+        <button class="btn-primary" id="restart-confirm-ok">Restart</button>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+
+  let cleaned = false;
+  const cleanup = (result) => {
+    if (cleaned) return;
+    cleaned = true;
+    document.removeEventListener('keydown', onKey);
+    overlay.remove();
+    resolve(result);
+  };
+  overlay.querySelector('#restart-confirm-cancel').onclick = () => cleanup(false);
+  overlay.querySelector('#restart-confirm-ok').onclick = () => cleanup(true);
+  overlay.onclick = (e) => { if (e.target === overlay) cleanup(false); };
+  const onKey = (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); cleanup(true); }
+    if (e.key === 'Escape') { e.preventDefault(); cleanup(false); }
+  };
+  document.addEventListener('keydown', onKey);
+
+  return { promise, dismiss: cleanup };
+}
+
+function showReloadOverlay() {
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.style.cursor = 'default';
+  overlay.innerHTML = `
+    <div style="text-align:center;">
+      <div class="reload-spinner"></div>
+      <div style="color:var(--ds-text-bright);font-size:16px;font-weight:600;margin-top:16px;">Restarting...</div>
+    </div>`;
+  document.body.appendChild(overlay);
 }
 
 function killSession(id) {
@@ -1402,7 +1424,8 @@ async function init() {
         createSession(msg.cwd, msg.id, false, { name: msg.name, allowDuplicate: true });
       }
     },
-    onShowRestartConfirm: () => showRestartConfirmDialog()
+    onShowRestartConfirm: () => showRestartConfirmDialog(),
+    onShowReloadOverlay: () => showReloadOverlay()
   });
 
   // Initialize Cmd+N tab switching (capture-phase listeners, off by default)

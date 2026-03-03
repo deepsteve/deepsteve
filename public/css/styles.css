@@ -295,6 +295,9 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
   0%, 100% { opacity: 1; }
   50% { opacity: 0.5; }
 }
+/* Reload spinner */
+.reload-spinner { width: 32px; height: 32px; border: 3px solid var(--ds-border); border-top-color: var(--ds-accent-blue); border-radius: 50%; animation: spin 0.8s linear infinite; margin: 0 auto; }
+@keyframes spin { to { transform: rotate(360deg); } }
 /* Modal */
 .modal-overlay { position: fixed; inset: 0; background: var(--ds-overlay); display: flex; align-items: center; justify-content: center; z-index: 100; }
 .modal { background: var(--ds-bg-secondary); border: 1px solid var(--ds-border); border-radius: 8px; padding: 20px; width: 420px; }
