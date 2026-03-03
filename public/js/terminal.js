@@ -63,36 +63,26 @@ export function setupTerminalIO(term, ws, { onUserInput, container } = {}) {
     return true;
   });
 
-  // Auto-scroll to bottom on new output, unless user has scrolled up.
+  // Auto-scroll state machine.
   //
-  // We detect user scroll intent via wheel events (direction-aware) and
-  // the DOM viewport's scroll position. We avoid xterm's onScroll and
-  // buffer.baseY/viewportY because:
-  // - Ink (Claude Code's UI) periodically clears and re-renders the screen,
-  //   resetting the scroll buffer, which fires misleading onScroll events.
-  // - During active output, baseY increases between the wheel event and the
-  //   rAF check, so the user can never "catch up" to the bottom — the flag
-  //   gets stuck as true.
-  // The DOM viewport's scrollTop/scrollHeight is the ground truth for what
-  // the user actually sees.
-  let userScrolledUp = false;
-
-  // During transitions (tab switch, reconnect, scrollback replay), suppress
-  // auto-scroll from onWriteParsed and wheel state tracking to prevent races.
-  let suppressAutoScroll = false;
+  // Three states:
+  //   AUTO           — new output auto-scrolls to bottom
+  //   USER_SCROLLED  — user scrolled up; output does NOT yank back
+  //   SUPPRESSED     — transitions (tab switch, reconnect, init) ignore scroll events
+  //
+  // Transitions:
+  //   AUTO → USER_SCROLLED  (scroll event detects gap > tolerance)
+  //   USER_SCROLLED → AUTO  (scroll event detects gap ≤ tolerance, or scrollToBottom())
+  //   * → SUPPRESSED        (suppressScroll())
+  //   SUPPRESSED → AUTO     (scrollToBottom() or 500ms safety timeout)
+  //
+  // We listen on the .xterm-viewport `scroll` event instead of `wheel` + rAF.
+  // The scroll event fires *after* the browser has updated scrollTop, so there
+  // are no stale-position races with output or Ink re-renders.
+  let state = 'AUTO';
   let suppressTimer = null;
 
-  // Generation counter: bumped on every programmatic scrollToBottom().
-  // Wheel rAF callbacks capture the generation when scheduled and ignore
-  // themselves if a programmatic scroll happened since — prevents a stale
-  // rAF from overwriting userScrolledUp after scrollToBottom() cleared it.
-  let scrollGen = 0;
-
-  // Fallback: detect when user is stuck scrolling down during active output.
-  // If the gap to bottom doesn't decrease across consecutive down-scroll rAFs,
-  // the bottom is receding faster than the user can scroll — force-snap.
-  let stuckDownCount = 0;
-  let prevDownGap = Infinity;
+  const BOTTOM_TOLERANCE = 10;
 
   // Floating scroll-to-bottom button
   const scrollBtn = document.createElement('button');
@@ -102,14 +92,19 @@ export function setupTerminalIO(term, ws, { onUserInput, container } = {}) {
   if (container) container.appendChild(scrollBtn);
 
   function scrollToBottom() {
-    suppressAutoScroll = false;
-    userScrolledUp = false;
-    stuckDownCount = 0;
-    prevDownGap = Infinity;
-    scrollGen++;
+    state = 'AUTO';
+    clearTimeout(suppressTimer);
     term.scrollToBottom();
     term.refresh(0, term.rows - 1);
     scrollBtn.classList.remove('visible');
+  }
+
+  function suppressScroll() {
+    state = 'SUPPRESSED';
+    clearTimeout(suppressTimer);
+    suppressTimer = setTimeout(() => {
+      if (state === 'SUPPRESSED') state = 'AUTO';
+    }, 500);
   }
 
   scrollBtn.addEventListener('click', () => {
@@ -121,77 +116,32 @@ export function setupTerminalIO(term, ws, { onUserInput, container } = {}) {
   // xterm renders .xterm-viewport as the scrollable container.
   const viewport = container?.querySelector('.xterm-viewport');
 
-  // Track scroll direction via wheel deltaY.
-  // - Scroll up (deltaY < 0): set userScrolledUp = true
-  // - Scroll down (deltaY > 0): check if viewport is near bottom → clear flag
-  // A small tolerance (half a row height, ~10px) handles sub-pixel rounding
-  // and the race where new output arrives between the wheel event and rAF.
-  const BOTTOM_TOLERANCE = 10;
-  const STUCK_DOWN_THRESHOLD = 3;
-
-  term.element.addEventListener('wheel', (e) => {
-    const gen = scrollGen;
-    const scrollingDown = e.deltaY > 0;
-    requestAnimationFrame(() => {
-      if (suppressAutoScroll) return;
-      if (gen !== scrollGen) return; // programmatic scroll happened since — ignore
-
-      if (!scrollingDown) {
-        stuckDownCount = 0;
-        prevDownGap = Infinity;
-        if (viewport && viewport.scrollTop > 0) {
-          userScrolledUp = true;
-          scrollBtn.classList.add('visible');
-        }
-        return;
-      }
-
-      // Scrolling down
-      if (!viewport) return;
+  if (viewport) {
+    viewport.addEventListener('scroll', () => {
+      if (state === 'SUPPRESSED') return;
       const gap = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight;
       if (gap <= BOTTOM_TOLERANCE) {
-        userScrolledUp = false;
-        stuckDownCount = 0;
-        prevDownGap = Infinity;
+        state = 'AUTO';
         scrollBtn.classList.remove('visible');
-        return;
-      }
-
-      // Not at bottom — check if stuck (gap not closing across consecutive down-scrolls)
-      if (gap >= prevDownGap) {
-        stuckDownCount++;
-        if (stuckDownCount >= STUCK_DOWN_THRESHOLD) {
-          stuckDownCount = 0;
-          prevDownGap = Infinity;
-          scrollToBottom();
-          return;
-        }
       } else {
-        stuckDownCount = 0;
+        state = 'USER_SCROLLED';
+        scrollBtn.classList.add('visible');
       }
-      prevDownGap = gap;
-    });
-  }, { passive: true });
+    }, { passive: true });
+  }
 
   term.onWriteParsed(() => {
-    if (suppressAutoScroll) return;
-    if (!userScrolledUp) {
-      scrollToBottom();
+    if (state === 'AUTO') {
+      term.scrollToBottom();
     }
   });
 
   return {
     scrollToBottom,
-    setSuppressAutoScroll(value) {
-      suppressAutoScroll = value;
-      clearTimeout(suppressTimer);
-      if (value) {
-        suppressTimer = setTimeout(() => { suppressAutoScroll = false; }, 500);
-      }
-    },
+    suppressScroll,
     /** Re-sync viewport to bottom if user hasn't intentionally scrolled up. */
     nudgeToBottom() {
-      if (!userScrolledUp) {
+      if (state === 'AUTO') {
         term.scrollToBottom();
       }
     }
