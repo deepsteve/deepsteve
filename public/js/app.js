@@ -1258,6 +1258,8 @@ async function showIssuePicker() {
       selectedIssue = issues.find(i => i.number === parseInt(item.dataset.number));
       startIssue();
     });
+    const link = item.querySelector('.issue-link');
+    if (link) link.addEventListener('click', e => e.stopPropagation());
   }
 
   function renderIssues(issuesToRender) {
@@ -1269,12 +1271,13 @@ async function showIssuePicker() {
       el.dataset.number = issue.number;
       el.innerHTML = `
         <span class="issue-number">#${issue.number}</span>
-        <div>
+        <div class="issue-info">
           <div class="issue-title">${escapeHtml(issue.title)}</div>
           ${issue.labels && issue.labels.length > 0 ? `
             <div class="issue-labels">${issue.labels.map(l => `<span class="issue-label">${escapeHtml(l.name)}</span>`).join('')}</div>
           ` : ''}
         </div>
+        <a class="issue-link" href="${escapeHtml(issue.url)}" target="_blank" title="Open on GitHub">&#8599;</a>
       `;
       list.appendChild(el);
       bindIssueItem(el);

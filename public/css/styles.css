@@ -253,7 +253,10 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
 .issue-item:hover { background: var(--ds-bg-tertiary); }
 .issue-item.selected { background: var(--ds-selected-bg); border-color: var(--ds-accent-green); }
 .issue-number { color: var(--ds-text-secondary); font-size: 13px; font-weight: 600; flex-shrink: 0; min-width: 36px; }
-.issue-title { color: var(--ds-text-primary); font-size: 13px; flex: 1; }
+.issue-info { flex: 1; min-width: 0; }
+.issue-title { color: var(--ds-text-primary); font-size: 13px; }
+.issue-link { color: var(--ds-text-secondary); text-decoration: none; font-size: 14px; flex-shrink: 0; padding: 0 2px; opacity: 0.5; transition: opacity 0.15s; }
+.issue-link:hover { opacity: 1; color: var(--ds-accent-green); }
 .issue-labels { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
 .issue-label { font-size: 11px; padding: 1px 6px; border-radius: 12px; background: var(--ds-bg-tertiary); color: var(--ds-text-secondary); border: 1px solid var(--ds-border); }
 .issue-empty { padding: 16px; text-align: center; color: var(--ds-text-secondary); font-size: 13px; }
