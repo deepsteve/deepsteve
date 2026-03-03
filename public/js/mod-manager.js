@@ -972,6 +972,9 @@ function _loadPanelMod(mod) {
   const iframeEl = document.createElement('iframe');
   iframeEl.src = `/mods/${mod.id}/${entry}`;
   iframeEl.setAttribute('sandbox', 'allow-scripts allow-same-origin');
+  if (mod.permissions?.length) {
+    iframeEl.setAttribute('allow', mod.permissions.join('; '));
+  }
   iframeEl.style.display = 'none'; // Hidden until switched to
   panelContainer.appendChild(iframeEl);
   iframeEl.addEventListener('load', () => {
@@ -1145,6 +1148,9 @@ function _showMod(mod) {
     iframe = document.createElement('iframe');
     iframe.src = `/mods/${mod.id}/${entry}`;
     iframe.setAttribute('sandbox', 'allow-scripts allow-same-origin');
+    if (mod.permissions?.length) {
+      iframe.setAttribute('allow', mod.permissions.join('; '));
+    }
     modContainer.appendChild(iframe);
     iframe.addEventListener('load', () => {
       _injectBridgeAPI(iframe, mod.id);

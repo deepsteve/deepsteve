@@ -110,6 +110,105 @@ function notifyMention(msg, myName) {
   }
 }
 
+// ─── TTS engine (module-level, outside React) ────────────────────────
+
+let ttsQueue = [];
+let ttsSpeaking = false;
+let voiceCache = new Map();
+let voicesLoaded = false;
+
+function hashName(name) {
+  let h = 0;
+  for (let i = 0; i < name.length; i++) {
+    h = ((h << 5) - h + name.charCodeAt(i)) | 0;
+  }
+  return Math.abs(h);
+}
+
+function senderVoice(name) {
+  if (voiceCache.has(name)) return voiceCache.get(name);
+  const voices = speechSynthesis.getVoices().filter(v => /en[-_]/i.test(v.lang));
+  if (voices.length === 0) return null;
+  const h = hashName(name);
+  const voice = voices[h % voices.length];
+  const pitch = 0.8 + (((h >> 8) & 0xff) / 255) * 0.5;  // 0.8–1.3
+  const rate = 0.9 + (((h >> 16) & 0xff) / 255) * 0.2;   // 0.9–1.1
+  const result = { voice, pitch, rate };
+  voiceCache.set(name, result);
+  return result;
+}
+
+function processQueue() {
+  if (ttsSpeaking || ttsQueue.length === 0) return;
+  ttsSpeaking = true;
+  const msg = ttsQueue.shift();
+  const text = msg.text.length > 500 ? msg.text.slice(0, 500) + '...' : msg.text;
+  const utterance = new SpeechSynthesisUtterance(`${msg.sender} says: ${text}`);
+  const voiceInfo = senderVoice(msg.sender);
+  if (voiceInfo) {
+    utterance.voice = voiceInfo.voice;
+    utterance.pitch = voiceInfo.pitch;
+    utterance.rate = voiceInfo.rate;
+  }
+  utterance.onend = () => { ttsSpeaking = false; processQueue(); };
+  utterance.onerror = () => { ttsSpeaking = false; processQueue(); };
+  speechSynthesis.speak(utterance);
+}
+
+function speakMessage(msg) {
+  ttsQueue.push(msg);
+  processQueue();
+}
+
+function cancelTts() {
+  ttsQueue = [];
+  ttsSpeaking = false;
+  speechSynthesis.cancel();
+}
+
+// Load voices (async in Chrome)
+if (typeof speechSynthesis !== 'undefined') {
+  speechSynthesis.onvoiceschanged = () => {
+    voicesLoaded = true;
+    voiceCache.clear();
+  };
+  if (speechSynthesis.getVoices().length > 0) voicesLoaded = true;
+}
+
+// ─── STT feature detection ───────────────────────────────────────────
+
+const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+const sttSupported = !!SpeechRecognition;
+
+// ─── SVG icons ───────────────────────────────────────────────────────
+
+function SpeakerIcon({ active }) {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke={active ? '#58a6ff' : '#8b949e'} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
+      {active && (
+        <>
+          <path d="M15.54 8.46a5 5 0 0 1 0 7.07" />
+          <path d="M19.07 4.93a10 10 0 0 1 0 14.14" />
+        </>
+      )}
+    </svg>
+  );
+}
+
+function MicIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="9" y="1" width="6" height="12" rx="3" />
+      <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+      <line x1="12" y1="19" x2="12" y2="23" />
+      <line x1="8" y1="23" x2="16" y2="23" />
+    </svg>
+  );
+}
+
+// ─── ChatPanel ───────────────────────────────────────────────────────
+
 function ChatPanel() {
   const [channels, setChannels] = useState({});
   const [activeChannel, setActiveChannel] = useState('general');
@@ -118,10 +217,19 @@ function ChatPanel() {
     try { return localStorage.getItem('deepsteve-chat-sender') || 'Human'; }
     catch { return 'Human'; }
   });
+  const [ttsEnabled, setTtsEnabled] = useState(false);
+  const [sttEnabled, setSttEnabled] = useState(false);
+  const [isListening, setIsListening] = useState(false);
+
   const messagesEndRef = useRef(null);
   const prevMessageCountRef = useRef(0);
   const senderNameRef = useRef(senderName);
   const seenMessageIdsRef = useRef(new Set());
+  const spokenMessageIdsRef = useRef(new Set());
+  const initialLoadDoneRef = useRef(false);
+  const ttsEnabledRef = useRef(false);
+  const activeChannelRef = useRef(activeChannel);
+  const recognitionRef = useRef(null);
   const lastReadIdRef = useRef((() => {
     try {
       const saved = localStorage.getItem('deepsteve-chat-last-read');
@@ -130,14 +238,41 @@ function ChatPanel() {
   })());
   const [unreadMarkers, setUnreadMarkers] = useState({});
 
-  // Keep ref in sync so the callback closure always has the latest name
+  // Keep refs in sync
   useEffect(() => { senderNameRef.current = senderName; }, [senderName]);
+  useEffect(() => { activeChannelRef.current = activeChannel; }, [activeChannel]);
+  useEffect(() => { ttsEnabledRef.current = ttsEnabled; }, [ttsEnabled]);
 
   // Persist sender name to localStorage
   useEffect(() => {
     try { localStorage.setItem('deepsteve-chat-sender', senderName); }
     catch {}
   }, [senderName]);
+
+  // Cancel TTS when toggled off
+  useEffect(() => {
+    if (!ttsEnabled) cancelTts();
+  }, [ttsEnabled]);
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      cancelTts();
+      if (recognitionRef.current) {
+        try { recognitionRef.current.abort(); } catch {}
+        recognitionRef.current = null;
+      }
+    };
+  }, []);
+
+  // Subscribe to settings changes from deepsteve bridge
+  useEffect(() => {
+    if (!window.deepsteve) return;
+    return window.deepsteve.onSettingsChanged((s) => {
+      setTtsEnabled(!!s.ttsEnabled);
+      setSttEnabled(!!s.sttEnabled);
+    });
+  }, []);
 
   // Mark current channel as read + clear badge when tab regains focus
   useEffect(() => {
@@ -181,8 +316,22 @@ function ChatPanel() {
                 }
               }
             }
+
+            // TTS: speak new messages
+            if (!spokenMessageIdsRef.current.has(msg.id)) {
+              spokenMessageIdsRef.current.add(msg.id);
+              if (initialLoadDoneRef.current && ttsEnabledRef.current && chName === activeChannelRef.current) {
+                speakMessage(msg);
+              }
+            }
           }
         }
+
+        // Mark initial load complete after first callback
+        if (!initialLoadDoneRef.current) {
+          initialLoadDoneRef.current = true;
+        }
+
         if (hasMention && document.hidden) {
           window.deepsteve?.setPanelBadge('!');
         }
@@ -264,6 +413,49 @@ function ChatPanel() {
     }
   }, []);
 
+  const toggleTts = useCallback(() => {
+    if (window.deepsteve?.updateSetting) {
+      window.deepsteve.updateSetting('ttsEnabled', !ttsEnabled);
+    }
+  }, [ttsEnabled]);
+
+  // ─── STT (speech-to-text) ────────────────────────────────────────
+
+  const startListening = useCallback(() => {
+    if (!sttSupported || recognitionRef.current) return;
+    const recognition = new SpeechRecognition();
+    recognition.continuous = true;
+    recognition.interimResults = true;
+    recognition.lang = 'en-US';
+    recognition.onresult = (event) => {
+      let transcript = '';
+      for (let i = 0; i < event.results.length; i++) {
+        transcript += event.results[i][0].transcript;
+      }
+      setInput(transcript);
+    };
+    recognition.onerror = (event) => {
+      if (event.error !== 'aborted') {
+        console.error('STT error:', event.error);
+      }
+      setIsListening(false);
+      recognitionRef.current = null;
+    };
+    recognition.onend = () => {
+      setIsListening(false);
+      recognitionRef.current = null;
+    };
+    recognitionRef.current = recognition;
+    recognition.start();
+    setIsListening(true);
+  }, []);
+
+  const stopListening = useCallback(() => {
+    if (recognitionRef.current) {
+      recognitionRef.current.stop();
+    }
+  }, []);
+
   const channelNames = Object.keys(channels);
   if (channelNames.length === 0 && activeChannel === 'general') {
     // Show general even if empty
@@ -275,6 +467,8 @@ function ChatPanel() {
     if (name === activeChannel) return sum;
     return sum + (channels[name]?.messages?.length || 0);
   }, 0);
+
+  const showMicButton = sttEnabled && sttSupported;
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100vh' }}>
@@ -301,25 +495,44 @@ function ChatPanel() {
               </span>
             )}
           </span>
-          {messages.length > 0 && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
             <button
-              onClick={() => clearChannel(activeChannel)}
+              onClick={toggleTts}
               style={{
                 background: 'none',
                 border: 'none',
-                color: '#8b949e',
                 cursor: 'pointer',
-                fontSize: 11,
-                padding: '2px 6px',
-                opacity: 0.6,
+                padding: '2px 4px',
+                display: 'flex',
+                alignItems: 'center',
+                opacity: ttsEnabled ? 1 : 0.5,
               }}
-              onMouseEnter={e => e.target.style.opacity = 1}
-              onMouseLeave={e => e.target.style.opacity = 0.6}
-              title={`Clear #${activeChannel}`}
+              onMouseEnter={e => { if (!ttsEnabled) e.currentTarget.style.opacity = 0.8; }}
+              onMouseLeave={e => { if (!ttsEnabled) e.currentTarget.style.opacity = 0.5; }}
+              title={ttsEnabled ? 'Disable text-to-speech' : 'Enable text-to-speech'}
             >
-              Clear
+              <SpeakerIcon active={ttsEnabled} />
             </button>
-          )}
+            {messages.length > 0 && (
+              <button
+                onClick={() => clearChannel(activeChannel)}
+                style={{
+                  background: 'none',
+                  border: 'none',
+                  color: '#8b949e',
+                  cursor: 'pointer',
+                  fontSize: 11,
+                  padding: '2px 6px',
+                  opacity: 0.6,
+                }}
+                onMouseEnter={e => e.target.style.opacity = 1}
+                onMouseLeave={e => e.target.style.opacity = 0.6}
+                title={`Clear #${activeChannel}`}
+              >
+                Clear
+              </button>
+            )}
+          </div>
         </div>
 
         {/* Channel selector */}
@@ -430,21 +643,46 @@ function ChatPanel() {
             value={input}
             onChange={e => setInput(e.target.value)}
             onKeyDown={handleKeyDown}
-            placeholder="Type a message..."
+            placeholder={isListening ? 'Listening...' : 'Type a message...'}
             rows={1}
             style={{
               flex: 1,
               padding: '6px 8px',
               fontSize: 12,
               background: '#0d1117',
-              border: '1px solid #30363d',
+              border: isListening ? '1px solid #f85149' : '1px solid #30363d',
               borderRadius: 6,
               color: '#c9d1d9',
               resize: 'none',
               outline: 'none',
               fontFamily: 'system-ui',
+              ...(isListening ? { animation: 'listening-pulse 1.5s ease-in-out infinite' } : {}),
             }}
           />
+          {showMicButton && (
+            <button
+              onMouseDown={startListening}
+              onMouseUp={stopListening}
+              onMouseLeave={() => { if (isListening) stopListening(); }}
+              onTouchStart={(e) => { e.preventDefault(); startListening(); }}
+              onTouchEnd={(e) => { e.preventDefault(); stopListening(); }}
+              style={{
+                padding: '6px 8px',
+                fontSize: 12,
+                background: isListening ? 'rgba(248, 81, 73, 0.2)' : 'rgba(255,255,255,0.06)',
+                border: isListening ? '1px solid #f85149' : '1px solid #30363d',
+                borderRadius: 6,
+                color: isListening ? '#f85149' : '#8b949e',
+                cursor: 'pointer',
+                flexShrink: 0,
+                display: 'flex',
+                alignItems: 'center',
+              }}
+              title="Hold to speak"
+            >
+              <MicIcon />
+            </button>
+          )}
           <button
             onClick={sendMessage}
             disabled={!input.trim()}
@@ -463,6 +701,14 @@ function ChatPanel() {
           </button>
         </div>
       </div>
+
+      {/* CSS animation for listening pulse */}
+      <style>{`
+        @keyframes listening-pulse {
+          0%, 100% { border-color: #f85149; }
+          50% { border-color: #f8514940; }
+        }
+      `}</style>
     </div>
   );
 }
