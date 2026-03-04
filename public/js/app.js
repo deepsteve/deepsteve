@@ -1109,7 +1109,7 @@ function renameSession(id) {
 function quickNewSession() {
   const active = activeId && sessions.get(activeId);
   const cwd = active?.cwd || SessionStore.getLastCwd() || '~';
-  createSession(cwd, null, true);
+  createSession(cwd, null, true, { agentType: getDefaultAgentType() });
 }
 
 /** Get the default agent type from cached settings */
@@ -1480,7 +1480,8 @@ async function showIssuePicker() {
       worktree: 'github-issue-' + selectedIssue.number,
       initialPrompt: prompt,
       planMode: wandPlanMode,
-      name: truncateTitle(`#${selectedIssue.number} ${selectedIssue.title}`)
+      name: truncateTitle(`#${selectedIssue.number} ${selectedIssue.title}`),
+      agentType: getDefaultAgentType()
     });
   }
 
