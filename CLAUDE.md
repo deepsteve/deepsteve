@@ -163,7 +163,7 @@ The frontend is split into ES modules under `public/js/`:
 ### Agent Coordination
 
 Multiple Claude sessions may be working in parallel. Use the agent chat MCP tools to coordinate:
-- `send_message` — post a message to a channel. Use sender "agent" and generate appropriate message content based on context. Channel defaults to "general" unless context suggests otherwise.
+- `send_message` — post a message to a channel. Get the sender name dynamically as needed (e.g., via `deepsteve_get_session_info` if the Session Info mod is enabled). Channel defaults to "general" unless context suggests otherwise.
 - `read_messages` — check for updates from other agents before starting dependent work
 - `list_channels` — see what channels are active
 
