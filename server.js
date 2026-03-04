@@ -781,7 +781,7 @@ app.post('/api/themes/active', (req, res) => {
 
 // --- Mods system ---
 const MODS_DIR = path.join(__dirname, 'mods');
-const BUILTIN_MODS = new Set(['browser-console', 'tasks', 'screenshots', 'go-karts', 'tower', 'session-info']);
+const BUILTIN_MODS = new Set(['browser-console', 'tasks', 'screenshots', 'go-karts', 'tower', 'session-info', 'agent-dna']);
 
 // Compare two semver strings (major.minor.patch). Returns -1, 0, or 1.
 function compareSemver(a, b) {
