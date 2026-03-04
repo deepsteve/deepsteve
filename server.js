@@ -1007,12 +1007,11 @@ app.delete('/api/shells/:id', (req, res) => {
   res.status(404).json({ error: 'Session not found' });
 });
 
-app.post('/api/shells/:id/close', (req, res) => {
-  const id = req.params.id;
+function closeSession(id) {
   const entry = shells.get(id);
-  if (!entry) return res.status(404).json({ error: 'Shell not found' });
+  if (!entry) return false;
 
-  log(`[API] close: session ${id} closing itself`);
+  log(`[closeSession] session ${id} closing`);
 
   // Notify connected browser clients to close this tab
   const closeMsg = JSON.stringify({ type: 'close-tab' });
@@ -1026,7 +1025,12 @@ app.post('/api/shells/:id/close', (req, res) => {
   delete savedState[id];
   saveState();
 
-  res.json({ closed: id });
+  return true;
+}
+
+app.post('/api/shells/:id/close', (req, res) => {
+  if (!closeSession(req.params.id)) return res.status(404).json({ error: 'Shell not found' });
+  res.json({ closed: req.params.id });
 });
 
 app.get('/api/shells/:id/state', (req, res) => {
@@ -1492,7 +1496,7 @@ function broadcastToWindow(windowId, msg) {
 }
 
 // Initialize MCP server (async, ~100ms for dynamic import)
-initMCP({ app, shells, wss, broadcast, broadcastToWindow, log, MODS_DIR }).catch(e => log('MCP init failed:', e.message));
+initMCP({ app, shells, wss, broadcast, broadcastToWindow, log, MODS_DIR, closeSession }).catch(e => log('MCP init failed:', e.message));
 
 // Watch themes directory for changes and broadcast to clients
 let themeWatchDebounce = null;
