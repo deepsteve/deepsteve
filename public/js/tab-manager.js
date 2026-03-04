@@ -84,6 +84,24 @@ function showContextMenu(x, y, sessionId, callbacks) {
   }
   menu.appendChild(sendEl);
 
+  // Mod-provided context menu items
+  const modItems = callbacks.getModMenuItems ? callbacks.getModMenuItems() : [];
+  if (modItems.length > 0) {
+    const sep = document.createElement('div');
+    sep.className = 'context-menu-separator';
+    menu.appendChild(sep);
+    for (const item of modItems) {
+      const el = document.createElement('div');
+      el.className = 'context-menu-item';
+      el.textContent = item.label;
+      el.onclick = () => {
+        hideContextMenu();
+        item.onClick(sessionId);
+      };
+      menu.appendChild(el);
+    }
+  }
+
   menu.style.left = x + 'px';
   menu.style.top = y + 'px';
   document.body.appendChild(menu);

@@ -1461,6 +1461,29 @@ function handleModChanged(modId) {
   }
 }
 
+/**
+ * Focus a panel mod by switching to it (and showing the panel if collapsed).
+ */
+function focusPanel(modId) {
+  _switchToPanel(modId);
+}
+
+/**
+ * Get context menu items from enabled mods' manifests.
+ * Returns [{ label, modId, action }] for mods that declare a contextMenu array.
+ */
+function getContextMenuItems() {
+  const items = [];
+  for (const mod of allMods) {
+    if (!enabledMods.has(mod.id)) continue;
+    if (!mod.contextMenu) continue;
+    for (const entry of mod.contextMenu) {
+      items.push({ label: entry.label, modId: mod.id, action: entry.action });
+    }
+  }
+  return items;
+}
+
 export const ModManager = {
   init,
   loadAvailableMods,
@@ -1476,4 +1499,6 @@ export const ModManager = {
   isModViewVisible,
   isModActive,
   handleModChanged,
+  focusPanel,
+  getContextMenuItems,
 };

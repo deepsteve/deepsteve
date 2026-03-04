@@ -714,7 +714,15 @@ function initTerminal(id, ws, cwd, initialName, { hasScrollback = false, pending
       ModManager.notifySessionsChanged(getSessionList());
     },
     getLiveWindows: () => WindowManager.getLiveWindows(),
-    onSendToWindow: (sessionId, targetWindowId) => sendToWindow(sessionId, targetWindowId)
+    onSendToWindow: (sessionId, targetWindowId) => sendToWindow(sessionId, targetWindowId),
+    getModMenuItems: () => {
+      return ModManager.getContextMenuItems().map(item => ({
+        label: item.label,
+        onClick: () => {
+          if (item.action === 'focus-panel') ModManager.focusPanel(item.modId);
+        },
+      }));
+    },
   };
 
   TabManager.addTab(id, name, tabCallbacks);
