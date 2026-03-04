@@ -331,3 +331,7 @@ Mod state is stored in localStorage with the following keys:
 | `deepsteve-mod-settings-<modId>` | Per-mod settings object (one key per mod) |
 
 Panel mods are auto-enabled on first visit (when no mod preferences have been saved yet).
+
+## Tutorials
+
+- [Three.js VR Skeleton](../mod-tutorials/threejs-vr-skeleton/) — Minimal three.js + WebXR starter template for building VR mods

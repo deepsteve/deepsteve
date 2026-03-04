@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Three.js VR Skeleton</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { overflow: hidden; background: #000; }
+
+    #scene {
+      display: block;
+      width: 100vw;
+      height: 100vh;
+    }
+
+    /* Simple HUD overlay — customize or remove as needed */
+    #hud {
+      position: absolute;
+      top: 12px;
+      left: 12px;
+      color: #fff;
+      font: 14px/1.4 monospace;
+      pointer-events: none;
+      text-shadow: 0 1px 3px rgba(0,0,0,0.7);
+    }
+  </style>
+
+  <!-- Three.js import map — same CDN + version as Monkey Code -->
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.171.0/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.171.0/examples/jsm/"
+    }
+  }
+  </script>
+</head>
+<body>
+  <canvas id="scene"></canvas>
+  <div id="hud">VR Skeleton</div>
+
+  <script type="module" src="skeleton.js"></script>
+</body>
+</html>
