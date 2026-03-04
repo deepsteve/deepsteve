@@ -120,7 +120,8 @@ Issue description:
 
 Please read the issue carefully, understand the codebase context, and implement the changes needed.`,
   defaultAgent: 'claude',
-  opencodeBinary: 'opencode'
+  opencodeBinary: 'opencode',
+  enabledAgents: ['claude', 'opencode']
 };
 
 // Load settings
@@ -779,8 +780,10 @@ app.get('/api/version', async (req, res) => {
 app.get('/api/home', (req, res) => res.json({ home: os.homedir() }));
 
 app.get('/api/agents', (req, res) => {
+  const enabledAgents = settings.enabledAgents || ['claude'];
+  const defaultAgent = settings.defaultAgent || 'claude';
   const agents = [
-    { id: 'claude', name: 'Claude Code', available: true }
+    { id: 'claude', name: 'Claude Code', available: true, enabled: enabledAgents.includes('claude'), isDefault: defaultAgent === 'claude' }
   ];
   // Check if opencode is installed (use login shell for full PATH)
   let opencodeAvailable = false;
@@ -789,8 +792,8 @@ app.get('/api/agents', (req, res) => {
     execSync(`zsh -l -c 'which ${bin}'`, { timeout: 5000, stdio: 'pipe' });
     opencodeAvailable = true;
   } catch {}
-  agents.push({ id: 'opencode', name: 'OpenCode', available: opencodeAvailable });
-  res.json(agents);
+  agents.push({ id: 'opencode', name: 'OpenCode', available: opencodeAvailable, enabled: enabledAgents.includes('opencode'), isDefault: defaultAgent === 'opencode' });
+  res.json({ agents, defaultAgent });
 });
 
 app.get('/api/settings', (req, res) => {
@@ -821,6 +824,18 @@ app.post('/api/settings', (req, res) => {
   if (req.body.cmdTabSwitch !== undefined) {
     settings.cmdTabSwitch = !!req.body.cmdTabSwitch;
     log(`Settings updated: cmdTabSwitch=${settings.cmdTabSwitch}`);
+  }
+  if (req.body.enabledAgents !== undefined) {
+    const agents = req.body.enabledAgents;
+    if (Array.isArray(agents)) {
+      const valid = agents.filter(a => a === 'claude' || a === 'opencode');
+      if (valid.length > 0) {
+        settings.enabledAgents = valid;
+        // If only one agent enabled, that's the default
+        settings.defaultAgent = valid[0];
+        log(`Settings updated: enabledAgents=${valid.join(',')}, defaultAgent=${settings.defaultAgent}`);
+      }
+    }
   }
   if (req.body.defaultAgent !== undefined) {
     const agent = String(req.body.defaultAgent);

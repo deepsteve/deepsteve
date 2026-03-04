@@ -430,15 +430,19 @@ settingsBtn?.addEventListener('click', async () => {
         </p>
       </div>
       <div class="settings-section">
-        <h3>Default Agent</h3>
+        <h3>Enabled Agents</h3>
         <p style="font-size: 13px; color: var(--ds-text-secondary); margin-bottom: 8px;">
-          Agent to use for new sessions.
+          Select which agents are available. If multiple are enabled, you can switch between them using the Engine dropdown.
         </p>
-        <select id="default-agent" style="padding: 4px 8px; border-radius: 4px; border: 1px solid var(--ds-border); background: var(--ds-bg-secondary); color: var(--ds-text-primary); margin-bottom: 8px;">
-          <option value="claude" ${currentDefaultAgent === 'claude' ? 'selected' : ''}>Claude Code</option>
-          <option value="opencode" ${currentDefaultAgent === 'opencode' ? 'selected' : ''} ${agents.find(a => a.id === 'opencode')?.available ? '' : 'disabled'}>OpenCode${agents.find(a => a.id === 'opencode')?.available ? '' : ' (not installed)'}</option>
-        </select>
-        <div id="opencode-binary-row" style="display: ${currentDefaultAgent === 'opencode' ? 'block' : 'none'};">
+        <label style="font-size: 13px; color: var(--ds-text-primary); cursor: pointer; display: flex; align-items: center; gap: 8px; margin-bottom: 8px;">
+          <input type="checkbox" id="agent-claude" ${agents.find(a => a.id === 'claude')?.enabled !== false ? 'checked' : ''} style="accent-color: var(--ds-accent-green);">
+          Claude Code
+        </label>
+        <label style="font-size: 13px; color: var(--ds-text-primary); cursor: pointer; display: flex; align-items: center; gap: 8px; margin-bottom: 8px;">
+          <input type="checkbox" id="agent-opencode" ${agents.find(a => a.id === 'opencode')?.enabled ? 'checked' : ''} ${agents.find(a => a.id === 'opencode')?.available ? '' : 'disabled'} style="accent-color: var(--ds-accent-green);">
+          OpenCode${agents.find(a => a.id === 'opencode')?.available ? '' : ' (not installed)'}
+        </label>
+        <div id="opencode-binary-row" style="display: ${agents.find(a => a.id === 'opencode')?.enabled ? 'block' : 'none'}; margin-top: 8px;">
           <label style="font-size: 12px; color: var(--ds-text-secondary);">Binary path</label>
           <input type="text" id="opencode-binary" value="${escapeHtml(currentOpencodeBinary)}" placeholder="opencode" style="width: 200px; padding: 4px 8px; border-radius: 4px; border: 1px solid var(--ds-border); background: var(--ds-bg-secondary); color: var(--ds-text-primary);">
         </div>
@@ -485,11 +489,11 @@ settingsBtn?.addEventListener('click', async () => {
     // The server will broadcast the theme CSS via WebSocket — applyTheme runs from the WS handler
   });
 
-  // Show/hide OpenCode binary path input based on agent selection
-  const agentSelect = overlay.querySelector('#default-agent');
+  // Show/hide OpenCode binary path input based on checkbox
+  const agentOpencodeCheckbox = overlay.querySelector('#agent-opencode');
   const opencodeBinaryRow = overlay.querySelector('#opencode-binary-row');
-  agentSelect.addEventListener('change', () => {
-    opencodeBinaryRow.style.display = agentSelect.value === 'opencode' ? 'block' : 'none';
+  agentOpencodeCheckbox?.addEventListener('change', () => {
+    opencodeBinaryRow.style.display = agentOpencodeCheckbox.checked ? 'block' : 'none';
   });
 
   // Wand template reset button
@@ -507,17 +511,19 @@ settingsBtn?.addEventListener('click', async () => {
     const wandPlanMode = overlay.querySelector('#wand-plan-mode').checked;
     const wandPromptTemplate = overlay.querySelector('#wand-prompt-template').value;
     const cmdTabSwitch = overlay.querySelector('#cmd-tab-switch').checked;
-    const defaultAgent = overlay.querySelector('#default-agent').value;
+    const enabledAgents = [];
+    if (overlay.querySelector('#agent-claude').checked) enabledAgents.push('claude');
+    if (overlay.querySelector('#agent-opencode').checked) enabledAgents.push('opencode');
     const opencodeBinary = overlay.querySelector('#opencode-binary').value || 'opencode';
     await fetch('/api/settings', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ shellProfile, maxIssueTitleLength: newMaxTitle, wandPlanMode, wandPromptTemplate, cmdTabSwitch, defaultAgent, opencodeBinary })
+      body: JSON.stringify({ shellProfile, maxIssueTitleLength: newMaxTitle, wandPlanMode, wandPromptTemplate, cmdTabSwitch, enabledAgents, opencodeBinary })
     });
     maxIssueTitleLength = Math.max(10, Math.min(200, newMaxTitle));
     setCmdTabSwitchEnabled(cmdTabSwitch);
-    window.__deepsteveDefaultAgent = defaultAgent;
-    overlay.remove();
+    // Reload to refresh agents dropdown
+    window.location.reload();
   };
   overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
 });
@@ -1113,6 +1119,64 @@ function getDefaultAgentType() {
 }
 
 /**
+ * Initialize the engines dropdown (shown when multiple agents are enabled)
+ */
+function initEnginesDropdown() {
+  const agents = window.__deepsteveAgents || [];
+  const enabledAgents = agents.filter(a => a.enabled);
+  
+  // Only show dropdown if multiple agents are enabled
+  const dropdown = document.getElementById('engines-dropdown');
+  const btn = document.getElementById('engines-btn');
+  const menu = document.getElementById('engines-menu');
+  
+  if (enabledAgents.length <= 1) {
+    dropdown.style.display = 'none';
+    return;
+  }
+  
+  dropdown.style.display = 'flex';
+  
+  // Build menu items
+  menu.innerHTML = enabledAgents.map(a => {
+    const isDefault = a.id === window.__deepsteveDefaultAgent;
+    return `<div class="dropdown-item ${isDefault ? 'active' : 'clickable'}" data-agent="${a.id}">${a.name}${isDefault ? ' ✓' : ''}</div>`;
+  }).join('');
+  
+  // Update button text
+  const currentAgent = agents.find(a => a.id === window.__deepsteveDefaultAgent);
+  btn.textContent = currentAgent?.name || 'Engine';
+  
+  // Handle clicks
+  menu.querySelectorAll('.dropdown-item').forEach(item => {
+    item.addEventListener('click', () => {
+      const agentId = item.dataset.agent;
+      window.__deepsteveDefaultAgent = agentId;
+      // Update checkmarks
+      menu.querySelectorAll('.dropdown-item').forEach(i => {
+        const a = agents.find(ag => ag.id === i.dataset.agent);
+        const isSelected = i.dataset.agent === agentId;
+        i.textContent = (a?.name || '') + (isSelected ? ' ✓' : '');
+      });
+      // Update button text
+      const newDefault = agents.find(a => a.id === agentId);
+      btn.textContent = newDefault?.name || 'Engine';
+      menu.classList.remove('open');
+    });
+  });
+  
+  // Toggle dropdown
+  btn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    menu.classList.toggle('open');
+  });
+  
+  document.addEventListener('click', () => {
+    menu.classList.remove('open');
+  });
+}
+
+/**
  * Show dropdown menu for new tab options (recent repos + actions)
  */
 function showNewTabMenu(e) {
@@ -1122,9 +1186,23 @@ function showNewTabMenu(e) {
   const menu = document.createElement('div');
   menu.className = 'new-tab-menu context-menu';
 
+  const agents = window.__deepsteveAgents || [];
+  const enabledAgents = agents.filter(a => a.enabled);
+  const currentAgent = getDefaultAgentType();
+  
+  // Build agent selector at top (only if multiple enabled)
+  let html = '';
+  if (enabledAgents.length > 1) {
+    html += '<div class="context-menu-header">Agent</div>';
+    for (const agent of enabledAgents) {
+      const isSelected = agent.id === currentAgent;
+      html += `<div class="context-menu-item agent-selector ${isSelected ? 'selected' : ''}" data-agent="${agent.id}">○ ${agent.name}</div>`;
+    }
+    html += '<div class="context-menu-separator"></div>';
+  }
+
   // Build recent dirs section
   const recentDirs = SessionStore.getRecentDirs();
-  let html = '';
   if (recentDirs.length > 0) {
     html += '<div class="context-menu-header">Recent</div>';
     // Disambiguate duplicate leaf names by appending parent dir
@@ -1147,15 +1225,23 @@ function showNewTabMenu(e) {
     <div class="context-menu-item" data-action="worktree">New worktree...</div>
     <div class="context-menu-item" data-action="repo">Change repo...</div>
   `;
-  // Add OpenCode option if available (cached from /api/agents)
-  if (window.__deepsteveAgents) {
-    const opencode = window.__deepsteveAgents.find(a => a.id === 'opencode');
-    if (opencode?.available) {
-      html += '<div class="context-menu-separator"></div>';
-      html += '<div class="context-menu-item" data-action="opencode">New OpenCode session</div>';
-    }
-  }
   menu.innerHTML = html;
+
+  // Handle agent selector clicks
+  menu.querySelectorAll('.agent-selector').forEach(item => {
+    item.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      const agentId = item.dataset.agent;
+      window.__deepsteveDefaultAgent = agentId;
+      // Update visual selection
+      menu.querySelectorAll('.agent-selector').forEach(i => {
+        i.classList.remove('selected');
+        i.innerHTML = '○ ' + agents.find(a => a.id === i.dataset.agent)?.name;
+      });
+      item.classList.add('selected');
+      item.innerHTML = '● ' + agents.find(a => a.id === agentId)?.name;
+    });
+  });
 
   // Position below the dropdown arrow button
   const btn = e.target.closest('#new-btn-dropdown') || e.target.closest('#new-btn-group');
@@ -1249,7 +1335,7 @@ async function promptWorktreeSession() {
       const name = input.value.trim();
       overlay.remove();
       if (name) {
-        createSession(cwd, null, true, { worktree: name });
+        createSession(cwd, null, true, { worktree: name, agentType: getDefaultAgentType() });
       }
       resolve();
     };
@@ -1464,7 +1550,11 @@ async function showIssuePicker() {
  */
 async function init() {
   // Cache available agents and default agent setting for new-tab menu and settings
-  fetch('/api/agents').then(r => r.json()).then(agents => { window.__deepsteveAgents = agents; }).catch(() => {});
+  fetch('/api/agents').then(r => r.json()).then(data => { 
+    window.__deepsteveAgents = data.agents || []; 
+    window.__deepsteveDefaultAgent = data.defaultAgent || 'claude';
+    initEnginesDropdown();
+  }).catch(() => {});
   fetch('/api/settings').then(r => r.json()).then(s => { window.__deepsteveDefaultAgent = s.defaultAgent || 'claude'; }).catch(() => {});
 
   // Initialize layout manager
