@@ -1,0 +1,11 @@
+{
+  "name": "Three.js VR Skeleton",
+  "version": "0.4.0",
+  "minDeepsteveVersion": "0.4.0",
+  "description": "Minimal three.js + WebXR starter template for building VR mods",
+  "experimental": true,
+  "enabledByDefault": false,
+  "tags": ["games"],
+  "entry": "index.html",
+  "toolbar": { "label": "VR Skeleton" }
+}
