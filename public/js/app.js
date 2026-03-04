@@ -357,6 +357,9 @@ settingsBtn?.addEventListener('click', async () => {
   const currentWandPlanMode = settingsData.wandPlanMode !== undefined ? settingsData.wandPlanMode : true;
   const currentWandTemplate = settingsData.wandPromptTemplate || defaultsData.wandPromptTemplate || '';
   const currentCmdTabSwitch = !!settingsData.cmdTabSwitch;
+  const currentDefaultAgent = settingsData.defaultAgent || 'claude';
+  const currentOpencodeBinary = settingsData.opencodeBinary || 'opencode';
+  const agents = window.__deepsteveAgents || [];
   const themes = themesData.themes || [];
   const activeTheme = themesData.active || '';
 
@@ -427,6 +430,20 @@ settingsBtn?.addEventListener('click', async () => {
         </p>
       </div>
       <div class="settings-section">
+        <h3>Default Agent</h3>
+        <p style="font-size: 13px; color: var(--ds-text-secondary); margin-bottom: 8px;">
+          Agent to use for new sessions.
+        </p>
+        <select id="default-agent" style="padding: 4px 8px; border-radius: 4px; border: 1px solid var(--ds-border); background: var(--ds-bg-secondary); color: var(--ds-text-primary); margin-bottom: 8px;">
+          <option value="claude" ${currentDefaultAgent === 'claude' ? 'selected' : ''}>Claude Code</option>
+          <option value="opencode" ${currentDefaultAgent === 'opencode' ? 'selected' : ''} ${agents.find(a => a.id === 'opencode')?.available ? '' : 'disabled'}>OpenCode${agents.find(a => a.id === 'opencode')?.available ? '' : ' (not installed)'}</option>
+        </select>
+        <div id="opencode-binary-row" style="display: ${currentDefaultAgent === 'opencode' ? 'block' : 'none'};">
+          <label style="font-size: 12px; color: var(--ds-text-secondary);">Binary path</label>
+          <input type="text" id="opencode-binary" value="${escapeHtml(currentOpencodeBinary)}" placeholder="opencode" style="width: 200px; padding: 4px 8px; border-radius: 4px; border: 1px solid var(--ds-border); background: var(--ds-bg-secondary); color: var(--ds-text-primary);">
+        </div>
+      </div>
+      <div class="settings-section">
         <h3>Version</h3>
         <div class="version-info">
           <span>Version ${escapeHtml(versionData.current)}</span>
@@ -468,6 +485,13 @@ settingsBtn?.addEventListener('click', async () => {
     // The server will broadcast the theme CSS via WebSocket — applyTheme runs from the WS handler
   });
 
+  // Show/hide OpenCode binary path input based on agent selection
+  const agentSelect = overlay.querySelector('#default-agent');
+  const opencodeBinaryRow = overlay.querySelector('#opencode-binary-row');
+  agentSelect.addEventListener('change', () => {
+    opencodeBinaryRow.style.display = agentSelect.value === 'opencode' ? 'block' : 'none';
+  });
+
   // Wand template reset button
   overlay.querySelector('#wand-template-reset').onclick = async () => {
     if (!confirm('Reset magic wand prompt template to default?')) return;
@@ -483,13 +507,16 @@ settingsBtn?.addEventListener('click', async () => {
     const wandPlanMode = overlay.querySelector('#wand-plan-mode').checked;
     const wandPromptTemplate = overlay.querySelector('#wand-prompt-template').value;
     const cmdTabSwitch = overlay.querySelector('#cmd-tab-switch').checked;
+    const defaultAgent = overlay.querySelector('#default-agent').value;
+    const opencodeBinary = overlay.querySelector('#opencode-binary').value || 'opencode';
     await fetch('/api/settings', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ shellProfile, maxIssueTitleLength: newMaxTitle, wandPlanMode, wandPromptTemplate, cmdTabSwitch })
+      body: JSON.stringify({ shellProfile, maxIssueTitleLength: newMaxTitle, wandPlanMode, wandPromptTemplate, cmdTabSwitch, defaultAgent, opencodeBinary })
     });
     maxIssueTitleLength = Math.max(10, Math.min(200, newMaxTitle));
     setCmdTabSwitchEnabled(cmdTabSwitch);
+    window.__deepsteveDefaultAgent = defaultAgent;
     overlay.remove();
   };
   overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
@@ -514,7 +541,7 @@ function getWindowId() {
  */
 function createSession(cwd, existingId = null, isNew = false, opts = {}) {
   const { cols, rows } = measureTerminalSize();
-  const ws = createWebSocket({ id: existingId, cwd, isNew, worktree: opts.worktree, name: opts.name, planMode: opts.planMode, cols, rows, windowId: getWindowId() });
+  const ws = createWebSocket({ id: existingId, cwd, isNew, worktree: opts.worktree, name: opts.name, planMode: opts.planMode, agentType: opts.agentType, cols, rows, windowId: getWindowId() });
 
   // Promise that resolves when the session is fully initialized (terminal created)
   let resolveReady;
@@ -1079,6 +1106,12 @@ function quickNewSession() {
   createSession(cwd, null, true);
 }
 
+/** Get the default agent type from cached settings */
+function getDefaultAgentType() {
+  // Cached from /api/agents fetch at init
+  return window.__deepsteveDefaultAgent || 'claude';
+}
+
 /**
  * Show dropdown menu for new tab options (recent repos + actions)
  */
@@ -1114,6 +1147,14 @@ function showNewTabMenu(e) {
     <div class="context-menu-item" data-action="worktree">New worktree...</div>
     <div class="context-menu-item" data-action="repo">Change repo...</div>
   `;
+  // Add OpenCode option if available (cached from /api/agents)
+  if (window.__deepsteveAgents) {
+    const opencode = window.__deepsteveAgents.find(a => a.id === 'opencode');
+    if (opencode?.available) {
+      html += '<div class="context-menu-separator"></div>';
+      html += '<div class="context-menu-item" data-action="opencode">New OpenCode session</div>';
+    }
+  }
   menu.innerHTML = html;
 
   // Position below the dropdown arrow button
@@ -1148,11 +1189,15 @@ function showNewTabMenu(e) {
     menu.remove();
     cleanup();
     if (action === 'recent') {
-      createSession(item.dataset.path, null, true);
+      createSession(item.dataset.path, null, true, { agentType: getDefaultAgentType() });
     } else if (action === 'worktree') {
       await promptWorktreeSession();
     } else if (action === 'repo') {
       await promptRepoSession();
+    } else if (action === 'opencode') {
+      const active = activeId && sessions.get(activeId);
+      const cwdPath = active?.cwd || SessionStore.getLastCwd() || '~';
+      createSession(cwdPath, null, true, { agentType: 'opencode' });
     }
   };
 
@@ -1222,7 +1267,7 @@ async function promptWorktreeSession() {
 async function promptRepoSession() {
   const cwd = await showDirectoryPicker();
   if (cwd === null) return;
-  createSession(cwd, null, true);
+  createSession(cwd, null, true, { agentType: getDefaultAgentType() });
 }
 
 /**
@@ -1418,6 +1463,10 @@ async function showIssuePicker() {
  * Main initialization
  */
 async function init() {
+  // Cache available agents and default agent setting for new-tab menu and settings
+  fetch('/api/agents').then(r => r.json()).then(agents => { window.__deepsteveAgents = agents; }).catch(() => {});
+  fetch('/api/settings').then(r => r.json()).then(s => { window.__deepsteveDefaultAgent = s.defaultAgent || 'claude'; }).catch(() => {});
+
   // Initialize layout manager
   LayoutManager.init();
 

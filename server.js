@@ -118,7 +118,9 @@ URL: {{url}}
 Issue description:
 {{body}}
 
-Please read the issue carefully, understand the codebase context, and implement the changes needed.`
+Please read the issue carefully, understand the codebase context, and implement the changes needed.`,
+  defaultAgent: 'claude',
+  opencodeBinary: 'opencode'
 };
 
 // Load settings
@@ -323,6 +325,26 @@ function spawnClaude(args, cwd, { cols = 120, rows = 40, env: extraEnv } = {}) {
   });
 }
 
+// Spawn opencode with full login shell environment
+function spawnOpenCode(args, cwd, { cols = 120, rows = 40, env: extraEnv } = {}) {
+  const bin = settings.opencodeBinary || 'opencode';
+  const quoted = args.map(a => `'${a.replace(/'/g, "'\\''")}'`).join(' ');
+  const env = extraEnv ? { ...process.env, ...extraEnv } : process.env;
+  return pty.spawn('zsh', ['-l', '-c', `${bin} ${quoted}`], {
+    name: 'xterm-256color',
+    cols,
+    rows,
+    cwd,
+    env
+  });
+}
+
+// Dispatch to the correct spawn function based on agent type
+function spawnAgent(agentType, args, cwd, opts = {}) {
+  if (agentType === 'opencode') return spawnOpenCode(args, cwd, opts);
+  return spawnClaude(args, cwd, opts);
+}
+
 function validateWorktree(value) {
   if (typeof value !== 'string') return null;
   if (value.length === 0 || value.length > 128) return null;
@@ -453,56 +475,60 @@ function wireShellOutput(id) {
     while (e.scrollbackSize > SCROLLBACK_SIZE && e.scrollback.length > 1) {
       e.scrollbackSize -= e.scrollback.shift().length;
     }
-    // Detect claude --resume <UUID> in PTY output to track the actual session ID.
-    // Claude prints this line when a session exits (including /exit, /clear, shutdown).
-    // Strip ANSI escapes before matching so dim/bold wrappers don't interfere.
-    const plain = data.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '');
-    const resumeMatch = plain.match(/claude --resume ([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/);
-    if (resumeMatch) {
-      const newSessionId = resumeMatch[1];
-      if (newSessionId !== e.claudeSessionId) {
-        log(`Session ${id} claude session updated: ${e.claudeSessionId} → ${newSessionId}`);
-        e.claudeSessionId = newSessionId;
-        // During shutdown, saveState() is blocked by stateFrozen and the process may be
-        // killed before the final save block runs. Write the updated ID to disk immediately
-        // so it survives even if the process is killed mid-shutdown.
-        if (shuttingDown) {
-          try {
-            const current = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
-            if (current[id]) {
-              current[id].claudeSessionId = newSessionId;
-              fs.writeFileSync(STATE_FILE, JSON.stringify(current, null, 2));
-              log(`Session ${id} patched state.json during shutdown`);
+    // Claude-specific: detect --resume UUID and BEL for input state tracking.
+    // OpenCode doesn't emit BEL, so skip all of this for opencode sessions.
+    if (e.agentType !== 'opencode') {
+      // Detect claude --resume <UUID> in PTY output to track the actual session ID.
+      // Claude prints this line when a session exits (including /exit, /clear, shutdown).
+      // Strip ANSI escapes before matching so dim/bold wrappers don't interfere.
+      const plain = data.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '');
+      const resumeMatch = plain.match(/claude --resume ([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/);
+      if (resumeMatch) {
+        const newSessionId = resumeMatch[1];
+        if (newSessionId !== e.claudeSessionId) {
+          log(`Session ${id} claude session updated: ${e.claudeSessionId} → ${newSessionId}`);
+          e.claudeSessionId = newSessionId;
+          // During shutdown, saveState() is blocked by stateFrozen and the process may be
+          // killed before the final save block runs. Write the updated ID to disk immediately
+          // so it survives even if the process is killed mid-shutdown.
+          if (shuttingDown) {
+            try {
+              const current = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+              if (current[id]) {
+                current[id].claudeSessionId = newSessionId;
+                fs.writeFileSync(STATE_FILE, JSON.stringify(current, null, 2));
+                log(`Session ${id} patched state.json during shutdown`);
+              }
+            } catch (err) {
+              console.error('Failed to patch state.json during shutdown:', err.message);
             }
-          } catch (err) {
-            console.error('Failed to patch state.json during shutdown:', err.message);
           }
+        }
+      }
+      if (data.includes('\x07') && !e.waitingForInput) {
+        e.waitingForInput = true;
+        const stateMsg = JSON.stringify({ type: 'state', waiting: true });
+        e.clients.forEach((c) => c.send(stateMsg));
+
+        if (e.initialPrompt) {
+          const prompt = e.initialPrompt;
+          e.initialPrompt = null;
+          e.waitingForInput = false;
+          setTimeout(() => submitToShell(e.shell, prompt), 500);
+        }
+      } else if (!data.includes('\x07') && e.waitingForInput) {
+        // PTY produced non-BEL output while we thought Claude was waiting —
+        // means a tool was auto-approved or Claude continued on its own.
+        // Strip ANSI escape sequences and check for substantive content.
+        const stripped = data.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').replace(/[\s\x07]/g, '');
+        if (stripped.length > 0) {
+          e.waitingForInput = false;
+          const stateMsg = JSON.stringify({ type: 'state', waiting: false });
+          e.clients.forEach((c) => c.send(stateMsg));
         }
       }
     }
     e.clients.forEach((c) => c.send(data));
-    if (data.includes('\x07') && !e.waitingForInput) {
-      e.waitingForInput = true;
-      const stateMsg = JSON.stringify({ type: 'state', waiting: true });
-      e.clients.forEach((c) => c.send(stateMsg));
-
-      if (e.initialPrompt) {
-        const prompt = e.initialPrompt;
-        e.initialPrompt = null;
-        e.waitingForInput = false;
-        setTimeout(() => submitToShell(e.shell, prompt), 500);
-      }
-    } else if (!data.includes('\x07') && e.waitingForInput) {
-      // PTY produced non-BEL output while we thought Claude was waiting —
-      // means a tool was auto-approved or Claude continued on its own.
-      // Strip ANSI escape sequences and check for substantive content.
-      const stripped = data.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').replace(/[\s\x07]/g, '');
-      if (stripped.length > 0) {
-        e.waitingForInput = false;
-        const stateMsg = JSON.stringify({ type: 'state', waiting: false });
-        e.clients.forEach((c) => c.send(stateMsg));
-      }
-    }
   });
 }
 
@@ -513,9 +539,12 @@ function killShell(entry, id) {
   entry.killed = true;
 
   const pid = entry.shell.pid;
-  log(`Killing shell ${id} (pid=${pid}, waitingForInput=${entry.waitingForInput})`);
+  log(`Killing shell ${id} (pid=${pid}, agent=${entry.agentType || 'claude'}, waitingForInput=${entry.waitingForInput})`);
 
-  if (entry.waitingForInput) {
+  if (entry.agentType === 'opencode') {
+    // OpenCode: just Ctrl+C, no /exit or BEL logic
+    try { entry.shell.write('\x03'); } catch {}
+  } else if (entry.waitingForInput) {
     // Safe to send /exit directly
     try { submitToShell(entry.shell, '/exit'); } catch {}
   } else {
@@ -579,7 +608,7 @@ function saveState() {
   }
   const state = {};
   for (const [id, entry] of shells) {
-    state[id] = { cwd: entry.cwd, claudeSessionId: entry.claudeSessionId, worktree: entry.worktree || null, name: entry.name || null, lastActivity: entry.lastActivity || null, createdAt: entry.createdAt || null };
+    state[id] = { cwd: entry.cwd, claudeSessionId: entry.claudeSessionId, agentType: entry.agentType || 'claude', worktree: entry.worktree || null, name: entry.name || null, lastActivity: entry.lastActivity || null, createdAt: entry.createdAt || null };
   }
   // Merge with any saved state that wasn't reconnected yet
   const merged = { ...savedState, ...state };
@@ -644,7 +673,10 @@ async function shutdown(signal) {
   log(`Gracefully exiting ${entries.length} shells...`);
   for (const [id, entry] of entries) {
     try {
-      if (entry.waitingForInput) {
+      if (entry.agentType === 'opencode') {
+        // OpenCode: just Ctrl+C, no /exit or BEL logic
+        entry.shell.write('\x03');
+      } else if (entry.waitingForInput) {
         submitToShell(entry.shell, '/exit');
       } else {
         entry.shell.write('\x03');
@@ -680,7 +712,7 @@ async function shutdown(signal) {
   {
     const state = {};
     for (const [sid, sentry] of shells) {
-      state[sid] = { cwd: sentry.cwd, claudeSessionId: sentry.claudeSessionId, worktree: sentry.worktree || null, name: sentry.name || null, lastActivity: sentry.lastActivity || null };
+      state[sid] = { cwd: sentry.cwd, claudeSessionId: sentry.claudeSessionId, agentType: sentry.agentType || 'claude', worktree: sentry.worktree || null, name: sentry.name || null, lastActivity: sentry.lastActivity || null };
     }
     const merged = { ...savedState, ...state };
     try {
@@ -746,6 +778,21 @@ app.get('/api/version', async (req, res) => {
 
 app.get('/api/home', (req, res) => res.json({ home: os.homedir() }));
 
+app.get('/api/agents', (req, res) => {
+  const agents = [
+    { id: 'claude', name: 'Claude Code', available: true }
+  ];
+  // Check if opencode is installed (use login shell for full PATH)
+  let opencodeAvailable = false;
+  try {
+    const bin = settings.opencodeBinary || 'opencode';
+    execSync(`zsh -l -c 'which ${bin}'`, { timeout: 5000, stdio: 'pipe' });
+    opencodeAvailable = true;
+  } catch {}
+  agents.push({ id: 'opencode', name: 'OpenCode', available: opencodeAvailable });
+  res.json(agents);
+});
+
 app.get('/api/settings', (req, res) => {
   const themeCSS = getActiveThemeCSS();
   res.json({ ...settings, themeCSS });
@@ -774,6 +821,17 @@ app.post('/api/settings', (req, res) => {
   if (req.body.cmdTabSwitch !== undefined) {
     settings.cmdTabSwitch = !!req.body.cmdTabSwitch;
     log(`Settings updated: cmdTabSwitch=${settings.cmdTabSwitch}`);
+  }
+  if (req.body.defaultAgent !== undefined) {
+    const agent = String(req.body.defaultAgent);
+    if (agent === 'claude' || agent === 'opencode') {
+      settings.defaultAgent = agent;
+      log(`Settings updated: defaultAgent=${agent}`);
+    }
+  }
+  if (req.body.opencodeBinary !== undefined) {
+    settings.opencodeBinary = String(req.body.opencodeBinary) || 'opencode';
+    log(`Settings updated: opencodeBinary=${settings.opencodeBinary}`);
   }
   saveSettings();
   broadcastSettings();
@@ -970,8 +1028,8 @@ app.post('/api/mods/uninstall', (req, res) => {
 });
 
 app.get('/api/shells', (req, res) => {
-  const active = [...shells.entries()].map(([id, entry]) => ({ id, pid: entry.shell.pid, cwd: entry.cwd, name: entry.name || null, status: 'active', lastActivity: entry.lastActivity || null }));
-  const saved = Object.entries(savedState).map(([id, entry]) => ({ id, cwd: entry.cwd, name: entry.name || null, status: entry.closed ? 'closed' : 'saved', lastActivity: entry.lastActivity || null }));
+  const active = [...shells.entries()].map(([id, entry]) => ({ id, pid: entry.shell.pid, cwd: entry.cwd, name: entry.name || null, agentType: entry.agentType || 'claude', status: 'active', lastActivity: entry.lastActivity || null }));
+  const saved = Object.entries(savedState).map(([id, entry]) => ({ id, cwd: entry.cwd, name: entry.name || null, agentType: entry.agentType || 'claude', status: entry.closed ? 'closed' : 'saved', lastActivity: entry.lastActivity || null }));
   res.json({ shells: [...active, ...saved] });
 });
 
@@ -1001,6 +1059,7 @@ app.delete('/api/shells/:id', (req, res) => {
     }
     savedState[id] = {
       cwd: entry.cwd, claudeSessionId: entry.claudeSessionId,
+      agentType: entry.agentType || 'claude',
       worktree: entry.worktree || null, name: entry.name || null,
       lastActivity: entry.lastActivity || null, createdAt: entry.createdAt || null,
       closed: true
@@ -1336,6 +1395,7 @@ function handleWsConnection(ws, req) {
   const windowId = url.searchParams.get('windowId') || null;
   const initialCols = parseInt(url.searchParams.get('cols')) || 120;
   const initialRows = parseInt(url.searchParams.get('rows')) || 40;
+  const agentType = url.searchParams.get('agentType') || 'claude';
 
   log(`[WS] Connection: id=${id}, cwd=${cwd}, createNew=${createNew}, worktree=${worktree}`);
   log(`[WS] Active shells: ${[...shells.keys()].join(', ') || 'none'}`);
@@ -1349,23 +1409,31 @@ function handleWsConnection(ws, req) {
       cwd = restored.cwd;
       const claudeSessionId = restored.claudeSessionId;
       const savedWorktree = validateWorktree(restored.worktree);
-      log(`Restoring session ${id} in ${cwd} (claude session: ${claudeSessionId}, worktree: ${savedWorktree || 'none'})`);
+      const savedAgentType = restored.agentType || 'claude';
+      log(`Restoring session ${id} in ${cwd} (agent: ${savedAgentType}, session: ${claudeSessionId}, worktree: ${savedWorktree || 'none'})`);
       const ptySize = { cols: initialCols, rows: initialRows };
-      const resumeArgs = claudeSessionId
-        ? ['--resume', claudeSessionId]
-        : ['-c'];
-      if (savedWorktree) resumeArgs.push('--worktree', savedWorktree);
-      const shell = spawnClaude(resumeArgs, cwd, { ...ptySize, env: { DEEPSTEVE_SESSION_ID: id } });
+      let resumeArgs;
+      if (savedAgentType === 'opencode') {
+        resumeArgs = claudeSessionId
+          ? ['--session', claudeSessionId, '--continue']
+          : ['--continue'];
+      } else {
+        resumeArgs = claudeSessionId
+          ? ['--resume', claudeSessionId]
+          : ['-c'];
+        if (savedWorktree) resumeArgs.push('--worktree', savedWorktree);
+      }
+      const shell = spawnAgent(savedAgentType, resumeArgs, cwd, { ...ptySize, env: { DEEPSTEVE_SESSION_ID: id } });
       const startTime = Date.now();
       const restoredName = name || restored.name || null;
-      shells.set(id, { shell, clients: new Set(), cwd, claudeSessionId, worktree: savedWorktree, name: restoredName, restored: true, waitingForInput: false, lastActivity: Date.now(), createdAt: restored.createdAt || Date.now() });
+      shells.set(id, { shell, clients: new Set(), cwd, claudeSessionId, agentType: savedAgentType, worktree: savedWorktree, name: restoredName, restored: true, waitingForInput: false, lastActivity: Date.now(), createdAt: restored.createdAt || Date.now() });
       wireShellOutput(id);
-      watchClaudeSessionDir(id);
+      if (savedAgentType !== 'opencode') watchClaudeSessionDir(id);
       shell.onExit(() => {
-        unwatchClaudeSessionDir(id);
+        if (savedAgentType !== 'opencode') unwatchClaudeSessionDir(id);
         if (shuttingDown) return;  // Don't overwrite state file during shutdown
         const elapsed = Date.now() - startTime;
-        if (elapsed < 5000 && claudeSessionId) {
+        if (elapsed < 5000 && claudeSessionId && savedAgentType !== 'opencode') {
           // --resume failed quickly, fall back to continuing last conversation
           log(`Session ${id} exited after ${elapsed}ms, --resume likely failed. Falling back to -c`);
           const newClaudeSessionId = randomUUID();
@@ -1401,16 +1469,22 @@ function handleWsConnection(ws, req) {
   if (!id || !shells.has(id)) {
     const oldId = id;
     id = randomUUID().slice(0, 8);
-    const claudeSessionId = randomUUID();  // Full UUID for Claude's --session-id
-    const claudeArgs = ['--session-id', claudeSessionId];
-    if (planMode) claudeArgs.push('--permission-mode', 'plan');
-    if (worktree) claudeArgs.push('--worktree', worktree);
-    log(`[WS] Creating NEW shell: oldId=${oldId}, newId=${id}, claudeSession=${claudeSessionId}, worktree=${worktree || 'none'}, cwd=${cwd}`);
-    const shell = spawnClaude(claudeArgs, cwd, { cols: initialCols, rows: initialRows, env: { DEEPSTEVE_SESSION_ID: id } });
-    shells.set(id, { shell, clients: new Set(), cwd, claudeSessionId, worktree: worktree || null, name: name || null, waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now() });
+    const sessionId = randomUUID();  // Full UUID for session ID (both agents)
+    let spawnArgs;
+    if (agentType === 'opencode') {
+      spawnArgs = ['--session', sessionId];
+      if (planMode) spawnArgs.push('--agent', 'plan');
+    } else {
+      spawnArgs = ['--session-id', sessionId];
+      if (planMode) spawnArgs.push('--permission-mode', 'plan');
+      if (worktree) spawnArgs.push('--worktree', worktree);
+    }
+    log(`[WS] Creating NEW shell: oldId=${oldId}, newId=${id}, agent=${agentType}, session=${sessionId}, worktree=${worktree || 'none'}, cwd=${cwd}`);
+    const shell = spawnAgent(agentType, spawnArgs, cwd, { cols: initialCols, rows: initialRows, env: { DEEPSTEVE_SESSION_ID: id } });
+    shells.set(id, { shell, clients: new Set(), cwd, claudeSessionId: sessionId, agentType, worktree: worktree || null, name: name || null, waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now() });
     wireShellOutput(id);
-    watchClaudeSessionDir(id);
-    shell.onExit(() => { if (!shuttingDown) { unwatchClaudeSessionDir(id); shells.delete(id); saveState(); } });
+    if (agentType !== 'opencode') watchClaudeSessionDir(id);
+    shell.onExit(() => { if (!shuttingDown) { if (agentType !== 'opencode') unwatchClaudeSessionDir(id); shells.delete(id); saveState(); } });
     saveState();
   }
 
@@ -1425,7 +1499,7 @@ function handleWsConnection(ws, req) {
   if (windowId) entry.windowId = windowId;
   const hasScrollback = entry.scrollback && entry.scrollback.length > 0;
   log(`[WS] Sending session response: id=${id}, restored=${entry.restored || false}, scrollback=${hasScrollback ? entry.scrollbackSize + 'B' : 'none'}, existingClients=${existingClients}`);
-  ws.send(JSON.stringify({ type: 'session', id, restored: entry.restored || false, cwd: entry.cwd, name: entry.name || null, scrollback: hasScrollback, existingClients }));
+  ws.send(JSON.stringify({ type: 'session', id, restored: entry.restored || false, cwd: entry.cwd, name: entry.name || null, agentType: entry.agentType || 'claude', scrollback: hasScrollback, existingClients }));
 
   // Send buffered scrollback so the client can render the terminal immediately
   if (hasScrollback) {
@@ -1440,7 +1514,17 @@ function handleWsConnection(ws, req) {
       const parsed = JSON.parse(str);
       if (parsed.type === 'resize') { entry.shell.resize(parsed.cols, parsed.rows); return; }
       if (parsed.type === 'redraw') { entry.shell.write('\x0c'); return; } // Ctrl+L
-      if (parsed.type === 'initialPrompt') { entry.initialPrompt = parsed.text; return; }
+      if (parsed.type === 'initialPrompt') {
+        if (entry.agentType === 'opencode') {
+          // OpenCode doesn't emit BEL, so submit the prompt directly after a delay
+          // to give the TUI time to initialize
+          const prompt = parsed.text;
+          setTimeout(() => submitToShell(entry.shell, prompt), 3000);
+        } else {
+          entry.initialPrompt = parsed.text;
+        }
+        return;
+      }
       if (parsed.type === 'rename') { entry.name = parsed.name || null; return; }
       if (parsed.type === 'close-session') {
         entry.clients.delete(ws);
@@ -1449,6 +1533,7 @@ function handleWsConnection(ws, req) {
           log(`[WS] close-session: last client detached from ${id}, killing shell`);
           savedState[id] = {
             cwd: entry.cwd, claudeSessionId: entry.claudeSessionId,
+            agentType: entry.agentType || 'claude',
             worktree: entry.worktree || null, name: entry.name || null,
             lastActivity: entry.lastActivity || null, createdAt: entry.createdAt || null,
             closed: true
@@ -1480,7 +1565,7 @@ function handleWsConnection(ws, req) {
       entry.killTimer = setTimeout(() => {
         if (entry.clients.size === 0) {
           // Preserve session info so it can be restored on next connect
-          savedState[id] = { cwd: entry.cwd, claudeSessionId: entry.claudeSessionId, worktree: entry.worktree || null, name: entry.name || null, lastActivity: entry.lastActivity || null };
+          savedState[id] = { cwd: entry.cwd, claudeSessionId: entry.claudeSessionId, agentType: entry.agentType || 'claude', worktree: entry.worktree || null, name: entry.name || null, lastActivity: entry.lastActivity || null };
           killShell(entry, id);
           shells.delete(id);
           saveState();

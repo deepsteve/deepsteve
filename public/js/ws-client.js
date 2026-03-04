@@ -13,6 +13,7 @@ export function createWebSocket(options = {}) {
   if (options.rows) params.set('rows', options.rows);
   if (options.name) params.set('name', options.name);
   if (options.planMode) params.set('planMode', '1');
+  if (options.agentType && options.agentType !== 'claude') params.set('agentType', options.agentType);
   if (options.windowId) params.set('windowId', options.windowId);
 
   const wsProto = location.protocol === 'https:' ? 'wss://' : 'ws://';
@@ -49,6 +50,7 @@ export function createWebSocket(options = {}) {
       if (options.cwd) p.set('cwd', options.cwd);
       if (options.cols) p.set('cols', options.cols);
       if (options.rows) p.set('rows', options.rows);
+      if (options.agentType && options.agentType !== 'claude') p.set('agentType', options.agentType);
       url = wsProto + location.host + '?' + p;
     },
 
