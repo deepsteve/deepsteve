@@ -40,6 +40,9 @@ let agentChatCallbacks = [];     // [{modId, cb}] — callbacks for agent-chat b
 let browserEvalCallbacks = [];   // [{modId, cb}] — callbacks for browser-eval-request
 let browserConsoleCallbacks = []; // [{modId, cb}] — callbacks for browser-console-request
 let screenshotCaptureCallbacks = []; // [{modId, cb}] — callbacks for screenshot-capture-request
+let sceneUpdateCallbacks = [];       // [{modId, cb}] — callbacks for scene-update-request
+let sceneQueryCallbacks = [];        // [{modId, cb}] — callbacks for scene-query-request
+let sceneSnapshotCallbacks = [];     // [{modId, cb}] — callbacks for scene-snapshot-request
 let activeSessionCallbacks = [];     // [{modId, cb}] — callbacks for active session changes
 let getActiveSessionIdFn = null;     // set from appHooks
 let deepsteveVersion = null;   // set from /api/mods response
@@ -1050,6 +1053,9 @@ function _unloadPanelMod(modId) {
   browserEvalCallbacks = browserEvalCallbacks.filter(e => e.modId !== modId);
   browserConsoleCallbacks = browserConsoleCallbacks.filter(e => e.modId !== modId);
   screenshotCaptureCallbacks = screenshotCaptureCallbacks.filter(e => e.modId !== modId);
+  sceneUpdateCallbacks = sceneUpdateCallbacks.filter(e => e.modId !== modId);
+  sceneQueryCallbacks = sceneQueryCallbacks.filter(e => e.modId !== modId);
+  sceneSnapshotCallbacks = sceneSnapshotCallbacks.filter(e => e.modId !== modId);
   settingsCallbacks = settingsCallbacks.filter(e => e.modId !== modId);
   sessionCallbacks = sessionCallbacks.filter(e => e.modId !== modId);
   activeSessionCallbacks = activeSessionCallbacks.filter(e => e.modId !== modId);
@@ -1300,6 +1306,33 @@ function notifyScreenshotCaptureRequest(req) {
 }
 
 /**
+ * Notify panel mods of a scene-update request (called from app.js on WS broadcast).
+ */
+function notifySceneUpdateRequest(req) {
+  for (const entry of sceneUpdateCallbacks) {
+    try { entry.cb(req); } catch (e) { console.error('Scene update callback error:', e); }
+  }
+}
+
+/**
+ * Notify panel mods of a scene-query request (called from app.js on WS broadcast).
+ */
+function notifySceneQueryRequest(req) {
+  for (const entry of sceneQueryCallbacks) {
+    try { entry.cb(req); } catch (e) { console.error('Scene query callback error:', e); }
+  }
+}
+
+/**
+ * Notify panel mods of a scene-snapshot request (called from app.js on WS broadcast).
+ */
+function notifySceneSnapshotRequest(req) {
+  for (const entry of sceneSnapshotCallbacks) {
+    try { entry.cb(req); } catch (e) { console.error('Scene snapshot callback error:', e); }
+  }
+}
+
+/**
  * Check if the mod view is currently visible.
  */
 function isModViewVisible() {
@@ -1415,6 +1448,27 @@ function _injectBridgeAPI(iframeEl, modId) {
           screenshotCaptureCallbacks = screenshotCaptureCallbacks.filter(e => e !== entry);
         };
       },
+      onSceneUpdateRequest(cb) {
+        const entry = { modId, cb };
+        sceneUpdateCallbacks.push(entry);
+        return () => {
+          sceneUpdateCallbacks = sceneUpdateCallbacks.filter(e => e !== entry);
+        };
+      },
+      onSceneQueryRequest(cb) {
+        const entry = { modId, cb };
+        sceneQueryCallbacks.push(entry);
+        return () => {
+          sceneQueryCallbacks = sceneQueryCallbacks.filter(e => e !== entry);
+        };
+      },
+      onSceneSnapshotRequest(cb) {
+        const entry = { modId, cb };
+        sceneSnapshotCallbacks.push(entry);
+        return () => {
+          sceneSnapshotCallbacks = sceneSnapshotCallbacks.filter(e => e !== entry);
+        };
+      },
       setPanelBadge(text) {
         const tab = panelTabs.get(modId);
         if (!tab) return;
@@ -1473,6 +1527,9 @@ export const ModManager = {
   notifyBrowserEvalRequest,
   notifyBrowserConsoleRequest,
   notifyScreenshotCaptureRequest,
+  notifySceneUpdateRequest,
+  notifySceneQueryRequest,
+  notifySceneSnapshotRequest,
   isModViewVisible,
   isModActive,
   handleModChanged,

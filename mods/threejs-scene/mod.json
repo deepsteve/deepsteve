@@ -1,0 +1,15 @@
+{
+  "name": "3D Scene",
+  "version": "0.4.0",
+  "description": "Programmable Three.js scene controlled via MCP tools",
+  "enabledByDefault": false,
+  "entry": "index.html",
+  "display": "panel",
+  "panel": { "position": "right", "defaultWidth": 480, "minWidth": 300 },
+  "toolbar": { "label": "3D Scene" },
+  "tools": [
+    { "name": "scene_update", "description": "Add, update, or remove objects in a 3D scene" },
+    { "name": "scene_query", "description": "List objects and inspect scene state" },
+    { "name": "scene_snapshot", "description": "Capture the current scene as a PNG" }
+  ]
+}
