@@ -1,0 +1,13 @@
+{
+  "name": "Space Station",
+  "version": "0.1.0",
+  "minDeepsteveVersion": "0.4.0",
+  "description": "A robot tagging game set aboard a space station in WebXR. Fly with jetpacks, tag robots, and explore the ship interior.",
+  "experimental": true,
+  "enabledByDefault": false,
+  "tags": ["games"],
+  "entry": "index.html",
+  "toolbar": {
+    "label": "Space Station"
+  }
+}
