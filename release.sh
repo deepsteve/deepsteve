@@ -188,6 +188,37 @@ if command -v claude &>/dev/null; then
     claude mcp add --scope user --transport http deepsteve http://localhost:3000/mcp 2>/dev/null || true
 fi
 
+# Configure OpenCode global MCP (merges with existing config)
+if command -v opencode &>/dev/null; then
+    OC_CONFIG_DIR="$HOME/.config/opencode"
+    OC_CONFIG="$OC_CONFIG_DIR/opencode.json"
+    mkdir -p "$OC_CONFIG_DIR"
+    if [ -f "$OC_CONFIG" ]; then
+        # Merge deepsteve MCP into existing config
+        node -e '
+            const fs = require("fs");
+            const p = process.argv[1];
+            let cfg = {};
+            try { cfg = JSON.parse(fs.readFileSync(p, "utf8")); } catch {}
+            if (!cfg.mcp) cfg.mcp = {};
+            cfg.mcp.deepsteve = { type: "remote", url: "http://127.0.0.1:3000/mcp" };
+            fs.writeFileSync(p, JSON.stringify(cfg, null, 2) + "\n");
+        ' "$OC_CONFIG" 2>/dev/null || true
+    else
+        cat > "$OC_CONFIG" << 'OC_EOF'
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "deepsteve": {
+      "type": "remote",
+      "url": "http://127.0.0.1:3000/mcp"
+    }
+  }
+}
+OC_EOF
+    fi
+fi
+
 launchctl unload "$PLIST_PATH" 2>/dev/null
 launchctl load "$PLIST_PATH"
 
