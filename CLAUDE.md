@@ -101,6 +101,7 @@ DeepSteve has **no authentication, no CORS, and no WebSocket origin checking**. 
 - **LaunchAgent PATH**: `execSync` uses `/bin/sh` without Homebrew paths. Commands like `gh` and `git` must be wrapped in `zsh -l -c '...'` to get the user's full PATH.
 - **Worktrees**: Sessions can be created with a `--worktree <name>` flag that's passed through to Claude Code. The worktree name is persisted in state.json for restore. `./restart.sh` only deploys from the main repo checkout — it does NOT copy worktree contents to `~/.deepsteve/`. Merge changes to main first, then restart from the main repo.
 - **Session self-discovery**: Each PTY gets a `DEEPSTEVE_SESSION_ID` env var set to its 8-char shell ID at spawn time. Claude can read this via `echo $DEEPSTEVE_SESSION_ID` and pass it to the `get_session_info` MCP tool to get live metadata (tab name, cwd, worktree). Tab names can change after spawn (via rename), so always use the tool for current values.
+- **Session self-close**: The `close_session` MCP tool closes a session from within Claude. The MCP response is sent synchronously before the PTY teardown begins (`killShell` uses `setTimeout` for escalation), so Claude always receives the acknowledgment. A session can close itself or any other session.
 - **HTTPS support**: Opt-in via `--https` flag or `DEEPSTEVE_HTTPS=1`. Runs a second server on port 3443 (configurable via `--https-port` or `DEEPSTEVE_HTTPS_PORT`). HTTP and HTTPS run simultaneously — HTTP for localhost, HTTPS for LAN/Quest. Certs auto-generated at startup using `mkcert` (if available) or `selfsigned` package. Certs regenerate when LAN IPs change. MCP stays HTTP-only (localhost, avoids self-signed cert issues with SDK).
 
 ### Frontend Module Structure
@@ -155,8 +156,9 @@ The frontend is split into ES modules under `public/js/`:
 **Screenshots** — capture deepsteve UI elements as PNG (does NOT access your project's website or any other browser tab)
 - `screenshot_capture(selector, filename?, output_dir?)` — screenshot a deepsteve UI element by CSS selector (not your project)
 
-**Session Info** — session self-discovery
+**Session Info** — session self-discovery and lifecycle
 - `get_session_info(session_id)` — get session metadata (tab name, cwd, worktree) by deepsteve session ID. Pass `$DEEPSTEVE_SESSION_ID` env var value.
+- `close_session(session_id)` — close a session, its browser tab, and terminate the Claude process. Use when work is complete.
 
 ### Agent Coordination
 
