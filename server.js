@@ -121,6 +121,7 @@ Issue description:
 Please read the issue carefully, understand the codebase context, and implement the changes needed.`,
   defaultAgent: 'claude',
   opencodeBinary: 'opencode',
+  geminiBinary: 'gemini',
   enabledAgents: ['claude', 'opencode']
 };
 
@@ -340,9 +341,24 @@ function spawnOpenCode(args, cwd, { cols = 120, rows = 40, env: extraEnv } = {})
   });
 }
 
+// Spawn Gemini CLI with full login shell environment
+function spawnGemini(args, cwd, { cols = 120, rows = 40, env: extraEnv } = {}) {
+  const bin = settings.geminiBinary || 'gemini';
+  const quoted = args.map(a => `'${a.replace(/'/g, "'\\''")}'`).join(' ');
+  const env = extraEnv ? { ...process.env, ...extraEnv } : process.env;
+  return pty.spawn('zsh', ['-l', '-c', `${bin} ${quoted}`], {
+    name: 'xterm-256color',
+    cols,
+    rows,
+    cwd,
+    env
+  });
+}
+
 // Dispatch to the correct spawn function based on agent type
 function spawnAgent(agentType, args, cwd, opts = {}) {
   if (agentType === 'opencode') return spawnOpenCode(args, cwd, opts);
+  if (agentType === 'gemini') return spawnGemini(args, cwd, opts);
   return spawnClaude(args, cwd, opts);
 }
 
@@ -477,8 +493,8 @@ function wireShellOutput(id) {
       e.scrollbackSize -= e.scrollback.shift().length;
     }
     // Claude-specific: detect --resume UUID and BEL for input state tracking.
-    // OpenCode doesn't emit BEL, so skip all of this for opencode sessions.
-    if (e.agentType !== 'opencode') {
+    // OpenCode and Gemini don't emit BEL, so skip all of this for non-Claude sessions.
+    if (e.agentType !== 'opencode' && e.agentType !== 'gemini') {
       // Detect claude --resume <UUID> in PTY output to track the actual session ID.
       // Claude prints this line when a session exits (including /exit, /clear, shutdown).
       // Strip ANSI escapes before matching so dim/bold wrappers don't interfere.
@@ -542,8 +558,8 @@ function killShell(entry, id) {
   const pid = entry.shell.pid;
   log(`Killing shell ${id} (pid=${pid}, agent=${entry.agentType || 'claude'}, waitingForInput=${entry.waitingForInput})`);
 
-  if (entry.agentType === 'opencode') {
-    // OpenCode: just Ctrl+C, no /exit or BEL logic
+  if (entry.agentType === 'opencode' || entry.agentType === 'gemini') {
+    // OpenCode/Gemini: just Ctrl+C, no /exit or BEL logic
     try { entry.shell.write('\x03'); } catch {}
   } else if (entry.waitingForInput) {
     // Safe to send /exit directly
@@ -674,8 +690,8 @@ async function shutdown(signal) {
   log(`Gracefully exiting ${entries.length} shells...`);
   for (const [id, entry] of entries) {
     try {
-      if (entry.agentType === 'opencode') {
-        // OpenCode: just Ctrl+C, no /exit or BEL logic
+      if (entry.agentType === 'opencode' || entry.agentType === 'gemini') {
+        // OpenCode/Gemini: just Ctrl+C, no /exit or BEL logic
         entry.shell.write('\x03');
       } else if (entry.waitingForInput) {
         submitToShell(entry.shell, '/exit');
@@ -792,7 +808,17 @@ app.get('/api/agents', (req, res) => {
     execSync(`zsh -l -c 'which ${bin}'`, { timeout: 5000, stdio: 'pipe' });
     opencodeAvailable = true;
   } catch {}
-  agents.push({ id: 'opencode', name: 'OpenCode', available: opencodeAvailable, enabled: enabledAgents.includes('opencode'), isDefault: defaultAgent === 'opencode' });
+  // Auto-enable available agents
+  agents.push({ id: 'opencode', name: 'OpenCode', available: opencodeAvailable, enabled: opencodeAvailable, isDefault: defaultAgent === 'opencode' });
+  // Check if gemini is installed
+  let geminiAvailable = false;
+  try {
+    const bin = settings.geminiBinary || 'gemini';
+    execSync(`zsh -l -c 'which ${bin}'`, { timeout: 5000, stdio: 'pipe' });
+    geminiAvailable = true;
+  } catch {}
+  // Auto-enable available agents
+  agents.push({ id: 'gemini', name: 'Gemini', available: geminiAvailable, enabled: geminiAvailable, isDefault: defaultAgent === 'gemini' });
   res.json({ agents, defaultAgent });
 });
 
@@ -828,7 +854,7 @@ app.post('/api/settings', (req, res) => {
   if (req.body.enabledAgents !== undefined) {
     const agents = req.body.enabledAgents;
     if (Array.isArray(agents)) {
-      const valid = agents.filter(a => a === 'claude' || a === 'opencode');
+      const valid = agents.filter(a => a === 'claude' || a === 'opencode' || a === 'gemini');
       if (valid.length > 0) {
         settings.enabledAgents = valid;
         // If only one agent enabled, that's the default
@@ -839,7 +865,7 @@ app.post('/api/settings', (req, res) => {
   }
   if (req.body.defaultAgent !== undefined) {
     const agent = String(req.body.defaultAgent);
-    if (agent === 'claude' || agent === 'opencode') {
+    if (agent === 'claude' || agent === 'opencode' || agent === 'gemini') {
       settings.defaultAgent = agent;
       log(`Settings updated: defaultAgent=${agent}`);
     }
@@ -847,6 +873,10 @@ app.post('/api/settings', (req, res) => {
   if (req.body.opencodeBinary !== undefined) {
     settings.opencodeBinary = String(req.body.opencodeBinary) || 'opencode';
     log(`Settings updated: opencodeBinary=${settings.opencodeBinary}`);
+  }
+  if (req.body.geminiBinary !== undefined) {
+    settings.geminiBinary = String(req.body.geminiBinary) || 'gemini';
+    log(`Settings updated: geminiBinary=${settings.geminiBinary}`);
   }
   saveSettings();
   broadcastSettings();
@@ -1213,15 +1243,20 @@ app.get('/api/issues', (req, res) => {
 });
 
 app.post('/api/start-issue', (req, res) => {
-  const { number, title, body, labels, url, cwd: rawCwd, windowId: rawWindowId, sessionId } = req.body;
+  const { number, title, body, labels, url, cwd: rawCwd, windowId: rawWindowId, sessionId, agentType: rawAgentType } = req.body;
   if (!number || !title) return res.status(400).json({ error: 'number and title are required' });
 
-  // Resolve windowId: explicit value, or look up from caller's session
+  // Resolve windowId and agentType: explicit value, or look up from caller's session
   let windowId = rawWindowId;
-  if (!windowId && sessionId) {
+  let agentType = rawAgentType;
+  if (sessionId) {
     const callerEntry = shells.get(sessionId);
-    if (callerEntry && callerEntry.windowId) windowId = callerEntry.windowId;
+    if (callerEntry) {
+      if (!windowId && callerEntry.windowId) windowId = callerEntry.windowId;
+      if (!agentType && callerEntry.agentType) agentType = callerEntry.agentType;
+    }
   }
+  agentType = agentType || 'claude';
 
   let cwd = rawCwd || process.env.HOME;
   if (cwd.startsWith('~')) cwd = path.join(os.homedir(), cwd.slice(1));
@@ -1251,10 +1286,30 @@ app.post('/api/start-issue', (req, res) => {
 
   const worktree = validateWorktree('github-issue-' + number);
   const id = randomUUID().slice(0, 8);
-  const claudeSessionId = randomUUID();
-  const claudeArgs = ['--session-id', claudeSessionId];
-  if (settings.wandPlanMode) claudeArgs.push('--permission-mode', 'plan');
-  if (worktree) claudeArgs.push('--worktree', worktree);
+  const newSessionId = sessionId || randomUUID();
+
+  // For OpenCode: manually create worktree (it has no --worktree flag)
+  let worktreeCwd = cwd;
+  if (worktree && agentType === 'opencode') {
+    const worktreePath = path.join(cwd, '.claude', 'worktrees', worktree);
+    try {
+      execSync(`zsh -l -c 'git worktree add "${worktreePath}"'`, { cwd, encoding: 'utf8', timeout: 30000 });
+      worktreeCwd = worktreePath;
+      log(`[API] start-issue: created worktree ${worktreePath} for OpenCode`);
+    } catch (e) {
+      log(`[API] start-issue: failed to create worktree for OpenCode: ${e.message}`);
+    }
+  }
+
+  const spawnArgs = agentType === 'opencode'
+    ? ['--session', newSessionId]
+    : agentType === 'gemini'
+    ? []  // Gemini doesn't support --session-id; it manages sessions internally
+    : ['--session-id', newSessionId];
+  if (agentType === 'claude' && settings.wandPlanMode) spawnArgs.push('--permission-mode', 'plan');
+  if (agentType === 'opencode' && settings.wandPlanMode) spawnArgs.push('--agent', 'plan');
+  if (agentType === 'gemini' && settings.wandPlanMode) spawnArgs.push('--approval-mode', 'plan');
+  if (agentType === 'claude' && worktree) spawnArgs.push('--worktree', worktree);
 
   const maxLen = settings.maxIssueTitleLength || 25;
   const tabTitle = `#${number} ${title}`;
@@ -1267,12 +1322,15 @@ app.post('/api/start-issue', (req, res) => {
     return res.status(400).json({ error: 'Multiple browser windows open. Pass sessionId or windowId to target one.' });
   }
 
-  log(`[API] start-issue #${number}: id=${id}, worktree=${worktree}, cwd=${cwd}`);
-  const shell = spawnClaude(claudeArgs, cwd, { cols: 120, rows: 40, env: { DEEPSTEVE_SESSION_ID: id } });
-  shells.set(id, { shell, clients: new Set(), cwd, claudeSessionId, worktree: worktree || null, name, initialPrompt: prompt, waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now() });
+  log(`[API] start-issue #${number}: id=${id}, agent=${agentType}, worktree=${worktree || 'none'}, cwd=${worktreeCwd}`);
+  const shell = spawnAgent(agentType, spawnArgs, worktreeCwd, { cols: 120, rows: 40, env: { DEEPSTEVE_SESSION_ID: id } });
+  shells.set(id, { shell, clients: new Set(), cwd: worktreeCwd, claudeSessionId: sessionId, agentType, worktree: worktree || null, name, initialPrompt: prompt, waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now() });
   wireShellOutput(id);
-  watchClaudeSessionDir(id);
-  shell.onExit(() => { if (!shuttingDown) { unwatchClaudeSessionDir(id); shells.delete(id); saveState(); } });
+  if (agentType !== 'opencode' && agentType !== 'gemini') watchClaudeSessionDir(id);
+  shell.onExit(() => {
+    if (agentType !== 'opencode' && agentType !== 'gemini') unwatchClaudeSessionDir(id);
+    if (!shuttingDown) { shells.delete(id); saveState(); }
+  });
   saveState();
 
   // Notify browser to open the new session
@@ -1432,6 +1490,11 @@ function handleWsConnection(ws, req) {
         resumeArgs = claudeSessionId
           ? ['--session', claudeSessionId, '--continue']
           : ['--continue'];
+      } else if (savedAgentType === 'gemini') {
+        // Gemini: -r with session ID or index
+        resumeArgs = claudeSessionId
+          ? ['-r', claudeSessionId]
+          : ['-c'];
       } else {
         resumeArgs = claudeSessionId
           ? ['--resume', claudeSessionId]
@@ -1443,12 +1506,12 @@ function handleWsConnection(ws, req) {
       const restoredName = name || restored.name || null;
       shells.set(id, { shell, clients: new Set(), cwd, claudeSessionId, agentType: savedAgentType, worktree: savedWorktree, name: restoredName, restored: true, waitingForInput: false, lastActivity: Date.now(), createdAt: restored.createdAt || Date.now() });
       wireShellOutput(id);
-      if (savedAgentType !== 'opencode') watchClaudeSessionDir(id);
+      if (savedAgentType !== 'opencode' && savedAgentType !== 'gemini') watchClaudeSessionDir(id);
       shell.onExit(() => {
-        if (savedAgentType !== 'opencode') unwatchClaudeSessionDir(id);
+        if (savedAgentType !== 'opencode' && savedAgentType !== 'gemini') unwatchClaudeSessionDir(id);
         if (shuttingDown) return;  // Don't overwrite state file during shutdown
         const elapsed = Date.now() - startTime;
-        if (elapsed < 5000 && claudeSessionId && savedAgentType !== 'opencode') {
+        if (elapsed < 5000 && claudeSessionId && savedAgentType !== 'opencode' && savedAgentType !== 'gemini') {
           // --resume failed quickly, fall back to continuing last conversation
           log(`Session ${id} exited after ${elapsed}ms, --resume likely failed. Falling back to -c`);
           const newClaudeSessionId = randomUUID();
@@ -1489,6 +1552,9 @@ function handleWsConnection(ws, req) {
     if (agentType === 'opencode') {
       spawnArgs = ['--session', sessionId];
       if (planMode) spawnArgs.push('--agent', 'plan');
+    } else if (agentType === 'gemini') {
+      spawnArgs = [];  // Gemini manages sessions internally
+      if (planMode) spawnArgs.push('--approval-mode', 'plan');
     } else {
       spawnArgs = ['--session-id', sessionId];
       if (planMode) spawnArgs.push('--permission-mode', 'plan');
@@ -1498,8 +1564,8 @@ function handleWsConnection(ws, req) {
     const shell = spawnAgent(agentType, spawnArgs, cwd, { cols: initialCols, rows: initialRows, env: { DEEPSTEVE_SESSION_ID: id } });
     shells.set(id, { shell, clients: new Set(), cwd, claudeSessionId: sessionId, agentType, worktree: worktree || null, name: name || null, waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now() });
     wireShellOutput(id);
-    if (agentType !== 'opencode') watchClaudeSessionDir(id);
-    shell.onExit(() => { if (!shuttingDown) { if (agentType !== 'opencode') unwatchClaudeSessionDir(id); shells.delete(id); saveState(); } });
+    if (agentType !== 'opencode' && agentType !== 'gemini') watchClaudeSessionDir(id);
+    shell.onExit(() => { if (!shuttingDown) { if (agentType !== 'opencode' && agentType !== 'gemini') unwatchClaudeSessionDir(id); shells.delete(id); saveState(); } });
     saveState();
   }
 
@@ -1530,8 +1596,8 @@ function handleWsConnection(ws, req) {
       if (parsed.type === 'resize') { entry.shell.resize(parsed.cols, parsed.rows); return; }
       if (parsed.type === 'redraw') { entry.shell.write('\x0c'); return; } // Ctrl+L
       if (parsed.type === 'initialPrompt') {
-        if (entry.agentType === 'opencode') {
-          // OpenCode doesn't emit BEL, so submit the prompt directly after a delay
+        if (entry.agentType === 'opencode' || entry.agentType === 'gemini') {
+          // OpenCode/Gemini don't emit BEL, so submit the prompt directly after a delay
           // to give the TUI time to initialize
           const prompt = parsed.text;
           setTimeout(() => submitToShell(entry.shell, prompt), 3000);

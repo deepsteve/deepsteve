@@ -359,6 +359,7 @@ settingsBtn?.addEventListener('click', async () => {
   const currentCmdTabSwitch = !!settingsData.cmdTabSwitch;
   const currentDefaultAgent = settingsData.defaultAgent || 'claude';
   const currentOpencodeBinary = settingsData.opencodeBinary || 'opencode';
+  const currentGeminiBinary = settingsData.geminiBinary || 'gemini';
   const agents = window.__deepsteveAgents || [];
   const themes = themesData.themes || [];
   const activeTheme = themesData.active || '';
@@ -446,6 +447,14 @@ settingsBtn?.addEventListener('click', async () => {
           <label style="font-size: 12px; color: var(--ds-text-secondary);">Binary path</label>
           <input type="text" id="opencode-binary" value="${escapeHtml(currentOpencodeBinary)}" placeholder="opencode" style="width: 200px; padding: 4px 8px; border-radius: 4px; border: 1px solid var(--ds-border); background: var(--ds-bg-secondary); color: var(--ds-text-primary);">
         </div>
+        <label style="font-size: 13px; color: var(--ds-text-primary); cursor: pointer; display: flex; align-items: center; gap: 8px; margin-bottom: 8px;">
+          <input type="checkbox" id="agent-gemini" ${agents.find(a => a.id === 'gemini')?.enabled ? 'checked' : ''} ${agents.find(a => a.id === 'gemini')?.available ? '' : 'disabled'} style="accent-color: var(--ds-accent-green);">
+          Gemini${agents.find(a => a.id === 'gemini')?.available ? '' : ' (not installed)'}
+        </label>
+        <div id="gemini-binary-row" style="display: ${agents.find(a => a.id === 'gemini')?.enabled ? 'block' : 'none'}; margin-top: 8px;">
+          <label style="font-size: 12px; color: var(--ds-text-secondary);">Binary path</label>
+          <input type="text" id="gemini-binary" value="${escapeHtml(currentGeminiBinary)}" placeholder="gemini" style="width: 200px; padding: 4px 8px; border-radius: 4px; border: 1px solid var(--ds-border); background: var(--ds-bg-secondary); color: var(--ds-text-primary);">
+        </div>
       </div>
       <div class="settings-section">
         <h3>Version</h3>
@@ -496,6 +505,13 @@ settingsBtn?.addEventListener('click', async () => {
     opencodeBinaryRow.style.display = agentOpencodeCheckbox.checked ? 'block' : 'none';
   });
 
+  // Show/hide Gemini binary path input based on checkbox
+  const agentGeminiCheckbox = overlay.querySelector('#agent-gemini');
+  const geminiBinaryRow = overlay.querySelector('#gemini-binary-row');
+  agentGeminiCheckbox?.addEventListener('change', () => {
+    geminiBinaryRow.style.display = agentGeminiCheckbox.checked ? 'block' : 'none';
+  });
+
   // Wand template reset button
   overlay.querySelector('#wand-template-reset').onclick = async () => {
     if (!confirm('Reset magic wand prompt template to default?')) return;
@@ -514,11 +530,13 @@ settingsBtn?.addEventListener('click', async () => {
     const enabledAgents = [];
     if (overlay.querySelector('#agent-claude').checked) enabledAgents.push('claude');
     if (overlay.querySelector('#agent-opencode').checked) enabledAgents.push('opencode');
+    if (overlay.querySelector('#agent-gemini').checked) enabledAgents.push('gemini');
     const opencodeBinary = overlay.querySelector('#opencode-binary').value || 'opencode';
+    const geminiBinary = overlay.querySelector('#gemini-binary').value || 'gemini';
     await fetch('/api/settings', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ shellProfile, maxIssueTitleLength: newMaxTitle, wandPlanMode, wandPromptTemplate, cmdTabSwitch, enabledAgents, opencodeBinary })
+      body: JSON.stringify({ shellProfile, maxIssueTitleLength: newMaxTitle, wandPlanMode, wandPromptTemplate, cmdTabSwitch, enabledAgents, opencodeBinary, geminiBinary })
     });
     maxIssueTitleLength = Math.max(10, Math.min(200, newMaxTitle));
     setCmdTabSwitchEnabled(cmdTabSwitch);
