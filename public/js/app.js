@@ -441,7 +441,7 @@ settingsBtn?.addEventListener('click', async () => {
         </label>
         <label style="font-size: 13px; color: var(--ds-text-primary); cursor: pointer; display: flex; align-items: center; gap: 8px; margin-bottom: 8px;">
           <input type="checkbox" id="agent-opencode" ${agents.find(a => a.id === 'opencode')?.enabled ? 'checked' : ''} ${agents.find(a => a.id === 'opencode')?.available ? '' : 'disabled'} style="accent-color: var(--ds-accent-green);">
-          OpenCode${agents.find(a => a.id === 'opencode')?.available ? '' : ' (not installed)'}
+          OpenCode (experimental)${agents.find(a => a.id === 'opencode')?.available ? '' : ' (not installed)'}
         </label>
         <div id="opencode-binary-row" style="display: ${agents.find(a => a.id === 'opencode')?.enabled ? 'block' : 'none'}; margin-top: 8px;">
           <label style="font-size: 12px; color: var(--ds-text-secondary);">Binary path</label>
@@ -449,7 +449,7 @@ settingsBtn?.addEventListener('click', async () => {
         </div>
         <label style="font-size: 13px; color: var(--ds-text-primary); cursor: pointer; display: flex; align-items: center; gap: 8px; margin-bottom: 8px;">
           <input type="checkbox" id="agent-gemini" ${agents.find(a => a.id === 'gemini')?.enabled ? 'checked' : ''} ${agents.find(a => a.id === 'gemini')?.available ? '' : 'disabled'} style="accent-color: var(--ds-accent-green);">
-          Gemini${agents.find(a => a.id === 'gemini')?.available ? '' : ' (not installed)'}
+          Gemini (experimental)${agents.find(a => a.id === 'gemini')?.available ? '' : ' (not installed)'}
         </label>
         <div id="gemini-binary-row" style="display: ${agents.find(a => a.id === 'gemini')?.enabled ? 'block' : 'none'}; margin-top: 8px;">
           <label style="font-size: 12px; color: var(--ds-text-secondary);">Binary path</label>

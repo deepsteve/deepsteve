@@ -355,11 +355,96 @@ function spawnGemini(args, cwd, { cols = 120, rows = 40, env: extraEnv } = {}) {
   });
 }
 
+// Agent capabilities and argument mapping
+const AGENT_CONFIGS = {
+  claude: {
+    spawn: spawnClaude,
+    supportsWorktree: true,
+    supportsSessionId: true,
+    supportsSessionWatch: true,
+    emitsBel: true,
+    exitMethod: 'exit-cmd', // uses /exit
+    initialPromptDelay: 0,
+    sessionIdFlag: '--session-id',
+    planModeFlag: '--permission-mode',
+    planModeValue: 'plan',
+    resumeFlag: '--resume',
+    resumeDefault: '-c'
+  },
+  gemini: {
+    spawn: spawnGemini,
+    supportsWorktree: false,
+    supportsSessionId: false, // Managed internally
+    supportsSessionWatch: false,
+    emitsBel: false,
+    exitMethod: 'ctrl-c',
+    initialPromptDelay: 3000,
+    planModeFlag: '--approval-mode',
+    planModeValue: 'plan',
+    resumeFlag: '-r',
+    resumeDefault: '-c'
+  },
+  opencode: {
+    spawn: spawnOpenCode,
+    supportsWorktree: false,
+    supportsSessionId: true,
+    supportsSessionWatch: false,
+    emitsBel: false,
+    exitMethod: 'ctrl-c',
+    initialPromptDelay: 3000,
+    sessionIdFlag: '--session',
+    planModeFlag: '--agent',
+    planModeValue: 'plan',
+    resumeFlag: '--session', // uses --session ID --continue
+    resumeDefault: '--continue'
+  }
+};
+
+function getAgentConfig(agentType) {
+  return AGENT_CONFIGS[agentType] || AGENT_CONFIGS.claude;
+}
+
 // Dispatch to the correct spawn function based on agent type
 function spawnAgent(agentType, args, cwd, opts = {}) {
-  if (agentType === 'opencode') return spawnOpenCode(args, cwd, opts);
-  if (agentType === 'gemini') return spawnGemini(args, cwd, opts);
-  return spawnClaude(args, cwd, opts);
+  const config = getAgentConfig(agentType);
+  return config.spawn(args, cwd, opts);
+}
+
+function getSpawnArgs(agentType, { sessionId, planMode, worktree }) {
+  const config = getAgentConfig(agentType);
+  const args = [];
+
+  if (config.supportsSessionId && sessionId) {
+    args.push(config.sessionIdFlag, sessionId);
+  }
+
+  if (planMode && config.planModeFlag) {
+    args.push(config.planModeFlag, config.planModeValue);
+  }
+
+  if (worktree && config.supportsWorktree) {
+    args.push('--worktree', worktree);
+  }
+
+  return args;
+}
+
+function getResumeArgs(agentType, { sessionId, worktree }) {
+  const config = getAgentConfig(agentType);
+  const args = [];
+
+  if (sessionId) {
+    args.push(config.resumeFlag, sessionId);
+    if (agentType === 'opencode') args.push('--continue');
+  } else {
+    args.push(config.resumeDefault);
+  }
+
+  if (worktree && config.supportsWorktree) {
+    args.push('--worktree', worktree);
+  }
+
+  return args;
 }
 
 function validateWorktree(value) {
@@ -367,6 +452,28 @@ function validateWorktree(value) {
   if (value.length === 0 || value.length > 128) return null;
   if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(value)) return null;
   return value;
+}
+
+function getWorktreePath(cwd, name) {
+  // Use the same structure as Claude Code
+  return path.join(cwd, '.claude', 'worktrees', name);
+}
+
+function ensureWorktree(cwd, name) {
+  const worktreePath = getWorktreePath(cwd, name);
+  if (fs.existsSync(worktreePath)) {
+    return worktreePath;
+  }
+  try {
+    log(`Creating git worktree: ${name} in ${cwd}`);
+    execSync(`zsh -l -c 'git worktree add "${worktreePath}"'`, { cwd, encoding: 'utf8', timeout: 30000 });
+    return worktreePath;
+  } catch (e) {
+    log(`Failed to create worktree ${worktreePath}: ${e.message}`);
+    // If it fails, maybe the branch already exists or it's not a git repo.
+    // We attempt to return the path anyway if it was created, or fallback.
+    return fs.existsSync(worktreePath) ? worktreePath : cwd;
+  }
 }
 
 // --- Claude session directory watcher ---
@@ -492,9 +599,10 @@ function wireShellOutput(id) {
     while (e.scrollbackSize > SCROLLBACK_SIZE && e.scrollback.length > 1) {
       e.scrollbackSize -= e.scrollback.shift().length;
     }
-    // Claude-specific: detect --resume UUID and BEL for input state tracking.
-    // OpenCode and Gemini don't emit BEL, so skip all of this for non-Claude sessions.
-    if (e.agentType !== 'opencode' && e.agentType !== 'gemini') {
+    // Generic: detect session ID updates and BEL for input state tracking.
+    const config = getAgentConfig(e.agentType);
+
+    if (config.emitsBel) {
       // Detect claude --resume <UUID> in PTY output to track the actual session ID.
       // Claude prints this line when a session exits (including /exit, /clear, shutdown).
       // Strip ANSI escapes before matching so dim/bold wrappers don't interfere.
@@ -549,33 +657,38 @@ function wireShellOutput(id) {
   });
 }
 
-// Gracefully kill a shell - send /exit only if Claude is waiting for input,
-// otherwise Ctrl+C first to interrupt, then /exit once it's ready.
+// Gracefully kill a shell
 function killShell(entry, id) {
   if (entry.killed) return;
   entry.killed = true;
 
   const pid = entry.shell.pid;
+  const config = getAgentConfig(entry.agentType);
   log(`Killing shell ${id} (pid=${pid}, agent=${entry.agentType || 'claude'}, waitingForInput=${entry.waitingForInput})`);
 
-  if (entry.agentType === 'opencode' || entry.agentType === 'gemini') {
-    // OpenCode/Gemini: just Ctrl+C, no /exit or BEL logic
+  if (config.exitMethod === 'ctrl-c') {
+    // Agent just needs Ctrl+C (OpenCode, Gemini)
     try { entry.shell.write('\x03'); } catch {}
-  } else if (entry.waitingForInput) {
-    // Safe to send /exit directly
-    try { submitToShell(entry.shell, '/exit'); } catch {}
+  } else if (config.exitMethod === 'exit-cmd') {
+    // Agent supports /exit command (Claude)
+    if (entry.waitingForInput) {
+      // Safe to send /exit directly
+      try { submitToShell(entry.shell, '/exit'); } catch {}
+    } else {
+      // Claude is busy — send Ctrl+C to interrupt, then /exit when it's ready
+      try { entry.shell.write('\x03'); } catch {}
+      // Watch for BEL (Claude back at prompt), then send /exit
+      const exitHandler = (data) => {
+        if (data.includes('\x07')) {
+          entry.shell.removeListener('data', exitHandler);
+          try { submitToShell(entry.shell, '/exit'); } catch {}
+        }
+      };
+      entry.shell.onData(exitHandler);
+    }
   } else {
-    // Claude is busy — send Ctrl+C to interrupt, then /exit when it's ready
-    try { entry.shell.write('\x03'); } catch {}
-    // Watch for BEL (Claude back at prompt), then send /exit
-    const exitHandler = (data) => {
-      if (data.includes('\x07')) {
-        entry.shell.removeListener('data', exitHandler);
-        try { submitToShell(entry.shell, '/exit'); } catch {}
-      }
-    };
-    entry.shell.on('data', exitHandler);
-    // If BEL never comes, the SIGTERM fallback below will handle it
+    // Default fallback: just kill the process group
+    try { process.kill(-pid, 'SIGTERM'); } catch {}
   }
 
   // After 8 seconds, escalate to SIGTERM
@@ -685,26 +798,10 @@ async function shutdown(signal) {
   }
 
   // Phase 1: Gracefully exit all shells so Claude persists sessions.
-  // Only send /exit when Claude is at the input prompt (waitingForInput).
-  // If busy, Ctrl+C first to interrupt, then /exit once it returns to prompt.
   log(`Gracefully exiting ${entries.length} shells...`);
   for (const [id, entry] of entries) {
     try {
-      if (entry.agentType === 'opencode' || entry.agentType === 'gemini') {
-        // OpenCode/Gemini: just Ctrl+C, no /exit or BEL logic
-        entry.shell.write('\x03');
-      } else if (entry.waitingForInput) {
-        submitToShell(entry.shell, '/exit');
-      } else {
-        entry.shell.write('\x03');
-        const exitHandler = (data) => {
-          if (data.includes('\x07')) {
-            entry.shell.removeListener('data', exitHandler);
-            try { submitToShell(entry.shell, '/exit'); } catch {}
-          }
-        };
-        entry.shell.on('data', exitHandler);
-      }
+      killShell(entry, id);
     } catch {}
   }
 
@@ -809,7 +906,7 @@ app.get('/api/agents', (req, res) => {
     opencodeAvailable = true;
   } catch {}
   // Auto-enable available agents
-  agents.push({ id: 'opencode', name: 'OpenCode', available: opencodeAvailable, enabled: opencodeAvailable, isDefault: defaultAgent === 'opencode' });
+  agents.push({ id: 'opencode', name: 'OpenCode (experimental)', available: opencodeAvailable, enabled: opencodeAvailable, isDefault: defaultAgent === 'opencode' });
   // Check if gemini is installed
   let geminiAvailable = false;
   try {
@@ -818,7 +915,7 @@ app.get('/api/agents', (req, res) => {
     geminiAvailable = true;
   } catch {}
   // Auto-enable available agents
-  agents.push({ id: 'gemini', name: 'Gemini', available: geminiAvailable, enabled: geminiAvailable, isDefault: defaultAgent === 'gemini' });
+  agents.push({ id: 'gemini', name: 'Gemini (experimental)', available: geminiAvailable, enabled: geminiAvailable, isDefault: defaultAgent === 'gemini' });
   res.json({ agents, defaultAgent });
 });
 
@@ -1287,29 +1384,19 @@ app.post('/api/start-issue', (req, res) => {
   const worktree = validateWorktree('github-issue-' + number);
   const id = randomUUID().slice(0, 8);
   const newSessionId = sessionId || randomUUID();
+  const agentConfig = getAgentConfig(agentType);
 
-  // For OpenCode: manually create worktree (it has no --worktree flag)
+  // For agents that don't support --worktree natively: manually create worktree
   let worktreeCwd = cwd;
-  if (worktree && agentType === 'opencode') {
-    const worktreePath = path.join(cwd, '.claude', 'worktrees', worktree);
-    try {
-      execSync(`zsh -l -c 'git worktree add "${worktreePath}"'`, { cwd, encoding: 'utf8', timeout: 30000 });
-      worktreeCwd = worktreePath;
-      log(`[API] start-issue: created worktree ${worktreePath} for OpenCode`);
-    } catch (e) {
-      log(`[API] start-issue: failed to create worktree for OpenCode: ${e.message}`);
-    }
+  if (worktree && !agentConfig.supportsWorktree) {
+    worktreeCwd = ensureWorktree(cwd, worktree);
   }
 
-  const spawnArgs = agentType === 'opencode'
-    ? ['--session', newSessionId]
-    : agentType === 'gemini'
-    ? []  // Gemini doesn't support --session-id; it manages sessions internally
-    : ['--session-id', newSessionId];
-  if (agentType === 'claude' && settings.wandPlanMode) spawnArgs.push('--permission-mode', 'plan');
-  if (agentType === 'opencode' && settings.wandPlanMode) spawnArgs.push('--agent', 'plan');
-  if (agentType === 'gemini' && settings.wandPlanMode) spawnArgs.push('--approval-mode', 'plan');
-  if (agentType === 'claude' && worktree) spawnArgs.push('--worktree', worktree);
+  const spawnArgs = getSpawnArgs(agentType, { 
+    sessionId: newSessionId, 
+    planMode: settings.wandPlanMode, 
+    worktree 
+  });
 
   const maxLen = settings.maxIssueTitleLength || 25;
   const tabTitle = `#${number} ${title}`;
@@ -1477,41 +1564,33 @@ function handleWsConnection(ws, req) {
   // If client requested a specific ID that doesn't exist, check if we can restore it
   if (id && !shells.has(id) && !createNew) {
     if (savedState[id]) {
-      // Restore this session with --resume flag using saved Claude session ID
+      // Restore this session with --resume flag using saved agent session ID
       const restored = savedState[id];
       cwd = restored.cwd;
       const claudeSessionId = restored.claudeSessionId;
       const savedWorktree = validateWorktree(restored.worktree);
       const savedAgentType = restored.agentType || 'claude';
+      const agentConfig = getAgentConfig(savedAgentType);
+
       log(`Restoring session ${id} in ${cwd} (agent: ${savedAgentType}, session: ${claudeSessionId}, worktree: ${savedWorktree || 'none'})`);
       const ptySize = { cols: initialCols, rows: initialRows };
-      let resumeArgs;
-      if (savedAgentType === 'opencode') {
-        resumeArgs = claudeSessionId
-          ? ['--session', claudeSessionId, '--continue']
-          : ['--continue'];
-      } else if (savedAgentType === 'gemini') {
-        // Gemini: -r with session ID or index
-        resumeArgs = claudeSessionId
-          ? ['-r', claudeSessionId]
-          : ['-c'];
-      } else {
-        resumeArgs = claudeSessionId
-          ? ['--resume', claudeSessionId]
-          : ['-c'];
-        if (savedWorktree) resumeArgs.push('--worktree', savedWorktree);
-      }
+      
+      const resumeArgs = getResumeArgs(savedAgentType, { 
+        sessionId: claudeSessionId, 
+        worktree: savedWorktree 
+      });
+
       const shell = spawnAgent(savedAgentType, resumeArgs, cwd, { ...ptySize, env: { DEEPSTEVE_SESSION_ID: id } });
       const startTime = Date.now();
       const restoredName = name || restored.name || null;
       shells.set(id, { shell, clients: new Set(), cwd, claudeSessionId, agentType: savedAgentType, worktree: savedWorktree, name: restoredName, restored: true, waitingForInput: false, lastActivity: Date.now(), createdAt: restored.createdAt || Date.now() });
       wireShellOutput(id);
-      if (savedAgentType !== 'opencode' && savedAgentType !== 'gemini') watchClaudeSessionDir(id);
+      if (agentConfig.supportsSessionWatch) watchClaudeSessionDir(id);
       shell.onExit(() => {
-        if (savedAgentType !== 'opencode' && savedAgentType !== 'gemini') unwatchClaudeSessionDir(id);
+        if (agentConfig.supportsSessionWatch) unwatchClaudeSessionDir(id);
         if (shuttingDown) return;  // Don't overwrite state file during shutdown
         const elapsed = Date.now() - startTime;
-        if (elapsed < 5000 && claudeSessionId && savedAgentType !== 'opencode' && savedAgentType !== 'gemini') {
+        if (elapsed < 5000 && claudeSessionId && agentConfig.supportsSessionWatch) {
           // --resume failed quickly, fall back to continuing last conversation
           log(`Session ${id} exited after ${elapsed}ms, --resume likely failed. Falling back to -c`);
           const newClaudeSessionId = randomUUID();
@@ -1548,24 +1627,26 @@ function handleWsConnection(ws, req) {
     const oldId = id;
     id = randomUUID().slice(0, 8);
     const sessionId = randomUUID();  // Full UUID for session ID (both agents)
-    let spawnArgs;
-    if (agentType === 'opencode') {
-      spawnArgs = ['--session', sessionId];
-      if (planMode) spawnArgs.push('--agent', 'plan');
-    } else if (agentType === 'gemini') {
-      spawnArgs = [];  // Gemini manages sessions internally
-      if (planMode) spawnArgs.push('--approval-mode', 'plan');
-    } else {
-      spawnArgs = ['--session-id', sessionId];
-      if (planMode) spawnArgs.push('--permission-mode', 'plan');
-      if (worktree) spawnArgs.push('--worktree', worktree);
+    const agentConfig = getAgentConfig(agentType);
+    
+    // For agents that don't support --worktree natively: manually create worktree
+    let worktreeCwd = cwd;
+    if (worktree && !agentConfig.supportsWorktree) {
+      worktreeCwd = ensureWorktree(cwd, worktree);
     }
-    log(`[WS] Creating NEW shell: oldId=${oldId}, newId=${id}, agent=${agentType}, session=${sessionId}, worktree=${worktree || 'none'}, cwd=${cwd}`);
-    const shell = spawnAgent(agentType, spawnArgs, cwd, { cols: initialCols, rows: initialRows, env: { DEEPSTEVE_SESSION_ID: id } });
-    shells.set(id, { shell, clients: new Set(), cwd, claudeSessionId: sessionId, agentType, worktree: worktree || null, name: name || null, waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now() });
+
+    const spawnArgs = getSpawnArgs(agentType, { 
+      sessionId, 
+      planMode, 
+      worktree 
+    });
+
+    log(`[WS] Creating NEW shell: oldId=${oldId}, newId=${id}, agent=${agentType}, session=${sessionId}, worktree=${worktree || 'none'}, cwd=${worktreeCwd}`);
+    const shell = spawnAgent(agentType, spawnArgs, worktreeCwd, { cols: initialCols, rows: initialRows, env: { DEEPSTEVE_SESSION_ID: id } });
+    shells.set(id, { shell, clients: new Set(), cwd: worktreeCwd, claudeSessionId: sessionId, agentType, worktree: worktree || null, name: name || null, waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now() });
     wireShellOutput(id);
-    if (agentType !== 'opencode' && agentType !== 'gemini') watchClaudeSessionDir(id);
-    shell.onExit(() => { if (!shuttingDown) { if (agentType !== 'opencode' && agentType !== 'gemini') unwatchClaudeSessionDir(id); shells.delete(id); saveState(); } });
+    if (agentConfig.supportsSessionWatch) watchClaudeSessionDir(id);
+    shell.onExit(() => { if (!shuttingDown) { if (agentConfig.supportsSessionWatch) unwatchClaudeSessionDir(id); shells.delete(id); saveState(); } });
     saveState();
   }
 
@@ -1596,11 +1677,12 @@ function handleWsConnection(ws, req) {
       if (parsed.type === 'resize') { entry.shell.resize(parsed.cols, parsed.rows); return; }
       if (parsed.type === 'redraw') { entry.shell.write('\x0c'); return; } // Ctrl+L
       if (parsed.type === 'initialPrompt') {
-        if (entry.agentType === 'opencode' || entry.agentType === 'gemini') {
-          // OpenCode/Gemini don't emit BEL, so submit the prompt directly after a delay
+        const config = getAgentConfig(entry.agentType);
+        if (config.initialPromptDelay > 0) {
+          // Agent doesn't emit BEL, so submit the prompt directly after a delay
           // to give the TUI time to initialize
           const prompt = parsed.text;
-          setTimeout(() => submitToShell(entry.shell, prompt), 3000);
+          setTimeout(() => submitToShell(entry.shell, prompt), config.initialPromptDelay);
         } else {
           entry.initialPrompt = parsed.text;
         }
