@@ -24,7 +24,7 @@ Run multiple AI agent sessions side-by-side in your browser, each with full term
 ## Features
 
 - **Multiple sessions** - Open as many Claude Code instances as you need in separate tabs
-- **Real terminal emulation** - Full PTY support via xterm.js, not a fake terminal
+- **Real terminal emulation** - PTY support via xterm.js.
 - **Session persistence** - Conversations survive server restarts and page refreshes
 - **GitHub issue picker** - Pick an issue from any repo and launch a session with a worktree and prompt
 - **Agent coordination** - MCP tools let sessions chat, share tasks, and coordinate work
