@@ -6,7 +6,7 @@
 
 https://deepsteve.com
 
-Run multiple AI agent sessions side-by-side in your browser, each with full terminal capabilities and persistent conversation history. Currently supports **Claude Code** — with **OpenCode**, **Gemini CLI**, and **Codex** coming soon.
+Run multiple AI agent sessions side-by-side in your browser, each with full terminal capabilities and persistent conversation history. Supports **Claude Code** with experimental support for **OpenCode** and **Gemini**.
 
 <p align="center">
   <img src="screenshots/screenshot-31-hero.png" alt="deepsteve — full app with tabs and tasks panel" width="800">
@@ -23,8 +23,8 @@ Run multiple AI agent sessions side-by-side in your browser, each with full term
 
 ## Features
 
-- **Multiple sessions** - Open as many Claude Code instances as you need in separate tabs
-- **Real terminal emulation** - PTY support via xterm.js.
+- **Multiple sessions** - Open as many Claude Code, OpenCode, or Gemini instances as you need in separate tabs
+- **Real terminal emulation** - Full PTY support via xterm.js, not a fake terminal
 - **Session persistence** - Conversations survive server restarts and page refreshes
 - **GitHub issue picker** - Pick an issue from any repo and launch a session with a worktree and prompt
 - **Agent coordination** - MCP tools let sessions chat, share tasks, and coordinate work
@@ -42,7 +42,7 @@ curl -fsSL deepsteve.com/install.sh | bash
 
 - macOS
 - Node.js
-- [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI installed
+- [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [OpenCode](https://github.com/google/opencode), or [Gemini CLI](https://github.com/google/gemini-cli) installed
 
 ## Installation (from source)
 
