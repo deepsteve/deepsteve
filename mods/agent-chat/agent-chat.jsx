@@ -222,6 +222,7 @@ function ChatPanel() {
   const [isListening, setIsListening] = useState(false);
 
   const messagesEndRef = useRef(null);
+  const unreadMarkerRef = useRef(null);
   const prevMessageCountRef = useRef(0);
   const senderNameRef = useRef(senderName);
   const seenMessageIdsRef = useRef(new Set());
@@ -370,7 +371,18 @@ function ChatPanel() {
     const msgs = channels[activeChannel]?.messages || [];
     if (msgs.length > prevMessageCountRef.current) {
       const isInitialLoad = prevMessageCountRef.current === 0;
-      messagesEndRef.current?.scrollIntoView({ behavior: isInitialLoad ? 'instant' : 'smooth' });
+      if (isInitialLoad) {
+        // Wait for DOM to paint before scrolling on initial load
+        requestAnimationFrame(() => {
+          if (unreadMarkerRef.current) {
+            unreadMarkerRef.current.scrollIntoView({ behavior: 'instant' });
+          } else {
+            messagesEndRef.current?.scrollIntoView({ behavior: 'instant' });
+          }
+        });
+      } else {
+        messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+      }
       if (!document.hidden) {
         // Small delay so the divider flashes briefly before clearing
         setTimeout(() => markChannelRead(activeChannel), 1500);
@@ -594,7 +606,7 @@ function ChatPanel() {
           messages.map(msg => (
             <React.Fragment key={msg.id}>
               {unreadMarkers[activeChannel] === msg.id && (
-                <div style={{
+                <div ref={unreadMarkerRef} style={{
                   display: 'flex',
                   alignItems: 'center',
                   gap: 8,
