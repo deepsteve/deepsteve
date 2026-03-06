@@ -1437,7 +1437,7 @@ app.post('/api/start-issue', (req, res) => {
 
   log(`[API] start-issue #${number}: id=${id}, agent=${agentType}, worktree=${worktree || 'none'}, cwd=${worktreeCwd}`);
   const shell = spawnAgent(agentType, spawnArgs, worktreeCwd, { cols: 120, rows: 40, env: { DEEPSTEVE_SESSION_ID: id } });
-  shells.set(id, { shell, clients: new Set(), cwd: worktreeCwd, claudeSessionId: claudeSessionId, agentType, worktree: worktree || null, name, initialPrompt: prompt, waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now() });
+  shells.set(id, { shell, clients: new Set(), cwd: worktreeCwd, claudeSessionId: claudeSessionId, agentType, worktree: worktree || null, windowId: windowId || null, name, initialPrompt: prompt, waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now() });
   wireShellOutput(id);
   // For non-BEL agents, deliver initialPrompt after delay (BEL agents use wireShellOutput detection)
   if (prompt && agentConfig.initialPromptDelay > 0) {
@@ -1454,15 +1454,16 @@ app.post('/api/start-issue', (req, res) => {
   // Notify browser to open the new session
   let delivered = false;
   if (windowId) {
-    // Targeted: broadcast to ALL reload clients with windowId in payload.
-    // Client-side filter (app.js) ensures only the target window processes it.
+    // Targeted: send only to the reload client whose windowId matches
     const openMsg = JSON.stringify({ type: 'open-session', id, cwd, name, windowId });
     for (const client of readyClients) {
-      if (client.readyState === 1) client.send(openMsg);
+      if (client.windowId === windowId && client.readyState === 1) {
+        client.send(openMsg);
+        delivered = true;
+        break;
+      }
     }
-    if (readyClients.length > 0) {
-      delivered = true;
-    } else {
+    if (!delivered && readyClients.length === 0) {
       // No browser connected — queue for when the target window reconnects
       pendingOpens.push(openMsg);
       log(`[API] start-issue: no browser open, queued open-session for windowId=${windowId}`);
