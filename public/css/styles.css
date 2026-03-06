@@ -200,6 +200,7 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
 .dropdown { position: relative; }
 .dropdown-btn { padding: 4px 10px; background: var(--ds-bg-tertiary); border: 1px solid var(--ds-border); color: var(--ds-text-secondary); border-radius: 4px; cursor: pointer; font-size: 13px; }
 .dropdown-btn:hover { background: var(--ds-border); color: var(--ds-text-primary); }
+#settings-btn { font-size: 18px; }
 .dropdown-menu { display: none; position: absolute; right: 0; top: 100%; margin-top: 4px; background: var(--ds-bg-secondary); border: 1px solid var(--ds-border); border-radius: 6px; min-width: 220px; z-index: 200; box-shadow: 0 8px 24px var(--ds-shadow); max-height: 300px; overflow-y: auto; }
 .dropdown-menu.open { display: block; }
 .dropdown-item { padding: 8px 12px; font-size: 13px; color: var(--ds-text-primary); display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--ds-bg-tertiary); }
