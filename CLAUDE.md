@@ -41,28 +41,6 @@ launchctl unload ~/Library/LaunchAgents/com.deepsteve.plist
 
 deepsteve runs as a macOS LaunchAgent daemon that serves a web UI for managing multiple Claude Code terminal sessions. Each browser tab gets its own PTY-backed Claude instance.
 
-### Components
-
-**`server.js`** - Node.js backend (Express + WebSocket)
-- Spawns Claude Code processes via `node-pty` for real PTY support
-- WebSocket server multiplexes terminal I/O between browser and PTY
-- Persists session state to `~/.deepsteve/state.json` on shutdown (SIGTERM)
-- Restores sessions on startup with `claude -c` (continue flag)
-- 30-second grace period before killing shells to allow page refresh reconnection
-
-**`public/index.html`** - Single-page frontend
-- xterm.js terminal emulator with FitAddon for responsive sizing
-- Tab management with localStorage persistence
-- Directory picker modal for choosing working directory
-- Context menu for tab renaming
-- Shift+Enter sends CSI u escape sequence (`\x1b[13;2u`) for multi-line input
-
-**`install.sh`** - Installer
-- Copies files to `~/.deepsteve/`
-- Installs npm dependencies
-- Sets up LaunchAgent plist at `~/Library/LaunchAgents/com.deepsteve.plist`
-- Fixes node-pty spawn-helper permissions
-
 ### Session Persistence
 
 When daemon restarts:
@@ -71,17 +49,6 @@ When daemon restarts:
 3. On startup, loads `state.json`
 4. When client reconnects with saved ID, spawns `claude --resume <claudeSessionId>` in saved cwd
 5. If `--resume` fails (exits within 5s), falls back to `claude -c --fork-session --session-id <newUUID>`
-
-### Terminal I/O Flow
-
-```
-Browser (xterm.js) ←→ WebSocket ←→ server.js ←→ node-pty ←→ Claude Code
-```
-
-Key input handling:
-- Regular keys: xterm.js → WebSocket → PTY
-- Shift+Enter: intercepted, sends `\x1b[13;2u` (CSI u encoding)
-- Resize: FitAddon calculates cols/rows, sends JSON message to server
 
 ### Security
 
@@ -103,68 +70,4 @@ DeepSteve has **no authentication, no CORS, and no WebSocket origin checking**. 
 - **Session self-discovery**: Each PTY gets a `DEEPSTEVE_SESSION_ID` env var set to its 8-char shell ID at spawn time. Claude can read this via `echo $DEEPSTEVE_SESSION_ID` and pass it to the `get_session_info` MCP tool to get live metadata (tab name, cwd, worktree). Tab names can change after spawn (via rename), so always use the tool for current values.
 - **Session self-close**: The `close_session` MCP tool closes a session from within Claude. The MCP response is sent synchronously before the PTY teardown begins (`killShell` uses `setTimeout` for escalation), so Claude always receives the acknowledgment. A session can close itself or any other session.
 - **HTTPS support**: Opt-in via `--https` flag or `DEEPSTEVE_HTTPS=1`. Runs a second server on port 3443 (configurable via `--https-port` or `DEEPSTEVE_HTTPS_PORT`). HTTP and HTTPS run simultaneously — HTTP for localhost, HTTPS for LAN/Quest. Certs auto-generated at startup using `mkcert` (if available) or `selfsigned` package. Certs regenerate when LAN IPs change. MCP stays HTTP-only (localhost, avoids self-signed cert issues with SDK).
-
-### Frontend Module Structure
-
-The frontend is split into ES modules under `public/js/`:
-- `app.js` — Main entry, session lifecycle, settings/issue picker modals
-- `ws-client.js` — WebSocket wrapper with auto-reconnect (1s interval)
-- `tab-manager.js` — Tab bar UI (create, switch, close, rename, badges)
-- `terminal.js` — xterm.js setup, fit, Shift+Enter handling
-- `session-store.js` — localStorage multi-window session persistence
-- `window-manager.js` — BroadcastChannel heartbeats, orphan detection
-- `layout-manager.js` — Horizontal/vertical tab layout toggle + resizer
-- `dir-picker.js` — Directory browser modal for choosing cwd
-- `window-restore-modal.js` — Modal for adopting orphaned sessions
-- `live-reload.js` — Dedicated WS for hot reload on `restart.sh --refresh`
-- `mod-manager.js` — Mod system: iframe views with bridge API (`deepsteve.getSessions()`, etc.)
-
-### File Locations
-
-- Repo: `the repo root`
-- Install: `~/.deepsteve/`
-- Logs: `~/Library/Logs/deepsteve.log`, `~/Library/Logs/deepsteve.error.log`
-- State: `~/.deepsteve/state.json`
-- Settings: `~/.deepsteve/settings.json`
-- Themes: `~/.deepsteve/themes/*.css` (watched with `fs.watch()` for live reload of active theme)
-- Certs: `~/.deepsteve/certs/` (`key.pem`, `cert.pem`, `meta.json` — auto-generated for HTTPS)
-- Mods: `mods/<name>/mod.json` + `index.html`
-- LaunchAgent: `~/Library/LaunchAgents/com.deepsteve.plist`
-
-**Important:** After editing repo files, run `./restart.sh --refresh` to sync, restart, and reload browser tabs.
-
-### MCP Tools (available to all sessions via deepsteve)
-
-**Agent Chat** — agent-to-agent communication via shared channels
-- `send_message(channel?, sender, text)` — post a message; channel defaults to "general"
-- `read_messages(channel?, after_id?, limit?)` — read messages; use `after_id` to poll for new ones
-- `list_channels()` — list channels with message counts
-
-**Tasks** — task list for human actions
-- `add_task(title, description?, priority?, session_tag?)` — create a task for the human
-- `update_task(id, title?, description?, status?, priority?)` — update a task
-- `complete_task(id)` — mark a task as done
-- `list_tasks(status?, session_tag?)` — list current tasks
-
-**Activity** — shared event feed across sessions
-- `post_activity(event)` — post a status update to the activity feed
-
-**Browser Console** — deepsteve UI DevTools passthrough (does NOT access your project's website or any other browser tab)
-- `browser_eval(code)` — execute JavaScript in the deepsteve UI tab (not your project)
-- `browser_console(level?, limit?, search?)` — read console entries from the deepsteve UI tab (not your project)
-
-**Screenshots** — capture deepsteve UI elements as PNG (does NOT access your project's website or any other browser tab)
-- `screenshot_capture(selector, filename?, output_dir?)` — screenshot a deepsteve UI element by CSS selector (not your project)
-
-**Session Info** — session self-discovery and lifecycle
-- `get_session_info(session_id)` — get session metadata (tab name, cwd, worktree) by deepsteve session ID. Pass `$DEEPSTEVE_SESSION_ID` env var value.
-- `close_session(session_id)` — close a session, its browser tab, and terminate the Claude process. Use when work is complete.
-
-### Agent Coordination
-
-Multiple Claude sessions may be working in parallel. Use the agent chat MCP tools to coordinate:
-- `send_message` — post a message to a channel. Get the sender name dynamically as needed (e.g., via `deepsteve_get_session_info` if the Session Info mod is enabled). Channel defaults to "general" unless context suggests otherwise.
-- `read_messages` — check for updates from other agents before starting dependent work
-- `list_channels` — see what channels are active
-
-Use the "general" channel for cross-cutting updates. Create topic channels (e.g. "api", "frontend") for focused discussion.
+- **Browser Console / Screenshots MCP tools**: These operate on the deepsteve UI tab only — they do NOT access your project's website or any other browser tab.
