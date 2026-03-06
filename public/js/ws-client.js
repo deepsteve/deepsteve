@@ -51,6 +51,7 @@ export function createWebSocket(options = {}) {
       if (options.cols) p.set('cols', options.cols);
       if (options.rows) p.set('rows', options.rows);
       if (options.agentType && options.agentType !== 'claude') p.set('agentType', options.agentType);
+      if (options.windowId) p.set('windowId', options.windowId);
       url = wsProto + location.host + '?' + p;
     },
 

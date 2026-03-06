@@ -738,7 +738,7 @@ function saveState() {
   }
   const state = {};
   for (const [id, entry] of shells) {
-    state[id] = { cwd: entry.cwd, claudeSessionId: entry.claudeSessionId, agentType: entry.agentType || 'claude', worktree: entry.worktree || null, name: entry.name || null, lastActivity: entry.lastActivity || null, createdAt: entry.createdAt || null };
+    state[id] = { cwd: entry.cwd, claudeSessionId: entry.claudeSessionId, agentType: entry.agentType || 'claude', worktree: entry.worktree || null, name: entry.name || null, lastActivity: entry.lastActivity || null, createdAt: entry.createdAt || null, windowId: entry.windowId || null };
   }
   // Merge with any saved state that wasn't reconnected yet
   const merged = { ...savedState, ...state };
@@ -1454,14 +1454,19 @@ app.post('/api/start-issue', (req, res) => {
   // Notify browser to open the new session
   let delivered = false;
   if (windowId) {
-    // Targeted: send only to the matching reload client
+    // Targeted: broadcast to ALL reload clients with windowId in payload.
+    // Client-side filter (app.js) ensures only the target window processes it.
     const openMsg = JSON.stringify({ type: 'open-session', id, cwd, name, windowId });
     for (const client of readyClients) {
-      if (client.windowId === windowId) {
-        client.send(openMsg);
-        delivered = true;
-        break;
-      }
+      if (client.readyState === 1) client.send(openMsg);
+    }
+    if (readyClients.length > 0) {
+      delivered = true;
+    } else {
+      // No browser connected — queue for when the target window reconnects
+      pendingOpens.push(openMsg);
+      log(`[API] start-issue: no browser open, queued open-session for windowId=${windowId}`);
+      delivered = true;
     }
   }
   if (!delivered && readyClients.length === 1) {
@@ -1565,13 +1570,22 @@ function handleWsConnection(ws, req) {
         }
       } catch {}
     });
-    // Flush any pending open-session messages to the newly connected browser
+    // Flush pending open-session messages that match this window (or have no windowId)
     if (pendingOpens.length > 0) {
-      const toFlush = pendingOpens.splice(0);
-      for (const msg of toFlush) {
-        if (ws.readyState === 1) ws.send(msg);
+      const keep = [];
+      let flushed = 0;
+      for (const msg of pendingOpens) {
+        const parsed = JSON.parse(msg);
+        if (!parsed.windowId || parsed.windowId === ws.windowId) {
+          if (ws.readyState === 1) ws.send(msg);
+          flushed++;
+        } else {
+          keep.push(msg);
+        }
       }
-      log(`[WS] Flushed ${toFlush.length} pending open-session(s) to reload client`);
+      pendingOpens.length = 0;
+      pendingOpens.push(...keep);
+      if (flushed > 0) log(`[WS] Flushed ${flushed} pending open-session(s) to reload client (windowId=${ws.windowId}), ${keep.length} kept for other windows`);
     }
     return;
   }
@@ -1614,7 +1628,7 @@ function handleWsConnection(ws, req) {
       const shell = spawnAgent(savedAgentType, resumeArgs, cwd, { ...ptySize, env: { DEEPSTEVE_SESSION_ID: id } });
       const startTime = Date.now();
       const restoredName = name || restored.name || null;
-      shells.set(id, { shell, clients: new Set(), cwd, claudeSessionId, agentType: savedAgentType, worktree: savedWorktree, name: restoredName, restored: true, waitingForInput: false, lastActivity: Date.now(), createdAt: restored.createdAt || Date.now() });
+      shells.set(id, { shell, clients: new Set(), cwd, claudeSessionId, agentType: savedAgentType, worktree: savedWorktree, name: restoredName, restored: true, waitingForInput: false, lastActivity: Date.now(), createdAt: restored.createdAt || Date.now(), windowId: restored.windowId || null });
       wireShellOutput(id);
       if (agentConfig.supportsSessionWatch) watchClaudeSessionDir(id);
       shell.onExit(() => {
