@@ -1409,7 +1409,7 @@ app.post('/api/start-issue', (req, res) => {
 
   const worktree = validateWorktree('github-issue-' + number);
   const id = randomUUID().slice(0, 8);
-  const newSessionId = sessionId || randomUUID();
+  const claudeSessionId = randomUUID();
   const agentConfig = getAgentConfig(agentType);
 
   // For agents that don't support --worktree natively: manually create worktree
@@ -1419,7 +1419,7 @@ app.post('/api/start-issue', (req, res) => {
   }
 
   const spawnArgs = getSpawnArgs(agentType, { 
-    sessionId: newSessionId, 
+    sessionId: claudeSessionId,
     planMode: settings.wandPlanMode, 
     worktree 
   });
@@ -1437,7 +1437,7 @@ app.post('/api/start-issue', (req, res) => {
 
   log(`[API] start-issue #${number}: id=${id}, agent=${agentType}, worktree=${worktree || 'none'}, cwd=${worktreeCwd}`);
   const shell = spawnAgent(agentType, spawnArgs, worktreeCwd, { cols: 120, rows: 40, env: { DEEPSTEVE_SESSION_ID: id } });
-  shells.set(id, { shell, clients: new Set(), cwd: worktreeCwd, claudeSessionId: sessionId, agentType, worktree: worktree || null, name, initialPrompt: prompt, waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now() });
+  shells.set(id, { shell, clients: new Set(), cwd: worktreeCwd, claudeSessionId: claudeSessionId, agentType, worktree: worktree || null, name, initialPrompt: prompt, waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now() });
   wireShellOutput(id);
   // For non-BEL agents, deliver initialPrompt after delay (BEL agents use wireShellOutput detection)
   if (prompt && agentConfig.initialPromptDelay > 0) {
