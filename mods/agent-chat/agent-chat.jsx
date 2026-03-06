@@ -127,12 +127,20 @@ function hashName(name) {
 
 function senderVoice(name) {
   if (voiceCache.has(name)) return voiceCache.get(name);
-  const voices = speechSynthesis.getVoices().filter(v => /en[-_]/i.test(v.lang));
-  if (voices.length === 0) return null;
+  
+  // Allowlist of natural-sounding macOS voices
+  const allowedVoices = ['Samantha', 'Daniel', 'Karen', 'Moira', 'Rishi', 'Aman', 'Tara', 'Tessa', 'Reed', 'Sandy', 'Shelley'];
+  const allEnglish = speechSynthesis.getVoices().filter(v => /en[-_]/i.test(v.lang));
+  const voices = allEnglish.filter(v => allowedVoices.some(a => v.name.startsWith(a)));
+
+  // Fall back to any English voice if no allowlisted voice is available
+  if (voices.length === 0 && allEnglish.length === 0) return null;
+  const pool = voices.length > 0 ? voices : allEnglish;
   const h = hashName(name);
-  const voice = voices[h % voices.length];
-  const pitch = 0.8 + (((h >> 8) & 0xff) / 255) * 0.5;  // 0.8–1.3
-  const rate = 0.9 + (((h >> 16) & 0xff) / 255) * 0.2;   // 0.9–1.1
+  const voice = pool[h % pool.length];
+  // Slightly narrower pitch range (0.9–1.2) for more natural sound
+  const pitch = 0.9 + (((h >> 8) & 0xff) / 255) * 0.3;
+  const rate = 0.95 + (((h >> 16) & 0xff) / 255) * 0.15; // 0.95–1.1
   const result = { voice, pitch, rate };
   voiceCache.set(name, result);
   return result;
