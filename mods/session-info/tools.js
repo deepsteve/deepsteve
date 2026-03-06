@@ -1,4 +1,5 @@
 const { z } = require('zod');
+const path = require('path');
 
 function init(context) {
   const { shells, closeSession } = context;
@@ -13,10 +14,11 @@ function init(context) {
         if (!entry) {
           return { content: [{ type: 'text', text: `Session "${session_id}" not found.` }] };
         }
+        const fallbackName = entry.cwd ? path.basename(entry.cwd) : 'shell';
         return {
           content: [{ type: 'text', text: JSON.stringify({
             id: session_id,
-            name: entry.name || null,
+            name: entry.name || fallbackName || 'root',
             cwd: entry.cwd,
             worktree: entry.worktree || null,
             windowId: entry.windowId || null,
