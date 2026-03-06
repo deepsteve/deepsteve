@@ -1323,6 +1323,32 @@ app.get('/api/git-root', (req, res) => {
   }
 });
 
+app.post('/api/git-roots', express.json(), (req, res) => {
+  const paths = req.body?.paths;
+  if (!Array.isArray(paths)) return res.status(400).json({ error: 'paths must be an array' });
+  const rootSet = new Map();
+  for (const p of paths) {
+    try {
+      let cwd = p;
+      if (cwd.startsWith('~')) cwd = path.join(os.homedir(), cwd.slice(1));
+      const root = execSync("zsh -l -c 'git rev-parse --show-toplevel'", { cwd, encoding: 'utf8', timeout: 5000 }).trim();
+      if (!rootSet.has(root)) rootSet.set(root, path.basename(root));
+    } catch { /* skip non-git dirs */ }
+  }
+  // Disambiguate duplicate basenames
+  const nameCounts = {};
+  for (const name of rootSet.values()) nameCounts[name] = (nameCounts[name] || 0) + 1;
+  const roots = [];
+  for (const [root, baseName] of rootSet) {
+    const name = nameCounts[baseName] > 1
+      ? `${baseName} (${path.basename(path.dirname(root))})`
+      : baseName;
+    roots.push({ root, name });
+  }
+  roots.sort((a, b) => a.name.localeCompare(b.name));
+  res.json({ roots });
+});
+
 app.get('/api/issues', (req, res) => {
   let cwd = req.query.cwd || process.env.HOME;
   if (cwd.startsWith('~')) cwd = path.join(os.homedir(), cwd.slice(1));

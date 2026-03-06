@@ -1404,12 +1404,22 @@ async function showIssuePicker() {
     return;
   }
 
+  // Collect candidate paths for repo selector
+  const sessionCwds = [...sessions.values()].map(s => s.cwd).filter(Boolean);
+  const recentCwds = SessionStore.getRecentDirs().map(d => d.path);
+  const allCwds = [...new Set([cwd, ...sessionCwds, ...recentCwds])];
+
   // Show modal immediately with loading state
   const overlay = document.createElement('div');
   overlay.className = 'modal-overlay';
   overlay.innerHTML = `
     <div class="modal" style="width: 520px;">
       <h2>Pick a GitHub Issue</h2>
+      <div class="issue-repo-selector" style="display:none;">
+        <select class="issue-repo-select" id="issue-repo-select">
+          <option value="${escapeHtml(gitRoot)}">${escapeHtml(gitRoot.split('/').pop())}</option>
+        </select>
+      </div>
       <div class="issue-list">
         <div class="issue-loading">
           <span class="issue-loading-text">Loading issues…</span>
@@ -1566,6 +1576,40 @@ async function showIssuePicker() {
   }
 
   fetchAndRender();
+
+  // Wire repo selector change handler
+  const repoSelect = overlay.querySelector('#issue-repo-select');
+  repoSelect.addEventListener('change', () => {
+    gitRoot = repoSelect.value;
+    currentPage = 1;
+    issues = null;
+    selectedIssue = null;
+    hasMore = false;
+    // Replace issue list (or error/empty state) with fresh loading spinner
+    const existing = overlay.querySelector('.issue-list') || overlay.querySelector('.issue-empty') || overlay.querySelector('.issue-error');
+    if (existing) {
+      const fresh = document.createElement('div');
+      fresh.className = 'issue-list';
+      fresh.innerHTML = '<div class="issue-loading"><span class="issue-loading-text">Loading issues…</span></div>';
+      existing.replaceWith(fresh);
+    }
+    const startBtn = overlay.querySelector('#issue-start');
+    if (startBtn) startBtn.remove();
+    fetchAndRender();
+  });
+
+  // Populate repo dropdown asynchronously
+  fetch('/api/git-roots', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ paths: allCwds })
+  }).then(r => r.json()).then(data => {
+    if (!overlay.parentNode || !data.roots || data.roots.length <= 1) return;
+    repoSelect.innerHTML = data.roots.map(r =>
+      `<option value="${escapeHtml(r.root)}"${r.root === gitRoot ? ' selected' : ''}>${escapeHtml(r.name)}</option>`
+    ).join('');
+    overlay.querySelector('.issue-repo-selector').style.display = '';
+  }).catch(() => {});
 }
 
 /**

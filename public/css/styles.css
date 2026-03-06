@@ -269,6 +269,9 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
 .issue-error-message { color: #e06c75; margin-bottom: 12px; }
 .issue-retry { padding: 6px 16px; background: var(--ds-bg-tertiary); border: 1px solid var(--ds-border); color: var(--ds-text-primary); border-radius: 4px; cursor: pointer; font-size: 12px; }
 .issue-retry:hover { background: var(--ds-bg-secondary); }
+.issue-repo-selector { margin-bottom: 12px; }
+.issue-repo-select { width: 100%; padding: 8px 12px; background: var(--ds-bg-primary); border: 1px solid var(--ds-border); border-radius: 4px; color: var(--ds-text-primary); font-size: 13px; font-family: monospace; cursor: pointer; }
+.issue-repo-select:focus { outline: none; border-color: var(--ds-accent-green); }
 
 /* Content row — terminals + panel side by side */
 #content-row { display: flex; flex: 1; min-height: 0; }
