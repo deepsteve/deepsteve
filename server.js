@@ -1413,9 +1413,14 @@ app.post('/api/start-issue', (req, res) => {
   const shell = spawnAgent(agentType, spawnArgs, worktreeCwd, { cols: 120, rows: 40, env: { DEEPSTEVE_SESSION_ID: id } });
   shells.set(id, { shell, clients: new Set(), cwd: worktreeCwd, claudeSessionId: sessionId, agentType, worktree: worktree || null, name, initialPrompt: prompt, waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now() });
   wireShellOutput(id);
-  if (agentType !== 'opencode' && agentType !== 'gemini') watchClaudeSessionDir(id);
+  // For non-BEL agents, deliver initialPrompt after delay (BEL agents use wireShellOutput detection)
+  if (prompt && agentConfig.initialPromptDelay > 0) {
+    shells.get(id).initialPrompt = null; // Clear so BEL handler doesn't also fire
+    setTimeout(() => submitToShell(shell, prompt), agentConfig.initialPromptDelay);
+  }
+  if (agentConfig.supportsSessionWatch) watchClaudeSessionDir(id);
   shell.onExit(() => {
-    if (agentType !== 'opencode' && agentType !== 'gemini') unwatchClaudeSessionDir(id);
+    if (agentConfig.supportsSessionWatch) unwatchClaudeSessionDir(id);
     if (!shuttingDown) { shells.delete(id); saveState(); }
   });
   saveState();
