@@ -366,6 +366,52 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
 .version-update { color: var(--ds-accent-blue); }
 .version-failed { color: var(--ds-text-secondary); }
 
+/* Settings modal — scrollable with pinned header/footer */
+.settings-modal {
+  width: 480px;
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+  overflow: hidden;
+}
+.settings-header {
+  padding: 20px 20px 0;
+  flex-shrink: 0;
+}
+.settings-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 0 20px 8px;
+  min-height: 0;
+}
+.settings-body::-webkit-scrollbar { width: 6px; }
+.settings-body::-webkit-scrollbar-track { background: transparent; }
+.settings-body::-webkit-scrollbar-thumb { background: var(--ds-border); border-radius: 3px; }
+.settings-body::-webkit-scrollbar-thumb:hover { background: var(--ds-text-secondary); }
+.settings-modal .modal-buttons {
+  padding: 12px 20px 20px;
+  border-top: 1px solid var(--ds-border);
+  flex-shrink: 0;
+}
+
+/* Settings section cards */
+.settings-modal .settings-section {
+  margin-top: 12px;
+  padding: 12px;
+  border-top: none;
+  border: 1px solid var(--ds-border);
+  border-radius: 6px;
+  background: var(--ds-bg-primary);
+}
+.settings-modal .settings-section h3 {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  color: var(--ds-text-secondary);
+  margin-bottom: 10px;
+}
+
 /* Mod system */
 #mod-container { flex: 1; min-height: 0; display: none; }
 #mod-container iframe { width: 100%; height: 100%; border: none; }

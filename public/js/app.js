@@ -371,8 +371,11 @@ settingsBtn?.addEventListener('click', async () => {
   const overlay = document.createElement('div');
   overlay.className = 'modal-overlay';
   overlay.innerHTML = `
-    <div class="modal">
-      <h2>Settings</h2>
+    <div class="modal settings-modal">
+      <div class="settings-header">
+        <h2>Settings</h2>
+      </div>
+      <div class="settings-body">
       <p style="font-size: 13px; color: var(--ds-text-secondary); margin-bottom: 12px;">
         Shell profile to source before running Claude:
       </p>
@@ -470,7 +473,8 @@ settingsBtn?.addEventListener('click', async () => {
           }</div>
         </div>
       </div>
-      <div class="modal-buttons" style="margin-top: 16px;">
+      </div>
+      <div class="modal-buttons">
         <button class="btn-secondary" id="settings-cancel">Cancel</button>
         <button class="btn-primary" id="settings-save">Save</button>
       </div>
