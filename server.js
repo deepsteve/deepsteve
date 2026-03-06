@@ -1369,19 +1369,21 @@ app.post('/api/start-issue', (req, res) => {
   const { number, title, body, labels, url, cwd: rawCwd, windowId: rawWindowId, sessionId, agentType: rawAgentType } = req.body;
   if (!number || !title) return res.status(400).json({ error: 'number and title are required' });
 
-  // Resolve windowId and agentType: explicit value, or look up from caller's session
+  // Resolve windowId, agentType, and cwd: explicit value, or look up from caller's session
   let windowId = rawWindowId;
   let agentType = rawAgentType;
+  let cwd = rawCwd;
   if (sessionId) {
     const callerEntry = shells.get(sessionId);
     if (callerEntry) {
       if (!windowId && callerEntry.windowId) windowId = callerEntry.windowId;
       if (!agentType && callerEntry.agentType) agentType = callerEntry.agentType;
+      if (!cwd && callerEntry.cwd) cwd = callerEntry.cwd;
     }
   }
   agentType = agentType || 'claude';
 
-  let cwd = rawCwd || process.env.HOME;
+  cwd = cwd || process.env.HOME;
   if (cwd.startsWith('~')) cwd = path.join(os.homedir(), cwd.slice(1));
 
   // Fetch issue details from GitHub if not provided in request body
@@ -1452,6 +1454,7 @@ app.post('/api/start-issue', (req, res) => {
   saveState();
 
   // Notify browser to open the new session
+  log(`[API] start-issue: windowId=${windowId}, sessionId=${id}, readyClients=${readyClients.length}, clientWindowIds=[${readyClients.map(c => c.windowId).join(',')}]`);
   let delivered = false;
   if (windowId) {
     // Targeted: send only to the reload client whose windowId matches
@@ -1463,19 +1466,28 @@ app.post('/api/start-issue', (req, res) => {
         break;
       }
     }
-    if (!delivered && readyClients.length === 0) {
+    if (!delivered && readyClients.length > 0) {
+      // WindowId didn't match any client — broadcast without windowId so client-side filter accepts it
+      log(`[API] start-issue: windowId=${windowId} not found among reload clients [${readyClients.map(c => c.windowId).join(',')}], broadcasting`);
+      const broadcastMsg = JSON.stringify({ type: 'open-session', id, cwd, name });
+      for (const client of readyClients) {
+        if (client.readyState === 1) client.send(broadcastMsg);
+      }
+      delivered = true;
+    }
+    if (!delivered) {
       // No browser connected — queue for when the target window reconnects
       pendingOpens.push(openMsg);
       log(`[API] start-issue: no browser open, queued open-session for windowId=${windowId}`);
       delivered = true;
     }
   }
-  if (!delivered && readyClients.length === 1) {
-    // Exactly one browser window — unambiguous delivery
+  if (!delivered && readyClients.length > 0) {
+    // No windowId — send to first available window
     readyClients[0].send(JSON.stringify({ type: 'open-session', id, cwd, name }));
     delivered = true;
   }
-  if (!delivered && readyClients.length === 0) {
+  if (!delivered) {
     // No browser open — queue message and open one
     pendingOpens.push(JSON.stringify({ type: 'open-session', id, cwd, name }));
     log(`[API] start-issue: no browser open, queued open-session and launching browser`);
