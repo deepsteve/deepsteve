@@ -1161,6 +1161,19 @@ function updateHUD() {
         html += `<div class="item-hint">SPACE to use</div>`;
         html += `</div>`;
       }
+    } else if (raceState === RACE_RUNNING && k.finished) {
+      // Personal finish overlay — race still running for others
+      const standings = getStandings();
+      const pos = standings.findIndex(s => s.id === followId) + 1;
+      html += `<div id="cockpit-hud">`;
+      html += `<div class="lap-display" style="color:#ffd700">FINISHED ${k.finishTime.toFixed(2)}s</div>`;
+      html += `</div>`;
+      html += `<div id="player-finish-overlay">`;
+      html += `<div class="finish-title">FINISHED!</div>`;
+      html += `<div class="finish-position">P${pos}</div>`;
+      html += `<div class="finish-time">${k.finishTime.toFixed(2)}s</div>`;
+      html += `<div class="finish-waiting">Waiting for others...</div>`;
+      html += `</div>`;
     }
   }
 

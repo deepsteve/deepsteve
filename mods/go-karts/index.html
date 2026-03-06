@@ -122,6 +122,32 @@
       0% { opacity: 1; transform: translate(-50%, -50%) scale(1.3); }
       100% { opacity: 0; transform: translate(-50%, -50%) scale(1); }
     }
+    #player-finish-overlay {
+      position: absolute; top: 30%; left: 50%; transform: translate(-50%, -50%);
+      text-align: center; pointer-events: none;
+      animation: finishFadeIn 0.5s ease-out forwards;
+    }
+    #player-finish-overlay .finish-title {
+      font-size: 36px; color: #ffd700;
+      text-shadow: 3px 3px 0 #000, 0 0 20px rgba(255,215,0,0.6);
+    }
+    #player-finish-overlay .finish-position {
+      font-size: 20px; color: #fff; margin-top: 10px;
+      text-shadow: 2px 2px 0 #000;
+    }
+    #player-finish-overlay .finish-time {
+      font-size: 11px; color: #ccc; margin-top: 6px;
+      text-shadow: 1px 1px 0 #000;
+    }
+    #player-finish-overlay .finish-waiting {
+      font-size: 9px; color: #aaa; margin-top: 14px;
+      text-shadow: 1px 1px 0 #000;
+      animation: hintPulse 2s ease-in-out infinite;
+    }
+    @keyframes finishFadeIn {
+      0% { opacity: 0; transform: translate(-50%, -60%) scale(0.8); }
+      100% { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+    }
   </style>
 </head>
 <body>
