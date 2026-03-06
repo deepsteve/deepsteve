@@ -49,11 +49,13 @@ function AgentDnaPanel() {
     let unsub = null;
 
     function setup() {
-      unsub = window.deepsteve.onActiveSessionChanged((session) => {
-        if (session) {
-          setSessionId(session.id);
-          setSessionName(session.name || session.id);
-          fetchDna(session.id);
+      unsub = window.deepsteve.onActiveSessionChanged((id) => {
+        if (id) {
+          setSessionId(id);
+          const sessions = window.deepsteve.getSessions();
+          const match = sessions.find(s => s.id === id);
+          setSessionName(match?.name || id);
+          fetchDna(id);
         } else {
           setSessionId(null);
           setSessionName(null);
