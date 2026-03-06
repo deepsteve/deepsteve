@@ -108,7 +108,7 @@ function startAudio() {
 
 function updateEngineAudio() {
   if (!audioCtx || !gainNode) return;
-  if (viewMode !== MODE_COCKPIT || !followId || !kartState[followId]) {
+  if (viewMode !== MODE_COCKPIT || !followId || !kartState[followId] || raceState !== RACE_RUNNING) {
     gainNode.gain.linearRampToValueAtTime(0, audioCtx.currentTime + 0.1);
     return;
   }
