@@ -5,10 +5,46 @@ const { useState, useEffect, useRef, useCallback, useMemo } = React;
 // ═══════════════════════════════════════════════════════════════════════════════
 
 const NAME_BANKS = {
-  easy: ['Penguin', 'Dolphin', 'Eagle', 'Elephant', 'Octopus', 'Fox', 'Owl', 'Tiger', 'Whale', 'Chameleon'],
-  medium: ['Sherlock Holmes', 'Gandalf', 'Darth Vader', 'Hermione Granger', 'Pikachu', 'Batman', 'Frodo', 'Yoda', 'James Bond', 'Princess Leia'],
-  hard: ['Socrates', 'Aristotle', 'Nietzsche', 'Descartes', 'Confucius', 'Kant', 'Plato', 'Simone de Beauvoir', 'Hypatia', 'Diogenes'],
-  nightmare: ['Entropy', 'Grace', 'Nostalgia', 'Silence', 'Gravity', 'Time', 'Paradox', 'Symmetry', 'Irony', 'Serendipity'],
+  easy: [
+    'Penguin', 'Dolphin', 'Eagle', 'Elephant', 'Octopus', 'Fox', 'Owl', 'Tiger', 'Whale', 'Chameleon',
+    'Giraffe', 'Panda', 'Koala', 'Flamingo', 'Hedgehog', 'Otter', 'Parrot', 'Jellyfish', 'Sloth', 'Raccoon',
+    'Peacock', 'Seahorse', 'Armadillo', 'Platypus', 'Narwhal', 'Axolotl', 'Capybara', 'Cheetah', 'Gorilla', 'Jaguar',
+    'Kangaroo', 'Lemur', 'Lynx', 'Manatee', 'Moose', 'Ostrich', 'Porcupine', 'Quokka', 'Raven', 'Salamander',
+    'Tapir', 'Toucan', 'Vulture', 'Walrus', 'Wolverine', 'Yak', 'Zebra', 'Albatross', 'Bison', 'Cobra',
+    'Dragonfly', 'Falcon', 'Gazelle', 'Hummingbird', 'Iguana', 'Jackrabbit', 'Kiwi', 'Lobster', 'Mantis', 'Newt',
+    'Ocelot', 'Pelican', 'Quail', 'Rhinoceros', 'Stingray', 'Tarantula', 'Urchin', 'Viper', 'Wombat', 'Xerus',
+    'Badger', 'Coyote', 'Dugong', 'Ermine', 'Ferret',
+  ],
+  medium: [
+    'Sherlock Holmes', 'Gandalf', 'Darth Vader', 'Hermione Granger', 'Pikachu', 'Batman', 'Frodo', 'Yoda', 'James Bond', 'Princess Leia',
+    'Harry Potter', 'Katniss Everdeen', 'Spider-Man', 'Wonder Woman', 'Captain Jack Sparrow', 'Gollum', 'The Joker', 'Elsa', 'Shrek', 'Mario',
+    'Indiana Jones', 'Wolverine', 'Daenerys Targaryen', 'Luke Skywalker', 'Iron Man', 'Dumbledore', 'Rapunzel', 'The Doctor', 'Legolas', 'Catwoman',
+    'Sonic the Hedgehog', 'Lara Croft', 'Optimus Prime', 'Mulan', 'Captain America', 'Aragorn', 'Simba', 'Loki', 'Merlin', 'Neo',
+    'Zelda', 'Buzz Lightyear', 'Dracula', 'Robin Hood', 'Willy Wonka', 'Morpheus', 'Groot', 'Arya Stark', 'Jack Skellington', 'Megamind',
+    'Zorro', 'Pocahontas', 'Thanos', 'Aladdin', 'Maleficent', 'Thor', 'Black Panther', 'Tinker Bell', 'Sauron', 'Han Solo',
+    'Peter Pan', 'Cruella de Vil', 'Link', 'Deadpool', 'Mary Poppins', 'Bilbo Baggins', 'Cinderella', 'Darth Maul', 'Obi-Wan Kenobi', 'Scooby-Doo',
+    'The Grinch', 'Dorothy Gale', 'Pinocchio', 'Tarzan', 'Ratatouille',
+  ],
+  hard: [
+    'Socrates', 'Aristotle', 'Nietzsche', 'Descartes', 'Confucius', 'Kant', 'Plato', 'Simone de Beauvoir', 'Hypatia', 'Diogenes',
+    'Hegel', 'Kierkegaard', 'Spinoza', 'Leibniz', 'Hume', 'Locke', 'Hobbes', 'Rousseau', 'Voltaire', 'Wittgenstein',
+    'Heidegger', 'Sartre', 'Camus', 'Foucault', 'Derrida', 'Marx', 'Mill', 'Bentham', 'Epicurus', 'Seneca',
+    'Marcus Aurelius', 'Zeno of Citium', 'Parmenides', 'Heraclitus', 'Democritus', 'Pythagoras', 'Empedocles', 'Anaxagoras', 'Thales', 'Anaximander',
+    'Augustine', 'Aquinas', 'Machiavelli', 'Bacon', 'Montaigne', 'Pascal', 'Berkeley', 'Schopenhauer', 'Emerson', 'Thoreau',
+    'William James', 'Dewey', 'Husserl', 'Arendt', 'Popper', 'Kuhn', 'Rawls', 'Nozick', 'Judith Butler', 'Slavoj Zizek',
+    'Bertrand Russell', 'Frege', 'Quine', 'Rorty', 'Deleuze', 'Adorno', 'Habermas', 'Levinas', 'Merleau-Ponty', 'Gadamer',
+    'Al-Farabi', 'Avicenna', 'Averroes', 'Maimonides', 'Nagarjuna',
+  ],
+  nightmare: [
+    'Entropy', 'Grace', 'Nostalgia', 'Silence', 'Gravity', 'Time', 'Paradox', 'Symmetry', 'Irony', 'Serendipity',
+    'Consciousness', 'Infinity', 'Chaos', 'Harmony', 'Melancholy', 'Ambiguity', 'Resonance', 'Ephemeral', 'Sublime', 'Absurdity',
+    'Oblivion', 'Emergence', 'Duality', 'Solitude', 'Belonging', 'Transcendence', 'Whimsy', 'Dissonance', 'Luminance', 'Recursion',
+    'Inertia', 'Impermanence', 'Liminal', 'Aporia', 'Dialectic', 'Simulacrum', 'Abyss', 'Void', 'Threshold', 'Reverie',
+    'Vertigo', 'Metamorphosis', 'Equilibrium', 'Tension', 'Fragility', 'Opacity', 'Dissolution', 'Confluence', 'Caesura', 'Apathy',
+    'Euphoria', 'Ennui', 'Zeitgeist', 'Angst', 'Wanderlust', 'Pathos', 'Ethos', 'Hubris', 'Nemesis', 'Catharsis',
+    'Sonder', 'Hiraeth', 'Fernweh', 'Kenopsia', 'Jouissance', 'Dasein', 'Qualia', 'Gestalt', 'Umwelt', 'Ataraxia',
+    'Saudade', 'Wabi-Sabi', 'Mono no Aware', 'Ubuntu', 'Meraki',
+  ],
 };
 
 const TIERS = [
@@ -16,6 +52,7 @@ const TIERS = [
   { id: 'medium', label: 'Medium', icon: '\u{1F4D6}', desc: 'Fictional Characters', multiplier: 2, color: '#58a6ff', hint: 'Give moderate hints. Use catchphrases, plot references, and personality traits.' },
   { id: 'hard', label: 'Hard', icon: '\u{1F3DB}', desc: 'Philosophers', multiplier: 3, color: '#ffa657', hint: 'Be subtle. Use philosophical references, quotes, and intellectual parallels.' },
   { id: 'nightmare', label: 'Nightmare', icon: '\u{1F300}', desc: 'Abstract Concepts', multiplier: 5, color: '#f85149', hint: 'Be extremely cryptic. Use abstract metaphors and tangential associations only.' },
+  { id: 'custom', label: 'Custom', icon: '\u270F', desc: 'Your own', multiplier: 3, color: '#d2a8ff', hint: 'Custom identities chosen by you.' },
 ];
 
 const SENDER_COLORS = ['#58a6ff', '#f0883e', '#a5d6ff', '#7ee787', '#d2a8ff', '#f85149', '#79c0ff', '#ffa657'];
@@ -27,7 +64,10 @@ const BORDER = '#21262d';
 const TEXT = '#c9d1d9';
 const TEXT_DIM = '#8b949e';
 const STORAGE_KEY = 'deepsteve-agent-game-state';
+const CUSTOM_NAMES_KEY = 'deepsteve-agent-game-custom-names';
+const GENERATED_NAMES_KEY_PREFIX = 'deepsteve-agent-game-generated-';
 const CHANNEL = 'agent-game';
+const GENERATE_CHANNEL = 'agent-game-generate';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Utilities
@@ -48,8 +88,35 @@ function shuffle(arr) {
   return a;
 }
 
+function getGeneratedNames(tier) {
+  try {
+    const raw = localStorage.getItem(GENERATED_NAMES_KEY_PREFIX + tier);
+    return raw ? JSON.parse(raw) : [];
+  } catch { return []; }
+}
+
+function saveGeneratedNames(tier, names) {
+  localStorage.setItem(GENERATED_NAMES_KEY_PREFIX + tier, JSON.stringify(names));
+}
+
+function getNamePool(tier) {
+  const base = NAME_BANKS[tier] || [];
+  const generated = getGeneratedNames(tier);
+  // Deduplicate (case-insensitive)
+  const seen = new Set(base.map(n => n.toLowerCase()));
+  const merged = [...base];
+  for (const n of generated) {
+    if (!seen.has(n.toLowerCase())) {
+      seen.add(n.toLowerCase());
+      merged.push(n);
+    }
+  }
+  return merged;
+}
+
 function pickNames(tier, count) {
-  return shuffle(NAME_BANKS[tier]).slice(0, count);
+  if (tier === 'custom') return []; // custom names handled separately
+  return shuffle(getNamePool(tier)).slice(0, count);
 }
 
 function waitForBridge() {
@@ -67,6 +134,25 @@ function formatTime(ts) {
 
 function tierInfo(id) {
   return TIERS.find(t => t.id === id);
+}
+
+function buildGeneratorPrompt(tier, existingNames) {
+  const t = tierInfo(tier);
+  const category = { easy: 'animals', medium: 'fictional characters from books, movies, TV, and games', hard: 'philosophers from any era or tradition', nightmare: 'abstract concepts, emotions, or philosophical terms' }[tier] || t.desc;
+  return [
+    `Generate exactly 10 unique ${category} for a "Who Am I?" guessing game.`,
+    ``,
+    `Requirements:`,
+    `- Category: ${t.label} (${t.desc})`,
+    `- Each name should be well-known enough to give hints about`,
+    `- Do NOT repeat any of these existing names: ${existingNames.join(', ')}`,
+    `- Be creative and diverse in your selections`,
+    ``,
+    `Send your response as a JSON array of strings using send_message with channel "${GENERATE_CHANNEL}" and sender "Generator".`,
+    `Example: ["Name1", "Name2", "Name3", "Name4", "Name5", "Name6", "Name7", "Name8", "Name9", "Name10"]`,
+    ``,
+    `Send ONLY the JSON array in your message, nothing else. Then stop.`,
+  ].join('\n');
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -155,24 +241,206 @@ function injectStyles() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// Custom Names Editor
+// ═══════════════════════════════════════════════════════════════════════════════
+
+function CustomNamesEditor({ customNames, setCustomNames }) {
+  const [inputValue, setInputValue] = useState('');
+  const inputRef = useRef(null);
+
+  const addName = () => {
+    const name = inputValue.trim();
+    if (!name || customNames.length >= 8) return;
+    if (customNames.some(n => n.toLowerCase() === name.toLowerCase())) return;
+    const updated = [...customNames, name];
+    setCustomNames(updated);
+    localStorage.setItem(CUSTOM_NAMES_KEY, JSON.stringify(updated));
+    setInputValue('');
+    inputRef.current?.focus();
+  };
+
+  const removeName = (idx) => {
+    const updated = customNames.filter((_, i) => i !== idx);
+    setCustomNames(updated);
+    localStorage.setItem(CUSTOM_NAMES_KEY, JSON.stringify(updated));
+  };
+
+  return (
+    <div>
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 10 }}>
+        {customNames.map((name, i) => (
+          <div key={`${name}-${i}`} style={{
+            padding: '6px 10px', borderRadius: 20,
+            background: BG2, border: `1.5px solid ${BORDER}`,
+            color: TEXT, fontSize: 13,
+            display: 'flex', alignItems: 'center', gap: 6,
+          }}>
+            {name}
+            <button onClick={() => removeName(i)} style={{
+              background: 'none', border: 'none', color: TEXT_DIM, cursor: 'pointer',
+              fontSize: 12, padding: '0 2px', lineHeight: 1,
+            }}
+              onMouseEnter={e => e.currentTarget.style.color = '#f85149'}
+              onMouseLeave={e => e.currentTarget.style.color = TEXT_DIM}
+            >
+              \u00d7
+            </button>
+          </div>
+        ))}
+      </div>
+      {customNames.length < 8 && (
+        <div style={{ display: 'flex', gap: 6 }}>
+          <input
+            ref={inputRef}
+            type="text"
+            value={inputValue}
+            onChange={e => setInputValue(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); addName(); } }}
+            placeholder="Type a name and press Enter"
+            style={{
+              flex: 1, padding: '6px 10px', borderRadius: 6,
+              background: BG, border: `1px solid ${BORDER}`,
+              color: TEXT, fontSize: 13, outline: 'none',
+            }}
+          />
+          <button onClick={addName} style={{
+            padding: '6px 12px', borderRadius: 6, cursor: 'pointer',
+            background: PURPLE, border: 'none', color: BG,
+            fontSize: 12, fontWeight: 600,
+          }}>
+            Add
+          </button>
+        </div>
+      )}
+      <div style={{ fontSize: 10, color: TEXT_DIM, marginTop: 6 }}>
+        {customNames.length}/8 names ({customNames.length < 3 ? `need at least ${3 - customNames.length} more` : 'ready'})
+      </div>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // Setup Screen
 // ═══════════════════════════════════════════════════════════════════════════════
 
-function SetupScreen({ onStart, round, totalScore }) {
+function SetupScreen({ onStart, round, totalScore, bridge }) {
   const [tier, setTier] = useState('easy');
   const [count, setCount] = useState(3);
   const [names, setNames] = useState(() => pickNames('easy', 3));
   const [guesserIdx, setGuesserIdx] = useState(() => Math.floor(Math.random() * 3));
+  const [customNames, setCustomNames] = useState(() => {
+    try { return JSON.parse(localStorage.getItem(CUSTOM_NAMES_KEY)) || []; } catch { return []; }
+  });
+  const [generating, setGenerating] = useState(false);
+  const generatorSessionRef = useRef(null);
+  const generateTimeoutRef = useRef(null);
+  const unsubRef = useRef(null);
+
+  const isCustom = tier === 'custom';
+  const effectiveNames = isCustom ? customNames : names;
+  const canStart = isCustom ? customNames.length >= 3 : true;
 
   useEffect(() => {
+    if (isCustom) return;
     const n = pickNames(tier, count);
     setNames(n);
     setGuesserIdx(Math.floor(Math.random() * count));
   }, [tier, count]);
 
+  // Keep guesserIdx in range for custom names
+  useEffect(() => {
+    if (isCustom && guesserIdx >= customNames.length) {
+      setGuesserIdx(Math.max(0, customNames.length - 1));
+    }
+  }, [isCustom, customNames.length, guesserIdx]);
+
+  // Cleanup generator on unmount
+  useEffect(() => {
+    return () => {
+      if (generatorSessionRef.current && bridge) {
+        bridge.killSession(generatorSessionRef.current, { force: true });
+      }
+      if (generateTimeoutRef.current) clearTimeout(generateTimeoutRef.current);
+      if (unsubRef.current) unsubRef.current();
+    };
+  }, [bridge]);
+
   const handleShuffle = () => {
     setNames(pickNames(tier, count));
     setGuesserIdx(Math.floor(Math.random() * count));
+  };
+
+  const handleGenerate = async () => {
+    if (!bridge || generating || isCustom) return;
+    setGenerating(true);
+
+    try {
+      // Clear generator channel
+      await fetch(`/api/agent-chat/${GENERATE_CHANNEL}`, { method: 'DELETE' }).catch(() => {});
+
+      const existing = getNamePool(tier);
+      const prompt = buildGeneratorPrompt(tier, existing);
+      const sessions = bridge.getSessions();
+      const cwd = sessions.length > 0 ? sessions[0].cwd : '/tmp';
+
+      const sessionId = await bridge.createSession(cwd, {
+        name: 'Name Generator',
+        initialPrompt: prompt,
+        background: true,
+      });
+      generatorSessionRef.current = sessionId;
+
+      // Monitor for response
+      const unsub = bridge.onAgentChatChanged(channels => {
+        const msgs = channels[GENERATE_CHANNEL]?.messages || [];
+        if (msgs.length === 0) return;
+
+        // Look for a message with a JSON array
+        for (const msg of msgs) {
+          try {
+            // Strip markdown fences if present
+            let text = msg.text.trim();
+            text = text.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
+            const parsed = JSON.parse(text);
+            if (Array.isArray(parsed) && parsed.length > 0 && parsed.every(n => typeof n === 'string')) {
+              // Success — merge into pool
+              const existingGenerated = getGeneratedNames(tier);
+              const allGenerated = [...existingGenerated, ...parsed];
+              saveGeneratedNames(tier, allGenerated);
+
+              // Cleanup
+              if (unsub) unsub();
+              unsubRef.current = null;
+              if (generateTimeoutRef.current) { clearTimeout(generateTimeoutRef.current); generateTimeoutRef.current = null; }
+              bridge.killSession(sessionId, { force: true });
+              generatorSessionRef.current = null;
+              fetch(`/api/agent-chat/${GENERATE_CHANNEL}`, { method: 'DELETE' }).catch(() => {});
+
+              // Re-shuffle with new pool
+              setNames(pickNames(tier, count));
+              setGuesserIdx(Math.floor(Math.random() * count));
+              setGenerating(false);
+              return;
+            }
+          } catch {}
+        }
+      });
+      unsubRef.current = unsub;
+
+      // 60-second timeout
+      generateTimeoutRef.current = setTimeout(() => {
+        if (unsubRef.current) { unsubRef.current(); unsubRef.current = null; }
+        if (generatorSessionRef.current) {
+          bridge.killSession(generatorSessionRef.current, { force: true });
+          generatorSessionRef.current = null;
+        }
+        fetch(`/api/agent-chat/${GENERATE_CHANNEL}`, { method: 'DELETE' }).catch(() => {});
+        setGenerating(false);
+      }, 60000);
+
+    } catch {
+      setGenerating(false);
+    }
   };
 
   return (
@@ -181,7 +449,7 @@ function SetupScreen({ onStart, round, totalScore }) {
       background: `radial-gradient(ellipse at 50% 30%, ${GOLD}08 0%, transparent 60%), radial-gradient(ellipse at 80% 70%, ${PURPLE}06 0%, transparent 50%), ${BG}`,
     }}>
       <div style={{
-        maxWidth: 540, width: '100%', padding: '40px 36px',
+        maxWidth: 580, width: '100%', padding: '40px 36px',
         animation: 'ag-fadeIn 0.4s ease-out',
       }}>
         {/* Title */}
@@ -234,75 +502,140 @@ function SetupScreen({ onStart, round, totalScore }) {
           </div>
         </div>
 
-        {/* Agent Count */}
-        <div style={{ marginBottom: 24 }}>
-          <div style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: 2, color: TEXT_DIM, marginBottom: 10 }}>
-            Agents
+        {/* Agent Count (hidden for custom tier) */}
+        {!isCustom && (
+          <div style={{ marginBottom: 24 }}>
+            <div style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: 2, color: TEXT_DIM, marginBottom: 10 }}>
+              Agents
+            </div>
+            <div style={{ display: 'flex', gap: 6 }}>
+              {[3, 4, 5].map(n => (
+                <button key={n} onClick={() => setCount(n)} style={{
+                  width: 44, height: 36, borderRadius: 6, cursor: 'pointer',
+                  background: count === n ? GOLD : 'transparent',
+                  border: `1.5px solid ${count === n ? GOLD : BORDER}`,
+                  color: count === n ? BG : TEXT,
+                  fontSize: 14, fontWeight: 600,
+                  transition: 'all 0.15s',
+                }}>
+                  {n}
+                </button>
+              ))}
+            </div>
           </div>
-          <div style={{ display: 'flex', gap: 6 }}>
-            {[3, 4, 5].map(n => (
-              <button key={n} onClick={() => setCount(n)} style={{
-                width: 44, height: 36, borderRadius: 6, cursor: 'pointer',
-                background: count === n ? GOLD : 'transparent',
-                border: `1.5px solid ${count === n ? GOLD : BORDER}`,
-                color: count === n ? BG : TEXT,
-                fontSize: 14, fontWeight: 600,
-                transition: 'all 0.15s',
-              }}>
-                {n}
-              </button>
-            ))}
-          </div>
-        </div>
+        )}
 
-        {/* Name Roster */}
+        {/* Name Roster / Custom Editor */}
         <div style={{ marginBottom: 28 }}>
           <div style={{
             fontSize: 11, textTransform: 'uppercase', letterSpacing: 2, color: TEXT_DIM, marginBottom: 10,
             display: 'flex', justifyContent: 'space-between', alignItems: 'center',
           }}>
-            <span>Players &mdash; click to assign guesser</span>
-            <button onClick={handleShuffle} style={{
-              background: 'none', border: 'none', color: TEXT_DIM, cursor: 'pointer',
-              fontSize: 11, padding: '2px 6px',
-            }}>
-              Shuffle
-            </button>
-          </div>
-          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-            {names.map((name, i) => {
-              const isGuesser = i === guesserIdx;
-              return (
-                <button key={`${name}-${i}`} onClick={() => setGuesserIdx(i)} style={{
-                  padding: '8px 16px', borderRadius: 20, cursor: 'pointer',
-                  background: isGuesser ? `${PURPLE}20` : BG2,
-                  border: `1.5px solid ${isGuesser ? PURPLE : BORDER}`,
-                  color: isGuesser ? PURPLE : TEXT,
-                  fontSize: 13, fontWeight: isGuesser ? 600 : 400,
-                  display: 'flex', alignItems: 'center', gap: 6,
-                  animation: isGuesser ? 'ag-glow 2s ease-in-out infinite' : 'none',
-                  transition: 'all 0.15s',
-                }}>
-                  {isGuesser && <span style={{ fontSize: 11, opacity: 0.8 }}>???</span>}
-                  {name}
+            <span>{isCustom ? 'Custom Names' : 'Players \u2014 click to assign guesser'}</span>
+            {!isCustom && (
+              <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                <button onClick={handleGenerate} disabled={generating} style={{
+                  background: 'none', border: 'none', color: generating ? GOLD : TEXT_DIM, cursor: generating ? 'default' : 'pointer',
+                  fontSize: 11, padding: '2px 6px',
+                  display: 'flex', alignItems: 'center', gap: 4,
+                }} title="Generate names with AI">
+                  {generating ? (
+                    <>
+                      <span style={{
+                        display: 'inline-block', width: 10, height: 10,
+                        border: `1.5px solid ${GOLD}`, borderTopColor: 'transparent',
+                        borderRadius: '50%', animation: 'ag-spin 0.6s linear infinite',
+                      }} />
+                      Generating...
+                    </>
+                  ) : (
+                    <>\u2728 Generate</>
+                  )}
                 </button>
-              );
-            })}
+                <button onClick={handleShuffle} style={{
+                  background: 'none', border: 'none', color: TEXT_DIM, cursor: 'pointer',
+                  fontSize: 11, padding: '2px 6px',
+                }}>
+                  Shuffle
+                </button>
+              </div>
+            )}
           </div>
+
+          {isCustom ? (
+            <CustomNamesEditor customNames={customNames} setCustomNames={setCustomNames} />
+          ) : (
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+              {names.map((name, i) => {
+                const isGuesser = i === guesserIdx;
+                return (
+                  <button key={`${name}-${i}`} onClick={() => setGuesserIdx(i)} style={{
+                    padding: '8px 16px', borderRadius: 20, cursor: 'pointer',
+                    background: isGuesser ? `${PURPLE}20` : BG2,
+                    border: `1.5px solid ${isGuesser ? PURPLE : BORDER}`,
+                    color: isGuesser ? PURPLE : TEXT,
+                    fontSize: 13, fontWeight: isGuesser ? 600 : 400,
+                    display: 'flex', alignItems: 'center', gap: 6,
+                    animation: isGuesser ? 'ag-glow 2s ease-in-out infinite' : 'none',
+                    transition: 'all 0.15s',
+                  }}>
+                    {isGuesser && <span style={{ fontSize: 11, opacity: 0.8 }}>???</span>}
+                    {name}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+
+          {/* Guesser assignment for custom tier */}
+          {isCustom && customNames.length >= 3 && (
+            <div style={{ marginTop: 12 }}>
+              <div style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: 2, color: TEXT_DIM, marginBottom: 8 }}>
+                Click to assign guesser
+              </div>
+              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                {customNames.map((name, i) => {
+                  const isGuesser = i === guesserIdx;
+                  return (
+                    <button key={`${name}-${i}`} onClick={() => setGuesserIdx(i)} style={{
+                      padding: '8px 16px', borderRadius: 20, cursor: 'pointer',
+                      background: isGuesser ? `${PURPLE}20` : BG2,
+                      border: `1.5px solid ${isGuesser ? PURPLE : BORDER}`,
+                      color: isGuesser ? PURPLE : TEXT,
+                      fontSize: 13, fontWeight: isGuesser ? 600 : 400,
+                      display: 'flex', alignItems: 'center', gap: 6,
+                      animation: isGuesser ? 'ag-glow 2s ease-in-out infinite' : 'none',
+                      transition: 'all 0.15s',
+                    }}>
+                      {isGuesser && <span style={{ fontSize: 11, opacity: 0.8 }}>???</span>}
+                      {name}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
         </div>
 
         {/* Start Button */}
-        <button onClick={() => onStart({ tier, names, guesserIdx })} style={{
-          width: '100%', padding: 14, borderRadius: 8,
-          background: `linear-gradient(135deg, ${GOLD}, ${GOLD}dd)`,
-          border: 'none', cursor: 'pointer',
-          color: BG, fontSize: 15, fontWeight: 700, letterSpacing: 1,
-          transition: 'all 0.15s',
-        }}
-          onMouseEnter={e => e.currentTarget.style.filter = 'brightness(1.1)'}
+        <button
+          onClick={() => onStart({
+            tier,
+            names: isCustom ? customNames : names,
+            guesserIdx: isCustom ? Math.min(guesserIdx, customNames.length - 1) : guesserIdx,
+          })}
+          disabled={!canStart}
+          style={{
+            width: '100%', padding: 14, borderRadius: 8,
+            background: canStart ? `linear-gradient(135deg, ${GOLD}, ${GOLD}dd)` : `${BORDER}`,
+            border: 'none', cursor: canStart ? 'pointer' : 'not-allowed',
+            color: canStart ? BG : TEXT_DIM, fontSize: 15, fontWeight: 700, letterSpacing: 1,
+            transition: 'all 0.15s',
+          }}
+          onMouseEnter={e => { if (canStart) e.currentTarget.style.filter = 'brightness(1.1)'; }}
           onMouseLeave={e => e.currentTarget.style.filter = 'none'}
         >
-          START GAME
+          {isCustom && customNames.length < 3 ? `ADD ${3 - customNames.length} MORE NAME${3 - customNames.length > 1 ? 'S' : ''}` : 'START GAME'}
         </button>
       </div>
     </div>
@@ -917,7 +1250,7 @@ function AgentGame() {
 
   switch (phase) {
     case 'SETUP':
-      return <SetupScreen onStart={handleStart} round={round} totalScore={totalScore} />;
+      return <SetupScreen onStart={handleStart} round={round} totalScore={totalScore} bridge={bridge} />;
     case 'SPAWNING':
       return <SpawningScreen names={names} guesserIdx={guesserIdx} progress={spawnProgress} />;
     case 'PLAYING':
