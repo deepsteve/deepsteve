@@ -896,7 +896,7 @@ app.get('/api/agents', (req, res) => {
   const enabledAgents = settings.enabledAgents || ['claude'];
   const defaultAgent = settings.defaultAgent || 'claude';
   const agents = [
-    { id: 'claude', name: 'Claude Code', available: true, enabled: enabledAgents.includes('claude'), isDefault: defaultAgent === 'claude' }
+    { id: 'claude', name: 'Claude Code', shortName: 'CC', available: true, enabled: enabledAgents.includes('claude'), isDefault: defaultAgent === 'claude' }
   ];
   // Check if opencode is installed (use login shell for full PATH)
   let opencodeAvailable = false;
@@ -906,7 +906,7 @@ app.get('/api/agents', (req, res) => {
     opencodeAvailable = true;
   } catch {}
   // Auto-enable available agents
-  agents.push({ id: 'opencode', name: 'OpenCode (experimental)', available: opencodeAvailable, enabled: opencodeAvailable, isDefault: defaultAgent === 'opencode' });
+  agents.push({ id: 'opencode', name: 'OpenCode (experimental)', shortName: 'OC', available: opencodeAvailable, enabled: opencodeAvailable, isDefault: defaultAgent === 'opencode' });
   // Check if gemini is installed
   let geminiAvailable = false;
   try {
@@ -915,7 +915,7 @@ app.get('/api/agents', (req, res) => {
     geminiAvailable = true;
   } catch {}
   // Auto-enable available agents
-  agents.push({ id: 'gemini', name: 'Gemini (experimental)', available: geminiAvailable, enabled: geminiAvailable, isDefault: defaultAgent === 'gemini' });
+  agents.push({ id: 'gemini', name: 'Gemini (experimental)', shortName: 'Gem', available: geminiAvailable, enabled: geminiAvailable, isDefault: defaultAgent === 'gemini' });
   res.json({ agents, defaultAgent });
 });
 
