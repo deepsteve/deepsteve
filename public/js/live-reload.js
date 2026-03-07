@@ -5,16 +5,15 @@
  * { type: 'reload' } during shutdown only when restart.sh --refresh is used.
  * On normal restart, the WS drops and we silently reconnect without refreshing.
  *
- * Restart confirmation flow (restart.sh --refresh):
- * 1. Server sends { type: 'confirm-restart', totalWindows } BEFORE restarting
- * 2. Every window shows a modal. Each window confirms/declines independently.
- * 3. Each window sends { type: 'restart-confirmed' } or { type: 'restart-declined' }
- *    back to the server via its own WebSocket.
- * 4. Server tracks all responses. If all confirm → restart proceeds.
- *    If any declines → server sends { type: 'restart-cancelled' } to all.
- * 5. Server sends { type: 'restart-progress', confirmed, total } as windows confirm.
- * 6. When all confirmed, server proceeds with restart. All windows show spinner overlay
- *    while polling for the server to come back, then auto-refresh.
+ * Restart confirmation flow:
+ * 1. Server sends { type: 'confirm-restart' } to all browser windows.
+ * 2. Windows elect a single leader via BroadcastChannel (lowest windowId wins).
+ * 3. The leader shows a modal. The user confirms or declines.
+ * 4. Leader sends { type: 'restart-confirmed' } or { type: 'restart-declined' }
+ *    back to the server via WebSocket. First response wins on the server side.
+ * 5. Leader broadcasts the decision to other windows via BroadcastChannel.
+ * 6. On WS close after confirmation, all windows show spinner overlay and poll
+ *    for the server to come back, then auto-refresh.
  */
 
 export function initLiveReload({ onMessage, onShowRestartConfirm, onShowReloadOverlay, windowId } = {}) {
@@ -22,6 +21,9 @@ export function initLiveReload({ onMessage, onShowRestartConfirm, onShowReloadOv
   let intentionallyClosed = false;
   let restartConfirmed = false;
   let currentModal = null;
+
+  // BroadcastChannel for leader election during restart confirmation
+  const restartChannel = new BroadcastChannel('deepsteve-restart');
 
   function connect() {
     const wsProto = location.protocol === 'https:' ? 'wss://' : 'ws://';
@@ -48,16 +50,9 @@ export function initLiveReload({ onMessage, onShowRestartConfirm, onShowReloadOv
           lastPingTime = Date.now();
           ws.send(JSON.stringify({ type: 'pong' }));
         } else if (msg.type === 'confirm-restart') {
-          if (restartConfirmed) return; // Already handling
-          handleRestartConfirm(msg.totalWindows);
-        } else if (msg.type === 'restart-progress') {
-          if (currentModal) currentModal.updateProgress(msg.confirmed, msg.total);
-        } else if (msg.type === 'restart-cancelled') {
-          restartConfirmed = false;
-          if (currentModal) currentModal.dismiss(false);
-          currentModal = null;
+          electLeaderAndConfirm();
         } else if (msg.type === 'reload') {
-          // Legacy reload message (during shutdown) — auto-refresh if restart was confirmed
+          // Reload message during shutdown — auto-refresh if restart was confirmed
           if (restartConfirmed) {
             window.__deepsteveReloadPending = true;
           }
@@ -83,26 +78,100 @@ export function initLiveReload({ onMessage, onShowRestartConfirm, onShowReloadOv
     };
   }
 
-  function handleRestartConfirm(totalWindows) {
+  /**
+   * Leader election: all windows broadcast a claim with their windowId.
+   * After 200ms, the lowest windowId wins and shows the modal.
+   * Non-leaders wait for the leader's decision via BroadcastChannel.
+   */
+  function electLeaderAndConfirm() {
+    if (restartConfirmed) return;
+
+    const claims = new Set();
+    if (windowId) claims.add(windowId);
+
+    // Broadcast our claim
+    restartChannel.postMessage({ type: 'restart-claim', windowId });
+
+    // Listen for other claims and the leader's decision
+    let electionTimer = null;
+    let leaderFallbackTimer = null;
+    let elected = false;
+
+    const onElectionMessage = (event) => {
+      const data = event.data;
+      if (data.type === 'restart-claim') {
+        claims.add(data.windowId);
+        // Reset election timer — wait for all claims to arrive
+        if (electionTimer) clearTimeout(electionTimer);
+        electionTimer = setTimeout(runElection, 200);
+      } else if (data.type === 'restart-decided') {
+        // Leader has decided — apply the result
+        cleanup();
+        if (data.confirmed) {
+          restartConfirmed = true;
+        }
+      } else if (data.type === 'restart-leader-gone') {
+        // Leader closed during prompt — re-elect
+        cleanup();
+        electLeaderAndConfirm();
+      }
+    };
+
+    restartChannel.addEventListener('message', onElectionMessage);
+
+    function cleanup() {
+      restartChannel.removeEventListener('message', onElectionMessage);
+      if (electionTimer) clearTimeout(electionTimer);
+      if (leaderFallbackTimer) clearTimeout(leaderFallbackTimer);
+      elected = true;
+    }
+
+    function runElection() {
+      if (elected) return;
+      const sorted = [...claims].sort();
+      const isLeader = sorted[0] === windowId;
+
+      if (isLeader) {
+        cleanup();
+        handleRestartConfirm();
+      } else {
+        // Non-leader: wait for leader's decision with a 5s fallback
+        leaderFallbackTimer = setTimeout(() => {
+          // Leader didn't respond — re-elect
+          restartChannel.removeEventListener('message', onElectionMessage);
+          elected = true;
+          electLeaderAndConfirm();
+        }, 5000);
+      }
+    }
+
+    // Start election timer
+    electionTimer = setTimeout(runElection, 200);
+  }
+
+  function handleRestartConfirm() {
     const modal = onShowRestartConfirm
-      ? onShowRestartConfirm(totalWindows)
-      : { promise: Promise.resolve(true), dismiss: () => {}, updateStatus: () => {}, updateProgress: () => {} };
+      ? onShowRestartConfirm()
+      : { promise: Promise.resolve(true), dismiss: () => {} };
 
     currentModal = modal;
 
+    // If leader window is closing, notify other windows to re-elect
+    const onBeforeUnload = () => {
+      restartChannel.postMessage({ type: 'restart-leader-gone' });
+    };
+    window.addEventListener('beforeunload', onBeforeUnload);
+
     modal.promise.then(confirmed => {
+      window.removeEventListener('beforeunload', onBeforeUnload);
+      currentModal = null;
       if (confirmed) {
         restartConfirmed = true;
         ws.send(JSON.stringify({ type: 'restart-confirmed' }));
-        if (totalWindows > 1) {
-          modal.updateStatus('waiting');
-          // Keep currentModal so progress updates can reach it
-        } else {
-          currentModal = null;
-        }
+        restartChannel.postMessage({ type: 'restart-decided', confirmed: true });
       } else {
-        currentModal = null;
         ws.send(JSON.stringify({ type: 'restart-declined' }));
+        restartChannel.postMessage({ type: 'restart-decided', confirmed: false });
       }
     });
   }
@@ -129,6 +198,7 @@ export function initLiveReload({ onMessage, onShowRestartConfirm, onShowReloadOv
         if (res.ok) {
           clearInterval(interval);
           console.log('[live-reload] server is back, reconnecting WS...');
+          restartConfirmed = false; // Reset so future restart prompts aren't blocked
           connect();
         }
       } catch {
