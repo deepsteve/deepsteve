@@ -78,6 +78,7 @@ history.pushState(null, '', location.href);
 
 // Warn before leaving page with active sessions
 window.addEventListener('beforeunload', (e) => {
+  if (window.__deepsteveReloadPending) return; // Skip prompt during server restart reload
   const hasActiveSessions = [...sessions.values()].some(s => s.type !== 'mod-tab' && !s.waitingForInput);
   if (hasActiveSessions) {
     e.preventDefault();
