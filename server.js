@@ -59,8 +59,7 @@ const SCROLLBACK_SIZE = 100 * 1024; // 100KB circular buffer per shell
 const RELOAD_FLAG = path.join(os.homedir(), '.deepsteve', '.reload');
 const reloadClients = new Set(); // WebSocket connections for live-reload
 const pendingOpens = []; // open-session messages waiting for a browser to connect
-let restartState = null; // { pending: Map<clientId, 'waiting'|'confirmed'>, resolve: fn }
-let nextReloadClientId = 1;
+let restartState = null; // { resolve: fn } — first browser response wins
 
 function log(...args) {
   const ts = new Date().toISOString().slice(11, 23);
@@ -1498,8 +1497,9 @@ app.post('/api/start-issue', (req, res) => {
   res.json({ id, name, url: `http://localhost:${PORT}` });
 });
 
-// restart.sh --refresh calls this before restarting. Server asks browser(s)
-// for confirmation, waits for response, then replies to curl.
+// restart.sh calls this before restarting. Server asks browser(s) for
+// confirmation, waits for response, then replies to curl.
+// Browsers elect a single leader to show the modal; first response wins.
 app.post('/api/request-restart', (req, res) => {
   const clients = [...reloadClients].filter(c => c.readyState === 1);
   if (clients.length === 0) {
@@ -1507,30 +1507,22 @@ app.post('/api/request-restart', (req, res) => {
     return res.json({ result: 'confirmed' });
   }
 
-  // Build pending map of all live reload clients
-  const pending = new Map();
-  for (const ws of clients) {
-    pending.set(ws.reloadClientId, 'waiting');
-  }
-
-  const totalWindows = pending.size;
-
   const timeout = setTimeout(() => {
     restartState = null;
     res.json({ result: 'timeout' });
-  }, 115000);
+  }, 60000);
 
-  const resolve = (result) => {
-    clearTimeout(timeout);
-    restartState = null;
-    res.json({ result });
+  restartState = {
+    resolve: (result) => {
+      clearTimeout(timeout);
+      restartState = null;
+      res.json({ result });
+    }
   };
 
-  restartState = { pending, resolve };
-
-  // Send confirm-restart to all connected browsers
+  // Send confirm-restart to all connected browsers (they elect a leader)
   for (const ws of clients) {
-    try { ws.send(JSON.stringify({ type: 'confirm-restart', totalWindows })); } catch {}
+    try { ws.send(JSON.stringify({ type: 'confirm-restart' })); } catch {}
   }
 });
 
@@ -1581,15 +1573,8 @@ function handleWsConnection(ws, req) {
   // telling browsers to refresh. Otherwise the WS just drops and clients silently reconnect.
   if (action === 'reload') {
     ws.windowId = url.searchParams.get('windowId') || null;
-    ws.reloadClientId = nextReloadClientId++;
     reloadClients.add(ws);
     ws.isAlive = true;
-    // If a restart is pending (e.g. previous WS died), send confirm-restart to new client
-    if (restartState) {
-      restartState.pending.set(ws.reloadClientId, 'waiting');
-      const totalWindows = restartState.pending.size;
-      try { ws.send(JSON.stringify({ type: 'confirm-restart', totalWindows })); } catch {}
-    }
     const pingInterval = setInterval(() => {
       if (!ws.isAlive) {
         log(`[WS] Reload client dead (no pong), terminating (windowId=${ws.windowId})`);
@@ -1602,12 +1587,10 @@ function handleWsConnection(ws, req) {
     ws.on('close', () => {
       clearInterval(pingInterval);
       reloadClients.delete(ws);
-      // Handle disconnect during pending restart — remove dead client but don't auto-confirm.
-      // A reconnecting client will pick up the pending restart via the check above.
-      if (restartState && restartState.pending.has(ws.reloadClientId)) {
-        restartState.pending.delete(ws.reloadClientId);
-        // Only resolve if there are still live clients and all have confirmed
-        if (restartState.pending.size > 0 && [...restartState.pending.values()].every(v => v === 'confirmed')) {
+      // If restart is pending and no browsers remain, auto-confirm
+      if (restartState) {
+        const liveClients = [...reloadClients].filter(c => c.readyState === 1);
+        if (liveClients.length === 0) {
           restartState.resolve('confirmed');
         }
       }
@@ -1618,23 +1601,8 @@ function handleWsConnection(ws, req) {
         if (parsed.type === 'pong') {
           ws.isAlive = true;
         } else if (parsed.type === 'restart-confirmed' && restartState) {
-          restartState.pending.set(ws.reloadClientId, 'confirmed');
-          const confirmed = [...restartState.pending.values()].filter(v => v === 'confirmed').length;
-          const total = restartState.pending.size;
-          // Broadcast progress to all clients
-          const progress = JSON.stringify({ type: 'restart-progress', confirmed, total });
-          for (const c of reloadClients) {
-            try { if (c.readyState === 1) c.send(progress); } catch {}
-          }
-          if (confirmed === total) {
-            restartState.resolve('confirmed');
-          }
+          restartState.resolve('confirmed');
         } else if (parsed.type === 'restart-declined' && restartState) {
-          // One window declined — cancel for all
-          const cancelled = JSON.stringify({ type: 'restart-cancelled' });
-          for (const c of reloadClients) {
-            try { if (c.readyState === 1) c.send(cancelled); } catch {}
-          }
           restartState.resolve('declined');
         }
       } catch {}
