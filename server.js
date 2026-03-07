@@ -1583,7 +1583,18 @@ function handleWsConnection(ws, req) {
     ws.windowId = url.searchParams.get('windowId') || null;
     ws.reloadClientId = nextReloadClientId++;
     reloadClients.add(ws);
+    ws.isAlive = true;
+    const pingInterval = setInterval(() => {
+      if (!ws.isAlive) {
+        log(`[WS] Reload client dead (no pong), terminating (windowId=${ws.windowId})`);
+        ws.terminate();
+        return;
+      }
+      ws.isAlive = false;
+      if (ws.readyState === 1) ws.send(JSON.stringify({ type: 'ping' }));
+    }, 30000);
     ws.on('close', () => {
+      clearInterval(pingInterval);
       reloadClients.delete(ws);
       // Handle disconnect during pending restart
       if (restartState && restartState.pending.has(ws.reloadClientId)) {
@@ -1596,7 +1607,9 @@ function handleWsConnection(ws, req) {
     ws.on('message', (msg) => {
       try {
         const parsed = JSON.parse(msg.toString());
-        if (parsed.type === 'restart-confirmed' && restartState) {
+        if (parsed.type === 'pong') {
+          ws.isAlive = true;
+        } else if (parsed.type === 'restart-confirmed' && restartState) {
           restartState.pending.set(ws.reloadClientId, 'confirmed');
           const confirmed = [...restartState.pending.values()].filter(v => v === 'confirmed').length;
           const total = restartState.pending.size;
