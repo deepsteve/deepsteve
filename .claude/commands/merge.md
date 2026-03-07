@@ -18,7 +18,7 @@ Steps:
 
 6. **Handle the result**:
    - **Success**: Tell the user the branch was successfully merged into main. Show the merge output. Then continue to steps 7 and 8.
-   - **Conflict**: Show the user the conflict output. Run `git -C <main-worktree-path> merge --abort` to abort and leave main clean. Tell the user the merge was aborted due to conflicts and they need to resolve them manually. STOP here — do not proceed to steps 7 or 8.
+   - **Conflict**: Run `git -C <main-worktree-path> merge --abort` to leave main clean. Then rebase the worktree branch onto main (`git rebase main`), resolve any conflicts, and retry the merge from step 5. If the rebase itself fails with conflicts you cannot resolve, abort the rebase (`git rebase --abort`), tell the user, and STOP.
    - **Other failure**: Show the error output to the user. STOP here — do not proceed to steps 7 or 8.
 
 7. **Close the GitHub issue** (success only): Extract the issue number from the branch name obtained in step 2. If the branch name matches the pattern `*github-issue-<number>*`, run `gh issue close <number> --comment "Merged into main."`. If the branch name doesn't match this pattern, skip this step silently.
