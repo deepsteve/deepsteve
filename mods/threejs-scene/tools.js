@@ -28,10 +28,10 @@ function init(context) {
 
   return {
     scene_update: {
-      description: 'Add, update, or remove objects in a 3D scene. Takes a batch of operations so you can build complex scenes in one call. Make sure the 3D Scene mod is enabled in deepsteve.',
+      description: 'Add, update, or remove objects in a 3D scene. Takes a batch of operations so you can build complex scenes in one call. Use eval to run arbitrary Three.js code (animate, create particles, etc). Make sure the 3D Scene mod is enabled in deepsteve.',
       schema: {
         operations: z.array(z.object({
-          op: z.enum(['add', 'update', 'remove', 'clear']).describe('Operation type'),
+          op: z.enum(['add', 'update', 'remove', 'clear', 'eval']).describe('Operation type'),
           id: z.string().optional().describe('Object ID (required for add/update/remove)'),
           type: z.enum([
             'box', 'sphere', 'cylinder', 'cone', 'torus', 'plane', 'line', 'group',
@@ -46,7 +46,7 @@ function init(context) {
           light: z.record(z.any()).optional().describe('Light params: {color, intensity, castShadow, distance, decay, angle, penumbra}'),
           camera: z.record(z.any()).optional().describe('Camera params: {fov, position, lookAt}'),
           text: z.record(z.any()).optional().describe('Text params: {content, fontSize, color, backgroundColor}'),
-          animate: z.record(z.any()).optional().describe('Animation params: {rotateX, rotateY, rotateZ, bobY, bobAmplitude, bobSpeed}'),
+          code: z.string().optional().describe('JS code for eval op. Available context: THREE, scene, camera, renderer, registry, clock, controls, canvas, onFrame(id, fn(dt,t)), removeFrame(id), frameCallbacks'),
           visible: z.boolean().optional().describe('Whether the object is visible'),
           castShadow: z.boolean().optional().describe('Whether the object casts shadows'),
           receiveShadow: z.boolean().optional().describe('Whether the object receives shadows'),

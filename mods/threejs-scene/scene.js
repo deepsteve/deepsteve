@@ -39,8 +39,13 @@ const grid = new THREE.GridHelper(20, 20, 0x444466, 0x2a2a44);
 scene.add(grid);
 
 // --- Object Registry ---
-// id → { object3d, type, animate }
+// id → { object3d, type }
 const registry = new Map();
+
+// --- Frame Callbacks ---
+const frameCallbacks = new Map(); // id → fn(dt, t)
+function onFrame(id, fn) { frameCallbacks.set(id, fn); }
+function removeFrame(id) { frameCallbacks.delete(id); }
 
 // --- Resize ---
 function resize() {
@@ -61,18 +66,11 @@ function animate() {
   const dt = clock.getDelta();
   const t = clock.getElapsedTime();
 
-  // Process per-object animations
-  for (const [, entry] of registry) {
-    if (!entry.animate) continue;
-    const a = entry.animate;
-    const obj = entry.object3d;
-    if (a.rotateX) obj.rotation.x += a.rotateX;
-    if (a.rotateY) obj.rotation.y += a.rotateY;
-    if (a.rotateZ) obj.rotation.z += a.rotateZ;
-    if (a.bobY) {
-      const amp = a.bobAmplitude || 0.5;
-      const spd = a.bobSpeed || 1;
-      obj.position.y = (entry.baseY || 0) + Math.sin(t * spd) * amp;
+  // Run frame callbacks
+  for (const [id, fn] of frameCallbacks) {
+    try { fn(dt, t); } catch (e) {
+      console.error(`Frame callback '${id}' error:`, e);
+      frameCallbacks.delete(id);
     }
   }
 
@@ -245,9 +243,7 @@ function handleAdd(op) {
   }
   parent.add(object3d);
 
-  const entry = { object3d, type: op.type, animate: op.animate || null };
-  if (op.position) entry.baseY = op.position[1];
-  registry.set(op.id, entry);
+  registry.set(op.id, { object3d, type: op.type });
 
   return { ok: true, id: op.id, type: op.type };
 }
@@ -272,7 +268,6 @@ function handleUpdate(op) {
 
   const obj = entry.object3d;
   applyTransform(obj, op);
-  if (op.position) entry.baseY = op.position[1];
 
   // Update material
   if (op.material && obj.material) {
@@ -297,11 +292,6 @@ function handleUpdate(op) {
     applyTransform(newSprite, op);
     parent.add(newSprite);
     entry.object3d = newSprite;
-  }
-
-  // Update animation
-  if (op.animate !== undefined) {
-    entry.animate = op.animate;
   }
 
   return { ok: true, id: op.id };
@@ -337,7 +327,27 @@ function handleClear() {
     }
   }
   registry.clear();
+  frameCallbacks.clear();
   return { ok: true, cleared: true };
+}
+
+// --- Eval ---
+function handleEval(op) {
+  if (!op.code) return { error: 'eval requires a code string' };
+  try {
+    const fn = new Function(
+      'THREE', 'scene', 'camera', 'renderer', 'registry', 'clock',
+      'controls', 'canvas', 'onFrame', 'removeFrame', 'frameCallbacks',
+      op.code
+    );
+    const result = fn(
+      THREE, scene, camera, renderer, registry, clock,
+      controls, canvas, onFrame, removeFrame, frameCallbacks
+    );
+    return { ok: true, result: result !== undefined ? String(result) : undefined };
+  } catch (e) {
+    return { error: e.message };
+  }
 }
 
 // --- Query ---
@@ -353,7 +363,6 @@ function queryScene(id) {
       rotation: [obj.rotation.x, obj.rotation.y, obj.rotation.z],
       scale: [obj.scale.x, obj.scale.y, obj.scale.z],
       visible: obj.visible,
-      animate: entry.animate,
     };
   }
 
@@ -454,6 +463,7 @@ function waitForBridge() {
           case 'update': r = handleUpdate(op); break;
           case 'remove': r = handleRemove(op); break;
           case 'clear': r = handleClear(); break;
+          case 'eval': r = handleEval(op); break;
           default: r = { error: `unknown op '${op.op}'` };
         }
         results.push(r);
