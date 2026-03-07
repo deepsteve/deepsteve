@@ -129,6 +129,7 @@ function ActionRequiredPanel() {
 
   // Debounce refs
   const pendingTimersRef = useRef(new Map());   // sessionId → setTimeout ID
+  const removalTimersRef = useRef(new Map());   // sessionId → setTimeout ID
   const visibleSetRef = useRef(new Set());      // session IDs that passed debounce
   const debounceDurationRef = useRef(100);
 
@@ -244,46 +245,69 @@ function ActionRequiredPanel() {
           pendingTimersRef.current.delete(id);
         }
       }
+      for (const [id, timerId] of removalTimersRef.current) {
+        if (!currentIds.has(id)) {
+          clearTimeout(timerId);
+          removalTimersRef.current.delete(id);
+        }
+      }
 
       // Debounce gate for each session
       for (const s of sessionList) {
         const isVisible = visibleSetRef.current.has(s.id);
         const isPending = pendingTimersRef.current.has(s.id);
+        const isRemovalPending = removalTimersRef.current.has(s.id);
 
-        if (s.waitingForInput && !isVisible && !isPending) {
-          // New waiting session — start debounce timer
-          const timerId = setTimeout(() => {
-            pendingTimersRef.current.delete(s.id);
-            // Re-check: is the session still waiting?
-            const latest = window.deepsteve?.getSessions() || [];
-            const current = latest.find(x => x.id === s.id);
-            if (current?.waitingForInput) {
-              visibleSetRef.current.add(s.id);
-              setSessions([...latest]); // trigger re-render
+        if (s.waitingForInput) {
+          // Cancel any pending removal — session is waiting again
+          if (isRemovalPending) {
+            clearTimeout(removalTimersRef.current.get(s.id));
+            removalTimersRef.current.delete(s.id);
+            // Already visible, no action needed
+          } else if (!isVisible && !isPending) {
+            // New waiting session — start debounce timer
+            const timerId = setTimeout(() => {
+              pendingTimersRef.current.delete(s.id);
+              // Re-check: is the session still waiting?
+              const latest = window.deepsteve?.getSessions() || [];
+              const current = latest.find(x => x.id === s.id);
+              if (current?.waitingForInput) {
+                visibleSetRef.current.add(s.id);
+                setSessions([...latest]); // trigger re-render
 
-              // Check auto-switch for the newly promoted session
-              if (settingsRef.current.autoSwitch) {
-                const active = latest.find(x => x.id === activeIdRef.current);
-                if (!active?.waitingForInput || !visibleSetRef.current.has(active.id)) {
-                  const next = findNextVisible(latest, null);
-                  if (next && !autoSwitchTimerRef.current) {
-                    scheduleAutoSwitch(next.id);
+                // Check auto-switch for the newly promoted session
+                if (settingsRef.current.autoSwitch) {
+                  const active = latest.find(x => x.id === activeIdRef.current);
+                  if (!active?.waitingForInput || !visibleSetRef.current.has(active.id)) {
+                    const next = findNextVisible(latest, null);
+                    if (next && !autoSwitchTimerRef.current) {
+                      scheduleAutoSwitch(next.id);
+                    }
                   }
                 }
               }
-            }
-          }, debounceDurationRef.current);
-          pendingTimersRef.current.set(s.id, timerId);
-        } else if (!s.waitingForInput) {
+            }, debounceDurationRef.current);
+            pendingTimersRef.current.set(s.id, timerId);
+          }
+        } else {
           // Session stopped waiting
           if (isPending) {
-            // Still in debounce window — cancel silently (never shown)
+            // Still in addition debounce — cancel silently (never shown)
             clearTimeout(pendingTimersRef.current.get(s.id));
             pendingTimersRef.current.delete(s.id);
           }
-          if (isVisible) {
-            // Was visible — remove normally
-            visibleSetRef.current.delete(s.id);
+          if (isVisible && !isRemovalPending) {
+            // Was visible — start removal debounce timer
+            const timerId = setTimeout(() => {
+              removalTimersRef.current.delete(s.id);
+              const latest = window.deepsteve?.getSessions() || [];
+              const current = latest.find(x => x.id === s.id);
+              if (!current?.waitingForInput) {
+                visibleSetRef.current.delete(s.id);
+                setSessions([...latest]); // trigger re-render
+              }
+            }, debounceDurationRef.current);
+            removalTimersRef.current.set(s.id, timerId);
           }
         }
       }
@@ -314,6 +338,10 @@ function ActionRequiredPanel() {
         clearTimeout(timerId);
       }
       pendingTimersRef.current.clear();
+      for (const timerId of removalTimersRef.current.values()) {
+        clearTimeout(timerId);
+      }
+      removalTimersRef.current.clear();
     };
   }, []);
 
