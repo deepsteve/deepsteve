@@ -1,0 +1,78 @@
+{
+  "name": "Green Dragon",
+  "description": "A green dragon that breathes fire, flaps its wings occasionally, sways its tail, and writhes periodically.",
+  "operations": [
+    { "op": "clear" },
+    { "op": "add", "id": "cam", "type": "camera", "camera": { "fov": 50, "position": [8, 5, 12], "lookAt": [0, 2, 0] } },
+    { "op": "add", "id": "ambient", "type": "ambient_light", "light": { "color": 1644825, "intensity": 0.4 } },
+    { "op": "add", "id": "sun", "type": "directional_light", "position": [8, 12, 5], "light": { "color": 16771680, "intensity": 1.2, "castShadow": true } },
+    { "op": "add", "id": "fireLight", "type": "point_light", "position": [2, 3.5, 3], "light": { "color": 16744448, "intensity": 0, "distance": 12, "decay": 2 } },
+    { "op": "add", "id": "rimLight", "type": "point_light", "position": [-5, 6, -3], "light": { "color": 4488300, "intensity": 0.6, "distance": 20, "decay": 1 } },
+    { "op": "add", "id": "ground", "type": "plane", "position": [0, 0, 0], "rotation": [-1.5708, 0, 0], "scale": [30, 30, 1], "material": { "color": 2244398, "roughness": 0.9 }, "receiveShadow": true },
+
+    { "op": "add", "id": "dragon", "type": "group", "position": [0, 0, 0] },
+    { "op": "add", "id": "body", "type": "box", "parent": "dragon", "position": [0, 1.8, 0], "scale": [1.4, 1.2, 2.2], "material": { "color": 1601568, "roughness": 0.6, "metalness": 0.15 }, "castShadow": true },
+    { "op": "add", "id": "chest", "type": "box", "parent": "dragon", "position": [0, 1.65, 0.35], "scale": [1, 0.8, 1.2], "material": { "color": 5614165, "roughness": 0.5, "metalness": 0.1 } },
+
+    { "op": "add", "id": "neckGroup", "type": "group", "parent": "dragon", "position": [0, 2.3, 0.8] },
+    { "op": "add", "id": "neck", "type": "box", "parent": "neckGroup", "position": [0, 0.3, 0.4], "rotation": [0.4, 0, 0], "scale": [0.7, 1, 0.7], "material": { "color": 1601568, "roughness": 0.6, "metalness": 0.15 }, "castShadow": true },
+    { "op": "add", "id": "neckPlate1", "type": "box", "parent": "neckGroup", "position": [0, 0.6, 0.25], "rotation": [0.3, 0, 0], "scale": [0.15, 0.25, 0.15], "material": { "color": 1139712, "roughness": 0.4, "metalness": 0.3 } },
+    { "op": "add", "id": "neckPlate2", "type": "box", "parent": "neckGroup", "position": [0, 0.35, 0.5], "rotation": [0.5, 0, 0], "scale": [0.12, 0.2, 0.12], "material": { "color": 1139712, "roughness": 0.4, "metalness": 0.3 } },
+
+    { "op": "add", "id": "headGroup", "type": "group", "parent": "neckGroup", "position": [0, 0.7, 0.7] },
+    { "op": "add", "id": "head", "type": "box", "parent": "headGroup", "position": [0, 0.3, 0.3], "rotation": [0.2, 0, 0], "scale": [0.9, 0.7, 1], "material": { "color": 1864482, "roughness": 0.5, "metalness": 0.2 }, "castShadow": true },
+    { "op": "add", "id": "snout", "type": "box", "parent": "headGroup", "position": [0, 0.15, 1], "rotation": [0.15, 0, 0], "scale": [0.6, 0.4, 0.7], "material": { "color": 1864482, "roughness": 0.5, "metalness": 0.2 }, "castShadow": true },
+    { "op": "add", "id": "jawGroup", "type": "group", "parent": "headGroup", "position": [0, -0.05, 0.6] },
+    { "op": "add", "id": "jaw", "type": "box", "parent": "jawGroup", "position": [0, 0, 0.2], "scale": [0.5, 0.2, 0.6], "material": { "color": 1601568, "roughness": 0.6 } },
+    { "op": "add", "id": "hornL", "type": "cone", "parent": "headGroup", "position": [-0.3, 0.7, 0.1], "rotation": [0.3, 0, -0.2], "scale": [0.12, 0.5, 0.12], "material": { "color": 2236962, "roughness": 0.3, "metalness": 0.4 } },
+    { "op": "add", "id": "hornR", "type": "cone", "parent": "headGroup", "position": [0.3, 0.7, 0.1], "rotation": [0.3, 0, 0.2], "scale": [0.12, 0.5, 0.12], "material": { "color": 2236962, "roughness": 0.3, "metalness": 0.4 } },
+    { "op": "add", "id": "eyeL", "type": "sphere", "parent": "headGroup", "position": [-0.32, 0.4, 0.65], "scale": [0.15, 0.18, 0.12], "material": { "color": 16763904, "emissive": 16750848, "roughness": 0.2 } },
+    { "op": "add", "id": "eyeR", "type": "sphere", "parent": "headGroup", "position": [0.32, 0.4, 0.65], "scale": [0.15, 0.18, 0.12], "material": { "color": 16763904, "emissive": 16750848, "roughness": 0.2 } },
+    { "op": "add", "id": "pupilL", "type": "sphere", "parent": "headGroup", "position": [-0.32, 0.4, 0.72], "scale": [0.07, 0.12, 0.05], "material": { "color": 1118481 } },
+    { "op": "add", "id": "pupilR", "type": "sphere", "parent": "headGroup", "position": [0.32, 0.4, 0.72], "scale": [0.07, 0.12, 0.05], "material": { "color": 1118481 } },
+    { "op": "add", "id": "nostrilL", "type": "sphere", "parent": "headGroup", "position": [-0.12, 0.2, 1.33], "scale": [0.06, 0.05, 0.04], "material": { "color": 1118481 } },
+    { "op": "add", "id": "nostrilR", "type": "sphere", "parent": "headGroup", "position": [0.12, 0.2, 1.33], "scale": [0.06, 0.05, 0.04], "material": { "color": 1118481 } },
+
+    { "op": "add", "id": "legFL", "type": "box", "parent": "dragon", "position": [-0.65, 0.7, 0.7], "scale": [0.4, 1.4, 0.4], "material": { "color": 1601568, "roughness": 0.7 }, "castShadow": true },
+    { "op": "add", "id": "legFR", "type": "box", "parent": "dragon", "position": [0.65, 0.7, 0.7], "scale": [0.4, 1.4, 0.4], "material": { "color": 1601568, "roughness": 0.7 }, "castShadow": true },
+    { "op": "add", "id": "legBL", "type": "box", "parent": "dragon", "position": [-0.65, 0.7, -0.7], "scale": [0.4, 1.4, 0.4], "material": { "color": 1601568, "roughness": 0.7 }, "castShadow": true },
+    { "op": "add", "id": "legBR", "type": "box", "parent": "dragon", "position": [0.65, 0.7, -0.7], "scale": [0.4, 1.4, 0.4], "material": { "color": 1601568, "roughness": 0.7 }, "castShadow": true },
+    { "op": "add", "id": "clawFL", "type": "cone", "parent": "dragon", "position": [-0.65, 0.05, 0.85], "rotation": [0.5, 0, 0], "scale": [0.15, 0.2, 0.1], "material": { "color": 2236962 } },
+    { "op": "add", "id": "clawFR", "type": "cone", "parent": "dragon", "position": [0.65, 0.05, 0.85], "rotation": [0.5, 0, 0], "scale": [0.15, 0.2, 0.1], "material": { "color": 2236962 } },
+    { "op": "add", "id": "clawBL", "type": "cone", "parent": "dragon", "position": [-0.65, 0.05, -0.55], "rotation": [0.5, 0, 0], "scale": [0.15, 0.2, 0.1], "material": { "color": 2236962 } },
+    { "op": "add", "id": "clawBR", "type": "cone", "parent": "dragon", "position": [0.65, 0.05, -0.55], "rotation": [0.5, 0, 0], "scale": [0.15, 0.2, 0.1], "material": { "color": 2236962 } },
+
+    { "op": "add", "id": "wingL", "type": "group", "parent": "dragon", "position": [-0.7, 2.8, 0], "rotation": [0, 0, -0.6] },
+    { "op": "add", "id": "wingL1", "type": "box", "parent": "wingL", "position": [-1, 0.3, 0], "rotation": [0, 0, -0.3], "scale": [2, 0.06, 1.4], "material": { "color": 1864482, "opacity": 0.85, "roughness": 0.4 } },
+    { "op": "add", "id": "wingL2", "type": "box", "parent": "wingL", "position": [-1.8, 0.6, 0], "rotation": [0, 0, -0.5], "scale": [1.2, 0.04, 1], "material": { "color": 2659113, "opacity": 0.7 } },
+    { "op": "add", "id": "wingBoneL1", "type": "cylinder", "parent": "wingL", "position": [-0.5, 0.15, 0.5], "rotation": [0, 0, -0.3], "scale": [0.04, 1.8, 0.04], "material": { "color": 1139712, "metalness": 0.3 } },
+    { "op": "add", "id": "wingBoneL2", "type": "cylinder", "parent": "wingL", "position": [-0.5, 0.15, -0.3], "rotation": [0, 0, -0.3], "scale": [0.03, 1.5, 0.03], "material": { "color": 1139712, "metalness": 0.3 } },
+    { "op": "add", "id": "wingR", "type": "group", "parent": "dragon", "position": [0.7, 2.8, 0], "rotation": [0, 0, 0.6] },
+    { "op": "add", "id": "wingR1", "type": "box", "parent": "wingR", "position": [1, 0.3, 0], "rotation": [0, 0, 0.3], "scale": [2, 0.06, 1.4], "material": { "color": 1864482, "opacity": 0.85, "roughness": 0.4 } },
+    { "op": "add", "id": "wingR2", "type": "box", "parent": "wingR", "position": [1.8, 0.6, 0], "rotation": [0, 0, 0.5], "scale": [1.2, 0.04, 1], "material": { "color": 2659113, "opacity": 0.7 } },
+    { "op": "add", "id": "wingBoneR1", "type": "cylinder", "parent": "wingR", "position": [0.5, 0.15, 0.5], "rotation": [0, 0, 0.3], "scale": [0.04, 1.8, 0.04], "material": { "color": 1139712, "metalness": 0.3 } },
+    { "op": "add", "id": "wingBoneR2", "type": "cylinder", "parent": "wingR", "position": [0.5, 0.15, -0.3], "rotation": [0, 0, 0.3], "scale": [0.03, 1.5, 0.03], "material": { "color": 1139712, "metalness": 0.3 } },
+
+    { "op": "add", "id": "tail0", "type": "group", "parent": "dragon", "position": [0, 1.6, -1.1] },
+    { "op": "add", "id": "tail0mesh", "type": "box", "parent": "tail0", "position": [0, 0, -0.2], "scale": [0.9, 0.8, 1], "material": { "color": 1601568, "roughness": 0.6, "metalness": 0.15 }, "castShadow": true },
+    { "op": "add", "id": "tail1", "type": "group", "parent": "tail0", "position": [0, -0.1, -0.8] },
+    { "op": "add", "id": "tail1mesh", "type": "box", "parent": "tail1", "position": [0, 0, -0.2], "scale": [0.7, 0.6, 1], "material": { "color": 1601568, "roughness": 0.6 }, "castShadow": true },
+    { "op": "add", "id": "tail2", "type": "group", "parent": "tail1", "position": [0, -0.1, -0.7] },
+    { "op": "add", "id": "tail2mesh", "type": "box", "parent": "tail2", "position": [0, 0, -0.15], "scale": [0.55, 0.45, 0.9], "material": { "color": 1864482, "roughness": 0.6 }, "castShadow": true },
+    { "op": "add", "id": "tail3", "type": "group", "parent": "tail2", "position": [0, -0.08, -0.6] },
+    { "op": "add", "id": "tail3mesh", "type": "box", "parent": "tail3", "position": [0, 0, -0.15], "scale": [0.4, 0.35, 0.8], "material": { "color": 1864482, "roughness": 0.6 }, "castShadow": true },
+    { "op": "add", "id": "tail4", "type": "group", "parent": "tail3", "position": [0, -0.05, -0.55] },
+    { "op": "add", "id": "tail4mesh", "type": "box", "parent": "tail4", "position": [0, 0, -0.1], "scale": [0.3, 0.25, 0.7], "material": { "color": 2659113, "roughness": 0.5 }, "castShadow": true },
+    { "op": "add", "id": "tailTip", "type": "cone", "parent": "tail4", "position": [0, 0, -0.55], "rotation": [1.3, 0, 0], "scale": [0.25, 0.5, 0.15], "material": { "color": 1139712, "metalness": 0.3 } },
+
+    { "op": "add", "id": "spine1", "type": "cone", "parent": "dragon", "position": [0, 2.5, 0.3], "scale": [0.1, 0.3, 0.08], "material": { "color": 1139712, "metalness": 0.4 } },
+    { "op": "add", "id": "spine2", "type": "cone", "parent": "dragon", "position": [0, 2.55, -0.2], "scale": [0.1, 0.35, 0.08], "material": { "color": 1139712, "metalness": 0.4 } },
+    { "op": "add", "id": "spine3", "type": "cone", "parent": "dragon", "position": [0, 2.5, -0.7], "scale": [0.1, 0.3, 0.08], "material": { "color": 1139712, "metalness": 0.4 } },
+
+    { "op": "add", "id": "rock1", "type": "sphere", "position": [-3, 0.3, 2], "scale": [0.8, 0.5, 0.7], "material": { "color": 5592405, "roughness": 0.95 }, "receiveShadow": true },
+    { "op": "add", "id": "rock2", "type": "sphere", "position": [3.5, 0.2, -1], "scale": [0.5, 0.4, 0.6], "material": { "color": 6710886, "roughness": 0.9 }, "receiveShadow": true },
+    { "op": "add", "id": "title", "type": "text", "position": [0, 5.5, 0], "text": { "content": "GREEN DRAGON", "fontSize": 48, "color": "#22cc44", "backgroundColor": "rgba(0,0,0,0.5)" } },
+
+    { "op": "eval", "code": "const dragon=registry.get('dragon').object3d,neckGroup=registry.get('neckGroup').object3d,headGroup=registry.get('headGroup').object3d,jawGroup=registry.get('jawGroup').object3d,wingL=registry.get('wingL').object3d,wingR=registry.get('wingR').object3d,tail0=registry.get('tail0').object3d,tail1=registry.get('tail1').object3d,tail2=registry.get('tail2').object3d,tail3=registry.get('tail3').object3d,tail4=registry.get('tail4').object3d,fireLight=registry.get('fireLight').object3d;const fireCount=120,fireGeo=new THREE.BufferGeometry(),firePos=new Float32Array(fireCount*3),fireVel=new Float32Array(fireCount*3),fireLife=new Float32Array(fireCount),fireAge=new Float32Array(fireCount);for(let i=0;i<fireCount;i++){fireLife[i]=.4+Math.random()*.5;fireAge[i]=Math.random()*fireLife[i];firePos[i*3]=(Math.random()-.5)*.15;firePos[i*3+1]=(Math.random()-.5)*.1;firePos[i*3+2]=Math.random()*.3;fireVel[i*3]=(Math.random()-.5)*.4;fireVel[i*3+1]=.5+Math.random()*.8;fireVel[i*3+2]=1.5+Math.random()*1.5}fireGeo.setAttribute('position',new THREE.BufferAttribute(firePos,3));const fireMat=new THREE.ShaderMaterial({vertexShader:'void main(){vec4 mv=modelViewMatrix*vec4(position,1.0);gl_PointSize=180.0/-mv.z;gl_Position=projectionMatrix*mv;}',fragmentShader:'void main(){float d=length(gl_PointCoord-vec2(0.5));if(d>0.5)discard;float a=1.0-smoothstep(0.0,0.5,d);vec3 c=mix(vec3(1.0,0.2,0.0),vec3(1.0,0.9,0.0),d*2.0);gl_FragColor=vec4(c,a*0.7);}',transparent:true,depthWrite:false,blending:THREE.AdditiveBlending});const firePoints=new THREE.Points(fireGeo,fireMat);firePoints.visible=false;headGroup.add(firePoints);firePoints.position.set(0,.05,1.2);let breathTimer=0,isBreathing=false,breathDuration=0;onFrame('dragon-anim',function(dt,t){dragon.position.y=Math.sin(t*.8)*.03;neckGroup.rotation.x=Math.sin(t*.5)*.04;neckGroup.rotation.y=Math.sin(t*.3)*.03;headGroup.rotation.x=Math.sin(t*.7+1)*.03;headGroup.rotation.y=Math.sin(t*.4+2)*.025;const wingCycle=t%12;let wingAngle=0;if(wingCycle>9&&wingCycle<11){wingAngle=Math.sin((wingCycle-9)*Math.PI*3)*.35}else{wingAngle=Math.sin(t*.6)*.03}wingL.rotation.z=-.6+wingAngle;wingR.rotation.z=.6-wingAngle;const ts=.6;tail0.rotation.y=Math.sin(t*ts)*.08;tail1.rotation.y=Math.sin(t*ts-.4)*.12;tail2.rotation.y=Math.sin(t*ts-.8)*.18;tail3.rotation.y=Math.sin(t*ts-1.2)*.25;tail4.rotation.y=Math.sin(t*ts-1.6)*.3;const w=t%8;if(w>5.5&&w<7.5){const i=Math.sin((w-5.5)/2*Math.PI);dragon.rotation.y=Math.sin(t*2)*.06*i;dragon.rotation.z=Math.sin(t*1.5+1)*.03*i}else{dragon.rotation.y*=.95;dragon.rotation.z*=.95}breathTimer+=dt;if(!isBreathing&&breathTimer>8+Math.random()*4){isBreathing=true;breathDuration=0;breathTimer=0;firePoints.visible=true}if(isBreathing){breathDuration+=dt;jawGroup.rotation.x=Math.min(breathDuration*3,.3);for(let i=0;i<fireCount;i++){fireAge[i]+=dt;if(fireAge[i]>=fireLife[i]){fireAge[i]=0;fireLife[i]=.3+Math.random()*.4;firePos[i*3]=(Math.random()-.5)*.15;firePos[i*3+1]=(Math.random()-.5)*.1;firePos[i*3+2]=Math.random()*.2;fireVel[i*3]=(Math.random()-.5)*.5;fireVel[i*3+1]=.3+Math.random()*.6;fireVel[i*3+2]=2+Math.random()*2}firePos[i*3]+=fireVel[i*3]*dt;firePos[i*3+1]+=fireVel[i*3+1]*dt;firePos[i*3+2]+=fireVel[i*3+2]*dt}fireGeo.attributes.position.needsUpdate=true;fireLight.intensity=2.5+Math.sin(t*15);if(breathDuration>2.5){isBreathing=false;firePoints.visible=false;fireLight.intensity=0;jawGroup.rotation.x=0}}else{jawGroup.rotation.x=Math.sin(t*.9)*.02;fireLight.intensity*=.9}})" }
+  ]
+}
