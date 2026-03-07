@@ -233,7 +233,8 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
 .context-menu-has-submenu { position: relative; }
 .context-menu-arrow { float: right; margin-left: 12px; font-size: 10px; }
 .context-menu-arrow::after { content: '\25B6'; }
-.context-submenu { position: absolute; left: 100%; top: -4px; margin-left: 2px; }
+.context-menu.context-submenu { position: absolute; left: 100%; top: -4px; margin-left: 2px; min-width: 160px; white-space: nowrap; }
+.context-submenu .context-menu-item { padding: 8px 12px; }
 
 /* Split button group (+ / ▾) */
 #new-btn-group { display: flex; margin-left: 4px; flex-shrink: 0; }
