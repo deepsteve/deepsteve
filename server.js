@@ -76,6 +76,37 @@ app.use((req, res, next) => {
   express.json()(req, res, next);
 });
 
+// Proxy endpoint for Baby Browser — fetches URLs and strips iframe-blocking headers
+app.get('/api/proxy', async (req, res) => {
+  const url = req.query.url;
+  if (!url) return res.status(400).json({ error: 'Missing url parameter' });
+  try {
+    new URL(url); // validate
+  } catch {
+    return res.status(400).json({ error: 'Invalid URL' });
+  }
+  try {
+    const resp = await fetch(url, {
+      headers: { 'User-Agent': req.headers['user-agent'] || 'Mozilla/5.0' },
+      redirect: 'follow',
+    });
+    // Forward status
+    res.status(resp.status);
+    // Forward headers, stripping iframe-blocking ones
+    const skipHeaders = new Set(['x-frame-options', 'content-security-policy', 'content-security-policy-report-only', 'content-encoding', 'transfer-encoding', 'connection']);
+    for (const [key, value] of resp.headers.entries()) {
+      if (!skipHeaders.has(key.toLowerCase())) {
+        res.setHeader(key, value);
+      }
+    }
+    // Pipe body
+    const body = Buffer.from(await resp.arrayBuffer());
+    res.send(body);
+  } catch (err) {
+    res.status(502).json({ error: err.message });
+  }
+});
+
 // File upload endpoint — writes to /tmp/deepsteve-drops/ and returns the full path
 const DROPS_DIR = path.join(os.tmpdir(), 'deepsteve-drops');
 try { fs.mkdirSync(DROPS_DIR, { recursive: true }); } catch {}

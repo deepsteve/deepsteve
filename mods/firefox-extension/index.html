@@ -11,7 +11,7 @@
   .url-bar {
     display: flex;
     align-items: center;
-    gap: 6px;
+    gap: 4px;
     padding: 6px 8px;
     background: #16213e;
     border-bottom: 1px solid #2a2a4a;
@@ -29,7 +29,22 @@
     outline: none;
   }
   .url-bar input:focus { border-color: #4a4a8a; }
-  .url-bar button {
+  .nav-btn {
+    background: #2a2a4a;
+    border: 1px solid #3a3a5a;
+    border-radius: 4px;
+    color: #e0e0e0;
+    padding: 4px 8px;
+    cursor: pointer;
+    font-size: 15px;
+    line-height: 1;
+    min-width: 28px;
+    text-align: center;
+  }
+  .nav-btn:hover { background: #3a3a5a; }
+  .nav-btn:disabled { opacity: 0.3; cursor: default; }
+  .nav-btn:disabled:hover { background: #2a2a4a; }
+  .go-btn {
     background: #2a2a4a;
     border: 1px solid #3a3a5a;
     border-radius: 4px;
@@ -38,27 +53,7 @@
     cursor: pointer;
     font-size: 13px;
   }
-  .url-bar button:hover { background: #3a3a5a; }
-
-  .status-bar {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    padding: 4px 8px;
-    background: #16213e;
-    border-bottom: 1px solid #2a2a4a;
-    font-size: 11px;
-    color: #888;
-    flex-shrink: 0;
-  }
-  .status-dot {
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    flex-shrink: 0;
-  }
-  .status-dot.ok { background: #4caf50; }
-  .status-dot.missing { background: #f44336; }
+  .go-btn:hover { background: #3a3a5a; }
 
   iframe {
     flex: 1;
@@ -70,52 +65,76 @@
 </head>
 <body>
   <div class="url-bar">
+    <button class="nav-btn" id="back" title="Back" disabled>&#9664;</button>
+    <button class="nav-btn" id="forward" title="Forward" disabled>&#9654;</button>
+    <button class="nav-btn" id="refresh" title="Refresh">&#8635;</button>
     <input type="text" id="url" value="https://example.com" spellcheck="false" autocomplete="off">
-    <button id="go">Go</button>
+    <button class="go-btn" id="go">Go</button>
   </div>
-  <div class="status-bar">
-    <span class="status-dot missing" id="ext-dot"></span>
-    <span id="ext-label">Checking extension...</span>
-  </div>
-  <iframe id="browser" sandbox="allow-same-origin allow-scripts allow-forms allow-popups" src="https://example.com"></iframe>
+  <iframe id="browser" sandbox="allow-same-origin allow-scripts allow-forms allow-popups"></iframe>
 
   <script>
     const urlInput = document.getElementById('url');
     const goBtn = document.getElementById('go');
+    const backBtn = document.getElementById('back');
+    const forwardBtn = document.getElementById('forward');
+    const refreshBtn = document.getElementById('refresh');
     const frame = document.getElementById('browser');
-    const extDot = document.getElementById('ext-dot');
-    const extLabel = document.getElementById('ext-label');
 
-    function navigate() {
+    const history = [];
+    let historyIndex = -1;
+
+    function proxyUrl(url) {
+      return '/api/proxy?url=' + encodeURIComponent(url);
+    }
+
+    function updateNavButtons() {
+      backBtn.disabled = historyIndex <= 0;
+      forwardBtn.disabled = historyIndex >= history.length - 1;
+    }
+
+    function navigate(pushHistory = true) {
       let url = urlInput.value.trim();
       if (!url) return;
       if (!/^https?:\/\//i.test(url)) url = 'https://' + url;
       urlInput.value = url;
-      frame.src = url;
+
+      if (pushHistory) {
+        // Truncate forward history when navigating to a new page
+        history.length = historyIndex + 1;
+        history.push(url);
+        historyIndex = history.length - 1;
+      }
+
+      frame.src = proxyUrl(url);
+      updateNavButtons();
     }
 
-    goBtn.addEventListener('click', navigate);
+    backBtn.addEventListener('click', () => {
+      if (historyIndex <= 0) return;
+      historyIndex--;
+      urlInput.value = history[historyIndex];
+      navigate(false);
+    });
+
+    forwardBtn.addEventListener('click', () => {
+      if (historyIndex >= history.length - 1) return;
+      historyIndex++;
+      urlInput.value = history[historyIndex];
+      navigate(false);
+    });
+
+    refreshBtn.addEventListener('click', () => {
+      navigate(false);
+    });
+
+    goBtn.addEventListener('click', () => navigate());
     urlInput.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') navigate();
     });
 
-    // Check for companion extension
-    setTimeout(() => {
-      if (window.deepsteveExtensionPresent) {
-        extDot.classList.remove('missing');
-        extDot.classList.add('ok');
-        extLabel.textContent = 'Extension active';
-      } else {
-        extLabel.textContent = 'Extension required for most sites (strips X-Frame-Options)';
-      }
-    }, 500);
-
-    // Listen for resize messages from parent
-    window.addEventListener('message', (e) => {
-      if (e.data && e.data.type === 'resize') {
-        // Could be used for responsive adjustments
-      }
-    });
+    // Load default page
+    navigate();
   </script>
 </body>
 </html>
