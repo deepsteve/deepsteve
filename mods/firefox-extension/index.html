@@ -74,7 +74,8 @@
   <iframe id="browser" sandbox="allow-same-origin allow-scripts allow-forms allow-popups"></iframe>
 
   <script>
-    const STORAGE_KEY = 'baby-browser-state';
+    let _d=0;try{let w=window;while(w!==w.parent){w=w.parent;_d++}}catch{}
+    const STORAGE_KEY = (_d > 0 ? 'ds'+_d+'-' : '') + 'baby-browser-state';
     const urlInput = document.getElementById('url');
     const goBtn = document.getElementById('go');
     const backBtn = document.getElementById('back');

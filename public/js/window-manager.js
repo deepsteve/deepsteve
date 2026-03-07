@@ -4,9 +4,10 @@
  */
 
 import { SessionStore } from './session-store.js';
+import { nsKey, nsChannel } from './storage-namespace.js';
 
-const WINDOW_ID_KEY = 'deepsteve-window-id';
-const CHANNEL_NAME = 'deepsteve-windows';
+const WINDOW_ID_KEY = nsKey('deepsteve-window-id');
+const CHANNEL_NAME = nsChannel('deepsteve-windows');
 const HEARTBEAT_INTERVAL = 5000;
 const ORPHAN_DETECTION_TIMEOUT = 1500;
 const LIVE_WINDOW_STALE_MS = 15000;
