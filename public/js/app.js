@@ -1211,16 +1211,12 @@ function showNewTabMenu(e) {
   const agents = window.__deepsteveAgents || [];
   const enabledAgents = agents.filter(a => a.enabled);
   const currentAgent = getDefaultAgentType();
-  
-  // Build agent selector at top (only if multiple enabled)
+
+  // Build agent submenu item (only if multiple enabled)
   let html = '';
   if (enabledAgents.length > 1) {
-    html += '<div class="context-menu-header">Agent</div>';
-    for (const agent of enabledAgents) {
-      const isSelected = agent.id === currentAgent;
-      html += `<div class="context-menu-item agent-selector ${isSelected ? 'selected' : ''}" data-agent="${agent.id}">○ ${agent.name}</div>`;
-    }
-    html += '<div class="context-menu-separator"></div>';
+    const currentAgentName = agents.find(a => a.id === currentAgent)?.name || 'Claude Code';
+    html += `<div class="context-menu-item context-menu-has-submenu" id="agent-submenu-trigger">Agent: ${currentAgentName} <span class="context-menu-arrow"></span></div>`;
   }
 
   // Build recent dirs section
@@ -1249,21 +1245,65 @@ function showNewTabMenu(e) {
   `;
   menu.innerHTML = html;
 
-  // Handle agent selector clicks
-  menu.querySelectorAll('.agent-selector').forEach(item => {
-    item.addEventListener('click', (ev) => {
-      ev.stopPropagation();
-      const agentId = item.dataset.agent;
-      window.__deepsteveDefaultAgent = agentId;
-      // Update visual selection
-      menu.querySelectorAll('.agent-selector').forEach(i => {
-        i.classList.remove('selected');
-        i.innerHTML = '○ ' + agents.find(a => a.id === i.dataset.agent)?.name;
+  // Set up agent submenu
+  const agentTrigger = menu.querySelector('#agent-submenu-trigger');
+  if (agentTrigger) {
+    let submenu = null;
+    const showSubmenu = () => {
+      if (submenu) return;
+      submenu = document.createElement('div');
+      submenu.className = 'context-menu context-submenu';
+      submenu.innerHTML = enabledAgents.map(a => {
+        const isSelected = a.id === getDefaultAgentType();
+        return `<div class="context-menu-item" data-agent="${a.id}">${isSelected ? '&#10003; ' : '&nbsp;&nbsp; '}${a.name}</div>`;
+      }).join('');
+      agentTrigger.appendChild(submenu);
+
+      // Position: right by default, flip left if off-screen
+      const triggerRect = agentTrigger.getBoundingClientRect();
+      const subRect = submenu.getBoundingClientRect();
+      if (triggerRect.right + subRect.width > window.innerWidth) {
+        submenu.style.left = 'auto';
+        submenu.style.right = '100%';
+        submenu.style.marginLeft = '0';
+        submenu.style.marginRight = '2px';
+      }
+      if (subRect.bottom > window.innerHeight) {
+        submenu.style.top = 'auto';
+        submenu.style.bottom = '0';
+      }
+
+      submenu.addEventListener('click', (ev) => {
+        const item = ev.target.closest('.context-menu-item');
+        if (!item) return;
+        ev.stopPropagation();
+        const agentId = item.dataset.agent;
+        window.__deepsteveDefaultAgent = agentId;
+        const newName = agents.find(a => a.id === agentId)?.name || 'Claude Code';
+        agentTrigger.innerHTML = `Agent: ${newName} <span class="context-menu-arrow"></span>`;
+        initEnginesDropdown();
+        hideSubmenu();
       });
-      item.classList.add('selected');
-      item.innerHTML = '● ' + agents.find(a => a.id === agentId)?.name;
+    };
+    const hideSubmenu = () => {
+      if (submenu) { submenu.remove(); submenu = null; }
+    };
+    const setupSubmenuHover = () => {
+      agentTrigger.addEventListener('mouseenter', showSubmenu);
+      agentTrigger.addEventListener('mouseleave', (ev) => {
+        setTimeout(() => {
+          if (submenu && !submenu.matches(':hover') && !agentTrigger.matches(':hover')) {
+            hideSubmenu();
+          }
+        }, 100);
+      });
+    };
+    setupSubmenuHover();
+    agentTrigger.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      submenu ? hideSubmenu() : showSubmenu();
     });
-  });
+  }
 
   // Position below the dropdown arrow button
   const btn = e.target.closest('#new-btn-dropdown') || e.target.closest('#new-btn-group');
@@ -1294,6 +1334,7 @@ function showNewTabMenu(e) {
     const item = ev.target.closest('.context-menu-item');
     if (!item) return;
     const action = item.dataset.action;
+    if (!action) return; // ignore clicks on items without actions (e.g. agent submenu trigger)
     menu.remove();
     cleanup();
     if (action === 'recent') {
