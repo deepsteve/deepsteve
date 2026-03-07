@@ -983,46 +983,36 @@ function switchTo(id) {
  * then selects the right tab once — avoiding the race where the last session
  * to connect wins.
  */
-function restoreSessions(sessionList, opts = {}) {
+async function restoreSessions(sessionList, opts = {}) {
   const savedActiveId = ActiveTab.get();
   const allowDuplicate = opts.allowDuplicate !== undefined ? opts.allowDuplicate : true;
 
-  // Restore mod tabs synchronously (no server interaction)
-  const terminalSessions = [];
+  // Restore sessions in order — mod tabs are sync, terminal sessions are async.
+  // Sequential creation preserves tab position.
   for (const entry of sessionList) {
     if (entry.type === 'mod-tab' && entry.modId) {
       createModTab(entry.modId, { id: entry.id, name: entry.name, restoreActive: true });
     } else {
-      terminalSessions.push(entry);
+      const resolvedId = await createSession(entry.cwd, entry.id, false, { restoreActive: true, allowDuplicate });
+      if (resolvedId === null) {
+        console.log('[restore] Session', entry.id, 'rejected (duplicate), cleaning up storage');
+        SessionStore.removeSession(getWindowId(), entry.id);
+        TabSessions.remove(entry.id);
+      }
     }
   }
 
-  const promises = terminalSessions.map(({ id, cwd }) =>
-    createSession(cwd, id, false, { restoreActive: true, allowDuplicate })
-  );
-  Promise.all(promises).then((results) => {
-    // Clean up storage for sessions that were rejected (null result = duplicate)
-    results.forEach((resolvedId, i) => {
-      if (resolvedId === null) {
-        const { id } = terminalSessions[i];
-        console.log('[restore] Session', id, 'rejected (duplicate), cleaning up storage');
-        SessionStore.removeSession(getWindowId(), id);
-        TabSessions.remove(id);
-      }
-    });
-
-    const target = savedActiveId && sessions.has(savedActiveId)
-      ? savedActiveId
-      : sessions.keys().next().value;
-    if (target) {
-      if (target === savedActiveId) {
-        console.log('[restore] Selecting saved active tab', target);
-      } else {
-        console.log('[restore] Saved active tab', savedActiveId, 'not found, falling back to', target);
-      }
-      switchTo(target);
+  const target = savedActiveId && sessions.has(savedActiveId)
+    ? savedActiveId
+    : sessions.keys().next().value;
+  if (target) {
+    if (target === savedActiveId) {
+      console.log('[restore] Selecting saved active tab', target);
+    } else {
+      console.log('[restore] Saved active tab', savedActiveId, 'not found, falling back to', target);
     }
-  });
+    switchTo(target);
+  }
 }
 
 /**
