@@ -28,10 +28,26 @@ export function initLiveReload({ onMessage, onShowRestartConfirm, onShowReloadOv
     const params = 'action=reload' + (windowId ? '&windowId=' + encodeURIComponent(windowId) : '');
     ws = new WebSocket(wsProto + location.host + '?' + params);
 
+    let lastPingTime = Date.now();
+    let missedPingCheck;
+
+    ws.onopen = () => {
+      lastPingTime = Date.now();
+      missedPingCheck = setInterval(() => {
+        if (Date.now() - lastPingTime > 45000 && ws.readyState === WebSocket.OPEN) {
+          console.log('[live-reload] no ping from server in 45s, reconnecting...');
+          ws.close();
+        }
+      }, 45000);
+    };
+
     ws.onmessage = (e) => {
       try {
         const msg = JSON.parse(e.data);
-        if (msg.type === 'confirm-restart') {
+        if (msg.type === 'ping') {
+          lastPingTime = Date.now();
+          ws.send(JSON.stringify({ type: 'pong' }));
+        } else if (msg.type === 'confirm-restart') {
           if (restartConfirmed) return; // Already handling
           handleRestartConfirm(msg.totalWindows);
         } else if (msg.type === 'restart-progress') {
@@ -52,6 +68,7 @@ export function initLiveReload({ onMessage, onShowRestartConfirm, onShowReloadOv
     };
 
     ws.onclose = () => {
+      if (missedPingCheck) clearInterval(missedPingCheck);
       if (intentionallyClosed) return;
       if (restartConfirmed) {
         // User already confirmed restart — show overlay and poll for server
