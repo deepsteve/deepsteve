@@ -80,6 +80,7 @@ app.use((req, res, next) => {
 // pages need proxying to bypass X-Frame-Options.
 app.get('/api/proxy', async (req, res) => {
   const url = req.query.url;
+  log(`[proxy] url=${url}`);
   if (!url) return res.status(400).json({ error: 'Missing url parameter' });
   let parsed;
   try {
@@ -102,9 +103,9 @@ app.get('/api/proxy', async (req, res) => {
     const contentType = resp.headers.get('content-type') || '';
     let body = Buffer.from(await resp.arrayBuffer());
     if (contentType.includes('text/html')) {
-      // <base> makes relative resource URLs (CSS/JS/images) resolve to the real origin.
-      // Injected script intercepts link clicks and form submits to route through the proxy.
-      const origin = parsed.origin;
+      // Use the final URL after redirects (e.g. http→https) for correct origin
+      const finalUrl = new URL(resp.url);
+      const origin = finalUrl.origin;
       const injection = `<base href="${origin}/">
 <script>(function(){
   var P='/api/proxy?url=';
