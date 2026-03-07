@@ -25,27 +25,39 @@ const TAB_KEYS = new Set([
 ]);
 
 function resetState() {
+  if (holdTimer || tabSwitchModeActive) {
+    console.log('[cmd-tab-switch] resetState()', { hadTimer: !!holdTimer, wasActive: tabSwitchModeActive });
+  }
   clearTimeout(holdTimer);
   holdTimer = null;
   tabSwitchModeActive = false;
 }
 
 function onKeyDown(e) {
-  if (!enabled) return;
+  if (!enabled) {
+    if (e.metaKey && TAB_KEYS.has(e.code)) {
+      console.log('[cmd-tab-switch] keydown blocked: enabled=false', { key: e.key, code: e.code });
+    }
+    return;
+  }
 
   // Meta key pressed — start hold timer
   if (e.key === 'Meta' && !e.repeat) {
+    console.log('[cmd-tab-switch] Meta pressed, starting hold timer (' + HOLD_MS + 'ms)');
     resetState();
     holdTimer = setTimeout(() => {
       tabSwitchModeActive = true;
+      console.log('[cmd-tab-switch] Hold timer fired — tab switch mode ACTIVE');
     }, HOLD_MS);
     return;
   }
 
   // Non-modifier key while Meta is held
   if (e.metaKey) {
+    console.log('[cmd-tab-switch] key while Meta held:', { code: e.code, tabSwitchModeActive, inTabKeys: TAB_KEYS.has(e.code) });
     if (!tabSwitchModeActive) {
       // Still within hold period — normal Cmd shortcut, cancel timer
+      console.log('[cmd-tab-switch] Not in tab switch mode yet — cancelling timer, passing through');
       resetState();
       return;
     }
@@ -102,5 +114,6 @@ export function init({ getOrderedTabIds: g, getActiveTabId: a, switchToTab: s })
 
 export function setEnabled(val) {
   enabled = !!val;
+  console.log('[cmd-tab-switch] setEnabled(' + enabled + ')');
   if (!enabled) resetState();
 }

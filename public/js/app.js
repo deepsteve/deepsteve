@@ -548,8 +548,19 @@ settingsBtn?.addEventListener('click', async () => {
     });
     maxIssueTitleLength = Math.max(10, Math.min(200, newMaxTitle));
     setCmdTabSwitchEnabled(cmdTabSwitch);
-    // Reload to refresh agents dropdown
-    window.location.reload();
+    // Refresh agents data if agent settings changed
+    const prevEnabled = (window.__deepsteveAgents || []).filter(a => a.enabled).map(a => a.id).sort().join(',');
+    const newEnabled = enabledAgents.sort().join(',');
+    if (prevEnabled !== newEnabled) {
+      try {
+        const agentsResp = await fetch('/api/agents');
+        const agentsData = await agentsResp.json();
+        window.__deepsteveAgents = agentsData.agents || [];
+        window.__deepsteveDefaultAgent = agentsData.defaultAgent || 'claude';
+        refreshEnginesDropdown();
+      } catch {}
+    }
+    overlay.remove();
   };
   overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
 });
@@ -1261,30 +1272,45 @@ function getDefaultAgentType() {
 }
 
 /**
- * Initialize the engines dropdown (shown when multiple agents are enabled)
+ * Initialize the engines dropdown (shown when multiple agents are enabled).
+ * Sets up the document-level click-to-close listener once, then builds the UI.
  */
 function initEnginesDropdown() {
+  document.addEventListener('click', () => {
+    document.getElementById('engines-menu')?.classList.remove('open');
+  });
+  refreshEnginesDropdown();
+}
+
+/**
+ * Rebuild the engines dropdown UI. Safe to call multiple times —
+ * clone-replaces the button to clear stale event listeners.
+ */
+function refreshEnginesDropdown() {
   const agents = window.__deepsteveAgents || [];
   const enabledAgents = agents.filter(a => a.enabled);
-  
-  // Only show dropdown if multiple agents are enabled
+
   const dropdown = document.getElementById('engines-dropdown');
-  const btn = document.getElementById('engines-btn');
+  const oldBtn = document.getElementById('engines-btn');
   const menu = document.getElementById('engines-menu');
-  
+
   if (enabledAgents.length <= 1) {
     dropdown.style.display = 'none';
     return;
   }
-  
+
   dropdown.style.display = 'flex';
-  
+
+  // Clone-replace button to clear old event listeners
+  const btn = oldBtn.cloneNode(true);
+  oldBtn.replaceWith(btn);
+
   // Build menu items
   menu.innerHTML = enabledAgents.map(a => {
     const isDefault = a.id === window.__deepsteveDefaultAgent;
     return `<div class="dropdown-item ${isDefault ? 'active' : 'clickable'}" data-agent="${a.id}">${a.name}${isDefault ? ' ✓' : ''}</div>`;
   }).join('');
-  
+
   // Update button text (short name by default, full name on hover)
   const currentAgent = agents.find(a => a.id === window.__deepsteveDefaultAgent);
   btn.textContent = currentAgent?.shortName || currentAgent?.name || 'Engine';
@@ -1299,33 +1325,27 @@ function initEnginesDropdown() {
     btn.textContent = a?.shortName || a?.name || 'Engine';
   });
 
-  // Handle clicks
+  // Handle clicks on menu items
   menu.querySelectorAll('.dropdown-item').forEach(item => {
     item.addEventListener('click', () => {
       const agentId = item.dataset.agent;
       window.__deepsteveDefaultAgent = agentId;
-      // Update checkmarks
       menu.querySelectorAll('.dropdown-item').forEach(i => {
         const a = agents.find(ag => ag.id === i.dataset.agent);
         const isSelected = i.dataset.agent === agentId;
         i.textContent = (a?.name || '') + (isSelected ? ' ✓' : '');
       });
-      // Update button text (keep full name since still hovered)
       const newDefault = agents.find(a => a.id === agentId);
       btn.textContent = newDefault?.name || 'Engine';
       btn.title = newDefault?.name || 'Engine';
       menu.classList.remove('open');
     });
   });
-  
+
   // Toggle dropdown
   btn.addEventListener('click', (e) => {
     e.stopPropagation();
     menu.classList.toggle('open');
-  });
-  
-  document.addEventListener('click', () => {
-    menu.classList.remove('open');
   });
 }
 
@@ -1615,8 +1635,12 @@ async function showIssuePicker() {
     </div>
   `;
   document.body.appendChild(overlay);
-  overlay.querySelector('#issue-cancel').onclick = () => overlay.remove();
-  overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
+  const closeIssuePicker = () => overlay.remove();
+  overlay.querySelector('#issue-cancel').onclick = closeIssuePicker;
+  overlay.onclick = (e) => { if (e.target === overlay) closeIssuePicker(); };
+  const onEscIssuePicker = (e) => { if (e.key === 'Escape') { e.preventDefault(); closeIssuePicker(); } };
+  document.addEventListener('keydown', onEscIssuePicker);
+  new MutationObserver((_, obs) => { if (!overlay.parentNode) { document.removeEventListener('keydown', onEscIssuePicker); obs.disconnect(); } }).observe(document.body, { childList: true });
 
   let issues, wandPlanMode, wandPromptTemplate, hasMore;
   let selectedIssue = null;
