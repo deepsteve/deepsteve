@@ -1584,6 +1584,12 @@ function handleWsConnection(ws, req) {
     ws.reloadClientId = nextReloadClientId++;
     reloadClients.add(ws);
     ws.isAlive = true;
+    // If a restart is pending (e.g. previous WS died), send confirm-restart to new client
+    if (restartState) {
+      restartState.pending.set(ws.reloadClientId, 'waiting');
+      const totalWindows = restartState.pending.size;
+      try { ws.send(JSON.stringify({ type: 'confirm-restart', totalWindows })); } catch {}
+    }
     const pingInterval = setInterval(() => {
       if (!ws.isAlive) {
         log(`[WS] Reload client dead (no pong), terminating (windowId=${ws.windowId})`);
@@ -1596,10 +1602,12 @@ function handleWsConnection(ws, req) {
     ws.on('close', () => {
       clearInterval(pingInterval);
       reloadClients.delete(ws);
-      // Handle disconnect during pending restart
+      // Handle disconnect during pending restart — remove dead client but don't auto-confirm.
+      // A reconnecting client will pick up the pending restart via the check above.
       if (restartState && restartState.pending.has(ws.reloadClientId)) {
         restartState.pending.delete(ws.reloadClientId);
-        if (restartState.pending.size === 0 || [...restartState.pending.values()].every(v => v === 'confirmed')) {
+        // Only resolve if there are still live clients and all have confirmed
+        if (restartState.pending.size > 0 && [...restartState.pending.values()].every(v => v === 'confirmed')) {
           restartState.resolve('confirmed');
         }
       }
