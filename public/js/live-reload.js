@@ -6,12 +6,14 @@
  * On normal restart, the WS drops and we silently reconnect without refreshing.
  *
  * Restart confirmation flow (restart.sh --refresh):
- * 1. Server sends { type: 'confirm-restart' } BEFORE restarting
- * 2. Every tab shows a modal. When any tab confirms or skips, the decision is
- *    broadcast via BroadcastChannel so all tabs dismiss their modals together.
- * 3. The tab where the user clicked sends { type: 'restart-confirmed' } or
- *    { type: 'restart-declined' } back to the server.
- * 4. If confirmed, server proceeds with restart. All tabs show a spinner overlay
+ * 1. Server sends { type: 'confirm-restart', totalWindows } BEFORE restarting
+ * 2. Every window shows a modal. Each window confirms/declines independently.
+ * 3. Each window sends { type: 'restart-confirmed' } or { type: 'restart-declined' }
+ *    back to the server via its own WebSocket.
+ * 4. Server tracks all responses. If all confirm → restart proceeds.
+ *    If any declines → server sends { type: 'restart-cancelled' } to all.
+ * 5. Server sends { type: 'restart-progress', confirmed, total } as windows confirm.
+ * 6. When all confirmed, server proceeds with restart. All windows show spinner overlay
  *    while polling for the server to come back, then auto-refresh.
  */
 
@@ -19,6 +21,7 @@ export function initLiveReload({ onMessage, onShowRestartConfirm, onShowReloadOv
   let ws;
   let intentionallyClosed = false;
   let restartConfirmed = false;
+  let currentModal = null;
 
   function connect() {
     const wsProto = location.protocol === 'https:' ? 'wss://' : 'ws://';
@@ -30,7 +33,13 @@ export function initLiveReload({ onMessage, onShowRestartConfirm, onShowReloadOv
         const msg = JSON.parse(e.data);
         if (msg.type === 'confirm-restart') {
           if (restartConfirmed) return; // Already handling
-          handleRestartConfirm();
+          handleRestartConfirm(msg.totalWindows);
+        } else if (msg.type === 'restart-progress') {
+          if (currentModal) currentModal.updateProgress(msg.confirmed, msg.total);
+        } else if (msg.type === 'restart-cancelled') {
+          restartConfirmed = false;
+          if (currentModal) currentModal.dismiss(false);
+          currentModal = null;
         } else if (msg.type === 'reload') {
           // Legacy reload message (during shutdown) — auto-refresh if restart was confirmed
           if (restartConfirmed) {
@@ -57,44 +66,26 @@ export function initLiveReload({ onMessage, onShowRestartConfirm, onShowReloadOv
     };
   }
 
-  function handleRestartConfirm() {
-    const ch = new BroadcastChannel('deepsteve-ui-events');
-    let remoteDecision = false;
-
-    // Show modal in this tab
+  function handleRestartConfirm(totalWindows) {
     const modal = onShowRestartConfirm
-      ? onShowRestartConfirm()
-      : { promise: Promise.resolve(true), dismiss: () => {} };
+      ? onShowRestartConfirm(totalWindows)
+      : { promise: Promise.resolve(true), dismiss: () => {}, updateStatus: () => {}, updateProgress: () => {} };
 
-    // Listen for decision broadcast from another tab
-    const onMsg = (e) => {
-      if (e.data.type === 'reload-decision') {
-        remoteDecision = true;
-        ch.removeEventListener('message', onMsg);
-        ch.close();
-        modal.dismiss(e.data.confirmed);
-      }
-    };
-    ch.addEventListener('message', onMsg);
+    currentModal = modal;
 
-    // When modal resolves (user clicked locally, or dismissed by remote broadcast)
     modal.promise.then(confirmed => {
-      if (!remoteDecision) {
-        // Local click — broadcast to other tabs and send response to server
-        const bc = new BroadcastChannel('deepsteve-ui-events');
-        bc.postMessage({ type: 'reload-decision', confirmed });
-        setTimeout(() => bc.close(), 100);
-        ch.removeEventListener('message', onMsg);
-        ch.close();
-        if (confirmed) {
-          restartConfirmed = true;
-          ws.send(JSON.stringify({ type: 'restart-confirmed' }));
+      if (confirmed) {
+        restartConfirmed = true;
+        ws.send(JSON.stringify({ type: 'restart-confirmed' }));
+        if (totalWindows > 1) {
+          modal.updateStatus('waiting');
+          // Keep currentModal so progress updates can reach it
         } else {
-          ws.send(JSON.stringify({ type: 'restart-declined' }));
+          currentModal = null;
         }
       } else {
-        // Remote decision — set flag but don't send to server (other tab already did)
-        if (confirmed) restartConfirmed = true;
+        currentModal = null;
+        ws.send(JSON.stringify({ type: 'restart-declined' }));
       }
     });
   }

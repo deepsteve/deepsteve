@@ -12,7 +12,7 @@ Steps:
 
 3. **Find the main worktree path**: Run `git worktree list --porcelain | awk '/^worktree /{path=substr($0,10)} /^branch refs\/heads\/main$/{print path}'` — this outputs exactly one line: the path of the worktree with `main` checked out. If the output is empty, tell the user no worktree has `main` checked out and stop.
 
-4. **Check for uncommitted changes**: Run `git status --porcelain` in the current worktree. If there are uncommitted changes, tell the user: "There are uncommitted changes in this worktree. Please commit or stash them before merging." and stop. Do not proceed with the merge.
+4. **Commit any uncommitted changes**: Run `git status --porcelain` in the current worktree. If there are uncommitted changes, stage them with `git add -A` and commit with a message derived from the branch name (e.g. for branch `worktree-github-issue-230`, use "Fix restart prompt only shows in active window (#230)"). Use the GitHub issue title if the branch contains an issue number. Include the `Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>` trailer.
 
 5. **Merge**: Run `git -C <main-worktree-path> merge <branch-name> --no-edit` to merge the worktree branch into main from the main worktree's directory. Do NOT use `git checkout main` — main is checked out in a different worktree.
 

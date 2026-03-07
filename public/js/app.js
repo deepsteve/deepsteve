@@ -966,17 +966,19 @@ function showCloseConfirmDialog() {
   });
 }
 
-function showRestartConfirmDialog() {
+function showRestartConfirmDialog(totalWindows) {
   let resolve;
   const promise = new Promise(r => { resolve = r; });
 
   const overlay = document.createElement('div');
   overlay.className = 'modal-overlay';
+  const subtitle = totalWindows > 1 ? `<p style="font-size:11px;color:var(--ds-text-tertiary);margin-top:-8px;margin-bottom:12px;">(all ${totalWindows} windows must confirm)</p>` : '';
   overlay.innerHTML = `
     <div class="modal">
       <h2>Restart DeepSteve?</h2>
-      <p style="font-size:13px;color:var(--ds-text-secondary);margin-bottom:16px;">This will restart the server and reload the page. Running agents will be interrupted but sessions will be restored.</p>
-      <div class="modal-buttons">
+      ${subtitle}
+      <p id="restart-body" style="font-size:13px;color:var(--ds-text-secondary);margin-bottom:16px;">This will restart the server and reload the page. Running agents will be interrupted but sessions will be restored.</p>
+      <div class="modal-buttons" id="restart-buttons">
         <button class="btn-secondary" id="restart-confirm-cancel">Cancel</button>
         <button class="btn-primary" id="restart-confirm-ok">Restart</button>
       </div>
@@ -1000,7 +1002,24 @@ function showRestartConfirmDialog() {
   };
   document.addEventListener('keydown', onKey);
 
-  return { promise, dismiss: cleanup };
+  const updateStatus = (status) => {
+    if (status === 'waiting') {
+      const body = overlay.querySelector('#restart-body');
+      const buttons = overlay.querySelector('#restart-buttons');
+      if (body) body.textContent = 'Confirmed. Waiting for other windows\u2026';
+      if (buttons) buttons.innerHTML = '<span style="font-size:12px;color:var(--ds-text-tertiary);" id="restart-progress-text"></span>';
+      // Disable overlay click dismiss and keyboard shortcuts
+      overlay.onclick = null;
+      document.removeEventListener('keydown', onKey);
+    }
+  };
+
+  const updateProgress = (confirmed, total) => {
+    const el = overlay.querySelector('#restart-progress-text');
+    if (el) el.textContent = `${confirmed} of ${total} confirmed`;
+  };
+
+  return { promise, dismiss: cleanup, updateStatus, updateProgress };
 }
 
 function showReloadOverlay() {
@@ -1663,7 +1682,7 @@ async function init() {
         createSession(msg.cwd, msg.id, false, { name: msg.name, allowDuplicate: true });
       }
     },
-    onShowRestartConfirm: () => showRestartConfirmDialog(),
+    onShowRestartConfirm: (totalWindows) => showRestartConfirmDialog(totalWindows),
     onShowReloadOverlay: () => showReloadOverlay()
   });
 
