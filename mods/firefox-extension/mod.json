@@ -1,7 +1,7 @@
 {
   "name": "Baby Browser",
   "version": "0.1.0",
-  "description": "Iframe-based browser tab for viewing web pages",
+  "description": "Iframe-based browser tab for viewing web pages. Needs to run with the DeepSteve Proxy Helper extension.",
   "enabledByDefault": false,
   "entry": "index.html",
   "display": "tab",

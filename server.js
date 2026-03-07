@@ -76,31 +76,70 @@ app.use((req, res, next) => {
   express.json()(req, res, next);
 });
 
-// Proxy endpoint for Baby Browser — fetches URLs and strips iframe-blocking headers
+// Proxy endpoint for Baby Browser — fetches URLs and strips iframe-blocking headers.
+// Resources (CSS/JS/images) load directly from origin via <base> tag — only HTML
+// pages need proxying to bypass X-Frame-Options.
 app.get('/api/proxy', async (req, res) => {
   const url = req.query.url;
   if (!url) return res.status(400).json({ error: 'Missing url parameter' });
+  let parsed;
   try {
-    new URL(url); // validate
+    parsed = new URL(url);
   } catch {
     return res.status(400).json({ error: 'Invalid URL' });
   }
   try {
-    const resp = await fetch(url, {
+    const resp = await fetch(parsed.href, {
       headers: { 'User-Agent': req.headers['user-agent'] || 'Mozilla/5.0' },
       redirect: 'follow',
     });
-    // Forward status
     res.status(resp.status);
-    // Forward headers, stripping iframe-blocking ones
     const skipHeaders = new Set(['x-frame-options', 'content-security-policy', 'content-security-policy-report-only', 'content-encoding', 'transfer-encoding', 'connection']);
     for (const [key, value] of resp.headers.entries()) {
       if (!skipHeaders.has(key.toLowerCase())) {
         res.setHeader(key, value);
       }
     }
-    // Pipe body
-    const body = Buffer.from(await resp.arrayBuffer());
+    const contentType = resp.headers.get('content-type') || '';
+    let body = Buffer.from(await resp.arrayBuffer());
+    if (contentType.includes('text/html')) {
+      // <base> makes relative resource URLs (CSS/JS/images) resolve to the real origin.
+      // Injected script intercepts link clicks and form submits to route through the proxy.
+      const origin = parsed.origin;
+      const injection = `<base href="${origin}/">
+<script>(function(){
+  var P='/api/proxy?url=';
+  function proxyHref(href){
+    try{var u=new URL(href,document.baseURI);if(u.origin==='${origin}')return P+encodeURIComponent(u.href);return P+encodeURIComponent(href)}catch(e){return href}
+  }
+  document.addEventListener('click',function(e){
+    var a=e.target.closest('a');if(!a||!a.href)return;
+    var h=a.getAttribute('href');if(!h||h.startsWith('javascript:')||h.startsWith('#'))return;
+    e.preventDefault();window.location.href=proxyHref(a.href);
+  },true);
+  document.addEventListener('submit',function(e){
+    var f=e.target;if(!f||f.tagName!=='FORM')return;
+    var action=f.getAttribute('action')||'';
+    if(f.method&&f.method.toLowerCase()==='get'){
+      e.preventDefault();
+      var fd=new FormData(f);var params=new URLSearchParams(fd).toString();
+      var base=new URL(action||window.location.href,document.baseURI);
+      base.search=params?'?'+params:'';
+      window.location.href=P+encodeURIComponent(base.href);
+    }
+  },true);
+})()</script>`;
+      let html = body.toString('utf-8');
+      if (/<head[^>]*>/i.test(html)) {
+        html = html.replace(/<head([^>]*)>/i, `<head$1>${injection}`);
+      } else if (/<html[^>]*>/i.test(html)) {
+        html = html.replace(/<html([^>]*)>/i, `<html$1><head>${injection}</head>`);
+      } else {
+        html = injection + html;
+      }
+      body = Buffer.from(html, 'utf-8');
+      res.setHeader('content-length', body.length);
+    }
     res.send(body);
   } catch (err) {
     res.status(502).json({ error: err.message });

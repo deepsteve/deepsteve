@@ -74,6 +74,7 @@
   <iframe id="browser" sandbox="allow-same-origin allow-scripts allow-forms allow-popups"></iframe>
 
   <script>
+    const STORAGE_KEY = 'baby-browser-state';
     const urlInput = document.getElementById('url');
     const goBtn = document.getElementById('go');
     const backBtn = document.getElementById('back');
@@ -81,16 +82,28 @@
     const refreshBtn = document.getElementById('refresh');
     const frame = document.getElementById('browser');
 
-    const history = [];
-    let historyIndex = -1;
+    // Restore state from sessionStorage
+    let navHistory = ['https://example.com'];
+    let historyIndex = 0;
+    try {
+      const saved = JSON.parse(sessionStorage.getItem(STORAGE_KEY));
+      if (saved && saved.history?.length) {
+        navHistory = saved.history;
+        historyIndex = Math.min(saved.index ?? 0, saved.history.length - 1);
+      }
+    } catch {}
 
     function proxyUrl(url) {
       return '/api/proxy?url=' + encodeURIComponent(url);
     }
 
+    function saveState() {
+      sessionStorage.setItem(STORAGE_KEY, JSON.stringify({ history: navHistory, index: historyIndex }));
+    }
+
     function updateNavButtons() {
       backBtn.disabled = historyIndex <= 0;
-      forwardBtn.disabled = historyIndex >= history.length - 1;
+      forwardBtn.disabled = historyIndex >= navHistory.length - 1;
     }
 
     function navigate(pushHistory = true) {
@@ -100,27 +113,27 @@
       urlInput.value = url;
 
       if (pushHistory) {
-        // Truncate forward history when navigating to a new page
-        history.length = historyIndex + 1;
-        history.push(url);
-        historyIndex = history.length - 1;
+        navHistory.length = historyIndex + 1;
+        navHistory.push(url);
+        historyIndex = navHistory.length - 1;
       }
 
       frame.src = proxyUrl(url);
       updateNavButtons();
+      saveState();
     }
 
     backBtn.addEventListener('click', () => {
       if (historyIndex <= 0) return;
       historyIndex--;
-      urlInput.value = history[historyIndex];
+      urlInput.value = navHistory[historyIndex];
       navigate(false);
     });
 
     forwardBtn.addEventListener('click', () => {
-      if (historyIndex >= history.length - 1) return;
+      if (historyIndex >= navHistory.length - 1) return;
       historyIndex++;
-      urlInput.value = history[historyIndex];
+      urlInput.value = navHistory[historyIndex];
       navigate(false);
     });
 
@@ -128,13 +141,33 @@
       navigate(false);
     });
 
+    // Track in-iframe navigation (link clicks) and update URL bar + history
+    frame.addEventListener('load', () => {
+      try {
+        const frameSrc = frame.contentWindow.location.href;
+        const match = frameSrc.match(/[?&]url=([^&]+)/);
+        if (match) {
+          const realUrl = decodeURIComponent(match[1]);
+          if (realUrl && realUrl !== navHistory[historyIndex]) {
+            urlInput.value = realUrl;
+            navHistory.length = historyIndex + 1;
+            navHistory.push(realUrl);
+            historyIndex = navHistory.length - 1;
+            updateNavButtons();
+            saveState();
+          }
+        }
+      } catch {}
+    });
+
     goBtn.addEventListener('click', () => navigate());
     urlInput.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') navigate();
     });
 
-    // Load default page
-    navigate();
+    // Load current page from history
+    urlInput.value = navHistory[historyIndex];
+    navigate(false);
   </script>
 </body>
 </html>
