@@ -11,12 +11,13 @@
 let enabled = false;
 let holdTimer = null;
 let tabSwitchModeActive = false;
+let metaHeldOnBlur = false;
 
 let getOrderedTabIds;
 let getActiveTabId;
 let switchToTab;
 
-const HOLD_MS = 1000;
+let HOLD_MS = 1000;
 
 const TAB_KEYS = new Set([
   'Digit1', 'Digit2', 'Digit3', 'Digit4', 'Digit5',
@@ -24,13 +25,18 @@ const TAB_KEYS = new Set([
   'Comma', 'Period'
 ]);
 
+function setTabSwitchMode(active) {
+  tabSwitchModeActive = active;
+  document.getElementById('tabs')?.classList.toggle('tab-switch-mode', active);
+}
+
 function resetState() {
   if (holdTimer || tabSwitchModeActive) {
     console.log('[cmd-tab-switch] resetState()', { hadTimer: !!holdTimer, wasActive: tabSwitchModeActive });
   }
   clearTimeout(holdTimer);
   holdTimer = null;
-  tabSwitchModeActive = false;
+  setTabSwitchMode(false);
 }
 
 function onKeyDown(e) {
@@ -41,16 +47,26 @@ function onKeyDown(e) {
     return;
   }
 
-  // Meta key pressed — start hold timer
+  // Meta key pressed — start hold timer (or activate immediately if returning from blur)
   if (e.key === 'Meta' && !e.repeat) {
+    if (metaHeldOnBlur) {
+      // Cmd was held when we left the window — activate immediately
+      metaHeldOnBlur = false;
+      setTabSwitchMode(true);
+      console.log('[cmd-tab-switch] Meta still held after refocus — tab switch mode ACTIVE');
+      return;
+    }
     console.log('[cmd-tab-switch] Meta pressed, starting hold timer (' + HOLD_MS + 'ms)');
     resetState();
     holdTimer = setTimeout(() => {
-      tabSwitchModeActive = true;
+      setTabSwitchMode(true);
       console.log('[cmd-tab-switch] Hold timer fired — tab switch mode ACTIVE');
     }, HOLD_MS);
     return;
   }
+
+  // Non-Meta key clears the blur flag
+  metaHeldOnBlur = false;
 
   // Non-modifier key while Meta is held
   if (e.metaKey) {
@@ -95,11 +111,19 @@ function onKeyDown(e) {
 
 function onKeyUp(e) {
   if (!enabled) return;
-  if (e.key === 'Meta') resetState();
+  if (e.key === 'Meta') {
+    metaHeldOnBlur = false;
+    resetState();
+  }
 }
 
 function onBlur() {
-  resetState();
+  // Remember if tab-switch mode was active (Meta held) so we can
+  // re-activate immediately when the window regains focus.
+  metaHeldOnBlur = tabSwitchModeActive || holdTimer !== null;
+  clearTimeout(holdTimer);
+  holdTimer = null;
+  setTabSwitchMode(false);
 }
 
 export function init({ getOrderedTabIds: g, getActiveTabId: a, switchToTab: s }) {
@@ -116,4 +140,9 @@ export function setEnabled(val) {
   enabled = !!val;
   console.log('[cmd-tab-switch] setEnabled(' + enabled + ')');
   if (!enabled) resetState();
+}
+
+export function setHoldMs(ms) {
+  HOLD_MS = Math.max(0, ms | 0);
+  console.log('[cmd-tab-switch] setHoldMs(' + HOLD_MS + ')');
 }

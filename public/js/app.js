@@ -13,7 +13,7 @@ import { LayoutManager } from './layout-manager.js';
 import { initLiveReload } from './live-reload.js';
 import { ModManager } from './mod-manager.js';
 import { initFileDrop } from './file-drop.js';
-import { init as initCmdTabSwitch, setEnabled as setCmdTabSwitchEnabled } from './cmd-tab-switch.js';
+import { init as initCmdTabSwitch, setEnabled as setCmdTabSwitchEnabled, setHoldMs as setCmdTabSwitchHoldMs } from './cmd-tab-switch.js';
 
 // Configuration
 let maxIssueTitleLength = 25;
@@ -162,6 +162,9 @@ function applySettings(settings) {
   }
   if (settings.cmdTabSwitch !== undefined) {
     setCmdTabSwitchEnabled(settings.cmdTabSwitch);
+  }
+  if (settings.cmdTabSwitchHoldMs !== undefined) {
+    setCmdTabSwitchHoldMs(settings.cmdTabSwitchHoldMs);
   }
 }
 
@@ -361,6 +364,7 @@ settingsBtn?.addEventListener('click', async () => {
   const currentWandPlanMode = settingsData.wandPlanMode !== undefined ? settingsData.wandPlanMode : true;
   const currentWandTemplate = settingsData.wandPromptTemplate || defaultsData.wandPromptTemplate || '';
   const currentCmdTabSwitch = !!settingsData.cmdTabSwitch;
+  const currentCmdTabSwitchHoldMs = settingsData.cmdTabSwitchHoldMs !== undefined ? settingsData.cmdTabSwitchHoldMs : 1000;
   const currentDefaultAgent = settingsData.defaultAgent || 'claude';
   const currentOpencodeBinary = settingsData.opencodeBinary || 'opencode';
   const currentGeminiBinary = settingsData.geminiBinary || 'gemini';
@@ -433,8 +437,13 @@ settingsBtn?.addEventListener('click', async () => {
           <input type="checkbox" id="cmd-tab-switch" ${currentCmdTabSwitch ? 'checked' : ''} style="accent-color: var(--ds-accent-green);">
           Hold \u2318 to switch tabs (\u23181-9, \u2318&lt; \u2318&gt;)
         </label>
+        <label style="font-size: 13px; color: var(--ds-text-primary); display: flex; align-items: center; gap: 8px; margin-top: 8px;">
+          Hold delay:
+          <input type="number" id="cmd-tab-switch-hold-ms" value="${currentCmdTabSwitchHoldMs}" min="0" max="5000" step="100" style="width: 80px; padding: 4px 6px; background: var(--ds-bg-primary); border: 1px solid var(--ds-border); border-radius: 4px; color: var(--ds-text-primary); font-size: 13px;">
+          ms
+        </label>
         <p style="font-size: 11px; color: var(--ds-text-secondary); margin-top: 4px;">
-          Hold Command for 1 second to activate, then press 1-9 to jump to a tab or &lt; / &gt; to cycle.
+          Hold Command for this long to activate, then press 1-9 to jump to a tab or &lt; / &gt; to cycle. Set to 0 for instant.
         </p>
       </div>
       <div class="settings-section">
@@ -535,6 +544,7 @@ settingsBtn?.addEventListener('click', async () => {
     const wandPlanMode = overlay.querySelector('#wand-plan-mode').checked;
     const wandPromptTemplate = overlay.querySelector('#wand-prompt-template').value;
     const cmdTabSwitch = overlay.querySelector('#cmd-tab-switch').checked;
+    const cmdTabSwitchHoldMs = Math.max(0, Number(overlay.querySelector('#cmd-tab-switch-hold-ms').value) || 0);
     const enabledAgents = [];
     if (overlay.querySelector('#agent-claude').checked) enabledAgents.push('claude');
     if (overlay.querySelector('#agent-opencode').checked) enabledAgents.push('opencode');
@@ -544,10 +554,11 @@ settingsBtn?.addEventListener('click', async () => {
     await fetch('/api/settings', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ shellProfile, maxIssueTitleLength: newMaxTitle, wandPlanMode, wandPromptTemplate, cmdTabSwitch, enabledAgents, opencodeBinary, geminiBinary })
+      body: JSON.stringify({ shellProfile, maxIssueTitleLength: newMaxTitle, wandPlanMode, wandPromptTemplate, cmdTabSwitch, cmdTabSwitchHoldMs, enabledAgents, opencodeBinary, geminiBinary })
     });
     maxIssueTitleLength = Math.max(10, Math.min(200, newMaxTitle));
     setCmdTabSwitchEnabled(cmdTabSwitch);
+    setCmdTabSwitchHoldMs(cmdTabSwitchHoldMs);
     // Refresh agents data if agent settings changed
     const prevEnabled = (window.__deepsteveAgents || []).filter(a => a.enabled).map(a => a.id).sort().join(',');
     const newEnabled = enabledAgents.sort().join(',');

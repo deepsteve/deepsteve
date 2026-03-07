@@ -197,7 +197,7 @@ Please read the issue carefully, understand the codebase context, and implement 
 };
 
 // Load settings
-let settings = { shellProfile: '~/.zshrc', maxIssueTitleLength: 25, cmdTabSwitch: false, ...SETTINGS_DEFAULTS };
+let settings = { shellProfile: '~/.zshrc', maxIssueTitleLength: 25, cmdTabSwitch: false, cmdTabSwitchHoldMs: 1000, ...SETTINGS_DEFAULTS };
 try {
   if (fs.existsSync(SETTINGS_FILE)) {
     settings = { ...settings, ...JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8')) };

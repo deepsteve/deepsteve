@@ -68,6 +68,7 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
 .tab-drag-ghost { opacity: 0.9; box-shadow: 0 4px 12px rgba(0,0,0,0.5); border-color: var(--ds-accent-blue) !important; }
 #tabs-list.tab-drag-active { user-select: none; }
 #tabs-list.tab-drag-active .tab:not(.dragging) { pointer-events: none; transition: transform 0.15s ease; }
+#tabs.tab-switch-mode { outline: 2px solid var(--ds-accent-blue); outline-offset: -2px; border-radius: 4px; }
 
 /* Vertical layout mode */
 #app-container.vertical-layout { flex-direction: row; }
