@@ -23,4 +23,11 @@ Steps:
 
 7. **Close the GitHub issue** (success only): Extract the issue number from the branch name obtained in step 2. If the branch name matches the pattern `*github-issue-<number>*`, run `gh issue close <number> --comment "Merged into main."`. If the branch name doesn't match this pattern, skip this step silently.
 
-8. **Close this terminal** (success only): Run `curl -s -X POST http://localhost:3000/api/shells/$DEEPSTEVE_SESSION_ID/close`. This must be the absolute last step — the session terminates after this.
+8. **Add a testing task** (success only): Use the `mcp__deepsteve__add_task` tool to create a task for the human to manually test the change. The title should be short, e.g. "Test: <feature/fix summary>". The description should contain clear, actionable steps to verify the change works, written as a numbered list. Set priority to "medium" (or "high" if the change is risky or touches core functionality). Set `session_tag` to the branch name from step 2. Example description format:
+   ```
+   1. Open deepsteve and do X
+   2. Verify Y happens
+   3. Try edge case Z
+   ```
+
+9. **Close this terminal** (success only): Run `curl -s -X POST http://localhost:3000/api/shells/$DEEPSTEVE_SESSION_ID/close`. This must be the absolute last step — the session terminates after this.
