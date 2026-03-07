@@ -53,6 +53,16 @@ Browser (xterm.js) ←→ WebSocket ←→ server.js ←→ node-pty ←→ Shel
 ### Security
 **No authentication, no CORS, and no WebSocket origin checking.** Designed for localhost use (`127.0.0.1`). HTTPS is optional via `--https`.
 
+## Adding a New Setting
+
+Every setting must be wired in **three places** in `server.js`, plus the client UI:
+
+1. **Default value** — add to the `settings` initializer (~line 200)
+2. **POST `/api/settings` handler** — read from `req.body`, validate, and assign to `settings`
+3. **`broadcastSettings()`** — include in the WebSocket message so all windows receive updates
+
+The client sends the value in the POST body and applies it locally on save, which masks bugs where the server silently drops the field. Always verify that other browser windows pick up the change via WebSocket.
+
 ## Gotchas and Non-Obvious Behavior
 - **Ink input parsing**: Text and `\r` must be sent separately with a 1s delay (`submitToShell()`) for interactive agents like Claude/Gemini to recognize input correctly.
 - **BEL detection**: Server detects `\x07` (BEL) to know when an agent is waiting for input, driving notifications and `waitingForInput` state.

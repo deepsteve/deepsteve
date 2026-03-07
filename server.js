@@ -370,6 +370,7 @@ function broadcastSettings() {
     type: 'settings',
     maxIssueTitleLength: settings.maxIssueTitleLength,
     cmdTabSwitch: settings.cmdTabSwitch,
+    cmdTabSwitchHoldMs: settings.cmdTabSwitchHoldMs,
   });
   for (const client of wss.clients) {
     if (client.readyState === 1) client.send(msg);
@@ -1018,6 +1019,10 @@ app.post('/api/settings', (req, res) => {
   if (req.body.cmdTabSwitch !== undefined) {
     settings.cmdTabSwitch = !!req.body.cmdTabSwitch;
     log(`Settings updated: cmdTabSwitch=${settings.cmdTabSwitch}`);
+  }
+  if (req.body.cmdTabSwitchHoldMs !== undefined) {
+    settings.cmdTabSwitchHoldMs = Math.max(0, Number(req.body.cmdTabSwitchHoldMs) || 0);
+    log(`Settings updated: cmdTabSwitchHoldMs=${settings.cmdTabSwitchHoldMs}`);
   }
   if (req.body.enabledAgents !== undefined) {
     const agents = req.body.enabledAgents;
