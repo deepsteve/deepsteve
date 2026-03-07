@@ -282,6 +282,8 @@ async function refreshSessionsDropdown() {
       return (statusOrder[a.status] || 0) - (statusOrder[b.status] || 0);
     });
 
+    const showAgentBadge = window.__deepsteveAgents?.length > 1;
+
     sessionsMenu.innerHTML = allShells.map(shell => {
       const isConnected = connectedIds.has(shell.id);
       const isClosed = shell.status === 'closed';
@@ -290,11 +292,12 @@ async function refreshSessionsDropdown() {
       const statusText = isConnected ? 'connected' : (isClosed ? (staleness ? `closed ${staleness}` : 'closed') : (staleness || (shell.status === 'saved' ? 'saved' : 'not connected')));
       const statusClass = isConnected ? 'active' : (isClosed ? 'closed' : '');
       const canClose = !isConnected;
+      const agentLabel = shell.agentType === 'opencode' ? 'OpenCode' : (shell.agentType ? shell.agentType.charAt(0).toUpperCase() + shell.agentType.slice(1) : '');
 
       return `
         <div class="dropdown-item ${isConnected ? 'connected' : 'clickable'} ${isClosed ? 'closed' : ''}" data-id="${shell.id}" data-cwd="${shell.cwd}" data-name="${escapeHtml(name)}">
           <div class="session-info">
-            <span class="session-name">${name}</span>
+            <span class="session-name">${name}${showAgentBadge && agentLabel ? ` <span class="session-agent-badge">${agentLabel}</span>` : ''}</span>
             <span class="session-status ${statusClass}">${statusText}</span>
           </div>
           ${canClose ? `<span class="session-close" data-id="${shell.id}">✕</span>` : ''}
