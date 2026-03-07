@@ -1168,10 +1168,20 @@ function initEnginesDropdown() {
     return `<div class="dropdown-item ${isDefault ? 'active' : 'clickable'}" data-agent="${a.id}">${a.name}${isDefault ? ' ✓' : ''}</div>`;
   }).join('');
   
-  // Update button text
+  // Update button text (short name by default, full name on hover)
   const currentAgent = agents.find(a => a.id === window.__deepsteveDefaultAgent);
-  btn.textContent = currentAgent?.name || 'Engine';
-  
+  btn.textContent = currentAgent?.shortName || currentAgent?.name || 'Engine';
+  btn.title = currentAgent?.name || 'Engine';
+
+  btn.addEventListener('mouseenter', () => {
+    const a = agents.find(a => a.id === window.__deepsteveDefaultAgent);
+    btn.textContent = a?.name || 'Engine';
+  });
+  btn.addEventListener('mouseleave', () => {
+    const a = agents.find(a => a.id === window.__deepsteveDefaultAgent);
+    btn.textContent = a?.shortName || a?.name || 'Engine';
+  });
+
   // Handle clicks
   menu.querySelectorAll('.dropdown-item').forEach(item => {
     item.addEventListener('click', () => {
@@ -1183,9 +1193,10 @@ function initEnginesDropdown() {
         const isSelected = i.dataset.agent === agentId;
         i.textContent = (a?.name || '') + (isSelected ? ' ✓' : '');
       });
-      // Update button text
+      // Update button text (keep full name since still hovered)
       const newDefault = agents.find(a => a.id === agentId);
       btn.textContent = newDefault?.name || 'Engine';
+      btn.title = newDefault?.name || 'Engine';
       menu.classList.remove('open');
     });
   });
