@@ -1,0 +1,9 @@
+{
+  "name": "Baby Browser",
+  "version": "0.1.0",
+  "description": "Iframe-based browser tab for viewing web pages",
+  "enabledByDefault": false,
+  "entry": "index.html",
+  "display": "tab",
+  "tabOption": { "label": "Baby Browser" }
+}

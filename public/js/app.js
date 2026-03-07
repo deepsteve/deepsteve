@@ -78,7 +78,7 @@ history.pushState(null, '', location.href);
 
 // Warn before leaving page with active sessions
 window.addEventListener('beforeunload', (e) => {
-  const hasActiveSessions = [...sessions.values()].some(s => !s.waitingForInput);
+  const hasActiveSessions = [...sessions.values()].some(s => s.type !== 'mod-tab' && !s.waitingForInput);
   if (hasActiveSessions) {
     e.preventDefault();
     e.returnValue = '';
@@ -201,6 +201,7 @@ function getSessionList() {
     name: s.name || getDefaultTabName(s.cwd),
     cwd: s.cwd,
     waitingForInput: s.waitingForInput || false,
+    type: s.type || 'terminal',
   }));
 }
 
@@ -841,6 +842,81 @@ function initTerminal(id, ws, cwd, initialName, { hasScrollback = false, pending
 }
 
 /**
+ * Create a mod tab (client-only, no PTY or WebSocket).
+ */
+function createModTab(modId, opts = {}) {
+  const mod = ModManager.getNewTabItems().find(m => m.modId === modId);
+  if (!mod) {
+    // Mod disabled or removed — clean up stale storage if restoring
+    if (opts.id) {
+      SessionStore.removeSession(getWindowId(), opts.id);
+      TabSessions.remove(opts.id);
+    }
+    return;
+  }
+
+  const id = opts.id || crypto.randomUUID().slice(0, 8);
+  const name = opts.name || mod.label;
+
+  const container = document.createElement('div');
+  container.className = 'terminal-container';
+  container.id = 'term-' + id;
+  document.getElementById('terminals').appendChild(container);
+
+  const iframe = document.createElement('iframe');
+  iframe.src = `/mods/${modId}/${mod.entry}`;
+  iframe.style.cssText = 'width:100%;height:100%;border:none;';
+  iframe.sandbox = 'allow-same-origin allow-scripts allow-forms allow-popups';
+  container.appendChild(iframe);
+
+  sessions.set(id, {
+    term: null, fit: null, ws: null, container, cwd: null,
+    name, waitingForInput: false, scrollControl: null,
+    type: 'mod-tab', modId,
+  });
+
+  const tabCallbacks = {
+    onSwitch: (sessionId) => switchTo(sessionId),
+    onClose: async (sessionId) => {
+      if (await confirmCloseSession(sessionId)) killSession(sessionId);
+    },
+    onRename: (sessionId) => renameSession(sessionId),
+    onReorder: (orderedIds) => {
+      const tabList = TabSessions.get();
+      const reordered = orderedIds.map(id => tabList.find(s => s.id === id)).filter(Boolean);
+      TabSessions.save(reordered);
+      SessionStore.reorderSessions(getWindowId(), orderedIds);
+      ModManager.notifySessionsChanged(getSessionList());
+    },
+    getLiveWindows: () => [],
+    onSendToWindow: () => {},
+    getModMenuItems: () => [],
+  };
+
+  TabManager.addTab(id, name, tabCallbacks);
+  updateEmptyState();
+
+  if (!opts.restoreActive) {
+    switchTo(id);
+  }
+
+  // Persist
+  const windowId = getWindowId();
+  TabSessions.add({ id, name, type: 'mod-tab', modId });
+  SessionStore.addSession(windowId, { id, name, type: 'mod-tab', modId });
+
+  // Forward resize events to iframe
+  const ro = new ResizeObserver(([entry]) => {
+    const { width, height } = entry.contentRect;
+    iframe.contentWindow?.postMessage({ type: 'resize', width, height }, '*');
+  });
+  ro.observe(container);
+  sessions.get(id).resizeObserver = ro;
+
+  ModManager.notifySessionsChanged(getSessionList());
+}
+
+/**
  * Switch to a specific session tab
  */
 function switchTo(id) {
@@ -865,13 +941,15 @@ function switchTo(id) {
   ModManager.notifyActiveSessionChanged(id);
   const session = sessions.get(id);
   if (session) {
-    session.scrollControl.suppressScroll();
     session.container.classList.add('active');
     TabManager.setActive(id);
     // Clear badge and notification when switching to this tab
     TabManager.updateBadge(id, false);
     clearNotification(id);
 
+    if (session.type === 'mod-tab') return;
+
+    session.scrollControl.suppressScroll();
     requestAnimationFrame(() => {
       try {
         fitTerminal(session.term, session.fit, session.ws);
@@ -894,14 +972,25 @@ function switchTo(id) {
 function restoreSessions(sessionList, opts = {}) {
   const savedActiveId = ActiveTab.get();
   const allowDuplicate = opts.allowDuplicate !== undefined ? opts.allowDuplicate : true;
-  const promises = sessionList.map(({ id, cwd }) =>
+
+  // Restore mod tabs synchronously (no server interaction)
+  const terminalSessions = [];
+  for (const entry of sessionList) {
+    if (entry.type === 'mod-tab' && entry.modId) {
+      createModTab(entry.modId, { id: entry.id, name: entry.name, restoreActive: true });
+    } else {
+      terminalSessions.push(entry);
+    }
+  }
+
+  const promises = terminalSessions.map(({ id, cwd }) =>
     createSession(cwd, id, false, { restoreActive: true, allowDuplicate })
   );
   Promise.all(promises).then((results) => {
     // Clean up storage for sessions that were rejected (null result = duplicate)
     results.forEach((resolvedId, i) => {
       if (resolvedId === null) {
-        const { id } = sessionList[i];
+        const { id } = terminalSessions[i];
         console.log('[restore] Session', id, 'rejected (duplicate), cleaning up storage');
         SessionStore.removeSession(getWindowId(), id);
         TabSessions.remove(id);
@@ -928,8 +1017,11 @@ function restoreSessions(sessionList, opts = {}) {
  * (dropdown), fetches state from the server.
  */
 function confirmCloseSession(id) {
-  // Check local session first (tab is connected in this window)
+  // Mod tabs have no PTY — always allow close
   const session = sessions.get(id);
+  if (session?.type === 'mod-tab') return Promise.resolve(true);
+
+  // Check local session first (tab is connected in this window)
   const isIdle = session ? session.waitingForInput : null;
 
   if (isIdle === null) {
@@ -1019,15 +1111,21 @@ function killSession(id) {
   const session = sessions.get(id);
   if (!session) return;
 
-  // Tell server to close this client's connection to the shell.
-  // If no other clients are connected, the server kills the shell immediately.
-  // If other clients remain, the shell stays alive for them.
-  try { session.ws.sendJSON({ type: 'close-session' }); } catch {}
+  if (session.type === 'mod-tab') {
+    // Mod tabs: no PTY/WS to clean up
+    if (session.resizeObserver) session.resizeObserver.disconnect();
+    session.container.remove();
+  } else {
+    // Tell server to close this client's connection to the shell.
+    // If no other clients are connected, the server kills the shell immediately.
+    // If other clients remain, the shell stays alive for them.
+    try { session.ws.sendJSON({ type: 'close-session' }); } catch {}
 
-  if (session.resizeObserver) session.resizeObserver.disconnect();
-  session.ws.close();
-  session.term.dispose();
-  session.container.remove();
+    if (session.resizeObserver) session.resizeObserver.disconnect();
+    session.ws.close();
+    session.term.dispose();
+    session.container.remove();
+  }
 
   TabManager.removeTab(id);
   sessions.delete(id);
@@ -1119,8 +1217,8 @@ function renameSession(id) {
     const tabList = TabSessions.get();
     const tabEntry = tabList.find(s => s.id === id);
     if (tabEntry) { tabEntry.name = name; TabSessions.save(tabList); }
-    // Tell server so it persists across tab close/restore
-    session.ws.sendJSON({ type: 'rename', name });
+    // Tell server so it persists across tab close/restore (skip for mod tabs — no WS)
+    if (session.ws) session.ws.sendJSON({ type: 'rename', name });
     ModManager.notifySessionsChanged(getSessionList());
   });
 }
@@ -1247,6 +1345,16 @@ function showNewTabMenu(e) {
     <div class="context-menu-item" data-action="worktree">New worktree...</div>
     <div class="context-menu-item" data-action="repo">Change repo...</div>
   `;
+
+  // Add mod tab items
+  const modTabItems = ModManager.getNewTabItems();
+  if (modTabItems.length > 0) {
+    html += '<div class="context-menu-separator"></div>';
+    for (const item of modTabItems) {
+      html += `<div class="context-menu-item" data-action="mod-tab" data-mod-id="${item.modId}">${item.label}</div>`;
+    }
+  }
+
   menu.innerHTML = html;
 
   // Handle agent selector clicks
@@ -1302,6 +1410,8 @@ function showNewTabMenu(e) {
       await promptWorktreeSession();
     } else if (action === 'repo') {
       await promptRepoSession();
+    } else if (action === 'mod-tab') {
+      createModTab(item.dataset.modId);
     } else if (action === 'opencode') {
       const active = activeId && sessions.get(activeId);
       const cwdPath = active?.cwd || SessionStore.getLastCwd() || '~';
@@ -1638,6 +1748,11 @@ async function init() {
     createSession: (cwd, opts) => createSession(cwd, null, true, opts),
     killSession: async (id, opts) => {
       if (opts?.force || await confirmCloseSession(id)) killSession(id);
+    },
+    closeModTabs: (modId) => {
+      for (const [id, s] of sessions) {
+        if (s.type === 'mod-tab' && s.modId === modId) killSession(id);
+      }
     },
   });
 

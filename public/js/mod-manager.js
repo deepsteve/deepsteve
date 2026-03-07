@@ -280,9 +280,9 @@ async function loadAvailableMods() {
     if (mod.compatible === false) enabledMods.delete(mod.id);
   }
 
-  // Create toolbar buttons for enabled non-panel mods
+  // Create toolbar buttons for enabled non-panel, non-tab mods
   for (const mod of allMods) {
-    if (enabledMods.has(mod.id) && mod.entry && mod.display !== 'panel' && mod.compatible !== false) {
+    if (enabledMods.has(mod.id) && mod.entry && mod.display !== 'panel' && mod.display !== 'tab' && mod.compatible !== false) {
       _createToolbarButton(mod);
     }
   }
@@ -562,7 +562,7 @@ function _createModCard(mod, marketplaceOverlay) {
           enabledMods.add(depId);
           if (depMod.display === 'panel') {
             _loadPanelMod(depMod);
-          } else if (depMod.entry) {
+          } else if (depMod.display !== 'tab' && depMod.entry) {
             _createToolbarButton(depMod);
           }
           alsoEnabled.push(depMod.name || depId);
@@ -572,7 +572,7 @@ function _createModCard(mod, marketplaceOverlay) {
         if (mod.display === 'panel') {
           _loadPanelMod(mod);
           _switchToPanel(mod.id);
-        } else if (mod.entry) {
+        } else if (mod.display !== 'tab' && mod.entry) {
           _createToolbarButton(mod);
         }
         if (alsoEnabled.length > 0) {
@@ -588,6 +588,8 @@ function _createModCard(mod, marketplaceOverlay) {
           enabledMods.delete(depId);
           if (depMod?.display === 'panel') {
             _unloadPanelMod(depId);
+          } else if (depMod?.display === 'tab') {
+            if (hooks?.closeModTabs) hooks.closeModTabs(depId);
           } else {
             _removeToolbarButton(depId);
             if (activeViewId === depId) _hideMod();
@@ -598,6 +600,8 @@ function _createModCard(mod, marketplaceOverlay) {
         enabledMods.delete(mod.id);
         if (mod.display === 'panel') {
           _unloadPanelMod(mod.id);
+        } else if (mod.display === 'tab') {
+          if (hooks?.closeModTabs) hooks.closeModTabs(mod.id);
         } else {
           _removeToolbarButton(mod.id);
           if (activeViewId === mod.id) {
@@ -1538,6 +1542,21 @@ function getContextMenuItems() {
   return items;
 }
 
+/**
+ * Get new-tab menu items from enabled tab-display mods.
+ * Returns [{ modId, label, entry }].
+ */
+function getNewTabItems() {
+  const items = [];
+  for (const mod of allMods) {
+    if (!enabledMods.has(mod.id)) continue;
+    if (mod.display !== 'tab') continue;
+    if (mod.compatible === false) continue;
+    items.push({ modId: mod.id, label: mod.tabOption?.label || mod.name, entry: mod.entry });
+  }
+  return items;
+}
+
 export const ModManager = {
   init,
   loadAvailableMods,
@@ -1558,4 +1577,5 @@ export const ModManager = {
   handleModChanged,
   focusPanel,
   getContextMenuItems,
+  getNewTabItems,
 };
