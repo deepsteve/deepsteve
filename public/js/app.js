@@ -14,6 +14,7 @@ import { initLiveReload } from './live-reload.js';
 import { ModManager } from './mod-manager.js';
 import { initFileDrop } from './file-drop.js';
 import { init as initCmdHoldMode, setEnabled as setCmdHoldModeEnabled, setHoldMs as setCmdHoldModeHoldMs } from './cmd-tab-switch.js';
+import { nsKey } from './storage-namespace.js';
 
 // Configuration
 let maxIssueTitleLength = 25;
@@ -36,7 +37,7 @@ const processedBrowserRequests = new Set();
  * Survives page refresh, doesn't depend on localStorage window-ID mapping.
  */
 const TabSessions = {
-  KEY: 'deepsteve-tab-sessions',
+  KEY: nsKey('deepsteve-tab-sessions'),
   get() {
     try { return JSON.parse(sessionStorage.getItem(this.KEY)) || []; } catch { return []; }
   },
@@ -62,7 +63,7 @@ const TabSessions = {
  * Persist the active tab ID in sessionStorage so it survives page refresh.
  */
 const ActiveTab = {
-  KEY: 'deepsteve-active-tab',
+  KEY: nsKey('deepsteve-active-tab'),
   get() { return sessionStorage.getItem(this.KEY); },
   set(id) { sessionStorage.setItem(this.KEY, id); },
   clear() { sessionStorage.removeItem(this.KEY); }
@@ -2086,8 +2087,8 @@ async function init() {
   // Check if this is an existing tab BEFORE starting heartbeat (which creates window ID)
   const isExistingTab = WindowManager.hasExistingWindowId();
   console.log('[init] isExistingTab:', isExistingTab);
-  console.log('[init] sessionStorage windowId:', sessionStorage.getItem('deepsteve-window-id'));
-  console.log('[init] localStorage:', localStorage.getItem('deepsteve'));
+  console.log('[init] sessionStorage windowId:', sessionStorage.getItem(nsKey('deepsteve-window-id')));
+  console.log('[init] localStorage:', localStorage.getItem(nsKey('deepsteve')));
 
   // Check for legacy storage format and migrate
   const legacySessions = SessionStore.migrateFromLegacy();

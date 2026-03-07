@@ -2,7 +2,9 @@
  * Layout management for horizontal/vertical tab layouts
  */
 
-const STORAGE_KEY = 'deepsteve-layout';
+import { nsKey } from './storage-namespace.js';
+
+const STORAGE_KEY = nsKey('deepsteve-layout');
 const MIN_SIDEBAR_WIDTH = 60;
 const DEFAULT_SIDEBAR_WIDTH = 200;
 
