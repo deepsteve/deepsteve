@@ -10,7 +10,6 @@
   "toolbar": { "label": "Action Required" },
   "settings": [
     { "key": "autoSwitch", "type": "boolean", "label": "Auto-cycle tabs", "description": "Automatically switch to next waiting tab after input is sent", "default": true },
-    { "key": "switchDelay", "type": "number", "label": "Switch delay (ms)", "description": "Delay before auto-switching to next tab (100-500ms)", "default": 100 },
-    { "key": "debounceDelay", "type": "number", "label": "Debounce delay (ms)", "description": "How long a tab must be waiting before appearing in the queue (50-500ms)", "default": 100 }
+    { "key": "switchDelay", "type": "number", "label": "Switch delay (ms)", "description": "Delay before auto-switching to next tab (100-500ms)", "default": 100 }
   ]
 }
