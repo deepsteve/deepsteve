@@ -103,39 +103,39 @@ app.get('/api/proxy', async (req, res) => {
     const contentType = resp.headers.get('content-type') || '';
     let body = Buffer.from(await resp.arrayBuffer());
     if (contentType.includes('text/html')) {
-      // Use the final URL after redirects (e.g. http→https) for correct origin
       const finalUrl = new URL(resp.url);
       const origin = finalUrl.origin;
-      const injection = `<base href="${origin}/">
-<script>(function(){
-  var P='/api/proxy?url=';
-  function proxyHref(href){
-    try{var u=new URL(href,document.baseURI);if(u.origin==='${origin}')return P+encodeURIComponent(u.href);return P+encodeURIComponent(href)}catch(e){return href}
-  }
-  document.addEventListener('click',function(e){
-    var a=e.target.closest('a');if(!a||!a.href)return;
-    var h=a.getAttribute('href');if(!h||h.startsWith('javascript:')||h.startsWith('#'))return;
-    e.preventDefault();window.location.href=proxyHref(a.href);
-  },true);
-  document.addEventListener('submit',function(e){
-    var f=e.target;if(!f||f.tagName!=='FORM')return;
-    var action=f.getAttribute('action')||'';
-    if(f.method&&f.method.toLowerCase()==='get'){
-      e.preventDefault();
-      var fd=new FormData(f);var params=new URLSearchParams(fd).toString();
-      var base=new URL(action||window.location.href,document.baseURI);
-      base.search=params?'?'+params:'';
-      window.location.href=P+encodeURIComponent(base.href);
-    }
-  },true);
-})()</script>`;
       let html = body.toString('utf-8');
+      // Rewrite only <a href> and <form action> — not <link href> (stylesheets) or other tags.
+      // Resources load directly from origin via <base> tag.
+      html = html.replace(/<(a\s[^>]*?)href="(\/[^"]*?)"([^>]*?>)/gi, (match, pre, pathVal, post) => {
+        if (pathVal.startsWith('//')) return match;
+        if (pathVal === '#' || pathVal.startsWith('/#')) return match;
+        const absolute = new URL(pathVal, origin + '/').href;
+        return `<${pre}href="/api/proxy?url=${encodeURIComponent(absolute)}"${post}`;
+      });
+      html = html.replace(/<(a\s[^>]*?)href="(https?:\/\/[^"]*?)"([^>]*?>)/gi, (match, pre, urlVal, post) => {
+        try {
+          const u = new URL(urlVal);
+          if (u.origin === origin) {
+            return `<${pre}href="/api/proxy?url=${encodeURIComponent(urlVal)}"${post}`;
+          }
+        } catch {}
+        return match;
+      });
+      html = html.replace(/<(form\s[^>]*?)action="(\/[^"]*?)"([^>]*?>)/gi, (match, pre, pathVal, post) => {
+        if (pathVal.startsWith('//')) return match;
+        const absolute = new URL(pathVal, origin + '/').href;
+        return `<${pre}action="/api/proxy?url=${encodeURIComponent(absolute)}"${post}`;
+      });
+      // Inject <base> so resources (CSS/JS/images) with relative src resolve to origin
+      const baseTag = `<base href="${origin}/">`;
       if (/<head[^>]*>/i.test(html)) {
-        html = html.replace(/<head([^>]*)>/i, `<head$1>${injection}`);
+        html = html.replace(/<head([^>]*)>/i, `<head$1>${baseTag}`);
       } else if (/<html[^>]*>/i.test(html)) {
-        html = html.replace(/<html([^>]*)>/i, `<html$1><head>${injection}</head>`);
+        html = html.replace(/<html([^>]*)>/i, `<html$1><head>${baseTag}</head>`);
       } else {
-        html = injection + html;
+        html = baseTag + html;
       }
       body = Buffer.from(html, 'utf-8');
       res.setHeader('content-length', body.length);
