@@ -398,7 +398,7 @@ async function _showMarketplaceModal() {
   // Filters
   const filters = document.createElement('div');
   filters.className = 'marketplace-filters';
-  const filterNames = ['All', 'Enabled', 'Panel', 'Fullscreen', 'Games'];
+  const filterNames = ['All', 'Enabled', 'Skills', 'Panel', 'Fullscreen', 'Games'];
   for (const name of filterNames) {
     const pill = document.createElement('button');
     pill.className = 'filter-pill' + (name === 'All' ? ' active' : '');
@@ -439,9 +439,10 @@ async function _showMarketplaceModal() {
         if (!name.includes(q) && !desc.includes(q) && !tags.includes(q)) return false;
       }
       // Category filter
-      if (activeFilter === 'enabled') return enabledMods.has(mod.id);
-      if (activeFilter === 'panel') return mod.display === 'panel';
-      if (activeFilter === 'fullscreen') return mod.display !== 'panel';
+      if (activeFilter === 'enabled') return mod.type === 'skill' ? mod.enabled : enabledMods.has(mod.id);
+      if (activeFilter === 'skills') return mod.type === 'skill';
+      if (activeFilter === 'panel') return mod.type !== 'skill' && mod.display === 'panel';
+      if (activeFilter === 'fullscreen') return mod.type !== 'skill' && mod.display !== 'panel';
       if (activeFilter === 'games') return mod.tags && mod.tags.includes('games');
       return true;
     });
@@ -490,7 +491,86 @@ async function _showMarketplaceModal() {
 /**
  * Create a mod card element for the marketplace.
  */
+function _createSkillCard(mod, marketplaceOverlay) {
+  const card = document.createElement('div');
+  card.className = 'mod-card';
+  card.dataset.modId = mod.id;
+
+  // Extract skill ID from "skill:github-issue"
+  const skillId = mod.id.replace('skill:', '');
+
+  // Header
+  const header = document.createElement('div');
+  header.className = 'mod-card-header';
+
+  const info = document.createElement('div');
+  info.className = 'mod-card-info';
+  info.innerHTML = `<span class="mod-card-name">${mod.slashCommand || mod.name}</span>` +
+    `<span class="mod-badge skill">Skill</span>` +
+    `<span class="mod-badge built-in">Built-in</span>`;
+
+  const actions = document.createElement('div');
+  actions.className = 'mod-card-actions';
+
+  const toggle = document.createElement('label');
+  toggle.className = 'mod-card-toggle';
+  const checkbox = document.createElement('input');
+  checkbox.type = 'checkbox';
+  checkbox.checked = !!mod.enabled;
+  const slider = document.createElement('span');
+  slider.className = 'toggle-slider';
+  toggle.appendChild(checkbox);
+  toggle.appendChild(slider);
+
+  checkbox.addEventListener('change', async () => {
+    const endpoint = checkbox.checked ? '/api/skills/enable' : '/api/skills/disable';
+    try {
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: skillId })
+      });
+      if (!res.ok) {
+        const data = await res.json();
+        throw new Error(data.error || 'Failed');
+      }
+      mod.enabled = checkbox.checked;
+    } catch (e) {
+      checkbox.checked = !checkbox.checked; // revert
+      _showDepNotice(card, e.message, 'error');
+    }
+  });
+
+  actions.appendChild(toggle);
+  header.appendChild(info);
+  header.appendChild(actions);
+  card.appendChild(header);
+
+  // Description
+  if (mod.description) {
+    const desc = document.createElement('div');
+    desc.className = 'mod-card-description';
+    desc.textContent = mod.description;
+    card.appendChild(desc);
+  }
+
+  // Argument hint
+  if (mod.argumentHint) {
+    const hint = document.createElement('div');
+    hint.className = 'mod-card-description';
+    hint.style.color = 'var(--ds-text-secondary)';
+    hint.style.fontSize = '11px';
+    hint.textContent = `Usage: ${mod.slashCommand} ${mod.argumentHint}`;
+    card.appendChild(hint);
+  }
+
+  return card;
+}
+
 function _createModCard(mod, marketplaceOverlay) {
+  // Skills get a simplified card
+  if (mod.type === 'skill') return _createSkillCard(mod, marketplaceOverlay);
+
   const card = document.createElement('div');
   card.className = 'mod-card' + (mod.compatible === false ? ' mod-card-incompatible' : '');
   card.dataset.modId = mod.id;

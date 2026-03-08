@@ -38,6 +38,8 @@ mkdir -p ~/.deepsteve/themes
 cp -n themes/*.css ~/.deepsteve/themes/ 2>/dev/null || true
 mkdir -p ~/.deepsteve/mods
 cp -r mods/* ~/.deepsteve/mods/ 2>/dev/null || true
+mkdir -p ~/.deepsteve/skills
+cp -r skills/*.md ~/.deepsteve/skills/ 2>/dev/null || true
 
 # Install deps if package.json changed
 if ! diff -q package.json ~/.deepsteve/package.json.prev &>/dev/null; then
