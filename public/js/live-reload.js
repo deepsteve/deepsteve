@@ -8,7 +8,9 @@
  *   CONNECTED → (WS closes unexpectedly) → RECONNECTING → (server back) → CONNECTED
  *   RELOADING → (server back) → page reload
  *
- * Leader election: when multiple windows exist, lowest windowId shows the modal.
+ * All windows show the confirmation modal. First response wins — the deciding
+ * window sends restart-confirmed/declined to the server and broadcasts
+ * restart-decided via BroadcastChannel to dismiss modals in other windows.
  */
 
 const State = {
@@ -56,7 +58,7 @@ export function initLiveReload({ onMessage, onShowRestartConfirm, onShowReloadOv
           lastPingTime = Date.now();
           ws.send(JSON.stringify({ type: 'pong' }));
         } else if (msg.type === 'confirm-restart') {
-          if (state === State.CONNECTED) electLeaderAndConfirm();
+          if (state === State.CONNECTED) showConfirmInAllWindows();
         } else if (msg.type === 'reload') {
           // Server is about to shut down with --refresh — mark for reload
           if (state === State.CONFIRMED) {
@@ -124,73 +126,29 @@ export function initLiveReload({ onMessage, onShowRestartConfirm, onShowReloadOv
     }, 500);
   }
 
-  // --- Leader election ---
+  // --- Show modal in every window, first response wins ---
 
-  function electLeaderAndConfirm() {
+  function showConfirmInAllWindows() {
     setState(State.CONFIRMING);
 
-    const claims = new Set();
-    if (windowId) claims.add(windowId);
-    restartChannel.postMessage({ type: 'restart-claim', windowId });
-
-    let electionTimer = null;
-    let leaderFallbackTimer = null;
-    let settled = false;
-
-    const onMsg = (event) => {
-      const data = event.data;
-      if (data.type === 'restart-claim') {
-        claims.add(data.windowId);
-        if (electionTimer) clearTimeout(electionTimer);
-        electionTimer = setTimeout(runElection, 200);
-      } else if (data.type === 'restart-decided') {
-        done();
-        if (data.confirmed) setState(State.CONFIRMED);
-        else setState(State.CONNECTED);
-      } else if (data.type === 'restart-leader-gone') {
-        done();
-        electLeaderAndConfirm();
-      }
-    };
-
-    restartChannel.addEventListener('message', onMsg);
-
-    function done() {
-      if (settled) return;
-      settled = true;
-      restartChannel.removeEventListener('message', onMsg);
-      if (electionTimer) clearTimeout(electionTimer);
-      if (leaderFallbackTimer) clearTimeout(leaderFallbackTimer);
-    }
-
-    function runElection() {
-      if (settled) return;
-      const sorted = [...claims].sort();
-      if (sorted[0] === windowId) {
-        done();
-        showConfirmModal();
-      } else {
-        leaderFallbackTimer = setTimeout(() => {
-          done();
-          electLeaderAndConfirm();
-        }, 5000);
-      }
-    }
-
-    electionTimer = setTimeout(runElection, 200);
-  }
-
-  function showConfirmModal() {
     const modal = onShowRestartConfirm
       ? onShowRestartConfirm()
       : { promise: Promise.resolve(true), dismiss: () => {} };
 
-    // If leader window closes during prompt, notify others to re-elect
-    const onUnload = () => restartChannel.postMessage({ type: 'restart-leader-gone' });
-    window.addEventListener('beforeunload', onUnload);
+    const onBroadcast = (event) => {
+      if (event.data.type === 'restart-decided') {
+        restartChannel.removeEventListener('message', onBroadcast);
+        // Another window already responded — dismiss our modal and follow their decision
+        modal.dismiss();
+        if (event.data.confirmed) setState(State.CONFIRMED);
+        else setState(State.CONNECTED);
+      }
+    };
+    restartChannel.addEventListener('message', onBroadcast);
 
     modal.promise.then(confirmed => {
-      window.removeEventListener('beforeunload', onUnload);
+      restartChannel.removeEventListener('message', onBroadcast);
+      if (state !== State.CONFIRMING) return; // another window already decided
       if (confirmed) {
         setState(State.CONFIRMED);
         ws.send(JSON.stringify({ type: 'restart-confirmed' }));
