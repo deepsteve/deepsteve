@@ -11,6 +11,8 @@
  * Leader election: when multiple windows exist, lowest windowId shows the modal.
  */
 
+import { nsChannel } from './storage-namespace.js';
+
 const State = {
   CONNECTED: 'connected',
   CONFIRMING: 'confirming',
@@ -25,7 +27,7 @@ export function initLiveReload({ onMessage, onShowRestartConfirm, onShowReloadOv
   let pingTimer = null;
   let lastPingTime = 0;
 
-  const restartChannel = new BroadcastChannel('deepsteve-restart');
+  const restartChannel = new BroadcastChannel(nsChannel('deepsteve-restart'));
 
   function setState(newState) {
     console.log(`[live-reload] ${state} → ${newState}`);

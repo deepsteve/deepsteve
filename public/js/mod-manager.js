@@ -10,10 +10,12 @@
  * Only one panel is visible at a time; clicking a different tab switches to it.
  */
 
-const STORAGE_KEY = 'deepsteve-enabled-mods'; // Set of enabled mod IDs
-const ACTIVE_VIEW_KEY = 'deepsteve-active-mod-view'; // Which mod view is currently showing
-const PANEL_VISIBLE_KEY = 'deepsteve-panel-visible'; // Whether the panel is shown
-const ACTIVE_PANEL_KEY = 'deepsteve-active-panel'; // Which panel tab is active
+import { nsKey } from './storage-namespace.js';
+
+const STORAGE_KEY = nsKey('deepsteve-enabled-mods'); // Set of enabled mod IDs
+const ACTIVE_VIEW_KEY = nsKey('deepsteve-active-mod-view'); // Which mod view is currently showing
+const PANEL_VISIBLE_KEY = nsKey('deepsteve-panel-visible'); // Whether the panel is shown
+const ACTIVE_PANEL_KEY = nsKey('deepsteve-active-panel'); // Which panel tab is active
 
 let allMods = [];          // [{ id, name, description, entry, toolbar }]
 let enabledMods = new Set(); // mod IDs that are enabled
@@ -48,7 +50,7 @@ let getActiveSessionIdFn = null;     // set from appHooks
 let deepsteveVersion = null;   // set from /api/mods response
 let panelWidth = 360;
 const MIN_PANEL_WIDTH = 200;
-const PANEL_STORAGE_KEY = 'deepsteve-panel-width';
+const PANEL_STORAGE_KEY = nsKey('deepsteve-panel-width');
 
 // ─── Dependency helpers ──────────────────────────────────────────────
 
@@ -220,7 +222,7 @@ function _loadModSettings(mod) {
     defaults[s.key] = s.default;
   }
   try {
-    const stored = JSON.parse(localStorage.getItem(`deepsteve-mod-settings-${mod.id}`));
+    const stored = JSON.parse(localStorage.getItem(nsKey(`deepsteve-mod-settings-${mod.id}`)));
     if (stored) return { ...defaults, ...stored };
   } catch {}
   return defaults;
@@ -234,7 +236,7 @@ function _saveModSetting(modId, key, value) {
   if (!mod) return;
   const current = _loadModSettings(mod);
   current[key] = value;
-  localStorage.setItem(`deepsteve-mod-settings-${modId}`, JSON.stringify(current));
+  localStorage.setItem(nsKey(`deepsteve-mod-settings-${modId}`), JSON.stringify(current));
   _notifySettingsChanged(modId);
 }
 

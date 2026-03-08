@@ -15,7 +15,9 @@
  * }
  */
 
-const STORAGE_KEY = 'deepsteve';
+import { nsKey } from './storage-namespace.js';
+
+const STORAGE_KEY = nsKey('deepsteve');
 
 function getStorage() {
   try {
