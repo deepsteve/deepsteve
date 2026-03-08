@@ -100,6 +100,13 @@ export function setupTerminalIO(term, ws, { onUserInput, container } = {}) {
     term.refresh(0, term.rows - 1);
     scrollBtn.classList.remove('visible');
     if (viewport) prevScrollTop = viewport.scrollTop;
+    // After container visibility changes (tab switch), the viewport scroll
+    // dimensions may not be recalculated yet. Force a deferred sync so the
+    // scrollbar reflects the actual buffer height and the user can scroll.
+    requestAnimationFrame(() => {
+      term.scrollLines(0);
+      if (viewport) prevScrollTop = viewport.scrollTop;
+    });
   }
 
   function suppressScroll() {
