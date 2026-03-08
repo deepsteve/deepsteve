@@ -197,7 +197,7 @@ Please read the issue carefully, understand the codebase context, and implement 
 };
 
 // Load settings
-let settings = { shellProfile: '~/.zshrc', maxIssueTitleLength: 25, cmdTabSwitch: false, cmdTabSwitchHoldMs: 1000, ...SETTINGS_DEFAULTS };
+let settings = { shellProfile: '~/.zshrc', maxIssueTitleLength: 25, cmdTabSwitch: false, cmdTabSwitchHoldMs: 1000, enabledSkills: [], ...SETTINGS_DEFAULTS };
 try {
   if (fs.existsSync(SETTINGS_FILE)) {
     settings = { ...settings, ...JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8')) };
@@ -1083,6 +1083,54 @@ app.post('/api/themes/active', (req, res) => {
 const MODS_DIR = path.join(__dirname, 'mods');
 const BUILTIN_MODS = new Set(['browser-console', 'tasks', 'screenshots', 'go-karts', 'tower', 'session-info', 'agent-dna']);
 
+// --- Skills system ---
+const SKILLS_DIR = path.join(__dirname, 'skills');
+const CLAUDE_COMMANDS_DIR = path.join(os.homedir(), '.claude', 'commands');
+const SKILL_ID_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/;
+
+function parseSkillFrontmatter(content) {
+  const match = content.match(/^---\n([\s\S]*?)\n---/);
+  if (!match) return {};
+  const meta = {};
+  for (const line of match[1].split('\n')) {
+    const idx = line.indexOf(':');
+    if (idx > 0) meta[line.slice(0, idx).trim()] = line.slice(idx + 1).trim();
+  }
+  return meta;
+}
+
+// Skill files are installed to ~/.claude/commands/ with a "deepsteve-" prefix
+// to avoid collisions with user-created commands.
+function skillDestPath(id) {
+  return path.join(CLAUDE_COMMANDS_DIR, `deepsteve-${id}.md`);
+}
+
+// Reconcile enabled skills on startup: ensure .md files exist in ~/.claude/commands/
+function reconcileSkills() {
+  if (!settings.enabledSkills || settings.enabledSkills.length === 0) return;
+  try {
+    fs.mkdirSync(CLAUDE_COMMANDS_DIR, { recursive: true });
+    const validSkills = [];
+    for (const id of settings.enabledSkills) {
+      if (!SKILL_ID_RE.test(id)) continue;
+      const src = path.join(SKILLS_DIR, `${id}.md`);
+      const dest = skillDestPath(id);
+      if (fs.existsSync(src)) {
+        if (!fs.existsSync(dest)) {
+          fs.copyFileSync(src, dest);
+        }
+        validSkills.push(id);
+      }
+    }
+    if (validSkills.length !== settings.enabledSkills.length) {
+      settings.enabledSkills = validSkills;
+      saveSettings();
+    }
+  } catch (e) {
+    log('Skills reconciliation failed:', e.message);
+  }
+}
+
 // Compare two semver strings (major.minor.patch). Returns -1, 0, or 1.
 function compareSemver(a, b) {
   const pa = a.split('.').map(Number);
@@ -1110,9 +1158,75 @@ app.get('/api/mods', (req, res) => {
         mods.push({ id: entry.name, source, compatible, ...manifest });
       } catch { /* skip dirs without valid mod.json */ }
     }
+    // Append skills
+    try {
+      if (fs.existsSync(SKILLS_DIR)) {
+        for (const file of fs.readdirSync(SKILLS_DIR)) {
+          if (!file.endsWith('.md')) continue;
+          const id = file.slice(0, -3);
+          try {
+            const content = fs.readFileSync(path.join(SKILLS_DIR, file), 'utf8');
+            const meta = parseSkillFrontmatter(content);
+            mods.push({
+              id: `skill:${id}`,
+              name: `/deepsteve-${id}`,
+              description: meta.description || '',
+              type: 'skill',
+              source: 'built-in',
+              compatible: true,
+              version: pkg.version,
+              enabled: (settings.enabledSkills || []).includes(id),
+              slashCommand: `/deepsteve-${id}`,
+              argumentHint: meta['argument-hint'] || null,
+            });
+          } catch { /* skip unreadable skill files */ }
+        }
+      }
+    } catch { /* skip if skills dir missing */ }
+
     res.json({ mods, deepsteveVersion: pkg.version });
   } catch (e) {
     res.json({ mods: [], deepsteveVersion: pkg.version });
+  }
+});
+
+// Skills enable/disable
+app.post('/api/skills/enable', (req, res) => {
+  const { id } = req.body;
+  if (!id || !SKILL_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid skill ID' });
+  const src = path.join(SKILLS_DIR, `${id}.md`);
+  if (!path.resolve(src).startsWith(path.resolve(SKILLS_DIR) + path.sep)) {
+    return res.status(400).json({ error: 'Invalid skill ID' });
+  }
+  if (!fs.existsSync(src)) return res.status(404).json({ error: 'Skill not found' });
+  try {
+    fs.mkdirSync(CLAUDE_COMMANDS_DIR, { recursive: true });
+    fs.copyFileSync(src, skillDestPath(id));
+    if (!settings.enabledSkills) settings.enabledSkills = [];
+    if (!settings.enabledSkills.includes(id)) settings.enabledSkills.push(id);
+    saveSettings();
+    log(`Skill enabled: ${id}`);
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/api/skills/disable', (req, res) => {
+  const { id } = req.body;
+  if (!id || !SKILL_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid skill ID' });
+  const dest = skillDestPath(id);
+  if (!path.resolve(dest).startsWith(path.resolve(CLAUDE_COMMANDS_DIR) + path.sep)) {
+    return res.status(400).json({ error: 'Invalid skill ID' });
+  }
+  try {
+    if (fs.existsSync(dest)) fs.unlinkSync(dest);
+    settings.enabledSkills = (settings.enabledSkills || []).filter(s => s !== id);
+    saveSettings();
+    log(`Skill disabled: ${id}`);
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
   }
 });
 
@@ -1601,6 +1715,8 @@ app.post('/api/request-restart', (req, res) => {
     try { ws.send(JSON.stringify({ type: 'confirm-restart' })); } catch {}
   }
 });
+
+reconcileSkills();
 
 const server = app.listen(PORT, BIND, () => {
   log(`HTTP server listening on ${BIND}:${PORT}`);

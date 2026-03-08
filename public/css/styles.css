@@ -500,6 +500,7 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
 .mod-badge.built-in { background: var(--ds-bg-tertiary); color: var(--ds-text-secondary); border: 1px solid var(--ds-border); }
 .mod-badge.official { background: rgba(88, 166, 255, 0.15); color: var(--ds-accent-blue); border: 1px solid rgba(88, 166, 255, 0.3); }
 .mod-badge.experimental { background: rgba(227, 179, 65, 0.15); color: #e3b341; border: 1px solid rgba(227, 179, 65, 0.3); }
+.mod-badge.skill { background: rgba(163, 113, 247, 0.15); color: #a371f7; border: 1px solid rgba(163, 113, 247, 0.3); }
 .mod-card-version { font-size: 11px; color: var(--ds-text-secondary); }
 .mod-card-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
 .mod-card-toggle { position: relative; width: 36px; height: 20px; }
