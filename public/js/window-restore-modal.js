@@ -6,6 +6,28 @@ import { getDefaultTabName } from './tab-manager.js';
 
 export function showWindowRestoreModal(orphanedWindows) {
   return new Promise((resolve) => {
+    let dismissed = false;
+    const bc = new BroadcastChannel('deepsteve-windows');
+
+    function dismiss(result) {
+      if (dismissed) return;
+      dismissed = true;
+      bc.postMessage({ type: 'restore-modal-dismissed' });
+      bc.close();
+      overlay.remove();
+      resolve(result);
+    }
+
+    bc.onmessage = (event) => {
+      if (event.data.type === 'restore-modal-dismissed') {
+        if (dismissed) return;
+        dismissed = true;
+        bc.close();
+        overlay.remove();
+        resolve({ action: 'fresh' });
+      }
+    };
+
     const overlay = document.createElement('div');
     overlay.className = 'modal-overlay';
 
@@ -56,27 +78,23 @@ export function showWindowRestoreModal(orphanedWindows) {
 
       item.ondblclick = () => {
         selectedIndex = parseInt(item.dataset.index);
-        overlay.remove();
-        resolve({ action: 'restore', window: orphanedWindows[selectedIndex] });
+        dismiss({ action: 'restore', window: orphanedWindows[selectedIndex] });
       };
     });
 
     overlay.querySelector('#restore-btn').onclick = () => {
       if (selectedIndex !== null) {
-        overlay.remove();
-        resolve({ action: 'restore', window: orphanedWindows[selectedIndex] });
+        dismiss({ action: 'restore', window: orphanedWindows[selectedIndex] });
       }
     };
 
     overlay.querySelector('#skip-btn').onclick = () => {
-      overlay.remove();
-      resolve({ action: 'fresh' });
+      dismiss({ action: 'fresh' });
     };
 
     overlay.onclick = (e) => {
       if (e.target === overlay) {
-        overlay.remove();
-        resolve({ action: 'fresh' });
+        dismiss({ action: 'fresh' });
       }
     };
   });
