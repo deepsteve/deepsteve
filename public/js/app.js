@@ -1391,8 +1391,8 @@ function showNewTabMenu(e) {
 
   // Set up agent submenu
   const agentTrigger = menu.querySelector('#agent-submenu-trigger');
+  let submenu = null;
   if (agentTrigger) {
-    let submenu = null;
     const showSubmenu = () => {
       if (submenu) return;
       submenu = document.createElement('div');
@@ -1401,22 +1401,22 @@ function showNewTabMenu(e) {
         const isSelected = a.id === getDefaultAgentType();
         return `<div class="context-menu-item" data-agent="${a.id}">${isSelected ? '&#10003; ' : '&nbsp;&nbsp; '}${a.name}</div>`;
       }).join('');
-      agentTrigger.appendChild(submenu);
+      // Append to body (not agentTrigger) to avoid overflow clipping from .new-tab-menu
+      document.body.appendChild(submenu);
 
-      // Position: right by default, flip left if off-screen
+      // Position next to trigger
       const triggerRect = agentTrigger.getBoundingClientRect();
+      submenu.style.left = (triggerRect.right + 2) + 'px';
+      submenu.style.top = triggerRect.top + 'px';
       const subRect = submenu.getBoundingClientRect();
-      if (triggerRect.right + subRect.width > window.innerWidth) {
-        submenu.style.left = 'auto';
-        submenu.style.right = '100%';
-        submenu.style.marginLeft = '0';
-        submenu.style.marginRight = '2px';
+      if (subRect.right > window.innerWidth) {
+        submenu.style.left = (triggerRect.left - subRect.width - 2) + 'px';
       }
       if (subRect.bottom > window.innerHeight) {
-        submenu.style.top = 'auto';
-        submenu.style.bottom = '0';
+        submenu.style.top = (window.innerHeight - subRect.height - 8) + 'px';
       }
 
+      submenu.addEventListener('mouseleave', delayedHideSubmenu);
       submenu.addEventListener('click', (ev) => {
         const item = ev.target.closest('.context-menu-item');
         if (!item) return;
@@ -1432,17 +1432,15 @@ function showNewTabMenu(e) {
     const hideSubmenu = () => {
       if (submenu) { submenu.remove(); submenu = null; }
     };
-    const setupSubmenuHover = () => {
-      agentTrigger.addEventListener('mouseenter', showSubmenu);
-      agentTrigger.addEventListener('mouseleave', (ev) => {
-        setTimeout(() => {
-          if (submenu && !submenu.matches(':hover') && !agentTrigger.matches(':hover')) {
-            hideSubmenu();
-          }
-        }, 100);
-      });
+    const delayedHideSubmenu = () => {
+      setTimeout(() => {
+        if (submenu && !submenu.matches(':hover') && !agentTrigger.matches(':hover')) {
+          hideSubmenu();
+        }
+      }, 100);
     };
-    setupSubmenuHover();
+    agentTrigger.addEventListener('mouseenter', showSubmenu);
+    agentTrigger.addEventListener('mouseleave', delayedHideSubmenu);
     agentTrigger.addEventListener('click', (ev) => {
       ev.stopPropagation();
       submenu ? hideSubmenu() : showSubmenu();
@@ -1480,6 +1478,7 @@ function showNewTabMenu(e) {
     const action = item.dataset.action;
     if (!action) return; // ignore clicks on items without actions (e.g. agent submenu trigger)
     menu.remove();
+    if (submenu) submenu.remove();
     cleanup();
     if (action === 'recent') {
       createSession(item.dataset.path, null, true, { agentType: getDefaultAgentType() });
@@ -1503,8 +1502,9 @@ function showNewTabMenu(e) {
     document.removeEventListener('mousedown', closeHandler);
   };
   const closeHandler = (ev) => {
-    if (!menu.contains(ev.target) && ev.target !== btn) {
+    if (!menu.contains(ev.target) && !(submenu && submenu.contains(ev.target)) && ev.target !== btn) {
       menu.remove();
+      if (submenu) submenu.remove();
       cleanup();
     }
   };
