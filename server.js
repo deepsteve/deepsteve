@@ -1604,6 +1604,14 @@ app.post('/api/request-restart', (req, res) => {
 
 const server = app.listen(PORT, BIND, () => {
   log(`HTTP server listening on ${BIND}:${PORT}`);
+  // Auto-open browser if no clients connect within 3s of startup
+  setTimeout(() => {
+    const connected = [...reloadClients].filter(c => c.readyState === 1);
+    if (connected.length === 0) {
+      log('No browser connected after startup, opening default browser');
+      exec(`open "http://localhost:${PORT}"`);
+    }
+  }, 3000);
 });
 const shells = new Map();
 const wss = new WebSocketServer({ server });
