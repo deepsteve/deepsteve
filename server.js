@@ -1088,6 +1088,22 @@ const SKILLS_DIR = path.join(__dirname, 'skills');
 const CLAUDE_COMMANDS_DIR = path.join(os.homedir(), '.claude', 'commands');
 const SKILL_ID_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/;
 
+// Install a skill file: copy source .md to ~/.claude/commands/deepsteve-{id}.md
+// but inject `name: {id}` into the frontmatter so the slash command is /{id}.
+function installSkillFile(id) {
+  const src = path.join(SKILLS_DIR, `${id}.md`);
+  const dest = skillDestPath(id);
+  let content = fs.readFileSync(src, 'utf8');
+  // Inject name into frontmatter (replace existing or add after opening ---)
+  if (content.match(/^---\n/)) {
+    const hasName = content.match(/^---\n([\s\S]*?)\n---/)?.[1]?.split('\n').some(l => l.startsWith('name:'));
+    if (!hasName) {
+      content = content.replace(/^---\n/, `---\nname: ${id}\n`);
+    }
+  }
+  fs.writeFileSync(dest, content);
+}
+
 function parseSkillFrontmatter(content) {
   const match = content.match(/^---\n([\s\S]*?)\n---/);
   if (!match) return {};
@@ -1117,7 +1133,7 @@ function reconcileSkills() {
       const dest = skillDestPath(id);
       if (fs.existsSync(src)) {
         if (!fs.existsSync(dest)) {
-          fs.copyFileSync(src, dest);
+          installSkillFile(id);
         }
         validSkills.push(id);
       }
@@ -1169,14 +1185,14 @@ app.get('/api/mods', (req, res) => {
             const meta = parseSkillFrontmatter(content);
             mods.push({
               id: `skill:${id}`,
-              name: `/deepsteve-${id}`,
+              name: `/${id}`,
               description: meta.description || '',
               type: 'skill',
               source: 'built-in',
               compatible: true,
               version: pkg.version,
               enabled: (settings.enabledSkills || []).includes(id),
-              slashCommand: `/deepsteve-${id}`,
+              slashCommand: `/${id}`,
               argumentHint: meta['argument-hint'] || null,
             });
           } catch { /* skip unreadable skill files */ }
@@ -1201,7 +1217,7 @@ app.post('/api/skills/enable', (req, res) => {
   if (!fs.existsSync(src)) return res.status(404).json({ error: 'Skill not found' });
   try {
     fs.mkdirSync(CLAUDE_COMMANDS_DIR, { recursive: true });
-    fs.copyFileSync(src, skillDestPath(id));
+    installSkillFile(id);
     if (!settings.enabledSkills) settings.enabledSkills = [];
     if (!settings.enabledSkills.includes(id)) settings.enabledSkills.push(id);
     saveSettings();
