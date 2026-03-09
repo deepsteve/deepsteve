@@ -1,4 +1,5 @@
 ---
+name: github-issue
 description: Create a GitHub issue from a natural language description
 argument-hint: <description of the issue>
 ---

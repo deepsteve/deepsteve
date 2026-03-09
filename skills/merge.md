@@ -1,4 +1,5 @@
 ---
+name: merge
 description: Merge the current worktree branch into main
 ---
 

@@ -1093,15 +1093,7 @@ const SKILL_ID_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/;
 function installSkillFile(id) {
   const src = path.join(SKILLS_DIR, `${id}.md`);
   const dest = skillDestPath(id);
-  let content = fs.readFileSync(src, 'utf8');
-  // Inject name into frontmatter (replace existing or add after opening ---)
-  if (content.match(/^---\n/)) {
-    const hasName = content.match(/^---\n([\s\S]*?)\n---/)?.[1]?.split('\n').some(l => l.startsWith('name:'));
-    if (!hasName) {
-      content = content.replace(/^---\n/, `---\nname: ${id}\n`);
-    }
-  }
-  fs.writeFileSync(dest, content);
+  fs.copyFileSync(src, dest);
 }
 
 function parseSkillFrontmatter(content) {
@@ -1132,9 +1124,7 @@ function reconcileSkills() {
       const src = path.join(SKILLS_DIR, `${id}.md`);
       const dest = skillDestPath(id);
       if (fs.existsSync(src)) {
-        if (!fs.existsSync(dest)) {
-          installSkillFile(id);
-        }
+        installSkillFile(id);
         validSkills.push(id);
       }
     }
