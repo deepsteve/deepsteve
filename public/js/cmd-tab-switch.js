@@ -1,8 +1,11 @@
 /**
- * Command+N hold-to-activate tab switching.
+ * Command hold mode — tab switching and management.
  *
- * Hold Command for ~1 second to enter "tab switching mode," then press
- * 1-9 to jump to a tab, or , / . to go previous/next (wrapping).
+ * Hold Command for ~1 second to enter "hold mode," then press:
+ *   1-9    jump to tab N
+ *   , / .  previous / next tab (wrapping)
+ *   T      new tab
+ *   W      close active tab
  *
  * Uses capture-phase document listeners so keys are intercepted before
  * xterm.js sees them — no changes to terminal.js needed.
@@ -16,13 +19,15 @@ let metaHeldOnBlur = false;
 let getOrderedTabIds;
 let getActiveTabId;
 let switchToTab;
+let createTab;
+let closeTab;
 
 let HOLD_MS = 1000;
 
 const TAB_KEYS = new Set([
   'Digit1', 'Digit2', 'Digit3', 'Digit4', 'Digit5',
   'Digit6', 'Digit7', 'Digit8', 'Digit9',
-  'Comma', 'Period'
+  'Comma', 'Period', 'KeyT', 'KeyW'
 ]);
 
 function setTabSwitchMode(active) {
@@ -104,6 +109,10 @@ function onKeyDown(e) {
         const idx = tabIds.indexOf(activeId);
         const next = idx >= tabIds.length - 1 ? 0 : idx + 1;
         switchToTab(tabIds[next]);
+      } else if (e.code === 'KeyT') {
+        createTab?.();
+      } else if (e.code === 'KeyW') {
+        closeTab?.();
       }
     }
   }
@@ -126,10 +135,12 @@ function onBlur() {
   setTabSwitchMode(false);
 }
 
-export function init({ getOrderedTabIds: g, getActiveTabId: a, switchToTab: s }) {
+export function init({ getOrderedTabIds: g, getActiveTabId: a, switchToTab: s, createTab: c, closeTab: w }) {
   getOrderedTabIds = g;
   getActiveTabId = a;
   switchToTab = s;
+  createTab = c;
+  closeTab = w;
 
   document.addEventListener('keydown', onKeyDown, true);
   document.addEventListener('keyup', onKeyUp, true);

@@ -13,7 +13,7 @@ import { LayoutManager } from './layout-manager.js';
 import { initLiveReload } from './live-reload.js';
 import { ModManager } from './mod-manager.js';
 import { initFileDrop } from './file-drop.js';
-import { init as initCmdTabSwitch, setEnabled as setCmdTabSwitchEnabled, setHoldMs as setCmdTabSwitchHoldMs } from './cmd-tab-switch.js';
+import { init as initCmdHoldMode, setEnabled as setCmdHoldModeEnabled, setHoldMs as setCmdHoldModeHoldMs } from './cmd-tab-switch.js';
 
 // Configuration
 let maxIssueTitleLength = 25;
@@ -162,10 +162,10 @@ function applySettings(settings) {
     maxIssueTitleLength = settings.maxIssueTitleLength;
   }
   if (settings.cmdTabSwitch !== undefined) {
-    setCmdTabSwitchEnabled(settings.cmdTabSwitch);
+    setCmdHoldModeEnabled(settings.cmdTabSwitch);
   }
   if (settings.cmdTabSwitchHoldMs !== undefined) {
-    setCmdTabSwitchHoldMs(settings.cmdTabSwitchHoldMs);
+    setCmdHoldModeHoldMs(settings.cmdTabSwitchHoldMs);
   }
 }
 
@@ -558,8 +558,8 @@ settingsBtn?.addEventListener('click', async () => {
       body: JSON.stringify({ shellProfile, maxIssueTitleLength: newMaxTitle, wandPlanMode, wandPromptTemplate, cmdTabSwitch, cmdTabSwitchHoldMs, enabledAgents, opencodeBinary, geminiBinary })
     });
     maxIssueTitleLength = Math.max(10, Math.min(200, newMaxTitle));
-    setCmdTabSwitchEnabled(cmdTabSwitch);
-    setCmdTabSwitchHoldMs(cmdTabSwitchHoldMs);
+    setCmdHoldModeEnabled(cmdTabSwitch);
+    setCmdHoldModeHoldMs(cmdTabSwitchHoldMs);
     // Refresh agents data if agent settings changed
     const prevEnabled = (window.__deepsteveAgents || []).filter(a => a.enabled).map(a => a.id).sort().join(',');
     const newEnabled = enabledAgents.sort().join(',');
@@ -1863,11 +1863,13 @@ async function init() {
     onShowReloadOverlay: () => showReloadOverlay()
   });
 
-  // Initialize Cmd+N tab switching (capture-phase listeners, off by default)
-  initCmdTabSwitch({
+  // Initialize Cmd hold mode (tab switching, new/close tab — capture-phase listeners, off by default)
+  initCmdHoldMode({
     getOrderedTabIds: () => [...document.querySelectorAll('#tabs-list .tab')].map(t => t.id.replace('tab-', '')),
     getActiveTabId: () => activeId,
-    switchToTab: switchTo
+    switchToTab: switchTo,
+    createTab: () => quickNewSession(),
+    closeTab: () => { if (activeId) confirmCloseSession(activeId).then(ok => { if (ok) killSession(activeId) }) }
   });
 
   // Load settings before creating any terminals (prevents color flash, applies title length)
