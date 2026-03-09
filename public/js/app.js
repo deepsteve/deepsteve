@@ -1876,12 +1876,7 @@ async function init() {
     if (settingsData.themeCSS) {
       applyTheme(settingsData.themeCSS);
     }
-    if (settingsData.maxIssueTitleLength) {
-      maxIssueTitleLength = settingsData.maxIssueTitleLength;
-    }
-    if (settingsData.cmdTabSwitch) {
-      setCmdTabSwitchEnabled(true);
-    }
+    applySettings(settingsData);
   } catch {}
 
   // Load available mods (creates Mods button, auto-activates persisted mod)
