@@ -1246,6 +1246,23 @@ app.post('/api/skills/disable', (req, res) => {
   }
 });
 
+app.get('/api/skills/:id/content', (req, res) => {
+  const { id } = req.params;
+  if (!id || !SKILL_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid skill ID' });
+  const src = path.join(SKILLS_DIR, `${id}.md`);
+  if (!path.resolve(src).startsWith(path.resolve(SKILLS_DIR) + path.sep)) {
+    return res.status(400).json({ error: 'Invalid skill ID' });
+  }
+  try {
+    let content = fs.readFileSync(src, 'utf8');
+    // Strip YAML frontmatter
+    content = content.replace(/^---\n[\s\S]*?\n---\n*/, '');
+    res.json({ content });
+  } catch (e) {
+    res.status(404).json({ error: 'Skill not found' });
+  }
+});
+
 // Catalog: fetch remote mod catalog with caching
 let catalogCache = null;
 let catalogCacheTime = 0;
