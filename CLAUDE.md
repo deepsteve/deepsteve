@@ -69,10 +69,10 @@ The client sends the value in the POST body and applies it locally on save (`app
 Skills are slash commands that agents can invoke (e.g. `/chat`, `/merge`). Source files live in `skills/*.md`.
 
 - **Auto-discovery**: The server reads `skills/*.md` and exposes them in `GET /api/mods` with `type: 'skill'`. They appear in the mods UI automatically.
-- **Enable/disable**: `POST /api/skills/enable` copies the `.md` to `~/.claude/commands/deepsteve-{id}.md`, making it a `/{id}` slash command in Claude Code. `POST /api/skills/disable` removes it.
+- **Enable/disable**: `POST /api/skills/enable` copies the `.md` to `~/.claude/commands/deepsteve/{id}.md`, making it a `/deepsteve:{id}` slash command in Claude Code. `POST /api/skills/disable` removes it.
 - **Reconciliation**: On startup, `reconcileSkills()` re-copies all enabled skills to `~/.claude/commands/` to stay in sync.
 - **Frontmatter**: Each skill `.md` has YAML frontmatter with `name` (slash command name), `description`, and optional `argument-hint`.
-- **ID from filename**: `chat.md` → skill ID `chat`, installed as `~/.claude/commands/deepsteve-chat.md`, invoked as `/chat`.
+- **ID from filename**: `chat.md` → skill ID `chat`, installed as `~/.claude/commands/deepsteve/chat.md`, invoked as `/deepsteve:chat`.
 
 ### Gotchas and Non-Obvious Behavior
 
