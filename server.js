@@ -1210,7 +1210,7 @@ const SKILLS_DIR = path.join(__dirname, 'skills');
 const CLAUDE_COMMANDS_DIR = path.join(os.homedir(), '.claude', 'commands');
 const SKILL_ID_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/;
 
-// Install a skill file: copy source .md to ~/.claude/commands/deepsteve-{id}.md
+// Install a skill file: copy source .md to ~/.claude/commands/deepsteve/{id}.md
 // but inject `name: {id}` into the frontmatter so the slash command is /{id}.
 function installSkillFile(id) {
   const src = path.join(SKILLS_DIR, `${id}.md`);
@@ -1229,25 +1229,28 @@ function parseSkillFrontmatter(content) {
   return meta;
 }
 
-// Skill files are installed to ~/.claude/commands/ with a "deepsteve-" prefix
-// to avoid collisions with user-created commands.
+// Skill files are installed to ~/.claude/commands/deepsteve/{id}.md
+// so they appear as /deepsteve:{id} slash commands.
+const SKILL_DEST_DIR = path.join(CLAUDE_COMMANDS_DIR, 'deepsteve');
 function skillDestPath(id) {
-  return path.join(CLAUDE_COMMANDS_DIR, `deepsteve-${id}.md`);
+  return path.join(SKILL_DEST_DIR, `${id}.md`);
 }
 
 // Reconcile enabled skills on startup: ensure .md files exist in ~/.claude/commands/
 function reconcileSkills() {
   if (!settings.enabledSkills || settings.enabledSkills.length === 0) return;
   try {
-    fs.mkdirSync(CLAUDE_COMMANDS_DIR, { recursive: true });
+    fs.mkdirSync(SKILL_DEST_DIR, { recursive: true });
     const validSkills = [];
     for (const id of settings.enabledSkills) {
       if (!SKILL_ID_RE.test(id)) continue;
       const src = path.join(SKILLS_DIR, `${id}.md`);
-      const dest = skillDestPath(id);
       if (fs.existsSync(src)) {
         installSkillFile(id);
         validSkills.push(id);
+        // Clean up old deepsteve-{id}.md files from prior naming scheme
+        const oldDest = path.join(CLAUDE_COMMANDS_DIR, `deepsteve-${id}.md`);
+        if (fs.existsSync(oldDest)) fs.unlinkSync(oldDest);
       }
     }
     if (validSkills.length !== settings.enabledSkills.length) {
@@ -1329,7 +1332,7 @@ app.post('/api/skills/enable', (req, res) => {
   }
   if (!fs.existsSync(src)) return res.status(404).json({ error: 'Skill not found' });
   try {
-    fs.mkdirSync(CLAUDE_COMMANDS_DIR, { recursive: true });
+    fs.mkdirSync(SKILL_DEST_DIR, { recursive: true });
     installSkillFile(id);
     if (!settings.enabledSkills) settings.enabledSkills = [];
     if (!settings.enabledSkills.includes(id)) settings.enabledSkills.push(id);
@@ -1345,7 +1348,7 @@ app.post('/api/skills/disable', (req, res) => {
   const { id } = req.body;
   if (!id || !SKILL_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid skill ID' });
   const dest = skillDestPath(id);
-  if (!path.resolve(dest).startsWith(path.resolve(CLAUDE_COMMANDS_DIR) + path.sep)) {
+  if (!path.resolve(dest).startsWith(path.resolve(SKILL_DEST_DIR) + path.sep)) {
     return res.status(400).json({ error: 'Invalid skill ID' });
   }
   try {
