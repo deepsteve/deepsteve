@@ -33,7 +33,7 @@ function init(context) {
         selector: z.string().describe('CSS selector for the element to capture (e.g. "#app-container", ".terminal-container.active")'),
         filename: z.string().optional().describe('Output filename (without extension). Defaults to "screenshot-<timestamp>".'),
         output_dir: z.string().optional().describe('Directory to save the PNG. Defaults to ~/Desktop.'),
-        session_id: z.string().optional().describe('DeepSteve session ID ($DEEPSTEVE_SESSION_ID). When provided, the command is sent only to the browser window that owns this session.'),
+        session_id: z.string().optional().describe('DeepSteve session ID. Run `echo $DEEPSTEVE_SESSION_ID` in your terminal to get this value. When provided, the command is sent only to the browser window that owns this session.'),
       },
       handler: async ({ selector, filename, output_dir, session_id }) => {
         const requestId = randomUUID();

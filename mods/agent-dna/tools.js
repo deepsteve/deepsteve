@@ -34,7 +34,7 @@ function init(context) {
     get_agent_dna: {
       description: 'Get agent DNA personality config for a session',
       schema: {
-        session_id: z.string().describe('The deepsteve session ID (from DEEPSTEVE_SESSION_ID env var)'),
+        session_id: z.string().describe('The deepsteve session ID. Run `echo $DEEPSTEVE_SESSION_ID` in your terminal to get this value.'),
       },
       handler: async ({ session_id }) => {
         const dna = dnaStore[session_id] || {};
@@ -48,7 +48,7 @@ function init(context) {
     set_agent_dna: {
       description: 'Set agent DNA personality config for a session',
       schema: {
-        session_id: z.string().describe('The deepsteve session ID (from DEEPSTEVE_SESSION_ID env var)'),
+        session_id: z.string().describe('The deepsteve session ID. Run `echo $DEEPSTEVE_SESSION_ID` in your terminal to get this value.'),
         approach: z.string().optional().describe('1-2 word engineering role hint (e.g. "cautious", "move-fast")'),
         traits: z.array(z.string()).optional().describe('Array of personality trait keywords'),
       },
