@@ -1,5 +1,6 @@
 {
   "name": "Messages",
+  "version": "1.0.0",
   "description": "Send iMessages/SMS via macOS Messages app with a configurable contacts allowlist",
   "enabledByDefault": false,
   "entry": "index.html",
