@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    * { margin: 0; box-sizing: border-box; }
+    body {
+      background: var(--ds-bg-primary, #0d1117);
+      color: var(--ds-text-primary, #c9d1d9);
+      font-family: system-ui;
+      padding: 16px;
+    }
+    h3 { font-size: 14px; margin-bottom: 12px; font-weight: 600; }
+    label {
+      display: block;
+      font-size: 12px;
+      color: var(--ds-text-secondary, #8b949e);
+      margin-bottom: 4px;
+    }
+    textarea {
+      width: 100%;
+      min-height: 120px;
+      background: var(--ds-bg-secondary, #161b22);
+      color: var(--ds-text-primary, #c9d1d9);
+      border: 1px solid var(--ds-border, #30363d);
+      border-radius: 6px;
+      padding: 8px;
+      font-family: monospace;
+      font-size: 12px;
+      resize: vertical;
+    }
+    textarea:focus { outline: none; border-color: var(--ds-accent, #58a6ff); }
+    .toggle-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin: 12px 0;
+    }
+    .toggle-row input[type="checkbox"] { accent-color: var(--ds-accent, #58a6ff); }
+    .toggle-row span { font-size: 13px; }
+    button {
+      background: var(--ds-accent, #58a6ff);
+      color: #fff;
+      border: none;
+      border-radius: 6px;
+      padding: 6px 16px;
+      font-size: 13px;
+      cursor: pointer;
+    }
+    button:hover { opacity: 0.9; }
+    .status {
+      font-size: 12px;
+      margin-top: 8px;
+      color: var(--ds-text-secondary, #8b949e);
+    }
+    .hint {
+      font-size: 11px;
+      color: var(--ds-text-secondary, #8b949e);
+      margin-top: 4px;
+      line-height: 1.4;
+    }
+  </style>
+</head>
+<body>
+  <h3>Messages Settings</h3>
+
+  <label for="contacts">Contacts (one per line: name:+1234567890)</label>
+  <textarea id="contacts" placeholder="mom:+15551234567&#10;dad:+15559876543"></textarea>
+  <div class="hint">Format: name:+phonenumber — one contact per line or comma-separated</div>
+
+  <div class="toggle-row">
+    <input type="checkbox" id="allowlist" checked>
+    <span>Allowlist only (restrict to contacts above)</span>
+  </div>
+
+  <button id="save">Save</button>
+  <div class="status" id="status"></div>
+
+  <script>
+    const contactsEl = document.getElementById('contacts');
+    const allowlistEl = document.getElementById('allowlist');
+    const statusEl = document.getElementById('status');
+
+    async function load() {
+      try {
+        const res = await fetch('/api/messages/config');
+        const config = await res.json();
+        // Display contacts with newlines for readability
+        contactsEl.value = (config.contacts || '').split(',').map(s => s.trim()).filter(Boolean).join('\n');
+        allowlistEl.checked = config.allowlistEnabled !== false;
+      } catch (e) {
+        statusEl.textContent = 'Failed to load config';
+      }
+    }
+
+    document.getElementById('save').addEventListener('click', async () => {
+      // Normalize: newlines → commas
+      const contacts = contactsEl.value.split(/[\n,]/).map(s => s.trim()).filter(Boolean).join(',');
+      try {
+        const res = await fetch('/api/messages/config', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ contacts, allowlistEnabled: allowlistEl.checked }),
+        });
+        if (res.ok) {
+          statusEl.textContent = 'Saved!';
+          setTimeout(() => { statusEl.textContent = ''; }, 2000);
+        } else {
+          statusEl.textContent = 'Save failed';
+        }
+      } catch (e) {
+        statusEl.textContent = 'Save failed';
+      }
+    });
+
+    load();
+  </script>
+</body>
+</html>
