@@ -52,7 +52,7 @@ function init(context) {
           receiveShadow: z.boolean().optional().describe('Whether the object receives shadows'),
           parent: z.string().optional().describe('Parent group ID'),
         })).describe('Array of scene operations to execute in order'),
-        session_id: z.string().optional().describe('DeepSteve session ID ($DEEPSTEVE_SESSION_ID). When provided, the command is sent only to the browser window that owns this session.'),
+        session_id: z.string().optional().describe('DeepSteve session ID. Run `echo $DEEPSTEVE_SESSION_ID` in your terminal to get this value. When provided, the command is sent only to the browser window that owns this session.'),
       },
       handler: async ({ operations, session_id }) => {
         const requestId = randomUUID();
@@ -81,7 +81,7 @@ function init(context) {
       description: 'List objects and inspect scene state. Returns all objects with positions/types, or one object\'s full details if id is provided. Make sure the 3D Scene mod is enabled in deepsteve.',
       schema: {
         id: z.string().optional().describe('Object ID to inspect. If omitted, returns all objects.'),
-        session_id: z.string().optional().describe('DeepSteve session ID ($DEEPSTEVE_SESSION_ID). When provided, the command is sent only to the browser window that owns this session.'),
+        session_id: z.string().optional().describe('DeepSteve session ID. Run `echo $DEEPSTEVE_SESSION_ID` in your terminal to get this value. When provided, the command is sent only to the browser window that owns this session.'),
       },
       handler: async ({ id, session_id }) => {
         const requestId = randomUUID();
@@ -113,7 +113,7 @@ function init(context) {
         height: z.number().optional().describe('Snapshot height in pixels. Defaults to current canvas height.'),
         filename: z.string().optional().describe('Output filename (without extension). If provided, saves PNG to output_dir.'),
         output_dir: z.string().optional().describe('Directory to save the PNG. Defaults to ~/Desktop.'),
-        session_id: z.string().optional().describe('DeepSteve session ID ($DEEPSTEVE_SESSION_ID). When provided, the command is sent only to the browser window that owns this session.'),
+        session_id: z.string().optional().describe('DeepSteve session ID. Run `echo $DEEPSTEVE_SESSION_ID` in your terminal to get this value. When provided, the command is sent only to the browser window that owns this session.'),
       },
       handler: async ({ width, height, filename, output_dir, session_id }) => {
         const requestId = randomUUID();
