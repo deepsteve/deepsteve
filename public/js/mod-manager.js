@@ -541,6 +541,21 @@ function _createSkillCard(mod, marketplaceOverlay) {
     }
   });
 
+  const viewBtn = document.createElement('button');
+  viewBtn.className = 'skill-view-btn';
+  viewBtn.textContent = 'View';
+  viewBtn.addEventListener('click', async () => {
+    try {
+      const res = await fetch(`/api/skills/${encodeURIComponent(skillId)}/content`);
+      if (!res.ok) throw new Error('Failed to load skill content');
+      const { content } = await res.json();
+      _showSkillContentModal(mod.slashCommand || mod.name, content);
+    } catch (e) {
+      _showDepNotice(card, e.message, 'error');
+    }
+  });
+
+  actions.appendChild(viewBtn);
   actions.appendChild(toggle);
   header.appendChild(info);
   header.appendChild(actions);
@@ -565,6 +580,22 @@ function _createSkillCard(mod, marketplaceOverlay) {
   }
 
   return card;
+}
+
+function _showSkillContentModal(name, content) {
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.innerHTML = `
+    <div class="modal skill-content-modal">
+      <div class="modal-header"><span>${name}</span></div>
+      <div class="skill-content-body"><pre></pre></div>
+      <div class="modal-footer"><button class="btn" data-close>Close</button></div>
+    </div>`;
+  overlay.querySelector('pre').textContent = content;
+  const close = () => overlay.remove();
+  overlay.querySelector('[data-close]').addEventListener('click', close);
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+  document.body.appendChild(overlay);
 }
 
 function _createModCard(mod, marketplaceOverlay) {

@@ -512,6 +512,13 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
 .mod-card-toggle input:disabled + .toggle-slider { opacity: 0.4; cursor: not-allowed; }
 .mod-card-description { font-size: 12px; color: var(--ds-text-secondary); margin-top: 6px; line-height: 1.4; }
 
+/* Skill view button & content modal */
+.skill-view-btn { background: var(--ds-bg-tertiary); border: 1px solid var(--ds-border); color: var(--ds-text-secondary); font-size: 11px; padding: 2px 8px; border-radius: 4px; cursor: pointer; transition: background 0.15s, color 0.15s; }
+.skill-view-btn:hover { background: var(--ds-bg-hover); color: var(--ds-text-primary); }
+.skill-content-modal { max-width: 700px; width: 90vw; }
+.skill-content-body { max-height: 60vh; overflow: auto; padding: 12px 16px; }
+.skill-content-body pre { margin: 0; white-space: pre-wrap; word-wrap: break-word; font-size: 12px; line-height: 1.5; color: var(--ds-text-primary); font-family: var(--ds-font-mono, monospace); }
+
 /* Mod dependency tags */
 .mod-card-deps { display: flex; align-items: center; flex-wrap: wrap; gap: 4px; margin-top: 6px; font-size: 11px; color: var(--ds-text-secondary); }
 .dep-tag { display: inline-block; padding: 1px 7px; border-radius: 8px; font-size: 10px; font-weight: 500; }
