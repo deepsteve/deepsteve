@@ -1312,6 +1312,7 @@ app.get('/api/mods', (req, res) => {
       }
     } catch { /* skip if skills dir missing */ }
 
+    mods.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
     res.json({ mods, deepsteveVersion: pkg.version });
   } catch (e) {
     res.json({ mods: [], deepsteveVersion: pkg.version });
