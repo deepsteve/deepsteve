@@ -4,6 +4,9 @@ rm -f "$HOME/Library/LaunchAgents/com.deepsteve.plist"
 rm -rf "$HOME/.deepsteve"
 rm -f "$HOME/Library/Logs/deepsteve.log" "$HOME/Library/Logs/deepsteve.error.log"
 
+# Remove installed skills from Claude Code commands
+rm -f "$HOME/.claude/commands/deepsteve-"*.md
+
 # Remove Claude Code MCP registration
 if command -v claude &>/dev/null; then
     claude mcp remove --scope user deepsteve 2>/dev/null || true
