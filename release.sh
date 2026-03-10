@@ -59,6 +59,9 @@ mkdir -p "$HOME/Library/LaunchAgents"
 
 PREAMBLE
 
+# Validate all mods before embedding
+node validate-mods.js || exit 1
+
 # Generate mkdir for each mod directory
 for moddir in mods/*/; do
   modname=$(basename "$moddir")
