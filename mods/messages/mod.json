@@ -1,0 +1,12 @@
+{
+  "name": "Messages",
+  "description": "Send iMessages/SMS via macOS Messages app with a configurable contacts allowlist",
+  "enabledByDefault": false,
+  "entry": "index.html",
+  "display": "panel",
+  "panel": { "position": "right", "defaultWidth": 340, "minWidth": 200 },
+  "toolbar": { "label": "Messages" },
+  "tools": [
+    { "name": "send_imessage", "description": "Send an iMessage/SMS to a contact" }
+  ]
+}
