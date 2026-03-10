@@ -167,6 +167,11 @@ function applySettings(settings) {
   if (settings.cmdTabSwitchHoldMs !== undefined) {
     setCmdHoldModeHoldMs(settings.cmdTabSwitchHoldMs);
   }
+  if (settings.windowConfigs !== undefined) {
+    windowConfigs = settings.windowConfigs;
+    renderEmptyStateConfigs();
+    window.dispatchEvent(new CustomEvent('deepsteve-window-configs', { detail: windowConfigs }));
+  }
 }
 
 // When the browser tab regains visibility, re-sync scroll position.
@@ -195,6 +200,46 @@ function updateEmptyState() {
   const el = document.getElementById('empty-state');
   if (el) el.classList.toggle('hidden', sessions.size > 0);
 }
+
+let windowConfigs = [];
+
+function renderEmptyStateConfigs() {
+  const container = document.getElementById('empty-state-configs');
+  if (!container) return;
+  container.innerHTML = '';
+  for (const config of windowConfigs) {
+    const btn = document.createElement('button');
+    btn.className = 'config-btn';
+    btn.textContent = config.name;
+    btn.title = `Open ${config.tabs.length} tab${config.tabs.length === 1 ? '' : 's'}`;
+    btn.onclick = async () => {
+      btn.disabled = true;
+      btn.textContent = 'Opening...';
+      try {
+        await fetch(`/api/window-configs/${config.id}/apply`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ windowId: getWindowId() })
+        });
+      } catch (e) {
+        console.error('Failed to apply window config:', e);
+      }
+    };
+    container.appendChild(btn);
+  }
+}
+
+async function loadWindowConfigs() {
+  try {
+    const resp = await fetch('/api/window-configs');
+    const data = await resp.json();
+    windowConfigs = data.configs || [];
+    renderEmptyStateConfigs();
+  } catch {}
+}
+
+// Load configs on startup
+loadWindowConfigs();
 
 /**
  * Build a session list for the mod bridge API
@@ -474,6 +519,17 @@ settingsBtn?.addEventListener('click', async () => {
         </div>
       </div>
       <div class="settings-section">
+        <h3>Window Configs</h3>
+        <p style="font-size: 13px; color: var(--ds-text-secondary); margin-bottom: 8px;">
+          Saved tab layouts. Click a config in the empty state to open all its tabs at once.
+        </p>
+        <div id="settings-window-configs"></div>
+        <div style="display: flex; gap: 8px; margin-top: 8px;">
+          <button class="btn-secondary" id="settings-new-config" style="font-size: 12px; padding: 4px 12px;">+ New Config</button>
+          <button class="btn-secondary" id="settings-save-current" style="font-size: 12px; padding: 4px 12px;">Save Current Tabs</button>
+        </div>
+      </div>
+      <div class="settings-section">
         <h3>Version</h3>
         <div class="version-info">
           <span>Version ${escapeHtml(versionData.current)}</span>
@@ -537,6 +593,143 @@ settingsBtn?.addEventListener('click', async () => {
     templateInput.value = defaultsData.wandPromptTemplate || '';
   };
 
+  // Window Configs management
+  let editingConfigs = JSON.parse(JSON.stringify(windowConfigs));
+  const configsContainer = overlay.querySelector('#settings-window-configs');
+
+  function renderConfigsList() {
+    configsContainer.innerHTML = '';
+    if (editingConfigs.length === 0) {
+      configsContainer.innerHTML = '<p style="font-size: 12px; color: var(--ds-text-secondary); opacity: 0.6;">No configs saved yet.</p>';
+      return;
+    }
+    for (let i = 0; i < editingConfigs.length; i++) {
+      const config = editingConfigs[i];
+      const row = document.createElement('div');
+      row.style.cssText = 'display: flex; align-items: center; gap: 8px; margin-bottom: 6px; padding: 6px 8px; background: var(--ds-bg-primary); border: 1px solid var(--ds-border); border-radius: 4px;';
+      row.innerHTML = `
+        <span style="flex: 1; font-size: 13px; color: var(--ds-text-primary);">${escapeHtml(config.name)}</span>
+        <span style="font-size: 11px; color: var(--ds-text-secondary);">${config.tabs.length} tab${config.tabs.length === 1 ? '' : 's'}</span>
+        <button class="btn-secondary config-edit-btn" data-idx="${i}" style="padding: 2px 8px; font-size: 11px;">Edit</button>
+        <button class="btn-secondary config-delete-btn" data-idx="${i}" style="padding: 2px 8px; font-size: 11px; color: var(--ds-accent-red, #f85149);">Delete</button>
+      `;
+      configsContainer.appendChild(row);
+    }
+    configsContainer.querySelectorAll('.config-delete-btn').forEach(btn => {
+      btn.onclick = () => {
+        const idx = Number(btn.dataset.idx);
+        editingConfigs.splice(idx, 1);
+        renderConfigsList();
+      };
+    });
+    configsContainer.querySelectorAll('.config-edit-btn').forEach(btn => {
+      btn.onclick = () => showConfigEditor(Number(btn.dataset.idx));
+    });
+  }
+
+  function showConfigEditor(idx) {
+    const isNew = idx === -1;
+    const config = isNew ? { id: '', name: '', tabs: [{ name: '', cwd: '', agentType: 'claude' }] } : JSON.parse(JSON.stringify(editingConfigs[idx]));
+    const editorOverlay = document.createElement('div');
+    editorOverlay.className = 'modal-overlay';
+    editorOverlay.style.zIndex = '1001';
+
+    function renderEditor() {
+      const tabRows = config.tabs.map((t, ti) => `
+        <div style="display: flex; gap: 6px; margin-bottom: 4px; align-items: center;">
+          <input type="text" class="config-tab-name" data-ti="${ti}" value="${escapeHtml(t.name)}" placeholder="Tab name" style="width: 120px; padding: 4px 6px; background: var(--ds-bg-primary); border: 1px solid var(--ds-border); border-radius: 4px; color: var(--ds-text-primary); font-size: 12px;">
+          <input type="text" class="config-tab-cwd" data-ti="${ti}" value="${escapeHtml(t.cwd)}" placeholder="/path/to/project" style="flex: 1; padding: 4px 6px; background: var(--ds-bg-primary); border: 1px solid var(--ds-border); border-radius: 4px; color: var(--ds-text-primary); font-size: 12px;">
+          <select class="config-tab-agent" data-ti="${ti}" style="padding: 4px 6px; background: var(--ds-bg-primary); border: 1px solid var(--ds-border); border-radius: 4px; color: var(--ds-text-primary); font-size: 12px;">
+            <option value="claude" ${t.agentType === 'claude' ? 'selected' : ''}>Claude</option>
+            <option value="opencode" ${t.agentType === 'opencode' ? 'selected' : ''}>OpenCode</option>
+            <option value="gemini" ${t.agentType === 'gemini' ? 'selected' : ''}>Gemini</option>
+          </select>
+          <button class="btn-secondary config-tab-remove" data-ti="${ti}" style="padding: 2px 6px; font-size: 11px;" ${config.tabs.length <= 1 ? 'disabled' : ''}>&times;</button>
+        </div>
+      `).join('');
+
+      editorOverlay.innerHTML = `
+        <div class="modal" style="max-width: 600px;">
+          <h3 style="margin-bottom: 12px;">${isNew ? 'New' : 'Edit'} Window Config</h3>
+          <div style="margin-bottom: 12px;">
+            <label style="font-size: 12px; color: var(--ds-text-secondary);">Config Name</label>
+            <input type="text" id="config-editor-name" value="${escapeHtml(config.name)}" placeholder="My Config" style="width: 100%; padding: 6px 8px; background: var(--ds-bg-primary); border: 1px solid var(--ds-border); border-radius: 4px; color: var(--ds-text-primary); font-size: 13px; margin-top: 4px;">
+          </div>
+          <div style="margin-bottom: 8px;">
+            <label style="font-size: 12px; color: var(--ds-text-secondary);">Tabs</label>
+          </div>
+          <div id="config-editor-tabs">${tabRows}</div>
+          <button class="btn-secondary" id="config-add-tab" style="font-size: 11px; padding: 3px 10px; margin-top: 4px;">+ Add Tab</button>
+          <div class="modal-buttons" style="margin-top: 16px;">
+            <button class="btn-secondary" id="config-editor-cancel">Cancel</button>
+            <button class="btn-primary" id="config-editor-save">Save</button>
+          </div>
+        </div>
+      `;
+
+      editorOverlay.querySelector('#config-editor-cancel').onclick = () => editorOverlay.remove();
+      editorOverlay.querySelector('#config-add-tab').onclick = () => {
+        syncTabInputs();
+        config.tabs.push({ name: '', cwd: '', agentType: 'claude' });
+        renderEditor();
+      };
+      editorOverlay.querySelectorAll('.config-tab-remove').forEach(btn => {
+        btn.onclick = () => {
+          syncTabInputs();
+          config.tabs.splice(Number(btn.dataset.ti), 1);
+          renderEditor();
+        };
+      });
+      editorOverlay.querySelector('#config-editor-save').onclick = () => {
+        syncTabInputs();
+        config.name = editorOverlay.querySelector('#config-editor-name').value.trim();
+        if (!config.name) return alert('Config name is required');
+        const validTabs = config.tabs.filter(t => t.cwd.trim());
+        if (validTabs.length === 0) return alert('At least one tab with a path is required');
+        config.tabs = validTabs;
+        if (isNew) {
+          editingConfigs.push(config);
+        } else {
+          editingConfigs[idx] = config;
+        }
+        editorOverlay.remove();
+        renderConfigsList();
+      };
+      editorOverlay.onclick = (e) => { if (e.target === editorOverlay) editorOverlay.remove(); };
+    }
+
+    function syncTabInputs() {
+      editorOverlay.querySelectorAll('.config-tab-name').forEach(input => {
+        config.tabs[Number(input.dataset.ti)].name = input.value;
+      });
+      editorOverlay.querySelectorAll('.config-tab-cwd').forEach(input => {
+        config.tabs[Number(input.dataset.ti)].cwd = input.value;
+      });
+      editorOverlay.querySelectorAll('.config-tab-agent').forEach(select => {
+        config.tabs[Number(select.dataset.ti)].agentType = select.value;
+      });
+    }
+
+    renderEditor();
+    document.body.appendChild(editorOverlay);
+  }
+
+  renderConfigsList();
+
+  overlay.querySelector('#settings-new-config').onclick = () => showConfigEditor(-1);
+  overlay.querySelector('#settings-save-current').onclick = () => {
+    const currentTabs = [...sessions.entries()].map(([, s]) => ({
+      name: s.name || '',
+      cwd: s.cwd || '',
+      agentType: s.agentType || 'claude',
+    })).filter(t => t.cwd);
+    if (currentTabs.length === 0) return alert('No tabs open to save');
+    const name = prompt('Config name:');
+    if (!name) return;
+    editingConfigs.push({ id: '', name, tabs: currentTabs });
+    renderConfigsList();
+  };
+
   overlay.querySelector('#settings-cancel').onclick = () => overlay.remove();
   overlay.querySelector('#settings-save').onclick = async () => {
     const selected = overlay.querySelector('input[name="profile"]:checked').value;
@@ -555,7 +748,7 @@ settingsBtn?.addEventListener('click', async () => {
     await fetch('/api/settings', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ shellProfile, maxIssueTitleLength: newMaxTitle, wandPlanMode, wandPromptTemplate, cmdTabSwitch, cmdTabSwitchHoldMs, enabledAgents, opencodeBinary, geminiBinary })
+      body: JSON.stringify({ shellProfile, maxIssueTitleLength: newMaxTitle, wandPlanMode, wandPromptTemplate, cmdTabSwitch, cmdTabSwitchHoldMs, enabledAgents, opencodeBinary, geminiBinary, windowConfigs: editingConfigs })
     });
     maxIssueTitleLength = Math.max(10, Math.min(200, newMaxTitle));
     setCmdHoldModeEnabled(cmdTabSwitch);

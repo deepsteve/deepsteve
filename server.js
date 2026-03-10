@@ -197,7 +197,7 @@ Please read the issue carefully, understand the codebase context, and implement 
 };
 
 // Load settings
-let settings = { shellProfile: '~/.zshrc', maxIssueTitleLength: 25, cmdTabSwitch: false, cmdTabSwitchHoldMs: 1000, enabledSkills: [], ...SETTINGS_DEFAULTS };
+let settings = { shellProfile: '~/.zshrc', maxIssueTitleLength: 25, cmdTabSwitch: false, cmdTabSwitchHoldMs: 1000, enabledSkills: [], windowConfigs: [], ...SETTINGS_DEFAULTS };
 try {
   if (fs.existsSync(SETTINGS_FILE)) {
     settings = { ...settings, ...JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8')) };
@@ -371,6 +371,7 @@ function broadcastSettings() {
     maxIssueTitleLength: settings.maxIssueTitleLength,
     cmdTabSwitch: settings.cmdTabSwitch,
     cmdTabSwitchHoldMs: settings.cmdTabSwitchHoldMs,
+    windowConfigs: settings.windowConfigs || [],
   });
   for (const client of wss.clients) {
     if (client.readyState === 1) client.send(msg);
@@ -1051,9 +1052,130 @@ app.post('/api/settings', (req, res) => {
     settings.geminiBinary = String(req.body.geminiBinary) || 'gemini';
     log(`Settings updated: geminiBinary=${settings.geminiBinary}`);
   }
+  if (req.body.windowConfigs !== undefined) {
+    if (Array.isArray(req.body.windowConfigs)) {
+      settings.windowConfigs = req.body.windowConfigs.filter(c =>
+        c && typeof c === 'object' && typeof c.name === 'string' && Array.isArray(c.tabs)
+      ).map(c => ({
+        id: c.id || randomUUID().slice(0, 8),
+        name: c.name,
+        tabs: c.tabs.filter(t => t && typeof t === 'object' && typeof t.cwd === 'string').map(t => ({
+          name: t.name || '',
+          cwd: t.cwd,
+          agentType: t.agentType || 'claude',
+        })),
+      }));
+      log(`Settings updated: windowConfigs (${settings.windowConfigs.length} configs)`);
+    }
+  }
   saveSettings();
   broadcastSettings();
   res.json(settings);
+});
+
+// --- Window Configs CRUD + Apply ---
+
+app.get('/api/window-configs', (req, res) => {
+  res.json({ configs: settings.windowConfigs || [] });
+});
+
+app.post('/api/window-configs', (req, res) => {
+  const { id, name, tabs } = req.body;
+  if (!name || typeof name !== 'string') return res.status(400).json({ error: 'name is required' });
+  if (!Array.isArray(tabs) || tabs.length === 0) return res.status(400).json({ error: 'tabs array is required' });
+
+  const validTabs = tabs.filter(t => t && typeof t.cwd === 'string').map(t => ({
+    name: t.name || '',
+    cwd: t.cwd,
+    agentType: t.agentType || 'claude',
+  }));
+  if (validTabs.length === 0) return res.status(400).json({ error: 'at least one tab with cwd is required' });
+
+  if (!settings.windowConfigs) settings.windowConfigs = [];
+
+  if (id) {
+    // Update existing
+    const idx = settings.windowConfigs.findIndex(c => c.id === id);
+    if (idx === -1) return res.status(404).json({ error: 'config not found' });
+    settings.windowConfigs[idx] = { id, name, tabs: validTabs };
+  } else {
+    // Create new
+    const newId = randomUUID().slice(0, 8);
+    settings.windowConfigs.push({ id: newId, name, tabs: validTabs });
+  }
+
+  saveSettings();
+  broadcastSettings();
+  res.json({ configs: settings.windowConfigs });
+});
+
+app.delete('/api/window-configs/:id', (req, res) => {
+  if (!settings.windowConfigs) return res.status(404).json({ error: 'config not found' });
+  const idx = settings.windowConfigs.findIndex(c => c.id === req.params.id);
+  if (idx === -1) return res.status(404).json({ error: 'config not found' });
+  settings.windowConfigs.splice(idx, 1);
+  saveSettings();
+  broadcastSettings();
+  res.json({ configs: settings.windowConfigs });
+});
+
+app.post('/api/window-configs/:id/apply', (req, res) => {
+  const config = (settings.windowConfigs || []).find(c => c.id === req.params.id);
+  if (!config) return res.status(404).json({ error: 'config not found' });
+
+  const { windowId } = req.body || {};
+  const readyClients = [...reloadClients].filter(c => c.readyState === 1);
+  const createdSessions = [];
+
+  for (const tab of config.tabs) {
+    const cwd = tab.cwd.startsWith('~') ? path.join(os.homedir(), tab.cwd.slice(1)) : tab.cwd;
+    if (!fs.existsSync(cwd)) {
+      log(`[API] window-configs apply: cwd not found: ${cwd}, skipping`);
+      continue;
+    }
+
+    const agentType = tab.agentType || settings.defaultAgent || 'claude';
+    const agentConfig = getAgentConfig(agentType);
+    const id = randomUUID().slice(0, 8);
+    const claudeSessionId = randomUUID();
+    const spawnArgs = getSpawnArgs(agentType, { sessionId: claudeSessionId });
+    const name = tab.name || path.basename(cwd);
+
+    const shell = spawnAgent(agentType, spawnArgs, cwd, { cols: 120, rows: 40, env: { DEEPSTEVE_SESSION_ID: id } });
+    shells.set(id, { shell, clients: new Set(), cwd, claudeSessionId, agentType, worktree: null, windowId: windowId || null, name, initialPrompt: null, waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now() });
+    wireShellOutput(id);
+    if (agentConfig.supportsSessionWatch) watchClaudeSessionDir(id);
+    shell.onExit(() => {
+      if (agentConfig.supportsSessionWatch) unwatchClaudeSessionDir(id);
+      if (!shuttingDown) { shells.delete(id); saveState(); }
+    });
+
+    createdSessions.push({ id, name, cwd });
+
+    // Deliver open-session to browser
+    const openMsg = JSON.stringify({ type: 'open-session', id, cwd, name, windowId: windowId || undefined });
+    let delivered = false;
+    if (windowId) {
+      for (const client of readyClients) {
+        if (client.windowId === windowId && client.readyState === 1) {
+          client.send(openMsg);
+          delivered = true;
+          break;
+        }
+      }
+    }
+    if (!delivered && readyClients.length > 0) {
+      readyClients[0].send(JSON.stringify({ type: 'open-session', id, cwd, name }));
+      delivered = true;
+    }
+    if (!delivered) {
+      pendingOpens.push(JSON.stringify({ type: 'open-session', id, cwd, name }));
+    }
+  }
+
+  saveState();
+  log(`[API] window-configs apply: config="${config.name}", created ${createdSessions.length} sessions`);
+  res.json({ sessions: createdSessions });
 });
 
 app.get('/api/themes', (req, res) => {
