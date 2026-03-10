@@ -1,0 +1,11 @@
+{
+  "name": "Chat View",
+  "version": "0.4.0",
+  "minDeepsteveVersion": "0.4.0",
+  "description": "Immersive fullscreen chat with animated avatars",
+  "enabledByDefault": false,
+  "entry": "index.html",
+  "toolbar": {
+    "label": "Chat View"
+  }
+}
