@@ -713,6 +713,12 @@ function wireShellOutput(id) {
           e.initialPrompt = null;
           e.waitingForInput = false;
           setTimeout(() => submitToShell(e.shell, prompt), 500);
+        } else if (e.pendingChatAwaken?.length) {
+          const pending = e.pendingChatAwaken.shift();
+          e.waitingForInput = false;
+          const stateMsg = JSON.stringify({ type: 'state', waiting: false });
+          e.clients.forEach((c) => c.send(stateMsg));
+          setTimeout(() => submitToShell(e.shell, '/chat #' + pending.channel), 500);
         }
       } else if (!data.includes('\x07') && e.waitingForInput) {
         // PTY produced non-BEL output while we thought Claude was waiting —
