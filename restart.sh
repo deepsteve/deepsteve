@@ -38,6 +38,14 @@ mkdir -p ~/.deepsteve/themes
 cp -n themes/*.css ~/.deepsteve/themes/ 2>/dev/null || true
 mkdir -p ~/.deepsteve/mods
 cp -r mods/* ~/.deepsteve/mods/ 2>/dev/null || true
+
+# Prune stale repo mods (keep user-installed mods that have a .source marker)
+for deployed in ~/.deepsteve/mods/*/; do
+    modname=$(basename "$deployed")
+    if [ ! -d "mods/$modname" ] && [ ! -f "$deployed/.source" ]; then
+        rm -rf "$deployed"
+    fi
+done
 mkdir -p ~/.deepsteve/skills
 cp -r skills/*.md ~/.deepsteve/skills/ 2>/dev/null || true
 

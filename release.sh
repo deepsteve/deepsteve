@@ -234,3 +234,23 @@ POSTAMBLE
 
 chmod +x "$OUT"
 echo "Generated $OUT ($(wc -c < "$OUT" | tr -d ' ') bytes)"
+
+# Report deployed mods not in the repo
+if [ -d "$HOME/.deepsteve/mods" ]; then
+  STALE=""
+  for deployed in "$HOME/.deepsteve/mods"/*/; do
+    modname=$(basename "$deployed")
+    if [ ! -d "mods/$modname" ]; then
+      if [ -f "$deployed/.source" ]; then
+        STALE="$STALE  $modname (user-installed)\n"
+      else
+        STALE="$STALE  $modname (stale — no .source, not in repo)\n"
+      fi
+    fi
+  done
+  if [ -n "$STALE" ]; then
+    echo ""
+    echo "⚠️  Deployed mods not in repo:"
+    printf "$STALE"
+  fi
+fi
