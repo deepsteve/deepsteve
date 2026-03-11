@@ -169,6 +169,69 @@
     // Load current page from history
     urlInput.value = navHistory[historyIndex];
     navigate(false);
+
+    // ─── Baby Browser MCP bridge ───────────────────────────────────────
+    function initBridge() {
+      if (!window.deepsteve) {
+        setTimeout(initBridge, 200);
+        return;
+      }
+
+      window.deepsteve.onBabyBrowserRequest(async (req) => {
+        const { requestId, action } = req;
+        let result, error;
+
+        try {
+          if (action === 'navigate') {
+            urlInput.value = req.url;
+            result = await new Promise((resolve, reject) => {
+              const timeout = setTimeout(() => {
+                frame.removeEventListener('load', onLoad);
+                resolve(`Navigated to ${req.url} (load event timed out after 10s, page may still be loading)`);
+              }, 10000);
+              function onLoad() {
+                clearTimeout(timeout);
+                frame.removeEventListener('load', onLoad);
+                resolve(`Navigated to ${req.url}`);
+              }
+              frame.addEventListener('load', onLoad);
+              navigate();
+            });
+          } else if (action === 'read') {
+            try {
+              const doc = frame.contentDocument;
+              if (!doc || !doc.body) {
+                error = 'No page loaded in Baby Browser';
+              } else {
+                const clone = doc.body.cloneNode(true);
+                for (const tag of clone.querySelectorAll('script, style, noscript, svg, link, meta')) {
+                  tag.remove();
+                }
+                const title = doc.title || '';
+                const bodyText = clone.innerText.replace(/\n{3,}/g, '\n\n').trim();
+                result = (title ? `# ${title}\n\n` : '') + bodyText;
+              }
+            } catch (e) {
+              error = 'Cannot read page content (cross-origin restriction): ' + e.message;
+            }
+          } else if (action === 'url') {
+            result = navHistory[historyIndex] || '';
+          } else {
+            error = `Unknown action: ${action}`;
+          }
+        } catch (e) {
+          error = e.message;
+        }
+
+        fetch('/api/baby-browser/result', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ requestId, result, error }),
+        }).catch(e => console.error('Failed to post baby-browser result:', e));
+      });
+    }
+
+    initBridge();
   </script>
 </body>
 </html>

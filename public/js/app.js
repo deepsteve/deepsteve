@@ -922,6 +922,13 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
           setTimeout(() => processedBrowserRequests.delete(msg.requestId), 60000);
           ModManager.notifySceneSnapshotRequest(msg);
         }
+      } else if (msg.type === 'baby-browser-request') {
+        if (msg.targetWindowId && msg.targetWindowId !== WindowManager.getWindowId()) return;
+        if (!processedBrowserRequests.has(msg.requestId)) {
+          processedBrowserRequests.add(msg.requestId);
+          setTimeout(() => processedBrowserRequests.delete(msg.requestId), 15000);
+          ModManager.notifyBabyBrowserRequest(msg);
+        }
       }
     } catch (err) {
       console.error('Error handling control message:', err);
@@ -1088,6 +1095,11 @@ function createModTab(modId, opts = {}) {
   iframe.style.cssText = 'width:100%;height:100%;border:none;';
   iframe.sandbox = 'allow-same-origin allow-scripts allow-forms allow-popups';
   container.appendChild(iframe);
+
+  // Inject bridge API so tab mods can register MCP callbacks (e.g. Baby Browser tools)
+  iframe.addEventListener('load', () => {
+    ModManager.injectBridgeAPI(iframe, modId);
+  });
 
   sessions.set(id, {
     term: null, fit: null, ws: null, container, cwd: null,
