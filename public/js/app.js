@@ -80,7 +80,7 @@ history.pushState(null, '', location.href);
 // Warn before leaving page with active sessions
 window.addEventListener('beforeunload', (e) => {
   if (window.__deepsteveReloadPending) return; // Skip prompt during server restart reload
-  const hasActiveSessions = [...sessions.values()].some(s => s.type !== 'mod-tab' && !s.waitingForInput);
+  const hasActiveSessions = [...sessions.values()].some(s => s.type !== 'mod-tab' && s.type !== 'display-tab' && !s.waitingForInput);
   if (hasActiveSessions) {
     e.preventDefault();
     e.returnValue = '';
@@ -1137,6 +1137,60 @@ function createModTab(modId, opts = {}) {
 }
 
 /**
+ * Create a display tab (agent-generated HTML in a sandboxed iframe, no PTY).
+ */
+function createDisplayTab(id, name) {
+  const container = document.createElement('div');
+  container.className = 'terminal-container';
+  container.id = 'term-' + id;
+  document.getElementById('terminals').appendChild(container);
+
+  const iframe = document.createElement('iframe');
+  iframe.src = `/api/display-tab/${id}`;
+  iframe.style.cssText = 'width:100%;height:100%;border:none;';
+  iframe.sandbox = 'allow-scripts allow-forms';
+  container.appendChild(iframe);
+
+  sessions.set(id, {
+    term: null, fit: null, ws: null, container, cwd: null,
+    name: name || 'Display', waitingForInput: false, scrollControl: null,
+    type: 'display-tab',
+  });
+
+  const tabCallbacks = {
+    onSwitch: (sessionId) => switchTo(sessionId),
+    onClose: async (sessionId) => {
+      if (await confirmCloseSession(sessionId)) killSession(sessionId);
+    },
+    onRename: (sessionId) => renameSession(sessionId),
+    onReorder: (orderedIds) => {
+      const tabList = TabSessions.get();
+      const reordered = orderedIds.map(id => tabList.find(s => s.id === id)).filter(Boolean);
+      TabSessions.save(reordered);
+      SessionStore.reorderSessions(getWindowId(), orderedIds);
+      ModManager.notifySessionsChanged(getSessionList());
+    },
+    getLiveWindows: () => [],
+    onSendToWindow: () => {},
+    getModMenuItems: () => [],
+  };
+
+  TabManager.addTab(id, name || 'Display', tabCallbacks);
+  updateEmptyState();
+  switchTo(id);
+
+  // Forward resize events to iframe
+  const ro = new ResizeObserver(([entry]) => {
+    const { width, height } = entry.contentRect;
+    iframe.contentWindow?.postMessage({ type: 'resize', width, height }, '*');
+  });
+  ro.observe(container);
+  sessions.get(id).resizeObserver = ro;
+
+  ModManager.notifySessionsChanged(getSessionList());
+}
+
+/**
  * Switch to a specific session tab
  */
 function switchTo(id) {
@@ -1167,7 +1221,7 @@ function switchTo(id) {
     TabManager.updateBadge(id, false);
     clearNotification(id);
 
-    if (session.type === 'mod-tab') return;
+    if (session.type === 'mod-tab' || session.type === 'display-tab') return;
 
     session.scrollControl.suppressScroll();
     requestAnimationFrame(() => {
@@ -1227,9 +1281,9 @@ async function restoreSessions(sessionList, opts = {}) {
  * (dropdown), fetches state from the server.
  */
 function confirmCloseSession(id) {
-  // Mod tabs have no PTY — always allow close
+  // Mod/display tabs have no PTY — always allow close
   const session = sessions.get(id);
-  if (session?.type === 'mod-tab') return Promise.resolve(true);
+  if (session?.type === 'mod-tab' || session?.type === 'display-tab') return Promise.resolve(true);
 
   // Check local session first (tab is connected in this window)
   const isIdle = session ? session.waitingForInput : null;
@@ -1321,8 +1375,8 @@ function killSession(id) {
   const session = sessions.get(id);
   if (!session) return;
 
-  if (session.type === 'mod-tab') {
-    // Mod tabs: no PTY/WS to clean up
+  if (session.type === 'mod-tab' || session.type === 'display-tab') {
+    // Mod/display tabs: no PTY/WS to clean up
     if (session.resizeObserver) session.resizeObserver.disconnect();
     session.container.remove();
   } else {
@@ -2051,6 +2105,20 @@ async function init() {
         // Server created a session (e.g. via /api/start-issue) — open a tab for it
         if (msg.windowId && msg.windowId !== getWindowId()) return;
         createSession(msg.cwd, msg.id, false, { name: msg.name, allowDuplicate: true });
+      }
+      if (msg.type === 'open-display-tab') {
+        if (msg.windowId && msg.windowId !== getWindowId()) return;
+        createDisplayTab(msg.id, msg.name);
+      }
+      if (msg.type === 'update-display-tab') {
+        const session = sessions.get(msg.id);
+        if (session?.type === 'display-tab') {
+          const iframe = session.container.querySelector('iframe');
+          if (iframe) iframe.src = `/api/display-tab/${msg.id}?t=${Date.now()}`;
+        }
+      }
+      if (msg.type === 'close-display-tab') {
+        if (sessions.has(msg.id)) killSession(msg.id);
       }
     },
     onShowRestartConfirm: () => showRestartConfirmDialog(),

@@ -1520,6 +1520,12 @@ app.post('/api/mods/uninstall', (req, res) => {
   }
 });
 
+app.get('/api/display-tab/:id', (req, res) => {
+  const html = displayTabs.get(req.params.id);
+  if (!html) return res.status(404).send('Not found');
+  res.type('html').send(html);
+});
+
 app.get('/api/shells', (req, res) => {
   const active = [...shells.entries()].map(([id, entry]) => ({ id, pid: entry.shell.pid, cwd: entry.cwd, name: entry.name || null, agentType: entry.agentType || 'claude', status: 'active', lastActivity: entry.lastActivity || null }));
   const saved = Object.entries(savedState).map(([id, entry]) => ({ id, cwd: entry.cwd, name: entry.name || null, agentType: entry.agentType || 'claude', status: entry.closed ? 'closed' : 'saved', lastActivity: entry.lastActivity || null }));
@@ -1891,6 +1897,7 @@ const server = app.listen(PORT, BIND, () => {
   }, 3000);
 });
 const shells = new Map();
+const displayTabs = new Map(); // id → HTML string (ephemeral, not persisted)
 const wss = new WebSocketServer({ server });
 
 // HTTPS server (created async if enabled)
@@ -2211,7 +2218,7 @@ function broadcastToWindow(windowId, msg) {
 }
 
 // Initialize MCP server (async, ~100ms for dynamic import)
-initMCP({ app, shells, wss, broadcast, broadcastToWindow, log, MODS_DIR, closeSession, spawnAgent, getSpawnArgs, getAgentConfig, wireShellOutput, watchClaudeSessionDir, unwatchClaudeSessionDir, saveState, validateWorktree, ensureWorktree, submitToShell, reloadClients, pendingOpens, settings, isShuttingDown: () => shuttingDown }).catch(e => log('MCP init failed:', e.message));
+initMCP({ app, shells, wss, broadcast, broadcastToWindow, log, MODS_DIR, closeSession, spawnAgent, getSpawnArgs, getAgentConfig, wireShellOutput, watchClaudeSessionDir, unwatchClaudeSessionDir, saveState, validateWorktree, ensureWorktree, submitToShell, reloadClients, pendingOpens, settings, isShuttingDown: () => shuttingDown, displayTabs }).catch(e => log('MCP init failed:', e.message));
 
 // Watch themes directory for changes and broadcast to clients
 let themeWatchDebounce = null;
