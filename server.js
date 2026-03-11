@@ -653,6 +653,34 @@ function submitToShell(shell, text) {
 }
 
 /**
+ * Strip OSC sequences (e.g. window title updates like \x1b]0;Claude Code\x07)
+ * so that the BEL terminator inside them isn't mistaken for a standalone BEL.
+ */
+function stripOSC(data) {
+  return data.replace(/\x1b\][\s\S]*?(\x07|\x1b\\)/g, '');
+}
+
+/**
+ * Strip all known ANSI escape sequences, preserving printable text and whitespace.
+ * Used for UUID matching in resume detection.
+ */
+function stripEscapeSequences(data) {
+  return data
+    .replace(/\x1b\][\s\S]*?(\x07|\x1b\\)/g, '')  // OSC
+    .replace(/\x1b\[[0-9;?]*[a-zA-Z@`]/g, '')       // CSI (including private params like ?25h)
+    .replace(/\x1b[()][A-Z0-9]/g, '')                // SCS (character set selection)
+    .replace(/\x1b[78DMHNOcn=><]/g, '');              // Single-char escapes
+}
+
+/**
+ * Strip all escapes AND whitespace/BEL — used to check whether PTY output
+ * contains any substantive visible content.
+ */
+function stripAllEscapes(data) {
+  return stripEscapeSequences(data).replace(/[\s\x07]/g, '');
+}
+
+/**
  * Wire up a shell's onData handler: broadcast output to WebSocket clients,
  * detect BEL (Claude waiting for input), and auto-submit initialPrompt.
  */
@@ -678,8 +706,8 @@ function wireShellOutput(id) {
     if (config.emitsBel) {
       // Detect claude --resume <UUID> in PTY output to track the actual session ID.
       // Claude prints this line when a session exits (including /exit, /clear, shutdown).
-      // Strip ANSI escapes before matching so dim/bold wrappers don't interfere.
-      const plain = data.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '');
+      // Strip all ANSI escapes before matching so dim/bold/OSC wrappers don't interfere.
+      const plain = stripEscapeSequences(data);
       const resumeMatch = plain.match(/claude --resume ([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/);
       if (resumeMatch) {
         const newSessionId = resumeMatch[1];
@@ -703,32 +731,44 @@ function wireShellOutput(id) {
           }
         }
       }
-      if (data.includes('\x07') && !e.waitingForInput) {
-        e.waitingForInput = true;
-        const stateMsg = JSON.stringify({ type: 'state', waiting: true });
-        e.clients.forEach((c) => c.send(stateMsg));
+      // Strip OSC sequences first so their BEL terminators don't trigger false positives
+      const hasBel = stripOSC(data).includes('\x07');
 
-        if (e.initialPrompt) {
-          const prompt = e.initialPrompt;
-          e.initialPrompt = null;
-          e.waitingForInput = false;
-          setTimeout(() => submitToShell(e.shell, prompt), 500);
-        } else if (e.pendingChatAwaken?.length) {
-          const pending = e.pendingChatAwaken.shift();
-          e.waitingForInput = false;
-          const stateMsg = JSON.stringify({ type: 'state', waiting: false });
+      if (hasBel) {
+        e.lastBelTime = Date.now();
+        if (!e.waitingForInput) {
+          e.waitingForInput = true;
+          const stateMsg = JSON.stringify({ type: 'state', waiting: true });
           e.clients.forEach((c) => c.send(stateMsg));
-          setTimeout(() => submitToShell(e.shell, '/chat #' + pending.channel), 500);
+
+          if (e.initialPrompt) {
+            const prompt = e.initialPrompt;
+            e.initialPrompt = null;
+            e.waitingForInput = false;
+            setTimeout(() => submitToShell(e.shell, prompt), 500);
+          } else if (e.pendingChatAwaken?.length) {
+            const pending = e.pendingChatAwaken.shift();
+            e.waitingForInput = false;
+            const stateMsg2 = JSON.stringify({ type: 'state', waiting: false });
+            e.clients.forEach((c) => c.send(stateMsg2));
+            setTimeout(() => submitToShell(e.shell, '/chat #' + pending.channel), 500);
+          }
         }
-      } else if (!data.includes('\x07') && e.waitingForInput) {
+        // If already waiting, the BEL just refreshes lastBelTime (keeps it stable)
+      } else if (e.waitingForInput) {
         // PTY produced non-BEL output while we thought Claude was waiting —
-        // means a tool was auto-approved or Claude continued on its own.
-        // Strip ANSI escape sequences and check for substantive content.
-        const stripped = data.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').replace(/[\s\x07]/g, '');
-        if (stripped.length > 0) {
-          e.waitingForInput = false;
-          const stateMsg = JSON.stringify({ type: 'state', waiting: false });
-          e.clients.forEach((c) => c.send(stateMsg));
+        // but Ink re-renders arrive 50-150ms after BEL in the same render cycle.
+        // Debounce: ignore content within 150ms of the last BEL.
+        if (e.lastBelTime && (Date.now() - e.lastBelTime) < 150) {
+          // Same Ink render cycle — ignore this chunk
+        } else {
+          // Enough time has passed; check for substantive visible content
+          const stripped = stripAllEscapes(data);
+          if (stripped.length > 0) {
+            e.waitingForInput = false;
+            const stateMsg = JSON.stringify({ type: 'state', waiting: false });
+            e.clients.forEach((c) => c.send(stateMsg));
+          }
         }
       }
     }
@@ -758,7 +798,7 @@ function killShell(entry, id) {
       try { entry.shell.write('\x03'); } catch {}
       // Watch for BEL (Claude back at prompt), then send /exit
       const exitHandler = (data) => {
-        if (data.includes('\x07')) {
+        if (stripOSC(data).includes('\x07')) {
           entry.shell.removeListener('data', exitHandler);
           try { submitToShell(entry.shell, '/exit'); } catch {}
         }
