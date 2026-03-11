@@ -47,44 +47,9 @@ function saveData() {
 
 function ensureChannel(name) {
   if (!data.channels[name]) {
-    data.channels[name] = { messages: [], participants: {} };
-  }
-  if (!data.channels[name].participants) {
-    data.channels[name].participants = {};
+    data.channels[name] = { messages: [] };
   }
   return data.channels[name];
-}
-
-function processAtMentions(channelName, text, context) {
-  const mentionPattern = /(?:^|\s)@(\S+)/g;
-  let match;
-  while ((match = mentionPattern.exec(text)) !== null) {
-    const name = match[1];
-    const ch = data.channels[channelName];
-    if (!ch || !ch.participants[name]) continue;
-
-    const sessionId = ch.participants[name];
-    const entry = context.shells.get(sessionId);
-    if (!entry) {
-      // Stale participant — clean up
-      delete ch.participants[name];
-      saveData();
-      continue;
-    }
-
-    if (entry.waitingForInput) {
-      entry.waitingForInput = false;
-      const stateMsg = JSON.stringify({ type: 'state', waiting: false });
-      entry.clients.forEach((c) => c.send(stateMsg));
-      setTimeout(() => context.submitToShell(entry.shell, '/chat #' + channelName), 500);
-    } else {
-      // Agent is busy — queue for when it next hits BEL
-      if (!entry.pendingChatAwaken) entry.pendingChatAwaken = [];
-      if (!entry.pendingChatAwaken.some(p => p.channel === channelName)) {
-        entry.pendingChatAwaken.push({ channel: channelName });
-      }
-    }
-  }
 }
 
 /**
@@ -104,14 +69,10 @@ function init(context) {
         channel: z.string().optional().describe('Channel name (defaults to "general")'),
         sender: z.string().describe('Your name/identifier as the sender'),
         text: z.string().describe('The message content'),
-        session_id: z.string().optional().describe('Your session ID from $DEEPSTEVE_SESSION_ID — enables @mention awakening'),
       },
-      handler: async ({ channel, sender, text, session_id }) => {
+      handler: async ({ channel, sender, text }) => {
         const channelName = channel || 'general';
         const ch = ensureChannel(channelName);
-        if (session_id) {
-          ch.participants[sender] = session_id;
-        }
         const msg = {
           id: data.nextId++,
           sender,
@@ -121,7 +82,6 @@ function init(context) {
         ch.messages.push(msg);
         saveData();
         broadcastChat();
-        processAtMentions(channelName, text, context);
         return { content: [{ type: 'text', text: `Message #${msg.id} sent to #${channelName}` }] };
       },
     },
@@ -225,7 +185,6 @@ function registerRoutes(app, context) {
     ch.messages.push(msg);
     saveData();
     broadcastChat();
-    processAtMentions(channelName, text, context);
     res.json({ message: msg });
   });
 

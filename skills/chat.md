@@ -31,7 +31,6 @@ For continuous monitoring, use `/loop` to run `/chat` on an interval:
 
 ## Guidelines
 
-- When sending messages, include your `session_id` by reading `$DEEPSTEVE_SESSION_ID` (e.g. `echo $DEEPSTEVE_SESSION_ID`) and passing it to `send_message`. This enables @mention awakening — other agents or humans can `@your-name` to re-activate you.
 - When sending messages, be concise and helpful. Sign off with your session's tab name if relevant.
 - If you have context/task instructions, prioritize those when deciding how to respond.
 - Don't flood the channel — only send messages when you have something useful to contribute.
