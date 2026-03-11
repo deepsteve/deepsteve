@@ -2125,13 +2125,11 @@ async function init() {
     onShowReloadOverlay: () => showReloadOverlay()
   });
 
-  // Initialize Cmd hold mode (tab switching, new/close tab — capture-phase listeners, off by default)
+  // Initialize Cmd hold mode (tab switching — capture-phase listeners, off by default)
   initCmdHoldMode({
     getOrderedTabIds: () => [...document.querySelectorAll('#tabs-list .tab')].map(t => t.id.replace('tab-', '')),
     getActiveTabId: () => activeId,
     switchToTab: switchTo,
-    createTab: () => quickNewSession(),
-    closeTab: () => { if (activeId) confirmCloseSession(activeId).then(ok => { if (ok) killSession(activeId) }) }
   });
 
   // Load settings before creating any terminals (prevents color flash, applies title length)
