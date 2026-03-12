@@ -187,8 +187,8 @@ export const SessionStore = {
     // Remove existing entry (dedup) then prepend
     storage.recentDirs = storage.recentDirs.filter(d => d.path !== path);
     storage.recentDirs.unshift({ path, lastUsed: Date.now() });
-    // Cap at 10
-    if (storage.recentDirs.length > 10) storage.recentDirs.length = 10;
+    // Cap at 100
+    if (storage.recentDirs.length > 100) storage.recentDirs.length = 100;
     setStorage(storage);
   },
 

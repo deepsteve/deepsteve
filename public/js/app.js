@@ -1672,15 +1672,20 @@ function showNewTabMenu(e) {
 
   // Build recent dirs section
   const recentDirs = SessionStore.getRecentDirs();
+  const INITIAL_SHOW = 10;
+  const MORE_INCREMENT = 20;
+  let recentShown = 0;
+  // Disambiguate duplicate leaf names by appending parent dir
+  const leafCounts = {};
+  for (const d of recentDirs) {
+    const leaf = d.path.split('/').pop();
+    leafCounts[leaf] = (leafCounts[leaf] || 0) + 1;
+  }
   if (recentDirs.length > 0) {
     html += '<div class="context-menu-header">Recent</div>';
-    // Disambiguate duplicate leaf names by appending parent dir
-    const leafCounts = {};
-    for (const d of recentDirs) {
-      const leaf = d.path.split('/').pop();
-      leafCounts[leaf] = (leafCounts[leaf] || 0) + 1;
-    }
-    for (const d of recentDirs) {
+    const initialSlice = recentDirs.slice(0, INITIAL_SHOW);
+    recentShown = initialSlice.length;
+    for (const d of initialSlice) {
       const parts = d.path.split('/');
       const leaf = parts.pop();
       const label = leafCounts[leaf] > 1 && parts.length > 0
@@ -1688,7 +1693,10 @@ function showNewTabMenu(e) {
         : leaf;
       html += `<div class="context-menu-item" data-action="recent" data-path="${d.path.replace(/"/g, '&quot;')}" title="${d.path.replace(/"/g, '&quot;')}">${label}</div>`;
     }
-    html += '<div class="context-menu-separator"></div>';
+    if (recentDirs.length > INITIAL_SHOW) {
+      html += `<div class="context-menu-item context-menu-more" data-action="more">More...</div>`;
+    }
+    html += '<div class="context-menu-separator" id="recent-dirs-separator"></div>';
   }
   html += `
     <div class="context-menu-item" data-action="worktree">New worktree...</div>
@@ -1794,6 +1802,37 @@ function showNewTabMenu(e) {
     if (!item) return;
     const action = item.dataset.action;
     if (!action) return; // ignore clicks on items without actions (e.g. agent submenu trigger)
+    // "More" button: append next batch of recent dirs without closing menu
+    if (action === 'more') {
+      ev.stopPropagation();
+      const moreBtn = item;
+      const nextSlice = recentDirs.slice(recentShown, recentShown + MORE_INCREMENT);
+      recentShown += nextSlice.length;
+      const separator = menu.querySelector('#recent-dirs-separator');
+      for (const d of nextSlice) {
+        const parts = d.path.split('/');
+        const leaf = parts.pop();
+        const label = leafCounts[leaf] > 1 && parts.length > 0
+          ? `${leaf} (${parts.pop()})`
+          : leaf;
+        const el = document.createElement('div');
+        el.className = 'context-menu-item';
+        el.dataset.action = 'recent';
+        el.dataset.path = d.path;
+        el.title = d.path;
+        el.textContent = label;
+        menu.insertBefore(el, moreBtn);
+      }
+      if (recentShown >= recentDirs.length) {
+        moreBtn.remove();
+      }
+      // Re-check if menu extends off-screen after adding items
+      const updatedRect = menu.getBoundingClientRect();
+      if (updatedRect.bottom > window.innerHeight) {
+        menu.style.top = (window.innerHeight - updatedRect.height - 8) + 'px';
+      }
+      return;
+    }
     menu.remove();
     if (submenu) submenu.remove();
     cleanup();
