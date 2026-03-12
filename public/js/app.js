@@ -431,6 +431,20 @@ settingsBtn?.addEventListener('click', async () => {
         <h2>Settings</h2>
       </div>
       <div class="settings-body">
+      <div class="settings-section">
+        <h3>Version</h3>
+        <div class="version-info">
+          <span>Version ${escapeHtml(versionData.current)}</span>
+          <div class="version-status ${
+            versionData.latest === null ? 'version-failed' :
+            versionData.updateAvailable ? 'version-update' : 'version-ok'
+          }">${
+            versionData.latest === null ? "Couldn\u2019t check for updates" :
+            versionData.updateAvailable ? `Version ${escapeHtml(versionData.latest)} available \u2014 see deepsteve.com for upgrade instructions` :
+            "You\u2019re up to date"
+          }</div>
+        </div>
+      </div>
       <p style="font-size: 13px; color: var(--ds-text-secondary); margin-bottom: 12px;">
         Shell profile to source before running Claude:
       </p>
@@ -528,20 +542,6 @@ settingsBtn?.addEventListener('click', async () => {
         <div style="display: flex; gap: 8px; margin-top: 8px;">
           <button class="btn-secondary" id="settings-new-config" style="font-size: 12px; padding: 4px 12px;">+ New Config</button>
           <button class="btn-secondary" id="settings-save-current" style="font-size: 12px; padding: 4px 12px;">Save Current Tabs</button>
-        </div>
-      </div>
-      <div class="settings-section">
-        <h3>Version</h3>
-        <div class="version-info">
-          <span>Version ${escapeHtml(versionData.current)}</span>
-          <div class="version-status ${
-            versionData.latest === null ? 'version-failed' :
-            versionData.updateAvailable ? 'version-update' : 'version-ok'
-          }">${
-            versionData.latest === null ? "Couldn\u2019t check for updates" :
-            versionData.updateAvailable ? `Version ${escapeHtml(versionData.latest)} available \u2014 see deepsteve.com for upgrade instructions` :
-            "You\u2019re up to date"
-          }</div>
         </div>
       </div>
       </div>
