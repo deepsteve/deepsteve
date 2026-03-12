@@ -249,7 +249,8 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
 /* New-tab menu extras */
 .context-menu-header { padding: 6px 12px 4px; font-size: 11px; color: var(--ds-text-secondary); text-transform: uppercase; letter-spacing: 0.5px; }
 .context-menu-separator { height: 1px; background: var(--ds-border); margin: 4px 0; }
-.new-tab-menu { max-height: 340px; overflow-y: auto; }
+.new-tab-menu { max-height: 70vh; overflow-y: auto; }
+.context-menu-more { text-align: center; color: var(--ds-text-secondary); font-size: 12px; }
 
 /* Issue picker */
 .issue-list { background: var(--ds-bg-primary); border: 1px solid var(--ds-border); border-radius: 4px; max-height: 360px; overflow-y: auto; margin-bottom: 16px; }
