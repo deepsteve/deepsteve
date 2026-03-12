@@ -7,8 +7,6 @@ The user wants to merge their current worktree's branch into the `main` branch.
 
 Steps:
 
-0. **Confirm before merging**: Before doing anything else, ask the user: "Ready to merge this branch into main? Please confirm you've tested the changes." Wait for the user to confirm before proceeding. If they say no or want to wait, stop.
-
 1. **Detect if in a worktree**: Run `git rev-parse --git-common-dir` and `git rev-parse --git-dir` and compare their resolved absolute paths. If they resolve to the same directory, you are NOT in a worktree — tell the user: "Not in a worktree — /merge only works from a worktree session." and stop.
 
 2. **Get the current branch name**: Run `git branch --show-current`.
