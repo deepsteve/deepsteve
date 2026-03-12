@@ -1,0 +1,9 @@
+{
+  "name": "Start Issue",
+  "version": "0.1.0",
+  "enabledByDefault": true,
+  "description": "MCP tool for agents to open a new session for a GitHub issue",
+  "tools": [
+    { "name": "start_issue", "description": "Open a new deepsteve session for a GitHub issue" }
+  ]
+}
