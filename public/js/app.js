@@ -1692,7 +1692,7 @@ function showNewTabMenu(e) {
   }
   html += `
     <div class="context-menu-item" data-action="worktree">New worktree...</div>
-    <div class="context-menu-item" data-action="repo">Change repo...</div>
+    <div class="context-menu-item" data-action="repo">New tab in repo...</div>
   `;
 
   // Add mod tab items
