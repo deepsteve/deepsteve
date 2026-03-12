@@ -725,10 +725,67 @@ settingsBtn?.addEventListener('click', async () => {
       agentType: s.agentType || 'claude',
     })).filter(t => t.cwd);
     if (currentTabs.length === 0) return alert('No tabs open to save');
-    const name = prompt('Config name:');
-    if (!name) return;
-    editingConfigs.push({ id: '', name, tabs: currentTabs });
-    renderConfigsList();
+
+    const pickerOverlay = document.createElement('div');
+    pickerOverlay.className = 'modal-overlay';
+    pickerOverlay.style.zIndex = '1001';
+
+    const checked = currentTabs.map(() => true);
+
+    function renderPicker() {
+      const allChecked = checked.every(Boolean);
+      const tabRows = currentTabs.map((t, i) => `
+        <div style="display: flex; gap: 8px; align-items: center; padding: 6px 0; border-bottom: 1px solid var(--ds-border);">
+          <input type="checkbox" class="save-tab-check" data-i="${i}" ${checked[i] ? 'checked' : ''} style="margin: 0;">
+          <span style="min-width: 100px; font-size: 12px; color: var(--ds-text-primary);">${escapeHtml(t.name || '(unnamed)')}</span>
+          <span style="flex: 1; font-size: 11px; color: var(--ds-text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${escapeHtml(t.cwd)}</span>
+        </div>
+      `).join('');
+
+      pickerOverlay.innerHTML = `
+        <div class="modal" style="max-width: 550px;">
+          <h3 style="margin-bottom: 12px;">Save Current Tabs</h3>
+          <div style="margin-bottom: 12px;">
+            <label style="font-size: 12px; color: var(--ds-text-secondary);">Config Name</label>
+            <input type="text" id="save-tabs-name" placeholder="My Config" style="width: 100%; padding: 6px 8px; background: var(--ds-bg-primary); border: 1px solid var(--ds-border); border-radius: 4px; color: var(--ds-text-primary); font-size: 13px; margin-top: 4px;">
+          </div>
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+            <label style="font-size: 12px; color: var(--ds-text-secondary);">Select Tabs</label>
+            <button class="btn-secondary" id="save-tabs-toggle" style="font-size: 11px; padding: 2px 8px;">${allChecked ? 'Deselect All' : 'Select All'}</button>
+          </div>
+          <div style="max-height: 250px; overflow-y: auto;">${tabRows}</div>
+          <div class="modal-buttons" style="margin-top: 16px;">
+            <button class="btn-secondary" id="save-tabs-cancel">Cancel</button>
+            <button class="btn-primary" id="save-tabs-save">Save</button>
+          </div>
+        </div>
+      `;
+
+      pickerOverlay.querySelectorAll('.save-tab-check').forEach(cb => {
+        cb.onchange = () => {
+          checked[Number(cb.dataset.i)] = cb.checked;
+          renderPicker();
+        };
+      });
+      pickerOverlay.querySelector('#save-tabs-toggle').onclick = () => {
+        const newVal = !checked.every(Boolean);
+        checked.fill(newVal);
+        renderPicker();
+      };
+      pickerOverlay.querySelector('#save-tabs-cancel').onclick = () => pickerOverlay.remove();
+      pickerOverlay.querySelector('#save-tabs-save').onclick = () => {
+        const name = pickerOverlay.querySelector('#save-tabs-name').value.trim();
+        if (!name) return alert('Please enter a config name');
+        const selectedTabs = currentTabs.filter((_, i) => checked[i]);
+        if (selectedTabs.length === 0) return alert('Please select at least one tab');
+        editingConfigs.push({ id: '', name, tabs: selectedTabs });
+        pickerOverlay.remove();
+        renderConfigsList();
+      };
+    }
+
+    renderPicker();
+    document.body.appendChild(pickerOverlay);
   };
 
   overlay.querySelector('#settings-cancel').onclick = () => overlay.remove();
@@ -2185,6 +2242,34 @@ async function init() {
   });
 
   WindowManager.startHeartbeat();
+
+  // Check for ?config=<name> or ?config_id=<id> URL parameter
+  const urlParams = new URLSearchParams(window.location.search);
+  const configName = urlParams.get('config');
+  const configId = urlParams.get('config_id');
+  if ((configName || configId) && !isExistingTab) {
+    // Ensure configs are loaded (the top-level call is fire-and-forget)
+    await loadWindowConfigs();
+    const match = windowConfigs.find(c =>
+      configId ? c.id === configId : c.name === configName
+    );
+    if (match) {
+      // Clean URL so refresh uses TabSessions, not re-apply
+      history.replaceState(null, '', window.location.pathname);
+      try {
+        await fetch(`/api/window-configs/${match.id}/apply`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ windowId: getWindowId() })
+        });
+      } catch (e) {
+        console.error('Failed to apply window config from URL:', e);
+      }
+      // Sessions arrive via open-session WebSocket messages
+      return;
+    }
+    // Config not found — fall through to normal init
+  }
 
   // TabSessions (sessionStorage) is the authoritative per-tab source.
   // It survives page refresh and doesn't depend on localStorage window-ID mapping.
