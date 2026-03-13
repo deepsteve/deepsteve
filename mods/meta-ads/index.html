@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    * { margin: 0; box-sizing: border-box; }
+    body {
+      background: var(--ds-bg-primary, #0d1117);
+      color: var(--ds-text-primary, #c9d1d9);
+      font-family: system-ui;
+      padding: 16px;
+    }
+    .header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 12px;
+    }
+    h3 { font-size: 14px; font-weight: 600; }
+    .help-btn {
+      background: none;
+      border: 1px solid var(--ds-border, #30363d);
+      color: var(--ds-text-secondary, #8b949e);
+      border-radius: 50%;
+      width: 22px;
+      height: 22px;
+      font-size: 12px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 0;
+    }
+    .help-btn:hover { color: var(--ds-text-primary, #c9d1d9); border-color: var(--ds-text-secondary, #8b949e); }
+    label {
+      display: block;
+      font-size: 12px;
+      color: var(--ds-text-secondary, #8b949e);
+      margin-bottom: 4px;
+      margin-top: 12px;
+    }
+    label:first-of-type { margin-top: 0; }
+    input[type="text"] {
+      width: 100%;
+      background: var(--ds-bg-secondary, #161b22);
+      color: var(--ds-text-primary, #c9d1d9);
+      border: 1px solid var(--ds-border, #30363d);
+      border-radius: 6px;
+      padding: 8px;
+      font-family: monospace;
+      font-size: 12px;
+    }
+    input[type="text"]:focus { outline: none; border-color: var(--ds-accent, #58a6ff); }
+    button.save {
+      background: var(--ds-accent, #58a6ff);
+      color: #fff;
+      border: none;
+      border-radius: 6px;
+      padding: 6px 16px;
+      font-size: 13px;
+      cursor: pointer;
+      margin-top: 16px;
+    }
+    button.save:hover { opacity: 0.9; }
+    .status {
+      font-size: 12px;
+      margin-top: 8px;
+      color: var(--ds-text-secondary, #8b949e);
+    }
+    .hint {
+      font-size: 11px;
+      color: var(--ds-text-secondary, #8b949e);
+      margin-top: 4px;
+      line-height: 1.4;
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h3>Meta Ads Settings</h3>
+    <button class="help-btn" id="help" title="Get help">?</button>
+  </div>
+
+  <label for="token">Access Token</label>
+  <input type="text" id="token" placeholder="Your Meta access token">
+
+  <label for="account">Ad Account ID</label>
+  <input type="text" id="account" placeholder="act_123456789">
+  <div class="hint">Find this in Meta Business Manager under Ad Account Settings</div>
+
+  <button class="save" id="save">Save</button>
+  <div class="status" id="status"></div>
+
+  <script>
+    const tokenEl = document.getElementById('token');
+    const accountEl = document.getElementById('account');
+    const statusEl = document.getElementById('status');
+
+    async function load() {
+      try {
+        const res = await fetch('/api/meta-ads/config');
+        const config = await res.json();
+        tokenEl.value = config.accessTokenMasked || '';
+        accountEl.value = config.adAccountId || '';
+      } catch (e) {
+        statusEl.textContent = 'Failed to load config';
+      }
+    }
+
+    document.getElementById('save').addEventListener('click', async () => {
+      const body = { adAccountId: accountEl.value.trim() };
+      // Only send token if it was changed (not the masked version)
+      const tokenVal = tokenEl.value.trim();
+      if (tokenVal && !tokenVal.startsWith('***')) {
+        body.accessToken = tokenVal;
+      }
+      try {
+        const res = await fetch('/api/meta-ads/config', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        if (res.ok) {
+          const config = await res.json();
+          tokenEl.value = config.accessTokenMasked || '';
+          statusEl.textContent = 'Saved!';
+          setTimeout(() => { statusEl.textContent = ''; }, 2000);
+        } else {
+          statusEl.textContent = 'Save failed';
+        }
+      } catch (e) {
+        statusEl.textContent = 'Save failed';
+      }
+    });
+
+    document.getElementById('help').addEventListener('click', () => {
+      if (window.deepsteve && window.deepsteve.createSession) {
+        window.deepsteve.createSession(undefined, {
+          initialPrompt: 'I need help with the DeepSteve Meta Ads MCP Server, located at mods/meta-ads.',
+        });
+      }
+    });
+
+    load();
+  </script>
+</body>
+</html>
