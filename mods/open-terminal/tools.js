@@ -20,8 +20,9 @@ function init(context) {
         worktree: z.string().optional().describe('Worktree name'),
         agent_type: z.string().optional().describe('Agent type (defaults to caller\'s)'),
         plan_mode: z.boolean().optional().describe('Start in plan mode'),
+        fork: z.boolean().optional().describe('Fork the calling session\'s Claude conversation into the new tab'),
       },
-      handler: async ({ session_id, prompt, name, cwd, worktree, agent_type, plan_mode }) => {
+      handler: async ({ session_id, prompt, name, cwd, worktree, agent_type, plan_mode, fork }) => {
         const caller = shells.get(session_id);
         if (!caller) {
           return { content: [{ type: 'text', text: `Session "${session_id}" not found.` }] };
@@ -43,11 +44,19 @@ function init(context) {
 
         const id = randomUUID().slice(0, 8);
         const claudeSessionId = randomUUID();
-        const spawnArgs = getSpawnArgs(effectiveAgentType, {
-          sessionId: claudeSessionId,
-          planMode: plan_mode || false,
-          worktree: validatedWorktree,
-        });
+
+        let spawnArgs;
+        if (fork && caller.claudeSessionId) {
+          // Fork: resume caller's conversation into a new forked session
+          spawnArgs = ['--resume', caller.claudeSessionId, '--fork-session', '--session-id', claudeSessionId];
+          if (validatedWorktree) spawnArgs.push('--worktree', validatedWorktree);
+        } else {
+          spawnArgs = getSpawnArgs(effectiveAgentType, {
+            sessionId: claudeSessionId,
+            planMode: plan_mode || false,
+            worktree: validatedWorktree,
+          });
+        }
 
         const tabName = name || (validatedWorktree ? validatedWorktree : undefined);
 
