@@ -1099,11 +1099,7 @@ app.post('/api/settings', (req, res) => {
       ).map(c => ({
         id: c.id || randomUUID().slice(0, 8),
         name: c.name,
-        tabs: c.tabs.filter(t => t && typeof t === 'object' && typeof t.cwd === 'string').map(t => ({
-          name: t.name || '',
-          cwd: t.cwd,
-          agentType: t.agentType || 'claude',
-        })),
+        tabs: c.tabs.filter(t => t && typeof t === 'object' && validateConfigTab(t)).map(sanitizeConfigTab),
       }));
       log(`Settings updated: windowConfigs (${settings.windowConfigs.length} configs)`);
     }
@@ -1112,6 +1108,24 @@ app.post('/api/settings', (req, res) => {
   broadcastSettings();
   res.json(settings);
 });
+
+// --- Window Config Tab Helpers ---
+
+function validateConfigTab(t) {
+  const type = t.type || 'terminal';
+  if (type === 'terminal') return typeof t.cwd === 'string';
+  if (type === 'display-tab') return typeof t.html === 'string';
+  if (type === 'baby-browser') return typeof t.url === 'string';
+  return false;
+}
+
+function sanitizeConfigTab(t) {
+  const type = t.type || 'terminal';
+  if (type === 'display-tab') return { type, name: t.name || '', html: t.html };
+  if (type === 'baby-browser') return { type, name: t.name || '', url: t.url };
+  // terminal (default)
+  return { name: t.name || '', cwd: t.cwd, agentType: t.agentType || 'claude' };
+}
 
 // --- Window Configs CRUD + Apply ---
 
@@ -1124,12 +1138,8 @@ app.post('/api/window-configs', (req, res) => {
   if (!name || typeof name !== 'string') return res.status(400).json({ error: 'name is required' });
   if (!Array.isArray(tabs) || tabs.length === 0) return res.status(400).json({ error: 'tabs array is required' });
 
-  const validTabs = tabs.filter(t => t && typeof t.cwd === 'string').map(t => ({
-    name: t.name || '',
-    cwd: t.cwd,
-    agentType: t.agentType || 'claude',
-  }));
-  if (validTabs.length === 0) return res.status(400).json({ error: 'at least one tab with cwd is required' });
+  const validTabs = tabs.filter(t => t && typeof t === 'object' && validateConfigTab(t)).map(sanitizeConfigTab);
+  if (validTabs.length === 0) return res.status(400).json({ error: 'at least one valid tab is required' });
 
   if (!settings.windowConfigs) settings.windowConfigs = [];
 
@@ -1167,7 +1177,53 @@ app.post('/api/window-configs/:id/apply', (req, res) => {
   const readyClients = [...reloadClients].filter(c => c.readyState === 1);
   const createdSessions = [];
 
+  function deliverToWindow(msg) {
+    const msgStr = typeof msg === 'string' ? msg : JSON.stringify(msg);
+    let delivered = false;
+    if (windowId) {
+      for (const client of readyClients) {
+        if (client.windowId === windowId && client.readyState === 1) {
+          client.send(msgStr);
+          delivered = true;
+          break;
+        }
+      }
+    }
+    if (!delivered && readyClients.length > 0) {
+      // Strip windowId when falling back to first available client
+      const parsed = JSON.parse(msgStr);
+      delete parsed.windowId;
+      readyClients[0].send(JSON.stringify(parsed));
+      delivered = true;
+    }
+    if (!delivered) {
+      const parsed = JSON.parse(msgStr);
+      delete parsed.windowId;
+      pendingOpens.push(JSON.stringify(parsed));
+    }
+  }
+
   for (const tab of config.tabs) {
+    const tabType = tab.type || 'terminal';
+
+    if (tabType === 'display-tab') {
+      const id = randomUUID().slice(0, 8);
+      const name = tab.name || 'Display';
+      displayTabs.set(id, tab.html);
+      createdSessions.push({ id, name, type: 'display-tab' });
+      deliverToWindow({ type: 'open-display-tab', id, name, windowId: windowId || undefined });
+      continue;
+    }
+
+    if (tabType === 'baby-browser') {
+      const name = tab.name || 'Baby Browser';
+      const url = tab.url || '';
+      createdSessions.push({ name, type: 'baby-browser', url });
+      deliverToWindow({ type: 'open-mod-tab', modId: 'baby-browser', name, url, windowId: windowId || undefined });
+      continue;
+    }
+
+    // terminal (default)
     const cwd = tab.cwd.startsWith('~') ? path.join(os.homedir(), tab.cwd.slice(1)) : tab.cwd;
     if (!fs.existsSync(cwd)) {
       log(`[API] window-configs apply: cwd not found: ${cwd}, skipping`);
@@ -1191,26 +1247,7 @@ app.post('/api/window-configs/:id/apply', (req, res) => {
     });
 
     createdSessions.push({ id, name, cwd });
-
-    // Deliver open-session to browser
-    const openMsg = JSON.stringify({ type: 'open-session', id, cwd, name, windowId: windowId || undefined });
-    let delivered = false;
-    if (windowId) {
-      for (const client of readyClients) {
-        if (client.windowId === windowId && client.readyState === 1) {
-          client.send(openMsg);
-          delivered = true;
-          break;
-        }
-      }
-    }
-    if (!delivered && readyClients.length > 0) {
-      readyClients[0].send(JSON.stringify({ type: 'open-session', id, cwd, name }));
-      delivered = true;
-    }
-    if (!delivered) {
-      pendingOpens.push(JSON.stringify({ type: 'open-session', id, cwd, name }));
-    }
+    deliverToWindow({ type: 'open-session', id, cwd, name, windowId: windowId || undefined });
   }
 
   saveState();

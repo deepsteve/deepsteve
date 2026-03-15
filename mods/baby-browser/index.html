@@ -94,6 +94,15 @@
       }
     } catch {}
 
+    // Support ?url= query param for window config restore
+    try {
+      const paramUrl = new URLSearchParams(window.location.search).get('url');
+      if (paramUrl) {
+        navHistory = [paramUrl];
+        historyIndex = 0;
+      }
+    } catch {}
+
     function proxyUrl(url) {
       return '/api/proxy?url=' + encodeURIComponent(url);
     }
