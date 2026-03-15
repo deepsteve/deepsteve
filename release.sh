@@ -55,6 +55,7 @@ NODE_PATH=$(which node)
 mkdir -p "$INSTALL_DIR/public/js"
 mkdir -p "$INSTALL_DIR/public/css"
 mkdir -p "$INSTALL_DIR/themes"
+mkdir -p "$INSTALL_DIR/skills"
 mkdir -p "$HOME/Library/LaunchAgents"
 
 PREAMBLE
@@ -113,6 +114,11 @@ for moddir in mods/*/; do
   for f in "$moddir"*; do
     [ -f "$f" ] && embed_text "$f" "$f"
   done
+done
+
+# Skill files
+for skill in skills/*.md; do
+  embed_text "$skill" "$skill"
 done
 
 # --- Embed binary files as base64 ---
