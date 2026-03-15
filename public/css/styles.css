@@ -64,6 +64,8 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
 .tab .badge { width: 8px; height: 8px; background: var(--ds-accent-blue); border-radius: 50%; display: none; flex-shrink: 0; }
 .tab .badge.visible { display: inline-block; }
 .tab .tab-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tab.placeholder { animation: tab-connecting 1.2s ease-in-out infinite; }
+@keyframes tab-connecting { 0%, 100% { opacity: 0.4; } 50% { opacity: 0.8; } }
 .tab.dragging { opacity: 0.3; }
 .tab-drag-ghost { opacity: 0.9; box-shadow: 0 4px 12px rgba(0,0,0,0.5); border-color: var(--ds-accent-blue) !important; }
 #tabs-list.tab-drag-active { user-select: none; }
