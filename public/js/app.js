@@ -1042,7 +1042,7 @@ function initTerminal(id, ws, cwd, initialName, { hasScrollback = false, pending
   const windowId = getWindowId();
   const savedSessions = SessionStore.getWindowSessions(windowId);
   const savedSession = savedSessions.find(s => s.id === id);
-  const name = savedSession?.name || initialName || getDefaultTabName(cwd);
+  const name = initialName || savedSession?.name || getDefaultTabName(cwd);
 
   // Store session in memory
   sessions.set(id, { term, fit, ws, container, cwd, name, waitingForInput: false, scrollControl });
@@ -1331,7 +1331,7 @@ async function restoreSessions(sessionList, opts = {}) {
       createModTab(entry.modId, { id: entry.id, name: entry.name, restoreActive: true });
       return Promise.resolve(entry.id);
     } else {
-      return createSession(entry.cwd, entry.id, false, { restoreActive: true, allowDuplicate });
+      return createSession(entry.cwd, entry.id, false, { name: entry.name, restoreActive: true, allowDuplicate });
     }
   });
 
