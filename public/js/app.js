@@ -657,18 +657,30 @@ settingsBtn?.addEventListener('click', async () => {
     editorOverlay.style.zIndex = '1001';
 
     function renderEditor() {
-      const tabRows = config.tabs.map((t, ti) => `
-        <div style="display: flex; gap: 6px; margin-bottom: 4px; align-items: center;">
-          <input type="text" class="config-tab-name" data-ti="${ti}" value="${escapeHtml(t.name)}" placeholder="Tab name" style="width: 120px; padding: 4px 6px; background: var(--ds-bg-primary); border: 1px solid var(--ds-border); border-radius: 4px; color: var(--ds-text-primary); font-size: 12px;">
-          <input type="text" class="config-tab-cwd" data-ti="${ti}" value="${escapeHtml(t.cwd)}" placeholder="/path/to/project" style="flex: 1; padding: 4px 6px; background: var(--ds-bg-primary); border: 1px solid var(--ds-border); border-radius: 4px; color: var(--ds-text-primary); font-size: 12px;">
+      const tabRows = config.tabs.map((t, ti) => {
+        const tabType = t.type || 'terminal';
+        let fields = '';
+        if (tabType === 'display-tab') {
+          fields = `<span style="flex: 1; font-size: 12px; color: var(--ds-text-secondary); padding: 4px 6px;">(Display Tab)</span>`;
+        } else if (tabType === 'baby-browser') {
+          fields = `<input type="text" class="config-tab-url" data-ti="${ti}" value="${escapeHtml(t.url || '')}" placeholder="https://example.com" style="flex: 1; padding: 4px 6px; background: var(--ds-bg-primary); border: 1px solid var(--ds-border); border-radius: 4px; color: var(--ds-text-primary); font-size: 12px;">`;
+        } else {
+          fields = `
+          <input type="text" class="config-tab-cwd" data-ti="${ti}" value="${escapeHtml(t.cwd || '')}" placeholder="/path/to/project" style="flex: 1; padding: 4px 6px; background: var(--ds-bg-primary); border: 1px solid var(--ds-border); border-radius: 4px; color: var(--ds-text-primary); font-size: 12px;">
           <select class="config-tab-agent" data-ti="${ti}" style="padding: 4px 6px; background: var(--ds-bg-primary); border: 1px solid var(--ds-border); border-radius: 4px; color: var(--ds-text-primary); font-size: 12px;">
             <option value="claude" ${t.agentType === 'claude' ? 'selected' : ''}>Claude</option>
             <option value="opencode" ${t.agentType === 'opencode' ? 'selected' : ''}>OpenCode</option>
             <option value="gemini" ${t.agentType === 'gemini' ? 'selected' : ''}>Gemini</option>
-          </select>
+          </select>`;
+        }
+        return `
+        <div style="display: flex; gap: 6px; margin-bottom: 4px; align-items: center;">
+          <input type="text" class="config-tab-name" data-ti="${ti}" value="${escapeHtml(t.name)}" placeholder="Tab name" style="width: 120px; padding: 4px 6px; background: var(--ds-bg-primary); border: 1px solid var(--ds-border); border-radius: 4px; color: var(--ds-text-primary); font-size: 12px;">
+          ${fields}
           <button class="btn-secondary config-tab-remove" data-ti="${ti}" style="padding: 2px 6px; font-size: 11px;" ${config.tabs.length <= 1 ? 'disabled' : ''}>&times;</button>
         </div>
-      `).join('');
+      `;
+      }).join('');
 
       editorOverlay.innerHTML = `
         <div class="modal" style="max-width: 600px;">
@@ -706,8 +718,13 @@ settingsBtn?.addEventListener('click', async () => {
         syncTabInputs();
         config.name = editorOverlay.querySelector('#config-editor-name').value.trim();
         if (!config.name) return alert('Config name is required');
-        const validTabs = config.tabs.filter(t => t.cwd.trim());
-        if (validTabs.length === 0) return alert('At least one tab with a path is required');
+        const validTabs = config.tabs.filter(t => {
+          const type = t.type || 'terminal';
+          if (type === 'display-tab') return !!t.html;
+          if (type === 'baby-browser') return true;
+          return t.cwd && t.cwd.trim();
+        });
+        if (validTabs.length === 0) return alert('At least one valid tab is required');
         config.tabs = validTabs;
         if (isNew) {
           editingConfigs.push(config);
@@ -730,6 +747,9 @@ settingsBtn?.addEventListener('click', async () => {
       editorOverlay.querySelectorAll('.config-tab-agent').forEach(select => {
         config.tabs[Number(select.dataset.ti)].agentType = select.value;
       });
+      editorOverlay.querySelectorAll('.config-tab-url').forEach(input => {
+        config.tabs[Number(input.dataset.ti)].url = input.value;
+      });
     }
 
     renderEditor();
@@ -739,12 +759,30 @@ settingsBtn?.addEventListener('click', async () => {
   renderConfigsList();
 
   overlay.querySelector('#settings-new-config').onclick = () => showConfigEditor(-1);
-  overlay.querySelector('#settings-save-current').onclick = () => {
-    const currentTabs = [...sessions.entries()].map(([, s]) => ({
-      name: s.name || '',
-      cwd: s.cwd || '',
-      agentType: s.agentType || 'claude',
-    })).filter(t => t.cwd);
+  overlay.querySelector('#settings-save-current').onclick = async () => {
+    const currentTabs = [];
+    for (const [id, s] of sessions.entries()) {
+      if (s.type === 'display-tab') {
+        try {
+          const resp = await fetch(`/api/display-tab/${id}`);
+          if (resp.ok) {
+            currentTabs.push({ type: 'display-tab', name: s.name || 'Display', html: await resp.text() });
+          }
+        } catch {}
+      } else if (s.type === 'mod-tab' && s.modId === 'baby-browser') {
+        let url = '';
+        try {
+          const iframe = s.container?.querySelector('iframe');
+          if (iframe?.contentWindow) {
+            const urlInput = iframe.contentDocument?.getElementById('url');
+            if (urlInput) url = urlInput.value || '';
+          }
+        } catch {}
+        currentTabs.push({ type: 'baby-browser', name: s.name || 'Baby Browser', url });
+      } else if (s.cwd) {
+        currentTabs.push({ type: 'terminal', name: s.name || '', cwd: s.cwd, agentType: s.agentType || 'claude' });
+      }
+    }
     if (currentTabs.length === 0) return alert('No tabs open to save');
 
     const pickerOverlay = document.createElement('div');
@@ -755,13 +793,19 @@ settingsBtn?.addEventListener('click', async () => {
 
     function renderPicker() {
       const allChecked = checked.every(Boolean);
-      const tabRows = currentTabs.map((t, i) => `
+      const tabRows = currentTabs.map((t, i) => {
+        let detail = '';
+        if (t.type === 'display-tab') detail = '(Display Tab)';
+        else if (t.type === 'baby-browser') detail = t.url || '(no url)';
+        else detail = t.cwd;
+        return `
         <div style="display: flex; gap: 8px; align-items: center; padding: 6px 0; border-bottom: 1px solid var(--ds-border);">
           <input type="checkbox" class="save-tab-check" data-i="${i}" ${checked[i] ? 'checked' : ''} style="margin: 0;">
           <span style="min-width: 100px; font-size: 12px; color: var(--ds-text-primary);">${escapeHtml(t.name || '(unnamed)')}</span>
-          <span style="flex: 1; font-size: 11px; color: var(--ds-text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${escapeHtml(t.cwd)}</span>
+          <span style="flex: 1; font-size: 11px; color: var(--ds-text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${escapeHtml(detail)}</span>
         </div>
-      `).join('');
+      `;
+      }).join('');
 
       pickerOverlay.innerHTML = `
         <div class="modal" style="max-width: 550px;">
@@ -1171,7 +1215,9 @@ function createModTab(modId, opts = {}) {
   document.getElementById('terminals').appendChild(container);
 
   const iframe = document.createElement('iframe');
-  iframe.src = `/mods/${modId}/${mod.entry}`;
+  let iframeSrc = `/mods/${modId}/${mod.entry}`;
+  if (opts.url) iframeSrc += `?url=${encodeURIComponent(opts.url)}`;
+  iframe.src = iframeSrc;
   iframe.style.cssText = 'width:100%;height:100%;border:none;';
   iframe.sandbox = 'allow-same-origin allow-scripts allow-forms allow-popups';
   container.appendChild(iframe);
@@ -2258,6 +2304,10 @@ async function init() {
       if (msg.type === 'open-display-tab') {
         if (msg.windowId && msg.windowId !== getWindowId()) return;
         createDisplayTab(msg.id, msg.name);
+      }
+      if (msg.type === 'open-mod-tab') {
+        if (msg.windowId && msg.windowId !== getWindowId()) return;
+        createModTab(msg.modId, { name: msg.name, url: msg.url });
       }
       if (msg.type === 'update-display-tab') {
         const session = sessions.get(msg.id);
