@@ -843,7 +843,13 @@ settingsBtn?.addEventListener('click', async () => {
         if (!name) return alert('Please enter a config name');
         const selectedTabs = currentTabs.filter((_, i) => checked[i]);
         if (selectedTabs.length === 0) return alert('Please select at least one tab');
-        editingConfigs.push({ id: '', name, tabs: selectedTabs });
+        const existingIdx = editingConfigs.findIndex(c => c.name.trim().toLowerCase() === name.toLowerCase());
+        if (existingIdx !== -1) {
+          if (!confirm(`A config named "${name}" already exists. Overwrite it?`)) return;
+          editingConfigs[existingIdx] = { id: editingConfigs[existingIdx].id, name, tabs: selectedTabs };
+        } else {
+          editingConfigs.push({ id: '', name, tabs: selectedTabs });
+        }
         pickerOverlay.remove();
         renderConfigsList();
       };
