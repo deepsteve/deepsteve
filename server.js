@@ -1250,10 +1250,11 @@ const SKILLS_DIR = path.join(__dirname, 'skills');
 const CLAUDE_COMMANDS_DIR = path.join(os.homedir(), '.claude', 'commands');
 const SKILL_ID_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/;
 
-// Install a skill file: copy source .md to ~/.claude/commands/deepsteve-{id}.md
+// Install a skill file: copy source .md to ~/.claude/commands/deepsteve/{id}.md
 // Frontmatter `name: {id}` makes the slash command /{id}.
 function installSkillFile(id) {
   const src = path.join(SKILLS_DIR, `${id}.md`);
+  fs.mkdirSync(SKILL_DEST_DIR, { recursive: true });
   const dest = skillDestPath(id);
   fs.copyFileSync(src, dest);
 }
@@ -1269,18 +1270,18 @@ function parseSkillFrontmatter(content) {
   return meta;
 }
 
-// Skill files are installed to ~/.claude/commands/deepsteve-{id}.md
+// Skill files are installed to ~/.claude/commands/deepsteve/{id}.md
 // Frontmatter `name: {id}` makes them available as /{id} slash commands.
-const SKILL_DEST_DIR = CLAUDE_COMMANDS_DIR;
+const SKILL_DEST_DIR = path.join(CLAUDE_COMMANDS_DIR, 'deepsteve');
 function skillDestPath(id) {
-  return path.join(SKILL_DEST_DIR, `deepsteve-${id}.md`);
+  return path.join(SKILL_DEST_DIR, `${id}.md`);
 }
 
-// Reconcile enabled skills on startup: ensure .md files exist in ~/.claude/commands/
+// Reconcile enabled skills on startup: ensure .md files exist in ~/.claude/commands/deepsteve/
 function reconcileSkills() {
   if (!settings.enabledSkills || settings.enabledSkills.length === 0) return;
   try {
-    fs.mkdirSync(CLAUDE_COMMANDS_DIR, { recursive: true });
+    fs.mkdirSync(SKILL_DEST_DIR, { recursive: true });
     const validSkills = [];
     for (const id of settings.enabledSkills) {
       if (!SKILL_ID_RE.test(id)) continue;
@@ -1288,16 +1289,11 @@ function reconcileSkills() {
       if (fs.existsSync(src)) {
         installSkillFile(id);
         validSkills.push(id);
-        // Clean up old deepsteve/{id}.md files from prior naming scheme
-        const oldDest = path.join(CLAUDE_COMMANDS_DIR, 'deepsteve', `${id}.md`);
+        // Clean up old deepsteve-{id}.md flat files from prior naming scheme
+        const oldDest = path.join(CLAUDE_COMMANDS_DIR, `deepsteve-${id}.md`);
         if (fs.existsSync(oldDest)) fs.unlinkSync(oldDest);
       }
     }
-    // Remove old deepsteve/ subdirectory if empty
-    const oldSubdir = path.join(CLAUDE_COMMANDS_DIR, 'deepsteve');
-    try {
-      if (fs.existsSync(oldSubdir)) fs.rmdirSync(oldSubdir);
-    } catch { /* not empty, leave it */ }
     if (validSkills.length !== settings.enabledSkills.length) {
       settings.enabledSkills = validSkills;
       saveSettings();
@@ -1377,10 +1373,10 @@ app.post('/api/skills/enable', (req, res) => {
   }
   if (!fs.existsSync(src)) return res.status(404).json({ error: 'Skill not found' });
   try {
-    fs.mkdirSync(CLAUDE_COMMANDS_DIR, { recursive: true });
+    fs.mkdirSync(SKILL_DEST_DIR, { recursive: true });
     installSkillFile(id);
-    // Clean up old deepsteve/{id}.md from prior naming scheme
-    const oldDest = path.join(CLAUDE_COMMANDS_DIR, 'deepsteve', `${id}.md`);
+    // Clean up old deepsteve-{id}.md flat files from prior naming scheme
+    const oldDest = path.join(CLAUDE_COMMANDS_DIR, `deepsteve-${id}.md`);
     if (fs.existsSync(oldDest)) fs.unlinkSync(oldDest);
     if (!settings.enabledSkills) settings.enabledSkills = [];
     if (!settings.enabledSkills.includes(id)) settings.enabledSkills.push(id);
@@ -1396,14 +1392,14 @@ app.post('/api/skills/disable', (req, res) => {
   const { id } = req.body;
   if (!id || !SKILL_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid skill ID' });
   const dest = skillDestPath(id);
-  // Validate dest is inside CLAUDE_COMMANDS_DIR and starts with deepsteve- prefix
-  if (!path.resolve(dest).startsWith(path.resolve(CLAUDE_COMMANDS_DIR) + path.sep)) {
+  // Validate dest is inside SKILL_DEST_DIR (deepsteve/ subdirectory)
+  if (!path.resolve(dest).startsWith(path.resolve(SKILL_DEST_DIR) + path.sep)) {
     return res.status(400).json({ error: 'Invalid skill ID' });
   }
   try {
     if (fs.existsSync(dest)) fs.unlinkSync(dest);
-    // Also clean up old deepsteve/{id}.md from prior naming scheme
-    const oldDest = path.join(CLAUDE_COMMANDS_DIR, 'deepsteve', `${id}.md`);
+    // Also clean up old deepsteve-{id}.md flat files from prior naming scheme
+    const oldDest = path.join(CLAUDE_COMMANDS_DIR, `deepsteve-${id}.md`);
     if (fs.existsSync(oldDest)) fs.unlinkSync(oldDest);
     settings.enabledSkills = (settings.enabledSkills || []).filter(s => s !== id);
     saveSettings();
