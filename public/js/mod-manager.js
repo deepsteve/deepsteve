@@ -13,6 +13,7 @@
 import { nsKey } from './storage-namespace.js';
 
 const STORAGE_KEY = nsKey('deepsteve-enabled-mods'); // Set of enabled mod IDs
+const KNOWN_MODS_KEY = nsKey('deepsteve-known-mods'); // All mod IDs known at last save
 const ACTIVE_VIEW_KEY = nsKey('deepsteve-active-mod-view'); // Which mod view is currently showing
 const PANEL_VISIBLE_KEY = nsKey('deepsteve-panel-visible'); // Whether the panel is shown
 const ACTIVE_PANEL_KEY = nsKey('deepsteve-active-panel'); // Which panel tab is active
@@ -212,6 +213,9 @@ function init(appHooks) {
  */
 function _saveEnabledMods() {
   localStorage.setItem(STORAGE_KEY, JSON.stringify([...enabledMods]));
+  if (allMods.length > 0) {
+    localStorage.setItem(KNOWN_MODS_KEY, JSON.stringify(allMods.map(m => m.id)));
+  }
 }
 
 /**
@@ -290,11 +294,11 @@ async function loadAvailableMods() {
     }
   }
 
-  // Auto-enable default mods on first visit only (no saved prefs yet)
+  // Auto-enable enabledByDefault mods
   if (!hasExplicitModPrefs) {
+    // First visit — enable all enabledByDefault mods
     for (const mod of allMods) {
       if (mod.enabledByDefault && mod.compatible !== false) {
-        // Also auto-enable transitive dependencies
         try {
           for (const depId of _getRequiredMods(mod.id)) {
             const depMod = allMods.find(m => m.id === depId);
@@ -305,6 +309,31 @@ async function loadAvailableMods() {
       }
     }
     _saveEnabledMods();
+  } else {
+    // Existing user — auto-enable any NEW enabledByDefault mods not in the known set
+    let knownMods = new Set();
+    try {
+      const raw = localStorage.getItem(KNOWN_MODS_KEY);
+      if (raw) knownMods = new Set(JSON.parse(raw));
+    } catch {}
+    let changed = false;
+    for (const mod of allMods) {
+      if (mod.enabledByDefault && mod.compatible !== false && !knownMods.has(mod.id)) {
+        try {
+          for (const depId of _getRequiredMods(mod.id)) {
+            const depMod = allMods.find(m => m.id === depId);
+            if (depMod && depMod.compatible !== false) enabledMods.add(depId);
+          }
+        } catch {}
+        enabledMods.add(mod.id);
+        changed = true;
+      }
+    }
+    if (changed) _saveEnabledMods();
+    // Always update known mods to track the current set
+    if (allMods.length > 0) {
+      localStorage.setItem(KNOWN_MODS_KEY, JSON.stringify(allMods.map(m => m.id)));
+    }
   }
 
   // Auto-show the last active view if its mod is still enabled
