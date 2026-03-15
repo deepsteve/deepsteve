@@ -205,6 +205,51 @@ function init(appHooks) {
       if (Array.isArray(saved)) enabledMods = new Set(saved);
     }
   } catch {}
+
+  // Cross-tab sync for regular (non-skill) mods via storage events
+  window.addEventListener('storage', (e) => {
+    if (e.key !== STORAGE_KEY || e.storageArea !== localStorage) return;
+    let newSet;
+    try {
+      const parsed = JSON.parse(e.newValue);
+      newSet = new Set(Array.isArray(parsed) ? parsed : []);
+    } catch { return; }
+
+    // Find newly enabled mods
+    for (const id of newSet) {
+      if (!enabledMods.has(id)) {
+        enabledMods.add(id);
+        const mod = allMods.find(m => m.id === id);
+        if (!mod) continue;
+        if (mod.display === 'panel') {
+          _loadPanelMod(mod);
+        } else if (mod.display !== 'tab' && mod.entry) {
+          _createToolbarButton(mod);
+        }
+      }
+    }
+
+    // Find newly disabled mods
+    for (const id of [...enabledMods]) {
+      if (!newSet.has(id)) {
+        enabledMods.delete(id);
+        const mod = allMods.find(m => m.id === id);
+        if (!mod) continue;
+        if (mod.display === 'panel') {
+          _unloadPanelMod(id);
+        } else if (mod.display === 'tab') {
+          if (hooks?.closeModTabs) hooks.closeModTabs(id);
+        } else {
+          _removeToolbarButton(id);
+          if (activeViewId === id) _hideMod();
+        }
+      }
+    }
+
+    // Refresh marketplace modal toggles if open
+    const overlay = document.querySelector('.modal-overlay:has(.marketplace-modal)');
+    if (overlay) _refreshCardToggles(overlay);
+  });
 }
 
 /**
@@ -1630,6 +1675,29 @@ function _injectBridgeAPI(iframeEl, modId) {
  * Handle a mod-changed message from the server (file watcher detected changes).
  * Reloads the iframe if the changed mod is currently active.
  */
+/**
+ * Handle skills-changed broadcast from server (another tab toggled a skill).
+ * Updates allMods enabled state and refreshes any open marketplace modal.
+ */
+function handleSkillsChanged(enabledSkills) {
+  const enabledSet = new Set(enabledSkills || []);
+  for (const mod of allMods) {
+    if (mod.type === 'skill') {
+      const skillId = mod.id.replace('skill:', '');
+      mod.enabled = enabledSet.has(skillId);
+    }
+  }
+  // Refresh skill toggles in open marketplace modal if present
+  const overlay = document.querySelector('.modal-overlay:has(.marketplace-modal)');
+  if (overlay) {
+    for (const card of overlay.querySelectorAll('.mod-card[data-mod-id^="skill:"]')) {
+      const cb = card.querySelector('.mod-card-toggle input[type="checkbox"]');
+      const mod = allMods.find(m => m.id === card.dataset.modId);
+      if (cb && mod) cb.checked = !!mod.enabled;
+    }
+  }
+}
+
 function handleModChanged(modId) {
   if (activeViewId === modId && iframe) {
     iframe.src = iframe.src.replace(/(\?v=\d+)?$/, `?v=${Date.now()}`);
@@ -1709,6 +1777,7 @@ export const ModManager = {
   isModViewVisible,
   isModActive,
   handleModChanged,
+  handleSkillsChanged,
   focusPanel,
   getContextMenuItems,
   getNewTabItems,

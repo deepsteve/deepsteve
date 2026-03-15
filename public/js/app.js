@@ -917,6 +917,8 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
         applyTheme(msg.css || '');
       } else if (msg.type === 'settings') {
         applySettings(msg);
+      } else if (msg.type === 'skills-changed') {
+        ModManager.handleSkillsChanged(msg.enabledSkills);
       } else if (msg.type === 'mod-changed') {
         ModManager.handleModChanged(msg.modId);
       } else if (msg.type === 'state') {
@@ -2226,6 +2228,7 @@ async function init() {
     onMessage: async (msg) => {
       if (msg.type === 'theme') applyTheme(msg.css || '');
       if (msg.type === 'settings') applySettings(msg);
+      if (msg.type === 'skills-changed') ModManager.handleSkillsChanged(msg.enabledSkills);
       if (msg.type === 'open-session') {
         // Server created a session (e.g. via /api/start-issue) — open a tab for it
         if (msg.windowId && msg.windowId !== getWindowId()) return;

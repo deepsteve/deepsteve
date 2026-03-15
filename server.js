@@ -386,6 +386,24 @@ function broadcastSettings() {
   }
 }
 
+function broadcastSkills() {
+  const msg = JSON.stringify({
+    type: 'skills-changed',
+    enabledSkills: settings.enabledSkills || [],
+  });
+  for (const client of wss.clients) {
+    if (client.readyState === 1) client.send(msg);
+  }
+  if (httpsWss) {
+    for (const client of httpsWss.clients) {
+      if (client.readyState === 1) client.send(msg);
+    }
+  }
+  for (const client of reloadClients) {
+    if (client.readyState === 1) client.send(msg);
+  }
+}
+
 // Spawn claude with full login shell environment (like iTerm does)
 function spawnClaude(args, cwd, { cols = 120, rows = 40, env: extraEnv } = {}) {
   // Use login shell (-l) which properly sources /etc/zprofile, ~/.zprofile, ~/.zshrc
@@ -1382,6 +1400,7 @@ app.post('/api/skills/enable', (req, res) => {
     if (!settings.enabledSkills.includes(id)) settings.enabledSkills.push(id);
     saveSettings();
     log(`Skill enabled: ${id}`);
+    broadcastSkills();
     res.json({ ok: true });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -1404,6 +1423,7 @@ app.post('/api/skills/disable', (req, res) => {
     settings.enabledSkills = (settings.enabledSkills || []).filter(s => s !== id);
     saveSettings();
     log(`Skill disabled: ${id}`);
+    broadcastSkills();
     res.json({ ok: true });
   } catch (e) {
     res.status(500).json({ error: e.message });
