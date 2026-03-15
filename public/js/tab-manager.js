@@ -299,8 +299,15 @@ export const TabManager = {
       <span class="close">&#10005;</span>
     `;
 
-    // Click-to-switch is handled by onPointerDown below (click if no drag)
+    this._wireTabEvents(tab, sessionId, callbacks);
+    return tab;
+  },
 
+  /**
+   * Wire up event handlers (close, context menu, drag-to-reorder) on a tab element.
+   * Used by both createTab() and addTab() (placeholder upgrade path).
+   */
+  _wireTabEvents(tab, sessionId, callbacks) {
     tab.querySelector('.close').addEventListener('click', (e) => {
       e.stopPropagation();
       callbacks.onClose?.(sessionId);
@@ -356,14 +363,40 @@ export const TabManager = {
 
     tab.addEventListener('mousedown', onPointerDown);
     tab.addEventListener('touchstart', onPointerDown, { passive: true });
+  },
 
+  /**
+   * Add a placeholder tab stub for instant visual feedback during restore.
+   * Upgraded to a full tab when addTab() is called with the same sessionId.
+   */
+  addPlaceholderTab(sessionId, name) {
+    const tab = document.createElement('div');
+    tab.className = 'tab placeholder';
+    tab.id = 'tab-' + sessionId;
+    tab.innerHTML = `
+      <span class="badge"></span>
+      <span class="tab-label">${name}</span>
+      <span class="close">&#10005;</span>
+    `;
+    document.getElementById('tabs-list').appendChild(tab);
+    updateTabArrows();
     return tab;
   },
 
   /**
-   * Add a tab to the tab bar
+   * Add a tab to the tab bar. If a placeholder already exists for this
+   * sessionId, upgrade it in-place instead of appending a new element.
    */
   addTab(sessionId, name, callbacks) {
+    const existing = document.getElementById('tab-' + sessionId);
+    if (existing && existing.classList.contains('placeholder')) {
+      existing.classList.remove('placeholder');
+      existing.querySelector('.tab-label').textContent = name;
+      this._wireTabEvents(existing, sessionId, callbacks);
+      existing.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+      updateTabArrows();
+      return existing;
+    }
     const tab = this.createTab(sessionId, name, callbacks);
     document.getElementById('tabs-list').appendChild(tab);
     tab.scrollIntoView({ block: 'nearest', inline: 'nearest' });

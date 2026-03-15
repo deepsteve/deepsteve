@@ -1316,20 +1316,37 @@ async function restoreSessions(sessionList, opts = {}) {
   const savedActiveId = ActiveTab.get();
   const allowDuplicate = opts.allowDuplicate !== undefined ? opts.allowDuplicate : true;
 
-  // Restore sessions in order — mod tabs are sync, terminal sessions are async.
-  // Sequential creation preserves tab position.
+  // Pre-create placeholder tab stubs in correct order for instant visual feedback
   for (const entry of sessionList) {
-    if (entry.type === 'mod-tab' && entry.modId) {
-      createModTab(entry.modId, { id: entry.id, name: entry.name, restoreActive: true });
-    } else {
-      const resolvedId = await createSession(entry.cwd, entry.id, false, { restoreActive: true, allowDuplicate });
-      if (resolvedId === null) {
-        console.log('[restore] Session', entry.id, 'rejected (duplicate), cleaning up storage');
-        SessionStore.removeSession(getWindowId(), entry.id);
-        TabSessions.remove(entry.id);
-      }
+    if (!(entry.type === 'mod-tab' && entry.modId)) {
+      const name = entry.name || getDefaultTabName(entry.cwd);
+      TabManager.addPlaceholderTab(entry.id, name);
     }
   }
+  updateEmptyState();
+
+  // Connect all sessions in parallel — placeholders are upgraded by initTerminal's addTab()
+  const promises = sessionList.map(entry => {
+    if (entry.type === 'mod-tab' && entry.modId) {
+      createModTab(entry.modId, { id: entry.id, name: entry.name, restoreActive: true });
+      return Promise.resolve(entry.id);
+    } else {
+      return createSession(entry.cwd, entry.id, false, { restoreActive: true, allowDuplicate });
+    }
+  });
+
+  const results = await Promise.all(promises);
+
+  // Clean up rejected sessions
+  results.forEach((resolvedId, i) => {
+    if (resolvedId === null) {
+      const entry = sessionList[i];
+      console.log('[restore] Session', entry.id, 'rejected (duplicate), cleaning up storage');
+      SessionStore.removeSession(getWindowId(), entry.id);
+      TabSessions.remove(entry.id);
+      TabManager.removeTab(entry.id);
+    }
+  });
 
   const target = savedActiveId && sessions.has(savedActiveId)
     ? savedActiveId
@@ -2250,7 +2267,8 @@ async function init() {
   } catch {}
 
   // Load available mods (creates Mods button, auto-activates persisted mod)
-  await ModManager.loadAvailableMods();
+  // Fire-and-forget — don't block session restore on mod loading
+  ModManager.loadAvailableMods();
 
   // Split button: + creates tab, ▾ opens dropdown menu
   document.getElementById('new-btn').addEventListener('click', () => quickNewSession());
