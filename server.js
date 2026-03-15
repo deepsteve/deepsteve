@@ -1243,7 +1243,7 @@ app.post('/api/themes/active', (req, res) => {
 
 // --- Mods system ---
 const MODS_DIR = path.join(__dirname, 'mods');
-const BUILTIN_MODS = new Set(['browser-console', 'tasks', 'screenshots', 'go-karts', 'tower', 'session-info', 'agent-dna']);
+const BUILTIN_MODS = new Set(['browser-console', 'tasks', 'screenshots', 'go-karts', 'tower', 'deepsteve-core', 'agent-dna']);
 
 // --- Skills system ---
 const SKILLS_DIR = path.join(__dirname, 'skills');

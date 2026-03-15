@@ -1,9 +1,0 @@
-{
-  "name": "Open Terminal",
-  "version": "0.1.0",
-  "enabledByDefault": true,
-  "description": "MCP tool for agents to spawn new terminal sessions",
-  "tools": [
-    { "name": "open_terminal", "description": "Open a new terminal session with an optional prompt" }
-  ]
-}
