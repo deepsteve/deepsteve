@@ -1,0 +1,17 @@
+{
+  "name": "Agent Poker",
+  "version": "0.4.0",
+  "minDeepsteveVersion": "0.4.0",
+  "description": "Texas Hold'em where four AI agents play poker with chain-of-thought reasoning",
+  "enabledByDefault": false,
+  "tags": ["games"],
+  "entry": "index.html",
+  "requires": ["agent-chat"],
+  "toolbar": {
+    "label": "Poker"
+  },
+  "tools": [
+    { "name": "get_poker_state", "description": "Get current poker game state from your perspective" },
+    { "name": "poker_action", "description": "Take a poker action (fold, check, call, raise, all_in)" }
+  ]
+}
