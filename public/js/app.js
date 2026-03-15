@@ -429,8 +429,14 @@ settingsBtn?.addEventListener('click', async () => {
     <div class="modal settings-modal">
       <div class="settings-header">
         <h2>Settings</h2>
+        <div class="settings-tabs">
+          <button class="settings-tab active" data-tab="general">General</button>
+          <button class="settings-tab" data-tab="github">GitHub</button>
+          <button class="settings-tab" data-tab="windows">Windows</button>
+        </div>
       </div>
       <div class="settings-body">
+      <div class="settings-tab-content active" data-tab="general">
       <div class="settings-section">
         <h3>Version</h3>
         <div class="version-info">
@@ -469,28 +475,6 @@ settingsBtn?.addEventListener('click', async () => {
           Place .css files in ~/.deepsteve/themes/ to add themes.
         </p>
         <select class="theme-select" id="theme-select">${themeOptions}</select>
-      </div>
-      <div class="settings-section">
-        <h3>Issue Title Length</h3>
-        <p style="font-size: 13px; color: var(--ds-text-secondary); margin-bottom: 8px;">
-          Max characters to display for GitHub issue titles in tabs.
-        </p>
-        <input type="number" id="max-issue-title-length" min="10" max="200" value="${currentMaxTitle}" style="width: 80px; padding: 4px 8px; border-radius: 4px; border: 1px solid var(--ds-border); background: var(--ds-bg-secondary); color: var(--ds-text-primary);">
-      </div>
-      <div class="settings-section">
-        <h3>Magic Wand</h3>
-        <label style="font-size: 13px; color: var(--ds-text-primary); cursor: pointer; display: flex; align-items: center; gap: 8px; margin-bottom: 12px;">
-          <input type="checkbox" id="wand-plan-mode" ${currentWandPlanMode ? 'checked' : ''} style="accent-color: var(--ds-accent-green);">
-          Start issues in plan mode
-        </label>
-        <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px;">
-          <span style="font-size: 13px; color: var(--ds-text-primary);">Prompt template</span>
-          <button class="btn-secondary" id="wand-template-reset" style="padding: 2px 8px; font-size: 11px;">Reset</button>
-        </div>
-        <textarea id="wand-prompt-template" rows="6" style="width: 100%; box-sizing: border-box; padding: 8px; background: var(--ds-bg-primary); border: 1px solid var(--ds-border); border-radius: 4px; color: var(--ds-text-primary); font-size: 12px; font-family: monospace; resize: vertical;">${escapeHtml(currentWandTemplate)}</textarea>
-        <p style="font-size: 11px; color: var(--ds-text-secondary); margin-top: 4px;">
-          Variables: <code>{{number}}</code> <code>{{title}}</code> <code>{{labels}}</code> <code>{{url}}</code> <code>{{body}}</code>
-        </p>
       </div>
       <div class="settings-section">
         <h3>Keyboard</h3>
@@ -533,6 +517,32 @@ settingsBtn?.addEventListener('click', async () => {
           <input type="text" id="gemini-binary" value="${escapeHtml(currentGeminiBinary)}" placeholder="gemini" style="width: 200px; padding: 4px 8px; border-radius: 4px; border: 1px solid var(--ds-border); background: var(--ds-bg-secondary); color: var(--ds-text-primary);">
         </div>
       </div>
+      </div>
+      <div class="settings-tab-content" data-tab="github">
+      <div class="settings-section">
+        <h3>Issue Title Length</h3>
+        <p style="font-size: 13px; color: var(--ds-text-secondary); margin-bottom: 8px;">
+          Max characters to display for GitHub issue titles in tabs.
+        </p>
+        <input type="number" id="max-issue-title-length" min="10" max="200" value="${currentMaxTitle}" style="width: 80px; padding: 4px 8px; border-radius: 4px; border: 1px solid var(--ds-border); background: var(--ds-bg-secondary); color: var(--ds-text-primary);">
+      </div>
+      <div class="settings-section">
+        <h3>Magic Wand</h3>
+        <label style="font-size: 13px; color: var(--ds-text-primary); cursor: pointer; display: flex; align-items: center; gap: 8px; margin-bottom: 12px;">
+          <input type="checkbox" id="wand-plan-mode" ${currentWandPlanMode ? 'checked' : ''} style="accent-color: var(--ds-accent-green);">
+          Start issues in plan mode
+        </label>
+        <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px;">
+          <span style="font-size: 13px; color: var(--ds-text-primary);">Prompt template</span>
+          <button class="btn-secondary" id="wand-template-reset" style="padding: 2px 8px; font-size: 11px;">Reset</button>
+        </div>
+        <textarea id="wand-prompt-template" rows="6" style="width: 100%; box-sizing: border-box; padding: 8px; background: var(--ds-bg-primary); border: 1px solid var(--ds-border); border-radius: 4px; color: var(--ds-text-primary); font-size: 12px; font-family: monospace; resize: vertical;">${escapeHtml(currentWandTemplate)}</textarea>
+        <p style="font-size: 11px; color: var(--ds-text-secondary); margin-top: 4px;">
+          Variables: <code>{{number}}</code> <code>{{title}}</code> <code>{{labels}}</code> <code>{{url}}</code> <code>{{body}}</code>
+        </p>
+      </div>
+      </div>
+      <div class="settings-tab-content" data-tab="windows">
       <div class="settings-section">
         <h3>Window Configs</h3>
         <p style="font-size: 13px; color: var(--ds-text-secondary); margin-bottom: 8px;">
@@ -545,6 +555,7 @@ settingsBtn?.addEventListener('click', async () => {
         </div>
       </div>
       </div>
+      </div>
       <div class="modal-buttons">
         <button class="btn-secondary" id="settings-cancel">Cancel</button>
         <button class="btn-primary" id="settings-save">Save</button>
@@ -552,6 +563,16 @@ settingsBtn?.addEventListener('click', async () => {
     </div>
   `;
   document.body.appendChild(overlay);
+
+  // Tab switching
+  overlay.querySelectorAll('.settings-tab').forEach(tab => {
+    tab.addEventListener('click', () => {
+      overlay.querySelectorAll('.settings-tab').forEach(t => t.classList.remove('active'));
+      overlay.querySelectorAll('.settings-tab-content').forEach(c => c.classList.remove('active'));
+      tab.classList.add('active');
+      overlay.querySelector(`.settings-tab-content[data-tab="${tab.dataset.tab}"]`).classList.add('active');
+    });
+  });
 
   const customInput = overlay.querySelector('#custom-profile');
   overlay.querySelectorAll('input[name="profile"]').forEach(radio => {
