@@ -105,6 +105,7 @@ function onKeyDown(e) {
         const idx = tabIds.indexOf(activeId);
         const next = idx >= tabIds.length - 1 ? 0 : idx + 1;
         switchToTab(tabIds[next]);
+      }
     }
   }
 }
