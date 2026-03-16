@@ -65,6 +65,16 @@ Every setting must be wired in **three places** in `server.js`, plus the client 
 
 The client sends the value in the POST body and applies it locally on save (`app.js`), which masks bugs where the server silently drops the field. Always verify that other browser windows pick up the change via WebSocket.
 
+### Command Palette
+
+Cmd+K opens a command palette for keyboard-driven access to tabs, settings, and custom user scripts.
+
+- **Settings**: `commandPaletteEnabled` (default `true`) and `commandPaletteShortcut` (default `Meta+k`) follow the 3-place settings pattern (defaults, POST handler, broadcastSettings).
+- **Built-in commands**: Hard-coded in `BUILTIN_COMMANDS` array (new-tab, close-tab, settings, mods, next/prev-tab). Client dispatches these via callbacks.
+- **Custom commands**: Executable files in `~/.deepsteve/commands/`. Optional `.json` sidecar for name/description metadata. Executed server-side via `zsh -l -c` (for PATH). Not the same as Skills (which are Claude slash commands in `skills/*.md`).
+- **API**: `GET /api/commands` returns built-in + custom commands. `POST /api/commands/execute` runs a custom command by ID.
+- **Client**: `command-palette.js` is a self-contained ES module (like `cmd-tab-switch.js`) with `init()`, `setEnabled()`, `setShortcut()` exports.
+
 ### Skills System
 
 Skills are slash commands that agents can invoke (e.g. `/chat`, `/merge`). Source files live in `skills/*.md`.

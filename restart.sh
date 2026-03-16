@@ -46,6 +46,7 @@ for deployed in ~/.deepsteve/mods/*/; do
         rm -rf "$deployed"
     fi
 done
+mkdir -p ~/.deepsteve/commands
 mkdir -p ~/.deepsteve/skills
 cp -r skills/*.md ~/.deepsteve/skills/ 2>/dev/null || true
 

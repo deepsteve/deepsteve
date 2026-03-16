@@ -64,6 +64,36 @@ Open [http://localhost:3000](http://localhost:3000) in your browser.
 - Right-click a tab to rename it
 - Use **Shift+Enter** for multi-line input
 
+## Command Palette
+
+Press **⌘K** to open the command palette for quick keyboard-driven access to tabs, settings, and custom commands.
+
+- Type to filter, arrow keys to navigate, Enter to execute
+- Built-in commands: New Tab, Close Tab, Settings, Mods, Next/Previous Tab
+- Switch between open tabs by name
+- Customize the shortcut in Settings → Keyboard
+
+### Custom Commands
+
+Drop executable scripts into `~/.deepsteve/commands/` and they appear automatically in the palette:
+
+```bash
+cat > ~/.deepsteve/commands/hello.sh << 'EOF'
+#!/bin/bash
+echo "Hello from DeepSteve!"
+EOF
+chmod +x ~/.deepsteve/commands/hello.sh
+```
+
+The command name is derived from the filename (hyphens → spaces, title-cased). For custom names, add a JSON sidecar file alongside the script:
+
+```json
+// ~/.deepsteve/commands/hello.json
+{ "name": "Say Hello", "description": "Prints a friendly greeting" }
+```
+
+Scripts receive two environment variables: `DEEPSTEVE_SESSION_ID` (active tab's shell ID) and `DEEPSTEVE_CWD` (that tab's working directory).
+
 ## Themes
 
 Customize the UI with CSS theme files. See the [Themes Guide](docs/themes.md) for details.

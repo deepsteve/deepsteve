@@ -14,6 +14,7 @@ import { initLiveReload } from './live-reload.js';
 import { ModManager } from './mod-manager.js';
 import { initFileDrop } from './file-drop.js';
 import { init as initCmdHoldMode, setEnabled as setCmdHoldModeEnabled, setHoldMs as setCmdHoldModeHoldMs } from './cmd-tab-switch.js';
+import { init as initCommandPalette, setEnabled as setCommandPaletteEnabled, setShortcut as setCommandPaletteShortcut } from './command-palette.js';
 import { nsKey } from './storage-namespace.js';
 
 // Configuration
@@ -167,6 +168,12 @@ function applySettings(settings) {
   }
   if (settings.cmdTabSwitchHoldMs !== undefined) {
     setCmdHoldModeHoldMs(settings.cmdTabSwitchHoldMs);
+  }
+  if (settings.commandPaletteEnabled !== undefined) {
+    setCommandPaletteEnabled(settings.commandPaletteEnabled);
+  }
+  if (settings.commandPaletteShortcut !== undefined) {
+    setCommandPaletteShortcut(settings.commandPaletteShortcut);
   }
   if (settings.symlinkWorktreeSettings !== undefined) {
     const el = document.querySelector('#symlink-worktree-settings');
@@ -432,6 +439,8 @@ settingsBtn?.addEventListener('click', async () => {
   const currentSymlinkWorktreeSettings = !!settingsData.symlinkWorktreeSettings;
   const currentCmdTabSwitch = !!settingsData.cmdTabSwitch;
   const currentCmdTabSwitchHoldMs = settingsData.cmdTabSwitchHoldMs !== undefined ? settingsData.cmdTabSwitchHoldMs : 1000;
+  const currentCommandPaletteEnabled = settingsData.commandPaletteEnabled !== undefined ? settingsData.commandPaletteEnabled : true;
+  const currentCommandPaletteShortcut = settingsData.commandPaletteShortcut || 'Meta+k';
   const currentDefaultAgent = settingsData.defaultAgent || 'claude';
   const currentOpencodeBinary = settingsData.opencodeBinary || 'opencode';
   const currentGeminiBinary = settingsData.geminiBinary || 'gemini';
@@ -509,6 +518,19 @@ settingsBtn?.addEventListener('click', async () => {
         </label>
         <p style="font-size: 11px; color: var(--ds-text-secondary); margin-top: 4px;">
           Hold Command for this long to activate, then press 1-9 to jump to a tab or &lt; / &gt; to cycle. Set to 0 for instant.
+        </p>
+        <hr style="border: none; border-top: 1px solid var(--ds-border); margin: 12px 0;">
+        <label style="font-size: 13px; color: var(--ds-text-primary); cursor: pointer; display: flex; align-items: center; gap: 8px;">
+          <input type="checkbox" id="command-palette-enabled" ${currentCommandPaletteEnabled ? 'checked' : ''} style="accent-color: var(--ds-accent-green);">
+          Command Palette
+        </label>
+        <label style="font-size: 13px; color: var(--ds-text-primary); display: flex; align-items: center; gap: 8px; margin-top: 8px;">
+          Shortcut:
+          <button type="button" id="command-palette-shortcut-btn" style="padding: 4px 10px; background: var(--ds-bg-primary); border: 1px solid var(--ds-border); border-radius: 4px; color: var(--ds-text-primary); font-size: 13px; cursor: pointer; min-width: 60px;">${escapeHtml(formatShortcut(currentCommandPaletteShortcut))}</button>
+          <input type="hidden" id="command-palette-shortcut" value="${escapeHtml(currentCommandPaletteShortcut)}">
+        </label>
+        <p style="font-size: 11px; color: var(--ds-text-secondary); margin-top: 4px;">
+          Click the button and press a key combo to set the shortcut.
         </p>
       </div>
       <div class="settings-section">
@@ -892,6 +914,33 @@ settingsBtn?.addEventListener('click', async () => {
     document.body.appendChild(pickerOverlay);
   };
 
+  // Command palette shortcut capture
+  const shortcutBtn = overlay.querySelector('#command-palette-shortcut-btn');
+  const shortcutInput = overlay.querySelector('#command-palette-shortcut');
+  if (shortcutBtn) {
+    shortcutBtn.onclick = () => {
+      shortcutBtn.textContent = 'Press key...';
+      shortcutBtn.style.borderColor = 'var(--ds-accent-blue)';
+      const handler = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        if (['Meta', 'Control', 'Alt', 'Shift'].includes(e.key)) return; // wait for non-modifier
+        const parts = [];
+        if (e.metaKey) parts.push('Meta');
+        if (e.ctrlKey) parts.push('Ctrl');
+        if (e.altKey) parts.push('Alt');
+        if (e.shiftKey) parts.push('Shift');
+        parts.push(e.key.toLowerCase());
+        const combo = parts.join('+');
+        shortcutInput.value = combo;
+        shortcutBtn.textContent = formatShortcut(combo);
+        shortcutBtn.style.borderColor = '';
+        document.removeEventListener('keydown', handler, true);
+      };
+      document.addEventListener('keydown', handler, true);
+    };
+  }
+
   overlay.querySelector('#settings-cancel').onclick = () => overlay.remove();
   overlay.querySelector('#settings-save').onclick = async () => {
     const selected = overlay.querySelector('input[name="profile"]:checked').value;
@@ -902,6 +951,8 @@ settingsBtn?.addEventListener('click', async () => {
     const symlinkWorktreeSettings = overlay.querySelector('#symlink-worktree-settings').checked;
     const cmdTabSwitch = overlay.querySelector('#cmd-tab-switch').checked;
     const cmdTabSwitchHoldMs = Math.max(0, Number(overlay.querySelector('#cmd-tab-switch-hold-ms').value) || 0);
+    const commandPaletteEnabled = overlay.querySelector('#command-palette-enabled').checked;
+    const commandPaletteShortcut = overlay.querySelector('#command-palette-shortcut').value;
     const enabledAgents = [];
     if (overlay.querySelector('#agent-claude').checked) enabledAgents.push('claude');
     if (overlay.querySelector('#agent-opencode').checked) enabledAgents.push('opencode');
@@ -911,11 +962,13 @@ settingsBtn?.addEventListener('click', async () => {
     await fetch('/api/settings', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ shellProfile, maxIssueTitleLength: newMaxTitle, wandPlanMode, wandPromptTemplate, symlinkWorktreeSettings, cmdTabSwitch, cmdTabSwitchHoldMs, enabledAgents, opencodeBinary, geminiBinary, windowConfigs: editingConfigs })
+      body: JSON.stringify({ shellProfile, maxIssueTitleLength: newMaxTitle, wandPlanMode, wandPromptTemplate, symlinkWorktreeSettings, cmdTabSwitch, cmdTabSwitchHoldMs, commandPaletteEnabled, commandPaletteShortcut, enabledAgents, opencodeBinary, geminiBinary, windowConfigs: editingConfigs })
     });
     maxIssueTitleLength = Math.max(10, Math.min(200, newMaxTitle));
     setCmdHoldModeEnabled(cmdTabSwitch);
     setCmdHoldModeHoldMs(cmdTabSwitchHoldMs);
+    setCommandPaletteEnabled(commandPaletteEnabled);
+    setCommandPaletteShortcut(commandPaletteShortcut);
     // Refresh agents data if agent settings changed
     const prevEnabled = (window.__deepsteveAgents || []).filter(a => a.enabled).map(a => a.id).sort().join(',');
     const newEnabled = enabledAgents.sort().join(',');
@@ -2083,6 +2136,19 @@ function escapeHtml(str) {
   return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
+function formatShortcut(shortcutStr) {
+  if (!shortcutStr) return '';
+  const parts = shortcutStr.split('+');
+  return parts.map(p => {
+    const low = p.toLowerCase();
+    if (low === 'meta') return '\u2318';
+    if (low === 'ctrl') return '\u2303';
+    if (low === 'alt') return '\u2325';
+    if (low === 'shift') return '\u21E7';
+    return p.toUpperCase();
+  }).join('');
+}
+
 /**
  * Show GitHub issue picker and create worktree session
  */
@@ -2398,6 +2464,29 @@ async function init() {
     getOrderedTabIds: () => [...document.querySelectorAll('#tabs-list .tab')].map(t => t.id.replace('tab-', '')),
     getActiveTabId: () => activeId,
     switchToTab: switchTo,
+  });
+
+  // Initialize Command Palette (Cmd+K by default, on by default)
+  initCommandPalette({
+    getOrderedTabIds: () => [...document.querySelectorAll('#tabs-list .tab')].map(t => t.id.replace('tab-', '')),
+    getActiveTabId: () => activeId,
+    getTabName: (id) => {
+      const s = sessions.get(id);
+      return s?.name || getDefaultTabName(s?.cwd || '');
+    },
+    switchToTab: switchTo,
+    quickNewSession,
+    createSession: (cwd, opts) => createSession(cwd, null, true, opts),
+    getDefaultAgentType,
+    closeActiveTab: () => { if (activeId) confirmCloseSession(activeId).then(ok => { if (ok) killSession(activeId); }); },
+    openSettings: () => { document.getElementById('settings-btn')?.click(); },
+    openMods: () => { document.getElementById('mods-btn')?.click(); },
+    focusTerminal: () => {
+      if (activeId) {
+        const s = sessions.get(activeId);
+        if (s?.term) s.term.focus();
+      }
+    },
   });
 
   // Load settings before creating any terminals (prevents color flash, applies title length)
