@@ -583,7 +583,15 @@ function symlinkWorktreeClaudeSettings(parentCwd, worktreePath) {
   const targetDir = path.join(worktreePath, '.claude');
   const target = path.join(targetDir, 'settings.local.json');
   if (!fs.existsSync(source)) return;
-  if (fs.existsSync(target)) return;
+  // If target exists but isn't a symlink, replace the copy with a symlink
+  try {
+    const stat = fs.lstatSync(target);
+    if (stat.isSymbolicLink()) return; // already symlinked
+    fs.unlinkSync(target); // remove the copy
+    log(`Replacing copied settings with symlink: ${target}`);
+  } catch (e) {
+    if (e.code !== 'ENOENT') return; // unexpected error, bail
+  }
   fs.mkdirSync(targetDir, { recursive: true });
   const relSource = path.relative(targetDir, source);
   fs.symlinkSync(relSource, target);
