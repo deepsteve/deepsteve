@@ -1290,7 +1290,7 @@ function createModTab(modId, opts = {}) {
 /**
  * Create a display tab (agent-generated HTML in a sandboxed iframe, no PTY).
  */
-function createDisplayTab(id, name) {
+function createDisplayTab(id, name, opts = {}) {
   const container = document.createElement('div');
   container.className = 'terminal-container';
   container.id = 'term-' + id;
@@ -1302,11 +1302,15 @@ function createDisplayTab(id, name) {
   iframe.sandbox = 'allow-scripts allow-forms';
   container.appendChild(iframe);
 
+  const tabName = name || 'Display';
   sessions.set(id, {
     term: null, fit: null, ws: null, container, cwd: null,
-    name: name || 'Display', waitingForInput: false, scrollControl: null,
+    name: tabName, waitingForInput: false, scrollControl: null,
     type: 'display-tab',
   });
+
+  TabSessions.add({ id, name: tabName, type: 'display-tab' });
+  SessionStore.addSession(getWindowId(), { id, name: tabName, type: 'display-tab' });
 
   const tabCallbacks = {
     onSwitch: (sessionId) => switchTo(sessionId),
@@ -1326,9 +1330,9 @@ function createDisplayTab(id, name) {
     getModMenuItems: () => [],
   };
 
-  TabManager.addTab(id, name || 'Display', tabCallbacks);
+  TabManager.addTab(id, tabName, tabCallbacks);
   updateEmptyState();
-  switchTo(id);
+  if (!opts.restoreActive) switchTo(id);
 
   // Forward resize events to iframe
   const ro = new ResizeObserver(([entry]) => {
@@ -1409,7 +1413,17 @@ async function restoreSessions(sessionList, opts = {}) {
 
   // Connect all sessions in parallel — placeholders are upgraded by initTerminal's addTab()
   const promises = sessionList.map(entry => {
-    if (entry.type === 'mod-tab' && entry.modId) {
+    if (entry.type === 'display-tab') {
+      return fetch(`/api/display-tab/${entry.id}`, { method: 'HEAD' })
+        .then(resp => {
+          if (resp.ok) {
+            createDisplayTab(entry.id, entry.name, { restoreActive: true });
+            return entry.id;
+          }
+          return null; // server no longer has it
+        })
+        .catch(() => null);
+    } else if (entry.type === 'mod-tab' && entry.modId) {
       createModTab(entry.modId, { id: entry.id, name: entry.name, restoreActive: true });
       return Promise.resolve(entry.id);
     } else {
@@ -1545,6 +1559,9 @@ function killSession(id) {
 
   if (session.type === 'mod-tab' || session.type === 'display-tab') {
     // Mod/display tabs: no PTY/WS to clean up
+    if (session.type === 'display-tab') {
+      fetch(`/api/display-tab/${id}`, { method: 'DELETE' }).catch(() => {});
+    }
     if (session.resizeObserver) session.resizeObserver.disconnect();
     session.container.remove();
   } else {

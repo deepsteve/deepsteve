@@ -2,7 +2,7 @@ const { z } = require('zod');
 const { randomUUID } = require('crypto');
 
 function init(context) {
-  const { shells, reloadClients, pendingOpens, log, displayTabs } = context;
+  const { shells, reloadClients, pendingOpens, log, displayTabs, setDisplayTab, deleteDisplayTab } = context;
 
   return {
     create_display_tab: {
@@ -18,7 +18,7 @@ function init(context) {
         const tabName = name || 'Display';
         const id = randomUUID().slice(0, 8);
 
-        displayTabs.set(id, html);
+        setDisplayTab(id, html);
         log(`[MCP] create_display_tab: id=${id}, name=${tabName}, caller=${session_id}`);
 
         // Notify browser to open the display tab (same window-targeting as open_terminal)
@@ -69,7 +69,7 @@ function init(context) {
           return { content: [{ type: 'text', text: `Display tab "${tab_id}" not found.` }] };
         }
 
-        displayTabs.set(tab_id, html);
+        setDisplayTab(tab_id, html);
         log(`[MCP] update_display_tab: id=${tab_id}`);
 
         // Broadcast to all clients so the iframe reloads
@@ -93,7 +93,7 @@ function init(context) {
           return { content: [{ type: 'text', text: `Display tab "${tab_id}" not found.` }] };
         }
 
-        displayTabs.delete(tab_id);
+        deleteDisplayTab(tab_id);
         log(`[MCP] close_display_tab: id=${tab_id}`);
 
         // Broadcast to all clients to close the tab

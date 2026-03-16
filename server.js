@@ -66,6 +66,7 @@ function log(...args) {
   console.log(`[${ts}]`, ...args);
 }
 const STATE_FILE = path.join(os.homedir(), '.deepsteve', 'state.json');
+const DISPLAY_TABS_DIR = path.join(os.homedir(), '.deepsteve', 'display-tabs');
 const SETTINGS_FILE = path.join(os.homedir(), '.deepsteve', 'settings.json');
 const app = express();
 app.use(express.static('public'));
@@ -894,6 +895,29 @@ try {
   console.error('Failed to load state file:', e.message);
 }
 
+// Load persisted display tabs from disk and clean up stale files (>7 days)
+try {
+  if (fs.existsSync(DISPLAY_TABS_DIR)) {
+    const now = Date.now();
+    const MAX_AGE = 7 * 24 * 60 * 60 * 1000;
+    for (const file of fs.readdirSync(DISPLAY_TABS_DIR)) {
+      if (!file.endsWith('.html')) continue;
+      const filePath = path.join(DISPLAY_TABS_DIR, file);
+      const stat = fs.statSync(filePath);
+      if (now - stat.mtimeMs > MAX_AGE) {
+        fs.unlinkSync(filePath);
+        log(`[display-tab] Cleaned up stale file: ${file}`);
+        continue;
+      }
+      const id = file.replace(/\.html$/, '');
+      displayTabs.set(id, fs.readFileSync(filePath, 'utf8'));
+    }
+    if (displayTabs.size > 0) log(`Loaded ${displayTabs.size} display tabs from disk`);
+  }
+} catch (e) {
+  console.error('Failed to load display tabs:', e.message);
+}
+
 // Save state on shutdown
 let stateFrozen = false;  // Set during shutdown to prevent onExit handlers from overwriting
 function saveState() {
@@ -1261,7 +1285,7 @@ app.post('/api/window-configs/:id/apply', (req, res) => {
     if (tabType === 'display-tab') {
       const id = randomUUID().slice(0, 8);
       const name = tab.name || 'Display';
-      displayTabs.set(id, tab.html);
+      setDisplayTab(id, tab.html);
       createdSessions.push({ id, name, type: 'display-tab' });
       deliverToWindow({ type: 'open-display-tab', id, name, windowId: windowId || undefined });
       continue;
@@ -1650,7 +1674,18 @@ app.post('/api/mods/uninstall', (req, res) => {
 app.get('/api/display-tab/:id', (req, res) => {
   const html = displayTabs.get(req.params.id);
   if (!html) return res.status(404).send('Not found');
+  if (req.method === 'HEAD') return res.type('html').end();
   res.type('html').send(html);
+});
+
+app.head('/api/display-tab/:id', (req, res) => {
+  if (!displayTabs.has(req.params.id)) return res.status(404).end();
+  res.type('html').end();
+});
+
+app.delete('/api/display-tab/:id', (req, res) => {
+  deleteDisplayTab(req.params.id);
+  res.json({ deleted: true });
 });
 
 app.get('/api/shells', (req, res) => {
@@ -2027,7 +2062,20 @@ const server = app.listen(PORT, BIND, () => {
   }, 3000);
 });
 const shells = new Map();
-const displayTabs = new Map(); // id → HTML string (ephemeral, not persisted)
+const displayTabs = new Map(); // id → HTML string (disk-backed in ~/.deepsteve/display-tabs/)
+
+function setDisplayTab(id, html) {
+  displayTabs.set(id, html);
+  try {
+    fs.mkdirSync(DISPLAY_TABS_DIR, { recursive: true });
+    fs.writeFileSync(path.join(DISPLAY_TABS_DIR, `${id}.html`), html);
+  } catch (e) { log(`[display-tab] Failed to persist ${id}: ${e.message}`); }
+}
+
+function deleteDisplayTab(id) {
+  displayTabs.delete(id);
+  try { fs.unlinkSync(path.join(DISPLAY_TABS_DIR, `${id}.html`)); } catch {}
+}
 const wss = new WebSocketServer({ server });
 
 // HTTPS server (created async if enabled)
@@ -2348,7 +2396,7 @@ function broadcastToWindow(windowId, msg) {
 }
 
 // Initialize MCP server (async, ~100ms for dynamic import)
-initMCP({ app, shells, wss, broadcast, broadcastToWindow, log, MODS_DIR, closeSession, spawnAgent, getSpawnArgs, getAgentConfig, wireShellOutput, watchClaudeSessionDir, unwatchClaudeSessionDir, saveState, validateWorktree, ensureWorktree, submitToShell, fetchIssueFromGitHub, deliverPromptWhenReady, reloadClients, pendingOpens, settings, isShuttingDown: () => shuttingDown, displayTabs }).catch(e => log('MCP init failed:', e.message));
+initMCP({ app, shells, wss, broadcast, broadcastToWindow, log, MODS_DIR, closeSession, spawnAgent, getSpawnArgs, getAgentConfig, wireShellOutput, watchClaudeSessionDir, unwatchClaudeSessionDir, saveState, validateWorktree, ensureWorktree, submitToShell, fetchIssueFromGitHub, deliverPromptWhenReady, reloadClients, pendingOpens, settings, isShuttingDown: () => shuttingDown, displayTabs, setDisplayTab, deleteDisplayTab }).catch(e => log('MCP init failed:', e.message));
 
 // Watch themes directory for changes and broadcast to clients
 let themeWatchDebounce = null;
