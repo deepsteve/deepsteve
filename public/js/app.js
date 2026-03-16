@@ -168,6 +168,10 @@ function applySettings(settings) {
   if (settings.cmdTabSwitchHoldMs !== undefined) {
     setCmdHoldModeHoldMs(settings.cmdTabSwitchHoldMs);
   }
+  if (settings.symlinkWorktreeSettings !== undefined) {
+    const el = document.querySelector('#symlink-worktree-settings');
+    if (el) el.checked = settings.symlinkWorktreeSettings;
+  }
   if (settings.windowConfigs !== undefined) {
     windowConfigs = settings.windowConfigs;
     renderEmptyStateConfigs();
@@ -414,6 +418,7 @@ settingsBtn?.addEventListener('click', async () => {
   const currentMaxTitle = settingsData.maxIssueTitleLength || 25;
   const currentWandPlanMode = settingsData.wandPlanMode !== undefined ? settingsData.wandPlanMode : true;
   const currentWandTemplate = settingsData.wandPromptTemplate || defaultsData.wandPromptTemplate || '';
+  const currentSymlinkWorktreeSettings = !!settingsData.symlinkWorktreeSettings;
   const currentCmdTabSwitch = !!settingsData.cmdTabSwitch;
   const currentCmdTabSwitchHoldMs = settingsData.cmdTabSwitchHoldMs !== undefined ? settingsData.cmdTabSwitchHoldMs : 1000;
   const currentDefaultAgent = settingsData.defaultAgent || 'claude';
@@ -543,6 +548,16 @@ settingsBtn?.addEventListener('click', async () => {
         <textarea id="wand-prompt-template" rows="6" style="width: 100%; box-sizing: border-box; padding: 8px; background: var(--ds-bg-primary); border: 1px solid var(--ds-border); border-radius: 4px; color: var(--ds-text-primary); font-size: 12px; font-family: monospace; resize: vertical;">${escapeHtml(currentWandTemplate)}</textarea>
         <p style="font-size: 11px; color: var(--ds-text-secondary); margin-top: 4px;">
           Variables: <code>{{number}}</code> <code>{{title}}</code> <code>{{labels}}</code> <code>{{url}}</code> <code>{{body}}</code>
+        </p>
+      </div>
+      <div class="settings-section">
+        <h3>Worktrees</h3>
+        <label style="font-size: 13px; color: var(--ds-text-primary); cursor: pointer; display: flex; align-items: center; gap: 8px;">
+          <input type="checkbox" id="symlink-worktree-settings" ${currentSymlinkWorktreeSettings ? 'checked' : ''} style="accent-color: var(--ds-accent-green);">
+          Symlink settings.local.json into worktrees
+        </label>
+        <p style="font-size: 11px; color: var(--ds-text-secondary); margin-top: 4px;">
+          Shares tool permissions from the parent repo so worktrees don't re-prompt.
         </p>
       </div>
       </div>
@@ -873,6 +888,7 @@ settingsBtn?.addEventListener('click', async () => {
     const newMaxTitle = Number(overlay.querySelector('#max-issue-title-length').value) || 25;
     const wandPlanMode = overlay.querySelector('#wand-plan-mode').checked;
     const wandPromptTemplate = overlay.querySelector('#wand-prompt-template').value;
+    const symlinkWorktreeSettings = overlay.querySelector('#symlink-worktree-settings').checked;
     const cmdTabSwitch = overlay.querySelector('#cmd-tab-switch').checked;
     const cmdTabSwitchHoldMs = Math.max(0, Number(overlay.querySelector('#cmd-tab-switch-hold-ms').value) || 0);
     const enabledAgents = [];
@@ -884,7 +900,7 @@ settingsBtn?.addEventListener('click', async () => {
     await fetch('/api/settings', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ shellProfile, maxIssueTitleLength: newMaxTitle, wandPlanMode, wandPromptTemplate, cmdTabSwitch, cmdTabSwitchHoldMs, enabledAgents, opencodeBinary, geminiBinary, windowConfigs: editingConfigs })
+      body: JSON.stringify({ shellProfile, maxIssueTitleLength: newMaxTitle, wandPlanMode, wandPromptTemplate, symlinkWorktreeSettings, cmdTabSwitch, cmdTabSwitchHoldMs, enabledAgents, opencodeBinary, geminiBinary, windowConfigs: editingConfigs })
     });
     maxIssueTitleLength = Math.max(10, Math.min(200, newMaxTitle));
     setCmdHoldModeEnabled(cmdTabSwitch);

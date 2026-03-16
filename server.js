@@ -197,7 +197,7 @@ Please read the issue carefully, understand the codebase context, and implement 
 };
 
 // Load settings
-let settings = { shellProfile: '~/.zshrc', maxIssueTitleLength: 25, cmdTabSwitch: false, cmdTabSwitchHoldMs: 1000, enabledSkills: [], windowConfigs: [], ...SETTINGS_DEFAULTS };
+let settings = { shellProfile: '~/.zshrc', maxIssueTitleLength: 25, cmdTabSwitch: false, cmdTabSwitchHoldMs: 1000, enabledSkills: [], windowConfigs: [], symlinkWorktreeSettings: false, ...SETTINGS_DEFAULTS };
 try {
   if (fs.existsSync(SETTINGS_FILE)) {
     settings = { ...settings, ...JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8')) };
@@ -371,6 +371,7 @@ function broadcastSettings() {
     maxIssueTitleLength: settings.maxIssueTitleLength,
     cmdTabSwitch: settings.cmdTabSwitch,
     cmdTabSwitchHoldMs: settings.cmdTabSwitchHoldMs,
+    symlinkWorktreeSettings: settings.symlinkWorktreeSettings,
     windowConfigs: settings.windowConfigs || [],
   });
   for (const client of wss.clients) {
@@ -553,18 +554,35 @@ function getWorktreePath(cwd, name) {
 function ensureWorktree(cwd, name) {
   const worktreePath = getWorktreePath(cwd, name);
   if (fs.existsSync(worktreePath)) {
+    symlinkWorktreeClaudeSettings(cwd, worktreePath);
     return worktreePath;
   }
   try {
     log(`Creating git worktree: ${name} in ${cwd}`);
     execSync(`zsh -l -c 'git worktree add "${worktreePath}"'`, { cwd, encoding: 'utf8', timeout: 30000 });
+    symlinkWorktreeClaudeSettings(cwd, worktreePath);
     return worktreePath;
   } catch (e) {
     log(`Failed to create worktree ${worktreePath}: ${e.message}`);
     // If it fails, maybe the branch already exists or it's not a git repo.
     // We attempt to return the path anyway if it was created, or fallback.
-    return fs.existsSync(worktreePath) ? worktreePath : cwd;
+    const result = fs.existsSync(worktreePath) ? worktreePath : cwd;
+    if (result !== cwd) symlinkWorktreeClaudeSettings(cwd, result);
+    return result;
   }
+}
+
+function symlinkWorktreeClaudeSettings(parentCwd, worktreePath) {
+  if (!settings.symlinkWorktreeSettings) return;
+  const source = path.join(parentCwd, '.claude', 'settings.local.json');
+  const targetDir = path.join(worktreePath, '.claude');
+  const target = path.join(targetDir, 'settings.local.json');
+  if (!fs.existsSync(source)) return;
+  if (fs.existsSync(target)) return;
+  fs.mkdirSync(targetDir, { recursive: true });
+  const relSource = path.relative(targetDir, source);
+  fs.symlinkSync(relSource, target);
+  log(`Symlinked worktree Claude settings: ${target} -> ${relSource}`);
 }
 
 // --- Claude session directory watcher ---
@@ -1143,6 +1161,10 @@ app.post('/api/settings', (req, res) => {
   if (req.body.geminiBinary !== undefined) {
     settings.geminiBinary = String(req.body.geminiBinary) || 'gemini';
     log(`Settings updated: geminiBinary=${settings.geminiBinary}`);
+  }
+  if (req.body.symlinkWorktreeSettings !== undefined) {
+    settings.symlinkWorktreeSettings = !!req.body.symlinkWorktreeSettings;
+    log(`Settings updated: symlinkWorktreeSettings=${settings.symlinkWorktreeSettings}`);
   }
   if (req.body.windowConfigs !== undefined) {
     if (Array.isArray(req.body.windowConfigs)) {
