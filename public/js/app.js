@@ -761,7 +761,10 @@ settingsBtn?.addEventListener('click', async () => {
   overlay.querySelector('#settings-new-config').onclick = () => showConfigEditor(-1);
   overlay.querySelector('#settings-save-current').onclick = async () => {
     const currentTabs = [];
-    for (const [id, s] of sessions.entries()) {
+    const orderedIds = [...document.querySelectorAll('#tabs-list .tab')].map(t => t.id.replace('tab-', ''));
+    for (const id of orderedIds) {
+      const s = sessions.get(id);
+      if (!s) continue;
       if (s.type === 'display-tab') {
         try {
           const resp = await fetch(`/api/display-tab/${id}`);
