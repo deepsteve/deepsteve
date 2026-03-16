@@ -436,7 +436,7 @@ settingsBtn?.addEventListener('click', async () => {
         <div class="settings-tabs">
           <button class="settings-tab active" data-tab="general">General</button>
           <button class="settings-tab" data-tab="github">GitHub</button>
-          <button class="settings-tab" data-tab="windows">Windows</button>
+          <button class="settings-tab" data-tab="workspaces">Workspaces</button>
         </div>
       </div>
       <div class="settings-body">
@@ -546,9 +546,9 @@ settingsBtn?.addEventListener('click', async () => {
         </p>
       </div>
       </div>
-      <div class="settings-tab-content" data-tab="windows">
+      <div class="settings-tab-content" data-tab="workspaces">
       <div class="settings-section">
-        <h3>Window Configs</h3>
+        <h3>Workspace Configs</h3>
         <p style="font-size: 13px; color: var(--ds-text-secondary); margin-bottom: 8px;">
           Saved tab layouts. Click a config in the empty state to open all its tabs at once.
         </p>
