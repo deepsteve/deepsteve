@@ -145,8 +145,14 @@ export function setupTerminalIO(term, ws, { onUserInput, container } = {}) {
         scrollBtn.classList.add('visible');
       } else if (state === 'USER_SCROLLED' && gap <= SNAP_TOLERANCE) {
         scrollToBottom();
+      } else if (state === 'AUTO' && gap > SNAP_TOLERANCE) {
+        // User is far from bottom in AUTO state (e.g. after suppression ended
+        // while scrolled up). Transition to USER_SCROLLED so button appears.
+        // Uses SNAP_TOLERANCE (not BOTTOM_TOLERANCE) to avoid flicker during
+        // rapid output where auto-scroll momentarily lags.
+        state = 'USER_SCROLLED';
+        scrollBtn.classList.add('visible');
       }
-      // AUTO + !scrolledUp + gap>BOTTOM_TOLERANCE → stay AUTO (programmatic scroll racing with output)
       // USER_SCROLLED + !scrolledUp + gap>SNAP → stay USER_SCROLLED (button already visible)
     }, { passive: true });
   }
