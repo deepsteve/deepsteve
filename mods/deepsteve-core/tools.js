@@ -4,7 +4,7 @@ const path = require('path');
 
 function init(context) {
   const {
-    shells, closeSession, spawnAgent, getSpawnArgs, getAgentConfig, wireShellOutput,
+    shells, closeSession, spawnSession, engine, getSpawnArgs, getAgentConfig, wireShellOutput,
     watchClaudeSessionDir, unwatchClaudeSessionDir, saveState,
     validateWorktree, ensureWorktree, submitToShell,
     fetchIssueFromGitHub, deliverPromptWhenReady,
@@ -143,9 +143,9 @@ function init(context) {
         const name = tabTitle.length <= maxLen ? tabTitle : tabTitle.slice(0, maxLen) + '\u2026';
 
         log(`[MCP] start_issue #${number}: id=${id}, agent=${effectiveAgentType}, worktree=${worktree || 'none'}, cwd=${spawnCwd}`);
-        const shell = spawnAgent(effectiveAgentType, spawnArgs, spawnCwd, { cols: 120, rows: 40, env: { DEEPSTEVE_SESSION_ID: id } });
+        spawnSession(id, effectiveAgentType, spawnArgs, spawnCwd, { cols: 120, rows: 40, env: { DEEPSTEVE_SESSION_ID: id } });
         shells.set(id, {
-          shell, clients: new Set(), cwd: spawnCwd,
+          clients: new Set(), cwd: spawnCwd,
           claudeSessionId, agentType: effectiveAgentType,
           worktree: worktree || null, windowId,
           name, initialPrompt: prompt,
@@ -156,11 +156,11 @@ function init(context) {
         // For non-BEL agents with a synchronous prompt, deliver after delay
         if (prompt && agentConfig.initialPromptDelay > 0) {
           shells.get(id).initialPrompt = null;
-          setTimeout(() => submitToShell(shell, prompt), agentConfig.initialPromptDelay);
+          setTimeout(() => submitToShell(id, prompt), agentConfig.initialPromptDelay);
         }
 
         if (agentConfig.supportsSessionWatch) watchClaudeSessionDir(id);
-        shell.onExit(() => {
+        engine.onExit(id, () => {
           if (agentConfig.supportsSessionWatch) unwatchClaudeSessionDir(id);
           if (!isShuttingDown()) { shells.delete(id); saveState(); }
         });
@@ -233,9 +233,9 @@ function init(context) {
         const tabName = name || (validatedWorktree ? validatedWorktree : undefined);
 
         log(`[MCP] open_terminal: id=${id}, agent=${effectiveAgentType}, worktree=${validatedWorktree || 'none'}, cwd=${spawnCwd}, caller=${session_id}`);
-        const shell = spawnAgent(effectiveAgentType, spawnArgs, spawnCwd, { cols: 120, rows: 40, env: { DEEPSTEVE_SESSION_ID: id } });
+        spawnSession(id, effectiveAgentType, spawnArgs, spawnCwd, { cols: 120, rows: 40, env: { DEEPSTEVE_SESSION_ID: id } });
         shells.set(id, {
-          shell, clients: new Set(), cwd: spawnCwd,
+          clients: new Set(), cwd: spawnCwd,
           claudeSessionId, agentType: effectiveAgentType,
           worktree: validatedWorktree, windowId,
           name: tabName, initialPrompt: prompt || null,
@@ -246,11 +246,11 @@ function init(context) {
         // For non-BEL agents, deliver initialPrompt after delay
         if (prompt && agentConfig.initialPromptDelay > 0) {
           shells.get(id).initialPrompt = null;
-          setTimeout(() => submitToShell(shell, prompt), agentConfig.initialPromptDelay);
+          setTimeout(() => submitToShell(id, prompt), agentConfig.initialPromptDelay);
         }
 
         if (agentConfig.supportsSessionWatch) watchClaudeSessionDir(id);
-        shell.onExit(() => {
+        engine.onExit(id, () => {
           if (agentConfig.supportsSessionWatch) unwatchClaudeSessionDir(id);
           if (!isShuttingDown()) { shells.delete(id); saveState(); }
         });

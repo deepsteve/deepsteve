@@ -426,11 +426,12 @@ async function refreshSessionsDropdown() {
 const settingsBtn = document.getElementById('settings-btn');
 
 settingsBtn?.addEventListener('click', async () => {
-  const [settingsData, themesData, versionData, defaultsData] = await Promise.all([
+  const [settingsData, themesData, versionData, defaultsData, enginesData] = await Promise.all([
     fetch('/api/settings').then(r => r.json()),
     fetch('/api/themes').then(r => r.json()),
     fetch('/api/version').then(r => r.json()).catch(() => ({ current: '?', latest: null, updateAvailable: false })),
-    fetch('/api/settings/defaults').then(r => r.json()).catch(() => ({}))
+    fetch('/api/settings/defaults').then(r => r.json()).catch(() => ({})),
+    fetch('/api/engines').then(r => r.json()).catch(() => ({ engines: [], current: 'node-pty' }))
   ]);
   const currentProfile = settingsData.shellProfile || '~/.zshrc';
   const currentMaxTitle = settingsData.maxIssueTitleLength || 25;
@@ -558,6 +559,18 @@ settingsBtn?.addEventListener('click', async () => {
           <label style="font-size: 12px; color: var(--ds-text-secondary);">Binary path</label>
           <input type="text" id="gemini-binary" value="${escapeHtml(currentGeminiBinary)}" placeholder="gemini" style="width: 200px; padding: 4px 8px; border-radius: 4px; border: 1px solid var(--ds-border); background: var(--ds-bg-secondary); color: var(--ds-text-primary);">
         </div>
+      </div>
+      <div class="settings-section">
+        <h3>Terminal Engine</h3>
+        <p style="font-size: 13px; color: var(--ds-text-secondary); margin-bottom: 8px;">
+          How terminal sessions are managed. tmux sessions survive daemon restarts.
+        </p>
+        <select id="engine-select" style="padding: 4px 8px; border-radius: 4px; border: 1px solid var(--ds-border); background: var(--ds-bg-secondary); color: var(--ds-text-primary);">
+          ${(enginesData.engines || []).map(e => {
+            const label = e.available ? `${e.name}${e.version ? ' v' + e.version : ''}` : `${e.name} (not installed)`;
+            return `<option value="${e.id}" ${e.id === enginesData.current ? 'selected' : ''} ${!e.available ? 'disabled' : ''}>${escapeHtml(label)}</option>`;
+          }).join('')}
+        </select>
       </div>
       </div>
       <div class="settings-tab-content" data-tab="github">
@@ -959,11 +972,25 @@ settingsBtn?.addEventListener('click', async () => {
     if (overlay.querySelector('#agent-gemini').checked) enabledAgents.push('gemini');
     const opencodeBinary = overlay.querySelector('#opencode-binary').value || 'opencode';
     const geminiBinary = overlay.querySelector('#gemini-binary').value || 'gemini';
-    await fetch('/api/settings', {
+    const selectedEngine = overlay.querySelector('#engine-select')?.value || 'node-pty';
+    const settingsPayload = { shellProfile, maxIssueTitleLength: newMaxTitle, wandPlanMode, wandPromptTemplate, symlinkWorktreeSettings, cmdTabSwitch, cmdTabSwitchHoldMs, commandPaletteEnabled, commandPaletteShortcut, enabledAgents, opencodeBinary, geminiBinary, windowConfigs: editingConfigs, engine: selectedEngine };
+    let resp = await fetch('/api/settings', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ shellProfile, maxIssueTitleLength: newMaxTitle, wandPlanMode, wandPromptTemplate, symlinkWorktreeSettings, cmdTabSwitch, cmdTabSwitchHoldMs, commandPaletteEnabled, commandPaletteShortcut, enabledAgents, opencodeBinary, geminiBinary, windowConfigs: editingConfigs })
+      body: JSON.stringify(settingsPayload)
     });
+    let result = await resp.json();
+    if (result.engineSwitchRequired) {
+      const confirmed = confirm(`Switching engines will close ${result.activeSessions} active session(s). Continue?`);
+      if (confirmed) {
+        resp = await fetch('/api/settings', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ...settingsPayload, engineSwitchConfirm: true })
+        });
+        result = await resp.json();
+      }
+    }
     maxIssueTitleLength = Math.max(10, Math.min(200, newMaxTitle));
     setCmdHoldModeEnabled(cmdTabSwitch);
     setCmdHoldModeHoldMs(cmdTabSwitchHoldMs);
@@ -998,6 +1025,47 @@ function updateAppBadge() {
  */
 function getWindowId() {
   return WindowManager.getWindowId();
+}
+
+/**
+ * Attach to an existing tmux session (raw terminal)
+ */
+function createTmuxAttachSession(tmuxSessionName) {
+  const { cols, rows } = measureTerminalSize();
+  const ws = createWebSocket({
+    action: 'tmux-attach',
+    session: tmuxSessionName,
+    name: tmuxSessionName,
+    cols,
+    rows,
+    windowId: getWindowId(),
+  });
+
+  let pendingData = [];
+  let assignedId = null;
+
+  ws.onmessage = (e) => {
+    let msg;
+    try { msg = JSON.parse(e.data); } catch {
+      const session = assignedId && sessions.get(assignedId);
+      if (session) {
+        session.term.write(e.data);
+      } else {
+        pendingData.push(e.data);
+      }
+      return;
+    }
+
+    if (msg.type === 'session') {
+      assignedId = msg.id;
+      ws.setSessionId(msg.id);
+      initTerminal(msg.id, ws, null, msg.name || tmuxSessionName, { pendingData });
+      pendingData = [];
+    } else if (msg.type === 'error') {
+      alert(msg.message || 'Failed to attach to tmux session');
+      ws.close();
+    }
+  };
 }
 
 /**
@@ -1897,6 +1965,7 @@ function showNewTabMenu(e) {
   html += `
     <div class="context-menu-item" data-action="worktree">New worktree...</div>
     <div class="context-menu-item" data-action="repo">New tab in repo...</div>
+    <div class="context-menu-item context-menu-has-submenu" id="tmux-attach-trigger">Attach tmux session <span class="context-menu-arrow"></span></div>
   `;
 
   // Add mod tab items
@@ -1972,6 +2041,72 @@ function showNewTabMenu(e) {
     });
   }
 
+  // Set up tmux attach submenu
+  const tmuxTrigger = menu.querySelector('#tmux-attach-trigger');
+  let tmuxSubmenu = null;
+  if (tmuxTrigger) {
+    let tmuxHideTimer = null;
+    const hideTmuxSubmenu = () => { if (tmuxSubmenu) { tmuxSubmenu.remove(); tmuxSubmenu = null; } };
+    const delayedHideTmux = () => { tmuxHideTimer = setTimeout(hideTmuxSubmenu, 100); };
+    const cancelHideTmux = () => { clearTimeout(tmuxHideTimer); };
+
+    const showTmuxSubmenu = async () => {
+      cancelHideTmux();
+      if (tmuxSubmenu) return;
+      tmuxSubmenu = document.createElement('div');
+      tmuxSubmenu.className = 'context-menu context-submenu';
+      tmuxSubmenu.innerHTML = '<div class="context-menu-item" style="opacity:0.5;pointer-events:none">Loading...</div>';
+      document.body.appendChild(tmuxSubmenu);
+      const triggerRect = tmuxTrigger.getBoundingClientRect();
+      tmuxSubmenu.style.left = (triggerRect.right + 2) + 'px';
+      tmuxSubmenu.style.top = triggerRect.top + 'px';
+
+      try {
+        const data = await fetch('/api/tmux-sessions').then(r => r.json());
+        if (!tmuxSubmenu) return; // closed while fetching
+        const sessions = data.sessions || [];
+        if (sessions.length === 0) {
+          tmuxSubmenu.innerHTML = '<div class="context-menu-item" style="opacity:0.5;pointer-events:none">No tmux sessions</div>';
+        } else {
+          tmuxSubmenu.innerHTML = sessions.map(s => {
+            const label = s.attached ? `${s.name} (attached)` : s.name;
+            return `<div class="context-menu-item" data-tmux-session="${s.name.replace(/"/g, '&quot;')}">${label}</div>`;
+          }).join('');
+          tmuxSubmenu.addEventListener('click', (ev) => {
+            const item = ev.target.closest('.context-menu-item');
+            if (!item || !item.dataset.tmuxSession) return;
+            ev.stopPropagation();
+            const sessionName = item.dataset.tmuxSession;
+            hideTmuxSubmenu();
+            menu.remove();
+            createTmuxAttachSession(sessionName);
+          });
+        }
+        // Reposition in case size changed
+        const subRect = tmuxSubmenu.getBoundingClientRect();
+        if (subRect.right > window.innerWidth) {
+          tmuxSubmenu.style.left = (triggerRect.left - subRect.width - 2) + 'px';
+        }
+        if (subRect.bottom > window.innerHeight) {
+          tmuxSubmenu.style.top = (window.innerHeight - subRect.height - 8) + 'px';
+        }
+      } catch {
+        if (tmuxSubmenu) tmuxSubmenu.innerHTML = '<div class="context-menu-item" style="opacity:0.5;pointer-events:none">tmux not available</div>';
+      }
+      if (tmuxSubmenu) {
+        tmuxSubmenu.addEventListener('mouseenter', cancelHideTmux);
+        tmuxSubmenu.addEventListener('mouseleave', delayedHideTmux);
+      }
+    };
+
+    tmuxTrigger.addEventListener('mouseenter', showTmuxSubmenu);
+    tmuxTrigger.addEventListener('mouseleave', delayedHideTmux);
+    tmuxTrigger.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      tmuxSubmenu ? hideTmuxSubmenu() : showTmuxSubmenu();
+    });
+  }
+
   // Position below the dropdown arrow button
   const btn = e.target.closest('#new-btn-dropdown') || e.target.closest('#new-btn-group');
   const rect = btn.getBoundingClientRect();
@@ -2035,6 +2170,7 @@ function showNewTabMenu(e) {
     }
     menu.remove();
     if (submenu) submenu.remove();
+    if (tmuxSubmenu) tmuxSubmenu.remove();
     cleanup();
     if (action === 'recent') {
       createSession(item.dataset.path, null, true, { agentType: getDefaultAgentType() });
@@ -2060,9 +2196,10 @@ function showNewTabMenu(e) {
     document.removeEventListener('mousedown', closeHandler);
   };
   const closeHandler = (ev) => {
-    if (!menu.contains(ev.target) && !(submenu && submenu.contains(ev.target)) && ev.target !== btn) {
+    if (!menu.contains(ev.target) && !(submenu && submenu.contains(ev.target)) && !(tmuxSubmenu && tmuxSubmenu.contains(ev.target)) && ev.target !== btn) {
       menu.remove();
       if (submenu) submenu.remove();
+      if (tmuxSubmenu) tmuxSubmenu.remove();
       cleanup();
     }
   };

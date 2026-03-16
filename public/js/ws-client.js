@@ -5,6 +5,8 @@
 export function createWebSocket(options = {}) {
   const params = new URLSearchParams();
 
+  if (options.action) params.set('action', options.action);
+  if (options.session) params.set('session', options.session);
   if (options.id) params.set('id', options.id);
   if (options.cwd) params.set('cwd', options.cwd);
   if (options.isNew) params.set('new', '1');
@@ -46,6 +48,8 @@ export function createWebSocket(options = {}) {
     // so future reconnections request the existing session instead of creating new ones.
     setSessionId(id) {
       const p = new URLSearchParams();
+      if (options.action) p.set('action', options.action);
+      if (options.session) p.set('session', options.session);
       p.set('id', id);
       if (options.cwd) p.set('cwd', options.cwd);
       if (options.cols) p.set('cols', options.cols);
