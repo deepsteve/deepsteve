@@ -1855,6 +1855,10 @@ function showNewTabMenu(e) {
     }
   }
 
+  // New window option
+  html += '<div class="context-menu-separator"></div>';
+  html += '<div class="context-menu-item" data-action="new-window">New window</div>';
+
   menu.innerHTML = html;
 
   // Set up agent submenu
@@ -1991,6 +1995,8 @@ function showNewTabMenu(e) {
       const active = activeId && sessions.get(activeId);
       const cwdPath = active?.cwd || SessionStore.getLastCwd() || '~';
       createSession(cwdPath, null, true, { agentType: 'opencode' });
+    } else if (action === 'new-window') {
+      window.open(window.location.origin, '_blank');
     }
   };
 
