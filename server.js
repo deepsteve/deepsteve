@@ -1620,8 +1620,8 @@ app.get('/api/display-tab/:id', (req, res) => {
 });
 
 app.get('/api/shells', (req, res) => {
-  const active = [...shells.entries()].map(([id, entry]) => ({ id, pid: entry.shell.pid, cwd: entry.cwd, name: entry.name || null, agentType: entry.agentType || 'claude', status: 'active', lastActivity: entry.lastActivity || null }));
-  const saved = Object.entries(savedState).map(([id, entry]) => ({ id, cwd: entry.cwd, name: entry.name || null, agentType: entry.agentType || 'claude', status: entry.closed ? 'closed' : 'saved', lastActivity: entry.lastActivity || null }));
+  const active = [...shells.entries()].map(([id, entry]) => ({ id, pid: entry.shell.pid, cwd: entry.cwd, name: entry.name || null, agentType: entry.agentType || 'claude', status: 'active', lastActivity: entry.lastActivity || null, connectedClients: entry.clients.size }));
+  const saved = Object.entries(savedState).map(([id, entry]) => ({ id, cwd: entry.cwd, name: entry.name || null, agentType: entry.agentType || 'claude', status: entry.closed ? 'closed' : 'saved', lastActivity: entry.lastActivity || null, connectedClients: 0 }));
   res.json({ shells: [...active, ...saved] });
 });
 

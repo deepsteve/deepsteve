@@ -214,6 +214,7 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
 .session-agent-badge { font-size: 10px; background: var(--ds-bg-tertiary); color: var(--ds-text-secondary); padding: 1px 6px; border-radius: 8px; margin-left: 4px; vertical-align: middle; }
 .dropdown-item .session-status { font-size: 11px; color: var(--ds-text-secondary); }
 .dropdown-item .session-status.active { color: var(--ds-accent-green-soft); }
+.dropdown-item .session-status.other-window { color: var(--ds-accent-blue); }
 .dropdown-item .session-close { opacity: 0.5; cursor: pointer; padding: 2px 6px; font-size: 11px; }
 .dropdown-item .session-close:hover { opacity: 1; color: var(--ds-accent-red); }
 .dropdown-item.clickable { cursor: pointer; }
