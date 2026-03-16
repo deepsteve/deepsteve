@@ -2,8 +2,10 @@
  * Command hold mode — tab switching and management.
  *
  * Hold Command for ~1 second to enter "hold mode," then press:
- *   1-9    jump to tab N
- *   , / .  previous / next tab (wrapping)
+ *   1-9              jump to tab N
+ *   , / .            previous / next tab (wrapping)
+ *   Left / Right     previous / next tab (wrapping)
+ *   Up / Down        previous / next browser window
  *
  * Uses capture-phase document listeners so keys are intercepted before
  * xterm.js sees them — no changes to terminal.js needed.
@@ -17,13 +19,15 @@ let metaHeldOnBlur = false;
 let getOrderedTabIds;
 let getActiveTabId;
 let switchToTab;
+let navigateWindow;
 
 let HOLD_MS = 1000;
 
 const TAB_KEYS = new Set([
   'Digit1', 'Digit2', 'Digit3', 'Digit4', 'Digit5',
   'Digit6', 'Digit7', 'Digit8', 'Digit9',
-  'Comma', 'Period'
+  'Comma', 'Period',
+  'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'
 ]);
 
 function setTabSwitchMode(active) {
@@ -93,18 +97,23 @@ function onKeyDown(e) {
         if (index < tabIds.length) {
           switchToTab(tabIds[index]);
         }
-      } else if (e.code === 'Comma') {
+      } else if (e.code === 'Comma' || e.code === 'ArrowLeft') {
         // Previous tab (wrapping)
         const activeId = getActiveTabId();
         const idx = tabIds.indexOf(activeId);
         const prev = idx <= 0 ? tabIds.length - 1 : idx - 1;
         switchToTab(tabIds[prev]);
-      } else if (e.code === 'Period') {
+      } else if (e.code === 'Period' || e.code === 'ArrowRight') {
         // Next tab (wrapping)
         const activeId = getActiveTabId();
         const idx = tabIds.indexOf(activeId);
         const next = idx >= tabIds.length - 1 ? 0 : idx + 1;
         switchToTab(tabIds[next]);
+      } else if (e.code === 'ArrowUp' || e.code === 'ArrowDown') {
+        // Previous/next browser window
+        if (navigateWindow) {
+          navigateWindow(e.code === 'ArrowUp' ? -1 : 1);
+        }
       }
     }
   }
@@ -127,10 +136,11 @@ function onBlur() {
   setTabSwitchMode(false);
 }
 
-export function init({ getOrderedTabIds: g, getActiveTabId: a, switchToTab: s }) {
+export function init({ getOrderedTabIds: g, getActiveTabId: a, switchToTab: s, navigateWindow: n }) {
   getOrderedTabIds = g;
   getActiveTabId = a;
   switchToTab = s;
+  navigateWindow = n;
 
   document.addEventListener('keydown', onKeyDown, true);
   document.addEventListener('keyup', onKeyUp, true);
