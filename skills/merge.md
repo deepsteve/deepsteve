@@ -11,7 +11,7 @@ Steps:
 
 2. **Get the current branch name**: Run `git branch --show-current`.
 
-3. **Find the main worktree path**: Run `git worktree list --porcelain | awk '/^worktree /{path=substr($0,10)} /^branch refs\/heads\/main$/{print path}'` — this outputs exactly one line: the path of the worktree with `main` checked out. If the output is empty, tell the user no worktree has `main` checked out and stop.
+3. **Find the main worktree path**: Run `dirname "$(git rev-parse --git-common-dir)"` — this outputs the main repo path (e.g. `/path/to/repo`).
 
 4. **Commit any uncommitted changes**: Run `git status --porcelain` in the current worktree. If there are uncommitted changes, stage them with `git add -A` and commit with a message derived from the branch name (e.g. for branch `worktree-github-issue-230`, use "Fix restart prompt only shows in active window (#230)"). Use the GitHub issue title if the branch contains an issue number. Include the `Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>` trailer.
 
