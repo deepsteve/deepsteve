@@ -1,6 +1,5 @@
 const { z } = require('zod');
 const { randomUUID } = require('crypto');
-const { execSync } = require('child_process');
 const path = require('path');
 
 function init(context) {
@@ -8,6 +7,7 @@ function init(context) {
     shells, closeSession, spawnAgent, getSpawnArgs, getAgentConfig, wireShellOutput,
     watchClaudeSessionDir, unwatchClaudeSessionDir, saveState,
     validateWorktree, ensureWorktree, submitToShell,
+    fetchIssueFromGitHub, deliverPromptWhenReady,
     reloadClients, pendingOpens, settings, log, isShuttingDown,
   } = context;
 
@@ -106,33 +106,20 @@ function init(context) {
         const effectiveAgentType = agent_type || caller.agentType || 'claude';
         const windowId = caller.windowId || null;
 
-        // Fetch issue details from GitHub if body not provided
-        let issueBody = body || null;
-        let issueLabels = labels || null;
-        let issueUrl = url || null;
-        if (!issueBody) {
-          try {
-            const gh = JSON.parse(execSync(
-              `zsh -l -c 'gh issue view ${Number(number)} --json body,labels,url'`,
-              { cwd: effectiveCwd, encoding: 'utf8', timeout: 15000 }
-            ));
-            issueBody = gh.body;
-            issueLabels = issueLabels || (Array.isArray(gh.labels) ? gh.labels.map(l => typeof l === 'string' ? l : l.name).join(', ') : null);
-            issueUrl = issueUrl || gh.url;
-          } catch (e) {
-            log(`[MCP] start_issue: failed to fetch issue #${number} from GitHub: ${e.message}`);
-          }
+        // Build prompt helper
+        function buildPrompt(issueBody, issueLabels, issueUrl) {
+          const vars = {
+            number,
+            title,
+            labels: issueLabels || 'none',
+            url: issueUrl || '',
+            body: issueBody ? String(issueBody).slice(0, 2000) : '(no description)',
+          };
+          return settings.wandPromptTemplate.replace(/\{\{(\w+)\}\}/g, (_, key) => vars[key] ?? '');
         }
 
-        // Build prompt from wand template
-        const vars = {
-          number,
-          title,
-          labels: issueLabels || 'none',
-          url: issueUrl || '',
-          body: issueBody ? String(issueBody).slice(0, 2000) : '(no description)',
-        };
-        const prompt = settings.wandPromptTemplate.replace(/\{\{(\w+)\}\}/g, (_, key) => vars[key] ?? '');
+        // When body is provided inline, build prompt synchronously
+        const prompt = body ? buildPrompt(body, labels, url) : null;
 
         const worktree = validateWorktree('github-issue-' + number);
         const id = randomUUID().slice(0, 8);
@@ -166,7 +153,7 @@ function init(context) {
         });
         wireShellOutput(id);
 
-        // For non-BEL agents, deliver initialPrompt after delay
+        // For non-BEL agents with a synchronous prompt, deliver after delay
         if (prompt && agentConfig.initialPromptDelay > 0) {
           shells.get(id).initialPrompt = null;
           setTimeout(() => submitToShell(shell, prompt), agentConfig.initialPromptDelay);
@@ -178,6 +165,17 @@ function init(context) {
           if (!isShuttingDown()) { shells.delete(id); saveState(); }
         });
         saveState();
+
+        // When body was NOT provided, fetch async and deliver prompt when ready
+        if (!body) {
+          fetchIssueFromGitHub(number, effectiveCwd).then(gh => {
+            const issueBody = gh ? gh.body : null;
+            const issueLabels = gh ? (labels || (Array.isArray(gh.labels) ? gh.labels.map(l => typeof l === 'string' ? l : l.name).join(', ') : null)) : labels;
+            const issueUrl = gh ? (url || gh.url) : url;
+            const asyncPrompt = buildPrompt(issueBody, issueLabels, issueUrl);
+            deliverPromptWhenReady(id, asyncPrompt);
+          });
+        }
 
         notifyOpenSession(id, spawnCwd, name, windowId);
 

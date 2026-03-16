@@ -671,6 +671,41 @@ function submitToShell(shell, text) {
 }
 
 /**
+ * Async wrapper around `gh issue view` — returns { body, labels, url } or null.
+ * Uses exec (not execSync) so it doesn't block the event loop.
+ */
+function fetchIssueFromGitHub(number, cwd) {
+  return new Promise((resolve) => {
+    exec(`zsh -l -c 'gh issue view ${Number(number)} --json body,labels,url'`,
+      { cwd, encoding: 'utf8', timeout: 15000 },
+      (err, stdout) => {
+        if (err) { log(`[gh] Failed to fetch issue #${number}: ${err.message}`); resolve(null); return; }
+        try { resolve(JSON.parse(stdout)); } catch { resolve(null); }
+      });
+  });
+}
+
+/**
+ * Deliver a prompt to a shell, handling the race between async fetch and BEL readiness.
+ * If the shell is already waiting for input, submit immediately.
+ * If the agent uses initialPromptDelay (non-BEL), use that delay.
+ * Otherwise, set initialPrompt so the BEL handler picks it up.
+ */
+function deliverPromptWhenReady(id, prompt) {
+  const e = shells.get(id);
+  if (!e) return;
+  const config = getAgentConfig(e.agentType);
+  if (e.waitingForInput) {
+    e.waitingForInput = false;
+    setTimeout(() => submitToShell(e.shell, prompt), 500);
+  } else if (config.initialPromptDelay > 0) {
+    setTimeout(() => submitToShell(e.shell, prompt), config.initialPromptDelay);
+  } else {
+    e.initialPrompt = prompt;  // BEL handler will pick it up
+  }
+}
+
+/**
  * Strip OSC sequences (e.g. window title updates like \x1b]0;Claude Code\x07)
  * so that the BEL terminator inside them isn't mistaken for a standalone BEL.
  */
@@ -1836,28 +1871,17 @@ app.post('/api/start-issue', (req, res) => {
   cwd = cwd || process.env.HOME;
   if (cwd.startsWith('~')) cwd = path.join(os.homedir(), cwd.slice(1));
 
-  // Fetch issue details from GitHub if not provided in request body
-  let issueBody = body, issueLabels = labels, issueUrl = url;
-  if (!issueBody) {
-    try {
-      const gh = JSON.parse(execSync(`zsh -l -c 'gh issue view ${Number(number)} --json body,labels,url'`, { cwd, encoding: 'utf8', timeout: 15000 }));
-      issueBody = gh.body;
-      issueLabels = issueLabels || gh.labels;
-      issueUrl = issueUrl || gh.url;
-    } catch (e) {
-      log(`[API] start-issue: failed to fetch issue #${number} from GitHub: ${e.message}`);
-    }
+  // Build prompt helper (shared between sync and async paths)
+  function buildPrompt(issueBody, issueLabels, issueUrl) {
+    const vars = {
+      number,
+      title,
+      labels: Array.isArray(issueLabels) ? issueLabels.map(l => typeof l === 'string' ? l : l.name).join(', ') : (issueLabels || 'none'),
+      url: issueUrl || '',
+      body: issueBody ? String(issueBody).slice(0, 2000) : '(no description)',
+    };
+    return settings.wandPromptTemplate.replace(/\{\{(\w+)\}\}/g, (_, key) => vars[key] ?? '');
   }
-
-  // Build prompt from wand template (same as frontend startIssue)
-  const vars = {
-    number,
-    title,
-    labels: Array.isArray(issueLabels) ? issueLabels.map(l => typeof l === 'string' ? l : l.name).join(', ') : (issueLabels || 'none'),
-    url: issueUrl || '',
-    body: issueBody ? String(issueBody).slice(0, 2000) : '(no description)',
-  };
-  const prompt = settings.wandPromptTemplate.replace(/\{\{(\w+)\}\}/g, (_, key) => vars[key] ?? '');
 
   const worktree = validateWorktree('github-issue-' + number);
   const id = randomUUID().slice(0, 8);
@@ -1870,10 +1894,10 @@ app.post('/api/start-issue', (req, res) => {
     worktreeCwd = ensureWorktree(cwd, worktree);
   }
 
-  const spawnArgs = getSpawnArgs(agentType, { 
+  const spawnArgs = getSpawnArgs(agentType, {
     sessionId: claudeSessionId,
-    planMode: settings.wandPlanMode, 
-    worktree 
+    planMode: settings.wandPlanMode,
+    worktree
   });
 
   const maxLen = settings.maxIssueTitleLength || 25;
@@ -1887,11 +1911,14 @@ app.post('/api/start-issue', (req, res) => {
     return res.status(400).json({ error: 'Multiple browser windows open. Pass sessionId or windowId to target one.' });
   }
 
+  // When body is provided inline, build prompt synchronously
+  const prompt = body ? buildPrompt(body, labels, url) : null;
+
   log(`[API] start-issue #${number}: id=${id}, agent=${agentType}, worktree=${worktree || 'none'}, cwd=${worktreeCwd}`);
   const shell = spawnAgent(agentType, spawnArgs, worktreeCwd, { cols: 120, rows: 40, env: { DEEPSTEVE_SESSION_ID: id } });
   shells.set(id, { shell, clients: new Set(), cwd: worktreeCwd, claudeSessionId: claudeSessionId, agentType, worktree: worktree || null, windowId: windowId || null, name, initialPrompt: prompt, waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now() });
   wireShellOutput(id);
-  // For non-BEL agents, deliver initialPrompt after delay (BEL agents use wireShellOutput detection)
+  // For non-BEL agents with a synchronous prompt, deliver after delay
   if (prompt && agentConfig.initialPromptDelay > 0) {
     shells.get(id).initialPrompt = null; // Clear so BEL handler doesn't also fire
     setTimeout(() => submitToShell(shell, prompt), agentConfig.initialPromptDelay);
@@ -1902,6 +1929,17 @@ app.post('/api/start-issue', (req, res) => {
     if (!shuttingDown) { shells.delete(id); saveState(); }
   });
   saveState();
+
+  // When body was NOT provided, fetch async and deliver prompt when ready
+  if (!body) {
+    fetchIssueFromGitHub(number, cwd).then(gh => {
+      const issueBody = gh ? gh.body : null;
+      const issueLabels = gh ? (labels || (Array.isArray(gh.labels) ? gh.labels.map(l => typeof l === 'string' ? l : l.name).join(', ') : null)) : labels;
+      const issueUrl = gh ? (url || gh.url) : url;
+      const asyncPrompt = buildPrompt(issueBody, issueLabels, issueUrl);
+      deliverPromptWhenReady(id, asyncPrompt);
+    });
+  }
 
   // Notify browser to open the new session
   log(`[API] start-issue: windowId=${windowId}, sessionId=${id}, readyClients=${readyClients.length}, clientWindowIds=[${readyClients.map(c => c.windowId).join(',')}]`);
@@ -2311,7 +2349,7 @@ function broadcastToWindow(windowId, msg) {
 }
 
 // Initialize MCP server (async, ~100ms for dynamic import)
-initMCP({ app, shells, wss, broadcast, broadcastToWindow, log, MODS_DIR, closeSession, spawnAgent, getSpawnArgs, getAgentConfig, wireShellOutput, watchClaudeSessionDir, unwatchClaudeSessionDir, saveState, validateWorktree, ensureWorktree, submitToShell, reloadClients, pendingOpens, settings, isShuttingDown: () => shuttingDown, displayTabs }).catch(e => log('MCP init failed:', e.message));
+initMCP({ app, shells, wss, broadcast, broadcastToWindow, log, MODS_DIR, closeSession, spawnAgent, getSpawnArgs, getAgentConfig, wireShellOutput, watchClaudeSessionDir, unwatchClaudeSessionDir, saveState, validateWorktree, ensureWorktree, submitToShell, fetchIssueFromGitHub, deliverPromptWhenReady, reloadClients, pendingOpens, settings, isShuttingDown: () => shuttingDown, displayTabs }).catch(e => log('MCP init failed:', e.message));
 
 // Watch themes directory for changes and broadcast to clients
 let themeWatchDebounce = null;
