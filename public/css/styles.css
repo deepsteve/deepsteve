@@ -67,7 +67,7 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
 .tab.placeholder { animation: tab-connecting 1.2s ease-in-out infinite; }
 @keyframes tab-connecting { 0%, 100% { opacity: 0.4; } 50% { opacity: 0.8; } }
 .tab.dragging { opacity: 0.3; }
-.tab-drag-ghost { opacity: 0.9; box-shadow: 0 4px 12px rgba(0,0,0,0.5); border-color: var(--ds-accent-blue) !important; }
+.tab-drag-ghost { opacity: 0.9; box-shadow: 0 4px 12px rgba(0,0,0,0.5); }
 #tabs-list.tab-drag-active { user-select: none; }
 #tabs-list.tab-drag-active .tab:not(.dragging) { pointer-events: none; transition: transform 0.15s ease; }
 #tabs.tab-switch-mode { outline: 2px solid var(--ds-accent-blue); outline-offset: -2px; border-radius: 4px; }
@@ -78,24 +78,25 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
 #app-container.vertical-layout #tabs {
   flex-direction: column;
   align-items: stretch;
-  padding: 8px;
-  gap: 4px;
+  padding: 12px 10px;
+  gap: 2px;
   height: 100vh;
   flex-shrink: 0;
-  border-right: 1px solid var(--ds-border);
+  border-right: none;
+  box-shadow: 1px 0 0 0 var(--ds-border);
 }
 
 #app-container.vertical-layout #tabs-list-wrapper {
   flex-direction: column;
   flex: 1;
   min-height: 0;
-  gap: 4px;
+  gap: 2px;
 }
 
 #app-container.vertical-layout #tabs-list {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 2px;
   flex: 1;
   overflow-y: auto;
   overflow-x: hidden;
@@ -103,64 +104,105 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
 }
 
 #app-container.vertical-layout #tabs-arrows { gap: 4px; justify-content: center; }
+#app-container.vertical-layout .tabs-arrow { border: none; background: transparent; border-radius: 6px; transition: background 0.15s ease; }
+#app-container.vertical-layout .tabs-arrow:hover:not(.disabled) { background: var(--ds-bg-tertiary); }
 #app-container.vertical-layout #tabs-arrow-start::after { content: '\25B2'; }
 #app-container.vertical-layout #tabs-arrow-end::after { content: '\25BC'; }
 
 #app-container.vertical-layout #tabs-spacer { display: none; }
 
-#app-container.vertical-layout .layout-btn { margin-right: 0; margin-bottom: 8px; }
+#app-container.vertical-layout .layout-btn { margin-right: 0; margin-bottom: 12px; border: none; background: transparent; border-radius: 8px; transition: background 0.15s ease; }
+#app-container.vertical-layout .layout-btn:hover { background: var(--ds-bg-tertiary); }
 
 #app-container.vertical-layout .tab {
-  border-radius: 4px;
+  border-radius: 8px;
   width: 100%;
   position: relative;
-  padding-right: 8px;
+  padding: 8px 12px;
+  padding-right: 28px;
+  border: none;
+  background: transparent;
+  transition: background 0.15s ease;
+}
+#app-container.vertical-layout .tab:hover { background: var(--ds-bg-tertiary); }
+#app-container.vertical-layout .tab.active {
+  background: var(--ds-bg-tertiary);
+}
+#app-container.vertical-layout .tab.active::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 3px;
+  height: 16px;
+  background: var(--ds-accent-blue);
+  border-radius: 0 3px 3px 0;
 }
 
 #app-container.vertical-layout .tab .close {
   position: absolute;
-  right: 4px;
+  right: 8px;
   top: 50%;
   transform: translateY(-50%);
   opacity: 0;
-  background: var(--ds-bg-tertiary);
+  background: transparent;
   padding: 2px 4px;
-  border-radius: 3px;
+  border-radius: 4px;
+  transition: opacity 0.15s ease, background 0.15s ease;
 }
 
 #app-container.vertical-layout .tab:hover .close {
-  opacity: 0.7;
+  opacity: 0.5;
 }
 
 #app-container.vertical-layout .tab .close:hover {
   opacity: 1;
+  background: var(--ds-bg-tertiary);
 }
 
 #app-container.vertical-layout #new-btn-group {
   width: 100%;
-  margin: 8px 0 0 0;
+  margin: 12px 0 0 0;
+  padding-top: 12px;
+  border-top: 1px solid var(--ds-border);
 }
-#app-container.vertical-layout #new-btn { flex: 1; }
-#app-container.vertical-layout #new-btn-dropdown { flex-shrink: 0; }
+#app-container.vertical-layout #new-btn { flex: 1; border-radius: 8px 0 0 8px; }
+#app-container.vertical-layout #new-btn-dropdown { flex-shrink: 0; border-radius: 0 8px 8px 0; }
 
 #app-container.vertical-layout .dropdown {
   width: 100%;
-  margin-top: 4px;
+  margin-top: 6px;
 }
 
 #app-container.vertical-layout #issue-btn {
   width: 100%;
-  margin-top: 4px;
+  margin-top: 6px;
+  border: none;
+  background: transparent;
+  border-radius: 8px;
+  transition: background 0.15s ease;
 }
+#app-container.vertical-layout #issue-btn:hover { background: var(--ds-bg-tertiary); }
 
 #app-container.vertical-layout .dropdown-btn {
   width: 100%;
+  border: none;
+  background: transparent;
+  border-radius: 8px;
+  transition: background 0.15s ease;
 }
+#app-container.vertical-layout .dropdown-btn:hover { background: var(--ds-bg-tertiary); }
 
 #app-container.vertical-layout #settings-btn {
   width: 100%;
-  margin: 4px 0 0 0;
+  margin: 6px 0 0 0;
+  border: none;
+  background: transparent;
+  border-radius: 8px;
+  transition: background 0.15s ease;
 }
+#app-container.vertical-layout #settings-btn:hover { background: var(--ds-bg-tertiary); }
 
 #app-container.vertical-layout .dropdown-menu {
   left: 100%;
@@ -184,15 +226,15 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
 /* Sidebar resizer for vertical layout */
 #app-container.vertical-layout #sidebar-resizer {
   display: block;
-  width: 4px;
-  background: var(--ds-border);
+  width: 2px;
+  background: transparent;
   cursor: col-resize;
   flex-shrink: 0;
-  transition: background 0.15s;
+  transition: background 0.15s ease;
 }
 
 #app-container.vertical-layout #sidebar-resizer:hover {
-  background: var(--ds-accent-blue);
+  background: rgba(88, 166, 255, 0.5);
 }
 
 /* Issue Button */
@@ -491,9 +533,13 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
 .mod-back-btn:hover { background: var(--ds-btn-neutral-hover); }
 
 /* Vertical layout mod buttons */
-#app-container.vertical-layout .mod-toolbar-btn { width: 100%; margin: 4px 0 0 0; }
-#app-container.vertical-layout .mod-back-btn { width: 100%; margin-bottom: 4px; }
-#app-container.vertical-layout #mods-btn { width: 100%; margin-top: 4px; }
+#app-container.vertical-layout .mod-toolbar-btn { width: 100%; margin: 6px 0 0 0; border: none; background: transparent; border-radius: 8px; transition: background 0.15s ease; }
+#app-container.vertical-layout .mod-toolbar-btn:hover { background: var(--ds-bg-tertiary); }
+#app-container.vertical-layout .mod-toolbar-btn.active { background: var(--ds-accent-blue); }
+#app-container.vertical-layout .mod-back-btn { width: 100%; margin-bottom: 6px; border: none; background: transparent; border-radius: 8px; transition: background 0.15s ease; }
+#app-container.vertical-layout .mod-back-btn:hover { background: var(--ds-bg-tertiary); }
+#app-container.vertical-layout #mods-btn { width: 100%; margin-top: 6px; border: none; background: transparent; border-radius: 8px; transition: background 0.15s ease; }
+#app-container.vertical-layout #mods-btn:hover { background: var(--ds-bg-tertiary); }
 
 /* Mod settings button (gear icon in mods dropdown) */
 .mod-settings-btn { background: transparent; border: none; color: var(--ds-text-secondary); cursor: pointer; font-size: 20px; padding: 0 2px; border-radius: 3px; line-height: 1; flex-shrink: 0; }
