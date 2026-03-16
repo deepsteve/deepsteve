@@ -324,29 +324,33 @@ async function refreshSessionsDropdown() {
     // Get IDs of sessions connected in THIS tab
     const connectedIds = new Set(sessions.keys());
 
-    // Sort: active/connected first, then saved, then closed last
+    // Classify each session into three states
+    const thisTab = s => connectedIds.has(s.id);
+    const otherWindow = s => !connectedIds.has(s.id) && (s.connectedClients || 0) > 0;
+    // Sort: this-tab first, then other-window, then disconnected
+    const stateOrder = s => thisTab(s) ? 0 : otherWindow(s) ? 1 : 2;
     const statusOrder = { active: 0, saved: 1, closed: 2 };
     allShells.sort((a, b) => {
-      const aConnected = connectedIds.has(a.id);
-      const bConnected = connectedIds.has(b.id);
-      if (aConnected !== bConnected) return aConnected ? -1 : 1;
+      const orderDiff = stateOrder(a) - stateOrder(b);
+      if (orderDiff !== 0) return orderDiff;
       return (statusOrder[a.status] || 0) - (statusOrder[b.status] || 0);
     });
 
     const showAgentBadge = window.__deepsteveAgents?.length > 1;
 
     sessionsMenu.innerHTML = allShells.map(shell => {
-      const isConnected = connectedIds.has(shell.id);
+      const isThisTab = thisTab(shell);
+      const isOtherWindow = otherWindow(shell);
       const isClosed = shell.status === 'closed';
       const name = sessions.get(shell.id)?.name || shell.name || getDefaultTabName(shell.cwd);
-      const staleness = !isConnected && shell.lastActivity ? formatRelativeTime(shell.lastActivity) : '';
-      const statusText = isConnected ? 'connected' : (isClosed ? (staleness ? `closed ${staleness}` : 'closed') : (staleness || (shell.status === 'saved' ? 'saved' : 'not connected')));
-      const statusClass = isConnected ? 'active' : (isClosed ? 'closed' : '');
-      const canClose = !isConnected;
+      const staleness = !isThisTab && !isOtherWindow && shell.lastActivity ? formatRelativeTime(shell.lastActivity) : '';
+      const statusText = isThisTab ? 'connected' : isOtherWindow ? 'other window' : (isClosed ? (staleness ? `closed ${staleness}` : 'closed') : (staleness || (shell.status === 'saved' ? 'saved' : 'not connected')));
+      const statusClass = isThisTab ? 'active' : isOtherWindow ? 'other-window' : (isClosed ? 'closed' : '');
+      const canClose = !isThisTab && !isOtherWindow;
       const agentLabel = shell.agentType === 'opencode' ? 'OpenCode' : (shell.agentType ? shell.agentType.charAt(0).toUpperCase() + shell.agentType.slice(1) : '');
 
       return `
-        <div class="dropdown-item ${isConnected ? 'connected' : 'clickable'} ${isClosed ? 'closed' : ''}" data-id="${shell.id}" data-cwd="${shell.cwd}" data-name="${escapeHtml(name)}">
+        <div class="dropdown-item ${isThisTab ? 'connected' : 'clickable'} ${isClosed ? 'closed' : ''}" data-id="${shell.id}" data-cwd="${shell.cwd}" data-name="${escapeHtml(name)}">
           <div class="session-info">
             <span class="session-name">${name}${showAgentBadge && agentLabel ? ` <span class="session-agent-badge">${agentLabel}</span>` : ''}</span>
             <span class="session-status ${statusClass}">${statusText}</span>
@@ -356,8 +360,8 @@ async function refreshSessionsDropdown() {
       `;
     }).join('');
 
-    // Add "Clear disconnected" button at the top
-    const disconnectedCount = allShells.filter(s => !connectedIds.has(s.id)).length;
+    // Add "Clear disconnected" button at the top — only count truly disconnected sessions
+    const disconnectedCount = allShells.filter(s => !connectedIds.has(s.id) && (s.connectedClients || 0) === 0).length;
     const clearBtn = document.createElement('div');
     clearBtn.className = 'dropdown-clear-disconnected' + (disconnectedCount === 0 ? ' disabled' : '');
     clearBtn.textContent = disconnectedCount > 0 ? `Clear disconnected (${disconnectedCount})` : 'Clear disconnected';
