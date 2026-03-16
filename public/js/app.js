@@ -350,7 +350,7 @@ async function refreshSessionsDropdown() {
       const agentLabel = shell.agentType === 'opencode' ? 'OpenCode' : (shell.agentType ? shell.agentType.charAt(0).toUpperCase() + shell.agentType.slice(1) : '');
 
       return `
-        <div class="dropdown-item ${isThisTab ? 'connected' : 'clickable'} ${isClosed ? 'closed' : ''}" data-id="${shell.id}" data-cwd="${shell.cwd}" data-name="${escapeHtml(name)}">
+        <div class="dropdown-item ${isThisTab ? 'connected' : 'clickable'} ${isClosed ? 'closed' : ''}" data-id="${shell.id}" data-cwd="${shell.cwd}" data-name="${escapeHtml(name)}"${isOtherWindow ? ' data-other-window="true"' : ''}>
           <div class="session-info">
             <span class="session-name">${name}${showAgentBadge && agentLabel ? ` <span class="session-agent-badge">${agentLabel}</span>` : ''}</span>
             <span class="session-status ${statusClass}">${statusText}</span>
@@ -378,10 +378,21 @@ async function refreshSessionsDropdown() {
       item.addEventListener('click', (e) => {
         if (e.target.closest('.session-close')) return;
         const id = item.dataset.id;
-        const cwd = item.dataset.cwd;
-        const name = item.dataset.name || null;
         sessionsMenu.classList.remove('open');
-        createSession(cwd, id, false, { name });
+
+        if (item.dataset.otherWindow) {
+          // Find which window owns this session and ask it to focus
+          const ownerWindow = WindowManager.getLiveWindows().find(w =>
+            w.sessions.some(s => s.id === id)
+          );
+          if (ownerWindow) {
+            WindowManager.focusSessionInWindow(ownerWindow.windowId, id);
+          }
+        } else {
+          const cwd = item.dataset.cwd;
+          const name = item.dataset.name || null;
+          createSession(cwd, id, false, { name });
+        }
       });
     });
 
@@ -2395,6 +2406,11 @@ async function init() {
   // Handle sessions sent from other windows
   WindowManager.onSessionReceived((session) => {
     createSession(session.cwd, session.id, false, { name: session.name, allowDuplicate: true });
+  });
+
+  // Handle focus-session requests from other windows
+  WindowManager.onFocusSession((sessionId) => {
+    switchTo(sessionId);
   });
 
   WindowManager.startHeartbeat();

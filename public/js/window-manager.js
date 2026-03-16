@@ -25,6 +25,7 @@ const liveWindows = new Map();
 // Callbacks set by app.js
 let sessionsProvider = null;
 let receiveSessionCallback = null;
+let focusSessionCallback = null;
 
 function generateWindowId() {
   return 'win-' + Math.random().toString(36).substring(2, 10);
@@ -168,6 +169,11 @@ export const WindowManager = {
             transferId: data.transferId,
             targetWindowId: data.fromWindowId
           });
+        } else if (data.type === 'focus-session' && data.targetWindowId === myId) {
+          window.focus();
+          if (focusSessionCallback) {
+            focusSessionCallback(data.sessionId);
+          }
         } else if (data.type === 'send-session-ack' && data.targetWindowId === myId) {
           const pending = pendingTransfers.get(data.transferId);
           if (pending) {
@@ -278,5 +284,25 @@ export const WindowManager = {
    */
   onSessionReceived(callback) {
     receiveSessionCallback = callback;
+  },
+
+  /**
+   * Register handler for focus-session requests from other windows
+   */
+  onFocusSession(callback) {
+    focusSessionCallback = callback;
+  },
+
+  /**
+   * Ask another window to focus itself and switch to a specific session
+   */
+  focusSessionInWindow(targetWindowId, sessionId) {
+    if (!channel) return;
+    channel.postMessage({
+      type: 'focus-session',
+      targetWindowId,
+      sessionId,
+      fromWindowId: this.getWindowId()
+    });
   }
 };
