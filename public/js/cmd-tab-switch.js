@@ -33,9 +33,6 @@ function setTabSwitchMode(active) {
 }
 
 function resetState() {
-  if (holdTimer || tabSwitchModeActive) {
-    console.log('[cmd-tab-switch] resetState()', { hadTimer: !!holdTimer, wasActive: tabSwitchModeActive });
-  }
   clearTimeout(holdTimer);
   holdTimer = null;
   setTabSwitchMode(false);
@@ -43,9 +40,6 @@ function resetState() {
 
 function onKeyDown(e) {
   if (!enabled) {
-    if (e.metaKey && TAB_KEYS.has(e.code)) {
-      console.log('[cmd-tab-switch] keydown blocked: enabled=false', { key: e.key, code: e.code });
-    }
     return;
   }
 
@@ -55,14 +49,11 @@ function onKeyDown(e) {
       // Cmd was held when we left the window — activate immediately
       metaHeldOnBlur = false;
       setTabSwitchMode(true);
-      console.log('[cmd-tab-switch] Meta still held after refocus — tab switch mode ACTIVE');
       return;
     }
-    console.log('[cmd-tab-switch] Meta pressed, starting hold timer (' + HOLD_MS + 'ms)');
     resetState();
     holdTimer = setTimeout(() => {
       setTabSwitchMode(true);
-      console.log('[cmd-tab-switch] Hold timer fired — tab switch mode ACTIVE');
     }, HOLD_MS);
     return;
   }
@@ -72,10 +63,8 @@ function onKeyDown(e) {
 
   // Non-modifier key while Meta is held
   if (e.metaKey) {
-    console.log('[cmd-tab-switch] key while Meta held:', { code: e.code, tabSwitchModeActive, inTabKeys: TAB_KEYS.has(e.code) });
     if (!tabSwitchModeActive) {
       // Still within hold period — normal Cmd shortcut, cancel timer
-      console.log('[cmd-tab-switch] Not in tab switch mode yet — cancelling timer, passing through');
       resetState();
       return;
     }
@@ -140,11 +129,9 @@ export function init({ getOrderedTabIds: g, getActiveTabId: a, switchToTab: s })
 
 export function setEnabled(val) {
   enabled = !!val;
-  console.log('[cmd-tab-switch] setEnabled(' + enabled + ')');
   if (!enabled) resetState();
 }
 
 export function setHoldMs(ms) {
   HOLD_MS = Math.max(0, ms | 0);
-  console.log('[cmd-tab-switch] setHoldMs(' + HOLD_MS + ')');
 }
