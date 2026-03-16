@@ -70,6 +70,9 @@ function toggleLayout() {
   applyLayout();
   saveLayout();
 
+  // Return focus to active terminal so keystrokes don't re-trigger the button
+  document.activeElement?.blur();
+
   // Trigger resize event so terminals refit
   window.dispatchEvent(new Event('resize'));
 }

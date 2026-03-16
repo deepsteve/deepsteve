@@ -222,7 +222,18 @@ export function observeTerminalResize(container, term, fit, ws) {
     if (container.clientWidth === 0 || container.clientHeight === 0) return;
     clearTimeout(debounceTimer);
     debounceTimer = setTimeout(() => {
+      // Preserve scroll position across refit (layout toggle, panel resize)
+      const vp = container.querySelector('.xterm-viewport');
+      const wasAtBottom = vp ? (vp.scrollHeight - vp.scrollTop - vp.clientHeight) < 20 : true;
+      const savedScroll = vp?.scrollTop;
       fit.fit();
+      if (vp) {
+        if (wasAtBottom) {
+          term.scrollToBottom();
+        } else {
+          vp.scrollTop = savedScroll;
+        }
+      }
       term.scrollLines(0); // Force viewport sync after resize
       ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
     }, 100);
