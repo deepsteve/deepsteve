@@ -784,8 +784,7 @@ function wireShellOutput(id) {
           }
         }
       }
-      // Strip OSC sequences first so their BEL terminators don't trigger false positives
-      const hasBel = stripOSC(data).includes('\x07');
+      const hasBel = data.includes('\x07');
 
       if (hasBel) {
         e.lastBelTime = Date.now();
@@ -845,7 +844,7 @@ function killShell(entry, id) {
       try { entry.shell.write('\x03'); } catch {}
       // Watch for BEL (Claude back at prompt), then send /exit
       const exitHandler = (data) => {
-        if (stripOSC(data).includes('\x07')) {
+        if (data.includes('\x07')) {
           entry.shell.removeListener('data', exitHandler);
           try { submitToShell(entry.shell, '/exit'); } catch {}
         }
