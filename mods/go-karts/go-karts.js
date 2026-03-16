@@ -100,7 +100,7 @@ function startAudio() {
   oscSq.type = 'square';
   oscSq.frequency.value = 130;
   const sqGain = audioCtx.createGain();
-  sqGain.gain.value = 0.3;
+  sqGain.gain.value = 0.21;
   oscSq.connect(sqGain);
   sqGain.connect(gainNode);
   oscSq.start();
@@ -108,7 +108,7 @@ function startAudio() {
 
 function updateEngineAudio() {
   if (!audioCtx || !gainNode) return;
-  if (viewMode !== MODE_COCKPIT || !followId || !kartState[followId] || raceState !== RACE_RUNNING) {
+  if (viewMode !== MODE_COCKPIT || !followId || !kartState[followId] || raceState !== RACE_RUNNING || kartState[followId].finished) {
     gainNode.gain.linearRampToValueAtTime(0, audioCtx.currentTime + 0.1);
     return;
   }
@@ -118,7 +118,7 @@ function updateEngineAudio() {
   oscSaw.frequency.linearRampToValueAtTime(freq, audioCtx.currentTime + 0.05);
   oscSq.frequency.linearRampToValueAtTime(freq * 2, audioCtx.currentTime + 0.05);
   filterNode.frequency.linearRampToValueAtTime(300 + t * 800, audioCtx.currentTime + 0.05);
-  gainNode.gain.linearRampToValueAtTime(0.03 + t * 0.07, audioCtx.currentTime + 0.05);
+  gainNode.gain.linearRampToValueAtTime(0.021 + t * 0.049, audioCtx.currentTime + 0.05);
 }
 
 // ── Three.js setup ──────────────────────────────────────────────────────────
