@@ -194,7 +194,9 @@ Please read the issue carefully, understand the codebase context, and implement 
   defaultAgent: 'claude',
   opencodeBinary: 'opencode',
   geminiBinary: 'gemini',
-  enabledAgents: ['claude', 'opencode']
+  enabledAgents: ['claude', 'opencode'],
+  commandPaletteEnabled: true,
+  commandPaletteShortcut: 'Meta+k'
 };
 
 // Load settings
@@ -372,6 +374,8 @@ function broadcastSettings() {
     maxIssueTitleLength: settings.maxIssueTitleLength,
     cmdTabSwitch: settings.cmdTabSwitch,
     cmdTabSwitchHoldMs: settings.cmdTabSwitchHoldMs,
+    commandPaletteEnabled: settings.commandPaletteEnabled,
+    commandPaletteShortcut: settings.commandPaletteShortcut,
     symlinkWorktreeSettings: settings.symlinkWorktreeSettings,
     windowConfigs: settings.windowConfigs || [],
   });
@@ -1159,6 +1163,14 @@ app.post('/api/settings', (req, res) => {
     settings.cmdTabSwitchHoldMs = Math.max(0, Number(req.body.cmdTabSwitchHoldMs) || 0);
     log(`Settings updated: cmdTabSwitchHoldMs=${settings.cmdTabSwitchHoldMs}`);
   }
+  if (req.body.commandPaletteEnabled !== undefined) {
+    settings.commandPaletteEnabled = !!req.body.commandPaletteEnabled;
+    log(`Settings updated: commandPaletteEnabled=${settings.commandPaletteEnabled}`);
+  }
+  if (req.body.commandPaletteShortcut !== undefined) {
+    settings.commandPaletteShortcut = String(req.body.commandPaletteShortcut);
+    log(`Settings updated: commandPaletteShortcut=${settings.commandPaletteShortcut}`);
+  }
   if (req.body.enabledAgents !== undefined) {
     const agents = req.body.enabledAgents;
     if (Array.isArray(agents)) {
@@ -1205,6 +1217,89 @@ app.post('/api/settings', (req, res) => {
   saveSettings();
   broadcastSettings();
   res.json(settings);
+});
+
+// --- Command Palette: Custom Commands ---
+
+const COMMANDS_DIR = path.join(os.homedir(), '.deepsteve', 'commands');
+try { fs.mkdirSync(COMMANDS_DIR, { recursive: true }); } catch {}
+
+const BUILTIN_COMMANDS = [
+  { id: 'new-tab', type: 'builtin', name: 'New Tab', description: 'Open a new agent tab' },
+  { id: 'new-tab-deepsteve', type: 'builtin', name: 'New Tab in ~/.deepsteve', description: 'Open a tab for editing commands' },
+  { id: 'close-tab', type: 'builtin', name: 'Close Tab', description: 'Close the current tab' },
+  { id: 'settings', type: 'builtin', name: 'Settings', description: 'Open settings' },
+  { id: 'mods', type: 'builtin', name: 'Mods', description: 'Open mods panel' },
+  { id: 'next-tab', type: 'builtin', name: 'Next Tab', description: 'Switch to next tab' },
+  { id: 'prev-tab', type: 'builtin', name: 'Previous Tab', description: 'Switch to previous tab' },
+];
+
+function getCustomCommands() {
+  const commands = [];
+  let entries;
+  try { entries = fs.readdirSync(COMMANDS_DIR, { withFileTypes: true }); } catch { return commands; }
+  for (const entry of entries) {
+    if (!entry.isFile()) continue;
+    const ext = path.extname(entry.name);
+    if (ext === '.json') continue; // skip sidecar metadata files
+    const id = path.basename(entry.name, ext);
+    const filePath = path.join(COMMANDS_DIR, entry.name);
+    // Check executable
+    try { fs.accessSync(filePath, fs.constants.X_OK); } catch { continue; }
+    // Check for JSON sidecar
+    let name = id.replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+    let description = 'Custom command';
+    const sidecar = path.join(COMMANDS_DIR, id + '.json');
+    try {
+      const meta = JSON.parse(fs.readFileSync(sidecar, 'utf8'));
+      if (meta.name) name = meta.name;
+      if (meta.description) description = meta.description;
+    } catch {}
+    commands.push({ id, type: 'custom', name, description });
+  }
+  return commands;
+}
+
+app.get('/api/commands', (req, res) => {
+  const custom = getCustomCommands();
+  res.json({ commands: [...BUILTIN_COMMANDS, ...custom] });
+});
+
+app.post('/api/commands/execute', (req, res) => {
+  const { id, sessionId } = req.body;
+  if (!id) return res.status(400).json({ error: 'id is required' });
+
+  // Built-in commands return action for client-side dispatch
+  const builtin = BUILTIN_COMMANDS.find(c => c.id === id);
+  if (builtin) {
+    return res.json({ action: id });
+  }
+
+  // Custom command — find and execute
+  let entries;
+  try { entries = fs.readdirSync(COMMANDS_DIR); } catch { return res.status(500).json({ error: 'Cannot read commands directory' }); }
+  const match = entries.find(f => path.basename(f, path.extname(f)) === id);
+  if (!match) return res.status(404).json({ error: 'Command not found' });
+
+  const filePath = path.join(COMMANDS_DIR, match);
+  const shell = sessionId ? shells.get(sessionId) : null;
+  const env = {
+    DEEPSTEVE_SESSION_ID: sessionId || '',
+    DEEPSTEVE_CWD: shell?.cwd || process.cwd(),
+  };
+
+  try {
+    const output = execSync(`zsh -l -c '${filePath.replace(/'/g, "'\\''")}'`, {
+      env: { ...process.env, ...env },
+      cwd: env.DEEPSTEVE_CWD,
+      timeout: 30000,
+      encoding: 'utf8',
+      maxBuffer: 1024 * 1024,
+    });
+    res.json({ ok: true, output: output.trim() });
+  } catch (err) {
+    res.json({ ok: false, output: (err.stdout || '') + (err.stderr || ''), exitCode: err.status });
+  }
 });
 
 // --- Window Config Tab Helpers ---
