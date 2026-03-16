@@ -318,7 +318,7 @@ function ChatPanel() {
           for (const msg of (ch.messages || [])) {
             if (!seenMessageIdsRef.current.has(msg.id)) {
               seenMessageIdsRef.current.add(msg.id);
-              if (msg.id > lastRead) {
+              if (msg.id > lastRead && initialLoadDoneRef.current) {
                 notifyMention(msg, senderNameRef.current);
                 if (msg.sender !== senderNameRef.current) {
                   if (buildMentionPattern(senderNameRef.current).test(msg.text)) hasMention = true;
