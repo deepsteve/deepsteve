@@ -2470,21 +2470,6 @@ async function init() {
     getOrderedTabIds: () => [...document.querySelectorAll('#tabs-list .tab')].map(t => t.id.replace('tab-', '')),
     getActiveTabId: () => activeId,
     switchToTab: switchTo,
-    navigateWindow: (direction) => {
-      const otherWindows = WindowManager.getLiveWindows();
-      if (otherWindows.length === 0) return;
-      const myId = getWindowId();
-      const allWindows = [{ windowId: myId }, ...otherWindows].sort((a, b) => a.windowId.localeCompare(b.windowId));
-      const myIdx = allWindows.findIndex(w => w.windowId === myId);
-      const len = allWindows.length;
-      const targetIdx = ((myIdx + direction) % len + len) % len;
-      const target = allWindows[targetIdx];
-      if (target.windowId === myId) return;
-      const firstSessionId = target.sessions?.[0]?.id;
-      if (firstSessionId) {
-        WindowManager.focusSessionInWindow(target.windowId, firstSessionId);
-      }
-    },
   });
 
   // Initialize Command Palette (Cmd+K by default, on by default)

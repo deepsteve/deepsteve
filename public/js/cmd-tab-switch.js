@@ -5,7 +5,6 @@
  *   1-9              jump to tab N
  *   , / .            previous / next tab (wrapping)
  *   Left / Right     previous / next tab (wrapping)
- *   Up / Down        previous / next browser window
  *
  * Uses capture-phase document listeners so keys are intercepted before
  * xterm.js sees them — no changes to terminal.js needed.
@@ -19,15 +18,13 @@ let metaHeldOnBlur = false;
 let getOrderedTabIds;
 let getActiveTabId;
 let switchToTab;
-let navigateWindow;
-
 let HOLD_MS = 1000;
 
 const TAB_KEYS = new Set([
   'Digit1', 'Digit2', 'Digit3', 'Digit4', 'Digit5',
   'Digit6', 'Digit7', 'Digit8', 'Digit9',
   'Comma', 'Period',
-  'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'
+  'ArrowLeft', 'ArrowRight'
 ]);
 
 function setTabSwitchMode(active) {
@@ -109,11 +106,6 @@ function onKeyDown(e) {
         const idx = tabIds.indexOf(activeId);
         const next = idx >= tabIds.length - 1 ? 0 : idx + 1;
         switchToTab(tabIds[next]);
-      } else if (e.code === 'ArrowUp' || e.code === 'ArrowDown') {
-        // Previous/next browser window
-        if (navigateWindow) {
-          navigateWindow(e.code === 'ArrowUp' ? -1 : 1);
-        }
       }
     }
   }
@@ -136,11 +128,10 @@ function onBlur() {
   setTabSwitchMode(false);
 }
 
-export function init({ getOrderedTabIds: g, getActiveTabId: a, switchToTab: s, navigateWindow: n }) {
+export function init({ getOrderedTabIds: g, getActiveTabId: a, switchToTab: s }) {
   getOrderedTabIds = g;
   getActiveTabId = a;
   switchToTab = s;
-  navigateWindow = n;
 
   document.addEventListener('keydown', onKeyDown, true);
   document.addEventListener('keyup', onKeyUp, true);
