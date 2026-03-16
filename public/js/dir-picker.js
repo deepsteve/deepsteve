@@ -22,17 +22,29 @@ async function fetchHome() {
   }
 }
 
-export function showDirectoryPicker() {
+function esc(s) {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+export function showDirectoryPicker({ configs = [] } = {}) {
   return new Promise(async (resolve) => {
     const home = await fetchHome();
     const defaultPath = SessionStore.getLastCwd() || home;
     const alwaysUse = SessionStore.getAlwaysUse();
+
+    const configsHtml = configs.length > 0 ? `
+        <div class="config-section">
+          ${configs.map(c => `<button class="config-btn" data-config-id="${esc(c.id)}" title="Open ${c.tabs.length} tab${c.tabs.length === 1 ? '' : 's'}">${esc(c.name)}</button>`).join('')}
+        </div>
+        <div class="config-separator"></div>
+    ` : '';
 
     const overlay = document.createElement('div');
     overlay.className = 'modal-overlay';
     overlay.innerHTML = `
       <div class="modal">
         <h2>Select working directory</h2>
+        ${configsHtml}
         <div class="path-wrap">
           <input type="text" id="cwd-input" value="${defaultPath}">
           <button class="path-up" id="up-btn">&#8593;</button>
@@ -50,6 +62,14 @@ export function showDirectoryPicker() {
       </div>
     `;
     document.body.appendChild(overlay);
+
+    // Config button click handlers
+    overlay.querySelectorAll('.config-btn[data-config-id]').forEach(btn => {
+      btn.onclick = () => {
+        overlay.remove();
+        resolve({ type: 'config', configId: btn.dataset.configId });
+      };
+    });
 
     const input = overlay.querySelector('#cwd-input');
     const checkbox = overlay.querySelector('#always-use');

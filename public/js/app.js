@@ -2008,9 +2008,21 @@ async function promptWorktreeSession() {
  * Prompt for directory and create session
  */
 async function promptRepoSession() {
-  const cwd = await showDirectoryPicker();
-  if (cwd === null) return;
-  createSession(cwd, null, true, { agentType: getDefaultAgentType() });
+  const result = await showDirectoryPicker({ configs: windowConfigs });
+  if (result === null) return;
+  if (result && typeof result === 'object' && result.type === 'config') {
+    try {
+      await fetch(`/api/window-configs/${result.configId}/apply`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ windowId: getWindowId() })
+      });
+    } catch (e) {
+      console.error('Failed to apply window config:', e);
+    }
+    return;
+  }
+  createSession(result, null, true, { agentType: getDefaultAgentType() });
 }
 
 /**
