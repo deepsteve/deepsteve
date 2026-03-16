@@ -54,6 +54,7 @@ NODE_PATH=$(which node)
 
 mkdir -p "$INSTALL_DIR/public/js"
 mkdir -p "$INSTALL_DIR/public/css"
+mkdir -p "$INSTALL_DIR/engines"
 mkdir -p "$INSTALL_DIR/themes"
 mkdir -p "$INSTALL_DIR/skills"
 mkdir -p "$HOME/Library/LaunchAgents"
@@ -90,6 +91,11 @@ embed_text() {
 embed_text "package.json" "package.json"
 embed_text "server.js" "server.js"
 embed_text "mcp-server.js" "mcp-server.js"
+
+# Engine files
+embed_text "engines/engine.js" "engines/engine.js"
+embed_text "engines/node-pty.js" "engines/node-pty.js"
+embed_text "engines/tmux.js" "engines/tmux.js"
 
 # Public files
 embed_text "public/index.html" "public/index.html"
