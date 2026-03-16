@@ -128,6 +128,18 @@ export function setupTerminalIO(term, ws, { onUserInput, container } = {}) {
   const viewport = container?.querySelector('.xterm-viewport');
 
   if (viewport) {
+    // Detect user scroll-up intent via wheel event. Wheel fires synchronously,
+    // before the browser updates scrollTop and before the async scroll event.
+    // This prevents the race where onWriteParsed (which fires between the
+    // scrollTop change and the scroll event) yanks the viewport back to bottom.
+    viewport.addEventListener('wheel', (e) => {
+      if (state === 'SUPPRESSED') return;
+      if (e.deltaY < 0 && state === 'AUTO') {
+        state = 'USER_SCROLLED';
+        scrollBtn.classList.add('visible');
+      }
+    }, { passive: true });
+
     viewport.addEventListener('scroll', () => {
       if (state === 'SUPPRESSED') return;
 
