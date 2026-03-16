@@ -1,6 +1,6 @@
 {
   "name": "3D Scene",
-  "version": "0.5.0",
+  "version": "0.9.0",
   "description": "Programmable Three.js scene controlled via MCP tools. Your agent can show you designs while prototyping Three.js games.",
   "enabledByDefault": false,
   "entry": "index.html",

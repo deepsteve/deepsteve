@@ -1,6 +1,6 @@
 {
   "name": "Meta Ads",
-  "version": "1.0.0",
+  "version": "0.9.0",
   "description": "Manage Meta (Facebook/Instagram) ad campaigns, experiments, and marketing knowledge base",
   "enabledByDefault": false,
   "entry": "index.html",

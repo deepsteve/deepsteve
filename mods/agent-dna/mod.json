@@ -1,6 +1,6 @@
 {
   "name": "Agent DNA",
-  "version": "0.1.0",
+  "version": "0.9.0",
   "minDeepsteveVersion": "0.4.0",
   "description": "Configurable personality traits for agent sessions",
   "enabledByDefault": false,

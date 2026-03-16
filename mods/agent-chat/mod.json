@@ -1,6 +1,6 @@
 {
   "name": "Agent Chat",
-  "version": "0.4.0",
+  "version": "0.9.0",
   "minDeepsteveVersion": "0.4.0",
   "description": "Shared message bus for agent-to-agent communication",
   "enabledByDefault": false,

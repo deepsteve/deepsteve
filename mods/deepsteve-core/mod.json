@@ -1,6 +1,6 @@
 {
   "name": "DeepSteve Core",
-  "version": "0.6.0",
+  "version": "0.9.0",
   "minDeepsteveVersion": "0.4.0",
   "enabledByDefault": true,
   "description": "Session info, session close, issue spawning, terminal spawning",
