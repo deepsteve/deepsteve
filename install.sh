@@ -64,7 +64,7 @@ mkdir -p "$INSTALL_DIR/mods/window-map"
 cat > "$INSTALL_DIR/package.json" << 'DEEPSTEVE_FILE_EOF'
 {
   "name": "deepsteve",
-  "version": "0.8.0",
+  "version": "0.8.1",
   "private": true,
   "description": "Web UI for running multiple Claude Code instances in browser tabs",
   "license": "MIT",
@@ -763,6 +763,41 @@ function submitToShell(shell, text) {
 }
 
 /**
+ * Async wrapper around `gh issue view` — returns { body, labels, url } or null.
+ * Uses exec (not execSync) so it doesn't block the event loop.
+ */
+function fetchIssueFromGitHub(number, cwd) {
+  return new Promise((resolve) => {
+    exec(`zsh -l -c 'gh issue view ${Number(number)} --json body,labels,url'`,
+      { cwd, encoding: 'utf8', timeout: 15000 },
+      (err, stdout) => {
+        if (err) { log(`[gh] Failed to fetch issue #${number}: ${err.message}`); resolve(null); return; }
+        try { resolve(JSON.parse(stdout)); } catch { resolve(null); }
+      });
+  });
+}
+
+/**
+ * Deliver a prompt to a shell, handling the race between async fetch and BEL readiness.
+ * If the shell is already waiting for input, submit immediately.
+ * If the agent uses initialPromptDelay (non-BEL), use that delay.
+ * Otherwise, set initialPrompt so the BEL handler picks it up.
+ */
+function deliverPromptWhenReady(id, prompt) {
+  const e = shells.get(id);
+  if (!e) return;
+  const config = getAgentConfig(e.agentType);
+  if (e.waitingForInput) {
+    e.waitingForInput = false;
+    setTimeout(() => submitToShell(e.shell, prompt), 500);
+  } else if (config.initialPromptDelay > 0) {
+    setTimeout(() => submitToShell(e.shell, prompt), config.initialPromptDelay);
+  } else {
+    e.initialPrompt = prompt;  // BEL handler will pick it up
+  }
+}
+
+/**
  * Strip OSC sequences (e.g. window title updates like \x1b]0;Claude Code\x07)
  * so that the BEL terminator inside them isn't mistaken for a standalone BEL.
  */
@@ -841,12 +876,7 @@ function wireShellOutput(id) {
           }
         }
       }
-      // Check for BEL: standalone \x07 OR inside an OSC title that indicates idle (✳).
-      // OSC title BELs are the primary signal from Claude Code — it sets the terminal
-      // title to "✳ Claude Code" when idle and spinner chars (⠐⠂ etc.) when busy.
-      const standaloneBel = stripOSC(data).includes('\x07');
-      const oscIdleMatch = /\x1b\]0;[^]*?✳[^]*?\x07/.test(data);
-      const hasBel = standaloneBel || oscIdleMatch;
+      const hasBel = data.includes('\x07');
 
       if (hasBel) {
         e.lastBelTime = Date.now();
@@ -906,7 +936,7 @@ function killShell(entry, id) {
       try { entry.shell.write('\x03'); } catch {}
       // Watch for BEL (Claude back at prompt), then send /exit
       const exitHandler = (data) => {
-        if (stripOSC(data).includes('\x07')) {
+        if (data.includes('\x07')) {
           entry.shell.removeListener('data', exitHandler);
           try { submitToShell(entry.shell, '/exit'); } catch {}
         }
@@ -1716,8 +1746,8 @@ app.get('/api/display-tab/:id', (req, res) => {
 });
 
 app.get('/api/shells', (req, res) => {
-  const active = [...shells.entries()].map(([id, entry]) => ({ id, pid: entry.shell.pid, cwd: entry.cwd, name: entry.name || null, agentType: entry.agentType || 'claude', status: 'active', lastActivity: entry.lastActivity || null }));
-  const saved = Object.entries(savedState).map(([id, entry]) => ({ id, cwd: entry.cwd, name: entry.name || null, agentType: entry.agentType || 'claude', status: entry.closed ? 'closed' : 'saved', lastActivity: entry.lastActivity || null }));
+  const active = [...shells.entries()].map(([id, entry]) => ({ id, pid: entry.shell.pid, cwd: entry.cwd, name: entry.name || null, agentType: entry.agentType || 'claude', status: 'active', lastActivity: entry.lastActivity || null, connectedClients: entry.clients.size }));
+  const saved = Object.entries(savedState).map(([id, entry]) => ({ id, cwd: entry.cwd, name: entry.name || null, agentType: entry.agentType || 'claude', status: entry.closed ? 'closed' : 'saved', lastActivity: entry.lastActivity || null, connectedClients: 0 }));
   res.json({ shells: [...active, ...saved] });
 });
 
@@ -1932,28 +1962,17 @@ app.post('/api/start-issue', (req, res) => {
   cwd = cwd || process.env.HOME;
   if (cwd.startsWith('~')) cwd = path.join(os.homedir(), cwd.slice(1));
 
-  // Fetch issue details from GitHub if not provided in request body
-  let issueBody = body, issueLabels = labels, issueUrl = url;
-  if (!issueBody) {
-    try {
-      const gh = JSON.parse(execSync(`zsh -l -c 'gh issue view ${Number(number)} --json body,labels,url'`, { cwd, encoding: 'utf8', timeout: 15000 }));
-      issueBody = gh.body;
-      issueLabels = issueLabels || gh.labels;
-      issueUrl = issueUrl || gh.url;
-    } catch (e) {
-      log(`[API] start-issue: failed to fetch issue #${number} from GitHub: ${e.message}`);
-    }
+  // Build prompt helper (shared between sync and async paths)
+  function buildPrompt(issueBody, issueLabels, issueUrl) {
+    const vars = {
+      number,
+      title,
+      labels: Array.isArray(issueLabels) ? issueLabels.map(l => typeof l === 'string' ? l : l.name).join(', ') : (issueLabels || 'none'),
+      url: issueUrl || '',
+      body: issueBody ? String(issueBody).slice(0, 2000) : '(no description)',
+    };
+    return settings.wandPromptTemplate.replace(/\{\{(\w+)\}\}/g, (_, key) => vars[key] ?? '');
   }
-
-  // Build prompt from wand template (same as frontend startIssue)
-  const vars = {
-    number,
-    title,
-    labels: Array.isArray(issueLabels) ? issueLabels.map(l => typeof l === 'string' ? l : l.name).join(', ') : (issueLabels || 'none'),
-    url: issueUrl || '',
-    body: issueBody ? String(issueBody).slice(0, 2000) : '(no description)',
-  };
-  const prompt = settings.wandPromptTemplate.replace(/\{\{(\w+)\}\}/g, (_, key) => vars[key] ?? '');
 
   const worktree = validateWorktree('github-issue-' + number);
   const id = randomUUID().slice(0, 8);
@@ -1966,10 +1985,10 @@ app.post('/api/start-issue', (req, res) => {
     worktreeCwd = ensureWorktree(cwd, worktree);
   }
 
-  const spawnArgs = getSpawnArgs(agentType, { 
+  const spawnArgs = getSpawnArgs(agentType, {
     sessionId: claudeSessionId,
-    planMode: settings.wandPlanMode, 
-    worktree 
+    planMode: settings.wandPlanMode,
+    worktree
   });
 
   const maxLen = settings.maxIssueTitleLength || 25;
@@ -1983,11 +2002,14 @@ app.post('/api/start-issue', (req, res) => {
     return res.status(400).json({ error: 'Multiple browser windows open. Pass sessionId or windowId to target one.' });
   }
 
+  // When body is provided inline, build prompt synchronously
+  const prompt = body ? buildPrompt(body, labels, url) : null;
+
   log(`[API] start-issue #${number}: id=${id}, agent=${agentType}, worktree=${worktree || 'none'}, cwd=${worktreeCwd}`);
   const shell = spawnAgent(agentType, spawnArgs, worktreeCwd, { cols: 120, rows: 40, env: { DEEPSTEVE_SESSION_ID: id } });
   shells.set(id, { shell, clients: new Set(), cwd: worktreeCwd, claudeSessionId: claudeSessionId, agentType, worktree: worktree || null, windowId: windowId || null, name, initialPrompt: prompt, waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now() });
   wireShellOutput(id);
-  // For non-BEL agents, deliver initialPrompt after delay (BEL agents use wireShellOutput detection)
+  // For non-BEL agents with a synchronous prompt, deliver after delay
   if (prompt && agentConfig.initialPromptDelay > 0) {
     shells.get(id).initialPrompt = null; // Clear so BEL handler doesn't also fire
     setTimeout(() => submitToShell(shell, prompt), agentConfig.initialPromptDelay);
@@ -1998,6 +2020,17 @@ app.post('/api/start-issue', (req, res) => {
     if (!shuttingDown) { shells.delete(id); saveState(); }
   });
   saveState();
+
+  // When body was NOT provided, fetch async and deliver prompt when ready
+  if (!body) {
+    fetchIssueFromGitHub(number, cwd).then(gh => {
+      const issueBody = gh ? gh.body : null;
+      const issueLabels = gh ? (labels || (Array.isArray(gh.labels) ? gh.labels.map(l => typeof l === 'string' ? l : l.name).join(', ') : null)) : labels;
+      const issueUrl = gh ? (url || gh.url) : url;
+      const asyncPrompt = buildPrompt(issueBody, issueLabels, issueUrl);
+      deliverPromptWhenReady(id, asyncPrompt);
+    });
+  }
 
   // Notify browser to open the new session
   log(`[API] start-issue: windowId=${windowId}, sessionId=${id}, readyClients=${readyClients.length}, clientWindowIds=[${readyClients.map(c => c.windowId).join(',')}]`);
@@ -2407,7 +2440,7 @@ function broadcastToWindow(windowId, msg) {
 }
 
 // Initialize MCP server (async, ~100ms for dynamic import)
-initMCP({ app, shells, wss, broadcast, broadcastToWindow, log, MODS_DIR, closeSession, spawnAgent, getSpawnArgs, getAgentConfig, wireShellOutput, watchClaudeSessionDir, unwatchClaudeSessionDir, saveState, validateWorktree, ensureWorktree, submitToShell, reloadClients, pendingOpens, settings, isShuttingDown: () => shuttingDown, displayTabs }).catch(e => log('MCP init failed:', e.message));
+initMCP({ app, shells, wss, broadcast, broadcastToWindow, log, MODS_DIR, closeSession, spawnAgent, getSpawnArgs, getAgentConfig, wireShellOutput, watchClaudeSessionDir, unwatchClaudeSessionDir, saveState, validateWorktree, ensureWorktree, submitToShell, fetchIssueFromGitHub, deliverPromptWhenReady, reloadClients, pendingOpens, settings, isShuttingDown: () => shuttingDown, displayTabs }).catch(e => log('MCP init failed:', e.message));
 
 // Watch themes directory for changes and broadcast to clients
 let themeWatchDebounce = null;
@@ -2926,6 +2959,7 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
 .session-agent-badge { font-size: 10px; background: var(--ds-bg-tertiary); color: var(--ds-text-secondary); padding: 1px 6px; border-radius: 8px; margin-left: 4px; vertical-align: middle; }
 .dropdown-item .session-status { font-size: 11px; color: var(--ds-text-secondary); }
 .dropdown-item .session-status.active { color: var(--ds-accent-green-soft); }
+.dropdown-item .session-status.other-window { color: var(--ds-accent-blue); }
 .dropdown-item .session-close { opacity: 0.5; cursor: pointer; padding: 2px 6px; font-size: 11px; }
 .dropdown-item .session-close:hover { opacity: 1; color: var(--ds-accent-red); }
 .dropdown-item.clickable { cursor: pointer; }
@@ -3299,8 +3333,14 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
 #empty-state .empty-state-btn:hover { opacity: 1; background: var(--ds-bg-secondary); }
 #empty-state .empty-state-configs { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; justify-content: center; max-width: 600px; }
 #empty-state .empty-state-configs:empty { display: none; }
-#empty-state .config-btn { padding: 6px 16px; font-size: 13px; font-family: inherit; color: var(--ds-text-primary); background: transparent; border: 1px solid var(--ds-border); border-radius: 6px; cursor: pointer; opacity: 0.7; transition: opacity 0.15s, background 0.15s; }
-#empty-state .config-btn:hover { opacity: 1; background: var(--ds-bg-tertiary); }
+
+/* Shared config button styles (used in empty state and directory picker modal) */
+.config-btn { padding: 6px 16px; font-size: 13px; font-family: inherit; color: var(--ds-text-primary); background: transparent; border: 1px solid var(--ds-border); border-radius: 6px; cursor: pointer; opacity: 0.7; transition: opacity 0.15s, background 0.15s; }
+.config-btn:hover { opacity: 1; background: var(--ds-bg-tertiary); }
+
+/* Config section in directory picker modal */
+.modal .config-section { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+.modal .config-separator { border-bottom: 1px solid var(--ds-border); margin-bottom: 12px; }
 @keyframes empty-state-fade-in { from { opacity: 0; } to { opacity: 1; } }
 
 /* File drop zone overlay */
@@ -3679,29 +3719,33 @@ async function refreshSessionsDropdown() {
     // Get IDs of sessions connected in THIS tab
     const connectedIds = new Set(sessions.keys());
 
-    // Sort: active/connected first, then saved, then closed last
+    // Classify each session into three states
+    const thisTab = s => connectedIds.has(s.id);
+    const otherWindow = s => !connectedIds.has(s.id) && (s.connectedClients || 0) > 0;
+    // Sort: this-tab first, then other-window, then disconnected
+    const stateOrder = s => thisTab(s) ? 0 : otherWindow(s) ? 1 : 2;
     const statusOrder = { active: 0, saved: 1, closed: 2 };
     allShells.sort((a, b) => {
-      const aConnected = connectedIds.has(a.id);
-      const bConnected = connectedIds.has(b.id);
-      if (aConnected !== bConnected) return aConnected ? -1 : 1;
+      const orderDiff = stateOrder(a) - stateOrder(b);
+      if (orderDiff !== 0) return orderDiff;
       return (statusOrder[a.status] || 0) - (statusOrder[b.status] || 0);
     });
 
     const showAgentBadge = window.__deepsteveAgents?.length > 1;
 
     sessionsMenu.innerHTML = allShells.map(shell => {
-      const isConnected = connectedIds.has(shell.id);
+      const isThisTab = thisTab(shell);
+      const isOtherWindow = otherWindow(shell);
       const isClosed = shell.status === 'closed';
       const name = sessions.get(shell.id)?.name || shell.name || getDefaultTabName(shell.cwd);
-      const staleness = !isConnected && shell.lastActivity ? formatRelativeTime(shell.lastActivity) : '';
-      const statusText = isConnected ? 'connected' : (isClosed ? (staleness ? `closed ${staleness}` : 'closed') : (staleness || (shell.status === 'saved' ? 'saved' : 'not connected')));
-      const statusClass = isConnected ? 'active' : (isClosed ? 'closed' : '');
-      const canClose = !isConnected;
+      const staleness = !isThisTab && !isOtherWindow && shell.lastActivity ? formatRelativeTime(shell.lastActivity) : '';
+      const statusText = isThisTab ? 'connected' : isOtherWindow ? 'other window' : (isClosed ? (staleness ? `closed ${staleness}` : 'closed') : (staleness || (shell.status === 'saved' ? 'saved' : 'not connected')));
+      const statusClass = isThisTab ? 'active' : isOtherWindow ? 'other-window' : (isClosed ? 'closed' : '');
+      const canClose = !isThisTab && !isOtherWindow;
       const agentLabel = shell.agentType === 'opencode' ? 'OpenCode' : (shell.agentType ? shell.agentType.charAt(0).toUpperCase() + shell.agentType.slice(1) : '');
 
       return `
-        <div class="dropdown-item ${isConnected ? 'connected' : 'clickable'} ${isClosed ? 'closed' : ''}" data-id="${shell.id}" data-cwd="${shell.cwd}" data-name="${escapeHtml(name)}">
+        <div class="dropdown-item ${isThisTab ? 'connected' : 'clickable'} ${isClosed ? 'closed' : ''}" data-id="${shell.id}" data-cwd="${shell.cwd}" data-name="${escapeHtml(name)}">
           <div class="session-info">
             <span class="session-name">${name}${showAgentBadge && agentLabel ? ` <span class="session-agent-badge">${agentLabel}</span>` : ''}</span>
             <span class="session-status ${statusClass}">${statusText}</span>
@@ -3711,8 +3755,8 @@ async function refreshSessionsDropdown() {
       `;
     }).join('');
 
-    // Add "Clear disconnected" button at the top
-    const disconnectedCount = allShells.filter(s => !connectedIds.has(s.id)).length;
+    // Add "Clear disconnected" button at the top — only count truly disconnected sessions
+    const disconnectedCount = allShells.filter(s => !connectedIds.has(s.id) && (s.connectedClients || 0) === 0).length;
     const clearBtn = document.createElement('div');
     clearBtn.className = 'dropdown-clear-disconnected' + (disconnectedCount === 0 ? ' disabled' : '');
     clearBtn.textContent = disconnectedCount > 0 ? `Clear disconnected (${disconnectedCount})` : 'Clear disconnected';
@@ -4116,7 +4160,10 @@ settingsBtn?.addEventListener('click', async () => {
   overlay.querySelector('#settings-new-config').onclick = () => showConfigEditor(-1);
   overlay.querySelector('#settings-save-current').onclick = async () => {
     const currentTabs = [];
-    for (const [id, s] of sessions.entries()) {
+    const orderedIds = [...document.querySelectorAll('#tabs-list .tab')].map(t => t.id.replace('tab-', ''));
+    for (const id of orderedIds) {
+      const s = sessions.get(id);
+      if (!s) continue;
       if (s.type === 'display-tab') {
         try {
           const resp = await fetch(`/api/display-tab/${id}`);
@@ -5363,9 +5410,21 @@ async function promptWorktreeSession() {
  * Prompt for directory and create session
  */
 async function promptRepoSession() {
-  const cwd = await showDirectoryPicker();
-  if (cwd === null) return;
-  createSession(cwd, null, true, { agentType: getDefaultAgentType() });
+  const result = await showDirectoryPicker({ configs: windowConfigs });
+  if (result === null) return;
+  if (result && typeof result === 'object' && result.type === 'config') {
+    try {
+      await fetch(`/api/window-configs/${result.configId}/apply`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ windowId: getWindowId() })
+      });
+    } catch (e) {
+      console.error('Failed to apply window config:', e);
+    }
+    return;
+  }
+  createSession(result, null, true, { agentType: getDefaultAgentType() });
 }
 
 /**
@@ -6004,17 +6063,29 @@ async function fetchHome() {
   }
 }
 
-export function showDirectoryPicker() {
+function esc(s) {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+export function showDirectoryPicker({ configs = [] } = {}) {
   return new Promise(async (resolve) => {
     const home = await fetchHome();
     const defaultPath = SessionStore.getLastCwd() || home;
     const alwaysUse = SessionStore.getAlwaysUse();
+
+    const configsHtml = configs.length > 0 ? `
+        <div class="config-section">
+          ${configs.map(c => `<button class="config-btn" data-config-id="${esc(c.id)}" title="Open ${c.tabs.length} tab${c.tabs.length === 1 ? '' : 's'}">${esc(c.name)}</button>`).join('')}
+        </div>
+        <div class="config-separator"></div>
+    ` : '';
 
     const overlay = document.createElement('div');
     overlay.className = 'modal-overlay';
     overlay.innerHTML = `
       <div class="modal">
         <h2>Select working directory</h2>
+        ${configsHtml}
         <div class="path-wrap">
           <input type="text" id="cwd-input" value="${defaultPath}">
           <button class="path-up" id="up-btn">&#8593;</button>
@@ -6032,6 +6103,14 @@ export function showDirectoryPicker() {
       </div>
     `;
     document.body.appendChild(overlay);
+
+    // Config button click handlers
+    overlay.querySelectorAll('.config-btn[data-config-id]').forEach(btn => {
+      btn.onclick = () => {
+        overlay.remove();
+        resolve({ type: 'config', configId: btn.dataset.configId });
+      };
+    });
 
     const input = overlay.querySelector('#cwd-input');
     const checkbox = overlay.querySelector('#always-use');
@@ -9281,8 +9360,14 @@ export function setupTerminalIO(term, ws, { onUserInput, container } = {}) {
         scrollBtn.classList.add('visible');
       } else if (state === 'USER_SCROLLED' && gap <= SNAP_TOLERANCE) {
         scrollToBottom();
+      } else if (state === 'AUTO' && gap > SNAP_TOLERANCE) {
+        // User is far from bottom in AUTO state (e.g. after suppression ended
+        // while scrolled up). Transition to USER_SCROLLED so button appears.
+        // Uses SNAP_TOLERANCE (not BOTTOM_TOLERANCE) to avoid flicker during
+        // rapid output where auto-scroll momentarily lags.
+        state = 'USER_SCROLLED';
+        scrollBtn.classList.add('visible');
       }
-      // AUTO + !scrolledUp + gap>BOTTOM_TOLERANCE → stay AUTO (programmatic scroll racing with output)
       // USER_SCROLLED + !scrolledUp + gap>SNAP → stay USER_SCROLLED (button already visible)
     }, { passive: true });
   }
@@ -15852,7 +15937,6 @@ DEEPSTEVE_FILE_EOF
 cat > "$INSTALL_DIR/mods/deepsteve-core/tools.js" << 'DEEPSTEVE_FILE_EOF'
 const { z } = require('zod');
 const { randomUUID } = require('crypto');
-const { execSync } = require('child_process');
 const path = require('path');
 
 function init(context) {
@@ -15860,6 +15944,7 @@ function init(context) {
     shells, closeSession, spawnAgent, getSpawnArgs, getAgentConfig, wireShellOutput,
     watchClaudeSessionDir, unwatchClaudeSessionDir, saveState,
     validateWorktree, ensureWorktree, submitToShell,
+    fetchIssueFromGitHub, deliverPromptWhenReady,
     reloadClients, pendingOpens, settings, log, isShuttingDown,
   } = context;
 
@@ -15958,33 +16043,20 @@ function init(context) {
         const effectiveAgentType = agent_type || caller.agentType || 'claude';
         const windowId = caller.windowId || null;
 
-        // Fetch issue details from GitHub if body not provided
-        let issueBody = body || null;
-        let issueLabels = labels || null;
-        let issueUrl = url || null;
-        if (!issueBody) {
-          try {
-            const gh = JSON.parse(execSync(
-              `zsh -l -c 'gh issue view ${Number(number)} --json body,labels,url'`,
-              { cwd: effectiveCwd, encoding: 'utf8', timeout: 15000 }
-            ));
-            issueBody = gh.body;
-            issueLabels = issueLabels || (Array.isArray(gh.labels) ? gh.labels.map(l => typeof l === 'string' ? l : l.name).join(', ') : null);
-            issueUrl = issueUrl || gh.url;
-          } catch (e) {
-            log(`[MCP] start_issue: failed to fetch issue #${number} from GitHub: ${e.message}`);
-          }
+        // Build prompt helper
+        function buildPrompt(issueBody, issueLabels, issueUrl) {
+          const vars = {
+            number,
+            title,
+            labels: issueLabels || 'none',
+            url: issueUrl || '',
+            body: issueBody ? String(issueBody).slice(0, 2000) : '(no description)',
+          };
+          return settings.wandPromptTemplate.replace(/\{\{(\w+)\}\}/g, (_, key) => vars[key] ?? '');
         }
 
-        // Build prompt from wand template
-        const vars = {
-          number,
-          title,
-          labels: issueLabels || 'none',
-          url: issueUrl || '',
-          body: issueBody ? String(issueBody).slice(0, 2000) : '(no description)',
-        };
-        const prompt = settings.wandPromptTemplate.replace(/\{\{(\w+)\}\}/g, (_, key) => vars[key] ?? '');
+        // When body is provided inline, build prompt synchronously
+        const prompt = body ? buildPrompt(body, labels, url) : null;
 
         const worktree = validateWorktree('github-issue-' + number);
         const id = randomUUID().slice(0, 8);
@@ -16018,7 +16090,7 @@ function init(context) {
         });
         wireShellOutput(id);
 
-        // For non-BEL agents, deliver initialPrompt after delay
+        // For non-BEL agents with a synchronous prompt, deliver after delay
         if (prompt && agentConfig.initialPromptDelay > 0) {
           shells.get(id).initialPrompt = null;
           setTimeout(() => submitToShell(shell, prompt), agentConfig.initialPromptDelay);
@@ -16030,6 +16102,17 @@ function init(context) {
           if (!isShuttingDown()) { shells.delete(id); saveState(); }
         });
         saveState();
+
+        // When body was NOT provided, fetch async and deliver prompt when ready
+        if (!body) {
+          fetchIssueFromGitHub(number, effectiveCwd).then(gh => {
+            const issueBody = gh ? gh.body : null;
+            const issueLabels = gh ? (labels || (Array.isArray(gh.labels) ? gh.labels.map(l => typeof l === 'string' ? l : l.name).join(', ') : null)) : labels;
+            const issueUrl = gh ? (url || gh.url) : url;
+            const asyncPrompt = buildPrompt(issueBody, issueLabels, issueUrl);
+            deliverPromptWhenReady(id, asyncPrompt);
+          });
+        }
 
         notifyOpenSession(id, spawnCwd, name, windowId);
 
@@ -16353,7 +16436,7 @@ function startAudio() {
   oscSq.type = 'square';
   oscSq.frequency.value = 130;
   const sqGain = audioCtx.createGain();
-  sqGain.gain.value = 0.3;
+  sqGain.gain.value = 0.21;
   oscSq.connect(sqGain);
   sqGain.connect(gainNode);
   oscSq.start();
@@ -16361,7 +16444,7 @@ function startAudio() {
 
 function updateEngineAudio() {
   if (!audioCtx || !gainNode) return;
-  if (viewMode !== MODE_COCKPIT || !followId || !kartState[followId] || raceState !== RACE_RUNNING) {
+  if (viewMode !== MODE_COCKPIT || !followId || !kartState[followId] || raceState !== RACE_RUNNING || kartState[followId].finished) {
     gainNode.gain.linearRampToValueAtTime(0, audioCtx.currentTime + 0.1);
     return;
   }
@@ -16371,7 +16454,7 @@ function updateEngineAudio() {
   oscSaw.frequency.linearRampToValueAtTime(freq, audioCtx.currentTime + 0.05);
   oscSq.frequency.linearRampToValueAtTime(freq * 2, audioCtx.currentTime + 0.05);
   filterNode.frequency.linearRampToValueAtTime(300 + t * 800, audioCtx.currentTime + 0.05);
-  gainNode.gain.linearRampToValueAtTime(0.03 + t * 0.07, audioCtx.currentTime + 0.05);
+  gainNode.gain.linearRampToValueAtTime(0.021 + t * 0.049, audioCtx.currentTime + 0.05);
 }
 
 // ── Three.js setup ──────────────────────────────────────────────────────────
@@ -24492,14 +24575,14 @@ Steps:
 
 7. **Close the GitHub issue** (success only): Extract the issue number from the branch name obtained in step 2. If the branch name matches the pattern `*github-issue-<number>*`, run `gh issue close <number> --comment "Merged into main."`. If the branch name doesn't match this pattern, skip this step silently.
 
-8. **Add a testing task** (success only): Use the `mcp__deepsteve__add_task` tool to create a task for the human to manually test the change. The title should be short, e.g. "Test: <feature/fix summary>". The description should contain clear, actionable steps to verify the change works, written as a numbered list. Set priority to "medium" (or "high" if the change is risky or touches core functionality). Set `session_tag` to the branch name from step 2. Example description format:
+8. **Add a testing task** (optional): Use the `mcp__deepsteve__add_task` tool to create a task for the human to manually test the change. The title should be short, e.g. "Test: <feature/fix summary>". The description should contain clear, actionable steps to verify the change works, written as a numbered list. Set priority to "medium" (or "high" if the change is risky or touches core functionality). Set `session_tag` to the branch name from step 2. If the user rejects this tool call, continue to step 9 anyway. Example description format:
    ```
    1. Open deepsteve and do X
    2. Verify Y happens
    3. Try edge case Z
    ```
 
-9. **Close this terminal** (success only): Run `curl -s -X POST http://localhost:3000/api/shells/$DEEPSTEVE_SESSION_ID/close`. This must be the absolute last step — the session terminates after this.
+9. **Close this terminal** (after successful merge): Run `curl -s -X POST http://localhost:3000/api/shells/$DEEPSTEVE_SESSION_ID/close`. This must always execute after a successful merge (step 5), regardless of whether step 8 was accepted or rejected. This must be the absolute last step — the session terminates after this.
 DEEPSTEVE_FILE_EOF
 
 base64 -d << 'DEEPSTEVE_B64_EOF' > "$INSTALL_DIR/public/favicon.png"
