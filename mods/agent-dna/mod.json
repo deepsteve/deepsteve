@@ -1,33 +1,18 @@
 {
   "name": "Agent DNA",
-  "version": "0.9.0",
+  "version": "0.1.0",
   "minDeepsteveVersion": "0.4.0",
   "description": "Configurable personality traits for agent sessions",
   "enabledByDefault": false,
   "entry": "index.html",
   "display": "panel",
-  "panel": {
-    "position": "right",
-    "defaultWidth": 320,
-    "minWidth": 200
-  },
-  "toolbar": {
-    "label": "DNA"
-  },
+  "panel": { "position": "right", "defaultWidth": 320, "minWidth": 200 },
+  "toolbar": { "label": "DNA" },
   "tools": [
-    {
-      "name": "get_agent_dna",
-      "description": "Get agent DNA personality config for a session"
-    },
-    {
-      "name": "set_agent_dna",
-      "description": "Set agent DNA personality config for a session"
-    }
+    { "name": "get_agent_dna", "description": "Get agent DNA personality config for a session" },
+    { "name": "set_agent_dna", "description": "Set agent DNA personality config for a session" }
   ],
   "contextMenu": [
-    {
-      "label": "Agent DNA...",
-      "action": "focus-panel"
-    }
+    { "label": "Agent DNA...", "action": "focus-panel" }
   ]
 }

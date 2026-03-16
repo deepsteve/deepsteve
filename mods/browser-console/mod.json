@@ -1,27 +1,15 @@
 {
   "name": "Console",
-  "version": "0.9.0",
+  "version": "0.4.0",
   "minDeepsteveVersion": "0.4.0",
   "description": "Browser console passthrough for Agent sessions",
   "enabledByDefault": false,
   "entry": "index.html",
   "display": "panel",
-  "panel": {
-    "position": "right",
-    "defaultWidth": 400,
-    "minWidth": 200
-  },
-  "toolbar": {
-    "label": "Console"
-  },
+  "panel": { "position": "right", "defaultWidth": 400, "minWidth": 200 },
+  "toolbar": { "label": "Console" },
   "tools": [
-    {
-      "name": "browser_eval",
-      "description": "Execute JavaScript in the browser context"
-    },
-    {
-      "name": "browser_console",
-      "description": "Read captured browser console entries"
-    }
+    { "name": "browser_eval", "description": "Execute JavaScript in the browser context" },
+    { "name": "browser_console", "description": "Read captured browser console entries" }
   ]
 }

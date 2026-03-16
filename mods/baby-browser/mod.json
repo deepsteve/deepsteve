@@ -1,25 +1,14 @@
 {
   "name": "Baby Browser",
-  "version": "0.9.0",
+  "version": "0.1.0",
   "description": "Iframe-based browser tab for viewing web pages via the proxy.",
   "enabledByDefault": false,
   "entry": "index.html",
   "display": "tab",
-  "tabOption": {
-    "label": "Baby Browser"
-  },
+  "tabOption": { "label": "Baby Browser" },
   "tools": [
-    {
-      "name": "baby_browser_navigate",
-      "description": "Navigate Baby Browser to a URL"
-    },
-    {
-      "name": "baby_browser_read",
-      "description": "Read page content as text"
-    },
-    {
-      "name": "baby_browser_url",
-      "description": "Get current URL"
-    }
+    { "name": "baby_browser_navigate", "description": "Navigate Baby Browser to a URL" },
+    { "name": "baby_browser_read", "description": "Read page content as text" },
+    { "name": "baby_browser_url", "description": "Get current URL" }
   ]
 }

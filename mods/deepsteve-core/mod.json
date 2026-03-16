@@ -1,25 +1,13 @@
 {
   "name": "DeepSteve Core",
-  "version": "0.9.0",
+  "version": "0.6.0",
   "minDeepsteveVersion": "0.4.0",
   "enabledByDefault": true,
   "description": "Session info, session close, issue spawning, terminal spawning",
   "tools": [
-    {
-      "name": "get_session_info",
-      "description": "Get session metadata by deepsteve session ID"
-    },
-    {
-      "name": "close_session",
-      "description": "Close a session and its browser tab"
-    },
-    {
-      "name": "start_issue",
-      "description": "Open a new deepsteve session for a GitHub issue"
-    },
-    {
-      "name": "open_terminal",
-      "description": "Open a new terminal session with an optional prompt"
-    }
+    { "name": "get_session_info", "description": "Get session metadata by deepsteve session ID" },
+    { "name": "close_session", "description": "Close a session and its browser tab" },
+    { "name": "start_issue", "description": "Open a new deepsteve session for a GitHub issue" },
+    { "name": "open_terminal", "description": "Open a new terminal session with an optional prompt" }
   ]
 }

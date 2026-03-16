@@ -1,30 +1,15 @@
 {
   "name": "3D Scene",
-  "version": "0.9.0",
+  "version": "0.5.0",
   "description": "Programmable Three.js scene controlled via MCP tools. Your agent can show you designs while prototyping Three.js games.",
   "enabledByDefault": false,
   "entry": "index.html",
   "display": "panel",
-  "panel": {
-    "position": "right",
-    "defaultWidth": 480,
-    "minWidth": 300
-  },
-  "toolbar": {
-    "label": "3D Scene"
-  },
+  "panel": { "position": "right", "defaultWidth": 480, "minWidth": 300 },
+  "toolbar": { "label": "3D Scene" },
   "tools": [
-    {
-      "name": "scene_update",
-      "description": "Add, update, or remove objects in a 3D scene"
-    },
-    {
-      "name": "scene_query",
-      "description": "List objects and inspect scene state"
-    },
-    {
-      "name": "scene_snapshot",
-      "description": "Capture the current scene as a PNG"
-    }
+    { "name": "scene_update", "description": "Add, update, or remove objects in a 3D scene" },
+    { "name": "scene_query", "description": "List objects and inspect scene state" },
+    { "name": "scene_snapshot", "description": "Capture the current scene as a PNG" }
   ]
 }

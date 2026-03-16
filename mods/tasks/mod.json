@@ -1,51 +1,21 @@
 {
   "name": "Tasks",
-  "version": "0.9.0",
+  "version": "0.4.0",
   "minDeepsteveVersion": "0.4.0",
   "description": "Task list for human actions, populated by Agent sessions",
   "enabledByDefault": true,
   "entry": "index.html",
   "display": "panel",
-  "panel": {
-    "position": "right",
-    "defaultWidth": 360,
-    "minWidth": 200
-  },
-  "toolbar": {
-    "label": "Tasks"
-  },
+  "panel": { "position": "right", "defaultWidth": 360, "minWidth": 200 },
+  "toolbar": { "label": "Tasks" },
   "tools": [
-    {
-      "name": "add_task",
-      "description": "Add a task for the human"
-    },
-    {
-      "name": "update_task",
-      "description": "Update a task"
-    },
-    {
-      "name": "complete_task",
-      "description": "Mark a task as done"
-    },
-    {
-      "name": "list_tasks",
-      "description": "List current tasks"
-    }
+    { "name": "add_task", "description": "Add a task for the human" },
+    { "name": "update_task", "description": "Update a task" },
+    { "name": "complete_task", "description": "Mark a task as done" },
+    { "name": "list_tasks", "description": "List current tasks" }
   ],
   "settings": [
-    {
-      "key": "panelPosition",
-      "type": "boolean",
-      "label": "Panel on left",
-      "description": "Show panel on left side instead of right",
-      "default": false
-    },
-    {
-      "key": "compactView",
-      "type": "boolean",
-      "label": "Compact view",
-      "description": "Show only task names (hide descriptions and badges)",
-      "default": false
-    }
+    { "key": "panelPosition", "type": "boolean", "label": "Panel on left", "description": "Show panel on left side instead of right", "default": false },
+    { "key": "compactView", "type": "boolean", "label": "Compact view", "description": "Show only task names (hide descriptions and badges)", "default": false }
   ]
 }
