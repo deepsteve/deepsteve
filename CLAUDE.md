@@ -32,6 +32,7 @@ launchctl unload ~/Library/LaunchAgents/com.deepsteve.plist
 ### Full reinstall:
 ```bash
 ~/.deepsteve/uninstall.sh
+./release.sh   # generates install.sh from source
 ./install.sh
 ```
 
@@ -83,7 +84,7 @@ Skills are slash commands that agents can invoke (e.g. `/chat`, `/merge`). Sourc
 - **Orphan detection**: Uses BroadcastChannel for cross-tab heartbeats. When a new tab opens and finds localStorage windows with no heartbeat response within 1.5s, those sessions are offered for restore.
 - **Scrollback buffer**: Each shell keeps a ~100KB circular buffer. On reconnect/restore, the full buffer is replayed to the terminal before any new output, so you see history.
 - **`restart.sh` runs in background**: It re-execs itself with `nohup` so the terminal returns immediately. Use `--refresh` flag to force browser page reload (vs silent WebSocket reconnect).
-- **`release.sh` generates `install.sh`**: The installer is a single self-contained bash script with all source files embedded as heredocs (text) or base64 (images). Binary images are base64-encoded.
+- **`release.sh` generates `install.sh`**: The installer is a single self-contained bash script with all source files embedded as heredocs (text) or base64 (images). Binary images are base64-encoded. `install.sh` is NOT checked into the repo — it is generated on demand and attached to GitHub releases.
 - **node-pty**: Uses `.removeListener()` not `.off()`. Must `delete env.CLAUDECODE` when spawning nested Claude instances.
 - **LaunchAgent PATH**: `execSync` uses `/bin/sh` without Homebrew paths. Commands like `gh` and `git` must be wrapped in `zsh -l -c '...'` to get the user's full PATH.
 - **Worktrees**: Sessions can be created with a `--worktree <name>` flag that's passed through to Claude Code. The worktree name is persisted in state.json for restore. `./restart.sh` only deploys from the main repo checkout — it does NOT copy worktree contents to `~/.deepsteve/`. Merge changes to main first, then restart from the main repo.
