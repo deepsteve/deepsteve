@@ -1,11 +1,20 @@
 {
-  "name": "Display Tab",
-  "version": "0.1.0",
+  "name": "Display Tabs",
+  "version": "0.9.0",
   "enabledByDefault": true,
   "description": "MCP tools for creating, updating, and closing HTML display tabs in the browser",
   "tools": [
-    { "name": "create_display_tab", "description": "Create a new browser tab displaying arbitrary HTML content" },
-    { "name": "update_display_tab", "description": "Update the HTML content of an existing display tab" },
-    { "name": "close_display_tab", "description": "Close a display tab" }
+    {
+      "name": "create_display_tab",
+      "description": "Create a new browser tab displaying arbitrary HTML content"
+    },
+    {
+      "name": "update_display_tab",
+      "description": "Update the HTML content of an existing display tab"
+    },
+    {
+      "name": "close_display_tab",
+      "description": "Close a display tab"
+    }
   ]
 }

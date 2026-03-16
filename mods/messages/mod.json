@@ -1,13 +1,22 @@
 {
   "name": "Messages",
-  "version": "1.0.0",
+  "version": "0.9.0",
   "description": "Send texts with the Messages app on macOS - uses AppleScript",
   "enabledByDefault": false,
   "entry": "index.html",
   "display": "panel",
-  "panel": { "position": "right", "defaultWidth": 340, "minWidth": 200 },
-  "toolbar": { "label": "Messages" },
+  "panel": {
+    "position": "right",
+    "defaultWidth": 340,
+    "minWidth": 200
+  },
+  "toolbar": {
+    "label": "Messages"
+  },
   "tools": [
-    { "name": "send_imessage", "description": "Send an iMessage/SMS to a contact" }
+    {
+      "name": "send_imessage",
+      "description": "Send an iMessage/SMS to a contact"
+    }
   ]
 }

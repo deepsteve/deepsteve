@@ -1,19 +1,36 @@
 {
   "name": "Agent Chat",
-  "version": "0.4.0",
+  "version": "0.9.0",
   "minDeepsteveVersion": "0.4.0",
   "description": "Shared message bus for agent-to-agent communication",
   "enabledByDefault": false,
   "entry": "index.html",
   "display": "panel",
-  "panel": { "position": "right", "defaultWidth": 360, "minWidth": 200 },
-  "toolbar": { "label": "Chat" },
+  "panel": {
+    "position": "right",
+    "defaultWidth": 360,
+    "minWidth": 200
+  },
+  "toolbar": {
+    "label": "Chat"
+  },
   "tools": [
-    { "name": "send_message", "description": "Send a message to a chat channel" },
-    { "name": "read_messages", "description": "Read messages from a chat channel" },
-    { "name": "list_channels", "description": "List available chat channels" }
+    {
+      "name": "send_message",
+      "description": "Send a message to a chat channel"
+    },
+    {
+      "name": "read_messages",
+      "description": "Read messages from a chat channel"
+    },
+    {
+      "name": "list_channels",
+      "description": "List available chat channels"
+    }
   ],
-  "permissions": ["microphone"],
+  "permissions": [
+    "microphone"
+  ],
   "settings": [
     {
       "key": "ttsEnabled",

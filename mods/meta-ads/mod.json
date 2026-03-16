@@ -1,35 +1,110 @@
 {
   "name": "Meta Ads",
-  "version": "1.0.0",
+  "version": "0.9.0",
   "description": "Manage Meta (Facebook/Instagram) ad campaigns, experiments, and marketing knowledge base",
   "enabledByDefault": false,
   "entry": "index.html",
   "display": "panel",
-  "panel": { "position": "right", "defaultWidth": 340, "minWidth": 200 },
-  "toolbar": { "label": "Meta Ads" },
+  "panel": {
+    "position": "right",
+    "defaultWidth": 340,
+    "minWidth": 200
+  },
+  "toolbar": {
+    "label": "Meta Ads"
+  },
   "tools": [
-    { "name": "get_campaigns", "description": "List all campaigns in the ad account" },
-    { "name": "get_campaign_insights", "description": "Get performance metrics for a campaign over a date range" },
-    { "name": "get_ad_insights", "description": "Get performance metrics for a specific ad" },
-    { "name": "get_account_summary", "description": "Get a summary of the entire ad account performance" },
-    { "name": "get_ad_sets", "description": "List ad sets in a campaign" },
-    { "name": "get_ads", "description": "List ads in an ad set" },
-    { "name": "get_ad_set_insights", "description": "Get performance metrics for an ad set over a date range" },
-    { "name": "create_campaign", "description": "Create a new campaign (defaults to PAUSED)" },
-    { "name": "create_ad_set", "description": "Create a new ad set within a campaign" },
-    { "name": "create_ad", "description": "Create a new ad in an ad set" },
-    { "name": "pause_resume_campaign", "description": "Pause or resume a campaign" },
-    { "name": "pause_resume_ad_set", "description": "Pause or resume an ad set" },
-    { "name": "create_ad_creative", "description": "Create an ad creative for use with create_ad" },
-    { "name": "update_budget", "description": "Update daily or lifetime budget for a campaign or ad set" },
-    { "name": "update_targeting", "description": "Update targeting for an ad set" },
-    { "name": "create_experiment", "description": "Create a new A/B test experiment with hypothesis and variants" },
-    { "name": "update_experiment_metrics", "description": "Update performance metrics for a variant in an experiment" },
-    { "name": "conclude_experiment", "description": "Mark an experiment as concluded with a winner and learnings" },
-    { "name": "get_experiment", "description": "Read a single experiment by name" },
-    { "name": "list_experiments", "description": "List all experiments with their status" },
-    { "name": "check_significance", "description": "Run A/B significance test between two variants" },
-    { "name": "add_learning", "description": "Add an entry to the marketing knowledge base" },
-    { "name": "get_knowledge_base", "description": "Read the full marketing knowledge base" }
+    {
+      "name": "get_campaigns",
+      "description": "List all campaigns in the ad account"
+    },
+    {
+      "name": "get_campaign_insights",
+      "description": "Get performance metrics for a campaign over a date range"
+    },
+    {
+      "name": "get_ad_insights",
+      "description": "Get performance metrics for a specific ad"
+    },
+    {
+      "name": "get_account_summary",
+      "description": "Get a summary of the entire ad account performance"
+    },
+    {
+      "name": "get_ad_sets",
+      "description": "List ad sets in a campaign"
+    },
+    {
+      "name": "get_ads",
+      "description": "List ads in an ad set"
+    },
+    {
+      "name": "get_ad_set_insights",
+      "description": "Get performance metrics for an ad set over a date range"
+    },
+    {
+      "name": "create_campaign",
+      "description": "Create a new campaign (defaults to PAUSED)"
+    },
+    {
+      "name": "create_ad_set",
+      "description": "Create a new ad set within a campaign"
+    },
+    {
+      "name": "create_ad",
+      "description": "Create a new ad in an ad set"
+    },
+    {
+      "name": "pause_resume_campaign",
+      "description": "Pause or resume a campaign"
+    },
+    {
+      "name": "pause_resume_ad_set",
+      "description": "Pause or resume an ad set"
+    },
+    {
+      "name": "create_ad_creative",
+      "description": "Create an ad creative for use with create_ad"
+    },
+    {
+      "name": "update_budget",
+      "description": "Update daily or lifetime budget for a campaign or ad set"
+    },
+    {
+      "name": "update_targeting",
+      "description": "Update targeting for an ad set"
+    },
+    {
+      "name": "create_experiment",
+      "description": "Create a new A/B test experiment with hypothesis and variants"
+    },
+    {
+      "name": "update_experiment_metrics",
+      "description": "Update performance metrics for a variant in an experiment"
+    },
+    {
+      "name": "conclude_experiment",
+      "description": "Mark an experiment as concluded with a winner and learnings"
+    },
+    {
+      "name": "get_experiment",
+      "description": "Read a single experiment by name"
+    },
+    {
+      "name": "list_experiments",
+      "description": "List all experiments with their status"
+    },
+    {
+      "name": "check_significance",
+      "description": "Run A/B significance test between two variants"
+    },
+    {
+      "name": "add_learning",
+      "description": "Add an entry to the marketing knowledge base"
+    },
+    {
+      "name": "get_knowledge_base",
+      "description": "Read the full marketing knowledge base"
+    }
   ]
 }

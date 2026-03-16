@@ -1,14 +1,23 @@
 {
   "name": "Screenshots",
-  "version": "0.4.0",
+  "version": "0.9.0",
   "minDeepsteveVersion": "0.4.0",
   "description": "Capture terminal screenshots as PNG images",
   "enabledByDefault": false,
   "entry": "index.html",
   "display": "panel",
-  "panel": { "position": "right", "defaultWidth": 360, "minWidth": 200 },
-  "toolbar": { "label": "Screenshots" },
+  "panel": {
+    "position": "right",
+    "defaultWidth": 360,
+    "minWidth": 200
+  },
+  "toolbar": {
+    "label": "Screenshots"
+  },
   "tools": [
-    { "name": "screenshot_capture", "description": "Capture a screenshot of a DOM element in the deepsteve browser tab and save it as a PNG file. Returns the file path. Use CSS selectors to target specific elements (e.g. \"#app-container\", \"#tabs\", \"#content-row\"). Make sure the Screenshots mod is enabled in deepsteve." }
+    {
+      "name": "screenshot_capture",
+      "description": "Capture a screenshot of a DOM element in the deepsteve browser tab and save it as a PNG file. Returns the file path. Use CSS selectors to target specific elements (e.g. \"#app-container\", \"#tabs\", \"#content-row\"). Make sure the Screenshots mod is enabled in deepsteve."
+    }
   ]
 }
