@@ -1,26 +1,86 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const { execSync } = require('child_process');
 const { z } = require('zod');
 
 const CONFIG_FILE = path.join(os.homedir(), '.deepsteve', 'meta-ads.json');
 const DATA_DIR = path.join(os.homedir(), '.deepsteve', 'meta-ads');
 const KB_PATH = path.join(DATA_DIR, 'knowledge-base.md');
 
+// ── Keychain helpers ────────────────────────────────────────
+
+const KEYCHAIN_SERVICE = 'deepsteve-meta-ads';
+const KEYCHAIN_ACCOUNT = 'access-token';
+
+function keychainGet() {
+  try {
+    return execSync(
+      `security find-generic-password -s "${KEYCHAIN_SERVICE}" -a "${KEYCHAIN_ACCOUNT}" -w`,
+      { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] },
+    ).trim();
+  } catch {
+    return '';
+  }
+}
+
+function keychainHas() {
+  try {
+    // -l flag just finds/lists the entry without outputting the password
+    execSync(
+      `security find-generic-password -s "${KEYCHAIN_SERVICE}" -a "${KEYCHAIN_ACCOUNT}"`,
+      { stdio: ['pipe', 'pipe', 'pipe'] },
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function keychainSet(token) {
+  // -U updates if exists, creates if not
+  execSync(
+    `security add-generic-password -U -s "${KEYCHAIN_SERVICE}" -a "${KEYCHAIN_ACCOUNT}" -w "${token.replace(/"/g, '\\"')}"`,
+    { stdio: ['pipe', 'pipe', 'pipe'] },
+  );
+}
+
+function keychainDelete() {
+  try {
+    execSync(
+      `security delete-generic-password -s "${KEYCHAIN_SERVICE}" -a "${KEYCHAIN_ACCOUNT}"`,
+      { stdio: ['pipe', 'pipe', 'pipe'] },
+    );
+  } catch {}
+}
+
 // ── Config ──────────────────────────────────────────────────
 
 function loadConfig() {
+  let adAccountId = '';
   try {
     if (fs.existsSync(CONFIG_FILE)) {
-      return JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
+      const json = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
+      adAccountId = json.adAccountId || '';
+      // Migrate: if token still in JSON, move it to Keychain
+      if (json.accessToken) {
+        keychainSet(json.accessToken);
+        delete json.accessToken;
+        fs.writeFileSync(CONFIG_FILE, JSON.stringify(json, null, 2));
+      }
     }
   } catch {}
-  return { accessToken: '', adAccountId: '' };
+  return { accessToken: keychainGet(), adAccountId };
 }
 
 function saveConfig(config) {
   fs.mkdirSync(path.dirname(CONFIG_FILE), { recursive: true });
-  fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2));
+  if (config.accessToken) {
+    keychainSet(config.accessToken);
+  }
+  // Only store non-secret fields in the JSON file
+  const jsonConfig = { adAccountId: config.adAccountId || '' };
+  fs.writeFileSync(CONFIG_FILE, JSON.stringify(jsonConfig, null, 2));
 }
 
 function maskToken(token) {
@@ -173,10 +233,15 @@ function addLearning(category, entry) {
 
 function registerRoutes(app) {
   app.get('/api/meta-ads/config', (req, res) => {
-    const config = loadConfig();
+    let adAccountId = '';
+    try {
+      if (fs.existsSync(CONFIG_FILE)) {
+        adAccountId = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8')).adAccountId || '';
+      }
+    } catch {}
     res.json({
-      accessTokenMasked: maskToken(config.accessToken),
-      adAccountId: config.adAccountId || '',
+      hasAccessToken: keychainHas(),
+      adAccountId,
     });
   });
 
@@ -186,7 +251,7 @@ function registerRoutes(app) {
     if (req.body.adAccountId !== undefined) config.adAccountId = req.body.adAccountId;
     saveConfig(config);
     res.json({
-      accessTokenMasked: maskToken(config.accessToken),
+      hasAccessToken: keychainHas(),
       adAccountId: config.adAccountId,
     });
   });
