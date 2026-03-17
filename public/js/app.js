@@ -461,6 +461,7 @@ settingsBtn?.addEventListener('click', async () => {
         <h2>Settings</h2>
         <div class="settings-tabs">
           <button class="settings-tab active" data-tab="general">General</button>
+          <button class="settings-tab" data-tab="terminal">Terminal</button>
           <button class="settings-tab" data-tab="github">GitHub</button>
           <button class="settings-tab" data-tab="workspaces">Workspaces</button>
         </div>
@@ -560,6 +561,8 @@ settingsBtn?.addEventListener('click', async () => {
           <input type="text" id="gemini-binary" value="${escapeHtml(currentGeminiBinary)}" placeholder="gemini" style="width: 200px; padding: 4px 8px; border-radius: 4px; border: 1px solid var(--ds-border); background: var(--ds-bg-secondary); color: var(--ds-text-primary);">
         </div>
       </div>
+      </div>
+      <div class="settings-tab-content" data-tab="terminal">
       <div class="settings-section">
         <h3>Terminal Engine</h3>
         <p style="font-size: 13px; color: var(--ds-text-secondary); margin-bottom: 8px;">
