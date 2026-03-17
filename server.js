@@ -857,7 +857,7 @@ function wireShellOutput(id) {
           }
         }
       }
-      const hasBel = data.includes('\x07');
+      const hasBel = stripOSC(data).includes('\x07');
 
       if (hasBel) {
         e.lastBelTime = Date.now();
@@ -2764,15 +2764,7 @@ function handleWsConnection(ws, req) {
       if (parsed.type === 'resize') { engine.resize(id, parsed.cols, parsed.rows); return; }
       if (parsed.type === 'redraw') { engine.write(id, '\x0c'); return; } // Ctrl+L
       if (parsed.type === 'initialPrompt') {
-        const config = getAgentConfig(entry.agentType);
-        if (config.initialPromptDelay > 0) {
-          // Agent doesn't emit BEL, so submit the prompt directly after a delay
-          // to give the TUI time to initialize
-          const prompt = parsed.text;
-          setTimeout(() => submitToShell(id, prompt), config.initialPromptDelay);
-        } else {
-          entry.initialPrompt = parsed.text;
-        }
+        deliverPromptWhenReady(id, parsed.text);
         return;
       }
       if (parsed.type === 'rename') { entry.name = parsed.name || null; return; }
