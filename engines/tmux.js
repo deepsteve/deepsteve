@@ -29,6 +29,7 @@ class TmuxEngine extends Engine {
     super();
     this._sessions = new Map(); // id → { attachPty, exitCallbacks }
     this._tmuxVersion = null;
+    this._tmuxPath = null; // Full path to tmux binary (needed for PTY spawns under LaunchAgent)
     this._checkTmux();
   }
 
@@ -37,8 +38,13 @@ class TmuxEngine extends Engine {
       const out = tmuxExec(['-V'], { encoding: 'utf8' }).trim();
       const match = out.match(/(\d+\.\d+)/);
       this._tmuxVersion = match ? match[1] : out;
+      // Resolve full path so pty.spawn() works under LaunchAgent (no Homebrew PATH)
+      this._tmuxPath = execFileSync('zsh', ['-l', '-c', 'which tmux'], {
+        encoding: 'utf8', timeout: 5000, stdio: 'pipe'
+      }).trim();
     } catch {
       this._tmuxVersion = null;
+      this._tmuxPath = null;
     }
   }
 
@@ -48,6 +54,11 @@ class TmuxEngine extends Engine {
 
   get version() {
     return this._tmuxVersion;
+  }
+
+  /** Full path to tmux binary (resolved via zsh -l for LaunchAgent PATH). */
+  get tmuxPath() {
+    return this._tmuxPath || 'tmux';
   }
 
   /** Check if tmux supports -e flag (>= 3.2) */
@@ -119,7 +130,8 @@ class TmuxEngine extends Engine {
 
   _attach(id, cols, rows) {
     const sessionName = this._tmuxSessionName(id);
-    const attachPty = pty.spawn('tmux', ['attach-session', '-t', sessionName], {
+    const tmux = this._tmuxPath || 'tmux';
+    const attachPty = pty.spawn(tmux, ['attach-session', '-t', sessionName], {
       name: 'xterm-256color',
       cols: cols || 120,
       rows: rows || 40,

@@ -2545,7 +2545,9 @@ function handleWsConnection(ws, req) {
 
     const pty = require('node-pty');
     const id = randomUUID().slice(0, 8);
-    const attachPty = pty.spawn('tmux', ['attach-session', '-t', tmuxSession], {
+    // Use resolved tmux path from engine (LaunchAgent PATH lacks Homebrew)
+    const tmuxBin = (engine instanceof TmuxEngine && engine.tmuxPath) || 'tmux';
+    const attachPty = pty.spawn(tmuxBin, ['attach-session', '-t', tmuxSession], {
       name: 'xterm-256color',
       cols: initialCols,
       rows: initialRows,
