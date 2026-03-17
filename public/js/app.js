@@ -57,6 +57,9 @@ const TabSessions = {
     const list = this.get();
     const s = list.find(s => s.id === oldId);
     if (s) { s.id = newId; this.save(list); }
+  },
+  clear() {
+    sessionStorage.removeItem(this.KEY);
   }
 };
 
@@ -161,6 +164,8 @@ function applyTheme(css) {
 
 function applySettings(settings) {
   if (settings.engine !== undefined && window.__deepsteveCurrentEngine && settings.engine !== window.__deepsteveCurrentEngine) {
+    TabSessions.clear();
+    SessionStore.removeWindow(getWindowId());
     location.reload();
     return;
   }
@@ -992,6 +997,8 @@ settingsBtn?.addEventListener('click', async () => {
       return;
     }
     if (result.engineSwitched) {
+      TabSessions.clear();
+      SessionStore.removeWindow(getWindowId());
       overlay.remove();
       location.reload();
       return;
@@ -1006,6 +1013,8 @@ settingsBtn?.addEventListener('click', async () => {
         });
         result = await resp.json();
         if (result.engineSwitched) {
+          TabSessions.clear();
+          SessionStore.removeWindow(getWindowId());
           overlay.remove();
           location.reload();
           return;
@@ -1160,6 +1169,8 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
       } else if (msg.type === 'gone') {
         SessionStore.removeSession(getWindowId(), msg.id);
         TabSessions.remove(msg.id);
+        TabManager.removeTab(msg.id);
+        resolveReady(null);
       } else if (msg.type === 'theme') {
         applyTheme(msg.css || '');
       } else if (msg.type === 'settings') {
