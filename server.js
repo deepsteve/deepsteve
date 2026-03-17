@@ -765,12 +765,16 @@ function deliverPromptWhenReady(id, prompt) {
   const e = shells.get(id);
   if (!e) return;
   const config = getAgentConfig(e.agentType);
+  log(`[deliverPrompt] id=${id} waitingForInput=${e.waitingForInput} initialPromptDelay=${config.initialPromptDelay} promptLen=${prompt.length}`);
   if (e.waitingForInput) {
     e.waitingForInput = false;
+    log(`[deliverPrompt] id=${id} submitting immediately (was waiting)`);
     setTimeout(() => submitToShell(id, prompt), 500);
   } else if (config.initialPromptDelay > 0) {
+    log(`[deliverPrompt] id=${id} using delay ${config.initialPromptDelay}ms`);
     setTimeout(() => submitToShell(id, prompt), config.initialPromptDelay);
   } else {
+    log(`[deliverPrompt] id=${id} storing as initialPrompt for BEL handler`);
     e.initialPrompt = prompt;  // BEL handler will pick it up
   }
 }
@@ -857,7 +861,17 @@ function wireShellOutput(id) {
           }
         }
       }
-      const hasBel = stripOSC(data).includes('\x07');
+      const strippedOSC = stripOSC(data);
+      const hasBel = strippedOSC.includes('\x07');
+
+      // Debug: log BEL detection for first 60s of session life
+      if (e.createdAt && (Date.now() - e.createdAt) < 60000) {
+        const rawBels = (data.match(/\x07/g) || []).length;
+        const oscBels = rawBels - (strippedOSC.match(/\x07/g) || []).length;
+        if (rawBels > 0) {
+          log(`[BEL-debug] id=${id} rawBels=${rawBels} oscBels=${oscBels} hasBel=${hasBel} waitingForInput=${e.waitingForInput} hasInitialPrompt=${!!e.initialPrompt} dataLen=${data.length}`);
+        }
+      }
 
       if (hasBel) {
         e.lastBelTime = Date.now();
@@ -870,6 +884,7 @@ function wireShellOutput(id) {
             const prompt = e.initialPrompt;
             e.initialPrompt = null;
             e.waitingForInput = false;
+            log(`[BEL-debug] id=${id} auto-submitting initialPrompt (len=${prompt.length})`);
             setTimeout(() => submitToShell(id, prompt), 500);
           }
         }
@@ -884,6 +899,7 @@ function wireShellOutput(id) {
           // Enough time has passed; check for substantive visible content
           const stripped = stripAllEscapes(data);
           if (stripped.length > 0) {
+            log(`[BEL-debug] id=${id} waitingForInput reset by visible content (${stripped.length} chars): ${stripped.slice(0, 80)}`);
             e.waitingForInput = false;
             const stateMsg = JSON.stringify({ type: 'state', waiting: false });
             e.clients.forEach((c) => c.send(stateMsg));
