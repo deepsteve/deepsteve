@@ -165,7 +165,22 @@ class TmuxEngine extends Engine {
 
   write(id, data) {
     const entry = this._sessions.get(id);
-    if (entry) entry.attachPty.write(data);
+    if (!entry) return;
+
+    // CSI u sequences (e.g., \x1b[13;2u for Shift+Enter) aren't passed through
+    // by tmux's input parser. Send as raw hex bytes directly to the pane.
+    if (data.length < 20 && /^\x1b\[\d+;\d+u$/.test(data)) {
+      try {
+        const sessionName = this._tmuxSessionName(id);
+        const hex = [...Buffer.from(data)].map(b => b.toString(16).padStart(2, '0'));
+        tmuxExec(['send-keys', '-t', sessionName, '-H', ...hex]);
+        return;
+      } catch {
+        // Fall through to direct write on failure
+      }
+    }
+
+    entry.attachPty.write(data);
   }
 
   resize(id, cols, rows) {
