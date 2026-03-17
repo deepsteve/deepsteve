@@ -1458,7 +1458,8 @@ function createDisplayTab(id, name, opts = {}) {
   const iframe = document.createElement('iframe');
   iframe.src = `/api/display-tab/${id}`;
   iframe.style.cssText = 'width:100%;height:100%;border:none;';
-  iframe.sandbox = 'allow-scripts allow-forms';
+  iframe.sandbox = 'allow-scripts allow-forms allow-same-origin';
+  iframe.allow = 'autoplay';
   container.appendChild(iframe);
 
   const tabName = name || 'Display';
