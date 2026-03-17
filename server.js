@@ -1312,6 +1312,7 @@ const BUILTIN_COMMANDS = [
   { id: 'new-tab', type: 'builtin', name: 'New Tab', description: 'Open a new agent tab' },
   { id: 'new-tab-deepsteve', type: 'builtin', name: 'New Tab in ~/.deepsteve', description: 'Open a tab for editing commands' },
   { id: 'new-terminal', type: 'builtin', name: 'New Terminal', description: 'Open a plain terminal (no agent)' },
+  { id: 'new-window', type: 'builtin', name: 'New Window', description: 'Open a new browser window' },
   { id: 'close-tab', type: 'builtin', name: 'Close Tab', description: 'Close the current tab' },
   { id: 'settings', type: 'builtin', name: 'Settings', description: 'Open settings' },
   { id: 'mods', type: 'builtin', name: 'Mods', description: 'Open mods panel' },
