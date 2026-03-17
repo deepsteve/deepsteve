@@ -135,6 +135,9 @@ async function executeCommand(cmd) {
       case 'new-tab-deepsteve':
         callbacks.createSession?.('~/.deepsteve', { agentType: callbacks.getDefaultAgentType?.() || 'claude' });
         break;
+      case 'new-terminal':
+        callbacks.quickNewTerminal?.();
+        break;
       case 'close-tab':
         callbacks.closeActiveTab?.();
         break;

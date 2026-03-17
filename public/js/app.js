@@ -1831,6 +1831,12 @@ function quickNewSession() {
   createSession(cwd, null, true, { agentType: getDefaultAgentType() });
 }
 
+function quickNewTerminal() {
+  const active = activeId && sessions.get(activeId);
+  const cwd = active?.cwd || SessionStore.getLastCwd() || '~';
+  createSession(cwd, null, true, { agentType: 'terminal' });
+}
+
 /** Get the default agent type from cached settings */
 function getDefaultAgentType() {
   // Cached from /api/agents fetch at init
@@ -1967,6 +1973,7 @@ function showNewTabMenu(e) {
   html += `
     <div class="context-menu-item" data-action="worktree">New worktree...</div>
     <div class="context-menu-item" data-action="repo">New tab in repo...</div>
+    <div class="context-menu-item" data-action="terminal">New terminal</div>
     <div class="context-menu-item context-menu-has-submenu" id="tmux-attach-trigger">Attach tmux session <span class="context-menu-arrow"></span></div>
   `;
 
@@ -2176,6 +2183,8 @@ function showNewTabMenu(e) {
     cleanup();
     if (action === 'recent') {
       createSession(item.dataset.path, null, true, { agentType: getDefaultAgentType() });
+    } else if (action === 'terminal') {
+      quickNewTerminal();
     } else if (action === 'worktree') {
       await promptWorktreeSession();
     } else if (action === 'repo') {
@@ -2621,6 +2630,7 @@ async function init() {
     },
     switchToTab: switchTo,
     quickNewSession,
+    quickNewTerminal,
     createSession: (cwd, opts) => createSession(cwd, null, true, opts),
     getDefaultAgentType,
     closeActiveTab: () => { if (activeId) confirmCloseSession(activeId).then(ok => { if (ok) killSession(activeId); }); },

@@ -441,11 +441,15 @@ function broadcastSkills() {
  * @param {{ cols?: number, rows?: number, env?: object }} opts
  */
 function spawnSession(id, agentType, args, cwd, { cols = 120, rows = 40, env: extraEnv } = {}) {
+  const env = extraEnv ? { ...process.env, ...extraEnv } : process.env;
+  if (agentType === 'terminal') {
+    engine.spawn(id, 'zsh', ['-l'], cwd, { cols, rows, env });
+    return;
+  }
   const bin = agentType === 'claude' ? 'claude'
     : agentType === 'opencode' ? (settings.opencodeBinary || 'opencode')
     : (settings.geminiBinary || 'gemini');
   const quoted = args.map(a => `'${a.replace(/'/g, "'\\''")}'`).join(' ');
-  const env = extraEnv ? { ...process.env, ...extraEnv } : process.env;
   engine.spawn(id, 'zsh', ['-l', '-c', `${bin} ${quoted}`], cwd, { cols, rows, env });
 }
 
@@ -488,6 +492,14 @@ const AGENT_CONFIGS = {
     planModeValue: 'plan',
     resumeFlag: '--session', // uses --session ID --continue
     resumeDefault: '--continue'
+  },
+  terminal: {
+    supportsWorktree: false,
+    supportsSessionId: false,
+    supportsSessionWatch: false,
+    emitsBel: false,
+    exitMethod: 'ctrl-c',
+    initialPromptDelay: 0,
   }
 };
 
@@ -1297,6 +1309,7 @@ try { fs.mkdirSync(COMMANDS_DIR, { recursive: true }); } catch {}
 const BUILTIN_COMMANDS = [
   { id: 'new-tab', type: 'builtin', name: 'New Tab', description: 'Open a new agent tab' },
   { id: 'new-tab-deepsteve', type: 'builtin', name: 'New Tab in ~/.deepsteve', description: 'Open a tab for editing commands' },
+  { id: 'new-terminal', type: 'builtin', name: 'New Terminal', description: 'Open a plain terminal (no agent)' },
   { id: 'close-tab', type: 'builtin', name: 'Close Tab', description: 'Close the current tab' },
   { id: 'settings', type: 'builtin', name: 'Settings', description: 'Open settings' },
   { id: 'mods', type: 'builtin', name: 'Mods', description: 'Open mods panel' },
