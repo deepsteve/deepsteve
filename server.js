@@ -2621,6 +2621,7 @@ function handleWsConnection(ws, req) {
   const initialCols = parseInt(url.searchParams.get('cols')) || 120;
   const initialRows = parseInt(url.searchParams.get('rows')) || 40;
   const agentType = url.searchParams.get('agentType') || 'claude';
+  const forkFrom = url.searchParams.get('fork');
 
   log(`[WS] Connection: id=${id}, cwd=${cwd}, createNew=${createNew}, worktree=${worktree}`);
   log(`[WS] Active shells: ${[...shells.keys()].join(', ') || 'none'}`);
@@ -2700,11 +2701,20 @@ function handleWsConnection(ws, req) {
       worktreeCwd = ensureWorktree(cwd, worktree);
     }
 
-    const spawnArgs = getSpawnArgs(agentType, { 
-      sessionId, 
-      planMode, 
-      worktree 
-    });
+    let spawnArgs;
+    if (forkFrom && shells.has(forkFrom)) {
+      const parent = shells.get(forkFrom);
+      spawnArgs = ['--resume', parent.claudeSessionId, '--fork-session', '--session-id', sessionId];
+      if (worktree) spawnArgs.push('--worktree', worktree);
+      else if (parent.worktree) spawnArgs.push('--worktree', parent.worktree);
+      log(`[WS] Forking from shell ${forkFrom} (parent claude session: ${parent.claudeSessionId})`);
+    } else {
+      spawnArgs = getSpawnArgs(agentType, {
+        sessionId,
+        planMode,
+        worktree
+      });
+    }
 
     log(`[WS] Creating NEW shell: oldId=${oldId}, newId=${id}, agent=${agentType}, session=${sessionId}, worktree=${worktree || 'none'}, cwd=${worktreeCwd}`);
     spawnSession(id, agentType, spawnArgs, worktreeCwd, { cols: initialCols, rows: initialRows, env: { DEEPSTEVE_SESSION_ID: id } });
