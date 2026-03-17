@@ -61,7 +61,7 @@ const SCROLLBACK_SIZE = 100 * 1024; // 100KB circular buffer per shell
 const RELOAD_FLAG = path.join(os.homedir(), '.deepsteve', '.reload');
 const reloadClients = new Set(); // WebSocket connections for live-reload
 const pendingOpens = []; // open-session messages waiting for a browser to connect
-let restartState = null; // { resolve: fn } — first browser response wins
+let restartState = null; // { resolve: fn, timeout: timer } — first browser response wins
 
 function log(...args) {
   const ts = new Date().toISOString().slice(11, 23);
@@ -2312,18 +2312,29 @@ app.post('/api/start-issue', (req, res) => {
 // Browsers elect a single leader to show the modal; first response wins.
 app.post('/api/request-restart', (req, res) => {
   const clients = [...reloadClients].filter(c => c.readyState === 1);
+  log(`[restart] ${clients.length} reload client(s), windowIds=[${clients.map(c => c.windowId || 'none').join(', ')}]`);
   if (clients.length === 0) {
-    // No browsers connected — auto-confirm
+    log(`[restart] no clients, auto-confirming`);
     return res.json({ result: 'confirmed' });
   }
 
+  // Cancel any pending request from a prior (killed) curl
+  if (restartState) {
+    log(`[restart] cancelling stale pending request`);
+    clearTimeout(restartState.timeout);
+    restartState = null;
+  }
+
   const timeout = setTimeout(() => {
+    log(`[restart] timed out after 60s, no browser response`);
     restartState = null;
     res.json({ result: 'timeout' });
   }, 60000);
 
   restartState = {
+    timeout,
     resolve: (result) => {
+      log(`[restart] resolved: ${result}`);
       clearTimeout(timeout);
       restartState = null;
       res.json({ result });
@@ -2332,7 +2343,10 @@ app.post('/api/request-restart', (req, res) => {
 
   // Send confirm-restart to all connected browsers (they elect a leader)
   for (const ws of clients) {
-    try { ws.send(JSON.stringify({ type: 'confirm-restart' })); } catch {}
+    log(`[restart] sending confirm-restart to windowId=${ws.windowId || 'none'}, readyState=${ws.readyState}`);
+    try { ws.send(JSON.stringify({ type: 'confirm-restart' })); } catch (e) {
+      log(`[restart] send failed: ${e.message}`);
+    }
   }
 });
 

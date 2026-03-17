@@ -1705,17 +1705,20 @@ function showRestartConfirmDialog() {
   const cleanup = (result) => {
     if (cleaned) return;
     cleaned = true;
-    document.removeEventListener('keydown', onKey);
+    document.removeEventListener('keydown', onKey, true);
     overlay.remove();
     resolve(result);
   };
   overlay.querySelector('#restart-confirm-cancel').onclick = () => cleanup(false);
   overlay.querySelector('#restart-confirm-ok').onclick = () => cleanup(true);
   const onKey = (e) => {
-    if (e.key === 'Enter') { e.preventDefault(); cleanup(true); }
-    if (e.key === 'Escape') { e.preventDefault(); cleanup(false); }
+    // Stop all key events from reaching the terminal while modal is open
+    e.stopPropagation();
+    e.preventDefault();
+    if (e.key === 'Enter') cleanup(true);
+    else if (e.key === 'Escape') cleanup(false);
   };
-  document.addEventListener('keydown', onKey);
+  document.addEventListener('keydown', onKey, true);
 
   return { promise, dismiss: cleanup };
 }
