@@ -1076,7 +1076,7 @@ function createTmuxAttachSession(tmuxSessionName) {
  */
 function createSession(cwd, existingId = null, isNew = false, opts = {}) {
   const { cols, rows } = measureTerminalSize();
-  const ws = createWebSocket({ id: existingId, cwd, isNew, worktree: opts.worktree, name: opts.name, planMode: opts.planMode, agentType: opts.agentType, cols, rows, windowId: getWindowId() });
+  const ws = createWebSocket({ id: existingId, cwd, isNew, worktree: opts.worktree, name: opts.name, planMode: opts.planMode, agentType: opts.agentType, cols, rows, windowId: getWindowId(), fork: opts.fork });
 
   // Promise that resolves when the session is fully initialized (terminal created)
   let resolveReady;
@@ -1307,6 +1307,12 @@ function initTerminal(id, ws, cwd, initialName, { hasScrollback = false, pending
     },
     getLiveWindows: () => WindowManager.getLiveWindows(),
     onSendToWindow: (sessionId, targetWindowId) => sendToWindow(sessionId, targetWindowId),
+    onFork: (sessionId) => {
+      const session = sessions.get(sessionId);
+      const sessionCwd = session?.cwd || '~';
+      createSession(sessionCwd, null, true, { fork: sessionId, name: session?.name });
+    },
+    getSessionType: () => 'terminal',
     getModMenuItems: () => {
       return ModManager.getContextMenuItems().map(item => ({
         label: item.label,
@@ -1412,6 +1418,8 @@ function createModTab(modId, opts = {}) {
     },
     getLiveWindows: () => [],
     onSendToWindow: () => {},
+    onFork: () => {},
+    getSessionType: () => 'mod-tab',
     getModMenuItems: () => [],
   };
 
@@ -1478,6 +1486,8 @@ function createDisplayTab(id, name, opts = {}) {
     },
     getLiveWindows: () => [],
     onSendToWindow: () => {},
+    onFork: () => {},
+    getSessionType: () => 'display-tab',
     getModMenuItems: () => [],
   };
 

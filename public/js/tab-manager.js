@@ -84,6 +84,36 @@ function showContextMenu(x, y, sessionId, callbacks) {
   }
   menu.appendChild(sendEl);
 
+  // Separator
+  const sep1 = document.createElement('div');
+  sep1.className = 'context-menu-separator';
+  menu.appendChild(sep1);
+
+  // Fork tab
+  const forkEl = document.createElement('div');
+  forkEl.className = 'context-menu-item';
+  const sessionType = callbacks.getSessionType?.() || 'terminal';
+  if (sessionType !== 'terminal') {
+    forkEl.classList.add('disabled');
+  }
+  forkEl.textContent = 'Fork tab';
+  forkEl.onclick = () => {
+    if (sessionType !== 'terminal') return;
+    hideContextMenu();
+    callbacks.onFork?.(sessionId);
+  };
+  menu.appendChild(forkEl);
+
+  // Close tab
+  const closeEl = document.createElement('div');
+  closeEl.className = 'context-menu-item';
+  closeEl.textContent = 'Close tab';
+  closeEl.onclick = () => {
+    hideContextMenu();
+    callbacks.onClose?.(sessionId);
+  };
+  menu.appendChild(closeEl);
+
   // Mod-provided context menu items
   const modItems = callbacks.getModMenuItems ? callbacks.getModMenuItems() : [];
   if (modItems.length > 0) {

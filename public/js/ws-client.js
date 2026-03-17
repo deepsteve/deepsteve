@@ -17,6 +17,7 @@ export function createWebSocket(options = {}) {
   if (options.planMode) params.set('planMode', '1');
   if (options.agentType && options.agentType !== 'claude') params.set('agentType', options.agentType);
   if (options.windowId) params.set('windowId', options.windowId);
+  if (options.fork) params.set('fork', options.fork);
 
   const wsProto = location.protocol === 'https:' ? 'wss://' : 'ws://';
   let url = wsProto + location.host + '?' + params;
