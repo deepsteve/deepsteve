@@ -1769,17 +1769,19 @@ function killSession(id) {
     session.container.remove();
   }
 
+  // Compute adjacent tab BEFORE removing from DOM
+  const nextId = (activeId === id) ? TabManager.getAdjacentTabId(id) : null;
+
   TabManager.removeTab(id);
   sessions.delete(id);
 
   SessionStore.removeSession(getWindowId(), id);
   TabSessions.remove(id);
 
-  // Switch to next available session
+  // Switch to adjacent tab (left preferred, then right)
   if (activeId === id) {
-    const next = sessions.keys().next().value;
-    if (next) {
-      switchTo(next);
+    if (nextId && sessions.has(nextId)) {
+      switchTo(nextId);
     } else {
       activeId = null;
       ActiveTab.clear();
@@ -1821,17 +1823,19 @@ async function sendToWindow(id, targetWindowId) {
   session.term.dispose();
   session.container.remove();
 
+  // Compute adjacent tab BEFORE removing from DOM
+  const nextId = (activeId === id) ? TabManager.getAdjacentTabId(id) : null;
+
   TabManager.removeTab(id);
   sessions.delete(id);
 
   SessionStore.removeSession(getWindowId(), id);
   TabSessions.remove(id);
 
-  // Switch to next available session
+  // Switch to adjacent tab (left preferred, then right)
   if (activeId === id) {
-    const next = sessions.keys().next().value;
-    if (next) {
-      switchTo(next);
+    if (nextId && sessions.has(nextId)) {
+      switchTo(nextId);
     } else {
       activeId = null;
       ActiveTab.clear();

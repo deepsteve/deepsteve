@@ -482,6 +482,20 @@ export const TabManager = {
   },
 
   /**
+   * Get the adjacent tab's session ID (left neighbor preferred, then right).
+   * Returns null if no adjacent tab exists.
+   */
+  getAdjacentTabId(sessionId) {
+    const tab = document.getElementById('tab-' + sessionId);
+    if (!tab) return null;
+    const left = tab.previousElementSibling;
+    if (left && left.classList.contains('tab')) return left.id.replace('tab-', '');
+    const right = tab.nextElementSibling;
+    if (right && right.classList.contains('tab')) return right.id.replace('tab-', '');
+    return null;
+  },
+
+  /**
    * Prompt user to rename a tab
    */
   promptRename(sessionId, currentName, callback) {
