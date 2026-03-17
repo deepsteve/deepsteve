@@ -702,9 +702,9 @@ function unwatchClaudeSessionDir(shellId) {
  * text first, then send \r in a separate write after a short delay to ensure
  * they land in different readable events.
  */
-function submitToShell(id, text) {
-  engine.write(id, text);
-  setTimeout(() => engine.write(id, '\r'), 1000);
+function submitToShell(id, text, eng) {
+  (eng || engine).write(id, text);
+  setTimeout(() => (eng || engine).write(id, '\r'), 1000);
 }
 
 /**
@@ -869,6 +869,7 @@ function wireShellOutput(id) {
 function killShell(entry, id) {
   if (entry.killed) return;
   entry.killed = true;
+  const eng = engine;  // Capture — survives async initEngine() swaps
 
   // tmux-attach sessions manage their own PTY — just detach
   if (entry.agentType === 'tmux-attach') {
@@ -878,60 +879,60 @@ function killShell(entry, id) {
     return;
   }
 
-  const pid = engine.getPid(id);
+  const pid = eng.getPid(id);
   const config = getAgentConfig(entry.agentType);
   log(`Killing shell ${id} (pid=${pid}, agent=${entry.agentType || 'claude'}, waitingForInput=${entry.waitingForInput})`);
 
   // Clean up engine data listener
   if (entry._engineDataHandler) {
-    engine.removeListener('data', entry._engineDataHandler);
+    eng.removeListener('data', entry._engineDataHandler);
     entry._engineDataHandler = null;
   }
 
   if (config.exitMethod === 'ctrl-c') {
     // Agent just needs Ctrl+C (OpenCode, Gemini)
-    try { engine.write(id, '\x03'); } catch {}
+    try { eng.write(id, '\x03'); } catch {}
   } else if (config.exitMethod === 'exit-cmd') {
     // Agent supports /exit command (Claude)
     if (entry.waitingForInput) {
       // Safe to send /exit directly
-      try { submitToShell(id, '/exit'); } catch {}
+      try { submitToShell(id, '/exit', eng); } catch {}
     } else {
       // Claude is busy — send Ctrl+C to interrupt, then /exit when it's ready
-      try { engine.write(id, '\x03'); } catch {}
+      try { eng.write(id, '\x03'); } catch {}
       // Watch for BEL (Claude back at prompt), then send /exit
       const exitHandler = (sid, data) => {
         if (sid !== id) return;
         if (data.includes('\x07')) {
-          engine.removeListener('data', exitHandler);
-          try { submitToShell(id, '/exit'); } catch {}
+          eng.removeListener('data', exitHandler);
+          try { submitToShell(id, '/exit', eng); } catch {}
         }
       };
-      engine.on('data', exitHandler);
+      eng.on('data', exitHandler);
     }
   } else {
     // Default fallback: just kill the process group
-    try { engine.kill(id, 'SIGTERM'); } catch {}
+    try { eng.kill(id, 'SIGTERM'); } catch {}
   }
 
   // After 8 seconds, escalate to SIGTERM
   setTimeout(() => {
-    const currentPid = engine.getPid(id);
+    const currentPid = eng.getPid(id);
     if (!currentPid) return; // Already dead
     try {
       process.kill(currentPid, 0); // Check if still alive
       log(`Shell ${id} still alive after /exit, sending SIGTERM`);
-      engine.kill(id, 'SIGTERM');
+      eng.kill(id, 'SIGTERM');
     } catch { return; } // Already dead
 
     // After 2 more seconds, escalate to SIGKILL
     setTimeout(() => {
-      const pid2 = engine.getPid(id);
+      const pid2 = eng.getPid(id);
       if (!pid2) return;
       try {
         process.kill(pid2, 0);
         log(`Shell ${id} still alive, sending SIGKILL`);
-        engine.kill(id, 'SIGKILL');
+        eng.kill(id, 'SIGKILL');
       } catch {}
     }, 2000);
   }, 8000);
