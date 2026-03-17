@@ -12,9 +12,9 @@ function init(context) {
   } = context;
 
   // Notify browser to open a new session tab, targeting the caller's window
-  function notifyOpenSession(id, cwd, name, windowId) {
+  function notifyOpenSession(id, cwd, name, windowId, initialPrompt) {
     const readyClients = [...reloadClients].filter(c => c.readyState === 1);
-    const openMsg = JSON.stringify({ type: 'open-session', id, cwd, name, windowId });
+    const openMsg = JSON.stringify({ type: 'open-session', id, cwd, name, windowId, initialPrompt });
     let delivered = false;
 
     if (windowId) {
@@ -26,7 +26,7 @@ function init(context) {
         }
       }
       if (!delivered && readyClients.length > 0) {
-        const broadcastMsg = JSON.stringify({ type: 'open-session', id, cwd, name });
+        const broadcastMsg = JSON.stringify({ type: 'open-session', id, cwd, name, initialPrompt });
         for (const client of readyClients) {
           if (client.readyState === 1) client.send(broadcastMsg);
         }
@@ -38,11 +38,11 @@ function init(context) {
       }
     }
     if (!delivered && readyClients.length > 0) {
-      readyClients[0].send(JSON.stringify({ type: 'open-session', id, cwd, name }));
+      readyClients[0].send(JSON.stringify({ type: 'open-session', id, cwd, name, initialPrompt }));
       delivered = true;
     }
     if (!delivered) {
-      pendingOpens.push(JSON.stringify({ type: 'open-session', id, cwd, name }));
+      pendingOpens.push(JSON.stringify({ type: 'open-session', id, cwd, name, initialPrompt }));
     }
   }
 
@@ -148,16 +148,10 @@ function init(context) {
           clients: new Set(), cwd: spawnCwd,
           claudeSessionId, agentType: effectiveAgentType,
           worktree: worktree || null, windowId,
-          name, initialPrompt: prompt,
+          name, initialPrompt: null,
           waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now(),
         });
         wireShellOutput(id);
-
-        // For non-BEL agents with a synchronous prompt, deliver after delay
-        if (prompt && agentConfig.initialPromptDelay > 0) {
-          shells.get(id).initialPrompt = null;
-          setTimeout(() => submitToShell(id, prompt), agentConfig.initialPromptDelay);
-        }
 
         if (agentConfig.supportsSessionWatch) watchClaudeSessionDir(id);
         engine.onExit(id, () => {
@@ -166,18 +160,21 @@ function init(context) {
         });
         saveState();
 
-        // When body was NOT provided, fetch async and deliver prompt when ready
+        // When body was NOT provided, fetch async and deliver prompt via WS when ready
         if (!body) {
           fetchIssueFromGitHub(number, effectiveCwd).then(gh => {
             const issueBody = gh ? gh.body : null;
             const issueLabels = gh ? (labels || (Array.isArray(gh.labels) ? gh.labels.map(l => typeof l === 'string' ? l : l.name).join(', ') : null)) : labels;
             const issueUrl = gh ? (url || gh.url) : url;
             const asyncPrompt = buildPrompt(issueBody, issueLabels, issueUrl);
-            deliverPromptWhenReady(id, asyncPrompt);
+            const deliverMsg = JSON.stringify({ type: 'deliver-prompt', id, initialPrompt: asyncPrompt });
+            for (const client of [...reloadClients].filter(c => c.readyState === 1)) {
+              client.send(deliverMsg);
+            }
           });
         }
 
-        notifyOpenSession(id, spawnCwd, name, windowId);
+        notifyOpenSession(id, spawnCwd, name, windowId, prompt);
 
         return { content: [{ type: 'text', text: JSON.stringify({ id, name, cwd: spawnCwd, worktree: worktree || null }) }] };
       },
