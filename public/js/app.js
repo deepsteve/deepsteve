@@ -2699,6 +2699,15 @@ async function init() {
   document.getElementById('issue-btn').addEventListener('click', () => showIssuePicker());
   document.getElementById('empty-state-btn')?.addEventListener('click', () => quickNewSession());
 
+  // Fresh window requested (e.g. from "New Window" command) — clear inherited sessionStorage
+  const freshParam = new URLSearchParams(window.location.search).get('fresh');
+  if (freshParam) {
+    sessionStorage.removeItem(nsKey('deepsteve-window-id'));
+    sessionStorage.removeItem(nsKey('deepsteve-tab-sessions'));
+    sessionStorage.removeItem(nsKey('deepsteve-active-tab'));
+    history.replaceState(null, '', window.location.pathname);
+  }
+
   // Check if this is an existing tab BEFORE starting heartbeat (which creates window ID)
   const isExistingTab = WindowManager.hasExistingWindowId();
   console.log('[init] isExistingTab:', isExistingTab);
