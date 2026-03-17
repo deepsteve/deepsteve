@@ -138,6 +138,9 @@ async function executeCommand(cmd) {
       case 'new-terminal':
         callbacks.quickNewTerminal?.();
         break;
+      case 'new-window':
+        window.open(window.location.origin, '_blank');
+        break;
       case 'close-tab':
         callbacks.closeActiveTab?.();
         break;
