@@ -68,6 +68,25 @@ if [ "$REFRESH" = 1 ]; then
     touch ~/.deepsteve/.reload
 fi
 
+# --- Stop old server ---
 launchctl unload ~/Library/LaunchAgents/com.deepsteve.plist 2>/dev/null
-sleep 3
+
+# Wait for old server process to fully exit (up to 15s).
+# The server's graceful shutdown can take ~12s worst case (8s shell exit +
+# 2s SIGTERM + 2s SIGKILL + 0.5s drain).
+WAITED=0
+while [ "$WAITED" -lt 15 ] && launchctl list 2>/dev/null | grep -q com.deepsteve; do
+    sleep 1
+    WAITED=$((WAITED + 1))
+done
+
+# Safety net: ensure the port is actually free (handles edge cases like
+# a child process holding the socket after the main process exits).
+WAITED=0
+while [ "$WAITED" -lt 5 ] && lsof -i :3000 -sTCP:LISTEN >/dev/null 2>&1; do
+    sleep 1
+    WAITED=$((WAITED + 1))
+done
+
+# --- Start new server ---
 launchctl load ~/Library/LaunchAgents/com.deepsteve.plist
