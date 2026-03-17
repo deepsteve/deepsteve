@@ -1682,7 +1682,6 @@ function showRestartConfirmDialog() {
   };
   overlay.querySelector('#restart-confirm-cancel').onclick = () => cleanup(false);
   overlay.querySelector('#restart-confirm-ok').onclick = () => cleanup(true);
-  overlay.onclick = (e) => { if (e.target === overlay) cleanup(false); };
   const onKey = (e) => {
     if (e.key === 'Enter') { e.preventDefault(); cleanup(true); }
     if (e.key === 'Escape') { e.preventDefault(); cleanup(false); }
