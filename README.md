@@ -21,6 +21,10 @@ Run multiple AI agent sessions side-by-side in your browser, each with full term
 
 > **Security notice:** DeepSteve has no authentication, no CORS restrictions, and no WebSocket origin checking. It is designed for **localhost use only**. Do not expose it to a network or the public internet.
 
+## Terminal Engines
+
+deepsteve currently uses **node-pty** to run agent sessions (Claude Code, OpenCode, Gemini) as child processes on a Node server, connected to the browser via WebSocket. **tmux** support is currently being implemented as an alternative backend — running sessions inside tmux panes instead of node-pty, enabling native session persistence and detach/reattach without the Node process staying alive.
+
 ## Features
 
 - **Multiple sessions** - Open as many Claude Code, OpenCode, or Gemini instances as you need in separate tabs
