@@ -39,6 +39,7 @@ function parseCLIValue(name) {
 const HTTPS_ENABLED = parseCLIFlag('https') || process.env.DEEPSTEVE_HTTPS === '1';
 const HTTPS_PORT = parseInt(parseCLIValue('https-port') || process.env.DEEPSTEVE_HTTPS_PORT) || 3443;
 const CERTS_DIR = path.join(os.homedir(), '.deepsteve', 'certs');
+const AUTOMATIONS_DIR = path.join(os.homedir(), '.deepsteve', 'automations');
 
 if (!net.isIP(BIND)) {
   console.error(`Error: '${BIND}' is not a valid IP address. Use --bind <address> with a valid IPv4 or IPv6 address.`);
@@ -1293,6 +1294,7 @@ app.post('/api/settings', (req, res) => {
 
 const COMMANDS_DIR = path.join(os.homedir(), '.deepsteve', 'commands');
 try { fs.mkdirSync(COMMANDS_DIR, { recursive: true }); } catch {}
+try { fs.mkdirSync(AUTOMATIONS_DIR, { recursive: true }); } catch {}
 
 const BUILTIN_COMMANDS = [
   { id: 'new-tab', type: 'builtin', name: 'New Tab', description: 'Open a new agent tab' },
@@ -1726,6 +1728,82 @@ app.get('/api/skills/:id/content', (req, res) => {
     res.json({ content });
   } catch (e) {
     res.status(404).json({ error: 'Skill not found' });
+  }
+});
+
+// --- Automations CRUD ---
+const AUTOMATION_ID_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/;
+
+app.get('/api/automations', (req, res) => {
+  try {
+    const automations = [];
+    if (fs.existsSync(AUTOMATIONS_DIR)) {
+      for (const file of fs.readdirSync(AUTOMATIONS_DIR)) {
+        if (!file.endsWith('.md')) continue;
+        const id = file.replace(/\.md$/, '');
+        if (!AUTOMATION_ID_RE.test(id)) continue;
+        try {
+          const content = fs.readFileSync(path.join(AUTOMATIONS_DIR, file), 'utf8');
+          const meta = parseSkillFrontmatter(content);
+          automations.push({ id, name: meta.name || id, icon: meta.icon || '⚡', description: meta.description || '' });
+        } catch { /* skip unreadable */ }
+      }
+    }
+    automations.sort((a, b) => a.name.localeCompare(b.name));
+    res.json({ automations });
+  } catch (e) {
+    res.json({ automations: [] });
+  }
+});
+
+app.post('/api/automations', (req, res) => {
+  const { id, name, icon, body } = req.body;
+  if (!id || !AUTOMATION_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid automation ID' });
+  const filePath = path.join(AUTOMATIONS_DIR, `${id}.md`);
+  if (!path.resolve(filePath).startsWith(path.resolve(AUTOMATIONS_DIR) + path.sep)) {
+    return res.status(400).json({ error: 'Invalid automation ID' });
+  }
+  try {
+    fs.mkdirSync(AUTOMATIONS_DIR, { recursive: true });
+    const content = `---\nname: ${name || id}\nicon: ${icon || '⚡'}\ndescription: ${(name || id)}\n---\n\n${body || ''}`;
+    fs.writeFileSync(filePath, content);
+    log(`Automation saved: ${id}`);
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/api/automations/:id', (req, res) => {
+  const { id } = req.params;
+  if (!id || !AUTOMATION_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid automation ID' });
+  const filePath = path.join(AUTOMATIONS_DIR, `${id}.md`);
+  if (!path.resolve(filePath).startsWith(path.resolve(AUTOMATIONS_DIR) + path.sep)) {
+    return res.status(400).json({ error: 'Invalid automation ID' });
+  }
+  try {
+    const content = fs.readFileSync(filePath, 'utf8');
+    const meta = parseSkillFrontmatter(content);
+    const body = content.replace(/^---\n[\s\S]*?\n---\n*/, '');
+    res.json({ id, name: meta.name || id, icon: meta.icon || '⚡', description: meta.description || '', body });
+  } catch (e) {
+    res.status(404).json({ error: 'Automation not found' });
+  }
+});
+
+app.delete('/api/automations/:id', (req, res) => {
+  const { id } = req.params;
+  if (!id || !AUTOMATION_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid automation ID' });
+  const filePath = path.join(AUTOMATIONS_DIR, `${id}.md`);
+  if (!path.resolve(filePath).startsWith(path.resolve(AUTOMATIONS_DIR) + path.sep)) {
+    return res.status(400).json({ error: 'Invalid automation ID' });
+  }
+  try {
+    if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+    log(`Automation deleted: ${id}`);
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
   }
 });
 
