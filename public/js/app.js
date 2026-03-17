@@ -2635,7 +2635,14 @@ async function init() {
       if (msg.type === 'open-session') {
         // Server created a session (e.g. via /api/start-issue) — open a tab for it
         if (msg.windowId && msg.windowId !== getWindowId()) return;
-        createSession(msg.cwd, msg.id, false, { name: msg.name, allowDuplicate: true });
+        createSession(msg.cwd, msg.id, false, { name: msg.name, allowDuplicate: true, initialPrompt: msg.initialPrompt });
+      }
+      if (msg.type === 'deliver-prompt') {
+        // Async prompt delivery (e.g. GitHub issue fetch completed after tab opened)
+        const session = sessions.get(msg.id);
+        if (session?.ws) {
+          session.ws.sendJSON({ type: 'initialPrompt', text: msg.initialPrompt });
+        }
       }
       if (msg.type === 'open-display-tab') {
         if (msg.windowId && msg.windowId !== getWindowId()) return;
