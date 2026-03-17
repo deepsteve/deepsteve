@@ -1,8 +1,20 @@
 const pty = require('node-pty');
-const { execSync } = require('child_process');
+const { execFileSync } = require('child_process');
 const Engine = require('./engine');
 
 const SESSION_PREFIX = 'ds-';
+
+/** Shell-quote a string for use in a single zsh -c layer. */
+function shellQuote(s) {
+  if (/^[a-zA-Z0-9_./:=-]+$/.test(s)) return s;
+  return "'" + s.replace(/'/g, "'\\''") + "'";
+}
+
+/** Run a tmux command via zsh -l -c (for Homebrew PATH). */
+function tmuxExec(args, opts = {}) {
+  const cmd = ['tmux', ...args.map(shellQuote)].join(' ');
+  return execFileSync('zsh', ['-l', '-c', cmd], { timeout: 5000, stdio: 'pipe', ...opts });
+}
 
 /**
  * tmux engine — each session runs inside a tmux session named ds-{id}.
@@ -22,7 +34,7 @@ class TmuxEngine extends Engine {
 
   _checkTmux() {
     try {
-      const out = execSync("zsh -l -c 'tmux -V'", { encoding: 'utf8', timeout: 5000 }).trim();
+      const out = tmuxExec(['-V'], { encoding: 'utf8' }).trim();
       const match = out.match(/(\d+\.\d+)/);
       this._tmuxVersion = match ? match[1] : out;
     } catch {
@@ -52,23 +64,23 @@ class TmuxEngine extends Engine {
   spawn(id, cmd, args, cwd, { cols = 120, rows = 40, env } = {}) {
     const sessionName = this._tmuxSessionName(id);
 
-    // Build the command string
-    const quoted = args.map(a => `'${a.replace(/'/g, "'\\''")}'`).join(' ');
-    const fullCmd = `${cmd} ${quoted}`;
+    // spawnSession wraps commands in zsh -l -c <cmd>. tmux new-session
+    // already runs its command in $SHELL, so unwrap to avoid nested quoting.
+    let fullCmd;
+    if (cmd === 'zsh' && args.length === 3 && args[0] === '-l' && args[1] === '-c') {
+      fullCmd = args[2]; // already shell-escaped by spawnSession
+    } else if (cmd === 'zsh' && args.length === 1 && args[0] === '-l') {
+      fullCmd = null; // plain login shell — tmux default
+    } else {
+      fullCmd = [cmd, ...args.map(a => shellQuote(a))].join(' ');
+    }
 
-    // Build tmux new-session command
-    const tmuxArgs = [
-      'new-session', '-d',
-      '-s', sessionName,
-      '-x', String(cols),
-      '-y', String(rows),
-      '-c', cwd,
-    ];
+    const tmuxArgs = ['new-session', '-d', '-s', sessionName, '-x', String(cols), '-y', String(rows)];
+    if (cwd) tmuxArgs.push('-c', cwd);
 
     // Pass environment variables
     const extraEnv = {};
     if (env) {
-      // Collect env vars that differ from process.env
       for (const [key, val] of Object.entries(env)) {
         if (val !== undefined && val !== process.env[key]) {
           extraEnv[key] = val;
@@ -81,21 +93,22 @@ class TmuxEngine extends Engine {
       for (const [key, val] of Object.entries(extraEnv)) {
         tmuxArgs.push('-e', `${key}=${val}`);
       }
-      tmuxArgs.push(fullCmd);
+      if (fullCmd) tmuxArgs.push(fullCmd);
     } else {
       // Older tmux: wrap with env command
-      const envPrefix = Object.entries(extraEnv)
-        .map(([k, v]) => `${k}='${v.replace(/'/g, "'\\''")}'`)
-        .join(' ');
-      tmuxArgs.push(envPrefix ? `env ${envPrefix} ${fullCmd}` : fullCmd);
+      if (fullCmd && Object.keys(extraEnv).length > 0) {
+        const envPrefix = Object.entries(extraEnv)
+          .map(([k, v]) => `${k}=${shellQuote(v)}`)
+          .join(' ');
+        tmuxArgs.push(`env ${envPrefix} ${fullCmd}`);
+      } else if (fullCmd) {
+        tmuxArgs.push(fullCmd);
+      }
     }
 
     // Create the tmux session
     try {
-      execSync(`zsh -l -c 'tmux ${tmuxArgs.map(a => `"${a.replace(/"/g, '\\"')}"`).join(' ')}'`, {
-        timeout: 10000,
-        stdio: 'pipe',
-      });
+      tmuxExec(tmuxArgs, { timeout: 10000 });
     } catch (e) {
       throw new Error(`Failed to create tmux session ${sessionName}: ${e.message}`);
     }
@@ -143,7 +156,7 @@ class TmuxEngine extends Engine {
   _tmuxSessionAlive(id) {
     const sessionName = this._tmuxSessionName(id);
     try {
-      execSync(`zsh -l -c 'tmux has-session -t "${sessionName}"'`, { timeout: 5000, stdio: 'pipe' });
+      tmuxExec(['has-session', '-t', sessionName]);
       return true;
     } catch {
       return false;
@@ -160,7 +173,7 @@ class TmuxEngine extends Engine {
     if (!entry) return;
     const sessionName = this._tmuxSessionName(id);
     try {
-      execSync(`zsh -l -c 'tmux resize-window -t "${sessionName}" -x ${cols} -y ${rows}'`, { timeout: 5000, stdio: 'pipe' });
+      tmuxExec(['resize-window', '-t', sessionName, '-x', String(cols), '-y', String(rows)]);
     } catch {}
     try {
       entry.attachPty.resize(cols, rows);
@@ -179,15 +192,15 @@ class TmuxEngine extends Engine {
     } catch {}
     // Fallback: kill the tmux session
     try {
-      execSync(`zsh -l -c 'tmux kill-session -t "${sessionName}"'`, { timeout: 5000, stdio: 'pipe' });
+      tmuxExec(['kill-session', '-t', sessionName]);
     } catch {}
   }
 
   _getPanePid(id) {
     const sessionName = this._tmuxSessionName(id);
     try {
-      const out = execSync(`zsh -l -c 'tmux display-message -t "${sessionName}" -p "#{pane_pid}"'`, {
-        encoding: 'utf8', timeout: 5000, stdio: 'pipe',
+      const out = tmuxExec(['display-message', '-t', sessionName, '-p', '#{pane_pid}'], {
+        encoding: 'utf8',
       }).trim();
       return parseInt(out, 10) || null;
     } catch {
@@ -208,7 +221,7 @@ class TmuxEngine extends Engine {
     // Kill the tmux session if still alive
     const sessionName = this._tmuxSessionName(id);
     try {
-      execSync(`zsh -l -c 'tmux kill-session -t "${sessionName}"'`, { timeout: 5000, stdio: 'pipe' });
+      tmuxExec(['kill-session', '-t', sessionName]);
     } catch {}
   }
 
@@ -232,8 +245,8 @@ class TmuxEngine extends Engine {
    */
   listSessions() {
     try {
-      const out = execSync("zsh -l -c 'tmux list-sessions -F \"#{session_name}\"'", {
-        encoding: 'utf8', timeout: 5000, stdio: 'pipe',
+      const out = tmuxExec(['list-sessions', '-F', '#{session_name}'], {
+        encoding: 'utf8',
       }).trim();
       if (!out) return [];
       return out.split('\n')

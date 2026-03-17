@@ -1275,10 +1275,18 @@ app.post('/api/settings', (req, res) => {
       log(`Settings updated: windowConfigs (${settings.windowConfigs.length} configs)`);
     }
   }
+  let engineSwitched = false;
   if (req.body.engine !== undefined) {
     const requested = String(req.body.engine);
     if (requested === 'node-pty' || requested === 'tmux') {
       if (requested !== settings.engine) {
+        // Validate tmux availability before switching
+        if (requested === 'tmux') {
+          const check = new TmuxEngine();
+          if (!check.available) {
+            return res.status(400).json({ error: 'tmux is not installed or not found in PATH' });
+          }
+        }
         // Check if there are active sessions
         if (shells.size > 0 && !req.body.engineSwitchConfirm) {
           return res.json({ ...settings, engineSwitchRequired: true, activeSessions: shells.size });
@@ -1293,13 +1301,14 @@ app.post('/api/settings', (req, res) => {
         }
         settings.engine = requested;
         initEngine();
+        engineSwitched = true;
         log(`Settings updated: engine=${settings.engine}`);
       }
     }
   }
   saveSettings();
   broadcastSettings();
-  res.json(settings);
+  res.json({ ...settings, ...(engineSwitched ? { engineSwitched: true } : {}) });
 });
 
 // --- Command Palette: Custom Commands ---

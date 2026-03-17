@@ -160,6 +160,10 @@ function applyTheme(css) {
 }
 
 function applySettings(settings) {
+  if (settings.engine !== undefined && window.__deepsteveCurrentEngine && settings.engine !== window.__deepsteveCurrentEngine) {
+    location.reload();
+    return;
+  }
   if (settings.maxIssueTitleLength !== undefined) {
     maxIssueTitleLength = settings.maxIssueTitleLength;
   }
@@ -566,7 +570,7 @@ settingsBtn?.addEventListener('click', async () => {
       <div class="settings-section">
         <h3>Terminal Engine</h3>
         <p style="font-size: 13px; color: var(--ds-text-secondary); margin-bottom: 8px;">
-          How terminal sessions are managed. tmux sessions survive daemon restarts.
+          Choose how terminal sessions run. With tmux, sessions survive daemon restarts.
         </p>
         <select id="engine-select" style="padding: 4px 8px; border-radius: 4px; border: 1px solid var(--ds-border); background: var(--ds-bg-secondary); color: var(--ds-text-primary);">
           ${(enginesData.engines || []).map(e => {
@@ -983,6 +987,15 @@ settingsBtn?.addEventListener('click', async () => {
       body: JSON.stringify(settingsPayload)
     });
     let result = await resp.json();
+    if (!resp.ok && result.error) {
+      alert(result.error);
+      return;
+    }
+    if (result.engineSwitched) {
+      overlay.remove();
+      location.reload();
+      return;
+    }
     if (result.engineSwitchRequired) {
       const confirmed = confirm(`Switching engines will close ${result.activeSessions} active session(s). Continue?`);
       if (confirmed) {
@@ -992,6 +1005,11 @@ settingsBtn?.addEventListener('click', async () => {
           body: JSON.stringify({ ...settingsPayload, engineSwitchConfirm: true })
         });
         result = await resp.json();
+        if (result.engineSwitched) {
+          overlay.remove();
+          location.reload();
+          return;
+        }
       }
     }
     maxIssueTitleLength = Math.max(10, Math.min(200, newMaxTitle));
@@ -2550,10 +2568,14 @@ async function showIssuePicker() {
  */
 async function init() {
   // Cache available agents and default agent setting for new-tab menu and settings
-  fetch('/api/agents').then(r => r.json()).then(data => { 
-    window.__deepsteveAgents = data.agents || []; 
+  fetch('/api/agents').then(r => r.json()).then(data => {
+    window.__deepsteveAgents = data.agents || [];
     window.__deepsteveDefaultAgent = data.defaultAgent || 'claude';
     initEnginesDropdown();
+  }).catch(() => {});
+  // Track current engine for cross-window reload detection
+  fetch('/api/engines').then(r => r.json()).then(data => {
+    window.__deepsteveCurrentEngine = data.current || 'node-pty';
   }).catch(() => {});
   fetch('/api/settings').then(r => r.json()).then(s => { window.__deepsteveDefaultAgent = s.defaultAgent || 'claude'; }).catch(() => {});
 
