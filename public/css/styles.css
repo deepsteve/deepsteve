@@ -625,6 +625,29 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
 .marketplace-modal .modal-buttons { padding: 12px 20px 20px; border-top: 1px solid var(--ds-border); }
 .marketplace-empty { padding: 32px 16px; text-align: center; color: var(--ds-text-secondary); font-size: 13px; }
 
+/* Automations chip row */
+.automations-section { padding: 12px 20px; border-bottom: 1px solid var(--ds-border); }
+.automations-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--ds-text-secondary); margin-bottom: 8px; }
+.automations-row { display: flex; gap: 8px; overflow-x: auto; align-items: center; padding-bottom: 4px; }
+.automations-row::-webkit-scrollbar { height: 4px; }
+.automations-row::-webkit-scrollbar-thumb { background: var(--ds-border); border-radius: 2px; }
+.automation-chip { display: flex; align-items: center; gap: 6px; padding: 6px 14px; border-radius: 16px; background: var(--ds-bg-tertiary); border: 1px solid var(--ds-border); color: var(--ds-text-primary); font-size: 13px; white-space: nowrap; cursor: pointer; transition: border-color 0.15s, background 0.15s; }
+.automation-chip:hover { border-color: var(--ds-accent-blue); background: var(--ds-bg-secondary); }
+.automation-chip-icon { font-size: 14px; }
+.automation-add-btn { width: 32px; height: 32px; border-radius: 50%; border: 1px dashed var(--ds-border); background: transparent; color: var(--ds-text-secondary); font-size: 18px; cursor: pointer; display: flex; align-items: center; justify-content: center; flex-shrink: 0; transition: border-color 0.15s, color 0.15s; }
+.automation-add-btn:hover { border-color: var(--ds-accent-blue); color: var(--ds-accent-blue); }
+.automations-empty { display: flex; flex-direction: column; align-items: center; gap: 8px; }
+.automations-empty-btn { width: 48px; height: 48px; border-radius: 8px; border: 1px dashed var(--ds-border); background: transparent; color: var(--ds-text-secondary); font-size: 24px; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: border-color 0.15s, color 0.15s; }
+.automations-empty-btn:hover { border-color: var(--ds-accent-blue); color: var(--ds-accent-blue); }
+.automations-empty-label { font-size: 12px; color: var(--ds-text-secondary); }
+
+/* Automation edit/create modal */
+.automation-modal-form { display: flex; flex-direction: column; gap: 12px; padding: 16px 20px; }
+.automation-modal-form label { font-size: 12px; color: var(--ds-text-secondary); display: flex; flex-direction: column; gap: 4px; }
+.automation-modal-form input, .automation-modal-form textarea { background: var(--ds-bg-primary); border: 1px solid var(--ds-border); border-radius: 4px; color: var(--ds-text-primary); padding: 8px; font-family: inherit; font-size: 13px; }
+.automation-modal-form textarea { min-height: 160px; resize: vertical; font-family: var(--ds-font-mono, monospace); font-size: 12px; }
+.automation-modal-form input:focus, .automation-modal-form textarea:focus { outline: none; border-color: var(--ds-accent-blue); }
+
 /* Empty state (no tabs open) */
 #empty-state { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 0; user-select: none; background: #0d0d0d; animation: empty-state-fade-in 0.4s ease-out; }
 #empty-state.hidden { display: none; }

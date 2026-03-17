@@ -427,16 +427,19 @@ async function loadAvailableMods() {
 async function _showMarketplaceModal() {
   // Fetch installed mods and catalog in parallel
   let catalogMods = [];
+  let automations = [];
   try {
-    const [modsRes, catalogRes] = await Promise.all([
+    const [modsRes, catalogRes, automationsRes] = await Promise.all([
       fetch('/api/mods').then(r => r.json()).catch(() => null),
-      fetch('/api/mods/catalog').then(r => r.json()).catch(() => ({ mods: [] }))
+      fetch('/api/mods/catalog').then(r => r.json()).catch(() => ({ mods: [] })),
+      fetch('/api/automations').then(r => r.json()).catch(() => ({ automations: [] }))
     ]);
     if (modsRes) {
       allMods = modsRes.mods || [];
       deepsteveVersion = modsRes.deepsteveVersion || null;
     }
     catalogMods = catalogRes.mods || [];
+    automations = automationsRes.automations || [];
   } catch {}
 
   // Merge: installed mods first, then catalog-only mods
@@ -493,8 +496,14 @@ async function _showMarketplaceModal() {
   footer.className = 'modal-buttons';
   footer.innerHTML = '<button class="btn-secondary" data-close>Close</button>';
 
+  // Automations section
+  const automationsSection = document.createElement('div');
+  automationsSection.className = 'automations-section';
+  _renderAutomationsSection(automations, automationsSection);
+
   modal.appendChild(header);
   modal.appendChild(filters);
+  modal.appendChild(automationsSection);
   modal.appendChild(list);
   modal.appendChild(footer);
   overlay.appendChild(modal);
@@ -542,6 +551,7 @@ async function _showMarketplaceModal() {
     searchTimeout = setTimeout(() => {
       searchQuery = searchInput.value;
       renderCards();
+      _renderAutomationsSection(automations, automationsSection, searchQuery);
     }, 150);
   });
 
@@ -673,6 +683,222 @@ function _showSkillContentModal(name, content) {
   overlay.querySelector('[data-close]').addEventListener('click', close);
   overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
   document.body.appendChild(overlay);
+}
+
+// --- Automations ---
+
+function _renderAutomationsSection(automations, section, searchQuery = '') {
+  section.innerHTML = '';
+  const label = document.createElement('div');
+  label.className = 'automations-label';
+  label.textContent = 'Automations';
+  section.appendChild(label);
+
+  const q = searchQuery.toLowerCase();
+  const filtered = q
+    ? automations.filter(a => a.name.toLowerCase().includes(q) || (a.description || '').toLowerCase().includes(q))
+    : automations;
+
+  // Hide section entirely if search yields no matches and there's a query
+  if (q && filtered.length === 0) {
+    section.style.display = 'none';
+    return;
+  }
+  section.style.display = '';
+
+  if (filtered.length === 0) {
+    // Empty state
+    const empty = document.createElement('div');
+    empty.className = 'automations-empty';
+    const btn = document.createElement('button');
+    btn.className = 'automations-empty-btn';
+    btn.textContent = '+';
+    btn.addEventListener('click', () => _showAutomationEditModal(null, automations, section));
+    const txt = document.createElement('div');
+    txt.className = 'automations-empty-label';
+    txt.textContent = 'Create an automation →';
+    empty.appendChild(btn);
+    empty.appendChild(txt);
+    section.appendChild(empty);
+    return;
+  }
+
+  const row = document.createElement('div');
+  row.className = 'automations-row';
+
+  for (const auto of filtered) {
+    const chip = document.createElement('div');
+    chip.className = 'automation-chip';
+    chip.innerHTML = `<span class="automation-chip-icon">${auto.icon || '⚡'}</span><span>${auto.name}</span>`;
+    chip.addEventListener('click', (e) => _showAutomationContextMenu(e, auto, automations, section));
+    row.appendChild(chip);
+  }
+
+  const addBtn = document.createElement('button');
+  addBtn.className = 'automation-add-btn';
+  addBtn.textContent = '+';
+  addBtn.addEventListener('click', () => _showAutomationEditModal(null, automations, section));
+  row.appendChild(addBtn);
+
+  section.appendChild(row);
+}
+
+function _showAutomationContextMenu(e, auto, automations, section) {
+  // Remove any existing context menu
+  document.querySelectorAll('.context-menu').forEach(m => m.remove());
+
+  const menu = document.createElement('div');
+  menu.className = 'context-menu';
+
+  const editItem = document.createElement('div');
+  editItem.className = 'context-menu-item';
+  editItem.textContent = 'Edit';
+  editItem.onclick = () => {
+    menu.remove();
+    _showAutomationEditModal(auto, automations, section);
+  };
+  menu.appendChild(editItem);
+
+  const deleteItem = document.createElement('div');
+  deleteItem.className = 'context-menu-item';
+  deleteItem.textContent = 'Delete';
+  deleteItem.style.color = 'var(--ds-accent-red)';
+  deleteItem.onclick = async () => {
+    menu.remove();
+    if (!confirm(`Delete automation "${auto.name}"?`)) return;
+    try {
+      const res = await fetch(`/api/automations/${encodeURIComponent(auto.id)}`, { method: 'DELETE' });
+      if (!res.ok) throw new Error('Delete failed');
+      const idx = automations.findIndex(a => a.id === auto.id);
+      if (idx >= 0) automations.splice(idx, 1);
+      _renderAutomationsSection(automations, section);
+    } catch (err) {
+      alert('Failed to delete automation: ' + err.message);
+    }
+  };
+  menu.appendChild(deleteItem);
+
+  // Position near click
+  menu.style.left = e.clientX + 'px';
+  menu.style.top = e.clientY + 'px';
+  document.body.appendChild(menu);
+
+  // Close on outside click
+  const closeMenu = (ev) => {
+    if (!menu.contains(ev.target)) {
+      menu.remove();
+      document.removeEventListener('click', closeMenu, true);
+    }
+  };
+  setTimeout(() => document.addEventListener('click', closeMenu, true), 0);
+}
+
+function _showAutomationEditModal(existing, automations, section) {
+  const isEdit = !!existing;
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+
+  const modal = document.createElement('div');
+  modal.className = 'modal';
+  modal.style.width = '480px';
+
+  const headerEl = document.createElement('div');
+  headerEl.className = 'modal-header';
+  headerEl.innerHTML = `<span>${isEdit ? 'Edit Automation' : 'New Automation'}</span>`;
+  modal.appendChild(headerEl);
+
+  const form = document.createElement('div');
+  form.className = 'automation-modal-form';
+
+  const nameLabel = document.createElement('label');
+  nameLabel.textContent = 'Name';
+  const nameInput = document.createElement('input');
+  nameInput.type = 'text';
+  nameInput.placeholder = 'e.g. Email digest';
+  nameInput.value = existing ? existing.name : '';
+  nameLabel.appendChild(nameInput);
+  form.appendChild(nameLabel);
+
+  const iconLabel = document.createElement('label');
+  iconLabel.textContent = 'Icon';
+  const iconInput = document.createElement('input');
+  iconInput.type = 'text';
+  iconInput.placeholder = '⚡';
+  iconInput.value = existing ? (existing.icon || '⚡') : '⚡';
+  iconInput.style.width = '60px';
+  iconLabel.appendChild(iconInput);
+  form.appendChild(iconLabel);
+
+  const bodyLabel = document.createElement('label');
+  bodyLabel.textContent = 'Instructions';
+  const bodyInput = document.createElement('textarea');
+  bodyInput.placeholder = 'Instructions for Claude...';
+  bodyLabel.appendChild(bodyInput);
+  form.appendChild(bodyLabel);
+
+  modal.appendChild(form);
+
+  // If editing, load the full body
+  if (isEdit) {
+    fetch(`/api/automations/${encodeURIComponent(existing.id)}`)
+      .then(r => r.json())
+      .then(data => { bodyInput.value = data.body || ''; })
+      .catch(() => {});
+  }
+
+  const footer = document.createElement('div');
+  footer.className = 'modal-footer';
+  footer.style.display = 'flex';
+  footer.style.gap = '8px';
+  footer.style.justifyContent = 'flex-end';
+  footer.style.padding = '12px 20px 20px';
+
+  const cancelBtn = document.createElement('button');
+  cancelBtn.className = 'btn-secondary';
+  cancelBtn.textContent = 'Cancel';
+  cancelBtn.addEventListener('click', () => overlay.remove());
+
+  const saveBtn = document.createElement('button');
+  saveBtn.className = 'btn';
+  saveBtn.textContent = 'Save';
+  saveBtn.addEventListener('click', async () => {
+    const name = nameInput.value.trim();
+    if (!name) { nameInput.focus(); return; }
+    const id = existing ? existing.id : name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+    if (!id) { nameInput.focus(); return; }
+    const icon = iconInput.value.trim() || '⚡';
+    const body = bodyInput.value;
+
+    try {
+      const res = await fetch('/api/automations', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id, name, icon, body })
+      });
+      if (!res.ok) {
+        const data = await res.json();
+        throw new Error(data.error || 'Save failed');
+      }
+      // Update local list
+      const idx = automations.findIndex(a => a.id === id);
+      const entry = { id, name, icon, description: name };
+      if (idx >= 0) automations[idx] = entry;
+      else automations.push(entry);
+      _renderAutomationsSection(automations, section);
+      overlay.remove();
+    } catch (err) {
+      alert('Failed to save: ' + err.message);
+    }
+  });
+
+  footer.appendChild(cancelBtn);
+  footer.appendChild(saveBtn);
+  modal.appendChild(footer);
+
+  overlay.appendChild(modal);
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+  document.body.appendChild(overlay);
+  nameInput.focus();
 }
 
 function _createModCard(mod, marketplaceOverlay) {
