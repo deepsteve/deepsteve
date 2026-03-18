@@ -780,8 +780,7 @@ function wireShellOutput(id) {
   if (!entry.scrollback) entry.scrollback = [];
   if (!entry.scrollbackSize) entry.scrollbackSize = 0;
 
-  const dataHandler = (sid, data) => {
-    if (sid !== id) return;
+  const dataHandler = (data) => {
     const e = shells.get(id);
     if (!e) return;
     e.lastActivity = Date.now();
@@ -860,7 +859,7 @@ function wireShellOutput(id) {
     e.clients.forEach((c) => c.send(data));
   };
 
-  engine.on('data', dataHandler);
+  engine.onData(id, dataHandler);
   // Store reference for cleanup
   entry._engineDataHandler = dataHandler;
 }

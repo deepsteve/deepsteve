@@ -137,11 +137,13 @@ class TmuxEngine extends Engine {
       rows: rows || 40,
     });
 
-    const entry = { attachPty, exitCallbacks: [] };
+    const entry = { attachPty, exitCallbacks: [], dataCallbacks: [] };
     this._sessions.set(id, entry);
 
     attachPty.onData((data) => {
-      this.emit('data', id, data);
+      for (const cb of entry.dataCallbacks) {
+        try { cb(data); } catch {}
+      }
     });
 
     attachPty.onExit(({ exitCode, signal }) => {
@@ -257,9 +259,14 @@ class TmuxEngine extends Engine {
     if (entry) entry.exitCallbacks.push(callback);
   }
 
+  onData(id, callback) {
+    const entry = this._sessions.get(id);
+    if (entry) entry.dataCallbacks.push(callback);
+  }
+
   removeDataListener(id, handler) {
     const entry = this._sessions.get(id);
-    if (entry) entry.attachPty.removeListener('data', handler);
+    if (entry) entry.dataCallbacks = entry.dataCallbacks.filter(cb => cb !== handler);
   }
 
   has(id) {

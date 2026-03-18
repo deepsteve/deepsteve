@@ -51,6 +51,11 @@ class Engine extends EventEmitter {
     throw new Error('onExit() not implemented');
   }
 
+  /** Register a data handler for a specific session. */
+  onData(id, callback) {
+    throw new Error('onData() not implemented');
+  }
+
   /** Remove a specific data listener for a session. */
   removeDataListener(id, handler) {
     throw new Error('removeDataListener() not implemented');

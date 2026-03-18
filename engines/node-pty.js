@@ -20,11 +20,13 @@ class NodePtyEngine extends Engine {
       env: env || process.env,
     });
 
-    const entry = { pty: p, exitCallbacks: [] };
+    const entry = { pty: p, exitCallbacks: [], dataCallbacks: [] };
     this._ptys.set(id, entry);
 
     p.onData((data) => {
-      this.emit('data', id, data);
+      for (const cb of entry.dataCallbacks) {
+        try { cb(data); } catch {}
+      }
     });
 
     p.onExit(({ exitCode, signal }) => {
@@ -71,9 +73,14 @@ class NodePtyEngine extends Engine {
     if (entry) entry.exitCallbacks.push(callback);
   }
 
+  onData(id, callback) {
+    const entry = this._ptys.get(id);
+    if (entry) entry.dataCallbacks.push(callback);
+  }
+
   removeDataListener(id, handler) {
     const entry = this._ptys.get(id);
-    if (entry) entry.pty.removeListener('data', handler);
+    if (entry) entry.dataCallbacks = entry.dataCallbacks.filter(cb => cb !== handler);
   }
 
   has(id) {
