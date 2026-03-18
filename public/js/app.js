@@ -579,7 +579,8 @@ settingsBtn?.addEventListener('click', async () => {
         </p>
         <select id="engine-select" style="padding: 4px 8px; border-radius: 4px; border: 1px solid var(--ds-border); background: var(--ds-bg-secondary); color: var(--ds-text-primary);">
           ${(enginesData.engines || []).map(e => {
-            const label = e.available ? `${e.name}${e.version ? ' v' + e.version : ''}` : `${e.name} (not installed)`;
+            const experimental = e.id === 'tmux' ? ' (experimental)' : '';
+            const label = e.available ? `${e.name}${e.version ? ' v' + e.version : ''}${experimental}` : `${e.name} (not installed)`;
             return `<option value="${e.id}" ${e.id === enginesData.current ? 'selected' : ''} ${!e.available ? 'disabled' : ''}>${escapeHtml(label)}</option>`;
           }).join('')}
         </select>
