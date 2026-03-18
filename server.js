@@ -1532,7 +1532,7 @@ app.post('/api/window-configs/:id/apply', (req, res) => {
     if (agentConfig.supportsSessionWatch) watchClaudeSessionDir(id);
     engine.onExit(id, () => {
       if (agentConfig.supportsSessionWatch) unwatchClaudeSessionDir(id);
-      if (!shuttingDown) { shells.delete(id); saveState(); }
+      if (!shuttingDown) { notifyClientsShellExited(id); shells.delete(id); saveState(); }
     });
 
     createdSessions.push({ id, name, cwd });
@@ -2040,6 +2040,13 @@ app.delete('/api/shells/:id', (req, res) => {
   res.status(404).json({ error: 'Session not found' });
 });
 
+function notifyClientsShellExited(id) {
+  const entry = shells.get(id);
+  if (!entry) return;
+  const msg = JSON.stringify({ type: 'close-tab' });
+  entry.clients.forEach((c) => { try { c.send(msg); } catch {} });
+}
+
 function closeSession(id) {
   const entry = shells.get(id);
   if (!entry) return false;
@@ -2249,7 +2256,7 @@ app.post('/api/start-issue', (req, res) => {
   if (agentConfig.supportsSessionWatch) watchClaudeSessionDir(id);
   engine.onExit(id, () => {
     if (agentConfig.supportsSessionWatch) unwatchClaudeSessionDir(id);
-    if (!shuttingDown) { shells.delete(id); saveState(); }
+    if (!shuttingDown) { notifyClientsShellExited(id); shells.delete(id); saveState(); }
   });
   saveState();
 
@@ -2399,7 +2406,7 @@ if (engine instanceof TmuxEngine) {
         if (agentConfig.supportsSessionWatch) watchClaudeSessionDir(id);
         engine.onExit(id, () => {
           if (agentConfig.supportsSessionWatch) unwatchClaudeSessionDir(id);
-          if (!shuttingDown) { shells.delete(id); saveState(); }
+          if (!shuttingDown) { notifyClientsShellExited(id); shells.delete(id); saveState(); }
         });
         delete savedState[id];
         log(`tmux: reattached session ${id} (${meta.name || meta.cwd})`);
@@ -2699,10 +2706,11 @@ function handleWsConnection(ws, req) {
             entry.scrollbackSize = 0;
             wireShellOutput(id);
             watchClaudeSessionDir(id);
-            engine.onExit(id, () => { if (!shuttingDown) { unwatchClaudeSessionDir(id); shells.delete(id); saveState(); } });
+            engine.onExit(id, () => { if (!shuttingDown) { unwatchClaudeSessionDir(id); notifyClientsShellExited(id); shells.delete(id); saveState(); } });
             saveState();
           }
         } else {
+          notifyClientsShellExited(id);
           shells.delete(id);
           saveState();
         }
@@ -2748,7 +2756,7 @@ function handleWsConnection(ws, req) {
     shells.set(id, { clients: new Set(), cwd: worktreeCwd, claudeSessionId: sessionId, agentType, worktree: worktree || null, name: name || null, waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now() });
     wireShellOutput(id);
     if (agentConfig.supportsSessionWatch) watchClaudeSessionDir(id);
-    engine.onExit(id, () => { if (!shuttingDown) { if (agentConfig.supportsSessionWatch) unwatchClaudeSessionDir(id); shells.delete(id); saveState(); } });
+    engine.onExit(id, () => { if (!shuttingDown) { if (agentConfig.supportsSessionWatch) unwatchClaudeSessionDir(id); notifyClientsShellExited(id); shells.delete(id); saveState(); } });
     saveState();
   }
 
