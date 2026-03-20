@@ -63,6 +63,40 @@ const reloadClients = new Set(); // WebSocket connections for live-reload
 const pendingOpens = []; // open-session messages waiting for a browser to connect
 let restartState = null; // { resolve: fn, timeout: timer } — first browser response wins
 
+// Deliver a message to a specific browser window, falling back to first available client.
+// If no clients are connected, queues the message for flush on next connection.
+function deliverToWindow(msg, targetWindowId, { openBrowser } = {}) {
+  const msgObj = typeof msg === 'string' ? JSON.parse(msg) : { ...msg };
+  const readyClients = [...reloadClients].filter(c => c.readyState === 1);
+  let delivered = false;
+
+  if (targetWindowId) {
+    for (const client of readyClients) {
+      if (client.windowId === targetWindowId && client.readyState === 1) {
+        client.send(JSON.stringify(msgObj));
+        delivered = true;
+        break;
+      }
+    }
+  }
+
+  if (!delivered && readyClients.length > 0) {
+    // Send to first available client only (not broadcast)
+    const fallbackMsg = { ...msgObj };
+    delete fallbackMsg.windowId;
+    readyClients[0].send(JSON.stringify(fallbackMsg));
+    delivered = true;
+  }
+
+  if (!delivered) {
+    // Keep windowId for flush routing
+    pendingOpens.push(JSON.stringify(msgObj));
+    if (openBrowser) {
+      exec(`open "http://localhost:${PORT}"`);
+    }
+  }
+}
+
 function log(...args) {
   const ts = new Date().toISOString().slice(11, 23);
   console.log(`[${ts}]`, ...args);
@@ -1462,34 +1496,7 @@ app.post('/api/window-configs/:id/apply', (req, res) => {
   if (!config) return res.status(404).json({ error: 'config not found' });
 
   const { windowId } = req.body || {};
-  const readyClients = [...reloadClients].filter(c => c.readyState === 1);
   const createdSessions = [];
-
-  function deliverToWindow(msg) {
-    const msgStr = typeof msg === 'string' ? msg : JSON.stringify(msg);
-    let delivered = false;
-    if (windowId) {
-      for (const client of readyClients) {
-        if (client.windowId === windowId && client.readyState === 1) {
-          client.send(msgStr);
-          delivered = true;
-          break;
-        }
-      }
-    }
-    if (!delivered && readyClients.length > 0) {
-      // Strip windowId when falling back to first available client
-      const parsed = JSON.parse(msgStr);
-      delete parsed.windowId;
-      readyClients[0].send(JSON.stringify(parsed));
-      delivered = true;
-    }
-    if (!delivered) {
-      const parsed = JSON.parse(msgStr);
-      delete parsed.windowId;
-      pendingOpens.push(JSON.stringify(parsed));
-    }
-  }
 
   for (const tab of config.tabs) {
     const tabType = tab.type || 'terminal';
@@ -1499,7 +1506,7 @@ app.post('/api/window-configs/:id/apply', (req, res) => {
       const name = tab.name || 'Display';
       setDisplayTab(id, tab.html);
       createdSessions.push({ id, name, type: 'display-tab' });
-      deliverToWindow({ type: 'open-display-tab', id, name, windowId: windowId || undefined });
+      deliverToWindow({ type: 'open-display-tab', id, name, windowId: windowId || undefined }, windowId);
       continue;
     }
 
@@ -1507,7 +1514,7 @@ app.post('/api/window-configs/:id/apply', (req, res) => {
       const name = tab.name || 'Baby Browser';
       const url = tab.url || '';
       createdSessions.push({ name, type: 'baby-browser', url });
-      deliverToWindow({ type: 'open-mod-tab', modId: 'baby-browser', name, url, windowId: windowId || undefined });
+      deliverToWindow({ type: 'open-mod-tab', modId: 'baby-browser', name, url, windowId: windowId || undefined }, windowId);
       continue;
     }
 
@@ -1535,7 +1542,7 @@ app.post('/api/window-configs/:id/apply', (req, res) => {
     });
 
     createdSessions.push({ id, name, cwd });
-    deliverToWindow({ type: 'open-session', id, cwd, name, windowId: windowId || undefined });
+    deliverToWindow({ type: 'open-session', id, cwd, name, windowId: windowId || undefined }, windowId);
   }
 
   saveState();
@@ -2272,45 +2279,7 @@ app.post('/api/start-issue', (req, res) => {
 
   // Notify browser to open the new session
   log(`[API] start-issue: windowId=${windowId}, sessionId=${id}, readyClients=${readyClients.length}, clientWindowIds=[${readyClients.map(c => c.windowId).join(',')}]`);
-  let delivered = false;
-  if (windowId) {
-    // Targeted: send only to the reload client whose windowId matches
-    const openMsg = JSON.stringify({ type: 'open-session', id, cwd, name, windowId });
-    for (const client of readyClients) {
-      if (client.windowId === windowId && client.readyState === 1) {
-        client.send(openMsg);
-        delivered = true;
-        break;
-      }
-    }
-    if (!delivered && readyClients.length > 0) {
-      // WindowId didn't match any client — broadcast without windowId so client-side filter accepts it
-      log(`[API] start-issue: windowId=${windowId} not found among reload clients [${readyClients.map(c => c.windowId).join(',')}], broadcasting`);
-      const broadcastMsg = JSON.stringify({ type: 'open-session', id, cwd, name });
-      for (const client of readyClients) {
-        if (client.readyState === 1) client.send(broadcastMsg);
-      }
-      delivered = true;
-    }
-    if (!delivered) {
-      // No browser connected — queue for when the target window reconnects
-      pendingOpens.push(openMsg);
-      log(`[API] start-issue: no browser open, queued open-session for windowId=${windowId}`);
-      delivered = true;
-    }
-  }
-  if (!delivered && readyClients.length > 0) {
-    // No windowId — send to first available window
-    readyClients[0].send(JSON.stringify({ type: 'open-session', id, cwd, name }));
-    delivered = true;
-  }
-  if (!delivered) {
-    // No browser open — queue message and open one
-    pendingOpens.push(JSON.stringify({ type: 'open-session', id, cwd, name }));
-    log(`[API] start-issue: no browser open, queued open-session and launching browser`);
-    exec(`open "http://localhost:${PORT}"`);
-    delivered = true;
-  }
+  deliverToWindow({ type: 'open-session', id, cwd, name, windowId }, windowId, { openBrowser: true });
   res.json({ id, name, url: `http://localhost:${PORT}` });
 });
 
@@ -2877,7 +2846,7 @@ function broadcastToWindow(windowId, msg) {
 }
 
 // Initialize MCP server (async, ~100ms for dynamic import)
-initMCP({ app, shells, wss, broadcast, broadcastToWindow, log, MODS_DIR, closeSession, spawnSession, engine, getSpawnArgs, getAgentConfig, wireShellOutput, watchClaudeSessionDir, unwatchClaudeSessionDir, saveState, validateWorktree, ensureWorktree, submitToShell, fetchIssueFromGitHub, deliverPromptWhenReady, reloadClients, pendingOpens, settings, isShuttingDown: () => shuttingDown, displayTabs, setDisplayTab, deleteDisplayTab }).catch(e => log('MCP init failed:', e.message));
+initMCP({ app, shells, wss, broadcast, broadcastToWindow, log, MODS_DIR, closeSession, spawnSession, engine, getSpawnArgs, getAgentConfig, wireShellOutput, watchClaudeSessionDir, unwatchClaudeSessionDir, saveState, validateWorktree, ensureWorktree, submitToShell, fetchIssueFromGitHub, deliverPromptWhenReady, reloadClients, deliverToWindow, settings, isShuttingDown: () => shuttingDown, displayTabs, setDisplayTab, deleteDisplayTab }).catch(e => log('MCP init failed:', e.message));
 
 // Watch themes directory for changes and broadcast to clients
 let themeWatchDebounce = null;

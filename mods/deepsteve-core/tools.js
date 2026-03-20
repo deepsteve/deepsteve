@@ -8,43 +8,8 @@ function init(context) {
     watchClaudeSessionDir, unwatchClaudeSessionDir, saveState,
     validateWorktree, ensureWorktree, submitToShell,
     fetchIssueFromGitHub, deliverPromptWhenReady,
-    reloadClients, pendingOpens, settings, log, isShuttingDown,
+    reloadClients, deliverToWindow, settings, log, isShuttingDown,
   } = context;
-
-  // Notify browser to open a new session tab, targeting the caller's window
-  function notifyOpenSession(id, cwd, name, windowId, initialPrompt) {
-    const readyClients = [...reloadClients].filter(c => c.readyState === 1);
-    const openMsg = JSON.stringify({ type: 'open-session', id, cwd, name, windowId, initialPrompt });
-    let delivered = false;
-
-    if (windowId) {
-      for (const client of readyClients) {
-        if (client.windowId === windowId && client.readyState === 1) {
-          client.send(openMsg);
-          delivered = true;
-          break;
-        }
-      }
-      if (!delivered && readyClients.length > 0) {
-        const broadcastMsg = JSON.stringify({ type: 'open-session', id, cwd, name, initialPrompt });
-        for (const client of readyClients) {
-          if (client.readyState === 1) client.send(broadcastMsg);
-        }
-        delivered = true;
-      }
-      if (!delivered) {
-        pendingOpens.push(openMsg);
-        delivered = true;
-      }
-    }
-    if (!delivered && readyClients.length > 0) {
-      readyClients[0].send(JSON.stringify({ type: 'open-session', id, cwd, name, initialPrompt }));
-      delivered = true;
-    }
-    if (!delivered) {
-      pendingOpens.push(JSON.stringify({ type: 'open-session', id, cwd, name, initialPrompt }));
-    }
-  }
 
   return {
     get_session_info: {
@@ -174,7 +139,7 @@ function init(context) {
           });
         }
 
-        notifyOpenSession(id, spawnCwd, name, windowId, prompt);
+        deliverToWindow({ type: 'open-session', id, cwd: spawnCwd, name, windowId, initialPrompt: prompt }, windowId);
 
         return { content: [{ type: 'text', text: JSON.stringify({ id, name, cwd: spawnCwd, worktree: worktree || null }) }] };
       },
@@ -253,7 +218,7 @@ function init(context) {
         });
         saveState();
 
-        notifyOpenSession(id, spawnCwd, tabName, windowId);
+        deliverToWindow({ type: 'open-session', id, cwd: spawnCwd, name: tabName, windowId }, windowId);
 
         return { content: [{ type: 'text', text: JSON.stringify({ id, name: tabName || id, cwd: spawnCwd, worktree: validatedWorktree }) }] };
       },
