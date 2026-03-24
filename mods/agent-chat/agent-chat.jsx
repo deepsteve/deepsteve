@@ -230,8 +230,11 @@ function ChatPanel() {
   const [isListening, setIsListening] = useState(false);
 
   const messagesEndRef = useRef(null);
+  const messagesContainerRef = useRef(null);
   const unreadMarkerRef = useRef(null);
   const prevMessageCountRef = useRef(0);
+  const userScrolledRef = useRef(false);
+  const [showScrollBtn, setShowScrollBtn] = useState(false);
   const senderNameRef = useRef(senderName);
   const seenMessageIdsRef = useRef(new Set());
   const spokenMessageIdsRef = useRef(new Set());
@@ -374,6 +377,26 @@ function ChatPanel() {
     return () => { if (unsub) unsub(); };
   }, []);
 
+  // Track user scroll position — pause auto-scroll when user scrolls up
+  useEffect(() => {
+    const container = messagesContainerRef.current;
+    if (!container) return;
+    const BOTTOM_TOLERANCE = 30;
+    const onScroll = () => {
+      const atBottom = container.scrollHeight - container.scrollTop - container.clientHeight <= BOTTOM_TOLERANCE;
+      userScrolledRef.current = !atBottom;
+      setShowScrollBtn(!atBottom);
+    };
+    container.addEventListener('scroll', onScroll);
+    return () => container.removeEventListener('scroll', onScroll);
+  }, []);
+
+  const scrollChatToBottom = useCallback(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    userScrolledRef.current = false;
+    setShowScrollBtn(false);
+  }, []);
+
   // Auto-scroll when new messages arrive; mark channel read if visible
   useEffect(() => {
     const msgs = channels[activeChannel]?.messages || [];
@@ -388,7 +411,7 @@ function ChatPanel() {
             messagesEndRef.current?.scrollIntoView({ behavior: 'instant' });
           }
         });
-      } else {
+      } else if (!userScrolledRef.current) {
         messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
       }
       if (!document.hidden) {
@@ -598,7 +621,7 @@ function ChatPanel() {
       </div>
 
       {/* Message list */}
-      <div style={{ flex: 1, overflowY: 'auto' }}>
+      <div ref={messagesContainerRef} style={{ flex: 1, overflowY: 'auto', position: 'relative' }}>
         {messages.length === 0 ? (
           <div style={{
             padding: 24,
@@ -631,6 +654,27 @@ function ChatPanel() {
         )}
         <div ref={messagesEndRef} />
       </div>
+
+      {/* Scroll-to-bottom button */}
+      {showScrollBtn && (
+        <div style={{ display: 'flex', justifyContent: 'center', marginTop: -28, position: 'relative', zIndex: 10, pointerEvents: 'none' }}>
+          <button
+            onClick={scrollChatToBottom}
+            style={{
+              pointerEvents: 'auto',
+              background: 'var(--ds-bg-secondary, #21262d)',
+              color: 'var(--ds-text-secondary, #8b949e)',
+              border: '1px solid var(--ds-border, rgba(255,255,255,0.1))',
+              borderRadius: 12,
+              padding: '2px 10px',
+              fontSize: 12,
+              cursor: 'pointer',
+              lineHeight: '18px',
+            }}
+            aria-label="Scroll to bottom"
+          >&#8595; New messages</button>
+        </div>
+      )}
 
       {/* Input area */}
       <div style={{
