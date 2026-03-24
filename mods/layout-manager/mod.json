@@ -1,0 +1,14 @@
+{
+  "name": "Layout Manager",
+  "version": "0.1.0",
+  "minDeepsteveVersion": "0.5.0",
+  "description": "Split and tile terminal sessions into multi-pane layouts",
+  "enabledByDefault": true,
+  "entry": "index.html",
+  "display": "panel",
+  "panel": { "position": "right", "defaultWidth": 280, "minWidth": 200 },
+  "toolbar": { "label": "Layout" },
+  "tools": [
+    { "name": "set_layout", "description": "Set the terminal layout to a split/tiled configuration" }
+  ]
+}
