@@ -48,6 +48,7 @@ let sceneQueryCallbacks = [];        // [{modId, cb}] — callbacks for scene-qu
 let sceneSnapshotCallbacks = [];     // [{modId, cb}] — callbacks for scene-snapshot-request
 let babyBrowserCallbacks = [];       // [{modId, cb}] — callbacks for baby-browser-request
 let activeSessionCallbacks = [];     // [{modId, cb}] — callbacks for active session changes
+let layoutCallbacks = [];            // [{modId, cb}] — callbacks for layout state changes
 let getActiveSessionIdFn = null;     // set from appHooks
 let deepsteveVersion = null;   // set from /api/mods response
 let panelWidth = 360;
@@ -1478,6 +1479,7 @@ function _unloadPanelMod(modId) {
   settingsCallbacks = settingsCallbacks.filter(e => e.modId !== modId);
   sessionCallbacks = sessionCallbacks.filter(e => e.modId !== modId);
   activeSessionCallbacks = activeSessionCallbacks.filter(e => e.modId !== modId);
+  layoutCallbacks = layoutCallbacks.filter(e => e.modId !== modId);
 
   // If it was the visible panel, switch to another or collapse
   if (visiblePanelId === modId) {
@@ -1682,6 +1684,12 @@ function notifySessionsChanged(sessionList) {
 /**
  * Notify panel mods that tasks have changed (called from app.js on WS broadcast).
  */
+function notifyLayoutChanged(state) {
+  for (const entry of layoutCallbacks) {
+    try { entry.cb(state); } catch (e) { console.error('Layout callback error:', e); }
+  }
+}
+
 function notifyTasksChanged(tasks) {
   for (const entry of taskCallbacks) {
     try { entry.cb(tasks); } catch (e) { console.error('Task callback error:', e); }
@@ -1833,6 +1841,28 @@ function _injectBridgeAPI(iframeEl, modId) {
           settingsCallbacks = settingsCallbacks.filter(e => e !== entry);
         };
       },
+      // Layout management
+      getLayoutState() {
+        return hooks.getLayoutState?.() || { layoutId: 'single', panes: [], focusedPane: 0, presets: [] };
+      },
+      setLayout(layoutId) {
+        hooks.setLayout?.(layoutId);
+      },
+      assignPane(paneIndex, sessionId) {
+        hooks.assignPane?.(paneIndex, sessionId);
+      },
+      focusPane(index) {
+        hooks.focusPane?.(index);
+      },
+      onLayoutChanged(cb) {
+        const entry = { modId, cb };
+        layoutCallbacks.push(entry);
+        // Fire immediately with current state
+        try { cb(hooks.getLayoutState?.() || { layoutId: 'single', panes: [], focusedPane: 0, presets: [] }); } catch {}
+        return () => {
+          layoutCallbacks = layoutCallbacks.filter(e => e !== entry);
+        };
+      },
       onTasksChanged(cb) {
         const entry = { modId, cb };
         taskCallbacks.push(entry);
@@ -1969,6 +1999,7 @@ function handleModChanged(modId) {
     settingsCallbacks = settingsCallbacks.filter(e => e.modId !== modId);
     sessionCallbacks = sessionCallbacks.filter(e => e.modId !== modId);
     activeSessionCallbacks = activeSessionCallbacks.filter(e => e.modId !== modId);
+    layoutCallbacks = layoutCallbacks.filter(e => e.modId !== modId);
 
     panelEntry.iframe.src = panelEntry.iframe.src.replace(/(\?v=\d+)?$/, `?v=${Date.now()}`);
   }
@@ -2019,6 +2050,7 @@ export const ModManager = {
   showTerminalForSession,
   notifySessionsChanged,
   notifyActiveSessionChanged,
+  notifyLayoutChanged,
   notifyTasksChanged,
   notifyAgentChatChanged,
   notifyBrowserEvalRequest,
