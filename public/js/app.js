@@ -15,6 +15,7 @@ import { ModManager } from './mod-manager.js';
 import { initFileDrop } from './file-drop.js';
 import { init as initCmdHoldMode, setEnabled as setCmdHoldModeEnabled, setHoldMs as setCmdHoldModeHoldMs } from './cmd-tab-switch.js';
 import { init as initCommandPalette, setEnabled as setCommandPaletteEnabled, setShortcut as setCommandPaletteShortcut } from './command-palette.js';
+import { init as initHashCommands, beforeSend as hashCommandsBeforeSend, setWaitingForInput as setHashCommandsWaiting, setEnabled as setHashCommandsEnabled } from './hash-commands.js';
 import { nsKey } from './storage-namespace.js';
 
 // Configuration
@@ -183,6 +184,9 @@ function applySettings(settings) {
   }
   if (settings.commandPaletteShortcut !== undefined) {
     setCommandPaletteShortcut(settings.commandPaletteShortcut);
+  }
+  if (settings.hashCommandsEnabled !== undefined) {
+    setHashCommandsEnabled(settings.hashCommandsEnabled);
   }
   if (settings.symlinkWorktreeSettings !== undefined) {
     const el = document.querySelector('#symlink-worktree-settings');
@@ -451,6 +455,7 @@ settingsBtn?.addEventListener('click', async () => {
   const currentCmdTabSwitchHoldMs = settingsData.cmdTabSwitchHoldMs !== undefined ? settingsData.cmdTabSwitchHoldMs : 1000;
   const currentCommandPaletteEnabled = settingsData.commandPaletteEnabled !== undefined ? settingsData.commandPaletteEnabled : true;
   const currentCommandPaletteShortcut = settingsData.commandPaletteShortcut || 'Meta+k';
+  const currentHashCommandsEnabled = settingsData.hashCommandsEnabled !== undefined ? settingsData.hashCommandsEnabled : true;
   const currentDefaultAgent = settingsData.defaultAgent || 'claude';
   const currentOpencodeBinary = settingsData.opencodeBinary || 'opencode';
   const currentGeminiBinary = settingsData.geminiBinary || 'gemini';
@@ -534,6 +539,10 @@ settingsBtn?.addEventListener('click', async () => {
         <label style="font-size: 13px; color: var(--ds-text-primary); cursor: pointer; display: flex; align-items: center; gap: 8px;">
           <input type="checkbox" id="command-palette-enabled" ${currentCommandPaletteEnabled ? 'checked' : ''} style="accent-color: var(--ds-accent-green);">
           Command Palette
+        </label>
+        <label style="font-size: 13px; color: var(--ds-text-primary); cursor: pointer; display: flex; align-items: center; gap: 8px; margin-top: 8px;">
+          <input type="checkbox" id="hash-commands-enabled" ${currentHashCommandsEnabled ? 'checked' : ''} style="accent-color: var(--ds-accent-green);">
+          Hash Commands <span style="font-size: 11px; color: var(--ds-text-secondary);">(# prefix for instant actions)</span>
         </label>
         <label style="font-size: 13px; color: var(--ds-text-primary); display: flex; align-items: center; gap: 8px; margin-top: 8px;">
           Shortcut:
@@ -979,6 +988,7 @@ settingsBtn?.addEventListener('click', async () => {
     const cmdTabSwitchHoldMs = Math.max(0, Number(overlay.querySelector('#cmd-tab-switch-hold-ms').value) || 0);
     const commandPaletteEnabled = overlay.querySelector('#command-palette-enabled').checked;
     const commandPaletteShortcut = overlay.querySelector('#command-palette-shortcut').value;
+    const hashCommandsEnabled = overlay.querySelector('#hash-commands-enabled').checked;
     const enabledAgents = [];
     if (overlay.querySelector('#agent-claude').checked) enabledAgents.push('claude');
     if (overlay.querySelector('#agent-opencode').checked) enabledAgents.push('opencode');
@@ -986,7 +996,7 @@ settingsBtn?.addEventListener('click', async () => {
     const opencodeBinary = overlay.querySelector('#opencode-binary').value || 'opencode';
     const geminiBinary = overlay.querySelector('#gemini-binary').value || 'gemini';
     const selectedEngine = overlay.querySelector('#engine-select')?.value || 'node-pty';
-    const settingsPayload = { shellProfile, maxIssueTitleLength: newMaxTitle, wandPlanMode, wandPromptTemplate, symlinkWorktreeSettings, cmdTabSwitch, cmdTabSwitchHoldMs, commandPaletteEnabled, commandPaletteShortcut, enabledAgents, opencodeBinary, geminiBinary, windowConfigs: editingConfigs, engine: selectedEngine };
+    const settingsPayload = { shellProfile, maxIssueTitleLength: newMaxTitle, wandPlanMode, wandPromptTemplate, symlinkWorktreeSettings, cmdTabSwitch, cmdTabSwitchHoldMs, commandPaletteEnabled, commandPaletteShortcut, hashCommandsEnabled, enabledAgents, opencodeBinary, geminiBinary, windowConfigs: editingConfigs, engine: selectedEngine };
     let resp = await fetch('/api/settings', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1027,6 +1037,7 @@ settingsBtn?.addEventListener('click', async () => {
     setCmdHoldModeHoldMs(cmdTabSwitchHoldMs);
     setCommandPaletteEnabled(commandPaletteEnabled);
     setCommandPaletteShortcut(commandPaletteShortcut);
+    setHashCommandsEnabled(hashCommandsEnabled);
     // Refresh agents data if agent settings changed
     const prevEnabled = (window.__deepsteveAgents || []).filter(a => a.enabled).map(a => a.id).sort().join(',');
     const newEnabled = enabledAgents.sort().join(',');
@@ -1198,6 +1209,7 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
         if (entry) {
           const [sid, s] = entry;
           s.waitingForInput = msg.waiting;
+          if (sid === activeId) setHashCommandsWaiting(msg.waiting);
           s.scrollControl.syncViewport();
           TabManager.updateBadge(sid, msg.waiting && activeId !== sid);
           updateTitle();
@@ -1309,7 +1321,8 @@ function initTerminal(id, ws, cwd, initialName, { hasScrollback = false, pending
   const { term, fit } = createTerminal(container);
   const scrollControl = setupTerminalIO(term, ws, {
     onUserInput: () => clearNotification(id),
-    container
+    container,
+    beforeSend: (data) => hashCommandsBeforeSend(data, container)
   });
 
   // Get saved name or generate default
@@ -1583,6 +1596,7 @@ function switchTo(id) {
 
     if (session.type === 'mod-tab' || session.type === 'display-tab') return;
 
+    setHashCommandsWaiting(!!session.waitingForInput);
     session.scrollControl.suppressScroll();
     requestAnimationFrame(() => {
       try {
@@ -2708,6 +2722,36 @@ async function init() {
     closeActiveTab: () => { if (activeId) confirmCloseSession(activeId).then(ok => { if (ok) killSession(activeId); }); },
     openSettings: () => { document.getElementById('settings-btn')?.click(); },
     openMods: () => { document.getElementById('mods-btn')?.click(); },
+    focusTerminal: () => {
+      if (activeId) {
+        const s = sessions.get(activeId);
+        if (s?.term) s.term.focus();
+      }
+    },
+  });
+
+  // Initialize Hash Commands (# prefix for instant actions)
+  initHashCommands({
+    quickNewTerminal,
+    closeActiveTab: () => { if (activeId) confirmCloseSession(activeId).then(ok => { if (ok) killSession(activeId); }); },
+    openSettings: () => { document.getElementById('settings-btn')?.click(); },
+    openMods: () => { document.getElementById('mods-btn')?.click(); },
+    renameActiveTab: (name) => {
+      if (!activeId) return;
+      const session = sessions.get(activeId);
+      if (!session) return;
+      const finalName = name || getDefaultTabName(session.cwd);
+      session.name = finalName;
+      TabManager.updateLabel(activeId, finalName);
+      if (session.ws) session.ws.sendJSON({ type: 'rename', name: finalName });
+      // Update session stores
+      const tabList = TabSessions.get();
+      const tabEntry = tabList.find(s => s.id === activeId);
+      if (tabEntry) { tabEntry.name = finalName; TabSessions.save(tabList); }
+      SessionStore.updateSession(getWindowId(), activeId, { name: finalName });
+      ModManager.notifySessionsChanged(getSessionList());
+    },
+    restart: () => { fetch('/api/request-restart', { method: 'POST' }); },
     focusTerminal: () => {
       if (activeId) {
         const s = sessions.get(activeId);

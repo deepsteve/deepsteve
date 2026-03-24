@@ -235,6 +235,7 @@ Please read the issue carefully, understand the codebase context, and implement 
   enabledAgents: ['claude', 'opencode'],
   commandPaletteEnabled: true,
   commandPaletteShortcut: 'Meta+k',
+  hashCommandsEnabled: true,
   engine: 'node-pty'
 };
 
@@ -434,6 +435,7 @@ function broadcastSettings() {
     cmdTabSwitchHoldMs: settings.cmdTabSwitchHoldMs,
     commandPaletteEnabled: settings.commandPaletteEnabled,
     commandPaletteShortcut: settings.commandPaletteShortcut,
+    hashCommandsEnabled: settings.hashCommandsEnabled,
     symlinkWorktreeSettings: settings.symlinkWorktreeSettings,
     windowConfigs: settings.windowConfigs || [],
     engine: settings.engine || 'node-pty',
@@ -1264,6 +1266,10 @@ app.post('/api/settings', (req, res) => {
   if (req.body.commandPaletteEnabled !== undefined) {
     settings.commandPaletteEnabled = !!req.body.commandPaletteEnabled;
     log(`Settings updated: commandPaletteEnabled=${settings.commandPaletteEnabled}`);
+  }
+  if (req.body.hashCommandsEnabled !== undefined) {
+    settings.hashCommandsEnabled = !!req.body.hashCommandsEnabled;
+    log(`Settings updated: hashCommandsEnabled=${settings.hashCommandsEnabled}`);
   }
   if (req.body.commandPaletteShortcut !== undefined) {
     settings.commandPaletteShortcut = String(req.body.commandPaletteShortcut);

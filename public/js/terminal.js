@@ -32,7 +32,7 @@ export function updateTerminalTheme(term) {
   term.options.theme = { ...term.options.theme, background: bg };
 }
 
-export function setupTerminalIO(term, ws, { onUserInput, container } = {}) {
+export function setupTerminalIO(term, ws, { onUserInput, container, beforeSend } = {}) {
   // Note: ws.onmessage is set in app.js to handle JSON control messages
   // and route terminal data here via term.write()
 
@@ -46,6 +46,8 @@ export function setupTerminalIO(term, ws, { onUserInput, container } = {}) {
       return;
     }
     suppressNextEnter = false;
+    // Allow hash-commands (or other interceptors) to consume input
+    if (beforeSend && beforeSend(data)) return;
     ws.send(data);
     if (onUserInput) onUserInput();
   });
