@@ -106,7 +106,7 @@ export function initLiveReload({ onMessage, onShowRestartConfirm, onShowReloadOv
           // bypasses beforeunload entirely.
           const meta = document.createElement('meta');
           meta.httpEquiv = 'refresh';
-          meta.content = '0';
+          meta.content = '0;url=' + location.pathname + '?_=' + Date.now();
           document.head.appendChild(meta);
         }
       } catch {}

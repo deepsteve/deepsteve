@@ -105,7 +105,9 @@ const STATE_FILE = path.join(os.homedir(), '.deepsteve', 'state.json');
 const DISPLAY_TABS_DIR = path.join(os.homedir(), '.deepsteve', 'display-tabs');
 const SETTINGS_FILE = path.join(os.homedir(), '.deepsteve', 'settings.json');
 const app = express();
-app.use(express.static('public'));
+app.use(express.static('public', {
+  setHeaders: (res) => res.setHeader('Cache-Control', 'no-cache')
+}));
 app.use('/mods', express.static('mods'));
 app.use((req, res, next) => {
   if (req.path === '/mcp') return next(); // MCP SDK parses its own body
