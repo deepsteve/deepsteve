@@ -1,0 +1,23 @@
+name: Integration Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Daily at 8am UTC
+    - cron: '0 8 * * *'
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run integration tests
+        run: docker compose -f test/docker-compose.yml up --build --abort-on-container-exit --exit-code-from test
+
+      - name: Cleanup
+        if: always()
+        run: docker compose -f test/docker-compose.yml down -v

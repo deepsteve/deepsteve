@@ -1,0 +1,7 @@
+node_modules
+.claude
+.git
+scratch
+install.sh
+.DS_Store
+screenshots
