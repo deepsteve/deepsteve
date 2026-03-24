@@ -142,8 +142,12 @@ export function initLiveReload({ onMessage, onShowRestartConfirm, onShowReloadOv
         restartChannel.removeEventListener('message', onBroadcast);
         // Another window already responded — dismiss our modal and follow their decision
         modal.dismiss();
-        if (event.data.confirmed) setState(State.CONFIRMED);
-        else setState(State.CONNECTED);
+        if (event.data.confirmed) {
+          setState(State.CONFIRMED);
+          window.__deepsteveReloadPending = true;
+        } else {
+          setState(State.CONNECTED);
+        }
       }
     };
     restartChannel.addEventListener('message', onBroadcast);
@@ -153,6 +157,7 @@ export function initLiveReload({ onMessage, onShowRestartConfirm, onShowReloadOv
       if (state !== State.CONFIRMING) return; // another window already decided
       if (confirmed) {
         setState(State.CONFIRMED);
+        window.__deepsteveReloadPending = true;
         ws.send(JSON.stringify({ type: 'restart-confirmed' }));
         restartChannel.postMessage({ type: 'restart-decided', confirmed: true });
       } else {

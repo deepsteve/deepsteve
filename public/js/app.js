@@ -1165,6 +1165,19 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
             ws.sendJSON({ type: 'initialPrompt', text: opts.initialPrompt });
           }
         }
+        // Track claudeSessionId for session verification (after initTerminal
+        // so TabSessions.add has already created the entry)
+        if (msg.claudeSessionId) {
+          const tabList = TabSessions.get();
+          const tabEntry = tabList.find(s => s.id === msg.id);
+          if (tabEntry) {
+            if (tabEntry.claudeSessionId && tabEntry.claudeSessionId !== msg.claudeSessionId) {
+              console.warn(`[session] Session ${msg.id} claudeSessionId changed: ${tabEntry.claudeSessionId} → ${msg.claudeSessionId}`);
+            }
+            tabEntry.claudeSessionId = msg.claudeSessionId;
+            TabSessions.save(tabList);
+          }
+        }
       } else if (msg.type === 'close-tab') {
         if (assignedId) killSession(assignedId);
       } else if (msg.type === 'gone') {
