@@ -844,7 +844,9 @@ function wireShellOutput(id) {
               const current = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
               if (current[id]) {
                 current[id].claudeSessionId = newSessionId;
-                fs.writeFileSync(STATE_FILE, JSON.stringify(current, null, 2));
+                const tmpFile = STATE_FILE + '.tmp';
+                fs.writeFileSync(tmpFile, JSON.stringify(current, null, 2));
+                fs.renameSync(tmpFile, STATE_FILE);
                 log(`Session ${id} patched state.json during shutdown`);
               }
             } catch (err) {
@@ -973,7 +975,7 @@ let savedState = {};
 try {
   if (fs.existsSync(STATE_FILE)) {
     savedState = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
-    log(`Loaded ${Object.keys(savedState).length} saved sessions from state file`);
+    log(`Loaded ${Object.keys(savedState).length} saved sessions: ${Object.entries(savedState).map(([id, e]) => `${id}→${(e.claudeSessionId || '?').slice(0, 8)}`).join(', ')}`);
   }
 } catch (e) {
   console.error('Failed to load state file:', e.message);
@@ -1018,8 +1020,10 @@ function saveState() {
   const merged = { ...savedState, ...state };
   try {
     fs.mkdirSync(path.dirname(STATE_FILE), { recursive: true });
-    fs.writeFileSync(STATE_FILE, JSON.stringify(merged, null, 2));
-    log(`Saved ${Object.keys(merged).length} sessions to state file`);
+    const tmpFile = STATE_FILE + '.tmp';
+    fs.writeFileSync(tmpFile, JSON.stringify(merged, null, 2));
+    fs.renameSync(tmpFile, STATE_FILE);
+    log(`Saved ${Object.keys(merged).length} sessions to state file: ${Object.entries(merged).map(([id, e]) => `${id}→${(e.claudeSessionId || '?').slice(0, 8)}`).join(', ')}`);
   } catch (e) {
     console.error('Failed to save state:', e.message);
   }
@@ -1105,8 +1109,10 @@ async function shutdown(signal) {
     }
     const merged = { ...savedState, ...state };
     try {
-      fs.writeFileSync(STATE_FILE, JSON.stringify(merged, null, 2));
-      log(`Final state save: ${Object.keys(merged).length} sessions`);
+      const tmpFile = STATE_FILE + '.tmp';
+      fs.writeFileSync(tmpFile, JSON.stringify(merged, null, 2));
+      fs.renameSync(tmpFile, STATE_FILE);
+      log(`Final state save: ${Object.keys(merged).length} sessions: ${Object.entries(merged).map(([id, e]) => `${id}→${(e.claudeSessionId || '?').slice(0, 8)}`).join(', ')}`);
     } catch (e) {
       console.error('Failed final state save:', e.message);
     }
@@ -2751,7 +2757,7 @@ function handleWsConnection(ws, req) {
   if (windowId) entry.windowId = windowId;
   const hasScrollback = entry.scrollback && entry.scrollback.length > 0;
   log(`[WS] Sending session response: id=${id}, restored=${entry.restored || false}, scrollback=${hasScrollback ? entry.scrollbackSize + 'B' : 'none'}, existingClients=${existingClients}`);
-  ws.send(JSON.stringify({ type: 'session', id, restored: entry.restored || false, cwd: entry.cwd, name: entry.name || null, agentType: entry.agentType || 'claude', scrollback: hasScrollback, existingClients }));
+  ws.send(JSON.stringify({ type: 'session', id, restored: entry.restored || false, cwd: entry.cwd, name: entry.name || null, agentType: entry.agentType || 'claude', claudeSessionId: entry.claudeSessionId || null, scrollback: hasScrollback, existingClients }));
 
   // Send buffered scrollback so the client can render the terminal immediately
   if (hasScrollback) {
