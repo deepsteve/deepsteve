@@ -15,7 +15,6 @@ import { ModManager } from './mod-manager.js';
 import { initFileDrop } from './file-drop.js';
 import { init as initCmdHoldMode, setEnabled as setCmdHoldModeEnabled, setHoldMs as setCmdHoldModeHoldMs } from './cmd-tab-switch.js';
 import { init as initCommandPalette, setEnabled as setCommandPaletteEnabled, setShortcut as setCommandPaletteShortcut } from './command-palette.js';
-import { SplitLayout } from './split-layout.js';
 import { nsKey } from './storage-namespace.js';
 
 // Configuration
@@ -301,11 +300,6 @@ window.__deepsteve = {
     this._dataListeners.get(id).add(callback);
     return () => { this._dataListeners.get(id)?.delete(callback); };
   },
-  // Split layout API
-  getLayoutState() { return SplitLayout.getState(); },
-  setLayout(layoutId) { SplitLayout.applyLayout(layoutId); },
-  assignPane(paneIndex, sessionId) { SplitLayout.assignSessionToPane(sessionId, paneIndex); },
-  focusPane(index) { SplitLayout.focusPane(index); },
 };
 
 // Sessions dropdown
@@ -1215,13 +1209,6 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
         }
       } else if (msg.type === 'tasks') {
         ModManager.notifyTasksChanged(msg.tasks);
-      } else if (msg.type === 'set-layout') {
-        SplitLayout.applyLayout(msg.layout);
-        if (msg.assignments) {
-          for (const [paneIdx, sessionId] of Object.entries(msg.assignments)) {
-            SplitLayout.assignSessionToPane(sessionId, parseInt(paneIdx, 10));
-          }
-        }
       } else if (msg.type === 'agent-chat') {
         ModManager.notifyAgentChatChanged(msg.channels);
       } else if (msg.type === 'browser-eval-request') {
@@ -1381,11 +1368,6 @@ function initTerminal(id, ws, cwd, initialName, { hasScrollback = false, pending
 
   TabManager.addTab(id, name, tabCallbacks);
   updateEmptyState();
-
-  // If split layout is active, assign new session to an empty pane
-  if (!restoreActive) {
-    SplitLayout.onSessionCreated(id);
-  }
 
   // During restore, skip switchTo() — restoreSessions() will select the
   // correct tab after all sessions are initialized. For new sessions,
@@ -1578,28 +1560,6 @@ function switchTo(id) {
     return;
   }
 
-  // Split layout mode: focus or swap pane
-  if (SplitLayout.isActive()) {
-    const paneIndex = SplitLayout.findPane(id);
-    if (paneIndex >= 0) {
-      // Session already in a pane — just focus it
-      SplitLayout.focusPane(paneIndex);
-    } else {
-      // Swap into the currently focused pane
-      const state = SplitLayout.getState();
-      SplitLayout.assignSessionToPane(id, state.focusedPane);
-      SplitLayout.focusPane(state.focusedPane);
-    }
-    // Update tab highlight and badges
-    activeId = id;
-    ActiveTab.set(id);
-    TabManager.setActive(id);
-    TabManager.updateBadge(id, false);
-    clearNotification(id);
-    ModManager.notifyActiveSessionChanged(id);
-    return;
-  }
-
   // Deactivate current
   if (activeId) {
     const current = sessions.get(activeId);
@@ -1688,9 +1648,6 @@ async function restoreSessions(sessionList, opts = {}) {
       TabManager.removeTab(entry.id);
     }
   });
-
-  // Reconcile split layout with available sessions
-  SplitLayout.reconcile([...sessions.keys()]);
 
   const target = savedActiveId && sessions.has(savedActiveId)
     ? savedActiveId
@@ -1806,9 +1763,6 @@ function showReloadOverlay() {
 function killSession(id) {
   const session = sessions.get(id);
   if (!session) return;
-
-  // Remove from split layout pane if active
-  SplitLayout.removeSession(id);
 
   if (session.type === 'mod-tab' || session.type === 'display-tab') {
     // Mod/display tabs: no PTY/WS to clean up
@@ -2660,53 +2614,6 @@ async function init() {
   // Initialize layout manager
   LayoutManager.init();
 
-  // Initialize split layout engine
-  SplitLayout.init({
-    onActiveChanged: (sessionId) => {
-      activeId = sessionId;
-      ActiveTab.set(sessionId);
-      TabManager.setActive(sessionId);
-      TabManager.updateBadge(sessionId, false);
-      clearNotification(sessionId);
-      ModManager.notifyActiveSessionChanged(sessionId);
-    },
-    getSessions: () => {
-      // Return terminal sessions in tab order
-      const tabList = TabSessions.get();
-      return tabList
-        .filter(t => sessions.has(t.id) && sessions.get(t.id).type !== 'mod-tab' && sessions.get(t.id).type !== 'display-tab')
-        .map(t => ({ id: t.id, name: sessions.get(t.id)?.name || t.name }));
-    },
-    getContainer: (sessionId) => {
-      const s = sessions.get(sessionId);
-      return s ? s.container : null;
-    },
-    focusTerminal: (sessionId) => {
-      const s = sessions.get(sessionId);
-      if (s?.term) {
-        requestAnimationFrame(() => {
-          s.term.focus();
-        });
-      }
-    },
-    onLayoutChanged: (state) => {
-      ModManager.notifyLayoutChanged(state);
-    },
-    onRevertToSingle: () => {
-      // Re-show the current active terminal
-      if (activeId) {
-        const s = sessions.get(activeId);
-        if (s) {
-          s.container.classList.add('active');
-          requestAnimationFrame(() => {
-            fitTerminal(s.term, s.fit, s.ws);
-            s.term.focus();
-          });
-        }
-      }
-    },
-  });
-
   // Initialize tab scroll arrows
   initTabArrows();
 
@@ -2724,11 +2631,6 @@ async function init() {
         if (s.type === 'mod-tab' && s.modId === modId) killSession(id);
       }
     },
-    // Layout management hooks
-    getLayoutState: () => SplitLayout.getState(),
-    setLayout: (layoutId) => SplitLayout.applyLayout(layoutId),
-    assignPane: (paneIndex, sessionId) => SplitLayout.assignSessionToPane(sessionId, paneIndex),
-    focusPane: (index) => SplitLayout.focusPane(index),
   });
 
   // File drag-and-drop upload

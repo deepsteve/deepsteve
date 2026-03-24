@@ -1553,21 +1553,6 @@ app.post('/api/window-configs/:id/apply', (req, res) => {
   res.json({ sessions: createdSessions });
 });
 
-// Layout management (for MCP tool to broadcast layout changes to browser)
-app.post('/api/layout', (req, res) => {
-  const { layout, assignments, windowId } = req.body || {};
-  if (!layout) return res.status(400).json({ error: 'layout required' });
-
-  const msg = JSON.stringify({ type: 'set-layout', layout, assignments: assignments || {} });
-  for (const client of reloadClients) {
-    if (client.readyState === 1) {
-      client.send(msg);
-    }
-  }
-  log(`[API] layout: set to "${layout}"`);
-  res.json({ ok: true });
-});
-
 app.get('/api/themes', (req, res) => {
   res.json({ themes: listThemes(), active: settings.activeTheme || null });
 });
@@ -1593,7 +1578,7 @@ app.post('/api/themes/active', (req, res) => {
 
 // --- Mods system ---
 const MODS_DIR = path.join(__dirname, 'mods');
-const BUILTIN_MODS = new Set(['browser-console', 'tasks', 'screenshots', 'go-karts', 'tower', 'deepsteve-core', 'agent-dna', 'layout-manager']);
+const BUILTIN_MODS = new Set(['browser-console', 'tasks', 'screenshots', 'go-karts', 'tower', 'deepsteve-core', 'agent-dna']);
 
 // --- Skills system ---
 const SKILLS_DIR = path.join(__dirname, 'skills');
