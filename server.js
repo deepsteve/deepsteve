@@ -681,16 +681,11 @@ function watchClaudeSessionDir(shellId) {
       const e = shells.get(shellId);
       if (!e || sessionId === e.claudeSessionId) return;
 
-      log(`Session ${shellId} checking potential fork file: ${filename}`);
-
       // Verify the new file references our current session (forks include the parent sessionId)
       try {
         const newFile = path.join(projectDir, filename);
         const head = fs.readFileSync(newFile, 'utf8').slice(0, 32768);
-        if (!head.includes(e.claudeSessionId)) {
-          log(`Session ${shellId} file ${filename} does not reference current session ${e.claudeSessionId}, skipping`);
-          return;
-        }
+        if (!head.includes(e.claudeSessionId)) return;
 
         log(`Session ${shellId} detected session fork via fs.watch: ${e.claudeSessionId} → ${sessionId}`);
         e.claudeSessionId = sessionId;
