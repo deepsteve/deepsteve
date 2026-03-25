@@ -12,7 +12,6 @@ Open a new plain shell tab (not a Claude session) in your current working direct
 
 2. **Open a terminal tab**: Call `mcp__deepsteve__open_terminal` with:
    - `session_id`: your DEEPSTEVE_SESSION_ID
-   - `agent_type`: `"shell"`
    - `name`: use `$ARGUMENTS` if provided, otherwise omit
 
 3. **Report**: Briefly confirm the terminal tab was opened with its name and working directory.

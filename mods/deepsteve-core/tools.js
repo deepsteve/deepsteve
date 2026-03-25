@@ -162,26 +162,46 @@ function init(context) {
           return { content: [{ type: 'text', text: `Session "${session_id}" not found.` }] };
         }
 
-        // Inherit from caller, allow overrides
         const effectiveCwd = cwd || caller.cwd;
-        const effectiveAgentType = agent_type || caller.agentType || 'claude';
-        const effectiveWorktree = worktree !== undefined ? (worktree || null) : (caller.worktree || null);
+        // agent_type provided → agent session; fork → inherit caller's agent; otherwise → plain shell
+        const effectiveAgentType = agent_type || (fork ? (caller.agentType || 'claude') : null);
         const windowId = caller.windowId || null;
-        const agentConfig = getAgentConfig(effectiveAgentType);
+        const id = randomUUID().slice(0, 8);
 
-        // Validate and prepare worktree
+        if (!effectiveAgentType) {
+          // Plain shell — no agent, no flags, no session tracking
+          const tabName = name || undefined;
+          log(`[MCP] open_terminal (shell): id=${id}, cwd=${effectiveCwd}, caller=${session_id}`);
+          spawnSession(id, 'terminal', [], effectiveCwd, { cols: 120, rows: 40, env: { DEEPSTEVE_SESSION_ID: id } });
+          shells.set(id, {
+            clients: new Set(), cwd: effectiveCwd,
+            claudeSessionId: null, agentType: 'terminal',
+            worktree: null, windowId,
+            name: tabName, initialPrompt: null,
+            waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now(),
+          });
+          wireShellOutput(id);
+          engine.onExit(id, () => {
+            if (!isShuttingDown()) { shells.delete(id); saveState(); }
+          });
+          saveState();
+          deliverToWindow({ type: 'open-session', id, cwd: effectiveCwd, name: tabName, windowId }, windowId);
+          return { content: [{ type: 'text', text: JSON.stringify({ id, name: tabName || id, cwd: effectiveCwd, worktree: null }) }] };
+        }
+
+        // Agent session
+        const agentConfig = getAgentConfig(effectiveAgentType);
+        const effectiveWorktree = worktree !== undefined ? (worktree || null) : (caller.worktree || null);
         const validatedWorktree = effectiveWorktree ? validateWorktree(effectiveWorktree) : null;
         let spawnCwd = effectiveCwd;
         if (validatedWorktree && !agentConfig.supportsWorktree) {
           spawnCwd = ensureWorktree(effectiveCwd, validatedWorktree);
         }
 
-        const id = randomUUID().slice(0, 8);
         const claudeSessionId = randomUUID();
 
         let spawnArgs;
         if (fork && caller.claudeSessionId) {
-          // Fork: resume caller's conversation into a new forked session
           spawnArgs = ['--resume', caller.claudeSessionId, '--fork-session', '--session-id', claudeSessionId];
           if (validatedWorktree) spawnArgs.push('--worktree', validatedWorktree);
         } else {
@@ -205,7 +225,6 @@ function init(context) {
         });
         wireShellOutput(id);
 
-        // For non-BEL agents, deliver initialPrompt after delay
         if (prompt && agentConfig.initialPromptDelay > 0) {
           shells.get(id).initialPrompt = null;
           setTimeout(() => submitToShell(id, prompt), agentConfig.initialPromptDelay);
