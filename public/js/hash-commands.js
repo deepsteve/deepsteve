@@ -17,6 +17,7 @@ let buffer = '';         // characters typed after #
 let selectedIndex = 0;
 let lockedCommand = null; // set when user types space after a matching command name
 let waitingForInput = false;
+let inputStarted = false; // true once user sends any keystroke after waitingForInput
 
 let popup = null;
 let inputDisplay = null;
@@ -260,6 +261,29 @@ function handleBackspace() {
 export function beforeSend(data, container) {
   // If hash mode is active, consume all input
   if (active) {
+    // Option+Delete (word delete): \x1b\x7f
+    if (data === '\x1b\x7f') {
+      if (buffer.length === 0) {
+        deactivate();
+        return true;
+      }
+      // Delete backward to previous word boundary (space or start)
+      const trimmed = buffer.replace(/\s+$/, ''); // strip trailing spaces first
+      const lastSpace = trimmed.lastIndexOf(' ');
+      buffer = lastSpace >= 0 ? buffer.slice(0, lastSpace + 1) : '';
+      // Un-lock if we deleted into the command name
+      if (lockedCommand && buffer.length < lockedCommand.name.length) {
+        lockedCommand = null;
+      }
+      if (buffer.length === 0) {
+        deactivate();
+      } else {
+        selectedIndex = 0;
+        renderList();
+      }
+      return true;
+    }
+
     // Handle escape sequences and control characters
     if (data === '\x1b' || data === '\x1b[A' || data === '\x1b[B' ||
         data === '\r' || data === '\x7f' || data === '\b') {
@@ -325,8 +349,8 @@ export function beforeSend(data, container) {
     return true;
   }
 
-  // Not active — check if we should activate
-  if (enabled && data.startsWith('#')) {
+  // Not active — check if we should activate (only at start of input)
+  if (enabled && !inputStarted && data.startsWith('#')) {
     if (data === '#') {
       // Single # keystroke — open interactive popup
       activate(container);
@@ -344,11 +368,15 @@ export function beforeSend(data, container) {
     }
   }
 
+  // Any data reaching the PTY means user has started typing
+  inputStarted = true;
   return false;
 }
 
 export function setWaitingForInput(waiting) {
   waitingForInput = waiting;
+  // Reset inputStarted when Claude starts waiting — next # at start of input activates popup
+  if (waiting) inputStarted = false;
   // If we lose waitingForInput while active, deactivate
   if (!waiting && active) {
     deactivate();
