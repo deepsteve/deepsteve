@@ -326,9 +326,22 @@ export function beforeSend(data, container) {
   }
 
   // Not active — check if we should activate
-  if (enabled && waitingForInput && data === '#') {
-    activate(container);
-    return true;
+  if (enabled && data.startsWith('#')) {
+    if (data === '#') {
+      // Single # keystroke — open interactive popup
+      activate(container);
+      return true;
+    }
+    // Pasted or batched input like "#terminal" or "#terminal\r"
+    const text = data.endsWith('\r') ? data.slice(1, -1) : data.slice(1);
+    const spaceIdx = text.indexOf(' ');
+    const cmdName = (spaceIdx >= 0 ? text.slice(0, spaceIdx) : text).toLowerCase();
+    const arg = spaceIdx >= 0 ? text.slice(spaceIdx + 1) : '';
+    const cmd = HASH_COMMANDS.find(c => c.name === cmdName);
+    if (cmd) {
+      executeCommand(cmd, arg);
+      return true;
+    }
   }
 
   return false;
