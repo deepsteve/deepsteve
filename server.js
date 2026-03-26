@@ -2762,7 +2762,7 @@ function handleWsConnection(ws, req) {
     try {
       const parsed = JSON.parse(str);
       if (parsed.type === 'resize') { engine.resize(id, parsed.cols, parsed.rows); return; }
-      if (parsed.type === 'redraw') { engine.write(id, '\x0c'); return; } // Ctrl+L
+      if (parsed.type === 'redraw') { return; } // no-op: Ink echoes \x0c as ^L garbage; scrollback replay handles reconnect
       if (parsed.type === 'initialPrompt') {
         const config = getAgentConfig(entry.agentType);
         if (config.initialPromptDelay > 0) {
