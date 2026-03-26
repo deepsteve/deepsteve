@@ -2640,6 +2640,7 @@ async function init() {
     killSession: async (id, opts) => {
       if (opts?.force || await confirmCloseSession(id)) killSession(id);
     },
+    getWindowId: () => getWindowId(),
     closeModTabs: (modId) => {
       for (const [id, s] of sessions) {
         if (s.type === 'mod-tab' && s.modId === modId) killSession(id);

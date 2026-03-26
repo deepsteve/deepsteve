@@ -1796,6 +1796,9 @@ function _injectBridgeAPI(iframeEl, modId) {
           sessionCallbacks = sessionCallbacks.filter(e => e !== entry);
         };
       },
+      getWindowId() {
+        return hooks.getWindowId();
+      },
       getActiveSessionId() {
         return getActiveSessionIdFn ? getActiveSessionIdFn() : null;
       },

@@ -81,10 +81,17 @@ function deliverToWindow(msg, targetWindowId, { openBrowser } = {}) {
   }
 
   if (!delivered && readyClients.length > 0) {
-    // Send to first available client only (not broadcast)
-    const fallbackMsg = { ...msgObj };
-    delete fallbackMsg.windowId;
-    readyClients[0].send(JSON.stringify(fallbackMsg));
+    if (targetWindowId) {
+      // WindowId didn't match any client — broadcast to all with windowId preserved (client-side guard will filter)
+      log(`[deliverToWindow] windowId=${targetWindowId} not found among reload clients [${readyClients.map(c => c.windowId).join(',')}], broadcasting`);
+      const msgStr = JSON.stringify(msgObj);
+      for (const client of readyClients) {
+        if (client.readyState === 1) client.send(msgStr);
+      }
+    } else {
+      // No windowId provided — send to first available client (backward compat)
+      readyClients[0].send(JSON.stringify(msgObj));
+    }
     delivered = true;
   }
 
