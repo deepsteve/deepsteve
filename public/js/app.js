@@ -1902,13 +1902,13 @@ function renameSession(id) {
  */
 function quickNewSession() {
   const active = activeId && sessions.get(activeId);
-  const cwd = active?.cwd || SessionStore.getLastCwd() || '~';
+  const cwd = active?.cwd || '~';
   createSession(cwd, null, true, { agentType: getDefaultAgentType() });
 }
 
 function quickNewTerminal() {
   const active = activeId && sessions.get(activeId);
-  const cwd = active?.cwd || SessionStore.getLastCwd() || '~';
+  const cwd = active?.cwd || '~';
   createSession(cwd, null, true, { agentType: 'terminal' });
 }
 
@@ -2268,7 +2268,7 @@ function showNewTabMenu(e) {
       createModTab(item.dataset.modId);
     } else if (action === 'opencode') {
       const active = activeId && sessions.get(activeId);
-      const cwdPath = active?.cwd || SessionStore.getLastCwd() || '~';
+      const cwdPath = active?.cwd || '~';
       createSession(cwdPath, null, true, { agentType: 'opencode' });
     } else if (action === 'new-window') {
       window.open(window.location.origin, '_blank');
@@ -2297,7 +2297,7 @@ function showNewTabMenu(e) {
  */
 async function promptWorktreeSession() {
   const active = activeId && sessions.get(activeId);
-  const cwd = active?.cwd || SessionStore.getLastCwd();
+  const cwd = active?.cwd;
   if (!cwd) return promptRepoSession();
 
   const overlay = document.createElement('div');
@@ -2383,7 +2383,7 @@ function formatShortcut(shortcutStr) {
  */
 async function showIssuePicker() {
   const active = activeId && sessions.get(activeId);
-  const cwd = active?.cwd || SessionStore.getLastCwd();
+  const cwd = active?.cwd;
   if (!cwd) return promptRepoSession();
 
   // Check git root
