@@ -22,7 +22,7 @@
  * so we override to flex:1 to fill remaining space. All shadows must be inset
  * since body overflow:hidden clips anything outside. */
 body {
-  background: #c8c0b8 !important;
+  background: #1a1a1a !important;
   display: flex !important;
   flex-direction: column !important;
   padding: 12px 25px 25px 25px;
