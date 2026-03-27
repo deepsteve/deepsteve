@@ -144,6 +144,23 @@ function init(context) {
         return { content: [{ type: 'text', text: JSON.stringify({ id, name, cwd: spawnCwd, worktree: worktree || null }) }] };
       },
     },
+    open_browser_tab: {
+      description: 'Open a URL in a new browser tab in the same window as the given session. Use this to open documentation, previews, or external links alongside the session.',
+      schema: {
+        session_id: z.string().describe('Your DEEPSTEVE_SESSION_ID env var — used to target the correct browser window'),
+        url: z.string().describe('The URL to open'),
+      },
+      handler: async ({ session_id, url }) => {
+        const caller = shells.get(session_id);
+        if (!caller) {
+          return { content: [{ type: 'text', text: `Session "${session_id}" not found.` }] };
+        }
+        const windowId = caller.windowId || null;
+        log(`[MCP] open_browser_tab: url=${url}, caller=${session_id}, windowId=${windowId}`);
+        deliverToWindow({ type: 'open-browser-tab', url, windowId }, windowId);
+        return { content: [{ type: 'text', text: JSON.stringify({ url, windowId }) }] };
+      },
+    },
     open_terminal: {
       description: 'Open a new deepsteve terminal session (new browser tab). Inherits context (cwd, worktree, windowId, agentType) from the calling session. Pass your DEEPSTEVE_SESSION_ID so the new tab opens in the same browser window.',
       schema: {

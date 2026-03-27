@@ -2680,6 +2680,10 @@ async function init() {
         if (msg.windowId && msg.windowId !== getWindowId()) return;
         createDisplayTab(msg.id, msg.name);
       }
+      if (msg.type === 'open-browser-tab') {
+        if (msg.windowId && msg.windowId !== getWindowId()) return;
+        window.open(msg.url, '_blank');
+      }
       if (msg.type === 'open-mod-tab') {
         if (msg.windowId && msg.windowId !== getWindowId()) return;
         createModTab(msg.modId, { name: msg.name, url: msg.url });
