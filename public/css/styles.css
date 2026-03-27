@@ -101,6 +101,7 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
   overflow-y: auto;
   overflow-x: hidden;
   min-height: 0;
+  min-width: 0;
 }
 
 #app-container.vertical-layout #tabs-arrows { gap: 4px; justify-content: center; }
@@ -117,6 +118,8 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
 #app-container.vertical-layout .tab {
   border-radius: 8px;
   width: 100%;
+  max-width: none;
+  min-width: 0;
   position: relative;
   padding: 8px 12px;
   padding-right: 28px;
@@ -191,6 +194,9 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
   background: transparent;
   border-radius: 8px;
   transition: background 0.15s ease;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 #app-container.vertical-layout .dropdown-btn:hover { background: var(--ds-bg-tertiary); }
 
