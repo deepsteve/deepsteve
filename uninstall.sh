@@ -1,8 +1,19 @@
 #!/bin/bash
-launchctl unload "$HOME/Library/LaunchAgents/com.deepsteve.plist" 2>/dev/null
-rm -f "$HOME/Library/LaunchAgents/com.deepsteve.plist"
+OS=$(uname -s)
+
+if [ "$OS" = "Darwin" ]; then
+    launchctl unload "$HOME/Library/LaunchAgents/com.deepsteve.plist" 2>/dev/null
+    rm -f "$HOME/Library/LaunchAgents/com.deepsteve.plist"
+    rm -f "$HOME/Library/Logs/deepsteve.log" "$HOME/Library/Logs/deepsteve.error.log"
+else
+    systemctl --user stop deepsteve 2>/dev/null
+    systemctl --user disable deepsteve 2>/dev/null
+    rm -f "$HOME/.config/systemd/user/deepsteve.service"
+    systemctl --user daemon-reload 2>/dev/null
+    rm -rf "$HOME/.local/share/deepsteve/logs"
+fi
+
 rm -rf "$HOME/.deepsteve"
-rm -f "$HOME/Library/Logs/deepsteve.log" "$HOME/Library/Logs/deepsteve.error.log"
 
 # Remove installed skills from Claude Code commands
 rm -f "$HOME/.claude/commands/deepsteve-"*.md

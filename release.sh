@@ -9,6 +9,8 @@ cd "$SCRIPT_DIR"
 NODE_VERSION="22.14.0"
 NODE_SHA256_ARM64="e9404633bc02a5162c5c573b1e2490f5fb44648345d64a958b17e325729a5e42"
 NODE_SHA256_X64="6698587713ab565a94a360e091df9f6d91c8fadda6d00f0cf6526e9b40bed250"
+NODE_SHA256_LINUX_ARM64="8cf30ff7250f9463b53c18f89c6c606dfda70378215b2c905d0a9a8b08bd45e0"
+NODE_SHA256_LINUX_X64="9d942932535988091034dc94cc5f42b6dc8784d6366df3a36c4c9ccb3996f0c2"
 
 OUT="install.sh"
 
@@ -17,24 +19,33 @@ cat > "$OUT" << 'PREAMBLE'
 #!/bin/bash
 set -e
 
+OS=$(uname -s)
+
 if ! command -v node &>/dev/null; then
   echo "Node.js not found, installing..."
   if command -v brew &>/dev/null; then
     brew install node
   else
-    ARCH=$(uname -m); [ "$ARCH" = "arm64" ] || ARCH="x64"
+    ARCH=$(uname -m)
+    case "$ARCH" in arm64|aarch64) ARCH="arm64";; *) ARCH="x64";; esac
     NODE_VERSION="__NODE_VERSION__"
-    if [ "$ARCH" = "arm64" ]; then
-      NODE_SHA256="__NODE_SHA256_ARM64__"
+    if [ "$OS" = "Darwin" ]; then
+      NODE_PLATFORM="darwin"
+      if [ "$ARCH" = "arm64" ]; then NODE_SHA256="__NODE_SHA256_ARM64__"; else NODE_SHA256="__NODE_SHA256_X64__"; fi
     else
-      NODE_SHA256="__NODE_SHA256_X64__"
+      NODE_PLATFORM="linux"
+      if [ "$ARCH" = "arm64" ]; then NODE_SHA256="__NODE_SHA256_LINUX_ARM64__"; else NODE_SHA256="__NODE_SHA256_LINUX_X64__"; fi
     fi
     NODE_DIR="$HOME/.deepsteve/node"
     mkdir -p "$NODE_DIR"
     NODE_TGZ=$(mktemp)
     trap 'rm -f "$NODE_TGZ"' EXIT
-    curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-darwin-${ARCH}.tar.gz" -o "$NODE_TGZ"
-    ACTUAL_SHA256=$(shasum -a 256 "$NODE_TGZ" | awk '{print $1}')
+    curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-${NODE_PLATFORM}-${ARCH}.tar.gz" -o "$NODE_TGZ"
+    if command -v shasum &>/dev/null; then
+      ACTUAL_SHA256=$(shasum -a 256 "$NODE_TGZ" | awk '{print $1}')
+    else
+      ACTUAL_SHA256=$(sha256sum "$NODE_TGZ" | awk '{print $1}')
+    fi
     if [ "$ACTUAL_SHA256" != "$NODE_SHA256" ]; then
       echo "ERROR: Node.js checksum verification failed!" >&2
       echo "  Expected: $NODE_SHA256" >&2
@@ -49,15 +60,24 @@ if ! command -v node &>/dev/null; then
 fi
 
 INSTALL_DIR="$HOME/.deepsteve"
-PLIST_PATH="$HOME/Library/LaunchAgents/com.deepsteve.plist"
 NODE_PATH=$(which node)
+
+if [ "$OS" = "Darwin" ]; then
+  SERVICE_PATH="$HOME/Library/LaunchAgents/com.deepsteve.plist"
+  LOG_DIR="$HOME/Library/Logs"
+  mkdir -p "$HOME/Library/LaunchAgents"
+else
+  SERVICE_PATH="$HOME/.config/systemd/user/deepsteve.service"
+  LOG_DIR="$HOME/.local/share/deepsteve/logs"
+  mkdir -p "$HOME/.config/systemd/user"
+  mkdir -p "$LOG_DIR"
+fi
 
 mkdir -p "$INSTALL_DIR/public/js"
 mkdir -p "$INSTALL_DIR/public/css"
 mkdir -p "$INSTALL_DIR/engines"
 mkdir -p "$INSTALL_DIR/themes"
 mkdir -p "$INSTALL_DIR/skills"
-mkdir -p "$HOME/Library/LaunchAgents"
 
 PREAMBLE
 
@@ -74,6 +94,8 @@ echo "" >> "$OUT"
 sed -i '' "s/__NODE_VERSION__/$NODE_VERSION/g" "$OUT"
 sed -i '' "s/__NODE_SHA256_ARM64__/$NODE_SHA256_ARM64/g" "$OUT"
 sed -i '' "s/__NODE_SHA256_X64__/$NODE_SHA256_X64/g" "$OUT"
+sed -i '' "s/__NODE_SHA256_LINUX_ARM64__/$NODE_SHA256_LINUX_ARM64/g" "$OUT"
+sed -i '' "s/__NODE_SHA256_LINUX_X64__/$NODE_SHA256_LINUX_X64/g" "$OUT"
 
 # --- Embed text files as heredocs ---
 
@@ -149,10 +171,11 @@ embed_text "uninstall.sh" "uninstall.sh"
   echo ""
 } >> "$OUT"
 
-# --- LaunchAgent plist (needs variable expansion at install time) ---
-# This section uses an unquoted heredoc delimiter so $VARS expand at install time
+# --- Service file (platform-conditional, needs variable expansion at install time) ---
+# Uses unquoted heredoc delimiters so $VARS expand at install time
 {
-  echo 'cat > "$PLIST_PATH" << PLISTEOF'
+  echo 'if [ "$OS" = "Darwin" ]; then'
+  echo 'cat > "$SERVICE_PATH" << PLISTEOF'
   echo '<?xml version="1.0" encoding="UTF-8"?>'
   echo '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">'
   echo '<plist version="1.0">'
@@ -182,12 +205,35 @@ embed_text "uninstall.sh" "uninstall.sh"
   echo '    <key>KeepAlive</key>'
   echo '    <true/>'
   echo '    <key>StandardOutPath</key>'
-  echo '    <string>$HOME/Library/Logs/deepsteve.log</string>'
+  echo '    <string>$LOG_DIR/deepsteve.log</string>'
   echo '    <key>StandardErrorPath</key>'
-  echo '    <string>$HOME/Library/Logs/deepsteve.error.log</string>'
+  echo '    <string>$LOG_DIR/deepsteve.error.log</string>'
   echo '</dict>'
   echo '</plist>'
   echo 'PLISTEOF'
+  echo 'else'
+  echo 'cat > "$SERVICE_PATH" << UNITEOF'
+  echo '[Unit]'
+  echo 'Description=deepsteve daemon'
+  echo 'After=network.target'
+  echo ''
+  echo '[Service]'
+  echo 'Type=simple'
+  echo 'ExecStart=$NODE_PATH $INSTALL_DIR/server.js'
+  echo 'WorkingDirectory=$INSTALL_DIR'
+  echo 'Environment=NODE_ENV=production'
+  echo 'Environment=PORT=3000'
+  echo 'Environment=DEEPSTEVE_BIND=127.0.0.1'
+  echo 'Environment=PATH=$INSTALL_DIR/node/bin:$HOME/.local/bin:$(dirname $NODE_PATH):/usr/local/bin:/usr/bin:/bin'
+  echo 'Restart=always'
+  echo 'RestartSec=5'
+  echo 'StandardOutput=append:$LOG_DIR/deepsteve.log'
+  echo 'StandardError=append:$LOG_DIR/deepsteve.error.log'
+  echo ''
+  echo '[Install]'
+  echo 'WantedBy=default.target'
+  echo 'UNITEOF'
+  echo 'fi'
   echo ""
 } >> "$OUT"
 
@@ -234,8 +280,17 @@ OC_EOF
     fi
 fi
 
-launchctl unload "$PLIST_PATH" 2>/dev/null
-launchctl load "$PLIST_PATH"
+if [ "$OS" = "Darwin" ]; then
+  launchctl unload "$SERVICE_PATH" 2>/dev/null
+  launchctl load "$SERVICE_PATH"
+else
+  if command -v systemctl &>/dev/null && systemctl --user status &>/dev/null 2>&1; then
+    systemctl --user daemon-reload
+    systemctl --user enable --now deepsteve
+  else
+    echo "Note: systemd not available. Start manually: node $INSTALL_DIR/server.js"
+  fi
+fi
 
 echo "deepsteve installed and running at http://localhost:3000"
 echo "To uninstall: ~/.deepsteve/uninstall.sh"
