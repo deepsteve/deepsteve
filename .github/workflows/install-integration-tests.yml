@@ -1,0 +1,20 @@
+name: Public Install Integration Tests
+
+on:
+  schedule:
+    # Daily at 8am UTC
+    - cron: '0 8 * * *'
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run integration tests (public install)
+        run: docker compose -f test/docker-compose.public.yml up --build --abort-on-container-exit --exit-code-from test
+
+      - name: Cleanup
+        if: always()
+        run: docker compose -f test/docker-compose.public.yml down -v

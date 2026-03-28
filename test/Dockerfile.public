@@ -1,0 +1,14 @@
+FROM node:22-bookworm
+
+# zsh: server.js spawns 'zsh -l' for all session types
+# curl: used by docker-compose healthcheck + public install
+RUN apt-get update && apt-get install -y --no-install-recommends zsh curl && rm -rf /var/lib/apt/lists/*
+
+# Install via public URL (strip launchctl lines — not available on Linux)
+RUN curl -fsSL deepsteve.com/install.sh | sed '/launchctl/d' | bash
+
+WORKDIR /root/.deepsteve
+
+EXPOSE 3000
+
+CMD ["node", "server.js"]

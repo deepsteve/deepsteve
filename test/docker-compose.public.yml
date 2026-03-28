@@ -1,0 +1,27 @@
+services:
+  server:
+    build:
+      context: ..
+      dockerfile: test/Dockerfile.public
+    ports:
+      - "3000:3000"
+    environment:
+      - PORT=3000
+      - DEEPSTEVE_BIND=0.0.0.0
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:3000/api/version"]
+      interval: 2s
+      timeout: 5s
+      retries: 15
+      start_period: 10s
+
+  test:
+    build:
+      context: ..
+      dockerfile: test/Dockerfile
+    depends_on:
+      server:
+        condition: service_healthy
+    environment:
+      - DEEPSTEVE_URL=http://server:3000
+    command: ["sh", "-c", "node --test --test-timeout 60000 test/integration/*.test.js"]
