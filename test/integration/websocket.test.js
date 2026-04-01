@@ -10,6 +10,12 @@ describe('WebSocket Protocol', () => {
     return c;
   }
 
+  before(async () => {
+    // Ensure clean state — previous test suites (e.g. tmux engine) may still be tearing down
+    await httpPost('/api/shells/killall').catch(() => {});
+    await new Promise(r => setTimeout(r, 1000));
+  });
+
   afterEach(async () => {
     await cleanupSessions(clients);
     clients.length = 0;
