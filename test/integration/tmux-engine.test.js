@@ -39,6 +39,9 @@ describe('Tmux Engine', () => {
 
   afterEach(async () => {
     await cleanupSessions(clients);
+    // Extra delay for tmux session teardown — tmux destroy is async and
+    // the attach PTY exit + tmux kill-session need time to complete
+    await new Promise(r => setTimeout(r, 1000));
     clients.length = 0;
   });
 
