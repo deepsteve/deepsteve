@@ -2634,6 +2634,16 @@ async function init() {
     }
   });
 
+  // Fresh window requested (e.g. from "New Window" command) — clear inherited sessionStorage
+  // Must run BEFORE initLiveReload/getWindowId so the new window gets its own ID
+  const freshParam = new URLSearchParams(window.location.search).get('fresh');
+  if (freshParam) {
+    WindowManager.resetWindowId();
+    sessionStorage.removeItem(nsKey('deepsteve-tab-sessions'));
+    sessionStorage.removeItem(nsKey('deepsteve-active-tab'));
+    history.replaceState(null, '', window.location.pathname);
+  }
+
   // Auto-reload browser when server restarts (restart.sh, node --watch, etc.)
   initLiveReload({
     windowId: getWindowId(),
@@ -2759,15 +2769,6 @@ async function init() {
   document.getElementById('new-btn-dropdown').addEventListener('click', (e) => showNewTabMenu(e));
   document.getElementById('issue-btn').addEventListener('click', () => showIssuePicker());
   document.getElementById('empty-state-btn')?.addEventListener('click', () => quickNewSession());
-
-  // Fresh window requested (e.g. from "New Window" command) — clear inherited sessionStorage
-  const freshParam = new URLSearchParams(window.location.search).get('fresh');
-  if (freshParam) {
-    sessionStorage.removeItem(nsKey('deepsteve-window-id'));
-    sessionStorage.removeItem(nsKey('deepsteve-tab-sessions'));
-    sessionStorage.removeItem(nsKey('deepsteve-active-tab'));
-    history.replaceState(null, '', window.location.pathname);
-  }
 
   // Check if this is an existing tab BEFORE starting heartbeat (which creates window ID)
   const isExistingTab = WindowManager.hasExistingWindowId();
