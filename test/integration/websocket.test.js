@@ -12,10 +12,11 @@ describe('WebSocket Protocol', () => {
 
   before(async () => {
     // Ensure clean state — previous test suites (e.g. tmux engine) may have
-    // killShell escalation timers still running (up to 10s). Wait for those
-    // to settle so stale signals don't hit PIDs reused by new sessions.
+    // killShell escalation timers still running. The kill sequence is:
+    // immediate kill attempt → 8s SIGTERM → 2s SIGKILL. Wait for the full
+    // escalation window so stale signals don't hit PIDs reused by new sessions.
     await httpPost('/api/shells/killall').catch(() => {});
-    await new Promise(r => setTimeout(r, 3000));
+    await new Promise(r => setTimeout(r, 12000));
   });
 
   afterEach(async () => {
