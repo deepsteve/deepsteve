@@ -58,6 +58,9 @@ describe('WebSocket Protocol', () => {
     const client = createClient();
     const session = await client.connect({ new: '1', agentType: 'terminal', cwd: '/tmp' });
 
+    // Wait for shell to be fully ready before renaming
+    await client.waitForOutput(/[#$%>]/, 10000);
+
     client.send({ type: 'rename', name: 'test-tab-name' });
     await new Promise(r => setTimeout(r, 500));
 
