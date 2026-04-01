@@ -24,4 +24,4 @@ services:
         condition: service_healthy
     environment:
       - DEEPSTEVE_URL=http://server:3000
-    command: ["sh", "-c", "node --test --test-timeout 60000 test/integration/*.test.js"]
+    command: ["sh", "-c", "node --test --test-concurrency=1 --test-timeout 60000 test/integration/*.test.js"]

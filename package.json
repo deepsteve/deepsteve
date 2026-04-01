@@ -11,7 +11,7 @@
   },
   "main": "server.js",
   "scripts": {
-    "test": "node --test --test-timeout 60000 test/integration/*.test.js",
+    "test": "node --test --test-concurrency=1 --test-timeout 60000 test/integration/*.test.js",
     "test:docker": "docker compose -f test/docker-compose.yml up --build --abort-on-container-exit --exit-code-from test",
     "test:docker:clean": "docker compose -f test/docker-compose.yml down -v --rmi local"
   },
