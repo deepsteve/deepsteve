@@ -26,13 +26,15 @@ describe('Tmux Engine', () => {
     await cleanupSessions(clients);
     clients.length = 0;
 
-    // Switch back to node-pty so subsequent test files are unaffected
-    await httpPost('/api/shells/killall').catch(() => {});
-    await new Promise(r => setTimeout(r, 500));
+    // Switch back to node-pty so subsequent test files are unaffected.
+    // The engine switch kills all sessions internally, but killShell() has
+    // background escalation timers (up to 10s). Wait for those to settle
+    // so stale SIGTERM/SIGKILL won't hit PIDs reused by the next test suite.
     await httpPost('/api/settings', {
       engine: 'node-pty',
       engineSwitchConfirm: true,
     });
+    await new Promise(r => setTimeout(r, 3000));
   });
 
   afterEach(async () => {
