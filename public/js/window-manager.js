@@ -225,6 +225,14 @@ export const WindowManager = {
   },
 
   /**
+   * Reset window ID (clear cache and sessionStorage so next getWindowId() generates a fresh one)
+   */
+  resetWindowId() {
+    currentWindowId = null;
+    sessionStorage.removeItem(WINDOW_ID_KEY);
+  },
+
+  /**
    * Release current window (mark as inactive without deleting sessions)
    */
   releaseWindow() {
