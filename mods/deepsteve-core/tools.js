@@ -4,7 +4,7 @@ const path = require('path');
 
 function init(context) {
   const {
-    shells, closeSession, spawnSession, engine, getSpawnArgs, getAgentConfig, wireShellOutput,
+    shells, closeSession, spawnSession, getSpawnArgs, getAgentConfig, wireShellOutput, getDefaultEngine,
     watchClaudeSessionDir, unwatchClaudeSessionDir, saveState,
     validateWorktree, ensureWorktree, submitToShell,
     fetchIssueFromGitHub, deliverPromptWhenReady,
@@ -107,11 +107,14 @@ function init(context) {
         const tabTitle = `#${number} ${title}`;
         const name = tabTitle.length <= maxLen ? tabTitle : tabTitle.slice(0, maxLen) + '\u2026';
 
-        log(`[MCP] start_issue #${number}: id=${id}, agent=${effectiveAgentType}, worktree=${worktree || 'none'}, cwd=${spawnCwd}`);
-        spawnSession(id, effectiveAgentType, spawnArgs, spawnCwd, { cols: 120, rows: 40, env: { DEEPSTEVE_SESSION_ID: id } });
+        const sessionEngine = getDefaultEngine();
+        const engineType = sessionEngine.constructor.name === 'TmuxEngine' ? 'tmux' : 'node-pty';
+        log(`[MCP] start_issue #${number}: id=${id}, agent=${effectiveAgentType}, engine=${engineType}, worktree=${worktree || 'none'}, cwd=${spawnCwd}`);
+        spawnSession(sessionEngine, id, effectiveAgentType, spawnArgs, spawnCwd, { cols: 120, rows: 40, env: { DEEPSTEVE_SESSION_ID: id } });
         shells.set(id, {
           clients: new Set(), cwd: spawnCwd,
           claudeSessionId, agentType: effectiveAgentType,
+          engine: sessionEngine, engineType,
           worktree: worktree || null, windowId,
           name, initialPrompt: null,
           waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now(),
@@ -119,7 +122,7 @@ function init(context) {
         wireShellOutput(id);
 
         if (agentConfig.supportsSessionWatch) watchClaudeSessionDir(id);
-        engine.onExit(id, () => {
+        sessionEngine.onExit(id, () => {
           if (agentConfig.supportsSessionWatch) unwatchClaudeSessionDir(id);
           if (!isShuttingDown()) { shells.delete(id); saveState(); }
         });
@@ -188,17 +191,20 @@ function init(context) {
         if (!effectiveAgentType) {
           // Plain shell — no agent, no flags, no session tracking
           const tabName = name || undefined;
-          log(`[MCP] open_terminal (shell): id=${id}, cwd=${effectiveCwd}, caller=${session_id}`);
-          spawnSession(id, 'terminal', [], effectiveCwd, { cols: 120, rows: 40, env: { DEEPSTEVE_SESSION_ID: id } });
+          const shellEngine = getDefaultEngine();
+          const shellEngineType = shellEngine.constructor.name === 'TmuxEngine' ? 'tmux' : 'node-pty';
+          log(`[MCP] open_terminal (shell): id=${id}, engine=${shellEngineType}, cwd=${effectiveCwd}, caller=${session_id}`);
+          spawnSession(shellEngine, id, 'terminal', [], effectiveCwd, { cols: 120, rows: 40, env: { DEEPSTEVE_SESSION_ID: id } });
           shells.set(id, {
             clients: new Set(), cwd: effectiveCwd,
             claudeSessionId: null, agentType: 'terminal',
+            engine: shellEngine, engineType: shellEngineType,
             worktree: null, windowId,
             name: tabName, initialPrompt: null,
             waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now(),
           });
           wireShellOutput(id);
-          engine.onExit(id, () => {
+          shellEngine.onExit(id, () => {
             if (!isShuttingDown()) { shells.delete(id); saveState(); }
           });
           saveState();
@@ -231,11 +237,14 @@ function init(context) {
 
         const tabName = name || (validatedWorktree ? validatedWorktree : undefined);
 
-        log(`[MCP] open_terminal: id=${id}, agent=${effectiveAgentType}, worktree=${validatedWorktree || 'none'}, cwd=${spawnCwd}, caller=${session_id}`);
-        spawnSession(id, effectiveAgentType, spawnArgs, spawnCwd, { cols: 120, rows: 40, env: { DEEPSTEVE_SESSION_ID: id } });
+        const sessionEngine2 = getDefaultEngine();
+        const engineType2 = sessionEngine2.constructor.name === 'TmuxEngine' ? 'tmux' : 'node-pty';
+        log(`[MCP] open_terminal: id=${id}, agent=${effectiveAgentType}, engine=${engineType2}, worktree=${validatedWorktree || 'none'}, cwd=${spawnCwd}, caller=${session_id}`);
+        spawnSession(sessionEngine2, id, effectiveAgentType, spawnArgs, spawnCwd, { cols: 120, rows: 40, env: { DEEPSTEVE_SESSION_ID: id } });
         shells.set(id, {
           clients: new Set(), cwd: spawnCwd,
           claudeSessionId, agentType: effectiveAgentType,
+          engine: sessionEngine2, engineType: engineType2,
           worktree: validatedWorktree, windowId,
           name: tabName, initialPrompt: prompt || null,
           waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now(),
@@ -248,7 +257,7 @@ function init(context) {
         }
 
         if (agentConfig.supportsSessionWatch) watchClaudeSessionDir(id);
-        engine.onExit(id, () => {
+        sessionEngine2.onExit(id, () => {
           if (agentConfig.supportsSessionWatch) unwatchClaudeSessionDir(id);
           if (!isShuttingDown()) { shells.delete(id); saveState(); }
         });

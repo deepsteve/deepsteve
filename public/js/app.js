@@ -164,12 +164,6 @@ function applyTheme(css) {
 }
 
 function applySettings(settings) {
-  if (settings.engine !== undefined && window.__deepsteveCurrentEngine && settings.engine !== window.__deepsteveCurrentEngine) {
-    TabSessions.clear();
-    SessionStore.removeWindow(getWindowId());
-    location.reload();
-    return;
-  }
   if (settings.maxIssueTitleLength !== undefined) {
     maxIssueTitleLength = settings.maxIssueTitleLength;
   }
@@ -582,9 +576,9 @@ settingsBtn?.addEventListener('click', async () => {
       </div>
       <div class="settings-tab-content" data-tab="terminal">
       <div class="settings-section">
-        <h3>Terminal Engine</h3>
+        <h3>Default Terminal Engine</h3>
         <p style="font-size: 13px; color: var(--ds-text-secondary); margin-bottom: 8px;">
-          Choose how terminal sessions run. With tmux, sessions survive daemon restarts.
+          Default engine for new sessions. Existing sessions keep their engine. With tmux, sessions survive daemon restarts.
         </p>
         <select id="engine-select" style="padding: 4px 8px; border-radius: 4px; border: 1px solid var(--ds-border); background: var(--ds-bg-secondary); color: var(--ds-text-primary);">
           ${(enginesData.engines || []).map(e => {
@@ -1007,31 +1001,6 @@ settingsBtn?.addEventListener('click', async () => {
       alert(result.error);
       return;
     }
-    if (result.engineSwitched) {
-      TabSessions.clear();
-      SessionStore.removeWindow(getWindowId());
-      overlay.remove();
-      location.reload();
-      return;
-    }
-    if (result.engineSwitchRequired) {
-      const confirmed = confirm(`Switching engines will close ${result.activeSessions} active session(s). Continue?`);
-      if (confirmed) {
-        resp = await fetch('/api/settings', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ ...settingsPayload, engineSwitchConfirm: true })
-        });
-        result = await resp.json();
-        if (result.engineSwitched) {
-          TabSessions.clear();
-          SessionStore.removeWindow(getWindowId());
-          overlay.remove();
-          location.reload();
-          return;
-        }
-      }
-    }
     maxIssueTitleLength = Math.max(10, Math.min(200, newMaxTitle));
     setCmdHoldModeEnabled(cmdTabSwitch);
     setCmdHoldModeHoldMs(cmdTabSwitchHoldMs);
@@ -1103,6 +1072,10 @@ function createTmuxAttachSession(tmuxSessionName) {
       ws.setSessionId(msg.id);
       initTerminal(msg.id, ws, null, msg.name || tmuxSessionName, { pendingData });
       pendingData = [];
+      if (msg.engineType) {
+        const sess = sessions.get(msg.id);
+        if (sess) sess.engineType = msg.engineType;
+      }
     } else if (msg.type === 'error') {
       alert(msg.message || 'Failed to attach to tmux session');
       ws.close();
@@ -1176,8 +1149,15 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
             ws.sendJSON({ type: 'initialPrompt', text: opts.initialPrompt });
           }
         }
-        // Track claudeSessionId for session verification (after initTerminal
+        // Track engineType and claudeSessionId for session verification (after initTerminal
         // so TabSessions.add has already created the entry)
+        if (msg.engineType) {
+          const sess = sessions.get(msg.id);
+          if (sess) sess.engineType = msg.engineType;
+          // Update tab tooltip to show engine type
+          const tabEl = document.getElementById('tab-' + msg.id);
+          if (tabEl) tabEl.title = msg.engineType === 'tmux' ? 'tmux session' : 'PTY session';
+        }
         if (msg.claudeSessionId) {
           const tabList = TabSessions.get();
           const tabEntry = tabList.find(s => s.id === msg.id);
@@ -2618,10 +2598,6 @@ async function init() {
     window.__deepsteveAgents = data.agents || [];
     window.__deepsteveDefaultAgent = data.defaultAgent || 'claude';
     initEnginesDropdown();
-  }).catch(() => {});
-  // Track current engine for cross-window reload detection
-  fetch('/api/engines').then(r => r.json()).then(data => {
-    window.__deepsteveCurrentEngine = data.current || 'node-pty';
   }).catch(() => {});
   fetch('/api/settings').then(r => r.json()).then(s => { window.__deepsteveDefaultAgent = s.defaultAgent || 'claude'; }).catch(() => {});
 

@@ -267,23 +267,40 @@ function saveSettings() {
 }
 
 // --- Engine initialization ---
-let engine;
-function initEngine() {
-  if (settings.engine === 'tmux') {
-    const tmux = new TmuxEngine();
-    if (tmux.available) {
-      engine = tmux;
-      log(`Engine: tmux v${tmux.version}`);
-      return;
+// Both engines coexist: node-pty is always enabled, tmux is enabled if installed.
+// settings.engine controls the default for new sessions, not a global mode switch.
+const ptyEngine = new NodePtyEngine();
+log('Engine: node-pty (always enabled)');
+
+let tmuxEngine = null;
+{
+  const tmuxCheck = new TmuxEngine();
+  if (tmuxCheck.available) {
+    tmuxEngine = tmuxCheck;
+    log(`Engine: tmux v${tmuxEngine.version} (available)`);
+  } else {
+    log('Engine: tmux not available');
+    if (settings.engine === 'tmux') {
+      settings.engine = 'node-pty';
+      saveSettings();
     }
-    log('Engine: tmux requested but not available, falling back to node-pty');
-    settings.engine = 'node-pty';
-    saveSettings();
   }
-  engine = new NodePtyEngine();
-  log('Engine: node-pty');
 }
-initEngine();
+
+function getDefaultEngine() {
+  if (settings.engine === 'tmux' && tmuxEngine) return tmuxEngine;
+  return ptyEngine;
+}
+
+function getEngineByType(type) {
+  if (type === 'tmux' && tmuxEngine) return tmuxEngine;
+  return ptyEngine;
+}
+
+function getEngine(id) {
+  const entry = shells.get(id);
+  return entry?.engine || getDefaultEngine();
+}
 
 function getShellProfilePath() {
   let p = settings.shellProfile || '~/.zshrc';
@@ -479,24 +496,25 @@ function broadcastSkills() {
 }
 
 /**
- * Spawn a session using the active engine.
+ * Spawn a session using the specified engine.
+ * @param {Engine} eng - Engine instance to use
  * @param {string} id - Session ID
  * @param {string} agentType - 'claude', 'opencode', or 'gemini'
  * @param {string[]} args - Agent CLI arguments
  * @param {string} cwd - Working directory
  * @param {{ cols?: number, rows?: number, env?: object }} opts
  */
-function spawnSession(id, agentType, args, cwd, { cols = 120, rows = 40, env: extraEnv } = {}) {
+function spawnSession(eng, id, agentType, args, cwd, { cols = 120, rows = 40, env: extraEnv } = {}) {
   const env = extraEnv ? { ...process.env, ...extraEnv } : process.env;
   if (agentType === 'terminal') {
-    engine.spawn(id, 'zsh', ['-l'], cwd, { cols, rows, env });
+    eng.spawn(id, 'zsh', ['-l'], cwd, { cols, rows, env });
     return;
   }
   const bin = agentType === 'claude' ? 'claude'
     : agentType === 'opencode' ? (settings.opencodeBinary || 'opencode')
     : (settings.geminiBinary || 'gemini');
   const quoted = args.map(a => `'${a.replace(/'/g, "'\\''")}'`).join(' ');
-  engine.spawn(id, 'zsh', ['-l', '-c', `${bin} ${quoted}`], cwd, { cols, rows, env });
+  eng.spawn(id, 'zsh', ['-l', '-c', `${bin} ${quoted}`], cwd, { cols, rows, env });
 }
 
 // Agent capabilities and argument mapping
@@ -743,8 +761,8 @@ function unwatchClaudeSessionDir(shellId) {
  * they land in different readable events.
  */
 function submitToShell(id, text, eng) {
-  (eng || engine).write(id, text);
-  setTimeout(() => (eng || engine).write(id, '\r'), 1000);
+  (eng || getEngine(id)).write(id, text);
+  setTimeout(() => (eng || getEngine(id)).write(id, '\r'), 1000);
 }
 
 /**
@@ -917,7 +935,7 @@ function wireShellOutput(id) {
     e.clients.forEach((c) => c.send(data));
   };
 
-  engine.onData(id, dataHandler);
+  (entry.engine || ptyEngine).onData(id, dataHandler);
   // Store reference for cleanup
   entry._engineDataHandler = dataHandler;
 }
@@ -926,7 +944,7 @@ function wireShellOutput(id) {
 function killShell(entry, id) {
   if (entry.killed) return;
   entry.killed = true;
-  const eng = engine;  // Capture — survives async initEngine() swaps
+  const eng = entry.engine || ptyEngine;
 
   // tmux-attach sessions manage their own PTY — just detach
   if (entry.agentType === 'tmux-attach') {
@@ -1039,7 +1057,7 @@ function saveState() {
   const state = {};
   for (const [id, entry] of shells) {
     if (entry.agentType === 'tmux-attach') continue; // ephemeral — don't persist
-    state[id] = { cwd: entry.cwd, claudeSessionId: entry.claudeSessionId, agentType: entry.agentType || 'claude', worktree: entry.worktree || null, name: entry.name || null, lastActivity: entry.lastActivity || null, createdAt: entry.createdAt || null, windowId: entry.windowId || null };
+    state[id] = { cwd: entry.cwd, claudeSessionId: entry.claudeSessionId, agentType: entry.agentType || 'claude', engineType: entry.engineType || 'node-pty', worktree: entry.worktree || null, name: entry.name || null, lastActivity: entry.lastActivity || null, createdAt: entry.createdAt || null, windowId: entry.windowId || null };
   }
   // Merge with any saved state that wasn't reconnected yet
   const merged = { ...savedState, ...state };
@@ -1110,8 +1128,8 @@ async function shutdown(signal) {
 
   // Phase 2: Wait up to 8s for shells to exit naturally (1s for \r delay + time to save)
   const alive = new Set(entries.map(([id]) => id));
-  for (const [id] of entries) {
-    engine.onExit(id, () => alive.delete(id));
+  for (const [id, entry] of entries) {
+    (entry.engine || ptyEngine).onExit(id, () => alive.delete(id));
   }
 
   const deadline = Date.now() + 8000;
@@ -1130,7 +1148,7 @@ async function shutdown(signal) {
     const state = {};
     for (const [sid, sentry] of shells) {
       if (sentry.agentType === 'tmux-attach') continue;
-      state[sid] = { cwd: sentry.cwd, claudeSessionId: sentry.claudeSessionId, agentType: sentry.agentType || 'claude', worktree: sentry.worktree || null, name: sentry.name || null, lastActivity: sentry.lastActivity || null };
+      state[sid] = { cwd: sentry.cwd, claudeSessionId: sentry.claudeSessionId, agentType: sentry.agentType || 'claude', engineType: sentry.engineType || 'node-pty', worktree: sentry.worktree || null, name: sentry.name || null, lastActivity: sentry.lastActivity || null };
     }
     const merged = { ...savedState, ...state };
     try {
@@ -1151,13 +1169,13 @@ async function shutdown(signal) {
   // Phase 3: SIGTERM remaining
   log(`${alive.size} shells still alive, sending SIGTERM...`);
   for (const id of alive) {
-    try { engine.kill(id, 'SIGTERM'); } catch {}
+    try { getEngine(id).kill(id, 'SIGTERM'); } catch {}
   }
 
   // Phase 4: Wait 2s more, then force kill
   await new Promise(r => setTimeout(r, 2000));
   for (const id of alive) {
-    try { engine.kill(id, 'SIGKILL'); } catch {}
+    try { getEngine(id).kill(id, 'SIGKILL'); } catch {}
   }
 
   log('Shutdown complete');
@@ -1225,20 +1243,13 @@ app.get('/api/settings', (req, res) => {
 app.get('/api/settings/defaults', (req, res) => res.json(SETTINGS_DEFAULTS));
 
 app.get('/api/engines', (req, res) => {
-  let tmuxAvailable = false;
-  let tmuxVersion = null;
-  try {
-    const out = execSync("zsh -l -c 'tmux -V'", { encoding: 'utf8', timeout: 5000 }).trim();
-    const match = out.match(/(\d+\.\d+)/);
-    tmuxVersion = match ? match[1] : out;
-    tmuxAvailable = true;
-  } catch {}
   res.json({
     engines: [
       { id: 'node-pty', name: 'node-pty (built-in)', available: true },
-      { id: 'tmux', name: 'tmux', available: tmuxAvailable, version: tmuxVersion },
+      { id: 'tmux', name: 'tmux', available: !!tmuxEngine, version: tmuxEngine?.version || null },
     ],
     current: settings.engine || 'node-pty',
+    tmuxAvailable: !!tmuxEngine,
   });
 });
 
@@ -1341,40 +1352,16 @@ app.post('/api/settings', (req, res) => {
       log(`Settings updated: windowConfigs (${settings.windowConfigs.length} configs)`);
     }
   }
-  let engineSwitched = false;
   if (req.body.engine !== undefined) {
     const requested = String(req.body.engine);
-    if (requested === 'node-pty' || requested === 'tmux') {
-      if (requested !== settings.engine) {
-        // Validate tmux availability before switching
-        if (requested === 'tmux') {
-          const check = new TmuxEngine();
-          if (!check.available) {
-            return res.status(400).json({ error: 'tmux is not installed or not found in PATH' });
-          }
-        }
-        // Check if there are active sessions
-        if (shells.size > 0 && !req.body.engineSwitchConfirm) {
-          return res.json({ ...settings, engineSwitchRequired: true, activeSessions: shells.size });
-        }
-        // Kill all active sessions before switching
-        if (shells.size > 0) {
-          for (const [sid, sentry] of shells) {
-            killShell(sentry, sid);
-            shells.delete(sid);
-          }
-          saveState();
-        }
-        settings.engine = requested;
-        initEngine();
-        engineSwitched = true;
-        log(`Settings updated: engine=${settings.engine}`);
-      }
+    if (requested === 'node-pty' || (requested === 'tmux' && tmuxEngine)) {
+      settings.engine = requested;
+      log(`Settings updated: default engine=${settings.engine}`);
     }
   }
   saveSettings();
   broadcastSettings();
-  res.json({ ...settings, ...(engineSwitched ? { engineSwitched: true } : {}) });
+  res.json(settings);
 });
 
 // --- Command Palette: Custom Commands ---
@@ -1564,11 +1551,13 @@ app.post('/api/window-configs/:id/apply', (req, res) => {
     const spawnArgs = getSpawnArgs(agentType, { sessionId: claudeSessionId });
     const name = tab.name || path.basename(cwd);
 
-    spawnSession(id, agentType, spawnArgs, cwd, { cols: 120, rows: 40, env: { DEEPSTEVE_SESSION_ID: id } });
-    shells.set(id, { clients: new Set(), cwd, claudeSessionId, agentType, worktree: null, windowId: windowId || null, name, initialPrompt: null, waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now() });
+    const sessionEngine = getDefaultEngine();
+    const engineType = sessionEngine === tmuxEngine ? 'tmux' : 'node-pty';
+    spawnSession(sessionEngine, id, agentType, spawnArgs, cwd, { cols: 120, rows: 40, env: { DEEPSTEVE_SESSION_ID: id } });
+    shells.set(id, { clients: new Set(), cwd, claudeSessionId, agentType, engine: sessionEngine, engineType, worktree: null, windowId: windowId || null, name, initialPrompt: null, waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now() });
     wireShellOutput(id);
     if (agentConfig.supportsSessionWatch) watchClaudeSessionDir(id);
-    engine.onExit(id, () => {
+    sessionEngine.onExit(id, () => {
       if (agentConfig.supportsSessionWatch) unwatchClaudeSessionDir(id);
       if (!shuttingDown) { notifyClientsShellExited(id); shells.delete(id); saveState(); }
     });
@@ -2016,15 +2005,15 @@ app.delete('/api/display-tab/:id', (req, res) => {
 });
 
 app.get('/api/shells', (req, res) => {
-  const active = [...shells.entries()].map(([id, entry]) => ({ id, pid: engine.getPid(id), cwd: entry.cwd, name: entry.name || null, agentType: entry.agentType || 'claude', status: 'active', lastActivity: entry.lastActivity || null, connectedClients: entry.clients.size }));
-  const saved = Object.entries(savedState).map(([id, entry]) => ({ id, cwd: entry.cwd, name: entry.name || null, agentType: entry.agentType || 'claude', status: entry.closed ? 'closed' : 'saved', lastActivity: entry.lastActivity || null, connectedClients: 0 }));
+  const active = [...shells.entries()].map(([id, entry]) => ({ id, pid: (entry.engine || ptyEngine).getPid(id), cwd: entry.cwd, name: entry.name || null, agentType: entry.agentType || 'claude', engineType: entry.engineType || 'node-pty', status: 'active', lastActivity: entry.lastActivity || null, connectedClients: entry.clients.size }));
+  const saved = Object.entries(savedState).map(([id, entry]) => ({ id, cwd: entry.cwd, name: entry.name || null, agentType: entry.agentType || 'claude', engineType: entry.engineType || 'node-pty', status: entry.closed ? 'closed' : 'saved', lastActivity: entry.lastActivity || null, connectedClients: 0 }));
   res.json({ shells: [...active, ...saved] });
 });
 
 app.post('/api/shells/killall', (req, res) => {
   const killed = [];
   for (const [id, entry] of shells) {
-    killed.push({ id, pid: engine.getPid(id) });
+    killed.push({ id, pid: (entry.engine || ptyEngine).getPid(id) });
     killShell(entry, id);
     shells.delete(id);
   }
@@ -2282,9 +2271,11 @@ app.post('/api/start-issue', (req, res) => {
   // When body is provided inline, build prompt synchronously
   const prompt = body ? buildPrompt(body, labels, url) : null;
 
-  log(`[API] start-issue #${number}: id=${id}, agent=${agentType}, worktree=${worktree || 'none'}, cwd=${worktreeCwd}`);
-  spawnSession(id, agentType, spawnArgs, worktreeCwd, { cols: 120, rows: 40, env: { DEEPSTEVE_SESSION_ID: id } });
-  shells.set(id, { clients: new Set(), cwd: worktreeCwd, claudeSessionId: claudeSessionId, agentType, worktree: worktree || null, windowId: windowId || null, name, initialPrompt: prompt, waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now() });
+  const sessionEngine = getDefaultEngine();
+  const engineType = sessionEngine === tmuxEngine ? 'tmux' : 'node-pty';
+  log(`[API] start-issue #${number}: id=${id}, agent=${agentType}, engine=${engineType}, worktree=${worktree || 'none'}, cwd=${worktreeCwd}`);
+  spawnSession(sessionEngine, id, agentType, spawnArgs, worktreeCwd, { cols: 120, rows: 40, env: { DEEPSTEVE_SESSION_ID: id } });
+  shells.set(id, { clients: new Set(), cwd: worktreeCwd, claudeSessionId: claudeSessionId, agentType, engine: sessionEngine, engineType, worktree: worktree || null, windowId: windowId || null, name, initialPrompt: prompt, waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now() });
   wireShellOutput(id);
   // For non-BEL agents with a synchronous prompt, deliver after delay
   if (prompt && agentConfig.initialPromptDelay > 0) {
@@ -2292,7 +2283,7 @@ app.post('/api/start-issue', (req, res) => {
     setTimeout(() => submitToShell(id, prompt), agentConfig.initialPromptDelay);
   }
   if (agentConfig.supportsSessionWatch) watchClaudeSessionDir(id);
-  engine.onExit(id, () => {
+  sessionEngine.onExit(id, () => {
     if (agentConfig.supportsSessionWatch) unwatchClaudeSessionDir(id);
     if (!shuttingDown) { notifyClientsShellExited(id); shells.delete(id); saveState(); }
   });
@@ -2375,25 +2366,28 @@ const shells = new Map();
 const displayTabs = new Map(); // id → HTML string (disk-backed in ~/.deepsteve/display-tabs/)
 
 // --- tmux session reattach on startup ---
-// When engine is tmux, check for surviving tmux sessions and reattach them.
-if (engine instanceof TmuxEngine) {
-  const tmuxSessions = engine.listSessions();
+// If tmux is available, check for surviving tmux sessions and reattach them
+// regardless of the default engine setting.
+if (tmuxEngine) {
+  const tmuxSessions = tmuxEngine.listSessions();
   if (tmuxSessions.length > 0) {
     log(`tmux: found ${tmuxSessions.length} surviving session(s): ${tmuxSessions.join(', ')}`);
     for (const id of tmuxSessions) {
       const meta = savedState[id];
       if (!meta) {
         log(`tmux: session ${id} has no metadata in state.json, killing orphan`);
-        engine.destroy(id);
+        tmuxEngine.destroy(id);
         continue;
       }
-      if (engine.reattach(id, 120, 40)) {
+      if (tmuxEngine.reattach(id, 120, 40)) {
         const agentConfig = getAgentConfig(meta.agentType || 'claude');
         shells.set(id, {
           clients: new Set(),
           cwd: meta.cwd,
           claudeSessionId: meta.claudeSessionId,
           agentType: meta.agentType || 'claude',
+          engine: tmuxEngine,
+          engineType: 'tmux',
           worktree: meta.worktree || null,
           name: meta.name || null,
           restored: true,
@@ -2404,7 +2398,7 @@ if (engine instanceof TmuxEngine) {
         });
         wireShellOutput(id);
         if (agentConfig.supportsSessionWatch) watchClaudeSessionDir(id);
-        engine.onExit(id, () => {
+        tmuxEngine.onExit(id, () => {
           if (agentConfig.supportsSessionWatch) unwatchClaudeSessionDir(id);
           if (!shuttingDown) { notifyClientsShellExited(id); shells.delete(id); saveState(); }
         });
@@ -2553,7 +2547,7 @@ function handleWsConnection(ws, req) {
     const pty = require('node-pty');
     const id = randomUUID().slice(0, 8);
     // Use resolved tmux path from engine (LaunchAgent PATH lacks Homebrew)
-    const tmuxBin = (engine instanceof TmuxEngine && engine.tmuxPath) || 'tmux';
+    const tmuxBin = tmuxEngine?.tmuxPath || 'tmux';
     const attachPty = pty.spawn(tmuxBin, ['attach-session', '-t', tmuxSession], {
       name: 'xterm-256color',
       cols: initialCols,
@@ -2565,6 +2559,8 @@ function handleWsConnection(ws, req) {
       cwd: null,
       claudeSessionId: null,
       agentType: 'tmux-attach',
+      engine: ptyEngine, // tmux-attach uses raw node-pty for the attach PTY
+      engineType: 'node-pty',
       tmuxSession,
       worktree: null,
       name: tabName,
@@ -2597,7 +2593,7 @@ function handleWsConnection(ws, req) {
     log(`[WS] tmux-attach: id=${id}, session=${tmuxSession}`);
 
     entry.clients.add(ws);
-    ws.send(JSON.stringify({ type: 'session', id, restored: false, cwd: null, name: tabName, agentType: 'tmux-attach', scrollback: false, existingClients: 0 }));
+    ws.send(JSON.stringify({ type: 'session', id, restored: false, cwd: null, name: tabName, agentType: 'tmux-attach', engineType: 'node-pty', scrollback: false, existingClients: 0 }));
 
     ws.on('message', (msg) => {
       const str = msg.toString();
@@ -2656,6 +2652,7 @@ function handleWsConnection(ws, req) {
   const initialRows = parseInt(url.searchParams.get('rows')) || 40;
   const agentType = url.searchParams.get('agentType') || 'claude';
   const forkFrom = url.searchParams.get('fork');
+  const requestedEngine = url.searchParams.get('engine'); // optional per-session engine override
 
   log(`[WS] Connection: id=${id}, cwd=${cwd}, createNew=${createNew}, worktree=${worktree}`);
   log(`[WS] Active shells: ${[...shells.keys()].join(', ') || 'none'}`);
@@ -2672,21 +2669,24 @@ function handleWsConnection(ws, req) {
       const savedAgentType = restored.agentType || 'claude';
       const agentConfig = getAgentConfig(savedAgentType);
 
-      log(`Restoring session ${id} in ${cwd} (agent: ${savedAgentType}, session: ${claudeSessionId}, worktree: ${savedWorktree || 'none'})`);
+      const savedEngineType = restored.engineType || 'node-pty';
+      const sessionEngine = getEngineByType(savedEngineType);
+      const restoredEngineType = sessionEngine === tmuxEngine ? 'tmux' : 'node-pty';
+      log(`Restoring session ${id} in ${cwd} (agent: ${savedAgentType}, engine: ${restoredEngineType}, session: ${claudeSessionId}, worktree: ${savedWorktree || 'none'})`);
       const ptySize = { cols: initialCols, rows: initialRows };
-      
-      const resumeArgs = getResumeArgs(savedAgentType, { 
-        sessionId: claudeSessionId, 
-        worktree: savedWorktree 
+
+      const resumeArgs = getResumeArgs(savedAgentType, {
+        sessionId: claudeSessionId,
+        worktree: savedWorktree
       });
 
-      spawnSession(id, savedAgentType, resumeArgs, cwd, { ...ptySize, env: { DEEPSTEVE_SESSION_ID: id } });
+      spawnSession(sessionEngine, id, savedAgentType, resumeArgs, cwd, { ...ptySize, env: { DEEPSTEVE_SESSION_ID: id } });
       const startTime = Date.now();
       const restoredName = name || restored.name || null;
-      shells.set(id, { clients: new Set(), cwd, claudeSessionId, agentType: savedAgentType, worktree: savedWorktree, name: restoredName, restored: true, waitingForInput: false, lastActivity: Date.now(), createdAt: restored.createdAt || Date.now(), windowId: restored.windowId || null });
+      shells.set(id, { clients: new Set(), cwd, claudeSessionId, agentType: savedAgentType, engine: sessionEngine, engineType: restoredEngineType, worktree: savedWorktree, name: restoredName, restored: true, waitingForInput: false, lastActivity: Date.now(), createdAt: restored.createdAt || Date.now(), windowId: restored.windowId || null });
       wireShellOutput(id);
       if (agentConfig.supportsSessionWatch) watchClaudeSessionDir(id);
-      engine.onExit(id, () => {
+      sessionEngine.onExit(id, () => {
         if (agentConfig.supportsSessionWatch) unwatchClaudeSessionDir(id);
         if (shuttingDown) return;  // Don't overwrite state file during shutdown
         const elapsed = Date.now() - startTime;
@@ -2697,8 +2697,8 @@ function handleWsConnection(ws, req) {
           const entry = shells.get(id);
           const fallbackArgs = ['-c', '--fork-session', '--session-id', newClaudeSessionId];
           if (entry && entry.worktree) fallbackArgs.push('--worktree', entry.worktree);
-          engine.destroy(id);
-          spawnSession(id, 'claude', fallbackArgs, cwd, { cols: initialCols, rows: initialRows, env: { DEEPSTEVE_SESSION_ID: id } });
+          sessionEngine.destroy(id);
+          spawnSession(sessionEngine, id, 'claude', fallbackArgs, cwd, { cols: initialCols, rows: initialRows, env: { DEEPSTEVE_SESSION_ID: id } });
           if (entry) {
             entry.claudeSessionId = newClaudeSessionId;
             entry.killed = false;
@@ -2706,7 +2706,7 @@ function handleWsConnection(ws, req) {
             entry.scrollbackSize = 0;
             wireShellOutput(id);
             watchClaudeSessionDir(id);
-            engine.onExit(id, () => { if (!shuttingDown) { unwatchClaudeSessionDir(id); notifyClientsShellExited(id); shells.delete(id); saveState(); } });
+            sessionEngine.onExit(id, () => { if (!shuttingDown) { unwatchClaudeSessionDir(id); notifyClientsShellExited(id); shells.delete(id); saveState(); } });
             saveState();
           }
         } else {
@@ -2751,12 +2751,14 @@ function handleWsConnection(ws, req) {
       });
     }
 
-    log(`[WS] Creating NEW shell: oldId=${oldId}, newId=${id}, agent=${agentType}, session=${sessionId}, worktree=${worktree || 'none'}, cwd=${worktreeCwd}`);
-    spawnSession(id, agentType, spawnArgs, worktreeCwd, { cols: initialCols, rows: initialRows, env: { DEEPSTEVE_SESSION_ID: id } });
-    shells.set(id, { clients: new Set(), cwd: worktreeCwd, claudeSessionId: sessionId, agentType, worktree: worktree || null, name: name || null, waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now() });
+    const sessionEngine = getEngineByType(requestedEngine || settings.engine);
+    const engineType = sessionEngine === tmuxEngine ? 'tmux' : 'node-pty';
+    log(`[WS] Creating NEW shell: oldId=${oldId}, newId=${id}, agent=${agentType}, engine=${engineType}, session=${sessionId}, worktree=${worktree || 'none'}, cwd=${worktreeCwd}`);
+    spawnSession(sessionEngine, id, agentType, spawnArgs, worktreeCwd, { cols: initialCols, rows: initialRows, env: { DEEPSTEVE_SESSION_ID: id } });
+    shells.set(id, { clients: new Set(), cwd: worktreeCwd, claudeSessionId: sessionId, agentType, engine: sessionEngine, engineType, worktree: worktree || null, name: name || null, waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now() });
     wireShellOutput(id);
     if (agentConfig.supportsSessionWatch) watchClaudeSessionDir(id);
-    engine.onExit(id, () => { if (!shuttingDown) { if (agentConfig.supportsSessionWatch) unwatchClaudeSessionDir(id); notifyClientsShellExited(id); shells.delete(id); saveState(); } });
+    sessionEngine.onExit(id, () => { if (!shuttingDown) { if (agentConfig.supportsSessionWatch) unwatchClaudeSessionDir(id); notifyClientsShellExited(id); shells.delete(id); saveState(); } });
     saveState();
   }
 
@@ -2771,7 +2773,7 @@ function handleWsConnection(ws, req) {
   if (windowId) entry.windowId = windowId;
   const hasScrollback = entry.scrollback && entry.scrollback.length > 0;
   log(`[WS] Sending session response: id=${id}, restored=${entry.restored || false}, scrollback=${hasScrollback ? entry.scrollbackSize + 'B' : 'none'}, existingClients=${existingClients}`);
-  ws.send(JSON.stringify({ type: 'session', id, restored: entry.restored || false, cwd: entry.cwd, name: entry.name || null, agentType: entry.agentType || 'claude', claudeSessionId: entry.claudeSessionId || null, scrollback: hasScrollback, existingClients }));
+  ws.send(JSON.stringify({ type: 'session', id, restored: entry.restored || false, cwd: entry.cwd, name: entry.name || null, agentType: entry.agentType || 'claude', engineType: entry.engineType || 'node-pty', claudeSessionId: entry.claudeSessionId || null, scrollback: hasScrollback, existingClients }));
 
   // Send buffered scrollback so the client can render the terminal immediately
   if (hasScrollback) {
@@ -2784,7 +2786,7 @@ function handleWsConnection(ws, req) {
     const str = msg.toString();
     try {
       const parsed = JSON.parse(str);
-      if (parsed.type === 'resize') { engine.resize(id, parsed.cols, parsed.rows); return; }
+      if (parsed.type === 'resize') { getEngine(id).resize(id, parsed.cols, parsed.rows); return; }
       if (parsed.type === 'redraw') { return; } // no-op: Ink echoes \x0c as ^L garbage; scrollback replay handles reconnect
       if (parsed.type === 'initialPrompt') {
         deliverPromptWhenReady(id, parsed.text);
@@ -2819,7 +2821,7 @@ function handleWsConnection(ws, req) {
       const stateMsg = JSON.stringify({ type: 'state', waiting: false });
       entry.clients.forEach((c) => c.send(stateMsg));
     }
-    engine.write(id, str);
+    getEngine(id).write(id, str);
   });
 
   ws.on('close', () => {
@@ -2870,7 +2872,7 @@ function broadcastToWindow(windowId, msg) {
 }
 
 // Initialize MCP server (async, ~100ms for dynamic import)
-initMCP({ app, shells, wss, broadcast, broadcastToWindow, log, MODS_DIR, closeSession, spawnSession, engine, getSpawnArgs, getAgentConfig, wireShellOutput, watchClaudeSessionDir, unwatchClaudeSessionDir, saveState, validateWorktree, ensureWorktree, submitToShell, fetchIssueFromGitHub, deliverPromptWhenReady, reloadClients, deliverToWindow, settings, isShuttingDown: () => shuttingDown, displayTabs, setDisplayTab, deleteDisplayTab }).catch(e => log('MCP init failed:', e.message));
+initMCP({ app, shells, wss, broadcast, broadcastToWindow, log, MODS_DIR, closeSession, spawnSession, getSpawnArgs, getAgentConfig, wireShellOutput, watchClaudeSessionDir, unwatchClaudeSessionDir, saveState, validateWorktree, ensureWorktree, submitToShell, fetchIssueFromGitHub, deliverPromptWhenReady, reloadClients, deliverToWindow, settings, isShuttingDown: () => shuttingDown, displayTabs, setDisplayTab, deleteDisplayTab, getDefaultEngine }).catch(e => log('MCP init failed:', e.message));
 
 // Watch themes directory for changes and broadcast to clients
 let themeWatchDebounce = null;
