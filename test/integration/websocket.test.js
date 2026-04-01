@@ -11,9 +11,11 @@ describe('WebSocket Protocol', () => {
   }
 
   before(async () => {
-    // Ensure clean state — previous test suites (e.g. tmux engine) may still be tearing down
+    // Ensure clean state — previous test suites (e.g. tmux engine) may have
+    // killShell escalation timers still running (up to 10s). Wait for those
+    // to settle so stale signals don't hit PIDs reused by new sessions.
     await httpPost('/api/shells/killall').catch(() => {});
-    await new Promise(r => setTimeout(r, 1000));
+    await new Promise(r => setTimeout(r, 3000));
   });
 
   afterEach(async () => {
@@ -26,7 +28,7 @@ describe('WebSocket Protocol', () => {
     const session = await client1.connect({ new: '1', agentType: 'terminal', cwd: '/tmp' });
 
     // Wait for shell prompt to appear
-    await client1.waitForOutput(/[#$%>]/, 10000);
+    await client1.waitForOutput(/[#$%>]/, 15000);
     client1.rawOutput = '';
 
     // Send command and wait for output
@@ -52,7 +54,7 @@ describe('WebSocket Protocol', () => {
     await client.connect({ new: '1', agentType: 'terminal', cwd: '/tmp' });
 
     // Wait for shell to be ready
-    await client.waitForOutput(/[#$%>]/, 10000);
+    await client.waitForOutput(/[#$%>]/, 15000);
 
     // Send resize — should not error or crash the session
     client.send({ type: 'resize', cols: 80, rows: 24 });
@@ -68,7 +70,7 @@ describe('WebSocket Protocol', () => {
     const session = await client.connect({ new: '1', agentType: 'terminal', cwd: '/tmp' });
 
     // Wait for shell to be fully ready before renaming
-    await client.waitForOutput(/[#$%>]/, 10000);
+    await client.waitForOutput(/[#$%>]/, 15000);
 
     client.send({ type: 'rename', name: 'test-tab-name' });
     await new Promise(r => setTimeout(r, 500));
@@ -93,7 +95,7 @@ describe('WebSocket Protocol', () => {
     await client2.connect({ id: session.id });
 
     // Wait for both to be connected and shell ready
-    await client1.waitForOutput(/[#$%>]/, 10000);
+    await client1.waitForOutput(/[#$%>]/, 15000);
     client1.rawOutput = '';
     client2.rawOutput = '';
 
