@@ -27,6 +27,9 @@ describe('WebSocket Protocol', () => {
     client1.sendInput('echo SCROLLBACK_MARKER_42\r');
     await client1.waitForOutput(/SCROLLBACK_MARKER_42/, 10000);
 
+    // Small delay to ensure scrollback buffer is populated before reconnect
+    await new Promise(r => setTimeout(r, 500));
+
     // Connect a second client to the same session
     const client2 = createClient();
     const session2 = await client2.connect({ id: session.id });
