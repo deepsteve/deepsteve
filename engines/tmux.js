@@ -124,6 +124,12 @@ class TmuxEngine extends Engine {
       throw new Error(`Failed to create tmux session ${sessionName}: ${e.message}`);
     }
 
+    // Disable status bar — it steals a row from the pane, causing dimension
+    // mismatch between what xterm.js reports and what programs inside see.
+    try {
+      tmuxExec(['set-option', '-t', sessionName, 'status', 'off']);
+    } catch {}
+
     // Attach to the tmux session via a PTY for I/O
     this._attach(id, cols, rows);
   }
@@ -200,10 +206,9 @@ class TmuxEngine extends Engine {
   resize(id, cols, rows) {
     const entry = this._sessions.get(id);
     if (!entry) return;
-    const sessionName = this._tmuxSessionName(id);
-    try {
-      tmuxExec(['resize-window', '-t', sessionName, '-x', String(cols), '-y', String(rows)]);
-    } catch {}
+    // Only resize the attach PTY — tmux auto-adjusts the window/pane via
+    // SIGWINCH. Calling resize-window explicitly races with this and can
+    // leave dimensions out of sync.
     try {
       entry.attachPty.resize(cols, rows);
     } catch {}

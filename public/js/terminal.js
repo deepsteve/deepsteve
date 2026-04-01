@@ -257,7 +257,7 @@ export function measureTerminalSize() {
 
   // Create a temporary off-screen terminal to measure cell size
   const tmp = document.createElement('div');
-  tmp.style.cssText = 'position:absolute;visibility:hidden;pointer-events:none;';
+  tmp.style.cssText = 'position:absolute;inset:0;visibility:hidden;pointer-events:none;';
   container.appendChild(tmp);
 
   const term = new Terminal({ fontSize: 14 });

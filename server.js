@@ -2601,8 +2601,6 @@ function handleWsConnection(ws, req) {
         const parsed = JSON.parse(str);
         if (parsed.type === 'resize') {
           attachPty.resize(parsed.cols, parsed.rows);
-          // Also resize the tmux window
-          try { execSync(`zsh -l -c 'tmux resize-window -t "${tmuxSession.replace(/"/g, '\\"')}" -x ${parsed.cols} -y ${parsed.rows}'`, { timeout: 5000, stdio: 'pipe' }); } catch {}
           return;
         }
         if (parsed.type === 'redraw') { attachPty.write('\x0c'); return; }
