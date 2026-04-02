@@ -112,7 +112,7 @@ deepsteve provides MCP tools available to all sessions:
 - **Activity**: `post_activity`
 - **Browser Console**: `browser_eval`, `browser_console`
 - **Screenshots**: `screenshot_capture`
-- **Session Info**: `get_session_info`, `close_session`
+- **Session Info**: `get_my_session_id`, `get_session_info`, `close_session`
 
 ## OpenCode Commands
 

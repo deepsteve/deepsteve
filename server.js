@@ -587,7 +587,14 @@ function spawnAgent(id, agentType, args, cwd, opts = {}) {
   spawnSession(id, agentType, args, cwd, opts);
 }
 
-function getSpawnArgs(agentType, { sessionId, planMode, worktree }) {
+function mcpConfigArgs(agentType, shellId) {
+  if (agentType !== 'claude' || !shellId) return [];
+  return ['--mcp-config', JSON.stringify({
+    deepsteve: { type: 'http', url: `http://localhost:${PORT}/mcp?shellId=${shellId}` }
+  })];
+}
+
+function getSpawnArgs(agentType, { sessionId, planMode, worktree, shellId }) {
   const config = getAgentConfig(agentType);
   const args = [];
 
@@ -603,10 +610,12 @@ function getSpawnArgs(agentType, { sessionId, planMode, worktree }) {
     args.push('--worktree', worktree);
   }
 
+  args.push(...mcpConfigArgs(agentType, shellId));
+
   return args;
 }
 
-function getResumeArgs(agentType, { sessionId, worktree }) {
+function getResumeArgs(agentType, { sessionId, worktree, shellId }) {
   const config = getAgentConfig(agentType);
   const args = [];
 
@@ -620,6 +629,8 @@ function getResumeArgs(agentType, { sessionId, worktree }) {
   if (worktree && config.supportsWorktree) {
     args.push('--worktree', worktree);
   }
+
+  args.push(...mcpConfigArgs(agentType, shellId));
 
   return args;
 }
@@ -1563,7 +1574,7 @@ app.post('/api/window-configs/:id/apply', (req, res) => {
     const agentConfig = getAgentConfig(agentType);
     const id = randomUUID().slice(0, 8);
     const claudeSessionId = randomUUID();
-    const spawnArgs = getSpawnArgs(agentType, { sessionId: claudeSessionId });
+    const spawnArgs = getSpawnArgs(agentType, { sessionId: claudeSessionId, shellId: id });
     const name = tab.name || path.basename(cwd);
 
     const sessionEngine = getDefaultEngine();
@@ -2286,7 +2297,8 @@ app.post('/api/start-issue', (req, res) => {
   const spawnArgs = getSpawnArgs(agentType, {
     sessionId: claudeSessionId,
     planMode: settings.wandPlanMode,
-    worktree
+    worktree,
+    shellId: id
   });
 
   const maxLen = settings.maxIssueTitleLength || 25;
@@ -2707,7 +2719,8 @@ function handleWsConnection(ws, req) {
 
       const resumeArgs = getResumeArgs(savedAgentType, {
         sessionId: claudeSessionId,
-        worktree: savedWorktree
+        worktree: savedWorktree,
+        shellId: id
       });
 
       const restoredName = name || restored.name || null;
@@ -2727,6 +2740,7 @@ function handleWsConnection(ws, req) {
           const entry = shells.get(id);
           const fallbackArgs = ['-c', '--fork-session', '--session-id', newClaudeSessionId];
           if (entry && entry.worktree) fallbackArgs.push('--worktree', entry.worktree);
+          fallbackArgs.push(...mcpConfigArgs('claude', id));
           sessionEngine.destroy(id);
           spawnSession(sessionEngine, id, 'claude', fallbackArgs, cwd, { cols: initialCols, rows: initialRows, env: sessionEnv(id, { name: entry?.name, worktree: entry?.worktree, windowId: entry?.windowId }) });
           if (entry) {
@@ -2772,12 +2786,14 @@ function handleWsConnection(ws, req) {
       spawnArgs = ['--resume', parent.claudeSessionId, '--fork-session', '--session-id', sessionId];
       if (worktree) spawnArgs.push('--worktree', worktree);
       else if (parent.worktree) spawnArgs.push('--worktree', parent.worktree);
+      spawnArgs.push(...mcpConfigArgs(agentType, id));
       log(`[WS] Forking from shell ${forkFrom} (parent claude session: ${parent.claudeSessionId})`);
     } else {
       spawnArgs = getSpawnArgs(agentType, {
         sessionId,
         planMode,
-        worktree
+        worktree,
+        shellId: id
       });
     }
 
@@ -2902,7 +2918,7 @@ function broadcastToWindow(windowId, msg) {
 }
 
 // Initialize MCP server (async, ~100ms for dynamic import)
-initMCP({ app, shells, wss, broadcast, broadcastToWindow, log, MODS_DIR, closeSession, spawnSession, sessionEnv, getSpawnArgs, getAgentConfig, wireShellOutput, watchClaudeSessionDir, unwatchClaudeSessionDir, saveState, validateWorktree, ensureWorktree, submitToShell, fetchIssueFromGitHub, deliverPromptWhenReady, reloadClients, deliverToWindow, settings, isShuttingDown: () => shuttingDown, displayTabs, setDisplayTab, deleteDisplayTab, getDefaultEngine }).catch(e => log('MCP init failed:', e.message));
+initMCP({ app, shells, wss, broadcast, broadcastToWindow, log, MODS_DIR, closeSession, spawnSession, sessionEnv, getSpawnArgs, mcpConfigArgs, getAgentConfig, wireShellOutput, watchClaudeSessionDir, unwatchClaudeSessionDir, saveState, validateWorktree, ensureWorktree, submitToShell, fetchIssueFromGitHub, deliverPromptWhenReady, reloadClients, deliverToWindow, settings, isShuttingDown: () => shuttingDown, displayTabs, setDisplayTab, deleteDisplayTab, getDefaultEngine }).catch(e => log('MCP init failed:', e.message));
 
 // Watch themes directory for changes and broadcast to clients
 let themeWatchDebounce = null;

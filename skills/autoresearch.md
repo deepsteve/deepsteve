@@ -25,7 +25,7 @@ Steps:
 3. **Create the issue.** Run `gh issue create --title "<concise research objective>" --body "<the body above>" --label "autoresearch"`. If the `autoresearch` label doesn't exist, omit the `--label` flag and create without it. Extract the issue number from the returned URL.
 
 4. **Start the research session.** Call the `mcp__deepsteve__start_issue` MCP tool with:
-   - `session_id`: your `DEEPSTEVE_SESSION_ID` (read it via `echo $DEEPSTEVE_SESSION_ID`)
+   - `session_id`: your session ID (call `mcp__deepsteve__get_my_session_id` to get it)
    - `number`: the issue number
    - `title`: the issue title
    - `body`: the issue body, PLUS the full research protocol below appended to the end

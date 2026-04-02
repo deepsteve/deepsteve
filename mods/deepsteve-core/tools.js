@@ -4,7 +4,7 @@ const path = require('path');
 
 function init(context) {
   const {
-    shells, closeSession, spawnSession, sessionEnv, getSpawnArgs, getAgentConfig, wireShellOutput, getDefaultEngine,
+    shells, closeSession, spawnSession, sessionEnv, getSpawnArgs, mcpConfigArgs, getAgentConfig, wireShellOutput, getDefaultEngine,
     watchClaudeSessionDir, unwatchClaudeSessionDir, saveState,
     validateWorktree, ensureWorktree, submitToShell,
     fetchIssueFromGitHub, deliverPromptWhenReady,
@@ -12,10 +12,21 @@ function init(context) {
   } = context;
 
   return {
+    get_my_session_id: {
+      description: 'Get the deepsteve session ID for the calling session. No parameters needed. Use this instead of running `echo $DEEPSTEVE_SESSION_ID`.',
+      schema: {},
+      handler: async (args, extra) => {
+        const shellId = extra?.requestInfo?.url?.searchParams?.get('shellId');
+        if (!shellId || !shells.has(shellId)) {
+          return { content: [{ type: 'text', text: 'Could not determine session ID. Run `echo $DEEPSTEVE_SESSION_ID` instead.' }] };
+        }
+        return { content: [{ type: 'text', text: JSON.stringify({ session_id: shellId }) }] };
+      },
+    },
     get_session_info: {
-      description: 'Get live session metadata (tab name, cwd, worktree) for a deepsteve session. Session context is also available via env vars ($DEEPSTEVE_SESSION_ID, $DEEPSTEVE_TAB_NAME, $DEEPSTEVE_WORKTREE, $DEEPSTEVE_WINDOW_ID, $DEEPSTEVE_API_URL) and via GET $DEEPSTEVE_API_URL/api/shells/<id>/info.',
+      description: 'Get live session metadata (tab name, cwd, worktree) for a deepsteve session. Use `get_my_session_id` to get your session ID.',
       schema: {
-        session_id: z.string().describe('The deepsteve session ID (available as $DEEPSTEVE_SESSION_ID env var).'),
+        session_id: z.string().describe('The deepsteve session ID. Use `get_my_session_id` to get this value.'),
       },
       handler: async ({ session_id }) => {
         const entry = shells.get(session_id);
@@ -40,7 +51,7 @@ function init(context) {
     close_session: {
       description: 'Close a deepsteve session and its browser tab. Gracefully terminates the Claude process. Call this when your work is complete and you want to clean up.',
       schema: {
-        session_id: z.string().describe('The deepsteve session ID to close. Run `echo $DEEPSTEVE_SESSION_ID` in your terminal to get this value.'),
+        session_id: z.string().describe('The deepsteve session ID to close. Use `get_my_session_id` to get this value.'),
       },
       handler: async ({ session_id }) => {
         if (!closeSession(session_id)) {
@@ -50,9 +61,9 @@ function init(context) {
       },
     },
     start_issue: {
-      description: 'Open a new deepsteve session for a GitHub issue. Fetches the issue body from GitHub, creates a worktree, and starts an agent with the issue prompt. Pass your DEEPSTEVE_SESSION_ID so the new tab opens in the same browser window.',
+      description: 'Open a new deepsteve session for a GitHub issue. Fetches the issue body from GitHub, creates a worktree, and starts an agent with the issue prompt. Pass your session ID so the new tab opens in the same browser window.',
       schema: {
-        session_id: z.string().describe('Your DEEPSTEVE_SESSION_ID env var — used to inherit context'),
+        session_id: z.string().describe('Your deepsteve session ID — use `get_my_session_id` to get this value'),
         number: z.number().describe('GitHub issue number'),
         title: z.string().describe('Issue title'),
         body: z.string().optional().describe('Issue body (if omitted, fetched from GitHub via gh CLI)'),
@@ -102,6 +113,7 @@ function init(context) {
           sessionId: claudeSessionId,
           planMode: settings.wandPlanMode,
           worktree,
+          shellId: id,
         });
 
         const maxLen = settings.maxIssueTitleLength || 25;
@@ -151,7 +163,7 @@ function init(context) {
     open_browser_tab: {
       description: 'Open a URL in a new browser tab in the same window as the given session. Use this to open documentation, previews, or external links alongside the session.',
       schema: {
-        session_id: z.string().describe('Your DEEPSTEVE_SESSION_ID env var — used to target the correct browser window'),
+        session_id: z.string().describe('Your deepsteve session ID — use `get_my_session_id` to get this value'),
         url: z.string().describe('The URL to open'),
       },
       handler: async ({ session_id, url }) => {
@@ -166,9 +178,9 @@ function init(context) {
       },
     },
     open_terminal: {
-      description: 'Open a new deepsteve terminal session (new browser tab). Inherits context (cwd, worktree, windowId, agentType) from the calling session. Pass your DEEPSTEVE_SESSION_ID so the new tab opens in the same browser window.',
+      description: 'Open a new deepsteve terminal session (new browser tab). Inherits context (cwd, worktree, windowId, agentType) from the calling session. Pass your session ID so the new tab opens in the same browser window.',
       schema: {
-        session_id: z.string().describe('Your DEEPSTEVE_SESSION_ID env var — used to inherit context'),
+        session_id: z.string().describe('Your deepsteve session ID — use `get_my_session_id` to get this value'),
         prompt: z.string().optional().describe('Initial prompt to send to the new session'),
         name: z.string().optional().describe('Tab name for the new session'),
         cwd: z.string().optional().describe('Working directory (defaults to caller\'s cwd)'),
@@ -228,11 +240,13 @@ function init(context) {
         if (fork && caller.claudeSessionId) {
           spawnArgs = ['--resume', caller.claudeSessionId, '--fork-session', '--session-id', claudeSessionId];
           if (validatedWorktree) spawnArgs.push('--worktree', validatedWorktree);
+          spawnArgs.push(...mcpConfigArgs(effectiveAgentType, id));
         } else {
           spawnArgs = getSpawnArgs(effectiveAgentType, {
             sessionId: claudeSessionId,
             planMode: plan_mode || false,
             worktree: validatedWorktree,
+            shellId: id,
           });
         }
 

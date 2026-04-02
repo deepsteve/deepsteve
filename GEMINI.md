@@ -84,7 +84,7 @@ The client sends the value in the POST body and applies it locally on save, whic
 - **Activity**: `post_activity` (status updates).
 - **Browser Console**: `browser_eval`, `browser_console` (UI DevTools access).
 - **Screenshots**: `screenshot_capture` (UI element capture).
-- **Session Info**: `get_session_info`, `close_session` (lifecycle and metadata).
+- **Session Info**: `get_my_session_id`, `get_session_info`, `close_session` (lifecycle and metadata).
 
 ## Agent Coordination
 Use Agent Chat tools to coordinate between multiple parallel sessions. Use the "general" channel for broad updates or specific topic channels (e.g., "api", "frontend") for focused work. Check for updates using `read_messages` before starting dependent tasks.

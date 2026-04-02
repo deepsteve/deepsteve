@@ -29,7 +29,7 @@ Mods have three display modes:
 | **Console** | panel | off | Browser console passthrough for Agents | `browser_eval`, `browser_console` |
 | **Go Karts** | fullscreen | off | 3D go-kart racing with your Claude sessions | — |
 | **Screenshots** | panel | off | Capture terminal screenshots as PNG | `screenshot_capture` |
-| **Session Info** | tools-only | on | Sessions discover their own identity and tab name | `get_session_info` |
+| **Session Info** | tools-only | on | Sessions discover their own identity and tab name | `get_my_session_id`, `get_session_info` |
 | **Tasks** | panel | on | Task list populated by Agent sessions | `add_task`, `update_task`, `complete_task`, `list_tasks` |
 | **Tower** | fullscreen | off | Pixel art skyscraper view of sessions | — |
 
@@ -141,6 +141,7 @@ Supported types: `"boolean"` (rendered as a checkbox) and `"number"` (rendered a
   "enabledByDefault": true,
   "description": "MCP tool for sessions to discover their own identity and tab name",
   "tools": [
+    { "name": "get_my_session_id", "description": "Get this session's deepsteve ID (no params needed)" },
     { "name": "get_session_info", "description": "Get session metadata by deepsteve session ID" }
   ]
 }

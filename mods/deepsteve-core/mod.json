@@ -5,6 +5,7 @@
   "enabledByDefault": true,
   "description": "Session info, session close, issue spawning, terminal spawning",
   "tools": [
+    { "name": "get_my_session_id", "description": "Get this session's deepsteve ID (no params needed)" },
     { "name": "get_session_info", "description": "Get session metadata by deepsteve session ID" },
     { "name": "close_session", "description": "Close a session and its browser tab" },
     { "name": "start_issue", "description": "Open a new deepsteve session for a GitHub issue" },

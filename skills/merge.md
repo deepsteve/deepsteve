@@ -25,5 +25,5 @@ Steps:
 7. **Close the GitHub issue** (success only): Extract the issue number from the branch name obtained in step 2. If the branch name matches the pattern `*github-issue-<number>*`, run `gh issue close <number> --comment "Merged into main."`. If the branch name doesn't match this pattern, skip this step silently.
 
 8. **Close this terminal and add a testing task** (after successful merge): Call BOTH of these in parallel in the SAME tool-use message — this is critical so that rejecting `add_task` cannot prevent the close:
-   - `mcp__deepsteve__close_session` with your `DEEPSTEVE_SESSION_ID` to close this tab
+   - `mcp__deepsteve__close_session` with your session ID (from `mcp__deepsteve__get_my_session_id`) to close this tab
    - `mcp__deepsteve__add_task` to create a task for the human to manually test the change. The title should be short, e.g. "Test: <feature/fix summary>". The description should contain clear, actionable steps to verify the change works, written as a numbered list. Set priority to "medium" (or "high" if the change is risky or touches core functionality). Set `session_tag` to the branch name from step 2.
