@@ -453,6 +453,7 @@ settingsBtn?.addEventListener('click', async () => {
   const currentDefaultAgent = settingsData.defaultAgent || 'claude';
   const currentOpencodeBinary = settingsData.opencodeBinary || 'opencode';
   const currentGeminiBinary = settingsData.geminiBinary || 'gemini';
+  const currentScrollbackKB = settingsData.scrollbackKB || 100;
   const agents = window.__deepsteveAgents || [];
   const themes = themesData.themes || [];
   const activeTheme = themesData.active || '';
@@ -587,6 +588,16 @@ settingsBtn?.addEventListener('click', async () => {
             return `<option value="${e.id}" ${e.id === enginesData.current ? 'selected' : ''} ${!e.available ? 'disabled' : ''}>${escapeHtml(label)}</option>`;
           }).join('')}
         </select>
+      </div>
+      <div class="settings-section">
+        <h3>Scrollback Buffer</h3>
+        <p style="font-size: 13px; color: var(--ds-text-secondary); margin-bottom: 8px;">
+          Size of the per-session scrollback buffer used for replay on reconnect/restore.
+        </p>
+        <label style="font-size: 13px; color: var(--ds-text-primary); display: flex; align-items: center; gap: 8px;">
+          <input type="number" id="scrollback-kb" value="${currentScrollbackKB}" min="1" max="10000" step="1" style="width: 80px; padding: 4px 6px; background: var(--ds-bg-primary); border: 1px solid var(--ds-border); border-radius: 4px; color: var(--ds-text-primary); font-size: 13px;">
+          KB
+        </label>
       </div>
       </div>
       <div class="settings-tab-content" data-tab="github">
@@ -990,7 +1001,8 @@ settingsBtn?.addEventListener('click', async () => {
     const opencodeBinary = overlay.querySelector('#opencode-binary').value || 'opencode';
     const geminiBinary = overlay.querySelector('#gemini-binary').value || 'gemini';
     const selectedEngine = overlay.querySelector('#engine-select')?.value || 'node-pty';
-    const settingsPayload = { shellProfile, maxIssueTitleLength: newMaxTitle, wandPlanMode, wandPromptTemplate, symlinkWorktreeSettings, cmdTabSwitch, cmdTabSwitchHoldMs, commandPaletteEnabled, commandPaletteShortcut, hashCommandsEnabled, enabledAgents, opencodeBinary, geminiBinary, windowConfigs: editingConfigs, engine: selectedEngine };
+    const scrollbackKB = Math.max(1, Math.min(10000, Math.round(Number(overlay.querySelector('#scrollback-kb').value)) || 100));
+    const settingsPayload = { shellProfile, maxIssueTitleLength: newMaxTitle, wandPlanMode, wandPromptTemplate, symlinkWorktreeSettings, cmdTabSwitch, cmdTabSwitchHoldMs, commandPaletteEnabled, commandPaletteShortcut, hashCommandsEnabled, enabledAgents, opencodeBinary, geminiBinary, windowConfigs: editingConfigs, engine: selectedEngine, scrollbackKB };
     let resp = await fetch('/api/settings', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

@@ -57,7 +57,7 @@ if (BIND !== '127.0.0.1' && BIND !== '::1') {
   console.error('  ╚══════════════════════════════════════════════════════════════╝');
   console.error('');
 }
-const SCROLLBACK_SIZE = 100 * 1024; // 100KB circular buffer per shell
+const SCROLLBACK_DEFAULT_KB = 100; // default scrollback buffer size in KB
 const RELOAD_FLAG = path.join(os.homedir(), '.deepsteve', '.reload');
 const reloadClients = new Set(); // WebSocket connections for live-reload
 const pendingOpens = []; // open-session messages waiting for a browser to connect
@@ -247,7 +247,7 @@ Please read the issue carefully, understand the codebase context, and implement 
 };
 
 // Load settings
-let settings = { shellProfile: '~/.zshrc', maxIssueTitleLength: 25, cmdTabSwitch: false, cmdTabSwitchHoldMs: 1000, enabledSkills: [], windowConfigs: [], symlinkWorktreeSettings: false, ...SETTINGS_DEFAULTS };
+let settings = { shellProfile: '~/.zshrc', maxIssueTitleLength: 25, cmdTabSwitch: false, cmdTabSwitchHoldMs: 1000, enabledSkills: [], windowConfigs: [], symlinkWorktreeSettings: false, scrollbackKB: SCROLLBACK_DEFAULT_KB, ...SETTINGS_DEFAULTS };
 try {
   if (fs.existsSync(SETTINGS_FILE)) {
     settings = { ...settings, ...JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8')) };
@@ -463,6 +463,7 @@ function broadcastSettings() {
     symlinkWorktreeSettings: settings.symlinkWorktreeSettings,
     windowConfigs: settings.windowConfigs || [],
     engine: settings.engine || 'node-pty',
+    scrollbackKB: settings.scrollbackKB,
   });
   for (const client of wss.clients) {
     if (client.readyState === 1) client.send(msg);
@@ -850,7 +851,7 @@ function wireShellOutput(id) {
     e.scrollback.push(data);
     e.scrollbackSize += data.length;
     // Trim scrollback if it exceeds the limit
-    while (e.scrollbackSize > SCROLLBACK_SIZE && e.scrollback.length > 1) {
+    while (e.scrollbackSize > (settings.scrollbackKB * 1024) && e.scrollback.length > 1) {
       e.scrollbackSize -= e.scrollback.shift().length;
     }
     // Generic: detect session ID updates and BEL for input state tracking.
@@ -1351,6 +1352,10 @@ app.post('/api/settings', (req, res) => {
       }));
       log(`Settings updated: windowConfigs (${settings.windowConfigs.length} configs)`);
     }
+  }
+  if (req.body.scrollbackKB !== undefined) {
+    settings.scrollbackKB = Math.max(1, Math.min(10000, Math.round(Number(req.body.scrollbackKB)) || SCROLLBACK_DEFAULT_KB));
+    log(`Settings updated: scrollbackKB=${settings.scrollbackKB}`);
   }
   if (req.body.engine !== undefined) {
     const requested = String(req.body.engine);
@@ -2580,7 +2585,7 @@ function handleWsConnection(ws, req) {
       e.lastActivity = Date.now();
       e.scrollback.push(data);
       e.scrollbackSize += data.length;
-      while (e.scrollbackSize > SCROLLBACK_SIZE && e.scrollback.length > 1) {
+      while (e.scrollbackSize > (settings.scrollbackKB * 1024) && e.scrollback.length > 1) {
         e.scrollbackSize -= e.scrollback.shift().length;
       }
       e.clients.forEach((c) => c.send(data));
