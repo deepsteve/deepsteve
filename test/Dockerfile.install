@@ -1,0 +1,21 @@
+# Installs from a locally-generated install.sh (built by release.sh).
+# Tests the install flow before publishing — catches install script bugs
+# that Dockerfile (repo source) won't find and Dockerfile.public can't
+# test until the script is already live.
+FROM node:22-bookworm
+
+# zsh: server.js spawns 'zsh -l' for all session types
+# curl: used by docker-compose healthcheck
+RUN apt-get update && apt-get install -y --no-install-recommends zsh curl && rm -rf /var/lib/apt/lists/*
+
+# Install via locally-generated install.sh (strip launchctl/systemctl — not available in Docker)
+COPY install.sh /tmp/install.sh
+RUN printf '#!/bin/sh\nexit 0\n' > /usr/local/bin/launchctl && chmod +x /usr/local/bin/launchctl \
+ && printf '#!/bin/sh\nexit 0\n' > /usr/local/bin/systemctl && chmod +x /usr/local/bin/systemctl \
+ && bash /tmp/install.sh
+
+WORKDIR /root/.deepsteve
+
+EXPOSE 3000
+
+CMD ["node", "server.js"]

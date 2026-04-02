@@ -1,3 +1,6 @@
+# Runs server directly from repo source (npm ci + node server.js).
+# Used by docker-compose.yml for standard integration tests.
+# See also: Dockerfile.public (published install.sh), Dockerfile.install (local install.sh).
 FROM node:22-bookworm
 
 # zsh: server.js spawns 'zsh -l' for all session types
