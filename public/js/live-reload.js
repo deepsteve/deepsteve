@@ -60,7 +60,7 @@ export function initLiveReload({ onMessage, onShowRestartConfirm, onShowReloadOv
           lastPingTime = Date.now();
           ws.send(JSON.stringify({ type: 'pong' }));
         } else if (msg.type === 'confirm-restart') {
-          if (state === State.CONNECTED) showConfirmInAllWindows();
+          if (state === State.CONNECTED || state === State.CONFIRMED) showConfirmInAllWindows();
         } else if (msg.type === 'reload') {
           // Server is about to shut down with --refresh — mark for reload
           if (state === State.CONFIRMED) {

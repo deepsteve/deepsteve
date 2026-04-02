@@ -16,8 +16,6 @@ let active = false;
 let buffer = '';         // characters typed after #
 let selectedIndex = 0;
 let lockedCommand = null; // set when user types space after a matching command name
-let waitingForInput = false;
-let inputStarted = false; // true once user sends any keystroke after waitingForInput
 
 let popup = null;
 let inputDisplay = null;
@@ -28,7 +26,6 @@ const HASH_COMMANDS = [
   { id: 'terminal', name: 'terminal', description: 'Open a plain shell tab' },
   { id: 'tab',      name: 'tab',      description: 'Rename current tab',     argument: '<name>' },
   { id: 'close',    name: 'close',    description: 'Close current tab' },
-  { id: 'restart',  name: 'restart',  description: 'Restart the daemon' },
   { id: 'settings', name: 'settings', description: 'Open settings' },
   { id: 'mods',     name: 'mods',     description: 'Open mods/marketplace' },
 ];
@@ -38,7 +35,6 @@ function executeCommand(cmd, arg) {
     case 'terminal': callbacks.quickNewTerminal?.(); break;
     case 'tab':      callbacks.renameActiveTab?.(arg?.trim()); break;
     case 'close':    callbacks.closeActiveTab?.(); break;
-    case 'restart':  callbacks.restart?.(); break;
     case 'settings': callbacks.openSettings?.(); break;
     case 'mods':     callbacks.openMods?.(); break;
   }
@@ -349,10 +345,9 @@ export function beforeSend(data, container) {
     return true;
   }
 
-  // Not active — check if we should activate (only at start of input)
-  if (enabled && !inputStarted && data.startsWith('#')) {
+  // Not active — check if first character is #
+  if (enabled && data.startsWith('#')) {
     if (data === '#') {
-      // Single # keystroke — open interactive popup
       activate(container);
       return true;
     }
@@ -368,15 +363,10 @@ export function beforeSend(data, container) {
     }
   }
 
-  // Any data reaching the PTY means user has started typing
-  inputStarted = true;
   return false;
 }
 
 export function setWaitingForInput(waiting) {
-  waitingForInput = waiting;
-  // Reset inputStarted when Claude starts waiting — next # at start of input activates popup
-  if (waiting) inputStarted = false;
   // If we lose waitingForInput while active, deactivate
   if (!waiting && active) {
     deactivate();
