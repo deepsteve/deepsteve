@@ -505,6 +505,16 @@ function broadcastSkills() {
  * @param {string} cwd - Working directory
  * @param {{ cols?: number, rows?: number, env?: object }} opts
  */
+function sessionEnv(id, { name, worktree, windowId } = {}) {
+  return {
+    DEEPSTEVE_SESSION_ID: id,
+    DEEPSTEVE_TAB_NAME: name || '',
+    DEEPSTEVE_WORKTREE: worktree || '',
+    DEEPSTEVE_WINDOW_ID: windowId || '',
+    DEEPSTEVE_API_URL: `http://localhost:${PORT}`,
+  };
+}
+
 function spawnSession(eng, id, agentType, args, cwd, { cols = 120, rows = 40, env: extraEnv } = {}) {
   const env = extraEnv ? { ...process.env, ...extraEnv } : process.env;
   if (agentType === 'terminal') {
@@ -1437,7 +1447,7 @@ app.post('/api/commands/execute', (req, res) => {
   const filePath = path.join(COMMANDS_DIR, match);
   const shell = sessionId ? shells.get(sessionId) : null;
   const env = {
-    DEEPSTEVE_SESSION_ID: sessionId || '',
+    ...sessionEnv(sessionId || '', { name: shell?.name, worktree: shell?.worktree, windowId: shell?.windowId }),
     DEEPSTEVE_CWD: shell?.cwd || process.cwd(),
   };
 
@@ -1558,7 +1568,7 @@ app.post('/api/window-configs/:id/apply', (req, res) => {
 
     const sessionEngine = getDefaultEngine();
     const engineType = sessionEngine === tmuxEngine ? 'tmux' : 'node-pty';
-    spawnSession(sessionEngine, id, agentType, spawnArgs, cwd, { cols: 120, rows: 40, env: { DEEPSTEVE_SESSION_ID: id } });
+    spawnSession(sessionEngine, id, agentType, spawnArgs, cwd, { cols: 120, rows: 40, env: sessionEnv(id, { name, windowId: windowId || null }) });
     shells.set(id, { clients: new Set(), cwd, claudeSessionId, agentType, engine: sessionEngine, engineType, worktree: null, windowId: windowId || null, name, initialPrompt: null, waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now() });
     wireShellOutput(id);
     if (agentConfig.supportsSessionWatch) watchClaudeSessionDir(id);
@@ -2112,6 +2122,23 @@ app.get('/api/shells/:id/state', (req, res) => {
   res.json({ waitingForInput: entry.waitingForInput || false });
 });
 
+app.get('/api/shells/:id/info', (req, res) => {
+  const id = req.params.id;
+  const entry = shells.get(id);
+  if (!entry) return res.status(404).json({ error: 'Session not found' });
+  const fallbackName = entry.cwd ? path.basename(entry.cwd) : 'shell';
+  res.json({
+    id,
+    name: entry.name || fallbackName || 'root',
+    cwd: entry.cwd,
+    worktree: entry.worktree || null,
+    windowId: entry.windowId || null,
+    agentType: entry.agentType || 'claude',
+    createdAt: entry.createdAt || null,
+    elapsedMs: entry.createdAt ? Date.now() - entry.createdAt : null,
+  });
+});
+
 app.post('/api/shells/clear-disconnected', (req, res) => {
   const cleared = [];
 
@@ -2279,7 +2306,7 @@ app.post('/api/start-issue', (req, res) => {
   const sessionEngine = getDefaultEngine();
   const engineType = sessionEngine === tmuxEngine ? 'tmux' : 'node-pty';
   log(`[API] start-issue #${number}: id=${id}, agent=${agentType}, engine=${engineType}, worktree=${worktree || 'none'}, cwd=${worktreeCwd}`);
-  spawnSession(sessionEngine, id, agentType, spawnArgs, worktreeCwd, { cols: 120, rows: 40, env: { DEEPSTEVE_SESSION_ID: id } });
+  spawnSession(sessionEngine, id, agentType, spawnArgs, worktreeCwd, { cols: 120, rows: 40, env: sessionEnv(id, { name, worktree, windowId: windowId || null }) });
   shells.set(id, { clients: new Set(), cwd: worktreeCwd, claudeSessionId: claudeSessionId, agentType, engine: sessionEngine, engineType, worktree: worktree || null, windowId: windowId || null, name, initialPrompt: prompt, waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now() });
   wireShellOutput(id);
   // For non-BEL agents with a synchronous prompt, deliver after delay
@@ -2683,9 +2710,9 @@ function handleWsConnection(ws, req) {
         worktree: savedWorktree
       });
 
-      spawnSession(sessionEngine, id, savedAgentType, resumeArgs, cwd, { ...ptySize, env: { DEEPSTEVE_SESSION_ID: id } });
-      const startTime = Date.now();
       const restoredName = name || restored.name || null;
+      spawnSession(sessionEngine, id, savedAgentType, resumeArgs, cwd, { ...ptySize, env: sessionEnv(id, { name: restoredName, worktree: savedWorktree, windowId: restored.windowId }) });
+      const startTime = Date.now();
       shells.set(id, { clients: new Set(), cwd, claudeSessionId, agentType: savedAgentType, engine: sessionEngine, engineType: restoredEngineType, worktree: savedWorktree, name: restoredName, restored: true, waitingForInput: false, lastActivity: Date.now(), createdAt: restored.createdAt || Date.now(), windowId: restored.windowId || null });
       wireShellOutput(id);
       if (agentConfig.supportsSessionWatch) watchClaudeSessionDir(id);
@@ -2701,7 +2728,7 @@ function handleWsConnection(ws, req) {
           const fallbackArgs = ['-c', '--fork-session', '--session-id', newClaudeSessionId];
           if (entry && entry.worktree) fallbackArgs.push('--worktree', entry.worktree);
           sessionEngine.destroy(id);
-          spawnSession(sessionEngine, id, 'claude', fallbackArgs, cwd, { cols: initialCols, rows: initialRows, env: { DEEPSTEVE_SESSION_ID: id } });
+          spawnSession(sessionEngine, id, 'claude', fallbackArgs, cwd, { cols: initialCols, rows: initialRows, env: sessionEnv(id, { name: entry?.name, worktree: entry?.worktree, windowId: entry?.windowId }) });
           if (entry) {
             entry.claudeSessionId = newClaudeSessionId;
             entry.killed = false;
@@ -2757,7 +2784,7 @@ function handleWsConnection(ws, req) {
     const sessionEngine = getEngineByType(requestedEngine || settings.engine);
     const engineType = sessionEngine === tmuxEngine ? 'tmux' : 'node-pty';
     log(`[WS] Creating NEW shell: oldId=${oldId}, newId=${id}, agent=${agentType}, engine=${engineType}, session=${sessionId}, worktree=${worktree || 'none'}, cwd=${worktreeCwd}`);
-    spawnSession(sessionEngine, id, agentType, spawnArgs, worktreeCwd, { cols: initialCols, rows: initialRows, env: { DEEPSTEVE_SESSION_ID: id } });
+    spawnSession(sessionEngine, id, agentType, spawnArgs, worktreeCwd, { cols: initialCols, rows: initialRows, env: sessionEnv(id, { name, worktree }) });
     shells.set(id, { clients: new Set(), cwd: worktreeCwd, claudeSessionId: sessionId, agentType, engine: sessionEngine, engineType, worktree: worktree || null, name: name || null, waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now() });
     wireShellOutput(id);
     if (agentConfig.supportsSessionWatch) watchClaudeSessionDir(id);
@@ -2875,7 +2902,7 @@ function broadcastToWindow(windowId, msg) {
 }
 
 // Initialize MCP server (async, ~100ms for dynamic import)
-initMCP({ app, shells, wss, broadcast, broadcastToWindow, log, MODS_DIR, closeSession, spawnSession, getSpawnArgs, getAgentConfig, wireShellOutput, watchClaudeSessionDir, unwatchClaudeSessionDir, saveState, validateWorktree, ensureWorktree, submitToShell, fetchIssueFromGitHub, deliverPromptWhenReady, reloadClients, deliverToWindow, settings, isShuttingDown: () => shuttingDown, displayTabs, setDisplayTab, deleteDisplayTab, getDefaultEngine }).catch(e => log('MCP init failed:', e.message));
+initMCP({ app, shells, wss, broadcast, broadcastToWindow, log, MODS_DIR, closeSession, spawnSession, sessionEnv, getSpawnArgs, getAgentConfig, wireShellOutput, watchClaudeSessionDir, unwatchClaudeSessionDir, saveState, validateWorktree, ensureWorktree, submitToShell, fetchIssueFromGitHub, deliverPromptWhenReady, reloadClients, deliverToWindow, settings, isShuttingDown: () => shuttingDown, displayTabs, setDisplayTab, deleteDisplayTab, getDefaultEngine }).catch(e => log('MCP init failed:', e.message));
 
 // Watch themes directory for changes and broadcast to clients
 let themeWatchDebounce = null;

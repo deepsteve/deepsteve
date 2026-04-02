@@ -96,7 +96,7 @@ The command name is derived from the filename (hyphens → spaces, title-cased).
 { "name": "Say Hello", "description": "Prints a friendly greeting" }
 ```
 
-Scripts receive two environment variables: `DEEPSTEVE_SESSION_ID` (active tab's shell ID) and `DEEPSTEVE_CWD` (that tab's working directory).
+Scripts receive environment variables: `DEEPSTEVE_SESSION_ID` (active tab's shell ID), `DEEPSTEVE_CWD` (that tab's working directory), `DEEPSTEVE_TAB_NAME`, `DEEPSTEVE_WORKTREE`, `DEEPSTEVE_WINDOW_ID`, and `DEEPSTEVE_API_URL`.
 
 ## Themes
 

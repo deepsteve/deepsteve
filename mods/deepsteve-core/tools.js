@@ -4,7 +4,7 @@ const path = require('path');
 
 function init(context) {
   const {
-    shells, closeSession, spawnSession, getSpawnArgs, getAgentConfig, wireShellOutput, getDefaultEngine,
+    shells, closeSession, spawnSession, sessionEnv, getSpawnArgs, getAgentConfig, wireShellOutput, getDefaultEngine,
     watchClaudeSessionDir, unwatchClaudeSessionDir, saveState,
     validateWorktree, ensureWorktree, submitToShell,
     fetchIssueFromGitHub, deliverPromptWhenReady,
@@ -13,9 +13,9 @@ function init(context) {
 
   return {
     get_session_info: {
-      description: 'Get session metadata (tab name, cwd, worktree) for a deepsteve session. Run `echo $DEEPSTEVE_SESSION_ID` in your terminal to get the session ID.',
+      description: 'Get live session metadata (tab name, cwd, worktree) for a deepsteve session. Session context is also available via env vars ($DEEPSTEVE_SESSION_ID, $DEEPSTEVE_TAB_NAME, $DEEPSTEVE_WORKTREE, $DEEPSTEVE_WINDOW_ID, $DEEPSTEVE_API_URL) and via GET $DEEPSTEVE_API_URL/api/shells/<id>/info.',
       schema: {
-        session_id: z.string().describe('The deepsteve session ID. Run `echo $DEEPSTEVE_SESSION_ID` in your terminal to get this value.'),
+        session_id: z.string().describe('The deepsteve session ID (available as $DEEPSTEVE_SESSION_ID env var).'),
       },
       handler: async ({ session_id }) => {
         const entry = shells.get(session_id);
@@ -30,6 +30,7 @@ function init(context) {
             cwd: entry.cwd,
             worktree: entry.worktree || null,
             windowId: entry.windowId || null,
+            agentType: entry.agentType || 'claude',
             createdAt: entry.createdAt || null,
             elapsedMs: entry.createdAt ? Date.now() - entry.createdAt : null,
           }, null, 2) }]
@@ -110,7 +111,7 @@ function init(context) {
         const sessionEngine = getDefaultEngine();
         const engineType = sessionEngine.constructor.name === 'TmuxEngine' ? 'tmux' : 'node-pty';
         log(`[MCP] start_issue #${number}: id=${id}, agent=${effectiveAgentType}, engine=${engineType}, worktree=${worktree || 'none'}, cwd=${spawnCwd}`);
-        spawnSession(sessionEngine, id, effectiveAgentType, spawnArgs, spawnCwd, { cols: 120, rows: 40, env: { DEEPSTEVE_SESSION_ID: id } });
+        spawnSession(sessionEngine, id, effectiveAgentType, spawnArgs, spawnCwd, { cols: 120, rows: 40, env: sessionEnv(id, { name, worktree, windowId }) });
         shells.set(id, {
           clients: new Set(), cwd: spawnCwd,
           claudeSessionId, agentType: effectiveAgentType,
@@ -194,7 +195,7 @@ function init(context) {
           const shellEngine = getDefaultEngine();
           const shellEngineType = shellEngine.constructor.name === 'TmuxEngine' ? 'tmux' : 'node-pty';
           log(`[MCP] open_terminal (shell): id=${id}, engine=${shellEngineType}, cwd=${effectiveCwd}, caller=${session_id}`);
-          spawnSession(shellEngine, id, 'terminal', [], effectiveCwd, { cols: 120, rows: 40, env: { DEEPSTEVE_SESSION_ID: id } });
+          spawnSession(shellEngine, id, 'terminal', [], effectiveCwd, { cols: 120, rows: 40, env: sessionEnv(id, { name: tabName, windowId }) });
           shells.set(id, {
             clients: new Set(), cwd: effectiveCwd,
             claudeSessionId: null, agentType: 'terminal',
@@ -240,7 +241,7 @@ function init(context) {
         const sessionEngine2 = getDefaultEngine();
         const engineType2 = sessionEngine2.constructor.name === 'TmuxEngine' ? 'tmux' : 'node-pty';
         log(`[MCP] open_terminal: id=${id}, agent=${effectiveAgentType}, engine=${engineType2}, worktree=${validatedWorktree || 'none'}, cwd=${spawnCwd}, caller=${session_id}`);
-        spawnSession(sessionEngine2, id, effectiveAgentType, spawnArgs, spawnCwd, { cols: 120, rows: 40, env: { DEEPSTEVE_SESSION_ID: id } });
+        spawnSession(sessionEngine2, id, effectiveAgentType, spawnArgs, spawnCwd, { cols: 120, rows: 40, env: sessionEnv(id, { name: tabName, worktree: validatedWorktree, windowId }) });
         shells.set(id, {
           clients: new Set(), cwd: spawnCwd,
           claudeSessionId, agentType: effectiveAgentType,
