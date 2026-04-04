@@ -4,15 +4,10 @@ const { WsClient, httpGet, httpPost, httpDelete, cleanupSessions } = require('..
 
 describe('Tmux Engine', () => {
   const clients = [];
-  let serverHasTmux = false;
   function createClient() {
     const c = new WsClient();
     clients.push(c);
     return c;
-  }
-
-  function skipIfNoTmux(t) {
-    if (!serverHasTmux) t.skip('server does not have tmux installed');
   }
 
   before(async () => {
@@ -20,23 +15,16 @@ describe('Tmux Engine', () => {
     await httpPost('/api/shells/killall').catch(() => {});
     await new Promise(r => setTimeout(r, 500));
 
-    // Try to switch to tmux — if the server doesn't have tmux, skip all tests
-    try {
-      const result = await httpPost('/api/settings', {
-        engine: 'tmux',
-        engineSwitchConfirm: true,
-      });
-      serverHasTmux = result.engine === 'tmux';
-    } catch {
-      serverHasTmux = false;
-    }
+    const result = await httpPost('/api/settings', {
+      engine: 'tmux',
+      engineSwitchConfirm: true,
+    });
+    assert.strictEqual(result.engine, 'tmux', 'engine should be tmux after switch');
   });
 
   after(async () => {
     await cleanupSessions(clients);
     clients.length = 0;
-
-    if (!serverHasTmux) return;
 
     // Switch back to node-pty so subsequent test files are unaffected.
     // The engine switch kills all sessions internally, but killShell() has
@@ -50,7 +38,6 @@ describe('Tmux Engine', () => {
   });
 
   afterEach(async () => {
-    if (!serverHasTmux) return;
     await cleanupSessions(clients);
     // Extra delay for tmux session teardown — tmux destroy is async and
     // the attach PTY exit + tmux kill-session need time to complete
@@ -58,8 +45,7 @@ describe('Tmux Engine', () => {
     clients.length = 0;
   });
 
-  it('creates a terminal session via WebSocket', async (t) => {
-    skipIfNoTmux(t);
+  it('creates a terminal session via WebSocket', async () => {
     const client = createClient();
     const session = await client.connect({ new: '1', agentType: 'terminal', cwd: '/tmp' });
     assert.strictEqual(session.type, 'session');
@@ -67,8 +53,7 @@ describe('Tmux Engine', () => {
     assert.strictEqual(session.agentType, 'terminal');
   });
 
-  it('can send a command and receive output', async (t) => {
-    skipIfNoTmux(t);
+  it('can send a command and receive output', async () => {
     const client = createClient();
     await client.connect({ new: '1', agentType: 'terminal', cwd: '/tmp' });
 
@@ -80,8 +65,7 @@ describe('Tmux Engine', () => {
     assert.ok(output.includes('hello_tmux_123'));
   });
 
-  it('session appears in GET /api/shells', async (t) => {
-    skipIfNoTmux(t);
+  it('session appears in GET /api/shells', async () => {
     const client = createClient();
     const session = await client.connect({ new: '1', agentType: 'terminal', cwd: '/tmp' });
 
@@ -92,8 +76,7 @@ describe('Tmux Engine', () => {
     assert.strictEqual(found.status, 'active');
   });
 
-  it('supports multiple concurrent sessions', async (t) => {
-    skipIfNoTmux(t);
+  it('supports multiple concurrent sessions', async () => {
     const client1 = createClient();
     const client2 = createClient();
     const s1 = await client1.connect({ new: '1', agentType: 'terminal', cwd: '/tmp' });
@@ -107,8 +90,7 @@ describe('Tmux Engine', () => {
     assert.ok(activeIds.includes(s2.id), 'second session in list');
   });
 
-  it('DELETE /api/shells/:id kills a session', async (t) => {
-    skipIfNoTmux(t);
+  it('DELETE /api/shells/:id kills a session', async () => {
     const client = createClient();
     const session = await client.connect({ new: '1', agentType: 'terminal', cwd: '/tmp' });
 
@@ -121,8 +103,7 @@ describe('Tmux Engine', () => {
     assert.strictEqual(active.length, 0, 'session should no longer be active');
   });
 
-  it('session exits naturally when shell exits', async (t) => {
-    skipIfNoTmux(t);
+  it('session exits naturally when shell exits', async () => {
     const client = createClient();
     const session = await client.connect({ new: '1', agentType: 'terminal', cwd: '/tmp' });
 
@@ -139,8 +120,7 @@ describe('Tmux Engine', () => {
     assert.strictEqual(active.length, 0, 'session should be gone after exit');
   });
 
-  it('reconnect to existing session receives scrollback', async (t) => {
-    skipIfNoTmux(t);
+  it('reconnect to existing session receives scrollback', async () => {
     const client1 = createClient();
     const session = await client1.connect({ new: '1', agentType: 'terminal', cwd: '/tmp' });
 
@@ -159,8 +139,7 @@ describe('Tmux Engine', () => {
     assert.ok(client2.rawOutput.includes('TMUX_SCROLLBACK_42'), 'scrollback should contain previous output');
   });
 
-  it('resize works under tmux', async (t) => {
-    skipIfNoTmux(t);
+  it('resize works under tmux', async () => {
     const client = createClient();
     await client.connect({ new: '1', agentType: 'terminal', cwd: '/tmp' });
 
@@ -173,8 +152,7 @@ describe('Tmux Engine', () => {
     await client.waitForOutput(/TMUX_RESIZE_OK/, 10000);
   });
 
-  it('can verify working directory', async (t) => {
-    skipIfNoTmux(t);
+  it('can verify working directory', async () => {
     const client = createClient();
     await client.connect({ new: '1', agentType: 'terminal', cwd: '/tmp' });
 
@@ -186,8 +164,7 @@ describe('Tmux Engine', () => {
     assert.ok(output.includes('/tmp'), 'shell should start in /tmp');
   });
 
-  it('POST /api/shells/killall removes all tmux sessions', async (t) => {
-    skipIfNoTmux(t);
+  it('POST /api/shells/killall removes all tmux sessions', async () => {
     const client1 = createClient();
     const client2 = createClient();
     await client1.connect({ new: '1', agentType: 'terminal', cwd: '/tmp' });
