@@ -2234,20 +2234,34 @@ app.post('/api/git-roots', express.json(), (req, res) => {
   res.json({ roots });
 });
 
+const issueCache = new Map(); // key: `${cwd}:${limit}` → { data, ts }
+const ISSUE_CACHE_TTL = 10000; // 10 seconds
+
 app.get('/api/issues', (req, res) => {
   let cwd = req.query.cwd || process.env.HOME;
   if (cwd.startsWith('~')) cwd = path.join(os.homedir(), cwd.slice(1));
   const page = Math.max(1, parseInt(req.query.page) || 1);
-  const perPage = 30;
-  try {
-    const limit = perPage * page;
-    const out = execSync(`zsh -l -c 'gh issue list --json number,title,body,labels,url --limit ${limit}'`, { cwd, encoding: 'utf8', timeout: 15000 });
-    const all = JSON.parse(out);
-    const pageIssues = all.slice((page - 1) * perPage);
-    res.json({ issues: pageIssues, hasMore: pageIssues.length === perPage });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
+  const perPage = 5;
+  const limit = perPage * page;
+  const cacheKey = `${cwd}:${limit}`;
+  const cached = issueCache.get(cacheKey);
+  if (cached && Date.now() - cached.ts < ISSUE_CACHE_TTL) {
+    const pageIssues = cached.data.slice((page - 1) * perPage);
+    return res.json({ issues: pageIssues, hasMore: pageIssues.length === perPage });
   }
+  exec(`zsh -l -c 'gh issue list --json number,title,body,labels,url --limit ${limit}'`,
+    { cwd, encoding: 'utf8', timeout: 15000 },
+    (err, stdout) => {
+      if (err) return res.status(500).json({ error: err.message });
+      try {
+        const all = JSON.parse(stdout);
+        issueCache.set(cacheKey, { data: all, ts: Date.now() });
+        const pageIssues = all.slice((page - 1) * perPage);
+        res.json({ issues: pageIssues, hasMore: pageIssues.length === perPage });
+      } catch (e) {
+        res.status(500).json({ error: e.message });
+      }
+    });
 });
 
 app.post('/api/start-issue', (req, res) => {

@@ -2780,6 +2780,16 @@ async function init() {
   document.getElementById('new-btn').addEventListener('click', () => quickNewSession());
   document.getElementById('new-btn-dropdown').addEventListener('click', (e) => showNewTabMenu(e));
   document.getElementById('issue-btn').addEventListener('click', () => showIssuePicker());
+  // Prefetch issues on hover so results are cached when the dialog opens
+  let issuePrefetching = false;
+  document.getElementById('issue-btn').addEventListener('mouseenter', () => {
+    if (issuePrefetching) return;
+    const active = activeId && sessions.get(activeId);
+    const cwd = active?.cwd;
+    if (!cwd) return;
+    issuePrefetching = true;
+    fetch('/api/issues?cwd=' + encodeURIComponent(cwd)).finally(() => { issuePrefetching = false; });
+  });
   document.getElementById('empty-state-btn')?.addEventListener('click', () => quickNewSession());
 
   // Check if this is an existing tab BEFORE starting heartbeat (which creates window ID)
