@@ -761,6 +761,7 @@ settingsBtn?.addEventListener('click', async () => {
           <input type="text" class="config-tab-cwd" data-ti="${ti}" value="${escapeHtml(t.cwd || '')}" placeholder="/path/to/project" style="flex: 1; padding: 4px 6px; background: var(--ds-bg-primary); border: 1px solid var(--ds-border); border-radius: 4px; color: var(--ds-text-primary); font-size: 12px;">
           <select class="config-tab-agent" data-ti="${ti}" style="padding: 4px 6px; background: var(--ds-bg-primary); border: 1px solid var(--ds-border); border-radius: 4px; color: var(--ds-text-primary); font-size: 12px;">
             <option value="claude" ${t.agentType === 'claude' ? 'selected' : ''}>Claude</option>
+            <option value="hermes" ${t.agentType === 'hermes' ? 'selected' : ''}>Hermes</option>
             <option value="opencode" ${t.agentType === 'opencode' ? 'selected' : ''}>OpenCode</option>
             <option value="gemini" ${t.agentType === 'gemini' ? 'selected' : ''}>Gemini</option>
           </select>`;

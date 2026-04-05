@@ -237,9 +237,10 @@ Issue description:
 
 Please read the issue carefully, understand the codebase context, and implement the changes needed.`,
   defaultAgent: 'claude',
+  hermesBinary: 'hermes',
   opencodeBinary: 'opencode',
   geminiBinary: 'gemini',
-  enabledAgents: ['claude', 'opencode'],
+  enabledAgents: ['claude', 'hermes', 'opencode'],
   commandPaletteEnabled: true,
   commandPaletteShortcut: 'Meta+k',
   hashCommandsEnabled: true,
@@ -522,6 +523,7 @@ function spawnSession(eng, id, agentType, args, cwd, { cols = 120, rows = 40, en
     return;
   }
   const bin = agentType === 'claude' ? 'claude'
+    : agentType === 'hermes' ? (settings.hermesBinary || 'hermes')
     : agentType === 'opencode' ? (settings.opencodeBinary || 'opencode')
     : (settings.geminiBinary || 'gemini');
   const quoted = args.map(a => `'${a.replace(/'/g, "'\\''")}'`).join(' ');
@@ -540,6 +542,16 @@ const AGENT_CONFIGS = {
     sessionIdFlag: '--session-id',
     planModeFlag: '--permission-mode',
     planModeValue: 'plan',
+    resumeFlag: '--resume',
+    resumeDefault: '-c'
+  },
+  hermes: {
+    supportsWorktree: true,
+    supportsSessionId: false, // Managed internally
+    supportsSessionWatch: false,
+    emitsBel: false,
+    exitMethod: 'ctrl-c',
+    initialPromptDelay: 3000,
     resumeFlag: '--resume',
     resumeDefault: '-c'
   },
@@ -1236,6 +1248,14 @@ app.get('/api/agents', (req, res) => {
   const agents = [
     { id: 'claude', name: 'Claude Code', shortName: 'CC', available: true, enabled: enabledAgents.includes('claude'), isDefault: defaultAgent === 'claude' }
   ];
+  // Check if hermes is installed
+  let hermesAvailable = false;
+  try {
+    const hBin = settings.hermesBinary || 'hermes';
+    execSync(`zsh -l -c 'which ${hBin}'`, { timeout: 5000, stdio: 'pipe' });
+    hermesAvailable = true;
+  } catch {}
+  agents.push({ id: 'hermes', name: 'Hermes', shortName: 'H', available: hermesAvailable, enabled: hermesAvailable, isDefault: defaultAgent === 'hermes' });
   // Check if opencode is installed (use login shell for full PATH)
   let opencodeAvailable = false;
   try {
@@ -1334,7 +1354,7 @@ app.post('/api/settings', (req, res) => {
   if (req.body.enabledAgents !== undefined) {
     const agents = req.body.enabledAgents;
     if (Array.isArray(agents)) {
-      const valid = agents.filter(a => a === 'claude' || a === 'opencode' || a === 'gemini');
+      const valid = agents.filter(a => a === 'claude' || a === 'hermes' || a === 'opencode' || a === 'gemini');
       if (valid.length > 0) {
         settings.enabledAgents = valid;
         // If only one agent enabled, that's the default
@@ -1345,10 +1365,14 @@ app.post('/api/settings', (req, res) => {
   }
   if (req.body.defaultAgent !== undefined) {
     const agent = String(req.body.defaultAgent);
-    if (agent === 'claude' || agent === 'opencode' || agent === 'gemini') {
+    if (agent === 'claude' || agent === 'hermes' || agent === 'opencode' || agent === 'gemini') {
       settings.defaultAgent = agent;
       log(`Settings updated: defaultAgent=${agent}`);
     }
+  }
+  if (req.body.hermesBinary !== undefined) {
+    settings.hermesBinary = String(req.body.hermesBinary) || 'hermes';
+    log(`Settings updated: hermesBinary=${settings.hermesBinary}`);
   }
   if (req.body.opencodeBinary !== undefined) {
     settings.opencodeBinary = String(req.body.opencodeBinary) || 'opencode';
