@@ -712,6 +712,14 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
 .scroll-to-bottom.visible { opacity: 1; pointer-events: auto; }
 .scroll-to-bottom:hover { background: var(--ds-bg-tertiary); color: var(--ds-text-primary); border-color: var(--ds-accent-blue); }
 
+/* Terminal search bar */
+.terminal-search-bar { position: absolute; top: 8px; right: 20px; z-index: 10; display: flex; align-items: center; gap: 4px; padding: 4px 8px; background: var(--ds-bg-secondary); border: 1px solid var(--ds-border); border-radius: 6px; box-shadow: 0 2px 8px var(--ds-shadow); }
+.terminal-search-input { background: var(--ds-bg-primary); border: 1px solid var(--ds-border); border-radius: 4px; color: var(--ds-text-primary); padding: 4px 8px; font-size: 13px; font-family: system-ui, sans-serif; width: 200px; outline: none; }
+.terminal-search-input:focus { border-color: var(--ds-accent-blue); }
+.terminal-search-btn { background: var(--ds-btn-neutral); border: 1px solid var(--ds-border); border-radius: 4px; color: var(--ds-text-secondary); cursor: pointer; padding: 2px 8px; font-size: 13px; line-height: 1.4; }
+.terminal-search-btn:hover { background: var(--ds-btn-neutral-hover); color: var(--ds-text-primary); }
+.terminal-search-close { font-size: 11px; }
+
 .file-drop-zone-content {
   background: var(--ds-bg-secondary);
   color: var(--ds-text-bright);
