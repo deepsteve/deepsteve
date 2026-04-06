@@ -131,6 +131,7 @@
       frame.src = proxyUrl(url);
       updateNavButtons();
       saveState();
+      registerWithServer();
     }
 
     backBtn.addEventListener('click', () => {
@@ -180,11 +181,24 @@
     navigate(false);
 
     // ─── Baby Browser MCP bridge ───────────────────────────────────────
+    let tabInstanceId = null;
+
+    function registerWithServer() {
+      if (!tabInstanceId) return;
+      fetch('/api/baby-browser/register', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tabId: tabInstanceId, url: navHistory[historyIndex] || '' }),
+      }).catch(() => {});
+    }
+
     function initBridge() {
       if (!window.deepsteve) {
         setTimeout(initBridge, 200);
         return;
       }
+
+      tabInstanceId = window.deepsteve.getTabInstanceId();
 
       window.deepsteve.onBabyBrowserRequest(async (req) => {
         const { requestId, action } = req;
@@ -238,7 +252,17 @@
           body: JSON.stringify({ requestId, result, error }),
         }).catch(e => console.error('Failed to post baby-browser result:', e));
       });
+
+      // Register this instance with the server
+      registerWithServer();
     }
+
+    window.addEventListener('beforeunload', () => {
+      if (tabInstanceId) {
+        navigator.sendBeacon('/api/baby-browser/deregister',
+          new Blob([JSON.stringify({ tabId: tabInstanceId })], { type: 'application/json' }));
+      }
+    });
 
     initBridge();
   </script>
