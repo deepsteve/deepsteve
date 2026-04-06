@@ -1726,6 +1726,7 @@ function notifyScreenshotCaptureRequest(req) {
  */
 function notifyBabyBrowserRequest(req) {
   for (const entry of babyBrowserCallbacks) {
+    if (req.targetTabId && entry.tabInstanceId !== req.targetTabId) continue;
     try { entry.cb(req); } catch (e) { console.error('Baby browser callback error:', e); }
   }
 }
@@ -1776,11 +1777,14 @@ function isModActive() {
  * @param {HTMLIFrameElement} iframeEl - The iframe element
  * @param {string} modId - The mod ID that owns this iframe
  */
-function _injectBridgeAPI(iframeEl, modId) {
+function _injectBridgeAPI(iframeEl, modId, tabInstanceId) {
   try {
     iframeEl.contentWindow.deepsteve = {
       getDeepsteveVersion() {
         return deepsteveVersion;
+      },
+      getTabInstanceId() {
+        return tabInstanceId || null;
       },
       getSessions() {
         return hooks.getSessions();
@@ -1898,7 +1902,7 @@ function _injectBridgeAPI(iframeEl, modId) {
         };
       },
       onBabyBrowserRequest(cb) {
-        const entry = { modId, cb };
+        const entry = { modId, tabInstanceId, cb };
         babyBrowserCallbacks.push(entry);
         return () => {
           babyBrowserCallbacks = babyBrowserCallbacks.filter(e => e !== entry);

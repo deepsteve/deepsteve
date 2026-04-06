@@ -1443,7 +1443,7 @@ function createModTab(modId, opts = {}) {
 
   // Inject bridge API so tab mods can register MCP callbacks (e.g. Baby Browser tools)
   iframe.addEventListener('load', () => {
-    ModManager.injectBridgeAPI(iframe, modId);
+    ModManager.injectBridgeAPI(iframe, modId, id);
   });
 
   sessions.set(id, {

@@ -9,6 +9,7 @@
   "tools": [
     { "name": "baby_browser_navigate", "description": "Navigate Baby Browser to a URL" },
     { "name": "baby_browser_read", "description": "Read page content as text" },
-    { "name": "baby_browser_url", "description": "Get current URL" }
+    { "name": "baby_browser_url", "description": "Get current URL" },
+    { "name": "baby_browser_list", "description": "List open Baby Browser tabs" }
   ]
 }
