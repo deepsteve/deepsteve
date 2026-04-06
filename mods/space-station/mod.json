@@ -1,0 +1,13 @@
+{
+  "name": "Space Station",
+  "version": "0.9.0",
+  "minDeepsteveVersion": "0.4.0",
+  "description": "Explore a space station with magnetic boots and zero-G EVA. Each Claude session becomes a robot crew member.",
+  "experimental": true,
+  "enabledByDefault": false,
+  "tags": ["games"],
+  "entry": "index.html",
+  "toolbar": {
+    "label": "Space Station"
+  }
+}
