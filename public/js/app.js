@@ -16,6 +16,7 @@ import { initFileDrop } from './file-drop.js';
 import { init as initCmdHoldMode, setEnabled as setCmdHoldModeEnabled, setHoldMs as setCmdHoldModeHoldMs } from './cmd-tab-switch.js';
 import { init as initCommandPalette, setEnabled as setCommandPaletteEnabled, setShortcut as setCommandPaletteShortcut } from './command-palette.js';
 import { init as initHashCommands, beforeSend as hashCommandsBeforeSend, setWaitingForInput as setHashCommandsWaiting, setEnabled as setHashCommandsEnabled } from './hash-commands.js';
+import { init as initTerminalSearch, attachSearchAddon, closeIfOpen as closeTerminalSearch } from './terminal-search.js';
 import { nsKey } from './storage-namespace.js';
 
 // Configuration
@@ -1325,7 +1326,8 @@ function initTerminal(id, ws, cwd, initialName, { hasScrollback = false, pending
   const name = initialName || savedSession?.name || getDefaultTabName(cwd);
 
   // Store session in memory
-  sessions.set(id, { term, fit, ws, container, cwd, name, waitingForInput: false, scrollControl });
+  const searchAddon = attachSearchAddon(term);
+  sessions.set(id, { term, fit, ws, container, cwd, name, waitingForInput: false, scrollControl, searchAddon });
 
   // Suppress scroll during init to prevent onWriteParsed races with
   // buffered data flush and scrollback replay
@@ -1565,6 +1567,8 @@ function switchTo(id) {
     ModManager.showTerminalForSession(id);
     return;
   }
+
+  closeTerminalSearch();
 
   // Deactivate current
   if (activeId) {
@@ -2726,6 +2730,22 @@ async function init() {
     closeActiveTab: () => { if (activeId) confirmCloseSession(activeId).then(ok => { if (ok) killSession(activeId); }); },
     openSettings: () => { document.getElementById('settings-btn')?.click(); },
     openMods: () => { document.getElementById('mods-btn')?.click(); },
+    focusTerminal: () => {
+      if (activeId) {
+        const s = sessions.get(activeId);
+        if (s?.term) s.term.focus();
+      }
+    },
+  });
+
+  // Initialize Terminal Search (Ctrl+F / Cmd+F)
+  initTerminalSearch({
+    getActiveSession: () => {
+      if (!activeId) return null;
+      const s = sessions.get(activeId);
+      if (!s?.term) return null;
+      return { term: s.term, container: s.container, searchAddon: s.searchAddon };
+    },
     focusTerminal: () => {
       if (activeId) {
         const s = sessions.get(activeId);
