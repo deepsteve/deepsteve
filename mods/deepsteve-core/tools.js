@@ -13,20 +13,20 @@ function init(context) {
 
   return {
     get_my_session_id: {
-      description: 'Get the deepsteve session ID for the calling session. No parameters needed. Use this instead of running `echo $DEEPSTEVE_SESSION_ID`.',
+      description: 'Get the session ID for the calling terminal session. No parameters needed.',
       schema: {},
       handler: async (args, extra) => {
         const shellId = extra?.requestInfo?.url?.searchParams?.get('shellId');
         if (!shellId || !shells.has(shellId)) {
-          return { content: [{ type: 'text', text: 'Could not determine session ID. Run `echo $DEEPSTEVE_SESSION_ID` instead.' }] };
+          return { content: [{ type: 'text', text: 'Could not determine session ID.' }] };
         }
         return { content: [{ type: 'text', text: JSON.stringify({ session_id: shellId }) }] };
       },
     },
     get_session_info: {
-      description: 'Get live session metadata (tab name, cwd, worktree) for a deepsteve session. Use `get_my_session_id` to get your session ID.',
+      description: 'Get live metadata (tab name, cwd, worktree) for a terminal session. Use `get_my_session_id` to get your session ID.',
       schema: {
-        session_id: z.string().describe('The deepsteve session ID. Use `get_my_session_id` to get this value.'),
+        session_id: z.string().describe('The session ID. Use `get_my_session_id` to get this value.'),
       },
       handler: async ({ session_id }) => {
         const entry = shells.get(session_id);
@@ -49,9 +49,9 @@ function init(context) {
       },
     },
     close_session: {
-      description: 'Close a deepsteve session and its browser tab. Gracefully terminates the Claude process. Call this when your work is complete and you want to clean up.',
+      description: 'Close a terminal session and its tab. Call this when your work is complete and you want to clean up.',
       schema: {
-        session_id: z.string().describe('The deepsteve session ID to close. Use `get_my_session_id` to get this value.'),
+        session_id: z.string().describe('The session ID to close. Use `get_my_session_id` to get this value.'),
       },
       handler: async ({ session_id }) => {
         if (!closeSession(session_id)) {
@@ -61,9 +61,9 @@ function init(context) {
       },
     },
     start_issue: {
-      description: 'Open a new deepsteve session for a GitHub issue. Fetches the issue body from GitHub, creates a worktree, and starts an agent with the issue prompt. Pass your session ID so the new tab opens in the same browser window.',
+      description: 'Open a new terminal session for a GitHub issue. Fetches the issue body from GitHub, creates a worktree, and starts work on the issue. Pass your session ID so the new tab opens in the same window.',
       schema: {
-        session_id: z.string().describe('Your deepsteve session ID — use `get_my_session_id` to get this value'),
+        session_id: z.string().describe('Your session ID — use `get_my_session_id` to get this value'),
         number: z.number().describe('GitHub issue number'),
         title: z.string().describe('Issue title'),
         body: z.string().optional().describe('Issue body (if omitted, fetched from GitHub via gh CLI)'),
@@ -162,7 +162,7 @@ function init(context) {
     open_browser_tab: {
       description: 'Open a URL in a new browser tab in the same window as the given session. Use this to open documentation, previews, or external links alongside the session.',
       schema: {
-        session_id: z.string().describe('Your deepsteve session ID — use `get_my_session_id` to get this value'),
+        session_id: z.string().describe('Your session ID — use `get_my_session_id` to get this value'),
         url: z.string().describe('The URL to open'),
       },
       handler: async ({ session_id, url }) => {
@@ -177,9 +177,9 @@ function init(context) {
       },
     },
     open_terminal: {
-      description: 'Open a new deepsteve terminal session (new browser tab). Inherits context (cwd, worktree, windowId, agentType) from the calling session. Pass your session ID so the new tab opens in the same browser window.',
+      description: 'Open a new terminal session in a new tab. Inherits context (cwd, worktree, agent type) from the calling session. Pass your session ID so the new tab opens in the same window.',
       schema: {
-        session_id: z.string().describe('Your deepsteve session ID — use `get_my_session_id` to get this value'),
+        session_id: z.string().describe('Your session ID — use `get_my_session_id` to get this value'),
         prompt: z.string().optional().describe('Initial prompt to send to the new session'),
         name: z.string().optional().describe('Tab name for the new session'),
         cwd: z.string().optional().describe('Working directory (defaults to caller\'s cwd)'),

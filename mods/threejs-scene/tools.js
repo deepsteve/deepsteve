@@ -28,7 +28,7 @@ function init(context) {
 
   return {
     scene_update: {
-      description: 'Add, update, or remove objects in a 3D scene. Takes a batch of operations so you can build complex scenes in one call. Use eval to run arbitrary Three.js code (animate, create particles, etc). Make sure the 3D Scene mod is enabled in deepsteve.',
+      description: 'Add, update, or remove objects in a 3D scene. Takes a batch of operations so you can build complex scenes in one call. Use eval to run arbitrary Three.js code (animate, create particles, etc). Make sure the 3D Scene mod is enabled.',
       schema: {
         operations: z.array(z.object({
           op: z.enum(['add', 'update', 'remove', 'clear', 'eval']).describe('Operation type'),
@@ -52,7 +52,7 @@ function init(context) {
           receiveShadow: z.boolean().optional().describe('Whether the object receives shadows'),
           parent: z.string().optional().describe('Parent group ID'),
         })).describe('Array of scene operations to execute in order'),
-        session_id: z.string().optional().describe('DeepSteve session ID. Run `echo $DEEPSTEVE_SESSION_ID` in your terminal to get this value. When provided, the command is sent only to the browser window that owns this session.'),
+        session_id: z.string().optional().describe('Session ID for the calling tab. When provided, the command is sent only to the window that owns this session.'),
       },
       handler: async ({ operations, session_id }) => {
         const requestId = randomUUID();
@@ -62,7 +62,7 @@ function init(context) {
           const timer = setTimeout(() => {
             pendingRequests.delete(requestId);
             resolve({
-              content: [{ type: 'text', text: 'Error: Timed out waiting for browser response. Make sure the 3D Scene mod is enabled in the deepsteve browser tab.' }],
+              content: [{ type: 'text', text: 'Error: Timed out waiting for browser response. Make sure the 3D Scene mod is enabled.' }],
             });
           }, TIMEOUT_MS);
 
@@ -78,10 +78,10 @@ function init(context) {
     },
 
     scene_query: {
-      description: 'List objects and inspect scene state. Returns all objects with positions/types, or one object\'s full details if id is provided. Make sure the 3D Scene mod is enabled in deepsteve.',
+      description: 'List objects and inspect scene state. Returns all objects with positions/types, or one object\'s full details if id is provided. Make sure the 3D Scene mod is enabled.',
       schema: {
         id: z.string().optional().describe('Object ID to inspect. If omitted, returns all objects.'),
-        session_id: z.string().optional().describe('DeepSteve session ID. Run `echo $DEEPSTEVE_SESSION_ID` in your terminal to get this value. When provided, the command is sent only to the browser window that owns this session.'),
+        session_id: z.string().optional().describe('Session ID for the calling tab. When provided, the command is sent only to the window that owns this session.'),
       },
       handler: async ({ id, session_id }) => {
         const requestId = randomUUID();
@@ -91,7 +91,7 @@ function init(context) {
           const timer = setTimeout(() => {
             pendingRequests.delete(requestId);
             resolve({
-              content: [{ type: 'text', text: 'Error: Timed out waiting for browser response. Make sure the 3D Scene mod is enabled in the deepsteve browser tab.' }],
+              content: [{ type: 'text', text: 'Error: Timed out waiting for browser response. Make sure the 3D Scene mod is enabled.' }],
             });
           }, TIMEOUT_MS);
 
@@ -107,13 +107,13 @@ function init(context) {
     },
 
     scene_snapshot: {
-      description: 'Capture the current 3D scene as a PNG image. Optionally saves to a file. Make sure the 3D Scene mod is enabled in deepsteve.',
+      description: 'Capture the current 3D scene as a PNG image. Optionally saves to a file. Make sure the 3D Scene mod is enabled.',
       schema: {
         width: z.number().optional().describe('Snapshot width in pixels. Defaults to current canvas width.'),
         height: z.number().optional().describe('Snapshot height in pixels. Defaults to current canvas height.'),
         filename: z.string().optional().describe('Output filename (without extension). If provided, saves PNG to output_dir.'),
         output_dir: z.string().optional().describe('Directory to save the PNG. Defaults to ~/Desktop.'),
-        session_id: z.string().optional().describe('DeepSteve session ID. Run `echo $DEEPSTEVE_SESSION_ID` in your terminal to get this value. When provided, the command is sent only to the browser window that owns this session.'),
+        session_id: z.string().optional().describe('Session ID for the calling tab. When provided, the command is sent only to the window that owns this session.'),
       },
       handler: async ({ width, height, filename, output_dir, session_id }) => {
         const requestId = randomUUID();
@@ -132,7 +132,7 @@ function init(context) {
           const timer = setTimeout(() => {
             pendingRequests.delete(requestId);
             resolve({
-              content: [{ type: 'text', text: 'Error: Timed out waiting for browser response. Make sure the 3D Scene mod is enabled in the deepsteve browser tab.' }],
+              content: [{ type: 'text', text: 'Error: Timed out waiting for browser response. Make sure the 3D Scene mod is enabled.' }],
             });
           }, TIMEOUT_MS);
 

@@ -47,12 +47,12 @@ function init(context) {
     return { error: `Multiple Baby Browser tabs are open. Specify tab_id to target one:\n${info}` };
   }
 
-  const SESSION_ID_SCHEMA = z.string().optional().describe('DeepSteve session ID. Run `echo $DEEPSTEVE_SESSION_ID` in your terminal to get this value. When provided, the command is sent only to the browser window that owns this session.');
+  const SESSION_ID_SCHEMA = z.string().optional().describe('Session ID for the calling tab. When provided, the command is sent only to the window that owns this session.');
   const TAB_ID_SCHEMA = z.string().optional().describe('Target a specific Baby Browser tab by its ID. Use baby_browser_list to see available tabs. When omitted and only one tab is open, it is auto-targeted.');
 
   return {
     baby_browser_navigate: {
-      description: 'Navigate Baby Browser to a URL and wait for the page to load. Baby Browser is a built-in iframe-based web browser tab in deepsteve. Use this to browse external websites.',
+      description: 'Navigate Baby Browser to a URL and wait for the page to load. Baby Browser is a built-in iframe-based web browser tab. Use this to browse external websites.',
       schema: {
         url: z.string().describe('The URL to navigate to (e.g. "https://example.com").'),
         session_id: SESSION_ID_SCHEMA,
