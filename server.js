@@ -602,7 +602,7 @@ function spawnAgent(id, agentType, args, cwd, opts = {}) {
 function mcpConfigArgs(agentType, shellId) {
   if (agentType !== 'claude' || !shellId) return [];
   return ['--mcp-config', JSON.stringify({
-    deepsteve: { type: 'http', url: `http://localhost:${PORT}/mcp?shellId=${shellId}` }
+    mcpServers: { deepsteve: { type: 'http', url: `http://localhost:${PORT}/mcp?shellId=${shellId}` } }
   })];
 }
 
