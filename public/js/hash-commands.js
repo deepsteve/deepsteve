@@ -377,8 +377,10 @@ export function beforeSend(data, container) {
 }
 
 export function setWaitingForInput(w) {
-  // If we lose waitingForInput while active, deactivate
-  if (!w && active) {
+  if (w) {
+    // Fresh prompt — input line is empty, allow # to activate again.
+    lineHasContent = false;
+  } else if (active) {
     deactivate();
   }
 }
