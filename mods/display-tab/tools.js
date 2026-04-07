@@ -6,9 +6,9 @@ function init(context) {
 
   return {
     create_display_tab: {
-      description: 'Create a new tab displaying arbitrary HTML content (charts, dashboards, reports). The HTML is rendered in a sandboxed iframe. Pass your session ID so the tab opens in the same window.',
+      description: 'Create a new browser tab displaying arbitrary HTML content (charts, dashboards, reports). The HTML is rendered in a sandboxed iframe. Pass your DEEPSTEVE_SESSION_ID so the tab opens in the same browser window.',
       schema: {
-        session_id: z.string().describe('Your session ID — used to target the correct window'),
+        session_id: z.string().describe('Your DEEPSTEVE_SESSION_ID env var — used to target the correct browser window'),
         html: z.string().describe('Full HTML content to display (can include inline CSS/JS, e.g. Chart.js visualizations)'),
         name: z.string().optional().describe('Tab name (defaults to "Display")'),
       },
