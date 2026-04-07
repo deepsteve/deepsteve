@@ -546,7 +546,7 @@ const AGENT_CONFIGS = {
     resumeDefault: '-c'
   },
   hermes: {
-    supportsWorktree: true,
+    supportsWorktree: false, // Hermes --worktree is a boolean flag (no name arg), so we create worktrees manually
     supportsSessionId: false, // Managed internally
     supportsSessionWatch: false,
     emitsBel: false,
@@ -921,14 +921,17 @@ function wireShellOutput(id) {
         }
       }
       const strippedOSC = stripOSC(data);
-      const hasBel = strippedOSC.includes('\x07');
+      // Detect standalone BEL, or OSC window-title BEL as fallback
+      // (Claude Code ≥2.1.92 no longer emits standalone BELs — all BELs are OSC terminators)
+      const hasBel = strippedOSC.includes('\x07') || /\x1b\]0;/.test(data);
 
       // Debug: log BEL detection for first 60s of session life
       if (e.createdAt && (Date.now() - e.createdAt) < 60000) {
         const rawBels = (data.match(/\x07/g) || []).length;
         const oscBels = rawBels - (strippedOSC.match(/\x07/g) || []).length;
         if (rawBels > 0) {
-          log(`[BEL-debug] id=${id} rawBels=${rawBels} oscBels=${oscBels} hasBel=${hasBel} waitingForInput=${e.waitingForInput} hasInitialPrompt=${!!e.initialPrompt} dataLen=${data.length}`);
+          const hexSnippet = Buffer.from(data).toString('hex').slice(0, 200);
+          log(`[BEL-debug] id=${id} rawBels=${rawBels} oscBels=${oscBels} hasBel=${hasBel} waitingForInput=${e.waitingForInput} hasInitialPrompt=${!!e.initialPrompt} dataLen=${data.length} hex=${hexSnippet}`);
         }
       }
 
@@ -1057,6 +1060,8 @@ try {
 } catch (e) {
   console.error('Failed to load state file:', e.message);
 }
+
+const displayTabs = new Map(); // id → HTML string (disk-backed in ~/.deepsteve/display-tabs/)
 
 // Load persisted display tabs from disk and clean up stale files (>7 days)
 try {
@@ -2445,7 +2450,6 @@ const server = app.listen(PORT, BIND, () => {
   }, 3000);
 });
 const shells = new Map();
-const displayTabs = new Map(); // id → HTML string (disk-backed in ~/.deepsteve/display-tabs/)
 
 // --- tmux session reattach on startup ---
 // If tmux is available, check for surviving tmux sessions and reattach them

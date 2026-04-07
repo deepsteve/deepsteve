@@ -11,6 +11,7 @@
  */
 
 let enabled = true;
+let lineHasContent = false; // true once user types any non-# character on current line
 let callbacks = {};
 let active = false;
 let buffer = '';         // characters typed after #
@@ -345,8 +346,17 @@ export function beforeSend(data, container) {
     return true;
   }
 
-  // Not active — check if first character is #
-  if (enabled && data.startsWith('#')) {
+  // Track line content: reset on Enter, set on printable chars
+  if (data === '\r') {
+    lineHasContent = false;
+  } else if (data === '\x7f' || data === '\b') {
+    // Can't perfectly track backspace-to-empty, but that's fine
+  } else if (data.length === 1 && data.charCodeAt(0) >= 32 && data !== '#') {
+    lineHasContent = true;
+  }
+
+  // Not active — only intercept # at the start of a line (no prior content)
+  if (enabled && !lineHasContent && data.startsWith('#')) {
     if (data === '#') {
       activate(container);
       return true;
@@ -366,9 +376,9 @@ export function beforeSend(data, container) {
   return false;
 }
 
-export function setWaitingForInput(waiting) {
+export function setWaitingForInput(w) {
   // If we lose waitingForInput while active, deactivate
-  if (!waiting && active) {
+  if (!w && active) {
     deactivate();
   }
 }

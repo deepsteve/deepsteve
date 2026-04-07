@@ -141,21 +141,20 @@ function init(context) {
         });
         saveState();
 
-        // When body was NOT provided, fetch async and deliver prompt via WS when ready
-        if (!body) {
+        // Deliver prompt: sync if body provided, async fetch from GitHub otherwise
+        if (prompt) {
+          deliverPromptWhenReady(id, prompt);
+        } else {
           fetchIssueFromGitHub(number, effectiveCwd).then(gh => {
             const issueBody = gh ? gh.body : null;
             const issueLabels = gh ? (labels || (Array.isArray(gh.labels) ? gh.labels.map(l => typeof l === 'string' ? l : l.name).join(', ') : null)) : labels;
             const issueUrl = gh ? (url || gh.url) : url;
             const asyncPrompt = buildPrompt(issueBody, issueLabels, issueUrl);
-            const deliverMsg = JSON.stringify({ type: 'deliver-prompt', id, initialPrompt: asyncPrompt });
-            for (const client of [...reloadClients].filter(c => c.readyState === 1)) {
-              client.send(deliverMsg);
-            }
+            deliverPromptWhenReady(id, asyncPrompt);
           });
         }
 
-        deliverToWindow({ type: 'open-session', id, cwd: spawnCwd, name, windowId, initialPrompt: prompt }, windowId);
+        deliverToWindow({ type: 'open-session', id, cwd: spawnCwd, name, windowId }, windowId);
 
         return { content: [{ type: 'text', text: JSON.stringify({ id, name, cwd: spawnCwd, worktree: worktree || null }) }] };
       },
