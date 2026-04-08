@@ -2685,6 +2685,7 @@ function handleWsConnection(ws, req) {
       const str = msg.toString();
       try {
         const parsed = JSON.parse(str);
+        if (parsed && typeof parsed === 'object') {
         if (parsed.type === 'resize') {
           attachPty.resize(parsed.cols, parsed.rows);
           return;
@@ -2701,6 +2702,7 @@ function handleWsConnection(ws, req) {
             shells.delete(id);
           }
           return;
+        }
         }
       } catch {}
       entry.lastActivity = Date.now();
@@ -2874,6 +2876,10 @@ function handleWsConnection(ws, req) {
     const str = msg.toString();
     try {
       const parsed = JSON.parse(str);
+      // Only treat input as a control message if it's a JSON object. Raw user input
+      // that happens to parse as a JSON primitive (e.g. typing "1" in a plain terminal
+      // parses as the number 1) must fall through to the PTY write below. See #373.
+      if (parsed && typeof parsed === 'object') {
       if (parsed.type === 'resize') { getEngine(id).resize(id, parsed.cols, parsed.rows); return; }
       if (parsed.type === 'redraw') { return; } // no-op: Ink echoes \x0c as ^L garbage; scrollback replay handles reconnect
       if (parsed.type === 'initialPrompt') {
@@ -2900,6 +2906,7 @@ function handleWsConnection(ws, req) {
           log(`[WS] close-session: client detached from ${id}, ${entry.clients.size} client(s) remain`);
         }
         return;
+      }
       }
     } catch {}
     // User sent input - update activity and clear waiting state
