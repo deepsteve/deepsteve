@@ -49,15 +49,19 @@ function init(context) {
       },
     },
     close_session: {
-      description: 'Close a deepsteve session and its browser tab. Gracefully terminates the Claude process. Call this when your work is complete and you want to clean up.',
+      description: 'Close a deepsteve session and its browser tab. Gracefully terminates the Claude process. With no arguments, closes the calling session. Pass session_id to close a different session.',
       schema: {
-        session_id: z.string().describe('The deepsteve session ID to close. Use `get_my_session_id` to get this value.'),
+        session_id: z.string().optional().describe('The deepsteve session ID to close. If omitted, closes the calling session (auto-detected from the MCP request).'),
       },
-      handler: async ({ session_id }) => {
-        if (!closeSession(session_id)) {
-          return { content: [{ type: 'text', text: `Session "${session_id}" not found.` }] };
+      handler: async ({ session_id }, extra) => {
+        const targetId = session_id || extra?.requestInfo?.url?.searchParams?.get('shellId');
+        if (!targetId) {
+          return { content: [{ type: 'text', text: 'Could not determine session to close.' }] };
         }
-        return { content: [{ type: 'text', text: `Session "${session_id}" closed.` }] };
+        if (!closeSession(targetId)) {
+          return { content: [{ type: 'text', text: `Session "${targetId}" not found.` }] };
+        }
+        return { content: [{ type: 'text', text: `Session "${targetId}" closed.` }] };
       },
     },
     start_issue: {
