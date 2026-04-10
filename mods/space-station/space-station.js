@@ -101,8 +101,8 @@ canvas.addEventListener('mousedown', () => { if (state.viewMode === MODE_ORBIT) 
 canvas.addEventListener('mouseup', () => { orbitDragging = false; });
 canvas.addEventListener('mousemove', (e) => {
   if (orbitDragging && state.viewMode === MODE_ORBIT) {
-    orbitAngle.theta += e.movementX * 0.005;
-    orbitAngle.phi = Math.max(0.05, Math.min(Math.PI / 2.5, orbitAngle.phi + e.movementY * 0.005));
+    orbitAngle.theta -= e.movementX * 0.005;
+    orbitAngle.phi = Math.max(0.05, Math.min(Math.PI / 2.5, orbitAngle.phi - e.movementY * 0.005));
   }
 });
 
