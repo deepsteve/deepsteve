@@ -832,6 +832,12 @@ function deliverPromptWhenReady(id, prompt) {
   } else if (config.initialPromptDelay > 0) {
     log(`[deliverPrompt] id=${id} using delay ${config.initialPromptDelay}ms`);
     setTimeout(() => submitToShell(id, prompt), config.initialPromptDelay);
+  } else if (e.lastBelTime && (Date.now() - e.lastBelTime) < 2000) {
+    // BEL already fired recently but waitingForInput was reset (e.g. by Ink re-render).
+    // Submit immediately rather than storing for a future BEL that may never come.
+    log(`[deliverPrompt] id=${id} BEL already fired ${Date.now() - e.lastBelTime}ms ago, submitting immediately`);
+    e.waitingForInput = false;
+    setTimeout(() => submitToShell(id, prompt), 500);
   } else {
     log(`[deliverPrompt] id=${id} storing as initialPrompt for BEL handler`);
     e.initialPrompt = prompt;  // BEL handler will pick it up
