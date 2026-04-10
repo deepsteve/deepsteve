@@ -9,6 +9,9 @@ on:
     # Daily at 8am UTC
     - cron: '0 8 * * *'
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   test:
     runs-on: ubuntu-latest
