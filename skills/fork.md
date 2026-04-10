@@ -8,11 +8,8 @@ Fork your current Claude conversation into a new deepsteve tab. Both tabs contin
 
 ## Procedure
 
-1. **Get your session ID**: Call `mcp__deepsteve__get_my_session_id` (no parameters needed).
-
-2. **Open a forked tab**: Call `mcp__deepsteve__open_terminal` with:
-   - `session_id`: the session ID from step 1
+1. **Open a forked tab**: Call `mcp__deepsteve__open_terminal` with:
    - `fork`: true
    - `name`: use `$ARGUMENTS` if provided, otherwise omit
 
-3. **Report**: Briefly confirm the fork succeeded with the new tab's ID and name.
+2. **Report**: Briefly confirm the fork succeeded with the new tab's ID and name.

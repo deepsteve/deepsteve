@@ -8,10 +8,7 @@ Open a new plain shell tab (not a Claude session) in your current working direct
 
 ## Procedure
 
-1. **Get your session ID**: Call `mcp__deepsteve__get_my_session_id` (no parameters needed).
-
-2. **Open a terminal tab**: Call `mcp__deepsteve__open_terminal` with:
-   - `session_id`: the session ID from step 1
+1. **Open a terminal tab**: Call `mcp__deepsteve__open_terminal` with:
    - `name`: use `$ARGUMENTS` if provided, otherwise omit
 
-3. **Report**: Briefly confirm the terminal tab was opened with its name and working directory.
+2. **Report**: Briefly confirm the terminal tab was opened with its name and working directory.

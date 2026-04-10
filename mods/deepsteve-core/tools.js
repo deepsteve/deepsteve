@@ -65,21 +65,22 @@ function init(context) {
       },
     },
     start_issue: {
-      description: 'Open a new deepsteve session for a GitHub issue. Fetches the issue body from GitHub, creates a worktree, and starts an agent with the issue prompt. Pass your session ID so the new tab opens in the same browser window.',
+      description: 'Open a new deepsteve session for a GitHub issue. Fetches the issue body from GitHub, creates a worktree, and starts an agent with the issue prompt. The new tab opens in the same browser window as the caller.',
       schema: {
-        session_id: z.string().describe('Your deepsteve session ID — use `get_my_session_id` to get this value'),
         number: z.number().describe('GitHub issue number'),
         title: z.string().describe('Issue title'),
+        session_id: z.string().optional().describe('Caller session ID (auto-detected if omitted)'),
         body: z.string().optional().describe('Issue body (if omitted, fetched from GitHub via gh CLI)'),
         labels: z.string().optional().describe('Comma-separated labels'),
         url: z.string().optional().describe('Issue URL'),
         cwd: z.string().optional().describe('Working directory (defaults to caller\'s cwd)'),
         agent_type: z.string().optional().describe('Agent type (defaults to caller\'s)'),
       },
-      handler: async ({ session_id, number, title, body, labels, url, cwd, agent_type }) => {
-        const caller = shells.get(session_id);
+      handler: async ({ session_id, number, title, body, labels, url, cwd, agent_type }, extra) => {
+        const callerId = session_id || extra?.requestInfo?.url?.searchParams?.get('shellId');
+        const caller = callerId ? shells.get(callerId) : null;
         if (!caller) {
-          return { content: [{ type: 'text', text: `Session "${session_id}" not found.` }] };
+          return { content: [{ type: 'text', text: `Session "${callerId || 'unknown'}" not found.` }] };
         }
 
         // Inherit from caller, allow overrides
@@ -164,15 +165,16 @@ function init(context) {
       },
     },
     open_browser_tab: {
-      description: 'Open a URL in a new browser tab in the same window as the given session. Use this to open documentation, previews, or external links alongside the session.',
+      description: 'Open a URL in a new browser tab in the same window as the caller. Use this to open documentation, previews, or external links alongside the session.',
       schema: {
-        session_id: z.string().describe('Your deepsteve session ID — use `get_my_session_id` to get this value'),
         url: z.string().describe('The URL to open'),
+        session_id: z.string().optional().describe('Caller session ID (auto-detected if omitted)'),
       },
-      handler: async ({ session_id, url }) => {
-        const caller = shells.get(session_id);
+      handler: async ({ session_id, url }, extra) => {
+        const callerId = session_id || extra?.requestInfo?.url?.searchParams?.get('shellId');
+        const caller = callerId ? shells.get(callerId) : null;
         if (!caller) {
-          return { content: [{ type: 'text', text: `Session "${session_id}" not found.` }] };
+          return { content: [{ type: 'text', text: `Session "${callerId || 'unknown'}" not found.` }] };
         }
         const windowId = caller.windowId || null;
         log(`[MCP] open_browser_tab: url=${url}, caller=${session_id}, windowId=${windowId}`);
@@ -181,21 +183,22 @@ function init(context) {
       },
     },
     open_terminal: {
-      description: 'Open a new deepsteve terminal session (new browser tab). Inherits context (cwd, worktree, windowId, agentType) from the calling session. Pass your session ID so the new tab opens in the same browser window.',
+      description: 'Open a new deepsteve terminal session (new tab). Inherits context (cwd, worktree, agent type) from the calling session. The new tab opens in the same browser window as the caller.',
       schema: {
-        session_id: z.string().describe('Your deepsteve session ID — use `get_my_session_id` to get this value'),
         prompt: z.string().optional().describe('Initial prompt to send to the new session'),
         name: z.string().optional().describe('Tab name for the new session'),
+        session_id: z.string().optional().describe('Caller session ID (auto-detected if omitted)'),
         cwd: z.string().optional().describe('Working directory (defaults to caller\'s cwd)'),
         worktree: z.string().optional().describe('Worktree name'),
         agent_type: z.string().optional().describe('Agent type (defaults to caller\'s)'),
         plan_mode: z.boolean().optional().describe('Start in plan mode'),
         fork: z.boolean().optional().describe('Fork the calling session\'s Claude conversation into the new tab'),
       },
-      handler: async ({ session_id, prompt, name, cwd, worktree, agent_type, plan_mode, fork }) => {
-        const caller = shells.get(session_id);
+      handler: async ({ session_id, prompt, name, cwd, worktree, agent_type, plan_mode, fork }, extra) => {
+        const callerId = session_id || extra?.requestInfo?.url?.searchParams?.get('shellId');
+        const caller = callerId ? shells.get(callerId) : null;
         if (!caller) {
-          return { content: [{ type: 'text', text: `Session "${session_id}" not found.` }] };
+          return { content: [{ type: 'text', text: `Session "${callerId || 'unknown'}" not found.` }] };
         }
 
         const effectiveCwd = cwd || caller.cwd;
