@@ -58,6 +58,21 @@ if ! diff -q package.json ~/.deepsteve/package.json.prev &>/dev/null; then
     cp package.json ~/.deepsteve/package.json.prev
 fi
 
+# Stamp install-source marker so the server knows this is a git-checkout install.
+# Used by the auto-update system (GET /api/version, POST /api/update/git-pull).
+INSTALL_VERSION=$(node -p "require('$SCRIPT_DIR/package.json').version" 2>/dev/null || echo "unknown")
+REPO_REMOTE=$(git -C "$SCRIPT_DIR" config --get remote.origin.url 2>/dev/null || echo "")
+INSTALLED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+cat > ~/.deepsteve/.install-source.json <<MARKEREOF
+{
+  "type": "git",
+  "installedAt": "$INSTALLED_AT",
+  "installVersion": "$INSTALL_VERSION",
+  "sourcePath": "$SCRIPT_DIR",
+  "repoRemote": "$REPO_REMOTE"
+}
+MARKEREOF
+
 # Register deepsteve as MCP server with Claude Code (idempotent)
 if command -v claude &>/dev/null; then
     claude mcp add --transport http deepsteve http://localhost:3000/mcp 2>/dev/null || true

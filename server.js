@@ -244,7 +244,10 @@ Please read the issue carefully, understand the codebase context, and implement 
   commandPaletteEnabled: true,
   commandPaletteShortcut: 'Meta+k',
   hashCommandsEnabled: true,
-  engine: 'node-pty'
+  engine: 'node-pty',
+  autoUpdateCheckEnabled: true,
+  autoUpdateCheckIntervalHours: 6,
+  autoUpdateApply: true
 };
 
 // Load settings
@@ -465,6 +468,9 @@ function broadcastSettings() {
     windowConfigs: settings.windowConfigs || [],
     engine: settings.engine || 'node-pty',
     scrollbackKB: settings.scrollbackKB,
+    autoUpdateCheckEnabled: settings.autoUpdateCheckEnabled,
+    autoUpdateCheckIntervalHours: settings.autoUpdateCheckIntervalHours,
+    autoUpdateApply: settings.autoUpdateApply,
   });
   for (const client of wss.clients) {
     if (client.readyState === 1) client.send(msg);
@@ -1233,22 +1239,301 @@ process.on('SIGINT', () => { if (!shuttingDown) { shuttingDown = true; shutdown(
 
 const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, 'package.json'), 'utf8'));
 
-app.get('/api/version', async (req, res) => {
-  const current = pkg.version;
+// --- Auto-update system ---
+// `versionStatus` caches the latest GitHub release check so /api/version is
+// non-blocking. `checkForUpdates()` runs at startup and on an interval driven
+// by settings.autoUpdateCheckIntervalHours. Broadcasts to reload clients when
+// the status changes so the UI can show a badge + toast without polling.
+
+const INSTALL_SOURCE_FILE = path.join(os.homedir(), '.deepsteve', '.install-source.json');
+
+let versionStatus = {
+  current: pkg.version,
+  latest: null,
+  updateAvailable: false,
+  releaseNotes: null,
+  releaseUrl: null,
+  releaseTag: null,
+  installSh: null,
+  checkedAt: null,
+  checkError: null,
+  installSource: { type: 'unknown' },
+  gitTreeClean: null,
+};
+
+let updateTimer = null;
+let updateInProgress = false;
+let pendingAutoApply = null; // { tag, deadline, timer }
+
+function loadInstallSource() {
+  try {
+    if (fs.existsSync(INSTALL_SOURCE_FILE)) {
+      const data = JSON.parse(fs.readFileSync(INSTALL_SOURCE_FILE, 'utf8'));
+      if (data && (data.type === 'git' || data.type === 'curl')) {
+        versionStatus.installSource = data;
+        return;
+      }
+    }
+  } catch (e) {
+    log(`Failed to load install source: ${e.message}`);
+  }
+  versionStatus.installSource = { type: 'unknown' };
+}
+
+function refreshGitTreeClean() {
+  if (versionStatus.installSource?.type !== 'git') {
+    versionStatus.gitTreeClean = null;
+    return;
+  }
+  const sourcePath = versionStatus.installSource.sourcePath;
+  if (!sourcePath || !fs.existsSync(sourcePath)) {
+    versionStatus.gitTreeClean = null;
+    return;
+  }
+  try {
+    const out = execFileSync('zsh', ['-l', '-c', `git -C "${sourcePath.replace(/"/g, '\\"')}" status --porcelain`], {
+      encoding: 'utf8',
+      timeout: 5000,
+      stdio: ['ignore', 'pipe', 'pipe']
+    });
+    versionStatus.gitTreeClean = out.trim() === '';
+  } catch (e) {
+    log(`git status failed in ${sourcePath}: ${e.message}`);
+    versionStatus.gitTreeClean = null;
+  }
+}
+
+function truncateNotes(body) {
+  if (!body) return null;
+  const MAX = 2000;
+  if (body.length <= MAX) return body;
+  return body.slice(0, MAX) + '\n\n… (truncated)';
+}
+
+async function checkForUpdates() {
+  loadInstallSource();
+  refreshGitTreeClean();
+  const wasAvailable = versionStatus.updateAvailable;
+  const prevTag = versionStatus.releaseTag;
   try {
     const resp = await fetch('https://api.github.com/repos/deepsteve/deepsteve/releases/latest', {
       headers: { Accept: 'application/vnd.github+json' },
-      signal: AbortSignal.timeout(5000)
+      signal: AbortSignal.timeout(10000)
     });
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     const release = await resp.json();
-    const latest = release.tag_name.replace(/^v/, '');
-    const updateAvailable = compareSemver(current, latest) < 0;
-    res.json({ current, latest, updateAvailable });
+    const latest = (release.tag_name || '').replace(/^v/, '');
+    const updateAvailable = latest ? compareSemver(pkg.version, latest) < 0 : false;
+    let installShUrl = null;
+    if (Array.isArray(release.assets)) {
+      const asset = release.assets.find(a => a.name === 'install.sh');
+      if (asset?.browser_download_url) installShUrl = asset.browser_download_url;
+    }
+    if (!installShUrl && release.tag_name) {
+      installShUrl = `https://github.com/deepsteve/deepsteve/releases/download/${release.tag_name}/install.sh`;
+    }
+    versionStatus.latest = latest || null;
+    versionStatus.updateAvailable = updateAvailable;
+    versionStatus.releaseNotes = truncateNotes(release.body);
+    versionStatus.releaseUrl = release.html_url || null;
+    versionStatus.releaseTag = release.tag_name || null;
+    versionStatus.installSh = installShUrl;
+    versionStatus.checkedAt = new Date().toISOString();
+    versionStatus.checkError = null;
+    log(`Version check: current=${pkg.version} latest=${latest} updateAvailable=${updateAvailable}`);
   } catch (e) {
+    versionStatus.checkError = e.message;
+    versionStatus.checkedAt = new Date().toISOString();
     log(`Version check failed: ${e.message}`);
-    res.json({ current, latest: null, updateAvailable: false });
   }
+
+  broadcastVersionStatus();
+
+  // Auto-apply logic: only for curl installs, only when the update is freshly
+  // discovered in this check, only when user has enabled it.
+  const justDiscovered = versionStatus.updateAvailable && (!wasAvailable || prevTag !== versionStatus.releaseTag);
+  if (justDiscovered &&
+      settings.autoUpdateApply &&
+      versionStatus.installSource?.type === 'curl' &&
+      !updateInProgress &&
+      !pendingAutoApply) {
+    scheduleAutoApply();
+  }
+}
+
+function broadcastVersionStatus() {
+  const msg = JSON.stringify({ type: 'version-status', status: versionStatus });
+  for (const client of reloadClients) {
+    if (client.readyState === 1) client.send(msg);
+  }
+}
+
+function scheduleAutoApply() {
+  const GRACE_MS = 60 * 1000;
+  const deadline = Date.now() + GRACE_MS;
+  log(`[auto-update] scheduling auto-apply in ${GRACE_MS / 1000}s for ${versionStatus.releaseTag}`);
+  const timer = setTimeout(() => {
+    log(`[auto-update] grace expired, triggering reinstall`);
+    pendingAutoApply = null;
+    applyCurlReinstall().catch(e => log(`[auto-update] auto-apply failed: ${e.message}`));
+  }, GRACE_MS);
+  pendingAutoApply = { tag: versionStatus.releaseTag, deadline, timer };
+  const msg = JSON.stringify({
+    type: 'version-auto-applying',
+    tag: versionStatus.releaseTag,
+    deadline,
+  });
+  for (const client of reloadClients) {
+    if (client.readyState === 1) client.send(msg);
+  }
+}
+
+function cancelAutoApply() {
+  if (!pendingAutoApply) return false;
+  clearTimeout(pendingAutoApply.timer);
+  pendingAutoApply = null;
+  const msg = JSON.stringify({ type: 'version-auto-apply-cancelled' });
+  for (const client of reloadClients) {
+    if (client.readyState === 1) client.send(msg);
+  }
+  log('[auto-update] auto-apply cancelled');
+  return true;
+}
+
+function restartUpdateTimer() {
+  if (updateTimer) {
+    clearInterval(updateTimer);
+    updateTimer = null;
+  }
+  if (!settings.autoUpdateCheckEnabled) {
+    log('[auto-update] background check disabled');
+    return;
+  }
+  const hours = Math.max(1, Math.min(168, settings.autoUpdateCheckIntervalHours || 6));
+  const intervalMs = hours * 60 * 60 * 1000;
+  updateTimer = setInterval(() => {
+    checkForUpdates().catch(e => log(`[auto-update] interval check failed: ${e.message}`));
+  }, intervalMs);
+  log(`[auto-update] background check every ${hours}h`);
+}
+
+async function applyGitPull() {
+  if (updateInProgress) throw new Error('An update is already in progress');
+  if (versionStatus.installSource?.type !== 'git') throw new Error('Not a git-checkout install');
+  const sourcePath = versionStatus.installSource.sourcePath;
+  if (!sourcePath || !fs.existsSync(sourcePath)) throw new Error(`Source path missing: ${sourcePath}`);
+  refreshGitTreeClean();
+  if (versionStatus.gitTreeClean !== true) throw new Error('Working tree has uncommitted changes');
+
+  updateInProgress = true;
+  try {
+    execFileSync('zsh', ['-l', '-c', `git -C "${sourcePath.replace(/"/g, '\\"')}" pull --ff-only`], {
+      encoding: 'utf8',
+      timeout: 5 * 60 * 1000,
+      stdio: ['ignore', 'pipe', 'pipe']
+    });
+    log(`[auto-update] git pull succeeded in ${sourcePath}`);
+    // Spawn restart.sh detached — it will POST /api/request-restart and take over.
+    const { spawn } = require('child_process');
+    const child = spawn('bash', [path.join(sourcePath, 'restart.sh'), '--refresh'], {
+      detached: true,
+      stdio: 'ignore',
+      cwd: sourcePath,
+    });
+    child.unref();
+    log(`[auto-update] spawned restart.sh`);
+  } catch (e) {
+    updateInProgress = false;
+    throw e;
+  }
+  // leave updateInProgress true — restart will tear this process down
+}
+
+async function applyCurlReinstall() {
+  if (updateInProgress) throw new Error('An update is already in progress');
+  if (versionStatus.installSource?.type !== 'curl') throw new Error('Not a curl-pipe install');
+  const installShUrl = versionStatus.installSh;
+  if (!installShUrl) throw new Error('install.sh download URL not known — check for updates first');
+
+  updateInProgress = true;
+  try {
+    const updateDir = path.join(os.homedir(), '.deepsteve', '.update');
+    fs.mkdirSync(updateDir, { recursive: true });
+    const tmpPath = path.join(updateDir, 'install.sh.tmp');
+    const finalPath = path.join(updateDir, 'install.sh');
+    log(`[auto-update] downloading ${installShUrl}`);
+    const resp = await fetch(installShUrl, { signal: AbortSignal.timeout(60 * 1000) });
+    if (!resp.ok) throw new Error(`Download failed: HTTP ${resp.status}`);
+    const buf = Buffer.from(await resp.arrayBuffer());
+    if (buf.length < 1024) throw new Error(`Download too small (${buf.length} bytes)`);
+    fs.writeFileSync(tmpPath, buf);
+    fs.chmodSync(tmpPath, 0o755);
+    fs.renameSync(tmpPath, finalPath);
+    log(`[auto-update] wrote ${finalPath} (${buf.length} bytes)`);
+
+    const applyingMsg = JSON.stringify({ type: 'version-applying', tag: versionStatus.releaseTag });
+    for (const client of reloadClients) {
+      if (client.readyState === 1) client.send(applyingMsg);
+    }
+
+    const { spawn } = require('child_process');
+    const child = spawn('bash', [finalPath], {
+      detached: true,
+      stdio: 'ignore',
+      cwd: updateDir,
+    });
+    child.unref();
+    log(`[auto-update] spawned install.sh`);
+  } catch (e) {
+    updateInProgress = false;
+    throw e;
+  }
+}
+
+app.get('/api/version', (req, res) => {
+  // Non-blocking: return cached status. Client can POST /api/version/check
+  // to force a fresh fetch.
+  res.json({
+    current: versionStatus.current,
+    latest: versionStatus.latest,
+    updateAvailable: versionStatus.updateAvailable,
+    status: versionStatus,
+  });
+});
+
+app.post('/api/version/check', async (req, res) => {
+  try {
+    await checkForUpdates();
+    res.json({ ok: true, status: versionStatus });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+app.post('/api/update/git-pull', async (req, res) => {
+  try {
+    await applyGitPull();
+    res.json({ ok: true, action: 'restarting' });
+  } catch (e) {
+    log(`[auto-update] git-pull failed: ${e.message}`);
+    res.status(400).json({ ok: false, error: e.message });
+  }
+});
+
+app.post('/api/update/curl-reinstall', async (req, res) => {
+  try {
+    if (pendingAutoApply) cancelAutoApply();
+    await applyCurlReinstall();
+    res.json({ ok: true, action: 'reinstalling' });
+  } catch (e) {
+    log(`[auto-update] curl-reinstall failed: ${e.message}`);
+    res.status(400).json({ ok: false, error: e.message });
+  }
+});
+
+app.delete('/api/update/pending', (req, res) => {
+  const cancelled = cancelAutoApply();
+  res.json({ ok: true, cancelled });
 });
 
 app.get('/api/home', (req, res) => res.json({ home: os.homedir() }));
@@ -1420,8 +1705,24 @@ app.post('/api/settings', (req, res) => {
       log(`Settings updated: default engine=${settings.engine}`);
     }
   }
+  let updateTimerNeedsRestart = false;
+  if (req.body.autoUpdateCheckEnabled !== undefined) {
+    settings.autoUpdateCheckEnabled = !!req.body.autoUpdateCheckEnabled;
+    log(`Settings updated: autoUpdateCheckEnabled=${settings.autoUpdateCheckEnabled}`);
+    updateTimerNeedsRestart = true;
+  }
+  if (req.body.autoUpdateCheckIntervalHours !== undefined) {
+    settings.autoUpdateCheckIntervalHours = Math.max(1, Math.min(168, Number(req.body.autoUpdateCheckIntervalHours) || 6));
+    log(`Settings updated: autoUpdateCheckIntervalHours=${settings.autoUpdateCheckIntervalHours}`);
+    updateTimerNeedsRestart = true;
+  }
+  if (req.body.autoUpdateApply !== undefined) {
+    settings.autoUpdateApply = !!req.body.autoUpdateApply;
+    log(`Settings updated: autoUpdateApply=${settings.autoUpdateApply}`);
+  }
   saveSettings();
   broadcastSettings();
+  if (updateTimerNeedsRestart) restartUpdateTimer();
   res.json(settings);
 });
 
@@ -2454,6 +2755,19 @@ const server = app.listen(PORT, BIND, () => {
       exec(`open "http://localhost:${PORT}"`);
     }
   }, 3000);
+
+  // Auto-update: load install source and kick off the first check after the
+  // server is listening (so the GitHub fetch doesn't block boot).
+  loadInstallSource();
+  refreshGitTreeClean();
+  if (settings.autoUpdateCheckEnabled) {
+    setTimeout(() => {
+      checkForUpdates().catch(e => log(`[auto-update] startup check failed: ${e.message}`));
+    }, 5000);
+    restartUpdateTimer();
+  } else {
+    log('[auto-update] background check disabled by settings');
+  }
 });
 const shells = new Map();
 
