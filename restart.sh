@@ -83,6 +83,12 @@ if [ "$REFRESH" = 1 ]; then
     touch ~/.deepsteve/.reload
 fi
 
+# Mark this as a restart so the new server skips its auto-open-browser timer.
+# Without this, existing browsers that are silently reconnecting their
+# WebSockets can lose the 3–5s race and the server ends up opening a phantom
+# new tab. The new server deletes this flag on startup.
+touch ~/.deepsteve/.restarting
+
 # --- Stop old server ---
 launchctl unload ~/Library/LaunchAgents/com.deepsteve.plist 2>/dev/null
 

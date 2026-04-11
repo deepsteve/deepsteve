@@ -111,6 +111,7 @@ function log(...args) {
 const STATE_FILE = path.join(os.homedir(), '.deepsteve', 'state.json');
 const DISPLAY_TABS_DIR = path.join(os.homedir(), '.deepsteve', 'display-tabs');
 const SETTINGS_FILE = path.join(os.homedir(), '.deepsteve', 'settings.json');
+const RESTARTING_FLAG = path.join(os.homedir(), '.deepsteve', '.restarting');
 const app = express();
 app.use(express.static('public', {
   setHeaders: (res) => res.setHeader('Cache-Control', 'no-cache')
@@ -2765,14 +2766,30 @@ reconcileSkills();
 
 const server = app.listen(PORT, BIND, () => {
   log(`HTTP server listening on ${BIND}:${PORT}`);
-  // Auto-open browser if no clients connect within 3s of startup
-  setTimeout(() => {
-    const connected = [...reloadClients].filter(c => c.readyState === 1);
-    if (connected.length === 0) {
-      log('No browser connected after startup, opening default browser');
-      exec(`open "http://localhost:${PORT}"`);
+  // Auto-open browser if no clients connect within 5s of startup.
+  // Skipped on restart: restart.sh writes .restarting before unloading the
+  // old daemon, so existing browsers get a chance to silently reconnect
+  // without a phantom new tab racing in. Cold starts (no marker) keep the
+  // original behavior.
+  let skipAutoOpen = false;
+  try {
+    if (fs.existsSync(RESTARTING_FLAG)) {
+      fs.unlinkSync(RESTARTING_FLAG);
+      skipAutoOpen = true;
+      log('Restart detected (.restarting flag present), skipping auto-open');
     }
-  }, 3000);
+  } catch (e) {
+    log(`Failed to check/clear .restarting flag: ${e.message}`);
+  }
+  if (!skipAutoOpen) {
+    setTimeout(() => {
+      const connected = [...reloadClients].filter(c => c.readyState === 1);
+      if (connected.length === 0) {
+        log('No browser connected after startup, opening default browser');
+        exec(`open "http://localhost:${PORT}"`);
+      }
+    }, 5000);
+  }
 
   // Auto-update: load install source and kick off the first check after the
   // server is listening (so the GitHub fetch doesn't block boot).
