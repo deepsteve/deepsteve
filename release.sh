@@ -245,6 +245,19 @@ npm install
 # Fix node-pty spawn-helper permissions
 find "$INSTALL_DIR/node_modules/node-pty" -name "spawn-helper" -exec chmod +x {} \;
 
+# Stamp install-source marker so the server knows this is a curl-pipe install.
+# Used by the auto-update system (GET /api/version, POST /api/update/curl-reinstall).
+INSTALL_VERSION=$(node -p "require('$INSTALL_DIR/package.json').version" 2>/dev/null || echo "unknown")
+INSTALLED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+cat > "$INSTALL_DIR/.install-source.json" <<MARKEREOF
+{
+  "type": "curl",
+  "installedAt": "$INSTALLED_AT",
+  "installVersion": "$INSTALL_VERSION",
+  "releaseTag": "v$INSTALL_VERSION"
+}
+MARKEREOF
+
 if command -v claude &>/dev/null; then
     claude mcp add --scope user --transport http deepsteve http://localhost:3000/mcp 2>/dev/null || true
 fi

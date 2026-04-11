@@ -423,10 +423,46 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
 
 /* Version info in settings */
 .version-info { font-size: 13px; color: var(--ds-text-secondary); }
-.version-status { margin-top: 4px; font-size: 12px; }
+.version-status { font-size: 11px; padding: 1px 6px; border-radius: 10px; border: 1px solid currentColor; }
 .version-ok { color: var(--ds-accent-green-soft); }
 .version-update { color: var(--ds-accent-blue); }
 .version-failed { color: var(--ds-text-secondary); }
+
+/* Update-available badge on the settings button */
+#settings-btn.update-available { position: relative; }
+#settings-btn.update-available::after {
+  content: "";
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--ds-accent-blue);
+  box-shadow: 0 0 0 1px var(--ds-bg-primary);
+}
+
+/* Auto-apply update toast */
+.auto-apply-toast {
+  position: fixed;
+  bottom: 16px;
+  right: 16px;
+  z-index: 2000;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: var(--ds-bg-secondary);
+  border: 1px solid var(--ds-accent-blue);
+  border-radius: 6px;
+  padding: 10px 14px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+  font-size: 12px;
+  color: var(--ds-text-primary);
+  max-width: 420px;
+}
+.auto-apply-toast-body { display: flex; flex-direction: column; gap: 2px; }
+.auto-apply-toast-countdown { color: var(--ds-text-secondary); font-size: 11px; }
+.auto-apply-toast-actions { display: flex; gap: 6px; }
 
 /* Settings modal — scrollable with pinned header/footer */
 .settings-modal {

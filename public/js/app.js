@@ -433,6 +433,65 @@ async function refreshSessionsDropdown() {
 // Settings modal
 const settingsBtn = document.getElementById('settings-btn');
 
+// --- Auto-update UI helpers ---
+function setUpdateAvailableBadge(on) {
+  if (!settingsBtn) return;
+  settingsBtn.classList.toggle('update-available', !!on);
+  settingsBtn.title = on ? 'Settings — update available' : 'Settings';
+}
+
+// Do an initial version fetch so the badge reflects the cached server state
+// even before any WebSocket broadcast arrives.
+fetch('/api/version').then(r => r.json()).then(data => {
+  setUpdateAvailableBadge(!!data.updateAvailable);
+}).catch(() => {});
+
+let autoApplyToastEl = null;
+let autoApplyCountdownTimer = null;
+function hideAutoApplyToast() {
+  if (autoApplyCountdownTimer) { clearInterval(autoApplyCountdownTimer); autoApplyCountdownTimer = null; }
+  if (autoApplyToastEl) { autoApplyToastEl.remove(); autoApplyToastEl = null; }
+}
+function showAutoApplyToast(tag, deadline) {
+  hideAutoApplyToast();
+  autoApplyToastEl = document.createElement('div');
+  autoApplyToastEl.className = 'auto-apply-toast';
+  autoApplyToastEl.innerHTML = `
+    <div class="auto-apply-toast-body">
+      <strong>Updating to ${tag || 'latest'}</strong>
+      <span class="auto-apply-toast-countdown">in <span id="auto-apply-remaining">…</span>s</span>
+    </div>
+    <div class="auto-apply-toast-actions">
+      <button type="button" class="btn-secondary" id="auto-apply-cancel" style="font-size: 11px; padding: 4px 10px;">Cancel</button>
+      <button type="button" class="btn-primary" id="auto-apply-now" style="font-size: 11px; padding: 4px 10px;">Update now</button>
+    </div>
+  `;
+  document.body.appendChild(autoApplyToastEl);
+  const remainingEl = autoApplyToastEl.querySelector('#auto-apply-remaining');
+  const tick = () => {
+    const remaining = Math.max(0, Math.ceil((deadline - Date.now()) / 1000));
+    if (remainingEl) remainingEl.textContent = remaining;
+    if (remaining <= 0) {
+      clearInterval(autoApplyCountdownTimer);
+      autoApplyCountdownTimer = null;
+    }
+  };
+  tick();
+  autoApplyCountdownTimer = setInterval(tick, 500);
+  autoApplyToastEl.querySelector('#auto-apply-cancel').onclick = async () => {
+    try {
+      await fetch('/api/update/pending', { method: 'DELETE' });
+    } catch {}
+    hideAutoApplyToast();
+  };
+  autoApplyToastEl.querySelector('#auto-apply-now').onclick = async () => {
+    try {
+      await fetch('/api/update/curl-reinstall', { method: 'POST' });
+    } catch {}
+    // Server will broadcast version-applying → showReloadOverlay
+  };
+}
+
 settingsBtn?.addEventListener('click', async () => {
   const [settingsData, themesData, versionData, defaultsData, enginesData] = await Promise.all([
     fetch('/api/settings').then(r => r.json()),
@@ -451,6 +510,9 @@ settingsBtn?.addEventListener('click', async () => {
   const currentCommandPaletteEnabled = settingsData.commandPaletteEnabled !== undefined ? settingsData.commandPaletteEnabled : true;
   const currentCommandPaletteShortcut = settingsData.commandPaletteShortcut || 'Meta+k';
   const currentHashCommandsEnabled = settingsData.hashCommandsEnabled !== undefined ? settingsData.hashCommandsEnabled : true;
+  const currentAutoUpdateCheckEnabled = settingsData.autoUpdateCheckEnabled !== undefined ? settingsData.autoUpdateCheckEnabled : true;
+  const currentAutoUpdateCheckIntervalHours = settingsData.autoUpdateCheckIntervalHours || 6;
+  const currentAutoUpdateApply = settingsData.autoUpdateApply !== undefined ? settingsData.autoUpdateApply : true;
   const currentDefaultAgent = settingsData.defaultAgent || 'claude';
   const currentOpencodeBinary = settingsData.opencodeBinary || 'opencode';
   const currentGeminiBinary = settingsData.geminiBinary || 'gemini';
@@ -478,19 +540,26 @@ settingsBtn?.addEventListener('click', async () => {
       </div>
       <div class="settings-body">
       <div class="settings-tab-content active" data-tab="general">
-      <div class="settings-section">
-        <h3>Version</h3>
-        <div class="version-info">
-          <span>Version ${escapeHtml(versionData.current)}</span>
-          <div class="version-status ${
-            versionData.latest === null ? 'version-failed' :
-            versionData.updateAvailable ? 'version-update' : 'version-ok'
-          }">${
-            versionData.latest === null ? "Couldn\u2019t check for updates" :
-            versionData.updateAvailable ? `Version ${escapeHtml(versionData.latest)} available \u2014 see deepsteve.com for upgrade instructions` :
-            "You\u2019re up to date"
-          }</div>
+      <div class="settings-section" id="updates-section">
+        <h3>Updates</h3>
+        <div id="updates-body"></div>
+        <div style="margin-top: 10px; display: flex; gap: 6px; flex-wrap: wrap;">
+          <button type="button" class="btn-secondary" id="updates-check-now" style="font-size: 11px; padding: 4px 10px;">Check now</button>
+          <button type="button" class="btn-primary" id="updates-action-btn" style="font-size: 11px; padding: 4px 10px; display: none;"></button>
         </div>
+        <label style="font-size: 12px; color: var(--ds-text-primary); cursor: pointer; display: flex; align-items: center; gap: 8px; margin-top: 12px;">
+          <input type="checkbox" id="auto-update-check-enabled" ${currentAutoUpdateCheckEnabled ? 'checked' : ''} style="accent-color: var(--ds-accent-green);">
+          Check for updates in the background
+        </label>
+        <label style="font-size: 12px; color: var(--ds-text-primary); display: flex; align-items: center; gap: 8px; margin-top: 6px;">
+          Every
+          <input type="number" id="auto-update-check-interval-hours" value="${currentAutoUpdateCheckIntervalHours}" min="1" max="168" step="1" style="width: 60px; padding: 3px 6px; background: var(--ds-bg-primary); border: 1px solid var(--ds-border); border-radius: 4px; color: var(--ds-text-primary); font-size: 12px;">
+          hours
+        </label>
+        <label id="auto-update-apply-row" style="font-size: 12px; color: var(--ds-text-primary); cursor: pointer; display: none; align-items: center; gap: 8px; margin-top: 6px;">
+          <input type="checkbox" id="auto-update-apply" ${currentAutoUpdateApply ? 'checked' : ''} style="accent-color: var(--ds-accent-green);">
+          Apply curl-pipe updates automatically (60s grace window)
+        </label>
       </div>
       <p style="font-size: 13px; color: var(--ds-text-secondary); margin-bottom: 12px;">
         Shell profile to source before running Claude:
@@ -707,6 +776,142 @@ settingsBtn?.addEventListener('click', async () => {
     const templateInput = overlay.querySelector('#wand-prompt-template');
     templateInput.value = defaultsData.wandPromptTemplate || '';
   };
+
+  // --- Updates section ---
+  const updatesBody = overlay.querySelector('#updates-body');
+  const updatesCheckBtn = overlay.querySelector('#updates-check-now');
+  const updatesActionBtn = overlay.querySelector('#updates-action-btn');
+  const autoUpdateApplyRow = overlay.querySelector('#auto-update-apply-row');
+  let currentStatus = versionData.status || {
+    current: versionData.current,
+    latest: versionData.latest,
+    updateAvailable: versionData.updateAvailable,
+    installSource: { type: 'unknown' },
+    gitTreeClean: null,
+    checkError: null,
+    checkedAt: null,
+    releaseNotes: null,
+    releaseUrl: null,
+    releaseTag: null,
+  };
+
+  function renderUpdates() {
+    const s = currentStatus || {};
+    const src = s.installSource || { type: 'unknown' };
+    const srcLabel =
+      src.type === 'git' ? `git checkout${src.sourcePath ? ` (${escapeHtml(src.sourcePath)})` : ''}` :
+      src.type === 'curl' ? 'curl install' :
+      'unknown';
+    const statusPill =
+      s.checkError ? `<span class="version-status version-failed">Check failed: ${escapeHtml(s.checkError)}</span>` :
+      s.latest === null ? `<span class="version-status version-failed">Couldn\u2019t check for updates</span>` :
+      s.updateAvailable ? `<span class="version-status version-update">Update available</span>` :
+      `<span class="version-status version-ok">Up to date</span>`;
+
+    let notesBlock = '';
+    if (s.updateAvailable && s.releaseNotes) {
+      notesBlock = `
+        <details style="margin-top: 8px;">
+          <summary style="cursor: pointer; font-size: 12px; color: var(--ds-text-secondary);">Release notes for ${escapeHtml(s.releaseTag || s.latest || '')}</summary>
+          <pre style="white-space: pre-wrap; font-size: 11px; color: var(--ds-text-primary); background: var(--ds-bg-primary); border: 1px solid var(--ds-border); border-radius: 4px; padding: 8px; margin-top: 6px; max-height: 200px; overflow-y: auto;">${escapeHtml(s.releaseNotes)}</pre>
+        </details>`;
+    }
+
+    const checkedLabel = s.checkedAt ? ` &middot; checked ${new Date(s.checkedAt).toLocaleString()}` : '';
+
+    updatesBody.innerHTML = `
+      <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+        <span style="font-size: 13px;">Version <strong>${escapeHtml(s.current || '?')}</strong></span>
+        ${s.updateAvailable && s.latest ? `<span style="font-size: 12px; color: var(--ds-text-secondary);">\u2192 ${escapeHtml(s.latest)}</span>` : ''}
+        ${statusPill}
+      </div>
+      <div style="font-size: 11px; color: var(--ds-text-secondary); margin-top: 4px;">Installed via: ${srcLabel}${checkedLabel}</div>
+      ${s.updateAvailable && s.releaseUrl ? `<div style="font-size: 11px; margin-top: 4px;"><a href="${escapeHtml(s.releaseUrl)}" target="_blank" style="color: var(--ds-accent-blue);">View on GitHub</a></div>` : ''}
+      ${notesBlock}
+    `;
+
+    // Action button — only shown when an update is available
+    updatesActionBtn.style.display = 'none';
+    updatesActionBtn.disabled = false;
+    updatesActionBtn.title = '';
+    if (s.updateAvailable) {
+      if (src.type === 'git') {
+        updatesActionBtn.style.display = '';
+        updatesActionBtn.textContent = 'Pull and restart';
+        if (s.gitTreeClean === false) {
+          updatesActionBtn.disabled = true;
+          updatesActionBtn.title = 'Working tree has uncommitted changes';
+        } else if (s.gitTreeClean === null) {
+          updatesActionBtn.disabled = true;
+          updatesActionBtn.title = 'Could not determine working tree state';
+        }
+      } else if (src.type === 'curl') {
+        updatesActionBtn.style.display = '';
+        updatesActionBtn.textContent = 'Update now';
+      } else {
+        updatesActionBtn.style.display = '';
+        updatesActionBtn.textContent = 'Update unavailable';
+        updatesActionBtn.disabled = true;
+        updatesActionBtn.title = 'Run ./restart.sh or re-install to enable auto-updates';
+      }
+    }
+
+    autoUpdateApplyRow.style.display = src.type === 'curl' ? 'flex' : 'none';
+  }
+
+  renderUpdates();
+
+  updatesCheckBtn.onclick = async () => {
+    updatesCheckBtn.disabled = true;
+    updatesCheckBtn.textContent = 'Checking...';
+    try {
+      const resp = await fetch('/api/version/check', { method: 'POST' });
+      const data = await resp.json();
+      if (data.status) {
+        currentStatus = data.status;
+        renderUpdates();
+      }
+    } catch (e) {
+      alert(`Check failed: ${e.message}`);
+    } finally {
+      updatesCheckBtn.disabled = false;
+      updatesCheckBtn.textContent = 'Check now';
+    }
+  };
+
+  updatesActionBtn.onclick = async () => {
+    const src = (currentStatus || {}).installSource || { type: 'unknown' };
+    const path = src.type === 'git' ? '/api/update/git-pull' : src.type === 'curl' ? '/api/update/curl-reinstall' : null;
+    if (!path) return;
+    const verb = src.type === 'git' ? 'pull and restart' : 're-download and reinstall';
+    if (!confirm(`Are you sure you want to ${verb}? Your sessions will be preserved.`)) return;
+    updatesActionBtn.disabled = true;
+    const originalText = updatesActionBtn.textContent;
+    updatesActionBtn.textContent = 'Starting...';
+    try {
+      const resp = await fetch(path, { method: 'POST' });
+      const data = await resp.json();
+      if (!resp.ok || !data.ok) {
+        alert(`Update failed: ${data.error || resp.status}`);
+        updatesActionBtn.disabled = false;
+        updatesActionBtn.textContent = originalText;
+        return;
+      }
+      updatesActionBtn.textContent = 'Restarting...';
+    } catch (e) {
+      alert(`Update failed: ${e.message}`);
+      updatesActionBtn.disabled = false;
+      updatesActionBtn.textContent = originalText;
+    }
+  };
+
+  // Keep Updates section in sync with WebSocket broadcasts while the modal is open.
+  // Cleanup is handled by the Save/Cancel/overlay click handlers below.
+  const versionStatusHandler = (e) => {
+    currentStatus = e.detail;
+    renderUpdates();
+  };
+  window.addEventListener('deepsteve:version-status', versionStatusHandler);
 
   // Window Configs management
   let editingConfigs = JSON.parse(JSON.stringify(windowConfigs));
@@ -983,7 +1188,10 @@ settingsBtn?.addEventListener('click', async () => {
     };
   }
 
-  overlay.querySelector('#settings-cancel').onclick = () => overlay.remove();
+  overlay.querySelector('#settings-cancel').onclick = () => {
+    window.removeEventListener('deepsteve:version-status', versionStatusHandler);
+    overlay.remove();
+  };
   overlay.querySelector('#settings-save').onclick = async () => {
     const selected = overlay.querySelector('input[name="profile"]:checked').value;
     const shellProfile = selected === 'custom' ? customInput.value : selected;
@@ -1004,7 +1212,10 @@ settingsBtn?.addEventListener('click', async () => {
     const geminiBinary = overlay.querySelector('#gemini-binary').value || 'gemini';
     const selectedEngine = overlay.querySelector('#engine-select')?.value || 'node-pty';
     const scrollbackKB = Math.max(1, Math.min(10000, Math.round(Number(overlay.querySelector('#scrollback-kb').value)) || 100));
-    const settingsPayload = { shellProfile, maxIssueTitleLength: newMaxTitle, wandPlanMode, wandPromptTemplate, symlinkWorktreeSettings, cmdTabSwitch, cmdTabSwitchHoldMs, commandPaletteEnabled, commandPaletteShortcut, hashCommandsEnabled, enabledAgents, opencodeBinary, geminiBinary, windowConfigs: editingConfigs, engine: selectedEngine, scrollbackKB };
+    const autoUpdateCheckEnabled = overlay.querySelector('#auto-update-check-enabled').checked;
+    const autoUpdateCheckIntervalHours = Math.max(1, Math.min(168, Number(overlay.querySelector('#auto-update-check-interval-hours').value) || 6));
+    const autoUpdateApply = overlay.querySelector('#auto-update-apply').checked;
+    const settingsPayload = { shellProfile, maxIssueTitleLength: newMaxTitle, wandPlanMode, wandPromptTemplate, symlinkWorktreeSettings, cmdTabSwitch, cmdTabSwitchHoldMs, commandPaletteEnabled, commandPaletteShortcut, hashCommandsEnabled, enabledAgents, opencodeBinary, geminiBinary, windowConfigs: editingConfigs, engine: selectedEngine, scrollbackKB, autoUpdateCheckEnabled, autoUpdateCheckIntervalHours, autoUpdateApply };
     let resp = await fetch('/api/settings', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1033,9 +1244,15 @@ settingsBtn?.addEventListener('click', async () => {
         refreshEnginesDropdown();
       } catch {}
     }
+    window.removeEventListener('deepsteve:version-status', versionStatusHandler);
     overlay.remove();
   };
-  overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
+  overlay.onclick = (e) => {
+    if (e.target === overlay) {
+      window.removeEventListener('deepsteve:version-status', versionStatusHandler);
+      overlay.remove();
+    }
+  };
 });
 
 function updateAppBadge() {
@@ -2705,6 +2922,20 @@ async function init() {
       }
       if (msg.type === 'close-display-tab') {
         if (sessions.has(msg.id)) killSession(msg.id);
+      }
+      if (msg.type === 'version-status') {
+        setUpdateAvailableBadge(!!msg.status?.updateAvailable);
+        window.dispatchEvent(new CustomEvent('deepsteve:version-status', { detail: msg.status }));
+      }
+      if (msg.type === 'version-auto-applying') {
+        showAutoApplyToast(msg.tag, msg.deadline);
+      }
+      if (msg.type === 'version-auto-apply-cancelled') {
+        hideAutoApplyToast();
+      }
+      if (msg.type === 'version-applying') {
+        hideAutoApplyToast();
+        showReloadOverlay();
       }
     },
     onShowRestartConfirm: () => showRestartConfirmDialog(),
