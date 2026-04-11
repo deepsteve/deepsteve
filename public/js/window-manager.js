@@ -9,6 +9,7 @@ import { nsKey, nsChannel } from './storage-namespace.js';
 const WINDOW_ID_KEY = nsKey('deepsteve-window-id');
 const CHANNEL_NAME = nsChannel('deepsteve-windows');
 const HEARTBEAT_INTERVAL = 5000;
+const ORPHAN_DETECTION_TIMEOUT = 1500;
 const LIVE_WINDOW_STALE_MS = 15000;
 const SEND_SESSION_ACK_TIMEOUT = 2000;
 
@@ -64,36 +65,55 @@ export const WindowManager = {
   },
 
   /**
-   * List windows that appear to be orphaned (no live WebSocket on the server).
-   * The server is the source of truth — every open tab holds a live-reload WS,
-   * so any localStorage window whose ID is absent from /api/live-windows has
-   * no live tab. If the fetch fails we return [] (safe failure: no restore
-   * modal rather than risk stealing sessions from a live window).
+   * List windows that appear to be orphaned (no active browser tab)
+   * Returns a promise that resolves after listening for heartbeats
    */
   async listOrphanedWindows() {
     const allWindows = SessionStore.getAllWindows();
     const windowIds = Object.keys(allWindows);
+
     if (windowIds.length === 0) return [];
 
+    // Current window is not orphaned
     const myWindowId = this.getWindowId();
 
-    let liveIds;
-    try {
-      const res = await fetch('/api/live-windows');
-      if (!res.ok) return [];
-      liveIds = new Set((await res.json()).windowIds || []);
-    } catch {
-      return [];
-    }
+    // Collect active windows via broadcast
+    const activeWindows = new Set();
 
-    return windowIds
-      .filter(id => id !== myWindowId && !liveIds.has(id))
-      .map(id => ({
-        windowId: id,
-        sessions: allWindows[id].sessions,
-        lastActive: allWindows[id].lastActive,
-      }))
-      .sort((a, b) => b.lastActive - a.lastActive);
+    return new Promise((resolve) => {
+      const tempChannel = new BroadcastChannel(CHANNEL_NAME);
+
+      tempChannel.onmessage = (event) => {
+        if (event.data.type === 'present' || event.data.type === 'heartbeat') {
+          activeWindows.add(event.data.windowId);
+        }
+      };
+
+      // Ask all windows to identify themselves
+      tempChannel.postMessage({ type: 'roll-call' });
+
+      // Wait for responses
+      setTimeout(() => {
+        tempChannel.close();
+
+        // Filter out active windows and current window
+        const orphaned = windowIds.filter(id =>
+          id !== myWindowId && !activeWindows.has(id)
+        );
+
+        // Return window data with session info
+        const orphanedWindows = orphaned.map(id => ({
+          windowId: id,
+          sessions: allWindows[id].sessions,
+          lastActive: allWindows[id].lastActive
+        }));
+
+        // Sort by last active (most recent first)
+        orphanedWindows.sort((a, b) => b.lastActive - a.lastActive);
+
+        resolve(orphanedWindows);
+      }, ORPHAN_DETECTION_TIMEOUT);
+    });
   },
 
   /**
