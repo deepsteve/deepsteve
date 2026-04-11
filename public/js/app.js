@@ -2456,6 +2456,7 @@ async function showIssuePicker() {
   function renderIssues(issuesToRender) {
     const list = overlay.querySelector('.issue-list');
     if (!list) return;
+    const sentinel = list.querySelector('.issue-sentinel');
     for (const issue of issuesToRender) {
       const el = document.createElement('div');
       el.className = 'issue-item';
@@ -2470,7 +2471,9 @@ async function showIssuePicker() {
         </div>
         <a class="issue-link" href="${escapeHtml(issue.url)}" target="_blank" title="Open on GitHub">&#8599;</a>
       `;
-      list.appendChild(el);
+      // Keep the sentinel as the last child so it stays at the bottom.
+      if (sentinel) list.insertBefore(el, sentinel);
+      else list.appendChild(el);
       bindIssueItem(el);
     }
   }
@@ -2486,6 +2489,11 @@ async function showIssuePicker() {
       issues = issues.concat(data.issues);
       hasMore = data.hasMore;
       renderIssues(data.issues);
+      if (!hasMore) {
+        const list = overlay.querySelector('.issue-list');
+        const sentinel = list?.querySelector('.issue-sentinel');
+        sentinel?.remove();
+      }
     } finally {
       loadingMore = false;
     }
@@ -2538,12 +2546,25 @@ async function showIssuePicker() {
         list.outerHTML = '<div class="issue-empty">No open issues found</div>';
       } else {
         list.innerHTML = '';
+        // Sentinel drives infinite scroll via IntersectionObserver: fires as
+        // soon as it's in the list viewport, which covers both "user scrolled
+        // near the bottom" and "initial page doesn't fill the container"
+        // (otherwise a scroll listener never fires and we're stuck at page 1).
+        const sentinel = document.createElement('div');
+        sentinel.className = 'issue-sentinel';
+        list.appendChild(sentinel);
         renderIssues(issues);
-        list.addEventListener('scroll', () => {
-          if (list.scrollTop + list.clientHeight >= list.scrollHeight - 40) {
-            loadMore();
-          }
-        });
+        if (!hasMore) {
+          sentinel.remove();
+        } else {
+          const io = new IntersectionObserver((entries) => {
+            if (entries.some(e => e.isIntersecting)) loadMore();
+          }, { root: list, rootMargin: '200px' });
+          io.observe(sentinel);
+          new MutationObserver((_, obs) => {
+            if (!overlay.parentNode) { io.disconnect(); obs.disconnect(); }
+          }).observe(document.body, { childList: true });
+        }
         const buttons = overlay.querySelector('.modal-buttons');
         const startBtn = document.createElement('button');
         startBtn.className = 'btn-primary';
