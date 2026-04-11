@@ -2390,6 +2390,15 @@ app.get('/api/shells', (req, res) => {
   res.json({ shells: [...active, ...saved] });
 });
 
+// Source of truth for orphan detection: which windowIds currently have
+// live WebSockets (reload channel and/or shell client channel).
+app.get('/api/live-windows', (req, res) => {
+  const ids = new Set();
+  for (const ws of reloadClients) { if (ws.windowId) ids.add(ws.windowId); }
+  for (const entry of shells.values()) { if (entry.windowId) ids.add(entry.windowId); }
+  res.json({ windowIds: [...ids] });
+});
+
 app.post('/api/shells/killall', (req, res) => {
   const killed = [];
   for (const [id, entry] of shells) {
