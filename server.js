@@ -225,34 +225,155 @@ app.put('/api/upload/:filename', express.raw({ type: '*/*', limit: '50mb' }), (r
   }
 });
 
-// Settings defaults (single source of truth for wand template + plan mode)
-const SETTINGS_DEFAULTS = {
-  activeTheme: 'retro-monitor',
-  wandPlanMode: true,
-  wandPromptTemplate: `I need you to work on GitHub issue #{{number}}: "{{title}}"
+// --- Settings schema (single source of truth) ---
+// Adding a new setting = one entry in SETTINGS_SCHEMA below. Defaults,
+// POST /api/settings validation, and broadcastSettings() all flow from here.
+// See CLAUDE.md "Adding a New Setting" for the contract.
+
+const WAND_DEFAULT_TEMPLATE = `I need you to work on GitHub issue #{{number}}: "{{title}}"
 Labels: {{labels}}
 URL: {{url}}
 
 Issue description:
 {{body}}
 
-Please read the issue carefully, understand the codebase context, and implement the changes needed.`,
-  defaultAgent: 'claude',
-  hermesBinary: 'hermes',
-  opencodeBinary: 'opencode',
-  geminiBinary: 'gemini',
-  enabledAgents: ['claude', 'hermes', 'opencode'],
-  commandPaletteEnabled: true,
-  commandPaletteShortcut: 'Meta+k',
-  hashCommandsEnabled: true,
-  engine: 'node-pty',
-  autoUpdateCheckEnabled: true,
-  autoUpdateCheckIntervalHours: 6,
-  autoUpdateApply: true
+Please read the issue carefully, understand the codebase context, and implement the changes needed.`;
+
+const AGENT_TYPES = ['claude', 'hermes', 'opencode', 'gemini'];
+
+function validateConfigTab(t) {
+  const type = t.type || 'terminal';
+  if (type === 'terminal') return typeof t.cwd === 'string';
+  if (type === 'display-tab') return typeof t.html === 'string';
+  if (type === 'baby-browser') return typeof t.url === 'string';
+  return false;
+}
+
+function sanitizeConfigTab(t) {
+  const type = t.type || 'terminal';
+  if (type === 'display-tab') return { type, name: t.name || '', html: t.html };
+  if (type === 'baby-browser') return { type, name: t.name || '', url: t.url };
+  // terminal (default)
+  return { name: t.name || '', cwd: t.cwd, agentType: t.agentType || 'claude' };
+}
+
+function sanitizeWindowConfigs(raw) {
+  if (!Array.isArray(raw)) return null;
+  return raw
+    .filter(c => c && typeof c === 'object' && typeof c.name === 'string' && Array.isArray(c.tabs))
+    .map(c => ({
+      id: c.id || randomUUID().slice(0, 8),
+      name: c.name,
+      tabs: c.tabs.filter(t => t && typeof t === 'object' && validateConfigTab(t)).map(sanitizeConfigTab),
+    }));
+}
+
+const SETTINGS_SCHEMA = [
+  { name: 'shellProfile',               type: 'string',  default: '~/.zshrc' },
+  { name: 'maxIssueTitleLength',        type: 'number',  default: 25, clamp: [10, 200] },
+  { name: 'wandPlanMode',               type: 'boolean', default: true, broadcast: false },
+  { name: 'wandPromptTemplate',         type: 'string',  default: WAND_DEFAULT_TEMPLATE, broadcast: false,
+    logValue: v => `(${v.length} chars)` },
+  { name: 'cmdTabSwitch',               type: 'boolean', default: false },
+  { name: 'cmdTabSwitchHoldMs',         type: 'number',  default: 1000, clamp: [0, Infinity], fallback: 0 },
+  { name: 'commandPaletteEnabled',      type: 'boolean', default: true },
+  { name: 'hashCommandsEnabled',        type: 'boolean', default: true },
+  { name: 'commandPaletteShortcut',     type: 'string',  default: 'Meta+k' },
+  { name: 'enabledAgents',              type: 'array',   default: ['claude', 'hermes', 'opencode'],
+    itemEnum: AGENT_TYPES, nonEmpty: true, broadcast: false,
+    sideEffect: (val, s) => { s.defaultAgent = val[0]; },
+    logValue: v => v.join(',') },
+  { name: 'defaultAgent',               type: 'enum',    default: 'claude', values: AGENT_TYPES, broadcast: false },
+  { name: 'hermesBinary',               type: 'string',  default: 'hermes',   fallbackOnEmpty: true, broadcast: false },
+  { name: 'opencodeBinary',             type: 'string',  default: 'opencode', fallbackOnEmpty: true, broadcast: false },
+  { name: 'geminiBinary',               type: 'string',  default: 'gemini',   fallbackOnEmpty: true, broadcast: false },
+  { name: 'symlinkWorktreeSettings',    type: 'boolean', default: false },
+  { name: 'windowConfigs',              type: 'custom',  default: [],
+    sanitize: sanitizeWindowConfigs,
+    logValue: v => `(${v.length} configs)` },
+  { name: 'scrollbackKB',               type: 'number',  default: SCROLLBACK_DEFAULT_KB, clamp: [1, 10000], round: true },
+  { name: 'engine',                     type: 'enum',    default: 'node-pty',
+    values: () => tmuxEngine ? ['node-pty', 'tmux'] : ['node-pty'] },
+  { name: 'autoUpdateCheckEnabled',     type: 'boolean', default: true },
+  { name: 'autoUpdateCheckIntervalHours', type: 'number', default: 6, clamp: [1, 168] },
+  { name: 'autoUpdateApply',            type: 'boolean', default: true },
+];
+
+// Settings whose default must exist in `settings` but that flow through
+// dedicated endpoints, not POST /api/settings or broadcastSettings:
+//   activeTheme   → POST /api/themes/active + broadcastTheme()   (ships CSS, not just the name)
+//   enabledSkills → POST /api/skills/{enable,disable} + broadcastSkills() (performs file I/O)
+const NON_SCHEMA_DEFAULTS = {
+  activeTheme: 'retro-monitor',
+  enabledSkills: [],
 };
 
+// Fields whose updates trigger restartUpdateTimer() (defined much later in the file).
+const AUTO_UPDATE_TIMER_FIELDS = new Set(['autoUpdateCheckEnabled', 'autoUpdateCheckIntervalHours']);
+
+function buildDefaults() {
+  const d = { ...NON_SCHEMA_DEFAULTS };
+  for (const entry of SETTINGS_SCHEMA) d[entry.name] = entry.default;
+  return d;
+}
+
+// Validate + coerce one POSTed setting value. Returns { ok, value }.
+// ok:false means the write is silently rejected (matches prior hand-rolled behavior).
+function coerceSetting(entry, raw) {
+  switch (entry.type) {
+    case 'string': {
+      const s = String(raw);
+      if (entry.fallbackOnEmpty && !s) return { ok: true, value: entry.default };
+      return { ok: true, value: s };
+    }
+    case 'boolean':
+      return { ok: true, value: !!raw };
+    case 'number': {
+      let n = Number(raw);
+      if (entry.round) n = Math.round(n);
+      if (!n) n = entry.fallback !== undefined ? entry.fallback : entry.default;
+      if (entry.clamp) {
+        const [lo, hi] = entry.clamp;
+        n = Math.max(lo, Math.min(hi, n));
+      }
+      return { ok: true, value: n };
+    }
+    case 'enum': {
+      const values = typeof entry.values === 'function' ? entry.values() : entry.values;
+      const v = String(raw);
+      if (!values.includes(v)) return { ok: false };
+      return { ok: true, value: v };
+    }
+    case 'array': {
+      if (!Array.isArray(raw)) return { ok: false };
+      let arr = raw;
+      if (entry.itemEnum) arr = arr.filter(x => entry.itemEnum.includes(x));
+      if (entry.nonEmpty && arr.length === 0) return { ok: false };
+      return { ok: true, value: arr };
+    }
+    case 'custom': {
+      const v = entry.sanitize(raw);
+      if (v === null || v === undefined) return { ok: false };
+      return { ok: true, value: v };
+    }
+  }
+  return { ok: false };
+}
+
+function applySettingsFromBody(body, s) {
+  for (const entry of SETTINGS_SCHEMA) {
+    if (!(entry.name in body)) continue;
+    const result = coerceSetting(entry, body[entry.name]);
+    if (!result.ok) continue;
+    s[entry.name] = result.value;
+    if (entry.sideEffect) entry.sideEffect(result.value, s);
+    const display = entry.logValue ? entry.logValue(result.value) : result.value;
+    log(`Settings updated: ${entry.name}=${display}`);
+  }
+}
+
 // Load settings
-let settings = { shellProfile: '~/.zshrc', maxIssueTitleLength: 25, cmdTabSwitch: false, cmdTabSwitchHoldMs: 1000, enabledSkills: [], windowConfigs: [], symlinkWorktreeSettings: false, scrollbackKB: SCROLLBACK_DEFAULT_KB, ...SETTINGS_DEFAULTS };
+let settings = buildDefaults();
 try {
   if (fs.existsSync(SETTINGS_FILE)) {
     settings = { ...settings, ...JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8')) };
@@ -457,22 +578,14 @@ function broadcastTheme(name, css) {
 }
 
 function broadcastSettings() {
-  const msg = JSON.stringify({
-    type: 'settings',
-    maxIssueTitleLength: settings.maxIssueTitleLength,
-    cmdTabSwitch: settings.cmdTabSwitch,
-    cmdTabSwitchHoldMs: settings.cmdTabSwitchHoldMs,
-    commandPaletteEnabled: settings.commandPaletteEnabled,
-    commandPaletteShortcut: settings.commandPaletteShortcut,
-    hashCommandsEnabled: settings.hashCommandsEnabled,
-    symlinkWorktreeSettings: settings.symlinkWorktreeSettings,
-    windowConfigs: settings.windowConfigs || [],
-    engine: settings.engine || 'node-pty',
-    scrollbackKB: settings.scrollbackKB,
-    autoUpdateCheckEnabled: settings.autoUpdateCheckEnabled,
-    autoUpdateCheckIntervalHours: settings.autoUpdateCheckIntervalHours,
-    autoUpdateApply: settings.autoUpdateApply,
-  });
+  const payload = { type: 'settings' };
+  for (const entry of SETTINGS_SCHEMA) {
+    if (entry.broadcast === false) continue;
+    payload[entry.name] = settings[entry.name];
+  }
+  // Defensive fallback in case an older settings.json on disk lacks this field.
+  if (payload.windowConfigs == null) payload.windowConfigs = [];
+  const msg = JSON.stringify(payload);
   for (const client of wss.clients) {
     if (client.readyState === 1) client.send(msg);
   }
@@ -1596,7 +1709,7 @@ app.get('/api/settings', (req, res) => {
   res.json({ ...settings, themeCSS });
 });
 
-app.get('/api/settings/defaults', (req, res) => res.json(SETTINGS_DEFAULTS));
+app.get('/api/settings/defaults', (req, res) => res.json(buildDefaults()));
 
 app.get('/api/engines', (req, res) => {
   res.json({
@@ -1628,119 +1741,12 @@ app.get('/api/tmux-sessions', (req, res) => {
 });
 
 app.post('/api/settings', (req, res) => {
-  const { shellProfile, maxIssueTitleLength } = req.body;
-  if (shellProfile !== undefined) {
-    settings.shellProfile = shellProfile;
-    log(`Settings updated: shellProfile=${shellProfile}`);
-  }
-  if (maxIssueTitleLength !== undefined) {
-    settings.maxIssueTitleLength = Math.max(10, Math.min(200, Number(maxIssueTitleLength) || 25));
-    log(`Settings updated: maxIssueTitleLength=${settings.maxIssueTitleLength}`);
-  }
-  if (req.body.wandPlanMode !== undefined) {
-    settings.wandPlanMode = !!req.body.wandPlanMode;
-    log(`Settings updated: wandPlanMode=${settings.wandPlanMode}`);
-  }
-  if (req.body.wandPromptTemplate !== undefined) {
-    settings.wandPromptTemplate = String(req.body.wandPromptTemplate);
-    log(`Settings updated: wandPromptTemplate (${settings.wandPromptTemplate.length} chars)`);
-  }
-  if (req.body.cmdTabSwitch !== undefined) {
-    settings.cmdTabSwitch = !!req.body.cmdTabSwitch;
-    log(`Settings updated: cmdTabSwitch=${settings.cmdTabSwitch}`);
-  }
-  if (req.body.cmdTabSwitchHoldMs !== undefined) {
-    settings.cmdTabSwitchHoldMs = Math.max(0, Number(req.body.cmdTabSwitchHoldMs) || 0);
-    log(`Settings updated: cmdTabSwitchHoldMs=${settings.cmdTabSwitchHoldMs}`);
-  }
-  if (req.body.commandPaletteEnabled !== undefined) {
-    settings.commandPaletteEnabled = !!req.body.commandPaletteEnabled;
-    log(`Settings updated: commandPaletteEnabled=${settings.commandPaletteEnabled}`);
-  }
-  if (req.body.hashCommandsEnabled !== undefined) {
-    settings.hashCommandsEnabled = !!req.body.hashCommandsEnabled;
-    log(`Settings updated: hashCommandsEnabled=${settings.hashCommandsEnabled}`);
-  }
-  if (req.body.commandPaletteShortcut !== undefined) {
-    settings.commandPaletteShortcut = String(req.body.commandPaletteShortcut);
-    log(`Settings updated: commandPaletteShortcut=${settings.commandPaletteShortcut}`);
-  }
-  if (req.body.enabledAgents !== undefined) {
-    const agents = req.body.enabledAgents;
-    if (Array.isArray(agents)) {
-      const valid = agents.filter(a => a === 'claude' || a === 'hermes' || a === 'opencode' || a === 'gemini');
-      if (valid.length > 0) {
-        settings.enabledAgents = valid;
-        // If only one agent enabled, that's the default
-        settings.defaultAgent = valid[0];
-        log(`Settings updated: enabledAgents=${valid.join(',')}, defaultAgent=${settings.defaultAgent}`);
-      }
-    }
-  }
-  if (req.body.defaultAgent !== undefined) {
-    const agent = String(req.body.defaultAgent);
-    if (agent === 'claude' || agent === 'hermes' || agent === 'opencode' || agent === 'gemini') {
-      settings.defaultAgent = agent;
-      log(`Settings updated: defaultAgent=${agent}`);
-    }
-  }
-  if (req.body.hermesBinary !== undefined) {
-    settings.hermesBinary = String(req.body.hermesBinary) || 'hermes';
-    log(`Settings updated: hermesBinary=${settings.hermesBinary}`);
-  }
-  if (req.body.opencodeBinary !== undefined) {
-    settings.opencodeBinary = String(req.body.opencodeBinary) || 'opencode';
-    log(`Settings updated: opencodeBinary=${settings.opencodeBinary}`);
-  }
-  if (req.body.geminiBinary !== undefined) {
-    settings.geminiBinary = String(req.body.geminiBinary) || 'gemini';
-    log(`Settings updated: geminiBinary=${settings.geminiBinary}`);
-  }
-  if (req.body.symlinkWorktreeSettings !== undefined) {
-    settings.symlinkWorktreeSettings = !!req.body.symlinkWorktreeSettings;
-    log(`Settings updated: symlinkWorktreeSettings=${settings.symlinkWorktreeSettings}`);
-  }
-  if (req.body.windowConfigs !== undefined) {
-    if (Array.isArray(req.body.windowConfigs)) {
-      settings.windowConfigs = req.body.windowConfigs.filter(c =>
-        c && typeof c === 'object' && typeof c.name === 'string' && Array.isArray(c.tabs)
-      ).map(c => ({
-        id: c.id || randomUUID().slice(0, 8),
-        name: c.name,
-        tabs: c.tabs.filter(t => t && typeof t === 'object' && validateConfigTab(t)).map(sanitizeConfigTab),
-      }));
-      log(`Settings updated: windowConfigs (${settings.windowConfigs.length} configs)`);
-    }
-  }
-  if (req.body.scrollbackKB !== undefined) {
-    settings.scrollbackKB = Math.max(1, Math.min(10000, Math.round(Number(req.body.scrollbackKB)) || SCROLLBACK_DEFAULT_KB));
-    log(`Settings updated: scrollbackKB=${settings.scrollbackKB}`);
-  }
-  if (req.body.engine !== undefined) {
-    const requested = String(req.body.engine);
-    if (requested === 'node-pty' || (requested === 'tmux' && tmuxEngine)) {
-      settings.engine = requested;
-      log(`Settings updated: default engine=${settings.engine}`);
-    }
-  }
-  let updateTimerNeedsRestart = false;
-  if (req.body.autoUpdateCheckEnabled !== undefined) {
-    settings.autoUpdateCheckEnabled = !!req.body.autoUpdateCheckEnabled;
-    log(`Settings updated: autoUpdateCheckEnabled=${settings.autoUpdateCheckEnabled}`);
-    updateTimerNeedsRestart = true;
-  }
-  if (req.body.autoUpdateCheckIntervalHours !== undefined) {
-    settings.autoUpdateCheckIntervalHours = Math.max(1, Math.min(168, Number(req.body.autoUpdateCheckIntervalHours) || 6));
-    log(`Settings updated: autoUpdateCheckIntervalHours=${settings.autoUpdateCheckIntervalHours}`);
-    updateTimerNeedsRestart = true;
-  }
-  if (req.body.autoUpdateApply !== undefined) {
-    settings.autoUpdateApply = !!req.body.autoUpdateApply;
-    log(`Settings updated: autoUpdateApply=${settings.autoUpdateApply}`);
-  }
+  applySettingsFromBody(req.body, settings);
   saveSettings();
   broadcastSettings();
-  if (updateTimerNeedsRestart) restartUpdateTimer();
+  // Side effect: restart the update-check interval if its fields changed.
+  const needsTimerRestart = Object.keys(req.body).some(k => AUTO_UPDATE_TIMER_FIELDS.has(k));
+  if (needsTimerRestart) restartUpdateTimer();
   res.json(settings);
 });
 
@@ -1829,24 +1835,6 @@ app.post('/api/commands/execute', (req, res) => {
     res.json({ ok: false, output: (err.stdout || '') + (err.stderr || ''), exitCode: err.status });
   }
 });
-
-// --- Window Config Tab Helpers ---
-
-function validateConfigTab(t) {
-  const type = t.type || 'terminal';
-  if (type === 'terminal') return typeof t.cwd === 'string';
-  if (type === 'display-tab') return typeof t.html === 'string';
-  if (type === 'baby-browser') return typeof t.url === 'string';
-  return false;
-}
-
-function sanitizeConfigTab(t) {
-  const type = t.type || 'terminal';
-  if (type === 'display-tab') return { type, name: t.name || '', html: t.html };
-  if (type === 'baby-browser') return { type, name: t.name || '', url: t.url };
-  // terminal (default)
-  return { name: t.name || '', cwd: t.cwd, agentType: t.agentType || 'claude' };
-}
 
 // --- Window Configs CRUD + Apply ---
 
