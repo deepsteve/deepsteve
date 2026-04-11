@@ -57,13 +57,24 @@ DeepSteve has **no authentication, no CORS, and no WebSocket origin checking**. 
 
 ### Adding a New Setting
 
-Every setting must be wired in **three places** in `server.js`, plus the client UI:
+Settings are declared once in the `SETTINGS_SCHEMA` array in `server.js`. Defaults, POST `/api/settings` validation, and `broadcastSettings()` all flow from that single entry — you do **not** hand-write a branch in the POST handler or an explicit field in the broadcast payload.
 
-1. **Default value** — add to the `settings` initializer (~line 200)
-2. **POST `/api/settings` handler** — read from `req.body`, validate, and assign to `settings`
-3. **`broadcastSettings()`** — include in the WebSocket message so all windows receive updates
+To add a setting, append one entry to `SETTINGS_SCHEMA`:
 
-The client sends the value in the POST body and applies it locally on save (`app.js`), which masks bugs where the server silently drops the field. Always verify that other browser windows pick up the change via WebSocket.
+```js
+{ name: 'myNewSetting', type: 'boolean', default: false }
+```
+
+Supported `type` values: `string` (opt-in `fallbackOnEmpty` restores the default when an empty string is POSTed), `boolean`, `number` (opt-in `clamp: [lo, hi]`, `round: true`, `fallback` for the NaN/0 case), `enum` (`values: [...]` or `values: () => [...]` for runtime-dependent enums like `engine`), `array` (`itemEnum` filters, `nonEmpty: true` rejects empty writes), and `custom` (provide a `sanitize(raw)` that returns `null` to reject or a cleaned value to accept — used by `windowConfigs`).
+
+Optional per-entry hooks:
+- `broadcast: false` — omit from the WebSocket `settings` message (use for server-internal fields like `wandPlanMode` or binary paths).
+- `sideEffect: (val, s) => { ... }` — mutate other settings on accept (e.g. `enabledAgents` re-points `defaultAgent`). Schema declaration order matters: a field later in the array can override a side-effect earlier in the same POST.
+- `logValue: v => '...'` — customize the `Settings updated: ...` log line (used by `wandPromptTemplate` and `windowConfigs`).
+
+The client sends fields by name in the POST body and applies them locally on save (`app.js`). Always verify that a second open browser window picks up the change via WebSocket.
+
+**Out-of-schema exceptions:** `activeTheme` and `enabledSkills` intentionally bypass this pipeline — they use dedicated endpoints (`POST /api/themes/active`, `POST /api/skills/{enable,disable}`) and dedicated broadcasts (`broadcastTheme`, `broadcastSkills`) because they ship side payloads (theme CSS) or perform file I/O (copying skill `.md` files). Their defaults live in `NON_SCHEMA_DEFAULTS` next to the schema.
 
 ### Command Palette
 
