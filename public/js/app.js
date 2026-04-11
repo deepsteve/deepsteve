@@ -1383,6 +1383,22 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
           if (opts.initialPrompt) {
             ws.sendJSON({ type: 'initialPrompt', text: opts.initialPrompt });
           }
+          // Apply persisted waiting state from the server. This handles the
+          // reconnect case where the shell was already idle before the browser
+          // dropped its WebSocket — without this, no "waiting" indicator shows
+          // until the next BEL fires. Do NOT call showNotification here: a
+          // reconnect restoring existing state should not re-notify.
+          if (msg.waitingForInput) {
+            const sess = sessions.get(msg.id);
+            if (sess) {
+              sess.waitingForInput = true;
+              if (msg.id === activeId) setHashCommandsWaiting(true);
+              TabManager.updateBadge(msg.id, msg.id !== activeId);
+              updateTitle();
+              updateAppBadge();
+              ModManager.notifySessionsChanged(getSessionList());
+            }
+          }
         }
         // Track engineType and claudeSessionId for session verification (after initTerminal
         // so TabSessions.add has already created the entry)

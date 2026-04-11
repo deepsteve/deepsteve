@@ -948,9 +948,12 @@ function fetchIssueFromGitHub(number, cwd) {
 
 /**
  * Deliver a prompt to a shell, handling the race between async fetch and BEL readiness.
- * If the shell is already waiting for input, submit immediately.
- * If the agent uses initialPromptDelay (non-BEL), use that delay.
- * Otherwise, set initialPrompt so the BEL handler picks it up.
+ * - If the shell is already waiting for input, submit immediately.
+ * - If the agent uses initialPromptDelay (non-BEL), use that delay.
+ * - If a BEL fired recently but waitingForInput was reset (e.g. by Ink re-render),
+ *   submit immediately rather than storing a callback that may never fire.
+ * - Otherwise, install a single-shot `onBelOnce` callback that the BEL handler
+ *   will invoke on the next idle transition.
  */
 function deliverPromptWhenReady(id, prompt) {
   const e = shells.get(id);
@@ -965,14 +968,15 @@ function deliverPromptWhenReady(id, prompt) {
     log(`[deliverPrompt] id=${id} using delay ${config.initialPromptDelay}ms`);
     setTimeout(() => submitToShell(id, prompt), config.initialPromptDelay);
   } else if (e.lastBelTime && (Date.now() - e.lastBelTime) < 2000) {
-    // BEL already fired recently but waitingForInput was reset (e.g. by Ink re-render).
-    // Submit immediately rather than storing for a future BEL that may never come.
     log(`[deliverPrompt] id=${id} BEL already fired ${Date.now() - e.lastBelTime}ms ago, submitting immediately`);
     e.waitingForInput = false;
     setTimeout(() => submitToShell(id, prompt), 500);
   } else {
-    log(`[deliverPrompt] id=${id} storing as initialPrompt for BEL handler`);
-    e.initialPrompt = prompt;  // BEL handler will pick it up
+    log(`[deliverPrompt] id=${id} installing onBelOnce for next idle transition`);
+    e.onBelOnce = () => {
+      log(`[deliverPrompt] id=${id} BEL fired, submitting queued prompt (len=${prompt.length})`);
+      setTimeout(() => submitToShell(id, prompt), 500);
+    };
   }
 }
 
@@ -1005,8 +1009,20 @@ function stripAllEscapes(data) {
 }
 
 /**
- * Wire up a shell's onData handler: broadcast output to WebSocket clients,
- * detect BEL (Claude waiting for input), and auto-submit initialPrompt.
+ * Set a shell's waitingForInput state and broadcast to all WebSocket clients.
+ * Early-returns if the state is unchanged, so callers can fire freely without
+ * spamming redundant messages.
+ */
+function broadcastWaitingState(entry, waiting) {
+  if (entry.waitingForInput === waiting) return;
+  entry.waitingForInput = waiting;
+  const msg = JSON.stringify({ type: 'state', waiting });
+  entry.clients.forEach((c) => c.send(msg));
+}
+
+/**
+ * Wire up a shell's onData handler: broadcast output to WebSocket clients
+ * and detect BEL transitions to drive the waitingForInput state.
  */
 function wireShellOutput(id) {
   const entry = shells.get(id);
@@ -1074,41 +1090,27 @@ function wireShellOutput(id) {
         const oscBels = rawBels - (strippedOSC.match(/\x07/g) || []).length;
         if (rawBels > 0) {
           const hexSnippet = Buffer.from(data).toString('hex').slice(0, 200);
-          log(`[BEL-debug] id=${id} rawBels=${rawBels} oscBels=${oscBels} hasBel=${hasBel} waitingForInput=${e.waitingForInput} hasInitialPrompt=${!!e.initialPrompt} dataLen=${data.length} hex=${hexSnippet}`);
+          log(`[BEL-debug] id=${id} rawBels=${rawBels} oscBels=${oscBels} hasBel=${hasBel} waitingForInput=${e.waitingForInput} hasPendingCallback=${!!e.onBelOnce} dataLen=${data.length} hex=${hexSnippet}`);
         }
       }
 
       if (hasBel) {
         e.lastBelTime = Date.now();
-        if (!e.waitingForInput) {
-          e.waitingForInput = true;
-          const stateMsg = JSON.stringify({ type: 'state', waiting: true });
-          e.clients.forEach((c) => c.send(stateMsg));
-
-          if (e.initialPrompt) {
-            const prompt = e.initialPrompt;
-            e.initialPrompt = null;
-            e.waitingForInput = false;
-            log(`[BEL-debug] id=${id} auto-submitting initialPrompt (len=${prompt.length})`);
-            setTimeout(() => submitToShell(id, prompt), 500);
-          }
+        const wasWaiting = e.waitingForInput;
+        broadcastWaitingState(e, true);
+        // On the transition into waiting, fire any queued one-shot callback
+        // (initialPrompt delivery). The callback owns its own contract — it
+        // may choose to immediately submit input and thus flip state back.
+        if (!wasWaiting && e.onBelOnce) {
+          const cb = e.onBelOnce;
+          e.onBelOnce = null;
+          try { cb(); } catch (err) { log(`[BEL] onBelOnce threw: ${err.message}`); }
         }
-        // If already waiting, the BEL just refreshes lastBelTime (keeps it stable)
       } else if (e.waitingForInput) {
-        // PTY produced non-BEL output while we thought Claude was waiting —
-        // but Ink re-renders arrive 50-150ms after BEL in the same render cycle.
-        // Debounce: ignore content within 150ms of the last BEL.
-        if (e.lastBelTime && (Date.now() - e.lastBelTime) < 150) {
-          // Same Ink render cycle — ignore this chunk
-        } else {
-          // Enough time has passed; check for substantive visible content
-          const stripped = stripAllEscapes(data);
-          if (stripped.length > 0) {
-            log(`[BEL-debug] id=${id} waitingForInput reset by visible content (${stripped.length} chars): ${stripped.slice(0, 80)}`);
-            e.waitingForInput = false;
-            const stateMsg = JSON.stringify({ type: 'state', waiting: false });
-            e.clients.forEach((c) => c.send(stateMsg));
-          }
+        // Non-BEL chunk with substantive visible content → Claude is producing
+        // output again, so clear the waiting state.
+        if (stripAllEscapes(data).length > 0) {
+          broadcastWaitingState(e, false);
         }
       }
     }
@@ -1922,7 +1924,7 @@ app.post('/api/window-configs/:id/apply', (req, res) => {
     const sessionEngine = getDefaultEngine();
     const engineType = sessionEngine === tmuxEngine ? 'tmux' : 'node-pty';
     spawnSession(sessionEngine, id, agentType, spawnArgs, cwd, { cols: 120, rows: 40, env: sessionEnv(id, { name, windowId: windowId || null }) });
-    shells.set(id, { clients: new Set(), cwd, claudeSessionId, agentType, engine: sessionEngine, engineType, worktree: null, windowId: windowId || null, name, initialPrompt: null, waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now() });
+    shells.set(id, { clients: new Set(), cwd, claudeSessionId, agentType, engine: sessionEngine, engineType, worktree: null, windowId: windowId || null, name, waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now() });
     wireShellOutput(id);
     if (agentConfig.supportsSessionWatch) watchClaudeSessionDir(id);
     sessionEngine.onExit(id, () => {
@@ -2685,13 +2687,11 @@ app.post('/api/start-issue', (req, res) => {
   const engineType = sessionEngine === tmuxEngine ? 'tmux' : 'node-pty';
   log(`[API] start-issue #${number}: id=${id}, agent=${agentType}, engine=${engineType}, worktree=${worktree || 'none'}, cwd=${worktreeCwd}`);
   spawnSession(sessionEngine, id, agentType, spawnArgs, worktreeCwd, { cols: 120, rows: 40, env: sessionEnv(id, { name, worktree, windowId: windowId || null }) });
-  shells.set(id, { clients: new Set(), cwd: worktreeCwd, claudeSessionId: claudeSessionId, agentType, engine: sessionEngine, engineType, worktree: worktree || null, windowId: windowId || null, name, initialPrompt: prompt, planMode: !!settings.wandPlanMode, waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now() });
+  shells.set(id, { clients: new Set(), cwd: worktreeCwd, claudeSessionId: claudeSessionId, agentType, engine: sessionEngine, engineType, worktree: worktree || null, windowId: windowId || null, name, planMode: !!settings.wandPlanMode, waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now() });
   wireShellOutput(id);
-  // For non-BEL agents with a synchronous prompt, deliver after delay
-  if (prompt && agentConfig.initialPromptDelay > 0) {
-    shells.get(id).initialPrompt = null; // Clear so BEL handler doesn't also fire
-    setTimeout(() => submitToShell(id, prompt), agentConfig.initialPromptDelay);
-  }
+  // Route any synchronous prompt through deliverPromptWhenReady so BEL agents
+  // get a one-shot onBelOnce callback and non-BEL agents get their configured delay.
+  if (prompt) deliverPromptWhenReady(id, prompt);
   if (agentConfig.supportsSessionWatch) watchClaudeSessionDir(id);
   sessionEngine.onExit(id, () => {
     if (agentConfig.supportsSessionWatch) unwatchClaudeSessionDir(id);
@@ -3223,7 +3223,7 @@ function handleWsConnection(ws, req) {
   if (windowId) entry.windowId = windowId;
   const hasScrollback = entry.scrollback && entry.scrollback.length > 0;
   log(`[WS] Sending session response: id=${id}, restored=${entry.restored || false}, scrollback=${hasScrollback ? entry.scrollbackSize + 'B' : 'none'}, existingClients=${existingClients}`);
-  ws.send(JSON.stringify({ type: 'session', id, restored: entry.restored || false, cwd: entry.cwd, name: entry.name || null, agentType: entry.agentType || 'claude', engineType: entry.engineType || 'node-pty', claudeSessionId: entry.claudeSessionId || null, scrollback: hasScrollback, existingClients }));
+  ws.send(JSON.stringify({ type: 'session', id, restored: entry.restored || false, cwd: entry.cwd, name: entry.name || null, agentType: entry.agentType || 'claude', engineType: entry.engineType || 'node-pty', claudeSessionId: entry.claudeSessionId || null, scrollback: hasScrollback, existingClients, waitingForInput: entry.waitingForInput || false }));
 
   // Send buffered scrollback so the client can render the terminal immediately
   if (hasScrollback) {
@@ -3272,11 +3272,7 @@ function handleWsConnection(ws, req) {
     } catch {}
     // User sent input - update activity and clear waiting state
     entry.lastActivity = Date.now();
-    if (entry.waitingForInput) {
-      entry.waitingForInput = false;
-      const stateMsg = JSON.stringify({ type: 'state', waiting: false });
-      entry.clients.forEach((c) => c.send(stateMsg));
-    }
+    broadcastWaitingState(entry, false);
     getEngine(id).write(id, str);
   });
 
