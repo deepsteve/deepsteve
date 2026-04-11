@@ -135,6 +135,7 @@ function init(context) {
           engine: sessionEngine, engineType,
           worktree: worktree || null, windowId,
           name, initialPrompt: null,
+          planMode: !!settings.wandPlanMode,
           waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now(),
         });
         wireShellOutput(id);
@@ -261,6 +262,9 @@ function init(context) {
         const sessionEngine2 = getDefaultEngine();
         const engineType2 = sessionEngine2.constructor.name === 'TmuxEngine' ? 'tmux' : 'node-pty';
         log(`[MCP] open_terminal: id=${id}, agent=${effectiveAgentType}, engine=${engineType2}, worktree=${validatedWorktree || 'none'}, cwd=${spawnCwd}, caller=${session_id}`);
+        // Forked sessions don't pass --permission-mode plan in spawnArgs, so record
+        // planMode=false for them regardless of the caller-supplied plan_mode arg.
+        const recordedPlanMode = (fork && caller.claudeSessionId) ? false : !!plan_mode;
         spawnSession(sessionEngine2, id, effectiveAgentType, spawnArgs, spawnCwd, { cols: 120, rows: 40, env: sessionEnv(id, { name: tabName, worktree: validatedWorktree, windowId }) });
         shells.set(id, {
           clients: new Set(), cwd: spawnCwd,
@@ -268,6 +272,7 @@ function init(context) {
           engine: sessionEngine2, engineType: engineType2,
           worktree: validatedWorktree, windowId,
           name: tabName, initialPrompt: prompt || null,
+          planMode: recordedPlanMode,
           waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now(),
         });
         wireShellOutput(id);
