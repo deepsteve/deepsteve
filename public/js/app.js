@@ -1071,7 +1071,10 @@ function createTmuxAttachSession(tmuxSessionName) {
 
   ws.onmessage = (e) => {
     let msg;
-    try { msg = JSON.parse(e.data); } catch {
+    try {
+      msg = JSON.parse(e.data);
+      if (typeof msg !== 'object' || msg === null) throw null;
+    } catch {
       const session = assignedId && sessions.get(assignedId);
       if (session) {
         session.term.write(e.data);
@@ -1118,8 +1121,9 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
     let msg;
     try {
       msg = JSON.parse(e.data);
+      if (typeof msg !== 'object' || msg === null) throw null;
     } catch {
-      // Not JSON - pass to terminal (or buffer if not yet created)
+      // Not a JSON control message - pass to terminal (or buffer if not yet created)
       const session = [...sessions.values()].find(s => s.ws === ws);
       if (session) {
         session.term.write(e.data);
@@ -1134,7 +1138,7 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
       return;
     }
 
-    // Valid JSON - handle control messages (never write to terminal)
+    // Valid JSON control message - handle (never write to terminal)
     try {
       if (msg.type === 'session') {
         assignedId = msg.id;
