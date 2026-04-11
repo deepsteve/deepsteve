@@ -2010,9 +2010,6 @@ function reconcileSkills() {
       if (fs.existsSync(src)) {
         installSkillFile(id);
         validSkills.push(id);
-        // Clean up old deepsteve-{id}.md flat files from prior naming scheme
-        const oldDest = path.join(CLAUDE_COMMANDS_DIR, `deepsteve-${id}.md`);
-        if (fs.existsSync(oldDest)) fs.unlinkSync(oldDest);
       }
     }
     if (validSkills.length !== settings.enabledSkills.length) {
@@ -2096,9 +2093,6 @@ app.post('/api/skills/enable', (req, res) => {
   try {
     fs.mkdirSync(SKILL_DEST_DIR, { recursive: true });
     installSkillFile(id);
-    // Clean up old deepsteve-{id}.md flat files from prior naming scheme
-    const oldDest = path.join(CLAUDE_COMMANDS_DIR, `deepsteve-${id}.md`);
-    if (fs.existsSync(oldDest)) fs.unlinkSync(oldDest);
     if (!settings.enabledSkills) settings.enabledSkills = [];
     if (!settings.enabledSkills.includes(id)) settings.enabledSkills.push(id);
     saveSettings();
@@ -2120,9 +2114,6 @@ app.post('/api/skills/disable', (req, res) => {
   }
   try {
     if (fs.existsSync(dest)) fs.unlinkSync(dest);
-    // Also clean up old deepsteve-{id}.md flat files from prior naming scheme
-    const oldDest = path.join(CLAUDE_COMMANDS_DIR, `deepsteve-${id}.md`);
-    if (fs.existsSync(oldDest)) fs.unlinkSync(oldDest);
     settings.enabledSkills = (settings.enabledSkills || []).filter(s => s !== id);
     saveSettings();
     log(`Skill disabled: ${id}`);
