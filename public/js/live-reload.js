@@ -168,5 +168,18 @@ export function initLiveReload({ onMessage, onShowRestartConfirm, onShowReloadOv
     });
   }
 
+  // Strip the ?_=<timestamp> cache-buster added by pollAndReload()'s meta-refresh
+  // reload. It's only needed to bypass the HTTP cache during the reload; once
+  // we're running, it just clutters the address bar.
+  function stripCacheBuster() {
+    const url = new URL(location.href);
+    if (!url.searchParams.has('_')) return;
+    url.searchParams.delete('_');
+    const query = url.searchParams.toString();
+    const clean = url.pathname + (query ? '?' + query : '') + url.hash;
+    history.replaceState(null, '', clean);
+  }
+  stripCacheBuster();
+
   connect();
 }
