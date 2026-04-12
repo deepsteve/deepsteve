@@ -820,11 +820,10 @@ function _showAutomationEditModal(existing, automations, section) {
   overlay.className = 'modal-overlay';
 
   const modal = document.createElement('div');
-  modal.className = 'modal';
-  modal.style.width = '560px';
+  modal.className = 'modal automation-modal';
 
   const headerEl = document.createElement('div');
-  headerEl.className = 'modal-header';
+  headerEl.className = 'automation-modal-header';
   headerEl.innerHTML = `<span>${isEdit ? 'Edit Automation' : 'New Automation'}</span>`;
   modal.appendChild(headerEl);
 
@@ -917,11 +916,7 @@ function _showAutomationEditModal(existing, automations, section) {
   }
 
   const footer = document.createElement('div');
-  footer.className = 'modal-footer';
-  footer.style.display = 'flex';
-  footer.style.gap = '8px';
-  footer.style.justifyContent = 'flex-end';
-  footer.style.padding = '12px 20px 20px';
+  footer.className = 'automation-modal-footer';
 
   const cancelBtn = document.createElement('button');
   cancelBtn.className = 'btn-secondary';
