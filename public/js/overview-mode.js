@@ -6,6 +6,10 @@
  * Supports two layouts: "tall" (vertical stacking) and "tiled" (2-row grid).
  */
 
+import { nsKey } from './storage-namespace.js';
+
+const LAYOUT_KEY = nsKey('deepsteve-overview-layout');
+
 let enabled = true;
 let shortcut = 'Meta+o';
 let isActive = false;
@@ -61,7 +65,7 @@ function enter() {
   if (ids.length === 0) return;
 
   isActive = true;
-  currentLayout = defaultLayout;
+  currentLayout = localStorage.getItem(LAYOUT_KEY) || defaultLayout;
 
   const terminals = document.getElementById('terminals');
   terminals.classList.add('overview-mode');
@@ -261,6 +265,7 @@ export function getLayout() {
 export function cycleLayout() {
   if (!isActive) return;
   currentLayout = currentLayout === 'tall' ? 'tiled' : 'tall';
+  localStorage.setItem(LAYOUT_KEY, currentLayout);
   applyLayout();
   requestAnimationFrame(() => {
     callbacks.fitAllTerminals?.();
