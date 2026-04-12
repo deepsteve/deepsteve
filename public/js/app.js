@@ -16,7 +16,7 @@ import { initFileDrop } from './file-drop.js';
 import { init as initCmdHoldMode, setEnabled as setCmdHoldModeEnabled, setHoldMs as setCmdHoldModeHoldMs } from './cmd-tab-switch.js';
 import { init as initCommandPalette, setEnabled as setCommandPaletteEnabled, setShortcut as setCommandPaletteShortcut } from './command-palette.js';
 import { init as initHashCommands, beforeSend as hashCommandsBeforeSend, setWaitingForInput as setHashCommandsWaiting, setEnabled as setHashCommandsEnabled } from './hash-commands.js';
-import { init as initOverviewMode, setEnabled as setOverviewModeEnabled, setShortcut as setOverviewModeShortcut, toggle as toggleOverviewMode, isOverviewActive } from './overview-mode.js';
+import { init as initOverviewMode, setEnabled as setOverviewModeEnabled, setShortcut as setOverviewModeShortcut, setDefaultLayout as setOverviewDefaultLayout, toggle as toggleOverviewMode, isOverviewActive } from './overview-mode.js';
 import { init as initTerminalSearch, attachSearchAddon, closeIfOpen as closeTerminalSearch } from './terminal-search.js';
 import { nsKey } from './storage-namespace.js';
 
@@ -197,6 +197,9 @@ function applySettings(settings) {
   }
   if (settings.overviewModeShortcut !== undefined) {
     setOverviewModeShortcut(settings.overviewModeShortcut);
+  }
+  if (settings.overviewDefaultLayout !== undefined) {
+    setOverviewDefaultLayout(settings.overviewDefaultLayout);
   }
   if (settings.symlinkWorktreeSettings !== undefined) {
     const el = document.querySelector('#symlink-worktree-settings');
@@ -526,6 +529,7 @@ settingsBtn?.addEventListener('click', async () => {
   const currentCommandPaletteEnabled = settingsData.commandPaletteEnabled !== undefined ? settingsData.commandPaletteEnabled : true;
   const currentCommandPaletteShortcut = settingsData.commandPaletteShortcut || 'Meta+k';
   const currentHashCommandsEnabled = settingsData.hashCommandsEnabled !== undefined ? settingsData.hashCommandsEnabled : true;
+  const currentOverviewDefaultLayout = settingsData.overviewDefaultLayout || 'tall';
   const currentAutoUpdateCheckEnabled = settingsData.autoUpdateCheckEnabled !== undefined ? settingsData.autoUpdateCheckEnabled : true;
   const currentAutoUpdateCheckIntervalHours = settingsData.autoUpdateCheckIntervalHours || 6;
   const currentAutoUpdateApply = settingsData.autoUpdateApply !== undefined ? settingsData.autoUpdateApply : true;
@@ -632,6 +636,17 @@ settingsBtn?.addEventListener('click', async () => {
         </label>
         <p style="font-size: 11px; color: var(--ds-text-secondary); margin-top: 4px;">
           Click the button and press a key combo to set the shortcut.
+        </p>
+        <hr style="border: none; border-top: 1px solid var(--ds-border); margin: 12px 0;">
+        <label style="font-size: 13px; color: var(--ds-text-primary); display: flex; align-items: center; gap: 8px;">
+          Overview default layout:
+          <select id="overview-default-layout" style="padding: 4px 6px; background: var(--ds-bg-primary); border: 1px solid var(--ds-border); border-radius: 4px; color: var(--ds-text-primary); font-size: 13px;">
+            <option value="tall" ${currentOverviewDefaultLayout === 'tall' ? 'selected' : ''}>Tall</option>
+            <option value="tiled" ${currentOverviewDefaultLayout === 'tiled' ? 'selected' : ''}>Tiled</option>
+          </select>
+        </label>
+        <p style="font-size: 11px; color: var(--ds-text-secondary); margin-top: 4px;">
+          Layout used when entering overview mode (\u2318O). Tall stacks vertically; Tiled uses a 2-row grid.
         </p>
       </div>
       <div class="settings-section">
@@ -1220,6 +1235,7 @@ settingsBtn?.addEventListener('click', async () => {
     const commandPaletteEnabled = overlay.querySelector('#command-palette-enabled').checked;
     const commandPaletteShortcut = overlay.querySelector('#command-palette-shortcut').value;
     const hashCommandsEnabled = overlay.querySelector('#hash-commands-enabled').checked;
+    const overviewDefaultLayout = overlay.querySelector('#overview-default-layout').value;
     const enabledAgents = [];
     if (overlay.querySelector('#agent-claude').checked) enabledAgents.push('claude');
     if (overlay.querySelector('#agent-opencode').checked) enabledAgents.push('opencode');
@@ -1231,7 +1247,7 @@ settingsBtn?.addEventListener('click', async () => {
     const autoUpdateCheckEnabled = overlay.querySelector('#auto-update-check-enabled').checked;
     const autoUpdateCheckIntervalHours = Math.max(1, Math.min(168, Number(overlay.querySelector('#auto-update-check-interval-hours').value) || 6));
     const autoUpdateApply = overlay.querySelector('#auto-update-apply').checked;
-    const settingsPayload = { shellProfile, maxIssueTitleLength: newMaxTitle, wandPlanMode, wandPromptTemplate, symlinkWorktreeSettings, cmdTabSwitch, cmdTabSwitchHoldMs, commandPaletteEnabled, commandPaletteShortcut, hashCommandsEnabled, enabledAgents, opencodeBinary, geminiBinary, windowConfigs: editingConfigs, engine: selectedEngine, scrollbackKB, autoUpdateCheckEnabled, autoUpdateCheckIntervalHours, autoUpdateApply };
+    const settingsPayload = { shellProfile, maxIssueTitleLength: newMaxTitle, wandPlanMode, wandPromptTemplate, symlinkWorktreeSettings, cmdTabSwitch, cmdTabSwitchHoldMs, commandPaletteEnabled, commandPaletteShortcut, hashCommandsEnabled, overviewDefaultLayout, enabledAgents, opencodeBinary, geminiBinary, windowConfigs: editingConfigs, engine: selectedEngine, scrollbackKB, autoUpdateCheckEnabled, autoUpdateCheckIntervalHours, autoUpdateApply };
     let resp = await fetch('/api/settings', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -3037,6 +3053,29 @@ async function init() {
     openSettings: () => { document.getElementById('settings-btn')?.click(); },
     openMods: () => { document.getElementById('mods-btn')?.click(); },
     toggleOverviewMode: () => toggleOverviewMode(),
+    focusTerminal: () => {
+      if (activeId) {
+        const s = sessions.get(activeId);
+        if (s?.term) s.term.focus();
+      }
+    },
+  });
+
+  // Initialize Overview Mode (Cmd+O by default)
+  initOverviewMode({
+    getOrderedTabIds: () => [...document.querySelectorAll('#tabs-list .tab')].map(t => t.id.replace('tab-', '')),
+    getActiveTabId: () => activeId,
+    getSession: (id) => sessions.get(id),
+    getTabName: (id) => {
+      const s = sessions.get(id);
+      return s?.name || getDefaultTabName(s?.cwd || '');
+    },
+    switchToTab: switchTo,
+    fitAllTerminals: () => {
+      for (const [, s] of sessions) {
+        if (s.term && s.fit && s.ws) fitTerminal(s.term, s.fit, s.ws);
+      }
+    },
     focusTerminal: () => {
       if (activeId) {
         const s = sessions.get(activeId);
