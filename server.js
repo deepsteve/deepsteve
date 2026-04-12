@@ -281,6 +281,7 @@ const SETTINGS_SCHEMA = [
   { name: 'commandPaletteShortcut',     type: 'string',  default: 'Meta+k' },
   { name: 'overviewModeEnabled',        type: 'boolean', default: true },
   { name: 'overviewModeShortcut',       type: 'string',  default: 'Meta+o' },
+  { name: 'overviewDefaultLayout',      type: 'enum',    default: 'tall', values: ['tall', 'tiled'] },
   { name: 'enabledAgents',              type: 'array',   default: ['claude', 'hermes', 'opencode'],
     itemEnum: AGENT_TYPES, nonEmpty: true, broadcast: false,
     sideEffect: (val, s) => { s.defaultAgent = val[0]; },

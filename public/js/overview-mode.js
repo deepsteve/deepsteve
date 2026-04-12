@@ -3,12 +3,14 @@
  *
  * Toggle with a configurable shortcut (default Cmd+O). Click a tile to
  * focus it and exit overview. Escape exits without changing the active tab.
- * Follows the same init/setEnabled/setShortcut pattern as cmd-tab-switch.js.
+ * Supports two layouts: "tall" (vertical stacking) and "tiled" (2-row grid).
  */
 
 let enabled = true;
 let shortcut = 'Meta+o';
 let isActive = false;
+let currentLayout = 'tall';
+let defaultLayout = 'tall';
 
 let callbacks = {};
 let observer = null;
@@ -35,11 +37,31 @@ function matchesShortcut(e) {
   return true;
 }
 
+function applyLayout() {
+  const terminals = document.getElementById('terminals');
+  terminals.classList.remove('overview-tall', 'overview-tiled');
+  terminals.classList.add(`overview-${currentLayout}`);
+
+  if (currentLayout === 'tiled') {
+    const count = terminals.querySelectorAll('.terminal-container.overview-visible').length;
+    terminals.style.setProperty('--overview-cols', Math.max(1, Math.ceil(count / 2)));
+  } else {
+    terminals.style.removeProperty('--overview-cols');
+  }
+
+  const btn = document.getElementById('overview-layout-btn');
+  if (btn) {
+    btn.title = currentLayout === 'tall' ? 'Switch to tiled layout' : 'Switch to tall layout';
+  }
+}
+
 function enter() {
   const ids = callbacks.getOrderedTabIds?.() || [];
   if (ids.length === 0) return;
 
   isActive = true;
+  currentLayout = defaultLayout;
+
   const terminals = document.getElementById('terminals');
   terminals.classList.add('overview-mode');
 
@@ -62,6 +84,12 @@ function enter() {
     updateWaitingIndicator(session);
   }
 
+  applyLayout();
+
+  // Show layout switcher
+  const btn = document.getElementById('overview-layout-btn');
+  if (btn) btn.style.display = '';
+
   requestAnimationFrame(() => {
     callbacks.fitAllTerminals?.();
   });
@@ -77,7 +105,8 @@ function exit(targetId) {
   stopObserver();
 
   const terminals = document.getElementById('terminals');
-  terminals.classList.remove('overview-mode');
+  terminals.classList.remove('overview-mode', 'overview-tall', 'overview-tiled');
+  terminals.style.removeProperty('--overview-cols');
 
   // Clean up all overview state from containers
   const containers = terminals.querySelectorAll('.terminal-container');
@@ -86,6 +115,10 @@ function exit(targetId) {
     container.querySelector('.overview-label')?.remove();
     container.querySelector('.overview-waiting')?.remove();
   }
+
+  // Hide layout switcher
+  const btn = document.getElementById('overview-layout-btn');
+  if (btn) btn.style.display = 'none';
 
   // Switch to the target tab, or restore the previously active tab
   const switchId = targetId || callbacks.getActiveTabId?.();
@@ -130,6 +163,7 @@ function startObserver() {
         updateWaitingIndicator(session);
       }
     }
+    applyLayout();
     requestAnimationFrame(() => {
       callbacks.fitAllTerminals?.();
     });
@@ -181,6 +215,10 @@ export function init(cbs) {
   callbacks = cbs;
   document.addEventListener('keydown', onKeyDown, true);
   document.getElementById('terminals')?.addEventListener('click', onClick, true);
+  document.getElementById('overview-layout-btn')?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    cycleLayout();
+  });
 }
 
 export function setEnabled(val) {
@@ -192,6 +230,25 @@ export function setShortcut(val) {
   if (val && typeof val === 'string') {
     shortcut = val;
   }
+}
+
+export function setDefaultLayout(val) {
+  if (val === 'tall' || val === 'tiled') {
+    defaultLayout = val;
+  }
+}
+
+export function getLayout() {
+  return currentLayout;
+}
+
+export function cycleLayout() {
+  if (!isActive) return;
+  currentLayout = currentLayout === 'tall' ? 'tiled' : 'tall';
+  applyLayout();
+  requestAnimationFrame(() => {
+    callbacks.fitAllTerminals?.();
+  });
 }
 
 export function toggle() {
