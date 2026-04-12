@@ -6,11 +6,18 @@ function getTerminalBackground() {
   return getComputedStyle(document.documentElement).getPropertyValue('--ds-bg-primary').trim() || '#0d1117';
 }
 
+function getTerminalForeground() {
+  return getComputedStyle(document.documentElement).getPropertyValue('--ds-terminal-foreground').trim() || null;
+}
+
 export function createTerminal(container) {
+  const themeObj = { background: getTerminalBackground() };
+  const fg = getTerminalForeground();
+  if (fg) themeObj.foreground = fg;
   const term = new Terminal({
     fontSize: 14,
     cursorBlink: false,  // Disable - Claude has its own cursor
-    theme: { background: getTerminalBackground() }
+    theme: themeObj
   });
 
   const fit = new FitAddon.FitAddon();
@@ -29,7 +36,10 @@ export function createTerminal(container) {
  */
 export function updateTerminalTheme(term) {
   const bg = getTerminalBackground();
-  term.options.theme = { ...term.options.theme, background: bg };
+  const fg = getTerminalForeground();
+  const update = { ...term.options.theme, background: bg };
+  if (fg) { update.foreground = fg; } else { delete update.foreground; }
+  term.options.theme = update;
 }
 
 export function setupTerminalIO(term, ws, { onUserInput, container, beforeSend } = {}) {
