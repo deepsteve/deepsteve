@@ -2962,6 +2962,11 @@ async function init() {
       const s = sessions.get(activeId);
       if (!s) return null;
       return { id: activeId, cwd: s.cwd, container: s.container, ws: s.ws };
+    },
+    getSessionByContainerId: (id) => {
+      const s = sessions.get(id);
+      if (!s) return null;
+      return { id, cwd: s.cwd, container: s.container, ws: s.ws };
     }
   });
 

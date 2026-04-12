@@ -5,18 +5,30 @@
  * path into the terminal — like dropping a file into iTerm.
  */
 
+import { isOverviewActive } from './overview-mode.js';
+
 let getActiveSession = null;
+let getSessionByContainerId = null;
 let dragDepth = 0;
 let dropZone = null;
 let dragTimer = null;
+let hoveredContainer = null;
 
 function hasFiles(e) {
   return e.dataTransfer && e.dataTransfer.types.includes('Files');
 }
 
-function showDropZone() {
+function getTargetContainer(e) {
+  if (isOverviewActive() && e) {
+    const container = e.target.closest('.terminal-container');
+    if (container) return container;
+  }
   const session = getActiveSession();
-  if (!session) return;
+  return session ? session.container : null;
+}
+
+function showDropZone(container) {
+  if (!container) return;
 
   if (!dropZone) {
     dropZone = document.createElement('div');
@@ -24,7 +36,7 @@ function showDropZone() {
     dropZone.innerHTML = '<div class="file-drop-zone-content">Drop files here</div>';
   }
 
-  session.container.appendChild(dropZone);
+  container.appendChild(dropZone);
   dropZone.offsetHeight; // force reflow for transition
   dropZone.classList.add('visible');
 }
@@ -63,8 +75,9 @@ function uploadFile(file) {
   });
 }
 
-export function initFileDrop({ getActiveSession: getter }) {
+export function initFileDrop({ getActiveSession: getter, getSessionByContainerId: containerGetter }) {
   getActiveSession = getter;
+  getSessionByContainerId = containerGetter;
   const terminals = document.getElementById('terminals');
 
   // Prevent browser from navigating to dropped files anywhere on the page
@@ -75,7 +88,10 @@ export function initFileDrop({ getActiveSession: getter }) {
     if (!hasFiles(e)) return;
     e.preventDefault();
     dragDepth++;
-    if (dragDepth === 1) showDropZone();
+    if (dragDepth === 1) {
+      hoveredContainer = getTargetContainer(e);
+      showDropZone(hoveredContainer);
+    }
   });
 
   terminals.addEventListener('dragover', (e) => {
@@ -85,13 +101,26 @@ export function initFileDrop({ getActiveSession: getter }) {
     // Reset safety timer — dragover fires continuously while drag is active.
     // If it stops (cancel, Escape, left window), the timeout hides the overlay.
     clearTimeout(dragTimer);
-    dragTimer = setTimeout(() => { dragDepth = 0; hideDropZone(); }, 500);
+    dragTimer = setTimeout(() => { dragDepth = 0; hideDropZone(); hoveredContainer = null; }, 500);
+
+    // In overview mode, move the drop zone to whichever tile the cursor is over
+    if (isOverviewActive()) {
+      const container = e.target.closest('.terminal-container');
+      if (container && container !== hoveredContainer) {
+        hideDropZone();
+        hoveredContainer = container;
+        showDropZone(hoveredContainer);
+      }
+    }
   });
 
   terminals.addEventListener('dragleave', (e) => {
     if (!hasFiles(e)) return;
     dragDepth--;
-    if (dragDepth === 0) hideDropZone();
+    if (dragDepth === 0) {
+      hideDropZone();
+      hoveredContainer = null;
+    }
   });
 
   terminals.addEventListener('drop', async (e) => {
@@ -101,7 +130,16 @@ export function initFileDrop({ getActiveSession: getter }) {
     dragDepth = 0;
     hideDropZone();
 
-    const session = getActiveSession();
+    let session = null;
+    if (isOverviewActive()) {
+      const container = hoveredContainer || e.target.closest('.terminal-container');
+      if (container) {
+        const id = container.id.replace(/^term-/, '');
+        session = getSessionByContainerId(id);
+      }
+    }
+    if (!session) session = getActiveSession();
+    hoveredContainer = null;
     if (!session) return;
 
     const files = [...e.dataTransfer.files];
