@@ -635,9 +635,11 @@ settingsBtn?.addEventListener('click', async () => {
         <p style="font-size: 11px; color: var(--ds-text-secondary); margin-top: 4px;">
           Click the button and press a key combo to set the shortcut.
         </p>
-        <hr style="border: none; border-top: 1px solid var(--ds-border); margin: 12px 0;">
+      </div>
+      <div class="settings-section">
+        <h3>Overview Mode</h3>
         <label style="font-size: 13px; color: var(--ds-text-primary); display: flex; align-items: center; gap: 8px;">
-          Overview default layout:
+          Default layout:
           <select id="overview-default-layout" style="padding: 4px 6px; background: var(--ds-bg-primary); border: 1px solid var(--ds-border); border-radius: 4px; color: var(--ds-text-primary); font-size: 13px;">
             <option value="tall" ${currentOverviewDefaultLayout === 'tall' ? 'selected' : ''}>Tall</option>
             <option value="tiled" ${currentOverviewDefaultLayout === 'tiled' ? 'selected' : ''}>Tiled</option>
