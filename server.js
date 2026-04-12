@@ -279,6 +279,8 @@ const SETTINGS_SCHEMA = [
   { name: 'commandPaletteEnabled',      type: 'boolean', default: true },
   { name: 'hashCommandsEnabled',        type: 'boolean', default: true },
   { name: 'commandPaletteShortcut',     type: 'string',  default: 'Meta+k' },
+  { name: 'overviewModeEnabled',        type: 'boolean', default: true },
+  { name: 'overviewModeShortcut',       type: 'string',  default: 'Meta+o' },
   { name: 'enabledAgents',              type: 'array',   default: ['claude', 'hermes', 'opencode'],
     itemEnum: AGENT_TYPES, nonEmpty: true, broadcast: false,
     sideEffect: (val, s) => { s.defaultAgent = val[0]; },
@@ -1766,6 +1768,7 @@ const BUILTIN_COMMANDS = [
   { id: 'mods', type: 'builtin', name: 'Mods', description: 'Open mods panel' },
   { id: 'next-tab', type: 'builtin', name: 'Next Tab', description: 'Switch to next tab' },
   { id: 'prev-tab', type: 'builtin', name: 'Previous Tab', description: 'Switch to previous tab' },
+  { id: 'overview-mode', type: 'builtin', name: 'Overview Mode', description: 'Show all terminals at once' },
 ];
 
 function getCustomCommands() {
