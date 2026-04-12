@@ -51,6 +51,7 @@ function applyLayout() {
 
   const btn = document.getElementById('overview-layout-btn');
   if (btn) {
+    btn.textContent = currentLayout === 'tall' ? '\u2590\u258C' : '\u229E';
     btn.title = currentLayout === 'tall' ? 'Switch to tiled layout' : 'Switch to tall layout';
   }
 }
