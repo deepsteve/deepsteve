@@ -1849,6 +1849,7 @@ function switchTo(id) {
     const current = sessions.get(activeId);
     if (current) {
       current.container.classList.remove('active');
+      if (current.waitingForInput) TabManager.updateBadge(activeId, true);
     }
     TabManager.setActive(null);
   }

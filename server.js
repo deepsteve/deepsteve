@@ -950,13 +950,11 @@ function fetchIssueFromGitHub(number, cwd) {
 }
 
 /**
- * Deliver a prompt to a shell, handling the race between async fetch and BEL readiness.
- * - If the shell is already waiting for input, submit immediately.
- * - If the agent uses initialPromptDelay (non-BEL), use that delay.
- * - If a BEL fired recently but waitingForInput was reset (e.g. by Ink re-render),
- *   submit immediately rather than storing a callback that may never fire.
- * - Otherwise, install a single-shot `onBelOnce` callback that the BEL handler
- *   will invoke on the next idle transition.
+ * Deliver a prompt to a shell, handling the race between async fetch and idle readiness.
+ * If the shell is already waiting for input, submit immediately.
+ * If the agent uses initialPromptDelay (non-BEL), use that delay.
+ * Otherwise, install a single-shot onIdleOnce callback that the idle timer
+ * will invoke on the next idle transition.
  */
 function deliverPromptWhenReady(id, prompt) {
   const e = shells.get(id);
@@ -971,24 +969,18 @@ function deliverPromptWhenReady(id, prompt) {
     log(`[deliverPrompt] id=${id} using delay ${config.initialPromptDelay}ms`);
     setTimeout(() => submitToShell(id, prompt), config.initialPromptDelay);
   } else if (e.lastBelTime && (Date.now() - e.lastBelTime) < 2000) {
-    log(`[deliverPrompt] id=${id} BEL already fired ${Date.now() - e.lastBelTime}ms ago, submitting immediately`);
+    // BEL fired recently — agent is likely at prompt even though idle timer
+    // hasn't fired yet. Submit immediately.
+    log(`[deliverPrompt] id=${id} BEL fired ${Date.now() - e.lastBelTime}ms ago, submitting immediately`);
     e.waitingForInput = false;
     setTimeout(() => submitToShell(id, prompt), 500);
   } else {
-    log(`[deliverPrompt] id=${id} installing onBelOnce for next idle transition`);
-    e.onBelOnce = () => {
-      log(`[deliverPrompt] id=${id} BEL fired, submitting queued prompt (len=${prompt.length})`);
+    log(`[deliverPrompt] id=${id} installing onIdleOnce for next idle transition`);
+    e.onIdleOnce = () => {
+      log(`[deliverPrompt] id=${id} idle detected, submitting queued prompt (len=${prompt.length})`);
       setTimeout(() => submitToShell(id, prompt), 500);
     };
   }
-}
-
-/**
- * Strip OSC sequences (e.g. window title updates like \x1b]0;Claude Code\x07)
- * so that the BEL terminator inside them isn't mistaken for a standalone BEL.
- */
-function stripOSC(data) {
-  return data.replace(/\x1b\][\s\S]*?(\x07|\x1b\\)/g, '');
 }
 
 /**
@@ -1004,28 +996,8 @@ function stripEscapeSequences(data) {
 }
 
 /**
- * Strip all escapes AND whitespace/BEL — used to check whether PTY output
- * contains any substantive visible content.
- */
-function stripAllEscapes(data) {
-  return stripEscapeSequences(data).replace(/[\s\x07]/g, '');
-}
-
-/**
- * Set a shell's waitingForInput state and broadcast to all WebSocket clients.
- * Early-returns if the state is unchanged, so callers can fire freely without
- * spamming redundant messages.
- */
-function broadcastWaitingState(entry, waiting) {
-  if (entry.waitingForInput === waiting) return;
-  entry.waitingForInput = waiting;
-  const msg = JSON.stringify({ type: 'state', waiting });
-  entry.clients.forEach((c) => c.send(msg));
-}
-
-/**
- * Wire up a shell's onData handler: broadcast output to WebSocket clients
- * and detect BEL transitions to drive the waitingForInput state.
+ * Wire up a shell's onData handler: broadcast output to WebSocket clients,
+ * detect idle state (2s silence), and auto-submit queued prompts.
  */
 function wireShellOutput(id) {
   const entry = shells.get(id);
@@ -1082,40 +1054,30 @@ function wireShellOutput(id) {
           }
         }
       }
-      const strippedOSC = stripOSC(data);
-      // Detect standalone BEL, or OSC window-title BEL as fallback
-      // (Claude Code ≥2.1.92 no longer emits standalone BELs — all BELs are OSC terminators)
-      const hasBel = strippedOSC.includes('\x07') || /\x1b\]0;/.test(data);
+      // Track lastBelTime for deliverPromptWhenReady fallback
+      if (data.includes('\x07')) e.lastBelTime = Date.now();
 
-      // Debug: log BEL detection for first 60s of session life
-      if (e.createdAt && (Date.now() - e.createdAt) < 60000) {
-        const rawBels = (data.match(/\x07/g) || []).length;
-        const oscBels = rawBels - (strippedOSC.match(/\x07/g) || []).length;
-        if (rawBels > 0) {
-          const hexSnippet = Buffer.from(data).toString('hex').slice(0, 200);
-          log(`[BEL-debug] id=${id} rawBels=${rawBels} oscBels=${oscBels} hasBel=${hasBel} waitingForInput=${e.waitingForInput} hasPendingCallback=${!!e.onBelOnce} dataLen=${data.length} hex=${hexSnippet}`);
-        }
+      // Silence-based idle detection: if no PTY output for 2s, mark as waiting.
+      // Any output resets the timer and clears waiting state.
+      if (e.waitingForInput) {
+        e.waitingForInput = false;
+        const stateMsg = JSON.stringify({ type: 'state', waiting: false });
+        e.clients.forEach((c) => c.send(stateMsg));
       }
+      clearTimeout(e.idleTimer);
+      e.idleTimer = setTimeout(() => {
+        if (!e.waitingForInput) {
+          e.waitingForInput = true;
+          const stateMsg = JSON.stringify({ type: 'state', waiting: true });
+          e.clients.forEach((c) => c.send(stateMsg));
 
-      if (hasBel) {
-        e.lastBelTime = Date.now();
-        const wasWaiting = e.waitingForInput;
-        broadcastWaitingState(e, true);
-        // On the transition into waiting, fire any queued one-shot callback
-        // (initialPrompt delivery). The callback owns its own contract — it
-        // may choose to immediately submit input and thus flip state back.
-        if (!wasWaiting && e.onBelOnce) {
-          const cb = e.onBelOnce;
-          e.onBelOnce = null;
-          try { cb(); } catch (err) { log(`[BEL] onBelOnce threw: ${err.message}`); }
+          if (e.onIdleOnce) {
+            const cb = e.onIdleOnce;
+            e.onIdleOnce = null;
+            try { cb(); } catch (err) { log(`[idle] onIdleOnce threw: ${err.message}`); }
+          }
         }
-      } else if (e.waitingForInput) {
-        // Non-BEL chunk with substantive visible content → Claude is producing
-        // output again, so clear the waiting state.
-        if (stripAllEscapes(data).length > 0) {
-          broadcastWaitingState(e, false);
-        }
-      }
+      }, 2000);
     }
     e.clients.forEach((c) => c.send(data));
   };
@@ -1143,7 +1105,8 @@ function killShell(entry, id) {
   const config = getAgentConfig(entry.agentType);
   log(`Killing shell ${id} (pid=${pid}, agent=${entry.agentType || 'claude'}, waitingForInput=${entry.waitingForInput})`);
 
-  // Clean up engine data listener
+  // Clean up idle timer and engine data listener
+  clearTimeout(entry.idleTimer);
   if (entry._engineDataHandler) {
     eng.removeListener('data', entry._engineDataHandler);
     entry._engineDataHandler = null;
@@ -2273,13 +2236,9 @@ app.post('/api/start-automation', (req, res) => {
 
   log(`[API] start-automation "${automationId}": id=${id}, agent=${agentType}, engine=${engineType}, cwd=${cwd}`);
   spawnSession(sessionEngine, id, agentType, spawnArgs, cwd, { cols: 120, rows: 40, env: sessionEnv(id, { name, windowId: windowId || null }) });
-  shells.set(id, { clients: new Set(), cwd, claudeSessionId, agentType, engine: sessionEngine, engineType, worktree: null, windowId: windowId || null, name, initialPrompt: prompt, waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now() });
+  shells.set(id, { clients: new Set(), cwd, claudeSessionId, agentType, engine: sessionEngine, engineType, worktree: null, windowId: windowId || null, name, waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now() });
   wireShellOutput(id);
-  // For non-BEL agents, deliver prompt after delay
-  if (agentConfig.initialPromptDelay > 0) {
-    shells.get(id).initialPrompt = null;
-    setTimeout(() => submitToShell(id, prompt), agentConfig.initialPromptDelay);
-  }
+  if (prompt) deliverPromptWhenReady(id, prompt);
   if (agentConfig.supportsSessionWatch) watchClaudeSessionDir(id);
   sessionEngine.onExit(id, () => {
     if (agentConfig.supportsSessionWatch) unwatchClaudeSessionDir(id);
@@ -2743,8 +2702,8 @@ app.post('/api/start-issue', (req, res) => {
   spawnSession(sessionEngine, id, agentType, spawnArgs, worktreeCwd, { cols: 120, rows: 40, env: sessionEnv(id, { name, worktree, windowId: windowId || null }) });
   shells.set(id, { clients: new Set(), cwd: worktreeCwd, claudeSessionId: claudeSessionId, agentType, engine: sessionEngine, engineType, worktree: worktree || null, windowId: windowId || null, name, planMode: !!settings.wandPlanMode, waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now() });
   wireShellOutput(id);
-  // Route any synchronous prompt through deliverPromptWhenReady so BEL agents
-  // get a one-shot onBelOnce callback and non-BEL agents get their configured delay.
+  // Route any synchronous prompt through deliverPromptWhenReady so agents
+  // get a one-shot onIdleOnce callback or their configured delay.
   if (prompt) deliverPromptWhenReady(id, prompt);
   if (agentConfig.supportsSessionWatch) watchClaudeSessionDir(id);
   sessionEngine.onExit(id, () => {
@@ -3324,9 +3283,14 @@ function handleWsConnection(ws, req) {
       }
       }
     } catch {}
-    // User sent input - update activity and clear waiting state
+    // User sent input - update activity and clear waiting/idle state
     entry.lastActivity = Date.now();
-    broadcastWaitingState(entry, false);
+    clearTimeout(entry.idleTimer);
+    if (entry.waitingForInput) {
+      entry.waitingForInput = false;
+      const stateMsg = JSON.stringify({ type: 'state', waiting: false });
+      entry.clients.forEach((c) => c.send(stateMsg));
+    }
     getEngine(id).write(id, str);
   });
 
