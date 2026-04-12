@@ -687,6 +687,50 @@ function _showSkillContentModal(name, content) {
 
 // --- Automations ---
 
+async function _showAutomationsModal() {
+  let automations = [];
+  try {
+    const res = await fetch('/api/automations').then(r => r.json());
+    automations = res.automations || [];
+  } catch {}
+
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+
+  const modal = document.createElement('div');
+  modal.className = 'modal';
+  modal.style.width = '520px';
+
+  const header = document.createElement('div');
+  header.className = 'modal-header';
+  header.innerHTML = '<span>Automations</span>';
+  modal.appendChild(header);
+
+  const section = document.createElement('div');
+  section.className = 'automations-section';
+  section.style.padding = '16px 20px';
+  _renderAutomationsSection(automations, section);
+  modal.appendChild(section);
+
+  const footer = document.createElement('div');
+  footer.className = 'modal-buttons';
+  footer.innerHTML = '<button class="btn-secondary" data-close>Close</button>';
+  modal.appendChild(footer);
+
+  overlay.appendChild(modal);
+  document.body.appendChild(overlay);
+
+  const close = () => {
+    overlay.remove();
+    window.__deepsteve?.refreshAutomationsCache?.();
+  };
+  footer.querySelector('[data-close]').addEventListener('click', close);
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+  document.addEventListener('keydown', function onKey(e) {
+    if (e.key === 'Escape') { close(); document.removeEventListener('keydown', onKey); }
+  });
+}
+
 function _renderAutomationsSection(automations, section, searchQuery = '') {
   section.innerHTML = '';
   const label = document.createElement('div');
@@ -2088,4 +2132,5 @@ export const ModManager = {
   focusPanel,
   getContextMenuItems,
   getNewTabItems,
+  showAutomationsModal: _showAutomationsModal,
 };

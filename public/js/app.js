@@ -2331,15 +2331,14 @@ function showNewTabMenu(e) {
   `;
 
   // Add automations section
-  if (cachedAutomations.length > 0) {
-    html += '<div class="context-menu-separator"></div>';
-    html += '<div class="context-menu-header">Automations</div>';
-    for (const auto of cachedAutomations) {
-      const icon = auto.icon || '\u26A1';
-      const label = `${icon} ${auto.name}`;
-      html += `<div class="context-menu-item" data-action="automation" data-automation-id="${auto.id.replace(/"/g, '&quot;')}">${label}</div>`;
-    }
+  html += '<div class="context-menu-separator"></div>';
+  html += '<div class="context-menu-header">Automations</div>';
+  for (const auto of cachedAutomations) {
+    const icon = auto.icon || '\u26A1';
+    const label = `${icon} ${auto.name}`;
+    html += `<div class="context-menu-item" data-action="automation" data-automation-id="${auto.id.replace(/"/g, '&quot;')}">${label}</div>`;
   }
+  html += '<div class="context-menu-item" data-action="manage-automations">Manage Automations\u2026</div>';
 
   // Add mod tab items
   const modTabItems = ModManager.getNewTabItems();
@@ -2559,6 +2558,8 @@ function showNewTabMenu(e) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ automationId: item.dataset.automationId, windowId: getWindowId() }),
       }).catch(err => console.error('Failed to start automation:', err));
+    } else if (action === 'manage-automations') {
+      ModManager.showAutomationsModal();
     } else if (action === 'mod-tab') {
       createModTab(item.dataset.modId);
     } else if (action === 'opencode') {
