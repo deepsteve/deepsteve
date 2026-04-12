@@ -1444,9 +1444,7 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
         if (msg.engineType) {
           const sess = sessions.get(msg.id);
           if (sess) sess.engineType = msg.engineType;
-          // Update tab tooltip to show engine type
-          const tabEl = document.getElementById('tab-' + msg.id);
-          if (tabEl) tabEl.title = msg.engineType === 'tmux' ? 'tmux session' : 'PTY session';
+          // engineType tracked on session object (tooltip shows tab name, set by TabManager)
         }
         if (msg.claudeSessionId) {
           const tabList = TabSessions.get();

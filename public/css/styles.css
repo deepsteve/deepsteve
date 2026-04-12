@@ -33,7 +33,7 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
 
 /* Tabs - horizontal layout (default) */
 #tabs { display: flex; gap: 2px; padding: 4px 8px; background: var(--ds-bg-secondary); align-items: center; flex-shrink: 0; }
-#tabs-list-wrapper { display: flex; min-width: 0; align-items: center; gap: 6px; }
+#tabs-list-wrapper { display: flex; min-width: 0; overflow: hidden; align-items: center; gap: 6px; }
 #tabs-list { display: flex; gap: 2px; overflow-x: auto; min-width: 0; scrollbar-width: none; }
 #tabs-list::-webkit-scrollbar { display: none; }
 
@@ -57,7 +57,7 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
 #sidebar-resizer { display: none; }
 
 /* Tab styling */
-.tab { padding: 6px 12px; background: var(--ds-bg-tertiary); border: 1px solid var(--ds-border); border-radius: 6px 6px 0 0; cursor: pointer; color: var(--ds-text-secondary); font-size: 13px; display: flex; align-items: center; gap: 6px; flex-shrink: 0; max-width: 200px; user-select: none; }
+.tab { padding: 6px 12px; background: var(--ds-bg-tertiary); border: 1px solid var(--ds-border); border-radius: 6px 6px 0 0; cursor: pointer; color: var(--ds-text-secondary); font-size: 13px; display: flex; align-items: center; gap: 6px; flex-shrink: 1; min-width: 80px; max-width: 250px; user-select: none; }
 .tab.active { background: var(--ds-bg-primary); color: var(--ds-text-bright); border-bottom-color: var(--ds-bg-primary); }
 .tab .close { opacity: 0.5; cursor: pointer; font-size: 11px; }
 .tab .close:hover { opacity: 1; color: var(--ds-accent-red); }
@@ -245,15 +245,16 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
 }
 
 /* Issue Button */
-#issue-btn { padding: 4px 8px; background: var(--ds-bg-tertiary); border: 1px solid var(--ds-border); color: var(--ds-text-secondary); border-radius: 4px; cursor: pointer; font-size: 15px; line-height: 1; }
+#issue-btn { padding: 4px 8px; background: var(--ds-bg-tertiary); border: 1px solid var(--ds-border); color: var(--ds-text-secondary); border-radius: 4px; cursor: pointer; font-size: 15px; line-height: 1; flex-shrink: 0; }
 #issue-btn:hover { background: var(--ds-border); color: var(--ds-text-primary); }
 
 /* Sessions Dropdown */
-.dropdown { position: relative; }
-.dropdown-btn { padding: 4px 10px; background: var(--ds-bg-tertiary); border: 1px solid var(--ds-border); color: var(--ds-text-secondary); border-radius: 4px; cursor: pointer; font-size: 13px; }
+.dropdown { position: relative; flex-shrink: 0; }
+.dropdown-btn { padding: 4px 10px; background: var(--ds-bg-tertiary); border: 1px solid var(--ds-border); color: var(--ds-text-secondary); border-radius: 4px; cursor: pointer; font-size: 13px; white-space: nowrap; }
 .dropdown-btn:hover { background: var(--ds-border); color: var(--ds-text-primary); }
 #engines-btn { transition: all 0.15s ease; white-space: nowrap; }
-#settings-btn { padding: 0 8px; font-size: 20px; background: transparent; border: none; }
+#mods-btn { flex-shrink: 0; }
+#settings-btn { padding: 0 8px; font-size: 20px; background: transparent; border: none; flex-shrink: 0; }
 #settings-btn:hover { background: transparent; }
 .dropdown-menu { display: none; position: absolute; right: 0; top: 100%; margin-top: 4px; background: var(--ds-bg-secondary); border: 1px solid var(--ds-border); border-radius: 6px; min-width: 220px; z-index: 200; box-shadow: 0 8px 24px var(--ds-shadow); max-height: 300px; overflow-y: auto; }
 .dropdown-menu.open { display: block; }
@@ -568,7 +569,7 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
 .mod-toggle-label input[type="checkbox"] { accent-color: var(--ds-accent-green); cursor: pointer; }
 
 /* Mod toolbar buttons (left side, registered by enabled mods) */
-.mod-toolbar-btn { padding: 4px 10px; background: var(--ds-btn-neutral); border: none; color: var(--ds-text-primary); border-radius: 4px; cursor: pointer; font-size: 13px; margin-left: 4px; user-select: none; }
+.mod-toolbar-btn { padding: 4px 10px; background: var(--ds-btn-neutral); border: none; color: var(--ds-text-primary); border-radius: 4px; cursor: pointer; font-size: 13px; margin-left: 4px; user-select: none; flex-shrink: 0; line-height: 1; box-sizing: border-box; }
 .mod-toolbar-btn:hover { background: var(--ds-btn-neutral-hover); }
 .mod-toolbar-btn:active { background: var(--ds-btn-neutral-active); }
 .mod-toolbar-btn.active { background: var(--ds-accent-blue); color: #fff; }

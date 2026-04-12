@@ -323,6 +323,7 @@ export const TabManager = {
     const tab = document.createElement('div');
     tab.className = 'tab';
     tab.id = 'tab-' + sessionId;
+    tab.title = name;
     tab.innerHTML = `
       <span class="badge"></span>
       <span class="tab-label">${name}</span>
@@ -449,6 +450,7 @@ export const TabManager = {
     const tab = document.getElementById('tab-' + sessionId);
     if (tab) {
       tab.querySelector('.tab-label').textContent = name;
+      tab.title = name;
     }
   },
 
