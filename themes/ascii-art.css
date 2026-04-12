@@ -41,6 +41,12 @@ body {
   font-family: inherit;
 }
 
+/* Reset xterm.js terminal font — xterm measures character cell widths using
+   its default fontFamily option (courier-new) but rendered spans inherit the
+   body font (SF Mono) through the cascade. This mismatch creates gaps. */
+.xterm {
+  font-family: 'courier-new', courier, monospace;
+}
 /* ── Main app container: double-line ASCII box ───────────────────────── */
 
 #app-container {
