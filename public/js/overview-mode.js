@@ -3,7 +3,7 @@
  *
  * Toggle with a configurable shortcut (default Cmd+O). Single-click a tile
  * to focus it; double-click (or use the × button) to exit overview and open
- * that terminal. Escape exits without changing the active tab.
+ * that terminal.
  * Supports two layouts: "tall" (vertical stacking) and "tiled" (2-row grid).
  */
 
@@ -212,7 +212,7 @@ function onKeyDown(e) {
   if (!enabled) return;
 
   if (isActive) {
-    if (e.key === 'Escape' || matchesShortcut(e)) {
+    if (matchesShortcut(e)) {
       e.preventDefault();
       e.stopPropagation();
       exit(null);
