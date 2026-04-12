@@ -3089,29 +3089,6 @@ async function init() {
     },
   });
 
-  // Initialize Overview Mode (Cmd+O by default)
-  initOverviewMode({
-    getOrderedTabIds: () => [...document.querySelectorAll('#tabs-list .tab')].map(t => t.id.replace('tab-', '')),
-    getActiveTabId: () => activeId,
-    getSession: (id) => sessions.get(id),
-    getTabName: (id) => {
-      const s = sessions.get(id);
-      return s?.name || getDefaultTabName(s?.cwd || '');
-    },
-    switchToTab: switchTo,
-    fitAllTerminals: () => {
-      for (const [, s] of sessions) {
-        if (s.term && s.fit && s.ws) fitTerminal(s.term, s.fit, s.ws);
-      }
-    },
-    focusTerminal: () => {
-      if (activeId) {
-        const s = sessions.get(activeId);
-        if (s?.term) s.term.focus();
-      }
-    },
-  });
-
   // Initialize Terminal Search (Ctrl+F / Cmd+F)
   initTerminalSearch({
     getActiveSession: () => {
