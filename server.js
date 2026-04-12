@@ -1050,6 +1050,7 @@ function wireShellOutput(id) {
           // left the plan-mode conversation, so don't re-apply --permission-mode
           // plan on the next restart.
           e.planMode = false;
+          saveState();
           // During shutdown, saveState() is blocked by stateFrozen and the process may be
           // killed before the final save block runs. Write the updated ID to disk immediately
           // so it survives even if the process is killed mid-shutdown.
