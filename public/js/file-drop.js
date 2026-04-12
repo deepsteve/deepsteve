@@ -8,6 +8,7 @@
 let getActiveSession = null;
 let dragDepth = 0;
 let dropZone = null;
+let dragTimer = null;
 
 function hasFiles(e) {
   return e.dataTransfer && e.dataTransfer.types.includes('Files');
@@ -81,6 +82,10 @@ export function initFileDrop({ getActiveSession: getter }) {
     if (!hasFiles(e)) return;
     e.preventDefault();
     e.dataTransfer.dropEffect = 'copy';
+    // Reset safety timer — dragover fires continuously while drag is active.
+    // If it stops (cancel, Escape, left window), the timeout hides the overlay.
+    clearTimeout(dragTimer);
+    dragTimer = setTimeout(() => { dragDepth = 0; hideDropZone(); }, 500);
   });
 
   terminals.addEventListener('dragleave', (e) => {
@@ -92,6 +97,7 @@ export function initFileDrop({ getActiveSession: getter }) {
   terminals.addEventListener('drop', async (e) => {
     if (!hasFiles(e)) return;
     e.preventDefault();
+    clearTimeout(dragTimer);
     dragDepth = 0;
     hideDropZone();
 
