@@ -818,7 +818,7 @@ function _showAutomationEditModal(existing, automations, section) {
 
   const modal = document.createElement('div');
   modal.className = 'modal';
-  modal.style.width = '480px';
+  modal.style.width = '560px';
 
   const headerEl = document.createElement('div');
   headerEl.className = 'modal-header';
@@ -839,12 +839,43 @@ function _showAutomationEditModal(existing, automations, section) {
 
   const iconLabel = document.createElement('label');
   iconLabel.textContent = 'Icon';
+  const iconRow = document.createElement('div');
+  iconRow.style.cssText = 'display: flex; align-items: center; gap: 6px;';
   const iconInput = document.createElement('input');
   iconInput.type = 'text';
   iconInput.placeholder = '⚡';
   iconInput.value = existing ? (existing.icon || '⚡') : '⚡';
   iconInput.style.width = '60px';
-  iconLabel.appendChild(iconInput);
+  const emojiPickerBtn = document.createElement('button');
+  emojiPickerBtn.type = 'button';
+  emojiPickerBtn.className = 'emoji-picker-btn';
+  emojiPickerBtn.textContent = '😀';
+  emojiPickerBtn.title = 'Pick an emoji';
+  emojiPickerBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    // Remove any existing picker
+    document.querySelector('.emoji-picker-popup')?.remove();
+    const EMOJI_GRID = ['⚡','🚀','⭐','🔥','💡','🎯','📧','📋','🔔','💬','🤖','🧹','📊','🔍','✅','❌','🎨','🛠️','📁','💾','🌐','📝','🔒','🔓','⏰','📅','🎉','💪','👁️','🧪','📦','🔄','💻','🗂️','📌','🏷️','🔗','⚙️','🎵','📸','🌟','💎','🧠','🦾','🏗️','📈','🔮','🎲'];
+    const popup = document.createElement('div');
+    popup.className = 'emoji-picker-popup';
+    for (const emoji of EMOJI_GRID) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.textContent = emoji;
+      btn.addEventListener('click', () => { iconInput.value = emoji; popup.remove(); });
+      popup.appendChild(btn);
+    }
+    // Position relative to the picker button
+    const rect = emojiPickerBtn.getBoundingClientRect();
+    popup.style.top = (rect.bottom + 4) + 'px';
+    popup.style.left = rect.left + 'px';
+    document.body.appendChild(popup);
+    const closeOnClick = (ev) => { if (!popup.contains(ev.target)) { popup.remove(); document.removeEventListener('click', closeOnClick); } };
+    setTimeout(() => document.addEventListener('click', closeOnClick), 0);
+  });
+  iconRow.appendChild(iconInput);
+  iconRow.appendChild(emojiPickerBtn);
+  iconLabel.appendChild(iconRow);
   form.appendChild(iconLabel);
 
   const descLabel = document.createElement('label');
@@ -855,6 +886,15 @@ function _showAutomationEditModal(existing, automations, section) {
   descInput.value = existing ? (existing.description || '') : '';
   descLabel.appendChild(descInput);
   form.appendChild(descLabel);
+
+  const repoLabel = document.createElement('label');
+  repoLabel.textContent = 'Default Repo';
+  const repoInput = document.createElement('input');
+  repoInput.type = 'text';
+  repoInput.placeholder = '/path/to/repo (optional)';
+  repoInput.value = existing ? (existing.repo || '') : '';
+  repoLabel.appendChild(repoInput);
+  form.appendChild(repoLabel);
 
   const bodyLabel = document.createElement('label');
   bodyLabel.textContent = 'Instructions';
@@ -869,7 +909,7 @@ function _showAutomationEditModal(existing, automations, section) {
   if (isEdit) {
     fetch(`/api/automations/${encodeURIComponent(existing.id)}`)
       .then(r => r.json())
-      .then(data => { bodyInput.value = data.body || ''; if (data.description) descInput.value = data.description; })
+      .then(data => { bodyInput.value = data.body || ''; if (data.description) descInput.value = data.description; if (data.repo) repoInput.value = data.repo; })
       .catch(() => {});
   }
 
@@ -895,13 +935,14 @@ function _showAutomationEditModal(existing, automations, section) {
     if (!id) { nameInput.focus(); return; }
     const icon = iconInput.value.trim() || '⚡';
     const description = descInput.value.trim();
+    const repo = repoInput.value.trim();
     const body = bodyInput.value;
 
     try {
       const res = await fetch('/api/automations', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id, name, icon, description, body })
+        body: JSON.stringify({ id, name, icon, description, repo, body })
       });
       if (!res.ok) {
         const data = await res.json();

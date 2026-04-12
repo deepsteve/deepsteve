@@ -37,7 +37,71 @@ let cachedAutomations = [];
 function refreshAutomationsCache() {
   fetch('/api/automations').then(r => r.json()).then(data => {
     cachedAutomations = data.automations || [];
+    refreshAutomationsDropdown();
   }).catch(() => {});
+}
+
+let _automationsDropdownInited = false;
+function refreshAutomationsDropdown() {
+  const dropdown = document.getElementById('automations-dropdown');
+  const menu = document.getElementById('automations-menu');
+  if (!dropdown || !menu) return;
+
+  if (!_automationsDropdownInited) {
+    _automationsDropdownInited = true;
+    document.addEventListener('click', () => {
+      document.getElementById('automations-menu')?.classList.remove('open');
+    });
+  }
+
+  if (cachedAutomations.length === 0) {
+    dropdown.style.display = 'none';
+    return;
+  }
+
+  dropdown.style.display = 'flex';
+
+  // Clone-replace button to clear old event listeners
+  const oldBtn = document.getElementById('automations-btn');
+  const btn = oldBtn.cloneNode(true);
+  oldBtn.replaceWith(btn);
+
+  // Build menu items
+  let html = '';
+  for (const auto of cachedAutomations) {
+    const icon = auto.icon || '\u26A1';
+    html += `<div class="dropdown-item clickable" data-automation-id="${auto.id}">${icon} ${auto.name}</div>`;
+  }
+  html += '<div style="height:1px;background:var(--ds-border);margin:4px 0;"></div>';
+  html += '<div class="dropdown-item clickable" data-action="manage">Manage Automations\u2026</div>';
+  menu.innerHTML = html;
+
+  // Handle item clicks
+  menu.querySelectorAll('.dropdown-item').forEach(item => {
+    item.addEventListener('click', async () => {
+      menu.classList.remove('open');
+      const automationId = item.dataset.automationId;
+      if (automationId) {
+        try {
+          await fetch('/api/start-automation', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ automationId, windowId: getWindowId() }),
+          });
+        } catch (err) {
+          console.error('Failed to start automation:', err);
+        }
+      } else if (item.dataset.action === 'manage') {
+        document.getElementById('mods-btn')?.click();
+      }
+    });
+  });
+
+  // Toggle dropdown
+  btn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    menu.classList.toggle('open');
+  });
 }
 
 // Dedup set for browser-eval/console requests (each tab processes once)
