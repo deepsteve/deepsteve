@@ -32,6 +32,14 @@ function truncateTitle(title) {
 const sessions = new Map();
 let activeId = null;
 
+// Cached automations for the new-tab dropdown (refreshed on load + modal close)
+let cachedAutomations = [];
+function refreshAutomationsCache() {
+  fetch('/api/automations').then(r => r.json()).then(data => {
+    cachedAutomations = data.automations || [];
+  }).catch(() => {});
+}
+
 // Dedup set for browser-eval/console requests (each tab processes once)
 const processedBrowserRequests = new Set();
 
@@ -283,6 +291,7 @@ function getSessionList() {
 
 // Expose session internals for mods that need direct terminal access (e.g. reparenting)
 window.__deepsteve = {
+  refreshAutomationsCache,
   fitSession(id) {
     const s = sessions.get(id);
     if (s) fitTerminal(s.term, s.fit, s.ws);
@@ -2293,6 +2302,17 @@ function showNewTabMenu(e) {
     <div class="context-menu-item context-menu-has-submenu" id="tmux-attach-trigger">Attach tmux session <span class="context-menu-arrow"></span></div>
   `;
 
+  // Add automations section
+  if (cachedAutomations.length > 0) {
+    html += '<div class="context-menu-separator"></div>';
+    html += '<div class="context-menu-header">Automations</div>';
+    for (const auto of cachedAutomations) {
+      const icon = auto.icon || '\u26A1';
+      const label = `${icon} ${auto.name}`;
+      html += `<div class="context-menu-item" data-action="automation" data-automation-id="${auto.id.replace(/"/g, '&quot;')}">${label}</div>`;
+    }
+  }
+
   // Add mod tab items
   const modTabItems = ModManager.getNewTabItems();
   if (modTabItems.length > 0) {
@@ -2505,6 +2525,12 @@ function showNewTabMenu(e) {
       await promptWorktreeSession();
     } else if (action === 'repo') {
       await promptRepoSession();
+    } else if (action === 'automation') {
+      fetch('/api/start-automation', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ automationId: item.dataset.automationId, windowId: getWindowId() }),
+      }).catch(err => console.error('Failed to start automation:', err));
     } else if (action === 'mod-tab') {
       createModTab(item.dataset.modId);
     } else if (action === 'opencode') {
@@ -2882,6 +2908,7 @@ async function init() {
     initEnginesDropdown();
   }).catch(() => {});
   fetch('/api/settings').then(r => r.json()).then(s => { window.__deepsteveDefaultAgent = s.defaultAgent || 'claude'; }).catch(() => {});
+  refreshAutomationsCache();
 
   // Initialize layout manager
   LayoutManager.init();
