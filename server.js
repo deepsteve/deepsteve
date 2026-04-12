@@ -2130,7 +2130,7 @@ app.get('/api/automations', (req, res) => {
         try {
           const content = fs.readFileSync(path.join(AUTOMATIONS_DIR, file), 'utf8');
           const meta = parseSkillFrontmatter(content);
-          automations.push({ id, name: meta.name || id, icon: meta.icon || '⚡', description: meta.description || '' });
+          automations.push({ id, name: meta.name || id, icon: meta.icon || '⚡', description: meta.description || '', repo: meta.repo || '' });
         } catch { /* skip unreadable */ }
       }
     }
@@ -2142,7 +2142,7 @@ app.get('/api/automations', (req, res) => {
 });
 
 app.post('/api/automations', (req, res) => {
-  const { id, name, icon, description, body } = req.body;
+  const { id, name, icon, description, repo, body } = req.body;
   if (!id || !AUTOMATION_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid automation ID' });
   const filePath = path.join(AUTOMATIONS_DIR, `${id}.md`);
   if (!path.resolve(filePath).startsWith(path.resolve(AUTOMATIONS_DIR) + path.sep)) {
@@ -2150,7 +2150,8 @@ app.post('/api/automations', (req, res) => {
   }
   try {
     fs.mkdirSync(AUTOMATIONS_DIR, { recursive: true });
-    const content = `---\nname: ${name || id}\nicon: ${icon || '⚡'}\ndescription: ${description || name || id}\n---\n\n${body || ''}`;
+    const repoLine = repo ? `\nrepo: ${repo}` : '';
+    const content = `---\nname: ${name || id}\nicon: ${icon || '⚡'}\ndescription: ${description || name || id}${repoLine}\n---\n\n${body || ''}`;
     fs.writeFileSync(filePath, content);
     log(`Automation saved: ${id}`);
     res.json({ ok: true });
@@ -2170,7 +2171,7 @@ app.get('/api/automations/:id', (req, res) => {
     const content = fs.readFileSync(filePath, 'utf8');
     const meta = parseSkillFrontmatter(content);
     const body = content.replace(/^---\n[\s\S]*?\n---\n*/, '');
-    res.json({ id, name: meta.name || id, icon: meta.icon || '⚡', description: meta.description || '', body });
+    res.json({ id, name: meta.name || id, icon: meta.icon || '⚡', description: meta.description || '', repo: meta.repo || '', body });
   } catch (e) {
     res.status(404).json({ error: 'Automation not found' });
   }
@@ -2227,6 +2228,11 @@ app.post('/api/start-automation', (req, res) => {
       if (callerEntry.agentType) agentType = callerEntry.agentType;
       if (callerEntry.cwd) cwd = callerEntry.cwd;
     }
+  }
+
+  // Automation's configured repo overrides caller CWD
+  if (meta.repo && fs.existsSync(meta.repo)) {
+    cwd = meta.repo;
   }
 
   const id = randomUUID().slice(0, 8);
