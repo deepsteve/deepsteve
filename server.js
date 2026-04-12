@@ -967,24 +967,34 @@ function deliverPromptWhenReady(id, prompt) {
   if (!e) return;
   const config = getAgentConfig(e.agentType);
   log(`[deliverPrompt] id=${id} waitingForInput=${e.waitingForInput} initialPromptDelay=${config.initialPromptDelay} promptLen=${prompt.length}`);
+
+  function submitAndNotify() {
+    submitToShell(id, prompt);
+    const entry = shells.get(id);
+    if (entry?.loading) {
+      entry.loading = false;
+      deliverToWindow({ type: 'prompt-submitted', id, windowId: entry.windowId || null }, entry.windowId || null);
+    }
+  }
+
   if (e.waitingForInput) {
     e.waitingForInput = false;
     log(`[deliverPrompt] id=${id} submitting immediately (was waiting)`);
-    setTimeout(() => submitToShell(id, prompt), 500);
+    setTimeout(submitAndNotify, 500);
   } else if (config.initialPromptDelay > 0) {
     log(`[deliverPrompt] id=${id} using delay ${config.initialPromptDelay}ms`);
-    setTimeout(() => submitToShell(id, prompt), config.initialPromptDelay);
+    setTimeout(submitAndNotify, config.initialPromptDelay);
   } else if (e.lastBelTime && (Date.now() - e.lastBelTime) < 2000) {
     // BEL fired recently — agent is likely at prompt even though idle timer
     // hasn't fired yet. Submit immediately.
     log(`[deliverPrompt] id=${id} BEL fired ${Date.now() - e.lastBelTime}ms ago, submitting immediately`);
     e.waitingForInput = false;
-    setTimeout(() => submitToShell(id, prompt), 500);
+    setTimeout(submitAndNotify, 500);
   } else {
     log(`[deliverPrompt] id=${id} installing onIdleOnce for next idle transition`);
     e.onIdleOnce = () => {
       log(`[deliverPrompt] id=${id} idle detected, submitting queued prompt (len=${prompt.length})`);
-      setTimeout(() => submitToShell(id, prompt), 500);
+      setTimeout(submitAndNotify, 500);
     };
   }
 }
@@ -2712,7 +2722,7 @@ app.post('/api/start-issue', (req, res) => {
   const engineType = sessionEngine === tmuxEngine ? 'tmux' : 'node-pty';
   log(`[API] start-issue #${number}: id=${id}, agent=${agentType}, engine=${engineType}, worktree=${worktree || 'none'}, cwd=${worktreeCwd}`);
   spawnSession(sessionEngine, id, agentType, spawnArgs, worktreeCwd, { cols: 120, rows: 40, env: sessionEnv(id, { name, worktree, windowId: windowId || null }) });
-  shells.set(id, { clients: new Set(), cwd: worktreeCwd, claudeSessionId: claudeSessionId, agentType, engine: sessionEngine, engineType, worktree: worktree || null, windowId: windowId || null, name, planMode: !!settings.wandPlanMode, waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now() });
+  shells.set(id, { clients: new Set(), cwd: worktreeCwd, claudeSessionId: claudeSessionId, agentType, engine: sessionEngine, engineType, worktree: worktree || null, windowId: windowId || null, name, planMode: !!settings.wandPlanMode, waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now(), loading: true });
   wireShellOutput(id);
   // Route any synchronous prompt through deliverPromptWhenReady so agents
   // get a one-shot onIdleOnce callback or their configured delay.
@@ -2737,7 +2747,7 @@ app.post('/api/start-issue', (req, res) => {
 
   // Notify browser to open the new session
   log(`[API] start-issue: windowId=${windowId}, sessionId=${id}, readyClients=${readyClients.length}, clientWindowIds=[${readyClients.map(c => c.windowId).join(',')}]`);
-  deliverToWindow({ type: 'open-session', id, cwd, name, windowId }, windowId, { openBrowser: true });
+  deliverToWindow({ type: 'open-session', id, cwd, name, windowId, loading: true }, windowId, { openBrowser: true });
   res.json({ id, name, url: `http://localhost:${PORT}` });
 });
 

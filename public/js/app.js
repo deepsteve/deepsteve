@@ -1516,6 +1516,10 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
           const sessionName = opts.name || msg.name;
           initTerminal(msg.id, ws, cwd, sessionName, { hasScrollback, pendingData, restoreActive: opts.restoreActive || opts.background });
           resolveReady(msg.id);
+          if (opts.loading) {
+            const sess = sessions.get(msg.id);
+            if (sess) showLoadingBanner(msg.id, sess.container);
+          }
           if (opts.initialPrompt) {
             ws.sendJSON({ type: 'initialPrompt', text: opts.initialPrompt });
           }
@@ -1674,6 +1678,29 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
   };
 
   return ready;
+}
+
+/**
+ * Show a loading banner at the top of a terminal container.
+ * Auto-dismisses after 60s as a safety net.
+ */
+function showLoadingBanner(sessionId, container) {
+  if (container.querySelector('.loading-banner')) return;
+  const banner = document.createElement('div');
+  banner.className = 'loading-banner';
+  banner.innerHTML = '<span class="loading-banner-spinner"></span> Reading GitHub issue and populating tab\u2026';
+  container.prepend(banner);
+  banner._loadingTimeout = setTimeout(() => dismissLoadingBanner(sessionId), 60000);
+}
+
+function dismissLoadingBanner(sessionId) {
+  const container = document.getElementById('term-' + sessionId);
+  if (!container) return;
+  const banner = container.querySelector('.loading-banner');
+  if (!banner) return;
+  if (banner._loadingTimeout) clearTimeout(banner._loadingTimeout);
+  banner.classList.add('loading-banner-dismiss');
+  setTimeout(() => banner.remove(), 300);
 }
 
 /**
@@ -3093,7 +3120,7 @@ async function init() {
       if (msg.type === 'open-session') {
         // Server created a session (e.g. via /api/start-issue) — open a tab for it
         if (msg.windowId && msg.windowId !== getWindowId()) return;
-        createSession(msg.cwd, msg.id, false, { name: msg.name, allowDuplicate: true, initialPrompt: msg.initialPrompt });
+        createSession(msg.cwd, msg.id, false, { name: msg.name, allowDuplicate: true, initialPrompt: msg.initialPrompt, loading: msg.loading });
       }
       if (msg.type === 'deliver-prompt') {
         // Async prompt delivery (e.g. GitHub issue fetch completed after tab opened)
@@ -3101,6 +3128,9 @@ async function init() {
         if (session?.ws) {
           session.ws.sendJSON({ type: 'initialPrompt', text: msg.initialPrompt });
         }
+      }
+      if (msg.type === 'prompt-submitted') {
+        dismissLoadingBanner(msg.id);
       }
       if (msg.type === 'open-display-tab') {
         if (msg.windowId && msg.windowId !== getWindowId()) return;
