@@ -1292,6 +1292,9 @@ settingsBtn?.addEventListener('click', async () => {
       overlay.remove();
     }
   };
+  const onEscSettings = (e) => { if (e.key === 'Escape') { e.preventDefault(); window.removeEventListener('deepsteve:version-status', versionStatusHandler); overlay.remove(); } };
+  document.addEventListener('keydown', onEscSettings);
+  new MutationObserver((_, obs) => { if (!overlay.parentNode) { document.removeEventListener('keydown', onEscSettings); obs.disconnect(); } }).observe(document.body, { childList: true });
 });
 
 function updateAppBadge() {

@@ -569,6 +569,9 @@ async function _showMarketplaceModal() {
   const close = () => overlay.remove();
   footer.querySelector('[data-close]').addEventListener('click', close);
   overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+  const onEscMods = (e) => { if (e.key === 'Escape') { e.preventDefault(); close(); } };
+  document.addEventListener('keydown', onEscMods);
+  new MutationObserver((_, obs) => { if (!overlay.parentNode) { document.removeEventListener('keydown', onEscMods); obs.disconnect(); } }).observe(document.body, { childList: true });
 
   // Render initial cards
   renderCards();
