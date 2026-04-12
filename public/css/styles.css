@@ -845,4 +845,6 @@ kbd {
 /* Overview layout switcher button */
 #overview-layout-btn { font-size: 14px; line-height: 1; padding: 4px 6px; background: transparent; border: 1px solid var(--ds-border); color: var(--ds-text-secondary); border-radius: 4px; cursor: pointer; }
 #overview-layout-btn:hover { background: var(--ds-bg-tertiary); color: var(--ds-text-primary); }
+#overview-exit-btn { font-size: 14px; line-height: 1; padding: 4px 6px; background: transparent; border: 1px solid var(--ds-border); color: var(--ds-text-secondary); border-radius: 4px; cursor: pointer; }
+#overview-exit-btn:hover { background: var(--ds-bg-tertiary); color: var(--ds-text-primary); }
 
