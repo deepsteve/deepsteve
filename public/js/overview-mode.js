@@ -134,6 +134,11 @@ function exit(targetId) {
   if (switchId) {
     callbacks.switchToTab?.(switchId);
   }
+
+  // Refit terminals to normal dimensions after overview CSS is removed
+  requestAnimationFrame(() => {
+    callbacks.fitAllTerminals?.();
+  });
 }
 
 function updateFocusClass(activeId) {
