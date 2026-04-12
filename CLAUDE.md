@@ -11,6 +11,8 @@ Web UI for running multiple Claude Code instances in browser tabs using real PTY
 ```
 Use `--refresh` when changes affect anything the browser loads (frontend JS/CSS/HTML, server endpoints, settings). Plain `./restart.sh` only restarts the server process — open browser tabs just silently reconnect their WebSocket, so they keep running old frontend code and won't see new server-side behavior until the page is reloaded.
 
+**`Restart cancelled.` has two causes.** `./restart.sh` first POSTs to `/api/request-restart`, which shows a confirm dialog in the browser. The script prints `Restart cancelled.` and exits if either (a) the user actively dismissed the dialog, or (b) nobody responded within the 60s timeout. Don't assume it was an explicit rejection — the user may have been away from the screen. Ask them to retry or confirm when they're ready rather than silently giving up.
+
 **Worktree sessions:** `./restart.sh` must be run from the main repo checkout — it copies files from the repo root to `~/.deepsteve/`. Worktree directories are not used for deployment, so edits made in a worktree won't take effect until they're merged to the main branch and `./restart.sh` is run from there.
 
 ### View logs:
