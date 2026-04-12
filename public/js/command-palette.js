@@ -171,6 +171,16 @@ async function executeCommand(cmd) {
     }
   } else if (cmd.type === 'switch-tab') {
     callbacks.switchToTab?.(cmd.tabId);
+  } else if (cmd.type === 'automation') {
+    try {
+      await fetch('/api/start-automation', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ automationId: cmd.automationId }),
+      });
+    } catch (err) {
+      console.error('[command-palette] Failed to start automation:', err);
+    }
   } else if (cmd.type === 'custom') {
     try {
       const activeTabId = callbacks.getActiveTabId?.();
@@ -189,12 +199,16 @@ async function open() {
   if (isOpen) return;
   isOpen = true;
 
-  // Fetch commands from server
+  // Fetch commands and automations from server in parallel
   let serverCommands = [];
+  let automations = [];
   try {
-    const resp = await fetch('/api/commands');
-    const data = await resp.json();
-    serverCommands = data.commands || [];
+    const [cmdResp, autoResp] = await Promise.all([
+      fetch('/api/commands').then(r => r.json()).catch(() => ({ commands: [] })),
+      fetch('/api/automations').then(r => r.json()).catch(() => ({ automations: [] })),
+    ]);
+    serverCommands = cmdResp.commands || [];
+    automations = autoResp.automations || [];
   } catch (err) {
     console.error('[command-palette] Failed to fetch commands:', err);
   }
@@ -221,6 +235,17 @@ async function open() {
       tabId: id,
       name: `Switch to: ${name}`,
       description: 'Switch to this tab',
+    });
+  }
+
+  // Automations
+  for (const auto of automations) {
+    items.push({
+      type: 'automation',
+      id: `automation-${auto.id}`,
+      automationId: auto.id,
+      name: `${auto.icon || '\u26A1'} ${auto.name}`,
+      description: auto.description || 'Run automation',
     });
   }
 

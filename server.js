@@ -2176,7 +2176,7 @@ app.get('/api/automations', (req, res) => {
 });
 
 app.post('/api/automations', (req, res) => {
-  const { id, name, icon, body } = req.body;
+  const { id, name, icon, description, body } = req.body;
   if (!id || !AUTOMATION_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid automation ID' });
   const filePath = path.join(AUTOMATIONS_DIR, `${id}.md`);
   if (!path.resolve(filePath).startsWith(path.resolve(AUTOMATIONS_DIR) + path.sep)) {
@@ -2184,7 +2184,7 @@ app.post('/api/automations', (req, res) => {
   }
   try {
     fs.mkdirSync(AUTOMATIONS_DIR, { recursive: true });
-    const content = `---\nname: ${name || id}\nicon: ${icon || '⚡'}\ndescription: ${(name || id)}\n---\n\n${body || ''}`;
+    const content = `---\nname: ${name || id}\nicon: ${icon || '⚡'}\ndescription: ${description || name || id}\n---\n\n${body || ''}`;
     fs.writeFileSync(filePath, content);
     log(`Automation saved: ${id}`);
     res.json({ ok: true });
@@ -2224,6 +2224,74 @@ app.delete('/api/automations/:id', (req, res) => {
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
+});
+
+// --- Run an automation (spawn session with automation body as prompt) ---
+app.post('/api/start-automation', (req, res) => {
+  const { automationId, windowId: rawWindowId, sessionId } = req.body;
+  if (!automationId || !AUTOMATION_ID_RE.test(automationId)) {
+    return res.status(400).json({ error: 'Invalid automation ID' });
+  }
+
+  // Read automation file
+  const filePath = path.join(AUTOMATIONS_DIR, `${automationId}.md`);
+  if (!path.resolve(filePath).startsWith(path.resolve(AUTOMATIONS_DIR) + path.sep)) {
+    return res.status(400).json({ error: 'Invalid automation ID' });
+  }
+  let content;
+  try {
+    content = fs.readFileSync(filePath, 'utf8');
+  } catch {
+    return res.status(404).json({ error: 'Automation not found' });
+  }
+  const meta = parseSkillFrontmatter(content);
+  const prompt = content.replace(/^---\n[\s\S]*?\n---\n*/, '');
+  if (!prompt.trim()) {
+    return res.status(400).json({ error: 'Automation has no instructions' });
+  }
+
+  // Resolve windowId and agentType from caller's session
+  let windowId = rawWindowId;
+  let agentType = 'claude';
+  let cwd = process.env.HOME;
+  if (sessionId) {
+    const callerEntry = shells.get(sessionId);
+    if (callerEntry) {
+      if (!windowId && callerEntry.windowId) windowId = callerEntry.windowId;
+      if (callerEntry.agentType) agentType = callerEntry.agentType;
+      if (callerEntry.cwd) cwd = callerEntry.cwd;
+    }
+  }
+
+  const id = randomUUID().slice(0, 8);
+  const claudeSessionId = randomUUID();
+  const agentConfig = getAgentConfig(agentType);
+  const icon = meta.icon || '⚡';
+  const autoName = meta.name || automationId;
+  const name = `${icon} ${autoName}`;
+
+  const spawnArgs = getSpawnArgs(agentType, { sessionId: claudeSessionId, shellId: id });
+  const sessionEngine = getDefaultEngine();
+  const engineType = sessionEngine === tmuxEngine ? 'tmux' : 'node-pty';
+
+  log(`[API] start-automation "${automationId}": id=${id}, agent=${agentType}, engine=${engineType}, cwd=${cwd}`);
+  spawnSession(sessionEngine, id, agentType, spawnArgs, cwd, { cols: 120, rows: 40, env: sessionEnv(id, { name, windowId: windowId || null }) });
+  shells.set(id, { clients: new Set(), cwd, claudeSessionId, agentType, engine: sessionEngine, engineType, worktree: null, windowId: windowId || null, name, initialPrompt: prompt, waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now() });
+  wireShellOutput(id);
+  // For non-BEL agents, deliver prompt after delay
+  if (agentConfig.initialPromptDelay > 0) {
+    shells.get(id).initialPrompt = null;
+    setTimeout(() => submitToShell(id, prompt), agentConfig.initialPromptDelay);
+  }
+  if (agentConfig.supportsSessionWatch) watchClaudeSessionDir(id);
+  sessionEngine.onExit(id, () => {
+    if (agentConfig.supportsSessionWatch) unwatchClaudeSessionDir(id);
+    if (!shuttingDown) { notifyClientsShellExited(id); shells.delete(id); saveState(); }
+  });
+  saveState();
+
+  deliverToWindow({ type: 'open-session', id, cwd, name, windowId }, windowId);
+  res.json({ id, name });
 });
 
 // Catalog: fetch remote mod catalog with caching

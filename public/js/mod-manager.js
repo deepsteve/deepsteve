@@ -750,6 +750,23 @@ function _showAutomationContextMenu(e, auto, automations, section) {
   const menu = document.createElement('div');
   menu.className = 'context-menu';
 
+  const runItem = document.createElement('div');
+  runItem.className = 'context-menu-item';
+  runItem.textContent = '\u25B6 Run';
+  runItem.onclick = async () => {
+    menu.remove();
+    try {
+      await fetch('/api/start-automation', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ automationId: auto.id }),
+      });
+    } catch (err) {
+      alert('Failed to start automation: ' + err.message);
+    }
+  };
+  menu.appendChild(runItem);
+
   const editItem = document.createElement('div');
   editItem.className = 'context-menu-item';
   editItem.textContent = 'Edit';
@@ -772,6 +789,7 @@ function _showAutomationContextMenu(e, auto, automations, section) {
       const idx = automations.findIndex(a => a.id === auto.id);
       if (idx >= 0) automations.splice(idx, 1);
       _renderAutomationsSection(automations, section);
+      window.__deepsteve?.refreshAutomationsCache?.();
     } catch (err) {
       alert('Failed to delete automation: ' + err.message);
     }
@@ -829,6 +847,15 @@ function _showAutomationEditModal(existing, automations, section) {
   iconLabel.appendChild(iconInput);
   form.appendChild(iconLabel);
 
+  const descLabel = document.createElement('label');
+  descLabel.textContent = 'Description';
+  const descInput = document.createElement('input');
+  descInput.type = 'text';
+  descInput.placeholder = 'Brief description of what this automation does';
+  descInput.value = existing ? (existing.description || '') : '';
+  descLabel.appendChild(descInput);
+  form.appendChild(descLabel);
+
   const bodyLabel = document.createElement('label');
   bodyLabel.textContent = 'Instructions';
   const bodyInput = document.createElement('textarea');
@@ -842,7 +869,7 @@ function _showAutomationEditModal(existing, automations, section) {
   if (isEdit) {
     fetch(`/api/automations/${encodeURIComponent(existing.id)}`)
       .then(r => r.json())
-      .then(data => { bodyInput.value = data.body || ''; })
+      .then(data => { bodyInput.value = data.body || ''; if (data.description) descInput.value = data.description; })
       .catch(() => {});
   }
 
@@ -867,13 +894,14 @@ function _showAutomationEditModal(existing, automations, section) {
     const id = existing ? existing.id : name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
     if (!id) { nameInput.focus(); return; }
     const icon = iconInput.value.trim() || '⚡';
+    const description = descInput.value.trim();
     const body = bodyInput.value;
 
     try {
       const res = await fetch('/api/automations', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id, name, icon, body })
+        body: JSON.stringify({ id, name, icon, description, body })
       });
       if (!res.ok) {
         const data = await res.json();
@@ -881,10 +909,11 @@ function _showAutomationEditModal(existing, automations, section) {
       }
       // Update local list
       const idx = automations.findIndex(a => a.id === id);
-      const entry = { id, name, icon, description: name };
+      const entry = { id, name, icon, description: description || name };
       if (idx >= 0) automations[idx] = entry;
       else automations.push(entry);
       _renderAutomationsSection(automations, section);
+      window.__deepsteve?.refreshAutomationsCache?.();
       overlay.remove();
     } catch (err) {
       alert('Failed to save: ' + err.message);
@@ -892,6 +921,24 @@ function _showAutomationEditModal(existing, automations, section) {
   });
 
   footer.appendChild(cancelBtn);
+  if (isEdit) {
+    const runBtn = document.createElement('button');
+    runBtn.className = 'btn-secondary';
+    runBtn.textContent = '\u25B6 Run';
+    runBtn.addEventListener('click', async () => {
+      overlay.remove();
+      try {
+        await fetch('/api/start-automation', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ automationId: existing.id }),
+        });
+      } catch (err) {
+        alert('Failed to start automation: ' + err.message);
+      }
+    });
+    footer.appendChild(runBtn);
+  }
   footer.appendChild(saveBtn);
   modal.appendChild(footer);
 
