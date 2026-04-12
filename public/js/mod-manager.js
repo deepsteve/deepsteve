@@ -1489,6 +1489,7 @@ function _hidePanel() {
   // Hide panel container + resizer
   panelContainer.style.display = 'none';
   panelResizer.style.display = 'none';
+  document.getElementById('terminals').style.display = '';
 
   localStorage.setItem(PANEL_VISIBLE_KEY, 'false');
   localStorage.removeItem(ACTIVE_PANEL_KEY);
