@@ -6,6 +6,16 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
+# Fail if package.json version matches the latest git tag (forgot to bump)
+PKG_VERSION=$(node -p "require('./package.json').version")
+LATEST_TAG=$(git tag --sort=-version:refname 2>/dev/null | head -1)
+if [ "v$PKG_VERSION" = "$LATEST_TAG" ]; then
+  echo "ERROR: package.json version ($PKG_VERSION) matches latest tag ($LATEST_TAG)." >&2
+  echo "Bump the version in package.json before running release.sh." >&2
+  exit 1
+fi
+echo "Version: $PKG_VERSION (latest tag: ${LATEST_TAG:-none})"
+
 NODE_VERSION="22.14.0"
 NODE_SHA256_ARM64="e9404633bc02a5162c5c573b1e2490f5fb44648345d64a958b17e325729a5e42"
 NODE_SHA256_X64="6698587713ab565a94a360e091df9f6d91c8fadda6d00f0cf6526e9b40bed250"
