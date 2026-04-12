@@ -1,8 +1,9 @@
 /**
  * Overview Mode — show all terminals at once in a grid layout.
  *
- * Toggle with a configurable shortcut (default Cmd+O). Click a tile to
- * focus it and exit overview. Escape exits without changing the active tab.
+ * Toggle with a configurable shortcut (default Cmd+O). Single-click a tile
+ * to focus it; double-click (or use the × button) to exit overview and open
+ * that terminal. Escape exits without changing the active tab.
  * Supports two layouts: "tall" (vertical stacking) and "tiled" (2-row grid).
  */
 
@@ -95,9 +96,11 @@ function enter() {
   const activeId = callbacks.getActiveTabId?.();
   if (activeId) updateFocusClass(activeId);
 
-  // Show layout switcher
+  // Show layout switcher and exit button
   const btn = document.getElementById('overview-layout-btn');
   if (btn) btn.style.display = '';
+  const exitBtn = document.getElementById('overview-exit-btn');
+  if (exitBtn) exitBtn.style.display = '';
 
   requestAnimationFrame(() => {
     callbacks.fitAllTerminals?.();
@@ -125,9 +128,11 @@ function exit(targetId) {
     container.querySelector('.overview-waiting')?.remove();
   }
 
-  // Hide layout switcher
+  // Hide layout switcher and exit button
   const btn = document.getElementById('overview-layout-btn');
   if (btn) btn.style.display = 'none';
+  const exitBtn = document.getElementById('overview-exit-btn');
+  if (exitBtn) exitBtn.style.display = 'none';
 
   // Switch to the target tab, or restore the previously active tab
   const switchId = targetId || callbacks.getActiveTabId?.();
@@ -218,7 +223,21 @@ function onKeyDown(e) {
   }
 }
 
-function onClick(e) {
+function onClickFocus(e) {
+  if (!isActive) return;
+
+  const container = e.target.closest('.terminal-container');
+  if (!container) return;
+
+  e.preventDefault();
+  e.stopPropagation();
+
+  const id = container.id.replace('term-', '');
+  callbacks.switchToTab?.(id);
+  updateFocusClass(id);
+}
+
+function onDblClick(e) {
   if (!isActive) return;
 
   const container = e.target.closest('.terminal-container');
@@ -231,13 +250,32 @@ function onClick(e) {
   exit(id);
 }
 
+function onTabDblClick(e) {
+  if (!isActive) return;
+
+  const tab = e.target.closest('.tab');
+  if (!tab) return;
+
+  e.preventDefault();
+  e.stopPropagation();
+
+  const id = tab.id.replace('tab-', '');
+  exit(id);
+}
+
 export function init(cbs) {
   callbacks = cbs;
   document.addEventListener('keydown', onKeyDown, true);
-  document.getElementById('terminals')?.addEventListener('click', onClick, true);
+  document.getElementById('terminals')?.addEventListener('click', onClickFocus, true);
+  document.getElementById('terminals')?.addEventListener('dblclick', onDblClick, true);
+  document.getElementById('tabs-list')?.addEventListener('dblclick', onTabDblClick);
   document.getElementById('overview-layout-btn')?.addEventListener('click', (e) => {
     e.stopPropagation();
     cycleLayout();
+  });
+  document.getElementById('overview-exit-btn')?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    exit(null);
   });
 }
 
