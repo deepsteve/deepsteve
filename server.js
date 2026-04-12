@@ -386,6 +386,12 @@ try {
   console.error('Failed to load settings:', e.message);
 }
 
+// Migrate renamed themes
+if (settings.activeTheme === 'windows-95') {
+  settings.activeTheme = 'win-95';
+  try { fs.writeFileSync(SETTINGS_FILE, JSON.stringify(settings, null, 2)); } catch {}
+}
+
 function saveSettings() {
   try {
     fs.mkdirSync(path.dirname(SETTINGS_FILE), { recursive: true });
