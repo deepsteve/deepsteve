@@ -822,6 +822,6 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
 /* Tiled layout — 2 rows, items flow left-to-right (row-major) */
 #terminals.overview-mode.overview-tiled { grid-template-rows: 1fr 1fr; grid-template-columns: repeat(var(--overview-cols, 2), 1fr); overflow-y: hidden; }
 /* Overview layout switcher button */
-#overview-layout-btn { font-size: 14px; line-height: 1; padding: 4px 6px; background: transparent; border: 1px solid var(--ds-border); color: var(--ds-text-secondary); border-radius: 4px; cursor: pointer; }
+#overview-layout-btn { display: inline-flex; align-items: center; justify-content: center; font-size: 14px; line-height: 1; padding: 4px 6px; background: transparent; border: 1px solid var(--ds-border); color: var(--ds-text-secondary); border-radius: 4px; cursor: pointer; }
 #overview-layout-btn:hover { background: var(--ds-bg-tertiary); color: var(--ds-text-primary); }
 
