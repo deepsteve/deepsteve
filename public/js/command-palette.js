@@ -168,6 +168,9 @@ async function executeCommand(cmd) {
         callbacks.switchToTab?.(ids[prev]);
         break;
       }
+      case 'overview-mode':
+        callbacks.toggleOverviewMode?.();
+        break;
     }
   } else if (cmd.type === 'switch-tab') {
     callbacks.switchToTab?.(cmd.tabId);

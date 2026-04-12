@@ -16,6 +16,7 @@ import { initFileDrop } from './file-drop.js';
 import { init as initCmdHoldMode, setEnabled as setCmdHoldModeEnabled, setHoldMs as setCmdHoldModeHoldMs } from './cmd-tab-switch.js';
 import { init as initCommandPalette, setEnabled as setCommandPaletteEnabled, setShortcut as setCommandPaletteShortcut } from './command-palette.js';
 import { init as initHashCommands, beforeSend as hashCommandsBeforeSend, setWaitingForInput as setHashCommandsWaiting, setEnabled as setHashCommandsEnabled } from './hash-commands.js';
+import { init as initOverviewMode, setEnabled as setOverviewModeEnabled, setShortcut as setOverviewModeShortcut, toggle as toggleOverviewMode, isOverviewActive } from './overview-mode.js';
 import { init as initTerminalSearch, attachSearchAddon, closeIfOpen as closeTerminalSearch } from './terminal-search.js';
 import { nsKey } from './storage-namespace.js';
 
@@ -182,6 +183,12 @@ function applySettings(settings) {
   }
   if (settings.hashCommandsEnabled !== undefined) {
     setHashCommandsEnabled(settings.hashCommandsEnabled);
+  }
+  if (settings.overviewModeEnabled !== undefined) {
+    setOverviewModeEnabled(settings.overviewModeEnabled);
+  }
+  if (settings.overviewModeShortcut !== undefined) {
+    setOverviewModeShortcut(settings.overviewModeShortcut);
   }
   if (settings.symlinkWorktreeSettings !== undefined) {
     const el = document.querySelector('#symlink-worktree-settings');
@@ -3002,6 +3009,30 @@ async function init() {
     closeActiveTab: () => { if (activeId) confirmCloseSession(activeId).then(ok => { if (ok) killSession(activeId); }); },
     openSettings: () => { document.getElementById('settings-btn')?.click(); },
     openMods: () => { document.getElementById('mods-btn')?.click(); },
+    toggleOverviewMode: () => toggleOverviewMode(),
+    focusTerminal: () => {
+      if (activeId) {
+        const s = sessions.get(activeId);
+        if (s?.term) s.term.focus();
+      }
+    },
+  });
+
+  // Initialize Overview Mode (Cmd+O by default)
+  initOverviewMode({
+    getOrderedTabIds: () => [...document.querySelectorAll('#tabs-list .tab')].map(t => t.id.replace('tab-', '')),
+    getActiveTabId: () => activeId,
+    getSession: (id) => sessions.get(id),
+    getTabName: (id) => {
+      const s = sessions.get(id);
+      return s?.name || getDefaultTabName(s?.cwd || '');
+    },
+    switchToTab: switchTo,
+    fitAllTerminals: () => {
+      for (const [, s] of sessions) {
+        if (s.term && s.fit && s.ws) fitTerminal(s.term, s.fit, s.ws);
+      }
+    },
     focusTerminal: () => {
       if (activeId) {
         const s = sessions.get(activeId);
