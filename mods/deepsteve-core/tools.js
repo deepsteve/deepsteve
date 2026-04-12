@@ -137,6 +137,7 @@ function init(context) {
           name, initialPrompt: null,
           planMode: !!settings.wandPlanMode,
           waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now(),
+          loading: true,
         });
         wireShellOutput(id);
 
@@ -160,7 +161,7 @@ function init(context) {
           });
         }
 
-        deliverToWindow({ type: 'open-session', id, cwd: spawnCwd, name, windowId }, windowId);
+        deliverToWindow({ type: 'open-session', id, cwd: spawnCwd, name, windowId, loading: true }, windowId);
 
         return { content: [{ type: 'text', text: JSON.stringify({ id, name, cwd: spawnCwd, worktree: worktree || null }) }] };
       },
