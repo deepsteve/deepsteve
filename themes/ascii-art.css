@@ -1,0 +1,448 @@
+/* ASCII Art Theme
+ * Extends the retro-monitor color palette with box-drawing character borders.
+ * All rounded corners are removed; UI chrome uses ┌─┐│└─┘ and ╔═╗║╚═╝. */
+
+/* ── Color palette (inherited from retro-monitor) ────────────────────── */
+:root {
+  --ds-bg-primary: #0a0a0a;
+  --ds-bg-secondary: #1a1a1a;
+  --ds-bg-tertiary: #2a2a2a;
+  --ds-border: #555;
+  --ds-text-primary: #d0d0d0;
+  --ds-text-secondary: #999;
+  --ds-text-bright: #fff;
+  --ds-accent-green: #33a333;
+  --ds-accent-green-hover: #44b844;
+  --ds-accent-green-active: #228822;
+  --ds-accent-green-soft: #55cc55;
+  --ds-accent-blue: #66aaff;
+  --ds-accent-red: #ff5555;
+  --ds-accent-orange: #dd8833;
+  --ds-btn-neutral: #333;
+  --ds-btn-neutral-hover: #444;
+  --ds-btn-neutral-active: #222;
+  --ds-selected-bg: #1a3a1a;
+  --ds-overlay: rgba(0, 0, 0, 0.85);
+  --ds-shadow: rgba(0, 0, 0, 0.6);
+}
+
+/* ── Global: monospace font, no rounded corners ──────────────────────── */
+
+body {
+  font-family: 'SF Mono', 'Menlo', 'Monaco', 'Consolas', monospace !important;
+  background: #111 !important;
+  display: flex !important;
+  flex-direction: column !important;
+  padding: 8px;
+}
+
+*, *::before, *::after {
+  border-radius: 0 !important;
+  font-family: inherit;
+}
+
+/* ── Main app container: double-line ASCII box ───────────────────────── */
+
+#app-container {
+  flex: 1 !important;
+  min-height: 0 !important;
+  height: auto !important;
+  position: relative;
+  border: 2px solid #888 !important;
+  box-shadow: none !important;
+  overflow: clip;
+}
+
+/* Corner characters on app container */
+#app-container::before {
+  content: '╔' attr(data-ignore) '╗';
+  position: absolute;
+  top: -2px;
+  left: 0;
+  right: 0;
+  display: flex;
+  justify-content: space-between;
+  color: #888;
+  font-size: 14px;
+  line-height: 1;
+  pointer-events: none;
+  z-index: 1;
+}
+
+#app-container::after {
+  content: '╚' attr(data-ignore) '╝';
+  position: absolute;
+  bottom: -2px;
+  left: 0;
+  right: 0;
+  display: flex;
+  justify-content: space-between;
+  color: #888;
+  font-size: 14px;
+  line-height: 1;
+  pointer-events: none;
+  z-index: 1;
+}
+
+/* ── Tab bar ─────────────────────────────────────────────────────────── */
+
+#tabs {
+  padding-top: 6px !important;
+  padding-left: 8px !important;
+  padding-right: 8px !important;
+  border-bottom: 1px solid #555 !important;
+}
+
+/* ── Individual tabs: single-line box drawing ────────────────────────── */
+
+.tab {
+  border: 1px solid #666 !important;
+  background: var(--ds-bg-tertiary) !important;
+  position: relative;
+  padding: 5px 10px !important;
+  font-size: 13px;
+}
+
+.tab::before {
+  content: '┌';
+  position: absolute;
+  top: -2px;
+  left: -2px;
+  color: #777;
+  font-size: 11px;
+  line-height: 1;
+  pointer-events: none;
+}
+
+.tab::after {
+  content: '┐';
+  position: absolute;
+  top: -2px;
+  right: -2px;
+  color: #777;
+  font-size: 11px;
+  line-height: 1;
+  pointer-events: none;
+}
+
+/* Active tab: double-line box drawing */
+.tab.active {
+  border: 1px solid #aaa !important;
+  border-bottom-color: var(--ds-bg-primary) !important;
+  background: var(--ds-bg-primary) !important;
+}
+
+.tab.active::before {
+  content: '╔';
+  color: #bbb;
+}
+
+.tab.active::after {
+  content: '╗';
+  color: #bbb;
+}
+
+/* Tab close button: bracket style */
+.tab .close {
+  font-size: 11px;
+}
+
+/* ── Tab scroll arrows ───────────────────────────────────────────────── */
+
+.tabs-arrow {
+  border: 1px solid #555 !important;
+  background: var(--ds-bg-tertiary) !important;
+  width: 20px !important;
+  height: 20px !important;
+}
+
+#tabs-arrow-start::after { content: '\25C4' !important; font-size: 9px; }
+#tabs-arrow-end::after { content: '\25BA' !important; font-size: 9px; }
+
+/* ── Buttons: bracket styling ────────────────────────────────────────── */
+
+#new-btn,
+#new-btn-dropdown,
+.dropdown-btn,
+.layout-btn,
+#issue-btn,
+.empty-state-btn,
+.config-btn,
+.mod-toolbar-btn {
+  border: 1px solid #666 !important;
+  text-transform: uppercase;
+  font-size: 12px !important;
+  letter-spacing: 0.5px;
+}
+
+/* Primary action buttons */
+#new-btn {
+  position: relative;
+}
+
+/* ── Modals: single-line ASCII box ───────────────────────────────────── */
+
+.modal {
+  border: 1px solid #777 !important;
+  box-shadow: 4px 4px 0 rgba(0,0,0,0.5) !important;
+  position: relative;
+}
+
+.modal::before {
+  content: '┌' attr(data-ignore) '┐';
+  position: absolute;
+  top: -1px;
+  left: 0;
+  right: 0;
+  display: flex;
+  justify-content: space-between;
+  color: #777;
+  font-size: 12px;
+  line-height: 1;
+  pointer-events: none;
+  z-index: 1;
+}
+
+.modal::after {
+  content: '└' attr(data-ignore) '┘';
+  position: absolute;
+  bottom: -1px;
+  left: 0;
+  right: 0;
+  display: flex;
+  justify-content: space-between;
+  color: #777;
+  font-size: 12px;
+  line-height: 1;
+  pointer-events: none;
+  z-index: 1;
+}
+
+/* Modal buttons */
+.modal button {
+  border: 1px solid #555 !important;
+  text-transform: uppercase;
+  font-size: 12px;
+  letter-spacing: 0.5px;
+}
+
+.modal .btn-primary {
+  border-color: var(--ds-accent-green) !important;
+}
+
+/* ── Settings panel ──────────────────────────────────────────────────── */
+
+.settings-section {
+  border: 1px solid #555 !important;
+}
+
+.settings-tabs {
+  border-bottom: 1px solid #555 !important;
+}
+
+.settings-tab {
+  text-transform: uppercase;
+  font-size: 12px;
+  letter-spacing: 0.5px;
+}
+
+.settings-tab.active {
+  border-bottom-color: var(--ds-accent-green) !important;
+}
+
+.settings-modal .modal-buttons {
+  border-top: 1px solid #555 !important;
+}
+
+/* ── Dropdown menus ──────────────────────────────────────────────────── */
+
+.dropdown-menu,
+.context-menu {
+  border: 1px solid #666 !important;
+  box-shadow: 3px 3px 0 rgba(0,0,0,0.5) !important;
+}
+
+.dropdown-item,
+.context-menu-item {
+  font-size: 12px;
+}
+
+/* Separator: dashed line */
+.context-menu-separator {
+  background: none !important;
+  border-top: 1px dashed #555 !important;
+  height: 0 !important;
+  margin: 4px 8px !important;
+}
+
+/* ── Command palette ─────────────────────────────────────────────────── */
+
+.command-palette {
+  border: 1px solid #777 !important;
+  box-shadow: 4px 4px 0 rgba(0,0,0,0.5) !important;
+}
+
+.command-palette-input {
+  border-bottom: 1px solid #555 !important;
+}
+
+/* ── Hash command popup ──────────────────────────────────────────────── */
+
+.hash-command-popup {
+  border: 1px solid #666 !important;
+  box-shadow: 3px 3px 0 rgba(0,0,0,0.5) !important;
+}
+
+.hash-command-input {
+  border-bottom: 1px solid #555 !important;
+}
+
+/* ── Panel (right side) ──────────────────────────────────────────────── */
+
+#panel-container {
+  border-left: 1px solid #555 !important;
+}
+
+#panel-tabs {
+  border-left: 1px solid #555 !important;
+}
+
+.panel-tab.active {
+  border-left-color: var(--ds-accent-green) !important;
+}
+
+/* ── Mod cards ───────────────────────────────────────────────────────── */
+
+.mod-card {
+  border: 1px solid #555 !important;
+}
+
+.mod-card-footer {
+  border-top: 1px dashed #555 !important;
+}
+
+/* ── Issue / directory / window lists ────────────────────────────────── */
+
+.issue-list,
+.dir-tree,
+.window-list {
+  border: 1px solid #555 !important;
+}
+
+.issue-item,
+.dir-item {
+  border-bottom: 1px dashed #444 !important;
+}
+
+.issue-item.selected {
+  border-color: var(--ds-accent-green) !important;
+}
+
+/* ── Terminal search bar ─────────────────────────────────────────────── */
+
+.terminal-search-bar {
+  border: 1px solid #666 !important;
+  box-shadow: 3px 3px 0 rgba(0,0,0,0.5) !important;
+}
+
+.terminal-search-input {
+  border: 1px solid #555 !important;
+}
+
+/* ── Scroll-to-bottom button ─────────────────────────────────────────── */
+
+.scroll-to-bottom {
+  border: 1px solid #555 !important;
+  box-shadow: 2px 2px 0 rgba(0,0,0,0.4) !important;
+}
+
+/* ── Toast notifications ─────────────────────────────────────────────── */
+
+.auto-apply-toast {
+  border: 1px solid var(--ds-accent-blue) !important;
+  box-shadow: 3px 3px 0 rgba(0,0,0,0.4) !important;
+}
+
+/* ── Reconnecting overlay dialog ─────────────────────────────────────── */
+
+.terminal-container.reconnecting::after {
+  border: 1px solid var(--ds-accent-orange) !important;
+  box-shadow: none !important;
+}
+
+/* ── File drop zone ──────────────────────────────────────────────────── */
+
+.file-drop-zone {
+  border: 2px dashed #555 !important;
+}
+
+/* ── Toggle switches ─────────────────────────────────────────────────── */
+
+.mod-card-toggle {
+  border: 1px solid #555 !important;
+}
+
+/* ── Vertical layout overrides ───────────────────────────────────────── */
+
+#app-container.vertical-layout #tabs {
+  box-shadow: 1px 0 0 0 #555 !important;
+  border-bottom: none !important;
+}
+
+#app-container.vertical-layout .tab.active::before {
+  content: '║';
+  top: 50%;
+  left: -3px;
+  transform: translateY(-50%);
+}
+
+#app-container.vertical-layout .tab.active::after {
+  content: '║';
+  top: 50%;
+  right: -3px;
+  transform: translateY(-50%);
+}
+
+/* ── Inputs ──────────────────────────────────────────────────────────── */
+
+input, select, textarea {
+  border: 1px solid #555 !important;
+  background: var(--ds-bg-primary) !important;
+  font-family: inherit !important;
+}
+
+input:focus, select:focus, textarea:focus {
+  border-color: var(--ds-accent-blue) !important;
+  outline: none !important;
+}
+
+/* ── Scrollbar styling ───────────────────────────────────────────────── */
+
+::-webkit-scrollbar { width: 8px; }
+::-webkit-scrollbar-track { background: var(--ds-bg-primary); }
+::-webkit-scrollbar-thumb { background: #444; border: 1px solid #555; }
+::-webkit-scrollbar-thumb:hover { background: #555; }
+
+/* ── Tab-switch mode outline ─────────────────────────────────────────── */
+
+#tabs.tab-switch-mode {
+  outline: 1px solid var(--ds-accent-blue) !important;
+  outline-offset: -1px !important;
+}
+
+/* ── Badge (notification dot) ────────────────────────────────────────── */
+
+.tab .badge {
+  width: 6px !important;
+  height: 6px !important;
+}
+
+/* ── Overview mode tiles ─────────────────────────────────────────────── */
+
+.overview-tile {
+  border: 1px solid #555 !important;
+}
+
+.overview-tile.active {
+  border-color: var(--ds-accent-green) !important;
+}
