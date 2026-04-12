@@ -5,7 +5,7 @@
 import { nsKey } from './storage-namespace.js';
 
 const STORAGE_KEY = nsKey('deepsteve-layout');
-const MIN_SIDEBAR_WIDTH = 60;
+const MIN_SIDEBAR_WIDTH = 140;
 const DEFAULT_SIDEBAR_WIDTH = 200;
 
 let currentLayout = 'horizontal';
@@ -133,7 +133,7 @@ export function initLayoutManager() {
   // Load saved preferences
   const saved = getSavedLayout();
   currentLayout = saved.layout;
-  sidebarWidth = saved.sidebarWidth;
+  sidebarWidth = Math.max(saved.sidebarWidth, MIN_SIDEBAR_WIDTH);
 
   // Setup toggle button
   const toggleBtn = document.getElementById('layout-toggle');

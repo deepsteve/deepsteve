@@ -82,6 +82,7 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
   gap: 2px;
   height: 100vh;
   flex-shrink: 0;
+  min-width: 140px;
   border-right: none;
   box-shadow: 1px 0 0 0 var(--ds-border);
 }
@@ -582,7 +583,7 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
 #app-container.vertical-layout .mod-toolbar-btn.active { background: var(--ds-accent-blue); }
 #app-container.vertical-layout .mod-back-btn { width: 100%; margin-bottom: 6px; border: none; background: transparent; border-radius: 8px; transition: background 0.15s ease; }
 #app-container.vertical-layout .mod-back-btn:hover { background: var(--ds-bg-tertiary); }
-#app-container.vertical-layout #mods-btn { width: 100%; margin-top: 6px; border: none; background: transparent; border-radius: 8px; transition: background 0.15s ease; }
+#app-container.vertical-layout #mods-btn { width: 100%; margin-top: 6px; border: none; background: transparent; border-radius: 8px; transition: background 0.15s ease; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #app-container.vertical-layout #mods-btn:hover { background: var(--ds-bg-tertiary); }
 
 /* Mod settings button (gear icon in mods dropdown) */
