@@ -556,6 +556,7 @@ settingsBtn?.addEventListener('click', async () => {
           <button class="settings-tab" data-tab="terminal">Terminal</button>
           <button class="settings-tab" data-tab="github">GitHub</button>
           <button class="settings-tab" data-tab="workspaces">Workspaces</button>
+          <button class="settings-tab" data-tab="tips">Tips</button>
         </div>
       </div>
       <div class="settings-body">
@@ -755,6 +756,34 @@ settingsBtn?.addEventListener('click', async () => {
         </div>
       </div>
       </div>
+      <div class="settings-tab-content" data-tab="tips">
+      <div class="settings-section">
+        <h3>Tab Switching Hold Delay</h3>
+        <p style="font-size: 13px; color: var(--ds-text-secondary);">
+          Lower the <kbd>\u2318</kbd> hold duration (General \u2192 Tab Switching) to press it faster
+          for browser tab navigation. Wait for the full duration to navigate between DeepSteve tabs.
+        </p>
+      </div>
+      <div class="settings-section">
+        <h3>Switch Tabs</h3>
+        <p style="font-size: 13px; color: var(--ds-text-secondary);">
+          <kbd>\u2318</kbd><kbd>&lt;</kbd> / <kbd>\u2318</kbd><kbd>&gt;</kbd> \u2014 switch to the previous or next tab.
+        </p>
+      </div>
+      <div class="settings-section">
+        <h3>Overview Mode</h3>
+        <p style="font-size: 13px; color: var(--ds-text-secondary);">
+          <kbd>\u2318</kbd><kbd>O</kbd> \u2014 see all of your tabs at once.
+        </p>
+      </div>
+      <div class="settings-section">
+        <h3>Custom Themes</h3>
+        <p style="font-size: 13px; color: var(--ds-text-secondary);">
+          Create your own <code>.css</code> theme file and place it in <code>~/.deepsteve/themes/</code>.
+          It will appear in the Theme dropdown under General settings.
+        </p>
+      </div>
+      </div>
       </div>
       <div class="modal-buttons">
         <button class="btn-secondary" id="settings-cancel">Cancel</button>
@@ -771,6 +800,7 @@ settingsBtn?.addEventListener('click', async () => {
       overlay.querySelectorAll('.settings-tab-content').forEach(c => c.classList.remove('active'));
       tab.classList.add('active');
       overlay.querySelector(`.settings-tab-content[data-tab="${tab.dataset.tab}"]`).classList.add('active');
+      overlay.querySelector('.modal-buttons').style.display = tab.dataset.tab === 'tips' ? 'none' : 'flex';
     });
   });
 
