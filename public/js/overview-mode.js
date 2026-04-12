@@ -87,6 +87,10 @@ function enter() {
 
   applyLayout();
 
+  // Mark the active tab as focused
+  const activeId = callbacks.getActiveTabId?.();
+  if (activeId) updateFocusClass(activeId);
+
   // Show layout switcher
   const btn = document.getElementById('overview-layout-btn');
   if (btn) btn.style.display = '';
@@ -112,7 +116,7 @@ function exit(targetId) {
   // Clean up all overview state from containers
   const containers = terminals.querySelectorAll('.terminal-container');
   for (const container of containers) {
-    container.classList.remove('overview-visible');
+    container.classList.remove('overview-visible', 'overview-focused');
     container.querySelector('.overview-label')?.remove();
     container.querySelector('.overview-waiting')?.remove();
   }
@@ -125,6 +129,17 @@ function exit(targetId) {
   const switchId = targetId || callbacks.getActiveTabId?.();
   if (switchId) {
     callbacks.switchToTab?.(switchId);
+  }
+}
+
+function updateFocusClass(activeId) {
+  const terminals = document.getElementById('terminals');
+  terminals.querySelectorAll('.terminal-container.overview-focused').forEach(el => {
+    el.classList.remove('overview-focused');
+  });
+  if (activeId) {
+    const container = document.getElementById(`term-${activeId}`);
+    if (container) container.classList.add('overview-focused');
   }
 }
 
@@ -258,6 +273,10 @@ export function toggle() {
   } else {
     enter();
   }
+}
+
+export function updateFocus(activeId) {
+  if (isActive) updateFocusClass(activeId);
 }
 
 export function isOverviewActive() {

@@ -16,7 +16,7 @@ import { initFileDrop } from './file-drop.js';
 import { init as initCmdHoldMode, setEnabled as setCmdHoldModeEnabled, setHoldMs as setCmdHoldModeHoldMs } from './cmd-tab-switch.js';
 import { init as initCommandPalette, setEnabled as setCommandPaletteEnabled, setShortcut as setCommandPaletteShortcut } from './command-palette.js';
 import { init as initHashCommands, beforeSend as hashCommandsBeforeSend, setWaitingForInput as setHashCommandsWaiting, setEnabled as setHashCommandsEnabled } from './hash-commands.js';
-import { init as initOverviewMode, setEnabled as setOverviewModeEnabled, setShortcut as setOverviewModeShortcut, setDefaultLayout as setOverviewDefaultLayout, toggle as toggleOverviewMode, isOverviewActive } from './overview-mode.js';
+import { init as initOverviewMode, setEnabled as setOverviewModeEnabled, setShortcut as setOverviewModeShortcut, setDefaultLayout as setOverviewDefaultLayout, toggle as toggleOverviewMode, isOverviewActive, updateFocus as updateOverviewFocus } from './overview-mode.js';
 import { init as initTerminalSearch, attachSearchAddon, closeIfOpen as closeTerminalSearch } from './terminal-search.js';
 import { nsKey } from './storage-namespace.js';
 
@@ -1856,6 +1856,7 @@ function switchTo(id) {
   // Activate new
   activeId = id;
   ActiveTab.set(id);
+  updateOverviewFocus(id);
   ModManager.notifyActiveSessionChanged(id);
   const session = sessions.get(id);
   if (session) {
