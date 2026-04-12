@@ -607,7 +607,7 @@ settingsBtn?.addEventListener('click', async () => {
         <select class="theme-select" id="theme-select">${themeOptions}</select>
       </div>
       <div class="settings-section">
-        <h3>Keyboard</h3>
+        <h3>Tab Switching</h3>
         <label style="font-size: 13px; color: var(--ds-text-primary); cursor: pointer; display: flex; align-items: center; gap: 8px;">
           <input type="checkbox" id="cmd-tab-switch" ${currentCmdTabSwitch ? 'checked' : ''} style="accent-color: var(--ds-accent-green);">
           Hold \u2318 to switch tabs (\u23181-9, \u2318&lt; \u2318&gt;)
@@ -620,14 +620,12 @@ settingsBtn?.addEventListener('click', async () => {
         <p style="font-size: 11px; color: var(--ds-text-secondary); margin-top: 4px;">
           Hold Command for this long to activate, then press 1-9 to jump to a tab or &lt; / &gt; to cycle. Set to 0 for instant.
         </p>
-        <hr style="border: none; border-top: 1px solid var(--ds-border); margin: 12px 0;">
+      </div>
+      <div class="settings-section">
+        <h3>Command Palette</h3>
         <label style="font-size: 13px; color: var(--ds-text-primary); cursor: pointer; display: flex; align-items: center; gap: 8px;">
           <input type="checkbox" id="command-palette-enabled" ${currentCommandPaletteEnabled ? 'checked' : ''} style="accent-color: var(--ds-accent-green);">
-          Command Palette
-        </label>
-        <label style="font-size: 13px; color: var(--ds-text-primary); cursor: pointer; display: flex; align-items: center; gap: 8px; margin-top: 8px;">
-          <input type="checkbox" id="hash-commands-enabled" ${currentHashCommandsEnabled ? 'checked' : ''} style="accent-color: var(--ds-accent-green);">
-          Hash Commands <span style="font-size: 11px; color: var(--ds-text-secondary);">(# prefix for instant actions)</span>
+          Enabled
         </label>
         <label style="font-size: 13px; color: var(--ds-text-primary); display: flex; align-items: center; gap: 8px; margin-top: 8px;">
           Shortcut:
@@ -648,6 +646,13 @@ settingsBtn?.addEventListener('click', async () => {
         <p style="font-size: 11px; color: var(--ds-text-secondary); margin-top: 4px;">
           Layout used when entering overview mode (\u2318O). Tall stacks vertically; Tiled uses a 2-row grid.
         </p>
+      </div>
+      <div class="settings-section">
+        <h3>Hash Commands</h3>
+        <label style="font-size: 13px; color: var(--ds-text-primary); cursor: pointer; display: flex; align-items: center; gap: 8px;">
+          <input type="checkbox" id="hash-commands-enabled" ${currentHashCommandsEnabled ? 'checked' : ''} style="accent-color: var(--ds-accent-green);">
+          Enabled <span style="font-size: 11px; color: var(--ds-text-secondary);">(# prefix for instant actions)</span>
+        </label>
       </div>
       <div class="settings-section">
         <h3>Enabled Agents</h3>
