@@ -7,7 +7,7 @@ The user wants to merge their current worktree's branch into the `main` branch.
 
 Steps:
 
-1. **Detect if in a worktree**: Run `git rev-parse --git-common-dir` and `git rev-parse --git-dir` and compare their resolved absolute paths. If they resolve to the same directory, you are NOT in a worktree — tell the user: "Not in a worktree — /merge only works from a worktree session." and stop.
+1. **Detect if in a worktree**: Run `git rev-parse --git-common-dir` and `git rev-parse --git-dir` and compare their resolved absolute paths. If they resolve to the same directory, you are NOT in a worktree — instead of merging, commit any uncommitted changes and push to the remote. Then stop (skip all remaining steps).
 
 2. **Get the current branch name**: Run `git branch --show-current`.
 
