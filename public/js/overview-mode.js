@@ -71,6 +71,13 @@ function enter() {
   const terminals = document.getElementById('terminals');
   terminals.classList.add('overview-mode');
 
+  // Reorder terminal containers to match tab order — DOM insertion order
+  // may differ from tab order after async restore or drag-reorder.
+  for (const id of ids) {
+    const container = document.getElementById(`term-${id}`);
+    if (container) terminals.appendChild(container);
+  }
+
   for (const id of ids) {
     const session = callbacks.getSession?.(id);
     if (!session?.container) continue;
