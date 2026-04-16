@@ -2082,9 +2082,11 @@ async function restoreSessions(sessionList, opts = {}) {
  * (dropdown), fetches state from the server.
  */
 function confirmCloseSession(id) {
-  // Mod/display tabs have no PTY — always allow close
   const session = sessions.get(id);
-  if (session?.type === 'mod-tab' || session?.type === 'display-tab') return Promise.resolve(true);
+  // Mod tabs are config UIs — always allow close
+  if (session?.type === 'mod-tab') return Promise.resolve(true);
+  // Display tabs hold non-recoverable agent-generated HTML
+  if (session?.type === 'display-tab') return showCloseDisplayTabDialog();
 
   // Check local session first (tab is connected in this window)
   const isIdle = session ? session.waitingForInput : null;
@@ -2119,6 +2121,28 @@ function showCloseConfirmDialog() {
     const cleanup = (result) => { overlay.remove(); resolve(result); };
     overlay.querySelector('#close-confirm-cancel').onclick = () => cleanup(false);
     overlay.querySelector('#close-confirm-ok').onclick = () => cleanup(true);
+    overlay.onclick = (e) => { if (e.target === overlay) cleanup(false); };
+  });
+}
+
+function showCloseDisplayTabDialog() {
+  return new Promise(resolve => {
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay';
+    overlay.innerHTML = `
+      <div class="modal">
+        <h2>Close display tab?</h2>
+        <p style="font-size:13px;color:var(--ds-text-secondary);margin-bottom:16px;">This tab's contents will be lost and cannot be recovered.</p>
+        <div class="modal-buttons">
+          <button class="btn-secondary" id="close-display-cancel">Cancel</button>
+          <button class="btn-danger" id="close-display-ok">Close</button>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+
+    const cleanup = (result) => { overlay.remove(); resolve(result); };
+    overlay.querySelector('#close-display-cancel').onclick = () => cleanup(false);
+    overlay.querySelector('#close-display-ok').onclick = () => cleanup(true);
     overlay.onclick = (e) => { if (e.target === overlay) cleanup(false); };
   });
 }
