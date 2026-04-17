@@ -294,7 +294,7 @@ window.addEventListener('focus', () => {
 });
 
 function updateTitle() {
-  const count = [...sessions.values()].filter(s => s.waitingForInput).length;
+  const count = [...sessions.values()].filter(s => s.hasUnseenActivity).length;
   document.title = count > 0 ? `(${count}) deepsteve` : 'deepsteve';
 }
 
@@ -1393,7 +1393,7 @@ settingsBtn?.addEventListener('click', async () => {
 
 function updateAppBadge() {
   if (!('setAppBadge' in navigator)) return;
-  const count = [...sessions.values()].filter(s => s.waitingForInput).length;
+  const count = [...sessions.values()].filter(s => s.hasUnseenActivity).length;
   if (count > 0) navigator.setAppBadge(count);
   else navigator.clearAppBadge();
 }
@@ -1523,19 +1523,16 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
           if (opts.initialPrompt) {
             ws.sendJSON({ type: 'initialPrompt', text: opts.initialPrompt });
           }
-          // Apply persisted waiting state from the server. This handles the
-          // reconnect case where the shell was already idle before the browser
-          // dropped its WebSocket — without this, no "waiting" indicator shows
-          // until the next BEL fires. Do NOT call showNotification here: a
-          // reconnect restoring existing state should not re-notify.
+          // Apply persisted waiting state from the server. This restores the
+          // busy/idle flag after a reconnect so close-confirm and the hash
+          // commands overlay see the correct state. Do NOT raise the badge or
+          // notification here — a reconnect restoring existing state is not
+          // new activity the user has missed.
           if (msg.waitingForInput) {
             const sess = sessions.get(msg.id);
             if (sess) {
               sess.waitingForInput = true;
               if (msg.id === activeId) setHashCommandsWaiting(true);
-              TabManager.updateBadge(msg.id, msg.id !== activeId);
-              updateTitle();
-              updateAppBadge();
               ModManager.notifySessionsChanged(getSessionList());
             }
           }
@@ -1580,7 +1577,10 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
           s.waitingForInput = msg.waiting;
           if (sid === activeId) setHashCommandsWaiting(msg.waiting);
           s.scrollControl.syncViewport();
-          TabManager.updateBadge(sid, msg.waiting && activeId !== sid);
+          if (msg.waiting && activeId !== sid) {
+            s.hasUnseenActivity = true;
+          }
+          TabManager.updateBadge(sid, s.hasUnseenActivity);
           updateTitle();
           updateAppBadge();
           if (msg.waiting) {
@@ -1728,7 +1728,7 @@ function initTerminal(id, ws, cwd, initialName, { hasScrollback = false, pending
 
   // Store session in memory
   const searchAddon = attachSearchAddon(term);
-  sessions.set(id, { term, fit, ws, container, cwd, name, waitingForInput: false, scrollControl, searchAddon });
+  sessions.set(id, { term, fit, ws, container, cwd, name, waitingForInput: false, hasUnseenActivity: false, scrollControl, searchAddon });
 
   // Suppress scroll during init to prevent onWriteParsed races with
   // buffered data flush and scrollback replay
@@ -1851,7 +1851,7 @@ function createModTab(modId, opts = {}) {
 
   sessions.set(id, {
     term: null, fit: null, ws: null, container, cwd: null,
-    name, waitingForInput: false, scrollControl: null,
+    name, waitingForInput: false, hasUnseenActivity: false, scrollControl: null,
     type: 'mod-tab', modId,
   });
 
@@ -1917,7 +1917,7 @@ function createDisplayTab(id, name, opts = {}) {
   const tabName = name || 'Display';
   sessions.set(id, {
     term: null, fit: null, ws: null, container, cwd: null,
-    name: tabName, waitingForInput: false, scrollControl: null,
+    name: tabName, waitingForInput: false, hasUnseenActivity: false, scrollControl: null,
     type: 'display-tab',
   });
 
@@ -1976,7 +1976,6 @@ function switchTo(id) {
     const current = sessions.get(activeId);
     if (current) {
       current.container.classList.remove('active');
-      if (current.waitingForInput) TabManager.updateBadge(activeId, true);
     }
     TabManager.setActive(null);
   }
@@ -1990,9 +1989,13 @@ function switchTo(id) {
   if (session) {
     session.container.classList.add('active');
     TabManager.setActive(id);
-    // Clear badge and notification when switching to this tab
+    // Clear badge and notification when switching to this tab —
+    // viewing the tab acknowledges any unseen activity.
+    session.hasUnseenActivity = false;
     TabManager.updateBadge(id, false);
     clearNotification(id);
+    updateTitle();
+    updateAppBadge();
 
     if (session.type === 'mod-tab' || session.type === 'display-tab') return;
 
