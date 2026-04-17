@@ -6,7 +6,7 @@
 
 https://deepsteve.com
 
-Run multiple AI agent sessions side-by-side in your browser, each with full terminal capabilities and persistent conversation history. Supports **Claude Code** with experimental support for **OpenCode** and **Gemini**.
+Run multiple AI agent sessions side-by-side in your browser, each with full terminal capabilities and persistent conversation history. Supports **Claude Code** with experimental support for **Hermes**, **OpenCode**, and **Gemini**.
 
 <p align="center">
   <img src="screenshots/screenshot-31-hero.png" alt="deepsteve — full app with tabs and tasks panel" width="800">
