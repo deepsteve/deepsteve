@@ -108,6 +108,14 @@ export function initLiveReload({ onMessage, onShowRestartConfirm, onShowReloadOv
           meta.httpEquiv = 'refresh';
           meta.content = '0;url=' + location.pathname + '?_=' + Date.now();
           document.head.appendChild(meta);
+          // Watchdog: if meta-refresh silently fails to navigate, clear the
+          // reload flag so per-tab WS reconnects resume instead of wedging.
+          setTimeout(() => {
+            console.warn('[live-reload] meta-refresh did not navigate, falling back');
+            window.__deepsteveReloadPending = false;
+            reloading = false;
+            location.replace(location.pathname + '?_=' + Date.now());
+          }, 3000);
         }
       } catch {}
     }, 500);
