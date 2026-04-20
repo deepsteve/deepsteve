@@ -1,16 +1,15 @@
 const { useState, useCallback, useRef, useEffect, useMemo } = React;
 
-function newId() {
-  if (window.crypto?.randomUUID) return window.crypto.randomUUID();
-  return `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-}
-
 function formatTimestamp(ts) {
   const d = new Date(ts);
   const hh = String(d.getHours()).padStart(2, '0');
   const mm = String(d.getMinutes()).padStart(2, '0');
   const ss = String(d.getSeconds()).padStart(2, '0');
   return `${hh}:${mm}:${ss}`;
+}
+
+function screenshotUrl(id) {
+  return `/api/screenshots/${id}.png`;
 }
 
 function ScreenshotsPanel() {
@@ -26,11 +25,41 @@ function ScreenshotsPanel() {
     statusTimer.current = setTimeout(() => setStatus(null), 3000);
   }, []);
 
-  const addScreenshot = useCallback((dataUrl, source, selector) => {
-    const item = { id: newId(), dataUrl, timestamp: Date.now(), source, selector };
-    setScreenshots((prev) => [item, ...prev]);
-    setSelectedId(item.id);
-    return item;
+  // Hydrate from server on mount — persisted across page refresh and daemon restarts.
+  useEffect(() => {
+    fetch('/api/screenshots')
+      .then((r) => r.json())
+      .then((d) => {
+        const list = Array.isArray(d?.screenshots) ? d.screenshots : [];
+        setScreenshots(list);
+        if (list.length > 0) setSelectedId(list[0].id);
+      })
+      .catch((e) => console.error('Failed to load screenshots:', e));
+  }, []);
+
+  // Subscribe to server broadcasts so new captures appear in every open window.
+  useEffect(() => {
+    if (!window.deepsteve?.onScreenshotEvent) return;
+    return window.deepsteve.onScreenshotEvent((msg) => {
+      if (msg.type === 'screenshot-added' && msg.meta) {
+        setScreenshots((prev) => {
+          if (prev.some((s) => s.id === msg.meta.id)) return prev;
+          return [msg.meta, ...prev];
+        });
+        setSelectedId((prev) => prev ?? msg.meta.id);
+      } else if (msg.type === 'screenshot-deleted' && msg.id) {
+        setScreenshots((prev) => {
+          const idx = prev.findIndex((s) => s.id === msg.id);
+          if (idx === -1) return prev;
+          const next = prev.filter((s) => s.id !== msg.id);
+          setSelectedId((sel) => {
+            if (sel !== msg.id) return sel;
+            return next.length === 0 ? null : (next[idx] || next[idx - 1] || next[0]).id;
+          });
+          return next;
+        });
+      }
+    });
   }, []);
 
   const selected = useMemo(
@@ -49,19 +78,27 @@ function ScreenshotsPanel() {
         return;
       }
       const dataUrl = await window.modernScreenshot.domToPng(xtermEl);
-      addScreenshot(dataUrl, 'manual');
+      const res = await fetch('/api/screenshots', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ dataUrl, source: 'manual' }),
+      });
+      if (!res.ok) throw new Error(`Server returned ${res.status}`);
+      const meta = await res.json();
+      setScreenshots((prev) => (prev.some((s) => s.id === meta.id) ? prev : [meta, ...prev]));
+      setSelectedId(meta.id);
       showStatus('Captured', 'success');
     } catch (e) {
       console.error('Screenshot capture failed:', e);
       showStatus('Capture failed: ' + e.message, 'error');
     }
     setCapturing(false);
-  }, [showStatus, addScreenshot]);
+  }, [showStatus]);
 
   const copyToClipboard = useCallback(async () => {
     if (!selected) return;
     try {
-      const res = await fetch(selected.dataUrl);
+      const res = await fetch(screenshotUrl(selected.id));
       const blob = await res.blob();
       await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
       showStatus('Copied to clipboard', 'success');
@@ -75,27 +112,25 @@ function ScreenshotsPanel() {
     if (!selected) return;
     const timestamp = new Date(selected.timestamp).toISOString().replace(/[:.]/g, '-').slice(0, 19);
     const a = document.createElement('a');
-    a.href = selected.dataUrl;
+    a.href = screenshotUrl(selected.id);
     a.download = `deepsteve-${timestamp}.png`;
     a.click();
     showStatus('Downloaded', 'success');
   }, [selected, showStatus]);
 
-  const removeScreenshot = (id) => {
-    const idx = screenshots.findIndex((s) => s.id === id);
-    if (idx === -1) return;
-    const next = screenshots.filter((s) => s.id !== id);
-    setScreenshots(next);
-    if (selectedId === id) {
-      // Prefer the item that took the removed one's position (newer neighbor), else fall back.
-      setSelectedId(next.length === 0 ? null : (next[idx] || next[idx - 1] || next[0]).id);
-    }
-  };
+  const removeScreenshot = useCallback((id) => {
+    fetch(`/api/screenshots/${id}`, { method: 'DELETE' }).catch((e) => {
+      console.error('Delete failed:', e);
+    });
+    // Broadcast will drive the state update.
+  }, []);
 
   const clearAll = useCallback(() => {
-    setScreenshots([]);
-    setSelectedId(null);
-  }, []);
+    const ids = screenshots.map((s) => s.id);
+    Promise.all(
+      ids.map((id) => fetch(`/api/screenshots/${id}`, { method: 'DELETE' }).catch(() => {}))
+    );
+  }, [screenshots]);
 
   // Handle MCP screenshot_capture requests
   useEffect(() => {
@@ -113,7 +148,7 @@ function ScreenshotsPanel() {
           return;
         }
         const dataUrl = await window.modernScreenshot.domToPng(el);
-        addScreenshot(dataUrl, 'mcp', selector);
+        // Let the server persist into the collection + broadcast — no local add here.
         await fetch('/api/screenshots/result', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -127,7 +162,7 @@ function ScreenshotsPanel() {
         });
       }
     });
-  }, [addScreenshot]);
+  }, []);
 
   const hasScreenshots = screenshots.length > 0;
 
@@ -146,7 +181,7 @@ function ScreenshotsPanel() {
           {hasScreenshots && (
             <button
               onClick={clearAll}
-              title="Remove all screenshots from this session"
+              title="Remove all screenshots"
               style={{
                 padding: '4px 8px',
                 fontSize: 11,
@@ -202,7 +237,7 @@ function ScreenshotsPanel() {
           <div>
             {/* Preview */}
             <img
-              src={selected.dataUrl}
+              src={screenshotUrl(selected.id)}
               style={{
                 width: '100%',
                 borderRadius: 6,
@@ -316,7 +351,7 @@ function Thumbnail({ item, isSelected, onSelect, onRemove }) {
       }}
     >
       <img
-        src={item.dataUrl}
+        src={screenshotUrl(item.id)}
         alt=""
         style={{
           width: '100%',

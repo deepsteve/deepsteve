@@ -43,6 +43,7 @@ let agentChatCallbacks = [];     // [{modId, cb}] — callbacks for agent-chat b
 let browserEvalCallbacks = [];   // [{modId, cb}] — callbacks for browser-eval-request
 let browserConsoleCallbacks = []; // [{modId, cb}] — callbacks for browser-console-request
 let screenshotCaptureCallbacks = []; // [{modId, cb}] — callbacks for screenshot-capture-request
+let screenshotEventCallbacks = [];   // [{modId, cb}] — callbacks for screenshot-added/deleted broadcasts
 let sceneUpdateCallbacks = [];       // [{modId, cb}] — callbacks for scene-update-request
 let sceneQueryCallbacks = [];        // [{modId, cb}] — callbacks for scene-query-request
 let sceneSnapshotCallbacks = [];     // [{modId, cb}] — callbacks for scene-snapshot-request
@@ -1853,6 +1854,15 @@ function notifyScreenshotCaptureRequest(req) {
 }
 
 /**
+ * Notify panel mods of a screenshot collection change (screenshot-added / screenshot-deleted).
+ */
+function notifyScreenshotEvent(msg) {
+  for (const entry of screenshotEventCallbacks) {
+    try { entry.cb(msg); } catch (e) { console.error('Screenshot event callback error:', e); }
+  }
+}
+
+/**
  * Notify mods of a baby-browser request (called from app.js on WS broadcast).
  */
 function notifyBabyBrowserRequest(req) {
@@ -2011,6 +2021,13 @@ function _injectBridgeAPI(iframeEl, modId, tabInstanceId) {
           screenshotCaptureCallbacks = screenshotCaptureCallbacks.filter(e => e !== entry);
         };
       },
+      onScreenshotEvent(cb) {
+        const entry = { modId, cb };
+        screenshotEventCallbacks.push(entry);
+        return () => {
+          screenshotEventCallbacks = screenshotEventCallbacks.filter(e => e !== entry);
+        };
+      },
       onSceneUpdateRequest(cb) {
         const entry = { modId, cb };
         sceneUpdateCallbacks.push(entry);
@@ -2159,6 +2176,7 @@ export const ModManager = {
   notifyBrowserEvalRequest,
   notifyBrowserConsoleRequest,
   notifyScreenshotCaptureRequest,
+  notifyScreenshotEvent,
   notifySceneUpdateRequest,
   notifySceneQueryRequest,
   notifySceneSnapshotRequest,

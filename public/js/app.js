@@ -1613,6 +1613,8 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
           setTimeout(() => processedBrowserRequests.delete(msg.requestId), 60000);
           ModManager.notifyScreenshotCaptureRequest(msg);
         }
+      } else if (msg.type === 'screenshot-added' || msg.type === 'screenshot-deleted') {
+        ModManager.notifyScreenshotEvent(msg);
       } else if (msg.type === 'scene-update-request') {
         if (msg.targetWindowId && msg.targetWindowId !== WindowManager.getWindowId()) return;
         if (!processedBrowserRequests.has(msg.requestId)) {

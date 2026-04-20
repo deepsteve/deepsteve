@@ -110,6 +110,7 @@ function log(...args) {
 }
 const STATE_FILE = path.join(os.homedir(), '.deepsteve', 'state.json');
 const DISPLAY_TABS_DIR = path.join(os.homedir(), '.deepsteve', 'display-tabs');
+const SCREENSHOTS_DIR = path.join(os.homedir(), '.deepsteve', 'screenshots');
 const SETTINGS_FILE = path.join(os.homedir(), '.deepsteve', 'settings.json');
 const RESTARTING_FLAG = path.join(os.homedir(), '.deepsteve', '.restarting');
 const app = express();
@@ -1212,6 +1213,43 @@ try {
   }
 } catch (e) {
   console.error('Failed to load display tabs:', e.message);
+}
+
+const screenshots = new Map(); // id → { id, timestamp, source, selector?, savedTo? } (disk-backed in ~/.deepsteve/screenshots/)
+
+// Load persisted screenshots from disk and clean up stale files (>7 days)
+try {
+  if (fs.existsSync(SCREENSHOTS_DIR)) {
+    const now = Date.now();
+    const MAX_AGE = 7 * 24 * 60 * 60 * 1000;
+    for (const file of fs.readdirSync(SCREENSHOTS_DIR)) {
+      if (!file.endsWith('.json')) continue;
+      const id = file.replace(/\.json$/, '');
+      const metaPath = path.join(SCREENSHOTS_DIR, file);
+      const pngPath = path.join(SCREENSHOTS_DIR, `${id}.png`);
+      try {
+        const stat = fs.statSync(metaPath);
+        if (now - stat.mtimeMs > MAX_AGE) {
+          fs.unlinkSync(metaPath);
+          try { fs.unlinkSync(pngPath); } catch {}
+          log(`[screenshots] Cleaned up stale file: ${id}`);
+          continue;
+        }
+        if (!fs.existsSync(pngPath)) {
+          fs.unlinkSync(metaPath);
+          log(`[screenshots] Removed orphan sidecar (no png): ${id}`);
+          continue;
+        }
+        const meta = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
+        screenshots.set(id, meta);
+      } catch (e) {
+        log(`[screenshots] Skipping ${id}: ${e.message}`);
+      }
+    }
+    if (screenshots.size > 0) log(`Loaded ${screenshots.size} screenshots from disk`);
+  }
+} catch (e) {
+  console.error('Failed to load screenshots:', e.message);
 }
 
 // Save state on shutdown
@@ -2419,6 +2457,45 @@ app.delete('/api/display-tab/:id', (req, res) => {
   res.json({ deleted: true });
 });
 
+app.get('/api/screenshots', (req, res) => {
+  const list = [...screenshots.values()].sort((a, b) => b.timestamp - a.timestamp);
+  res.json({ screenshots: list });
+});
+
+app.get('/api/screenshots/:id.png', (req, res) => {
+  const { id } = req.params;
+  if (!screenshots.has(id)) return res.status(404).end();
+  res.type('png').sendFile(getScreenshotPath(id));
+});
+
+app.post('/api/screenshots', express.json({ limit: '50mb' }), (req, res) => {
+  const { dataUrl, source, selector } = req.body || {};
+  if (typeof dataUrl !== 'string' || !dataUrl.startsWith('data:image/png;base64,')) {
+    return res.status(400).json({ error: 'Invalid dataUrl' });
+  }
+  const base64 = dataUrl.slice('data:image/png;base64,'.length);
+  const buf = Buffer.from(base64, 'base64');
+  if (buf.length === 0) return res.status(400).json({ error: 'Empty image data' });
+  const id = randomUUID().slice(0, 8);
+  const meta = {
+    id,
+    timestamp: Date.now(),
+    source: source === 'mcp' ? 'mcp' : 'manual',
+    ...(selector ? { selector } : {}),
+  };
+  setScreenshot(meta, buf);
+  broadcast({ type: 'screenshot-added', meta });
+  res.json(meta);
+});
+
+app.delete('/api/screenshots/:id', (req, res) => {
+  const { id } = req.params;
+  const existed = screenshots.has(id);
+  deleteScreenshot(id);
+  if (existed) broadcast({ type: 'screenshot-deleted', id });
+  res.json({ deleted: existed });
+});
+
 app.get('/api/shells', (req, res) => {
   const active = [...shells.entries()].map(([id, entry]) => ({ id, pid: (entry.engine || ptyEngine).getPid(id), cwd: entry.cwd, name: entry.name || null, agentType: entry.agentType || 'claude', engineType: entry.engineType || 'node-pty', status: 'active', lastActivity: entry.lastActivity || null, connectedClients: entry.clients.size }));
   const saved = Object.entries(savedState).map(([id, entry]) => ({ id, cwd: entry.cwd, name: entry.name || null, agentType: entry.agentType || 'claude', engineType: entry.engineType || 'node-pty', status: entry.closed ? 'closed' : 'saved', lastActivity: entry.lastActivity || null, connectedClients: 0 }));
@@ -2898,6 +2975,25 @@ function deleteDisplayTab(id) {
   displayTabs.delete(id);
   try { fs.unlinkSync(path.join(DISPLAY_TABS_DIR, `${id}.html`)); } catch {}
 }
+
+function setScreenshot(meta, pngBuffer) {
+  screenshots.set(meta.id, meta);
+  try {
+    fs.mkdirSync(SCREENSHOTS_DIR, { recursive: true });
+    fs.writeFileSync(path.join(SCREENSHOTS_DIR, `${meta.id}.png`), pngBuffer);
+    fs.writeFileSync(path.join(SCREENSHOTS_DIR, `${meta.id}.json`), JSON.stringify(meta));
+  } catch (e) { log(`[screenshots] Failed to persist ${meta.id}: ${e.message}`); }
+}
+
+function deleteScreenshot(id) {
+  screenshots.delete(id);
+  try { fs.unlinkSync(path.join(SCREENSHOTS_DIR, `${id}.png`)); } catch {}
+  try { fs.unlinkSync(path.join(SCREENSHOTS_DIR, `${id}.json`)); } catch {}
+}
+
+function getScreenshotPath(id) {
+  return path.join(SCREENSHOTS_DIR, `${id}.png`);
+}
 const wss = new WebSocketServer({ server });
 
 // HTTPS server (created async if enabled)
@@ -3365,7 +3461,7 @@ function broadcastToWindow(windowId, msg) {
 }
 
 // Initialize MCP server (async, ~100ms for dynamic import)
-initMCP({ app, shells, wss, broadcast, broadcastToWindow, log, MODS_DIR, closeSession, spawnSession, sessionEnv, getSpawnArgs, mcpConfigArgs, getAgentConfig, wireShellOutput, watchClaudeSessionDir, unwatchClaudeSessionDir, saveState, validateWorktree, ensureWorktree, submitToShell, fetchIssueFromGitHub, deliverPromptWhenReady, reloadClients, deliverToWindow, settings, isShuttingDown: () => shuttingDown, displayTabs, setDisplayTab, deleteDisplayTab, getDefaultEngine }).catch(e => log('MCP init failed:', e.message));
+initMCP({ app, shells, wss, broadcast, broadcastToWindow, log, MODS_DIR, closeSession, spawnSession, sessionEnv, getSpawnArgs, mcpConfigArgs, getAgentConfig, wireShellOutput, watchClaudeSessionDir, unwatchClaudeSessionDir, saveState, validateWorktree, ensureWorktree, submitToShell, fetchIssueFromGitHub, deliverPromptWhenReady, reloadClients, deliverToWindow, settings, isShuttingDown: () => shuttingDown, displayTabs, setDisplayTab, deleteDisplayTab, screenshots, setScreenshot, deleteScreenshot, getScreenshotPath, getDefaultEngine }).catch(e => log('MCP init failed:', e.message));
 
 // Watch themes directory for changes and broadcast to clients
 let themeWatchDebounce = null;

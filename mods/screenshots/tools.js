@@ -3,16 +3,19 @@ const { randomUUID } = require('crypto');
 const fs = require('fs');
 const path = require('path');
 
-// Pending requests awaiting browser response: requestId → { resolve, timer }
+// Pending requests awaiting browser response: requestId → { resolve, timer, outPath, selector }
 const pendingRequests = new Map();
 
 const TIMEOUT_MS = 30000; // 30s — screenshots can be slow
+
+let modContext = null; // stashed for registerRoutes to use
 
 /**
  * Initialize screenshot MCP tools.
  */
 function init(context) {
-  const { broadcast, broadcastToWindow, shells } = context;
+  modContext = context;
+  const { broadcast, broadcastToWindow, shells, screenshots, deleteScreenshot, getScreenshotPath } = context;
 
   // Resolve session_id to a windowId, returning the send function
   function resolveTarget(session_id) {
@@ -51,7 +54,7 @@ function init(context) {
             });
           }, TIMEOUT_MS);
 
-          pendingRequests.set(requestId, { resolve, timer, outPath });
+          pendingRequests.set(requestId, { resolve, timer, outPath, selector });
 
           send({
             type: 'screenshot-capture-request',
@@ -59,6 +62,43 @@ function init(context) {
             selector,
           });
         });
+      },
+    },
+
+    list_screenshots: {
+      description: 'List screenshots currently stored in the deepsteve persisted collection (~/.deepsteve/screenshots/). Returns an array of { id, timestamp, source, selector?, savedTo? } sorted newest first. Use get_screenshot_path to read any entry by id.',
+      schema: {},
+      handler: async () => {
+        const list = [...screenshots.values()].sort((a, b) => b.timestamp - a.timestamp);
+        return { content: [{ type: 'text', text: JSON.stringify(list, null, 2) }] };
+      },
+    },
+
+    get_screenshot_path: {
+      description: 'Return the absolute PNG file path for a persisted screenshot id from the deepsteve collection. Use the Read tool on the returned path to view the image — do NOT try to base64-decode or re-save; the bytes are already on disk.',
+      schema: {
+        id: z.string().describe('Screenshot id from list_screenshots'),
+      },
+      handler: async ({ id }) => {
+        if (!screenshots.has(id)) {
+          return { content: [{ type: 'text', text: `Error: no screenshot with id "${id}"` }] };
+        }
+        return { content: [{ type: 'text', text: getScreenshotPath(id) }] };
+      },
+    },
+
+    delete_screenshot: {
+      description: 'Delete a screenshot from the deepsteve persisted collection (removes the PNG and metadata sidecar from ~/.deepsteve/screenshots/ and notifies open browser windows).',
+      schema: {
+        id: z.string().describe('Screenshot id to delete'),
+      },
+      handler: async ({ id }) => {
+        if (!screenshots.has(id)) {
+          return { content: [{ type: 'text', text: `Error: no screenshot with id "${id}"` }] };
+        }
+        deleteScreenshot(id);
+        broadcast({ type: 'screenshot-deleted', id });
+        return { content: [{ type: 'text', text: JSON.stringify({ id, deleted: true }) }] };
       },
     },
   };
@@ -108,6 +148,23 @@ function registerRoutes(app, context) {
         }
         fs.mkdirSync(path.dirname(pending.outPath), { recursive: true });
         fs.writeFileSync(pending.outPath, buf);
+
+        // Also persist into the browsable collection so MCP captures appear in the
+        // screenshots panel and survive restarts.
+        const { setScreenshot, broadcast } = modContext;
+        const id = randomUUID().slice(0, 8);
+        const meta = {
+          id,
+          timestamp: Date.now(),
+          source: 'mcp',
+          ...(pending.selector ? { selector: pending.selector } : {}),
+          savedTo: pending.outPath,
+        };
+        try {
+          setScreenshot(meta, buf);
+          broadcast({ type: 'screenshot-added', meta });
+        } catch {}
+
         pending.resolve({
           content: [{ type: 'text', text: `Screenshot saved to ${pending.outPath}` }],
         });
