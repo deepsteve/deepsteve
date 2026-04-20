@@ -107,7 +107,7 @@ function init(context) {
     },
 
     scene_snapshot: {
-      description: 'Capture the current 3D scene as a PNG image. Optionally saves to a file. Make sure the 3D Scene mod is enabled in deepsteve.',
+      description: 'Capture the current 3D scene as a PNG image. Provide `filename` to save the PNG to disk (defaults to ~/Desktop); the tool returns the file path as text. To view the snapshot, use the Read tool on the returned path — do NOT base64-decode, re-save, or otherwise "read back" the image. Without `filename`, nothing is saved and only a size summary is returned, so pass `filename` whenever you actually want the image. Make sure the 3D Scene mod is enabled in deepsteve.',
       schema: {
         width: z.number().optional().describe('Snapshot width in pixels. Defaults to current canvas width.'),
         height: z.number().optional().describe('Snapshot height in pixels. Defaults to current canvas height.'),
