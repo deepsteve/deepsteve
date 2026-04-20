@@ -334,6 +334,20 @@ export function updateFocus(activeId) {
   if (isActive) updateFocusClass(activeId);
 }
 
+export function onTabsReordered(orderedIds) {
+  if (!isActive) return;
+  const terminals = document.getElementById('terminals');
+  if (!terminals) return;
+  for (const id of orderedIds) {
+    const container = document.getElementById(`term-${id}`);
+    if (container) terminals.appendChild(container);
+  }
+  applyLayout();
+  requestAnimationFrame(() => {
+    callbacks.fitAllTerminals?.();
+  });
+}
+
 export function isOverviewActive() {
   return isActive;
 }

@@ -16,7 +16,7 @@ import { initFileDrop } from './file-drop.js';
 import { init as initCmdHoldMode, setEnabled as setCmdHoldModeEnabled, setHoldMs as setCmdHoldModeHoldMs } from './cmd-tab-switch.js';
 import { init as initCommandPalette, setEnabled as setCommandPaletteEnabled, setShortcut as setCommandPaletteShortcut } from './command-palette.js';
 import { init as initHashCommands, beforeSend as hashCommandsBeforeSend, setWaitingForInput as setHashCommandsWaiting, setEnabled as setHashCommandsEnabled } from './hash-commands.js';
-import { init as initOverviewMode, setEnabled as setOverviewModeEnabled, setShortcut as setOverviewModeShortcut, setDefaultLayout as setOverviewDefaultLayout, toggle as toggleOverviewMode, isOverviewActive, updateFocus as updateOverviewFocus } from './overview-mode.js';
+import { init as initOverviewMode, setEnabled as setOverviewModeEnabled, setShortcut as setOverviewModeShortcut, setDefaultLayout as setOverviewDefaultLayout, toggle as toggleOverviewMode, isOverviewActive, updateFocus as updateOverviewFocus, onTabsReordered as onOverviewTabsReordered } from './overview-mode.js';
 import { init as initTerminalSearch, attachSearchAddon, closeIfOpen as closeTerminalSearch } from './terminal-search.js';
 import { nsKey } from './storage-namespace.js';
 
@@ -1756,6 +1756,7 @@ function initTerminal(id, ws, cwd, initialName, { hasScrollback = false, pending
       TabSessions.save(reordered);
       SessionStore.reorderSessions(getWindowId(), orderedIds);
       ModManager.notifySessionsChanged(getSessionList());
+      onOverviewTabsReordered(orderedIds);
     },
     getLiveWindows: () => WindowManager.getLiveWindows(),
     onSendToWindow: (sessionId, targetWindowId) => sendToWindow(sessionId, targetWindowId),
@@ -1867,6 +1868,7 @@ function createModTab(modId, opts = {}) {
       TabSessions.save(reordered);
       SessionStore.reorderSessions(getWindowId(), orderedIds);
       ModManager.notifySessionsChanged(getSessionList());
+      onOverviewTabsReordered(orderedIds);
     },
     getLiveWindows: () => [],
     onSendToWindow: () => {},
@@ -1936,6 +1938,7 @@ function createDisplayTab(id, name, opts = {}) {
       TabSessions.save(reordered);
       SessionStore.reorderSessions(getWindowId(), orderedIds);
       ModManager.notifySessionsChanged(getSessionList());
+      onOverviewTabsReordered(orderedIds);
     },
     getLiveWindows: () => [],
     onSendToWindow: () => {},
