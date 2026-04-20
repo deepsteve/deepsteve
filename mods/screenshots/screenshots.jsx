@@ -1,7 +1,21 @@
-const { useState, useCallback, useRef, useEffect } = React;
+const { useState, useCallback, useRef, useEffect, useMemo } = React;
+
+function newId() {
+  if (window.crypto?.randomUUID) return window.crypto.randomUUID();
+  return `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function formatTimestamp(ts) {
+  const d = new Date(ts);
+  const hh = String(d.getHours()).padStart(2, '0');
+  const mm = String(d.getMinutes()).padStart(2, '0');
+  const ss = String(d.getSeconds()).padStart(2, '0');
+  return `${hh}:${mm}:${ss}`;
+}
 
 function ScreenshotsPanel() {
-  const [imageDataUrl, setImageDataUrl] = useState(null);
+  const [screenshots, setScreenshots] = useState([]);
+  const [selectedId, setSelectedId] = useState(null);
   const [capturing, setCapturing] = useState(false);
   const [status, setStatus] = useState(null);
   const statusTimer = useRef(null);
@@ -11,6 +25,18 @@ function ScreenshotsPanel() {
     clearTimeout(statusTimer.current);
     statusTimer.current = setTimeout(() => setStatus(null), 3000);
   }, []);
+
+  const addScreenshot = useCallback((dataUrl, source, selector) => {
+    const item = { id: newId(), dataUrl, timestamp: Date.now(), source, selector };
+    setScreenshots((prev) => [item, ...prev]);
+    setSelectedId(item.id);
+    return item;
+  }, []);
+
+  const selected = useMemo(
+    () => screenshots.find((s) => s.id === selectedId) || null,
+    [screenshots, selectedId]
+  );
 
   const capture = useCallback(async () => {
     setCapturing(true);
@@ -23,19 +49,19 @@ function ScreenshotsPanel() {
         return;
       }
       const dataUrl = await window.modernScreenshot.domToPng(xtermEl);
-      setImageDataUrl(dataUrl);
+      addScreenshot(dataUrl, 'manual');
       showStatus('Captured', 'success');
     } catch (e) {
       console.error('Screenshot capture failed:', e);
       showStatus('Capture failed: ' + e.message, 'error');
     }
     setCapturing(false);
-  }, [showStatus]);
+  }, [showStatus, addScreenshot]);
 
   const copyToClipboard = useCallback(async () => {
-    if (!imageDataUrl) return;
+    if (!selected) return;
     try {
-      const res = await fetch(imageDataUrl);
+      const res = await fetch(selected.dataUrl);
       const blob = await res.blob();
       await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
       showStatus('Copied to clipboard', 'success');
@@ -43,17 +69,33 @@ function ScreenshotsPanel() {
       console.error('Copy failed:', e);
       showStatus('Copy failed — try downloading instead', 'error');
     }
-  }, [imageDataUrl, showStatus]);
+  }, [selected, showStatus]);
 
   const download = useCallback(() => {
-    if (!imageDataUrl) return;
-    const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    if (!selected) return;
+    const timestamp = new Date(selected.timestamp).toISOString().replace(/[:.]/g, '-').slice(0, 19);
     const a = document.createElement('a');
-    a.href = imageDataUrl;
+    a.href = selected.dataUrl;
     a.download = `deepsteve-${timestamp}.png`;
     a.click();
     showStatus('Downloaded', 'success');
-  }, [imageDataUrl, showStatus]);
+  }, [selected, showStatus]);
+
+  const removeScreenshot = (id) => {
+    const idx = screenshots.findIndex((s) => s.id === id);
+    if (idx === -1) return;
+    const next = screenshots.filter((s) => s.id !== id);
+    setScreenshots(next);
+    if (selectedId === id) {
+      // Prefer the item that took the removed one's position (newer neighbor), else fall back.
+      setSelectedId(next.length === 0 ? null : (next[idx] || next[idx - 1] || next[0]).id);
+    }
+  };
+
+  const clearAll = useCallback(() => {
+    setScreenshots([]);
+    setSelectedId(null);
+  }, []);
 
   // Handle MCP screenshot_capture requests
   useEffect(() => {
@@ -71,7 +113,7 @@ function ScreenshotsPanel() {
           return;
         }
         const dataUrl = await window.modernScreenshot.domToPng(el);
-        setImageDataUrl(dataUrl);
+        addScreenshot(dataUrl, 'mcp', selector);
         await fetch('/api/screenshots/result', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -85,7 +127,9 @@ function ScreenshotsPanel() {
         });
       }
     });
-  }, []);
+  }, [addScreenshot]);
+
+  const hasScreenshots = screenshots.length > 0;
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100vh' }}>
@@ -95,8 +139,27 @@ function ScreenshotsPanel() {
         borderBottom: '1px solid rgba(255,255,255,0.06)',
         flexShrink: 0,
       }}>
-        <div style={{ fontSize: 14, fontWeight: 600, color: '#f0f6fc', marginBottom: 8 }}>
-          Screenshots
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+          <div style={{ fontSize: 14, fontWeight: 600, color: '#f0f6fc' }}>
+            Screenshots{hasScreenshots ? ` (${screenshots.length})` : ''}
+          </div>
+          {hasScreenshots && (
+            <button
+              onClick={clearAll}
+              title="Remove all screenshots from this session"
+              style={{
+                padding: '4px 8px',
+                fontSize: 11,
+                border: 'none',
+                borderRadius: 4,
+                cursor: 'pointer',
+                background: 'rgba(255,255,255,0.06)',
+                color: '#8b949e',
+              }}
+            >
+              Clear
+            </button>
+          )}
         </div>
         <button
           onClick={capture}
@@ -135,22 +198,27 @@ function ScreenshotsPanel() {
           </div>
         )}
 
-        {imageDataUrl ? (
+        {selected ? (
           <div>
             {/* Preview */}
             <img
-              src={imageDataUrl}
+              src={selected.dataUrl}
               style={{
                 width: '100%',
                 borderRadius: 6,
                 border: '1px solid rgba(255,255,255,0.06)',
-                marginBottom: 10,
+                marginBottom: 6,
+                display: 'block',
               }}
               alt="Terminal screenshot"
             />
+            <div style={{ fontSize: 11, color: '#8b949e', marginBottom: 10 }}>
+              {formatTimestamp(selected.timestamp)}
+              {selected.source === 'mcp' && selected.selector ? ` · ${selected.selector}` : ''}
+            </div>
 
             {/* Action buttons */}
-            <div style={{ display: 'flex', gap: 8 }}>
+            <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
               <button
                 onClick={copyToClipboard}
                 style={{
@@ -182,6 +250,37 @@ function ScreenshotsPanel() {
                 Download
               </button>
             </div>
+
+            {/* History grid */}
+            {screenshots.length > 1 && (
+              <div>
+                <div style={{
+                  fontSize: 11,
+                  fontWeight: 600,
+                  color: '#8b949e',
+                  textTransform: 'uppercase',
+                  letterSpacing: 0.5,
+                  marginBottom: 6,
+                }}>
+                  History
+                </div>
+                <div style={{
+                  display: 'grid',
+                  gridTemplateColumns: 'repeat(auto-fill, minmax(72px, 1fr))',
+                  gap: 6,
+                }}>
+                  {screenshots.map((s) => (
+                    <Thumbnail
+                      key={s.id}
+                      item={s}
+                      isSelected={s.id === selectedId}
+                      onSelect={() => setSelectedId(s.id)}
+                      onRemove={() => removeScreenshot(s.id)}
+                    />
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
         ) : (
           <div style={{
@@ -194,6 +293,66 @@ function ScreenshotsPanel() {
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+function Thumbnail({ item, isSelected, onSelect, onRemove }) {
+  const [hover, setHover] = useState(false);
+  return (
+    <div
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      onClick={onSelect}
+      title={formatTimestamp(item.timestamp) + (item.selector ? ` · ${item.selector}` : '')}
+      style={{
+        position: 'relative',
+        aspectRatio: '4 / 3',
+        borderRadius: 4,
+        overflow: 'hidden',
+        cursor: 'pointer',
+        border: `2px solid ${isSelected ? '#58a6ff' : 'rgba(255,255,255,0.08)'}`,
+        background: '#0d1117',
+      }}
+    >
+      <img
+        src={item.dataUrl}
+        alt=""
+        style={{
+          width: '100%',
+          height: '100%',
+          objectFit: 'cover',
+          display: 'block',
+          opacity: isSelected ? 1 : 0.85,
+        }}
+      />
+      {hover && (
+        <button
+          onClick={(e) => { e.stopPropagation(); onRemove(); }}
+          title="Remove"
+          style={{
+            position: 'absolute',
+            top: 2,
+            right: 2,
+            width: 18,
+            height: 18,
+            padding: 0,
+            border: 'none',
+            borderRadius: '50%',
+            cursor: 'pointer',
+            background: 'rgba(0,0,0,0.7)',
+            color: '#fff',
+            fontSize: 12,
+            lineHeight: '18px',
+            textAlign: 'center',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+          }}
+        >
+          ×
+        </button>
+      )}
     </div>
   );
 }
