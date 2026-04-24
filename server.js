@@ -240,7 +240,7 @@ Issue description:
 
 Please read the issue carefully, understand the codebase context, and implement the changes needed.`;
 
-const AGENT_TYPES = ['claude', 'hermes', 'opencode', 'gemini'];
+const AGENT_TYPES = ['claude', 'hermes', 'opencode', 'gemini', 'pi'];
 
 function validateConfigTab(t) {
   const type = t.type || 'terminal';
@@ -283,7 +283,7 @@ const SETTINGS_SCHEMA = [
   { name: 'overviewModeEnabled',        type: 'boolean', default: true },
   { name: 'overviewModeShortcut',       type: 'string',  default: 'Meta+o' },
   { name: 'overviewDefaultLayout',      type: 'enum',    default: 'tall', values: ['tall', 'tiled'] },
-  { name: 'enabledAgents',              type: 'array',   default: ['claude', 'hermes', 'opencode'],
+  { name: 'enabledAgents',              type: 'array',   default: ['claude', 'hermes', 'opencode', 'pi'],
     itemEnum: AGENT_TYPES, nonEmpty: true, broadcast: false,
     sideEffect: (val, s) => { s.defaultAgent = val[0]; },
     logValue: v => v.join(',') },
@@ -291,6 +291,7 @@ const SETTINGS_SCHEMA = [
   { name: 'hermesBinary',               type: 'string',  default: 'hermes',   fallbackOnEmpty: true, broadcast: false },
   { name: 'opencodeBinary',             type: 'string',  default: 'opencode', fallbackOnEmpty: true, broadcast: false },
   { name: 'geminiBinary',               type: 'string',  default: 'gemini',   fallbackOnEmpty: true, broadcast: false },
+  { name: 'piBinary',                   type: 'string',  default: 'pi',       fallbackOnEmpty: true, broadcast: false },
   { name: 'symlinkWorktreeSettings',    type: 'boolean', default: false },
   { name: 'windowConfigs',              type: 'custom',  default: [],
     sanitize: sanitizeWindowConfigs,
@@ -655,6 +656,7 @@ function spawnSession(eng, id, agentType, args, cwd, { cols = 120, rows = 40, en
   const bin = agentType === 'claude' ? 'claude'
     : agentType === 'hermes' ? (settings.hermesBinary || 'hermes')
     : agentType === 'opencode' ? (settings.opencodeBinary || 'opencode')
+    : agentType === 'pi' ? (settings.piBinary || 'pi')
     : (settings.geminiBinary || 'gemini');
   const quoted = args.map(a => `'${a.replace(/'/g, "'\\''")}'`).join(' ');
   eng.spawn(id, 'zsh', ['-l', '-c', `${bin} ${quoted}`], cwd, { cols, rows, env });
@@ -710,6 +712,16 @@ const AGENT_CONFIGS = {
     resumeFlag: '--session', // uses --session ID --continue
     resumeDefault: '--continue'
   },
+  pi: {
+    supportsWorktree: false,
+    supportsSessionId: false,    // pi generates its own UUIDs; we isolate storage via --session-dir instead
+    supportsSessionWatch: false,
+    emitsBel: false,             // OSC 133 bytes are framing, not idle — 2s silence timer handles idle
+    exitMethod: 'sigterm',       // Ctrl+C cancels the current turn, not pi itself; SIGTERM is its graceful signal
+    initialPromptDelay: 3000,
+    resumeFlag: '-c',
+    resumeDefault: '-c'
+  },
   terminal: {
     supportsWorktree: false,
     supportsSessionId: false,
@@ -736,6 +748,15 @@ function mcpConfigArgs(agentType, shellId) {
   })];
 }
 
+// Per-shell session dir for pi. Isolates each tab's session JSONL so `-c`
+// (continue newest) always finds the right one without UUID tracking.
+function piSessionDirArgs(agentType, shellId) {
+  if (agentType !== 'pi' || !shellId) return [];
+  const dir = path.join(os.homedir(), '.deepsteve', 'pi-sessions', shellId);
+  try { fs.mkdirSync(dir, { recursive: true }); } catch {}
+  return ['--session-dir', dir];
+}
+
 function getSpawnArgs(agentType, { sessionId, planMode, worktree, shellId }) {
   const config = getAgentConfig(agentType);
   const args = [];
@@ -753,6 +774,7 @@ function getSpawnArgs(agentType, { sessionId, planMode, worktree, shellId }) {
   }
 
   args.push(...mcpConfigArgs(agentType, shellId));
+  args.push(...piSessionDirArgs(agentType, shellId));
 
   return args;
 }
@@ -780,6 +802,7 @@ function getResumeArgs(agentType, { sessionId, planMode, worktree, shellId }) {
   }
 
   args.push(...mcpConfigArgs(agentType, shellId));
+  args.push(...piSessionDirArgs(agentType, shellId));
 
   return args;
 }
@@ -1133,6 +1156,9 @@ function killShell(entry, id) {
   if (config.exitMethod === 'ctrl-c') {
     // Agent just needs Ctrl+C (OpenCode, Gemini)
     try { eng.write(id, '\x03'); } catch {}
+  } else if (config.exitMethod === 'sigterm') {
+    // pi: SIGTERM triggers its graceful shutdown handler. Ctrl+C is "cancel turn," not quit.
+    try { eng.kill(id, 'SIGTERM'); } catch {}
   } else if (config.exitMethod === 'exit-cmd') {
     // Agent supports /exit command (Claude)
     if (entry.waitingForInput) {
@@ -1724,6 +1750,14 @@ app.get('/api/agents', (req, res) => {
   } catch {}
   // Auto-enable available agents
   agents.push({ id: 'gemini', name: 'Gemini (experimental)', shortName: 'Gem', available: geminiAvailable, enabled: geminiAvailable, isDefault: defaultAgent === 'gemini' });
+  // Check if pi is installed
+  let piAvailable = false;
+  try {
+    const bin = settings.piBinary || 'pi';
+    execSync(`zsh -l -c 'which ${bin}'`, { timeout: 5000, stdio: 'pipe' });
+    piAvailable = true;
+  } catch {}
+  agents.push({ id: 'pi', name: 'Pi (experimental)', shortName: 'Pi', available: piAvailable, enabled: piAvailable, isDefault: defaultAgent === 'pi' });
   res.json({ agents, defaultAgent });
 });
 
