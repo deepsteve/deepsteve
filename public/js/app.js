@@ -1961,8 +1961,8 @@ function createDisplayTab(id, name, opts = {}) {
       ModManager.notifySessionsChanged(getSessionList());
       onOverviewTabsReordered(orderedIds);
     },
-    getLiveWindows: () => [],
-    onSendToWindow: () => {},
+    getLiveWindows: () => WindowManager.getLiveWindows(),
+    onSendToWindow: (sessionId, targetWindowId) => sendToWindow(sessionId, targetWindowId),
     onFork: () => {},
     getSessionType: () => 'display-tab',
     getModMenuItems: () => [],
@@ -2287,6 +2287,7 @@ async function sendToWindow(id, targetWindowId) {
   try {
     await WindowManager.sendSessionToWindow(targetWindowId, {
       id,
+      type: session.type || 'terminal',
       cwd: session.cwd,
       name: session.name
     });
@@ -2296,10 +2297,11 @@ async function sendToWindow(id, targetWindowId) {
     return;
   }
 
-  // Ack received — clean up locally (no server DELETE — shell stays alive for 30s grace period)
+  // Ack received — clean up locally (no server DELETE — shell stays alive for 30s grace period;
+  // display-tab HTML stays on disk so the target window can fetch it)
   if (session.resizeObserver) session.resizeObserver.disconnect();
-  session.ws.close();
-  session.term.dispose();
+  if (session.ws) session.ws.close();
+  if (session.term) session.term.dispose();
   session.container.remove();
 
   // Compute adjacent tab BEFORE removing from DOM
@@ -3372,7 +3374,11 @@ async function init() {
 
   // Handle sessions sent from other windows
   WindowManager.onSessionReceived((session) => {
-    createSession(session.cwd, session.id, false, { name: session.name, allowDuplicate: true });
+    if (session.type === 'display-tab') {
+      createDisplayTab(session.id, session.name);
+    } else {
+      createSession(session.cwd, session.id, false, { name: session.name, allowDuplicate: true });
+    }
   });
 
   // Handle focus-session requests from other windows
