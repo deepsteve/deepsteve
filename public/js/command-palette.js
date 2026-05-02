@@ -16,6 +16,7 @@ let input = null;
 let list = null;
 let items = [];
 let selectedIndex = 0;
+let hasMouseMoved = false;
 
 function parseShortcut(str) {
   const parts = str.split('+');
@@ -201,6 +202,7 @@ async function executeCommand(cmd) {
 async function open() {
   if (isOpen) return;
   isOpen = true;
+  hasMouseMoved = false;
 
   // Fetch commands and automations from server in parallel
   let serverCommands = [];
@@ -265,6 +267,9 @@ async function open() {
   overlay.addEventListener('click', (e) => {
     if (e.target === overlay) close();
   });
+  overlay.addEventListener('mousemove', () => {
+    hasMouseMoved = true;
+  }, { once: true });
 
   const palette = document.createElement('div');
   palette.className = 'command-palette';
@@ -299,6 +304,9 @@ async function open() {
 
     el.addEventListener('click', () => executeCommand(cmd));
     el.addEventListener('mouseenter', () => {
+      // Ignore hover until the user has actually moved the mouse — opening via
+      // keyboard shouldn't let a stationary cursor override the default selection.
+      if (!hasMouseMoved) return;
       const visible = getVisibleItems();
       const visIdx = visible.indexOf(el);
       if (visIdx >= 0) {
@@ -333,6 +341,7 @@ function close() {
   list = null;
   items = [];
   selectedIndex = 0;
+  hasMouseMoved = false;
   callbacks.focusTerminal?.();
 }
 
