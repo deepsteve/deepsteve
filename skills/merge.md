@@ -7,23 +7,33 @@ The user wants to merge their current worktree's branch into the `main` branch.
 
 Steps:
 
-1. **Detect if in a worktree**: Run `git rev-parse --git-common-dir` and `git rev-parse --git-dir` and compare their resolved absolute paths. If they resolve to the same directory, you are NOT in a worktree — instead of merging, commit any uncommitted changes and push to the remote. Then stop (skip all remaining steps).
+1. **Gather state in one shot**: Run this single bash invocation and parse the four `key=value` lines from its output. Use the resulting `branch`, `main_path`, `in_worktree`, and `dirty` values for the rest of the steps.
 
-2. **Get the current branch name**: Run `git branch --show-current`.
+   ```sh
+   common=$(git rev-parse --git-common-dir)
+   gitdir=$(git rev-parse --git-dir)
+   [ "$(cd "$gitdir" && pwd)" = "$(cd "$common" && pwd)" ] && echo "in_worktree=false" || echo "in_worktree=true"
+   echo "branch=$(git branch --show-current)"
+   echo "main_path=$(dirname "$(cd "$common" && pwd)")"
+   echo "dirty=$(git status --porcelain | wc -l | tr -d ' ')"
+   ```
 
-3. **Find the main worktree path**: Run `dirname "$(git rev-parse --git-common-dir)"` — this outputs the main repo path (e.g. `/path/to/repo`).
+2. **Derive the commit subject** (used in steps 3 and 4):
+   - If `branch` matches `*github-issue-<n>*`: run `gh issue view <n> --json title -q .title` to fetch the current title. Subject is `<title> (#<n>)`. If `gh` fails, fall back to the next bullet.
+   - Otherwise: subject is `Merge <branch> into main`.
+   - Do NOT include a `Co-Authored-By` trailer.
 
-4. **Commit any uncommitted changes**: Run `git status --porcelain` in the current worktree. If there are uncommitted changes, stage them with `git add -A` and commit with a message derived from the branch name (e.g. for branch `worktree-github-issue-230`, use "Fix restart prompt only shows in active window (#230)"). Use the GitHub issue title if the branch contains an issue number. Include the `Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>` trailer.
+3. **If `in_worktree=false`**: This is not a worktree session. If `dirty>0`, run `git add -A && git commit -m "<subject>" && git push` in a single bash invocation. If `dirty=0`, run `git push`. Then stop (skip all remaining steps).
 
-5. **Merge**: Run `git -C <main-worktree-path> merge <branch-name> --no-edit` to merge the worktree branch into main from the main worktree's directory. Do NOT use `git checkout main` — main is checked out in a different worktree.
+4. **Auto-commit dirty changes (worktree path)**: If `dirty>0`, run `git add -A && git commit -m "<subject>"`.
+
+5. **Merge**: Run `git -C <main_path> merge <branch> --no-edit` to merge the worktree branch into main from the main worktree's directory. Do NOT use `git checkout main` — main is checked out in a different worktree.
 
 6. **Handle the result**:
    - **Success**: Tell the user the branch was successfully merged into main. Show the merge output. Then continue to steps 7 and 8.
-   - **Conflict**: Run `git -C <main-worktree-path> merge --abort` to leave main clean. Then rebase the worktree branch onto main (`git rebase main`), resolve any conflicts, and retry the merge from step 5. If the rebase itself fails with conflicts you cannot resolve, abort the rebase (`git rebase --abort`), tell the user, and STOP.
+   - **Conflict**: Run `git -C <main_path> merge --abort` to leave main clean. Then rebase the worktree branch onto main (`git rebase main`), resolve any conflicts, and retry the merge from step 5. If the rebase itself fails with conflicts you cannot resolve, abort the rebase (`git rebase --abort`), tell the user, and STOP.
    - **Other failure**: Show the error output to the user. STOP here — do not proceed to steps 7 or 8.
 
-7. **Close the GitHub issue** (success only): Extract the issue number from the branch name obtained in step 2. If the branch name matches the pattern `*github-issue-<number>*`, run `gh issue close <number> --comment "Merged into main."`. If the branch name doesn't match this pattern, skip this step silently.
+7. **Close the GitHub issue** (success only): If `branch` matches `*github-issue-<n>*`, run `gh issue close <n> --comment "Merged into main."`. Otherwise skip silently.
 
-8. **Close this terminal and add a testing task** (after successful merge): Call BOTH of these in parallel in the SAME tool-use message — this is critical so that rejecting `add_task` cannot prevent the close:
-   - `mcp__deepsteve__close_session` with no arguments — it auto-detects the calling session
-   - `mcp__deepsteve__add_task` to create a task for the human to manually test the change. The title should be short, e.g. "Test: <feature/fix summary>". The description should contain clear, actionable steps to verify the change works, written as a numbered list. Set priority to "medium" (or "high" if the change is risky or touches core functionality). Set `session_tag` to the branch name from step 2.
+8. **Close this terminal** (success only): Call `mcp__deepsteve__close_session` with no arguments — it auto-detects the calling session.
