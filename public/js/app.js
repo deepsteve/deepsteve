@@ -1084,8 +1084,12 @@ settingsBtn?.addEventListener('click', async () => {
       configsContainer.appendChild(row);
     }
     configsContainer.querySelectorAll('.config-delete-btn').forEach(btn => {
-      btn.onclick = () => {
+      btn.onclick = async () => {
         const idx = Number(btn.dataset.idx);
+        const config = editingConfigs[idx];
+        if (!config) return;
+        const ok = await showDeleteConfigConfirmDialog(config.name);
+        if (!ok) return;
         editingConfigs.splice(idx, 1);
         renderConfigsList();
       };
@@ -2170,6 +2174,29 @@ function showCloseDisplayTabDialog() {
     const cleanup = (result) => { overlay.remove(); resolve(result); };
     overlay.querySelector('#close-display-cancel').onclick = () => cleanup(false);
     overlay.querySelector('#close-display-ok').onclick = () => cleanup(true);
+    overlay.onclick = (e) => { if (e.target === overlay) cleanup(false); };
+  });
+}
+
+function showDeleteConfigConfirmDialog(name) {
+  return new Promise(resolve => {
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay';
+    overlay.style.zIndex = '1002';
+    overlay.innerHTML = `
+      <div class="modal">
+        <h2>Delete workspace config?</h2>
+        <p style="font-size:13px;color:var(--ds-text-secondary);margin-bottom:16px;">"${escapeHtml(name)}" will be removed when you save settings.</p>
+        <div class="modal-buttons">
+          <button class="btn-secondary" id="delete-config-cancel">Cancel</button>
+          <button class="btn-danger" id="delete-config-ok">Delete</button>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+
+    const cleanup = (result) => { overlay.remove(); resolve(result); };
+    overlay.querySelector('#delete-config-cancel').onclick = () => cleanup(false);
+    overlay.querySelector('#delete-config-ok').onclick = () => cleanup(true);
     overlay.onclick = (e) => { if (e.target === overlay) cleanup(false); };
   });
 }
