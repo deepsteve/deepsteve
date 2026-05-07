@@ -1090,6 +1090,21 @@ settingsBtn?.addEventListener('click', async () => {
         if (!config) return;
         const ok = await showDeleteConfigConfirmDialog(config.name);
         if (!ok) return;
+        // Configs added in this modal session and not yet saved have id === '',
+        // so skip the server call and just remove them locally.
+        if (config.id) {
+          try {
+            const resp = await fetch(`/api/window-configs/${config.id}`, { method: 'DELETE' });
+            if (!resp.ok) {
+              const err = await resp.json().catch(() => ({}));
+              alert(`Delete failed: ${err.error || resp.statusText}`);
+              return;
+            }
+          } catch (e) {
+            alert(`Delete failed: ${e.message}`);
+            return;
+          }
+        }
         editingConfigs.splice(idx, 1);
         renderConfigsList();
       };
@@ -2186,7 +2201,7 @@ function showDeleteConfigConfirmDialog(name) {
     overlay.innerHTML = `
       <div class="modal">
         <h2>Delete workspace config?</h2>
-        <p style="font-size:13px;color:var(--ds-text-secondary);margin-bottom:16px;">"${escapeHtml(name)}" will be removed when you save settings.</p>
+        <p style="font-size:13px;color:var(--ds-text-secondary);margin-bottom:16px;">"${escapeHtml(name)}" will be permanently removed.</p>
         <div class="modal-buttons">
           <button class="btn-secondary" id="delete-config-cancel">Cancel</button>
           <button class="btn-danger" id="delete-config-ok">Delete</button>
