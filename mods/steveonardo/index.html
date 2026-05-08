@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Steveonardo</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; background: #0f0f23; color: #e0e0e0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+  body { display: flex; flex-direction: column; user-select: none; }
+
+  .toolbar {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 10px;
+    background: #16213e;
+    border-bottom: 1px solid #2a2a4a;
+    flex-shrink: 0;
+    flex-wrap: wrap;
+  }
+  .group { display: flex; align-items: center; gap: 4px; }
+  .sep {
+    width: 1px;
+    height: 22px;
+    background: #2a2a4a;
+    margin: 0 4px;
+  }
+  button {
+    background: #2a2a4a;
+    border: 1px solid #3a3a5a;
+    border-radius: 4px;
+    color: #e0e0e0;
+    padding: 5px 10px;
+    cursor: pointer;
+    font-size: 13px;
+    font-family: inherit;
+  }
+  button:hover:not(:disabled) { background: #3a3a5a; }
+  button:disabled { opacity: 0.4; cursor: default; }
+  button.active {
+    background: #4a8aff;
+    border-color: #6aa8ff;
+    color: white;
+  }
+  button.fg.active { background: #2a8a4a; border-color: #4aaa6a; }
+  button.bg.active { background: #aa4040; border-color: #cc6060; }
+  .status {
+    margin-left: auto;
+    font-size: 12px;
+    color: #8a8aaa;
+    font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 50%;
+  }
+
+  #stage {
+    flex: 1;
+    position: relative;
+    overflow: hidden;
+    background:
+      linear-gradient(45deg, #1a1a2e 25%, transparent 25%) 0 0 / 20px 20px,
+      linear-gradient(-45deg, #1a1a2e 25%, transparent 25%) 0 0 / 20px 20px,
+      linear-gradient(45deg, transparent 75%, #1a1a2e 75%) 10px 10px / 20px 20px,
+      linear-gradient(-45deg, transparent 75%, #1a1a2e 75%) 10px 10px / 20px 20px,
+      #14142a;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  #stage.drag-over {
+    outline: 2px dashed #6aa8ff;
+    outline-offset: -8px;
+  }
+  .canvas-wrap {
+    position: relative;
+    max-width: 100%;
+    max-height: 100%;
+  }
+  #image, #overlay {
+    display: block;
+    max-width: 100%;
+    max-height: 100%;
+    width: auto;
+    height: auto;
+    object-fit: contain;
+  }
+  #overlay {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+  }
+  #drop-hint {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-direction: column;
+    gap: 8px;
+    color: #6a6a8a;
+    font-size: 14px;
+    pointer-events: none;
+    text-align: center;
+    padding: 20px;
+  }
+  #drop-hint .big { font-size: 18px; color: #8a8aaa; }
+  #drop-hint .kbd {
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    background: #1a1a2e;
+    border: 1px solid #2a2a4a;
+    padding: 2px 6px;
+    border-radius: 3px;
+    font-size: 12px;
+  }
+
+  #toast {
+    position: fixed;
+    bottom: 20px;
+    left: 50%;
+    transform: translateX(-50%) translateY(20px);
+    background: #1a1a2e;
+    border: 1px solid #4a4a8a;
+    color: #e0e0e0;
+    padding: 8px 16px;
+    border-radius: 6px;
+    font-size: 13px;
+    opacity: 0;
+    transition: opacity 0.2s, transform 0.2s;
+    pointer-events: none;
+    z-index: 100;
+  }
+  #toast.visible {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0);
+  }
+</style>
+</head>
+<body>
+  <div class="toolbar">
+    <div class="group">
+      <button id="btn-load" title="Load image from disk">Load</button>
+      <button id="btn-paste" title="Paste image from clipboard">Paste</button>
+      <button id="btn-copy" title="Copy canvas to clipboard">Copy</button>
+      <button id="btn-undo" title="Undo (Ctrl+Z)">Undo</button>
+    </div>
+    <div class="sep"></div>
+    <div class="group">
+      <button id="mode-fg" class="fg" title="Mark foreground points">+ Foreground</button>
+      <button id="mode-bg" class="bg" title="Mark background points">− Background</button>
+      <button id="btn-clear-points" title="Clear current points">Clear</button>
+      <button id="btn-apply" title="Crop image to current mask">Apply mask</button>
+    </div>
+    <div id="status" class="status">Initializing…</div>
+  </div>
+
+  <div id="stage">
+    <div class="canvas-wrap">
+      <canvas id="image" width="0" height="0"></canvas>
+      <canvas id="overlay" width="0" height="0"></canvas>
+    </div>
+    <div id="drop-hint">
+      <div class="big">Drop an image here</div>
+      <div>or paste with <span class="kbd">Ctrl/⌘+V</span> · undo with <span class="kbd">Ctrl/⌘+Z</span> · right-click to copy</div>
+    </div>
+  </div>
+
+  <div id="toast"></div>
+
+  <input type="file" id="file-input" accept="image/*" style="display:none">
+
+  <!-- ONNX Runtime Web — pinned, served from jsDelivr; the matching .wasm
+       binaries are auto-resolved relative to the script URL. -->
+  <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.20.1/dist/ort.min.js" crossorigin="anonymous"></script>
+  <script type="module" src="./editor.js"></script>
+</body>
+</html>

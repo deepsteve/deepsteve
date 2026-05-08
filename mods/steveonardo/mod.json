@@ -1,0 +1,10 @@
+{
+  "name": "Steveonardo",
+  "version": "0.1.0",
+  "description": "In-browser image editor: drag-drop, paste, copy, 10-step undo, and SAM2 click-prompt segmentation via ONNX Runtime Web.",
+  "enabledByDefault": false,
+  "entry": "index.html",
+  "display": "tab",
+  "tabOption": { "label": "Steveonardo" },
+  "tools": []
+}
