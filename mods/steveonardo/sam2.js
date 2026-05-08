@@ -1,23 +1,29 @@
-// SAM2 click-prompt segmentation in the browser via ONNX Runtime Web.
+// SAM2.1 click-prompt segmentation in the browser via ONNX Runtime Web.
 //
-// The encoder runs once per image (~hundreds of MB of compute, slow on first call).
-// The decoder runs per click (cheap). Models are cached in the Cache API so the
-// 50–60 MB download is paid only once per browser/origin.
+// Uses the quantized uint8 export from `onnx-community/sam2.1-hiera-tiny-ONNX`,
+// mirrored to the deepsteve R2 bucket. The fp32 fp32 hiera-tiny encoder we
+// shipped first (134 MB) failed to instantiate in Firefox WASM with an opaque
+// raw pointer error; the uint8 quantized encoder is ~53 MB and loads fine.
+//
+// Each session needs two files: a small .onnx graph + a sibling .onnx_data
+// blob holding the externalized weights. ORT-Web wires them up via the
+// `externalData` session option.
 //
 // `ort` is expected to be loaded as a global via the <script> tag in index.html.
 
+const MODEL_BASE = 'https://models.deepsteve.com/models/sam2.1-hiera-tiny-uint8/';
 const MODELS = {
-  encoder: 'https://models.deepsteve.com/models/sam2/sam2_hiera_tiny.encoder.onnx',
-  decoder: 'https://models.deepsteve.com/models/sam2/sam2_hiera_tiny.decoder.onnx',
+  encoder: { graph: 'vision_encoder_uint8.onnx', data: 'vision_encoder_uint8.onnx_data' },
+  decoder: { graph: 'prompt_encoder_mask_decoder_uint8.onnx', data: 'prompt_encoder_mask_decoder_uint8.onnx_data' },
 };
 
-// Bump this to invalidate cached weights (e.g. after re-uploading models).
-const CACHE_NAME = 'steveonardo-models-v1';
+// Bump when re-uploading models to invalidate the Cache API.
+const CACHE_NAME = 'steveonardo-models-v2';
 
 // SAM2 hiera-tiny operates on 1024×1024 inputs.
 const SAM2_INPUT_SIZE = 1024;
 
-// ImageNet normalization (the SAM2 export expects this preprocessing).
+// ImageNet normalization (matches preprocessor_config.json on HuggingFace).
 const MEAN = [0.485, 0.456, 0.406];
 const STD = [0.229, 0.224, 0.225];
 
@@ -48,46 +54,34 @@ async function fetchWithCache(url, onProgress) {
   let off = 0;
   for (const c of chunks) { buf.set(c, off); off += c.length; }
 
-  // Persist for next time. Use a fresh Response — the original was consumed.
   await cache.put(url, new Response(buf, {
-    headers: {
-      'content-type': 'application/octet-stream',
-      'content-length': String(loaded),
-    },
+    headers: { 'content-type': 'application/octet-stream', 'content-length': String(loaded) },
   }));
 
   return buf.buffer;
 }
 
-// Find the input/output name in `names` that contains any of the keywords.
-// SAM2 ONNX exports vary slightly between authors; this lets us tolerate that.
-function pickName(names, ...keywords) {
-  for (const kw of keywords) {
-    const hit = names.find(n => n.toLowerCase().includes(kw));
-    if (hit) return hit;
-  }
-  return null;
-}
-
-function mapDecoderInputs(names) {
-  const get = (...kw) => pickName(names, ...kw);
-  return {
-    imageEmbed: get('image_embed', 'image_embeddings'),
-    feats0: get('high_res_feats_0', 'high_res_features_0', 'high_res_feat0'),
-    feats1: get('high_res_feats_1', 'high_res_features_1', 'high_res_feat1'),
-    pointCoords: get('point_coord'),
-    pointLabels: get('point_label'),
-    maskInput: get('mask_input'),
-    hasMaskInput: get('has_mask'),
-    origImSize: get('orig_im_size', 'image_size'),
-  };
-}
-
-function mapDecoderOutputs(names) {
-  return {
-    masks: pickName(names, 'mask'),
-    iou: pickName(names, 'iou', 'score'),
-  };
+async function fetchModelPair(spec, onProgress) {
+  // Fetch graph and external-data files concurrently, reporting combined progress.
+  const graphUrl = MODEL_BASE + spec.graph;
+  const dataUrl = MODEL_BASE + spec.data;
+  let graphLoaded = 0, dataLoaded = 0, graphTotal = 0, dataTotal = 0;
+  const report = () => onProgress?.({
+    phase: 'download',
+    loaded: graphLoaded + dataLoaded,
+    total: graphTotal && dataTotal ? graphTotal + dataTotal : 0,
+  });
+  const [graph, data] = await Promise.all([
+    fetchWithCache(graphUrl, p => {
+      if (p.phase === 'cached') return onProgress?.(p);
+      graphLoaded = p.loaded; graphTotal = p.total; report();
+    }),
+    fetchWithCache(dataUrl, p => {
+      if (p.phase === 'cached') return;
+      dataLoaded = p.loaded; dataTotal = p.total; report();
+    }),
+  ]);
+  return { graph, data };
 }
 
 function letterboxToTensor(bitmap) {
@@ -110,7 +104,6 @@ function letterboxToTensor(bitmap) {
   const { data } = ctx.getImageData(0, 0, SAM2_INPUT_SIZE, SAM2_INPUT_SIZE);
   const planeSize = SAM2_INPUT_SIZE * SAM2_INPUT_SIZE;
   const out = new Float32Array(3 * planeSize);
-  // RGBA → CHW float, ImageNet-normalized.
   for (let i = 0, p = 0; i < data.length; i += 4, p++) {
     out[p] = (data[i] / 255 - MEAN[0]) / STD[0];
     out[p + planeSize] = (data[i + 1] / 255 - MEAN[1]) / STD[1];
@@ -123,25 +116,24 @@ function letterboxToTensor(bitmap) {
   };
 }
 
-// Map a click in canvas/image-space into the model's 1024-space.
 function mapPoint(p, t) {
   return [p.x * t.scale + t.padX, p.y * t.scale + t.padY];
 }
 
-// Decode the lowest-res mask (256×256, logits) into an image-space binary mask
-// drawn on a canvas matching the original image dimensions.
-function maskTensorToCanvas(maskTensor, transform) {
+// Render a 256×256 logit mask plane into a canvas at original-image dimensions.
+// The decoder produces a [1, 1, 3, 256, 256] tensor; pass which mask index to use.
+function maskPlaneToCanvas(maskTensor, planeIdx, transform) {
   const { dims, data } = maskTensor;
-  // dims: [1, num_masks, H, W] — pick the first mask plane.
   const maskH = dims[dims.length - 2];
   const maskW = dims[dims.length - 1];
+  const planeSize = maskH * maskW;
+  const offset = planeIdx * planeSize;
 
-  // Render the 256×256 logit mask into a canvas, then resample into image-space.
   const lo = new OffscreenCanvas(maskW, maskH);
   const lctx = lo.getContext('2d');
   const img = lctx.createImageData(maskW, maskH);
-  for (let i = 0; i < maskW * maskH; i++) {
-    const v = data[i] > 0 ? 255 : 0;
+  for (let i = 0; i < planeSize; i++) {
+    const v = data[offset + i] > 0 ? 255 : 0;
     img.data[i * 4] = v;
     img.data[i * 4 + 1] = v;
     img.data[i * 4 + 2] = v;
@@ -149,7 +141,6 @@ function maskTensorToCanvas(maskTensor, transform) {
   }
   lctx.putImageData(img, 0, 0);
 
-  // Crop the active (non-padded) region from the 1024-space, then upscale to image-space.
   const { scale, padX, padY, srcW, srcH } = transform;
   const activeW = Math.round(srcW * scale);
   const activeH = Math.round(srcH * scale);
@@ -172,111 +163,103 @@ export async function initSAM2(onProgress) {
 
   // Single-threaded WASM works without cross-origin isolation; SAB threads need COOP/COEP.
   ort.env.wasm.numThreads = 1;
-  // jsDelivr serves the matching .wasm assets next to ort.min.js automatically.
-  // wasmPaths is left at default unless overridden.
 
-  // ORT-Web throws raw heap pointers as errors — useless to surface in the UI.
-  // Turn on verbose logging so the underlying failure (op name, OOM, etc.)
-  // prints to the dev-tools console before the throw.
+  // Verbose ORT logs print the underlying init failure to console before any
+  // raw heap-pointer throw, which is the only diagnostic we get.
   ort.env.logLevel = 'verbose';
   ort.env.debug = true;
 
   onProgress?.({ stage: 'encoder-fetch' });
-  const encoderBuf = await fetchWithCache(MODELS.encoder, p => onProgress?.({ stage: 'encoder-fetch', ...p }));
+  const encParts = await fetchModelPair(MODELS.encoder, p => onProgress?.({ stage: 'encoder-fetch', ...p }));
   onProgress?.({ stage: 'encoder-init' });
-  const encoder = await createSession(encoderBuf, 'encoder');
+  const encoder = await createSession(encParts, MODELS.encoder.data, 'encoder');
 
   onProgress?.({ stage: 'decoder-fetch' });
-  const decoderBuf = await fetchWithCache(MODELS.decoder, p => onProgress?.({ stage: 'decoder-fetch', ...p }));
+  const decParts = await fetchModelPair(MODELS.decoder, p => onProgress?.({ stage: 'decoder-fetch', ...p }));
   onProgress?.({ stage: 'decoder-init' });
-  const decoder = await createSession(decoderBuf, 'decoder');
+  const decoder = await createSession(decParts, MODELS.decoder.data, 'decoder');
 
-  const decIn = mapDecoderInputs(decoder.inputNames);
-  const decOut = mapDecoderOutputs(decoder.outputNames);
-
-  let imageEmbed = null;
-  let feats0 = null;
-  let feats1 = null;
+  let embeds = null;  // { e0, e1, e2 }
   let transform = null;
 
   async function setImage(bitmap) {
     const { tensor, transform: t } = letterboxToTensor(bitmap);
-    const encoderInputName = encoder.inputNames[0];
-    const out = await encoder.run({ [encoderInputName]: tensor });
-    // Find embeddings + high-res features in the encoder output by name pattern.
-    const embedName = pickName(encoder.outputNames, 'image_embed', 'image_embeddings');
-    const f0Name = pickName(encoder.outputNames, 'high_res_feats_0', 'high_res_features_0');
-    const f1Name = pickName(encoder.outputNames, 'high_res_feats_1', 'high_res_features_1');
-    if (!embedName) throw new Error(`Could not find image embedding in encoder outputs: ${encoder.outputNames.join(', ')}`);
-    imageEmbed = out[embedName];
-    feats0 = f0Name ? out[f0Name] : null;
-    feats1 = f1Name ? out[f1Name] : null;
+    const out = await encoder.run({ pixel_values: tensor });
+    embeds = {
+      e0: out['image_embeddings.0'],
+      e1: out['image_embeddings.1'],
+      e2: out['image_embeddings.2'],
+    };
+    if (!embeds.e0 || !embeds.e1 || !embeds.e2) {
+      throw new Error(`Unexpected encoder outputs: ${encoder.outputNames.join(', ')}`);
+    }
     transform = t;
   }
 
   async function predict(points) {
-    if (!imageEmbed) throw new Error('setImage() must be called before predict()');
+    if (!embeds) throw new Error('setImage() must be called before predict()');
     if (points.length === 0) return null;
 
-    const coords = new Float32Array(points.length * 2);
-    const labels = new Float32Array(points.length);
+    const N = points.length;
+    const coords = new Float32Array(N * 2);
+    const labels = new BigInt64Array(N);
     points.forEach((p, i) => {
       const [mx, my] = mapPoint(p, transform);
       coords[i * 2] = mx;
       coords[i * 2 + 1] = my;
-      labels[i] = p.label;
+      labels[i] = BigInt(p.label);  // 1=foreground, 0=background
     });
 
-    const feeds = {};
-    if (decIn.imageEmbed) feeds[decIn.imageEmbed] = imageEmbed;
-    if (decIn.feats0 && feats0) feeds[decIn.feats0] = feats0;
-    if (decIn.feats1 && feats1) feeds[decIn.feats1] = feats1;
-    if (decIn.pointCoords) feeds[decIn.pointCoords] = new ort.Tensor('float32', coords, [1, points.length, 2]);
-    if (decIn.pointLabels) feeds[decIn.pointLabels] = new ort.Tensor('float32', labels, [1, points.length]);
-    if (decIn.maskInput) feeds[decIn.maskInput] = new ort.Tensor('float32', new Float32Array(256 * 256), [1, 1, 256, 256]);
-    if (decIn.hasMaskInput) feeds[decIn.hasMaskInput] = new ort.Tensor('float32', new Float32Array([0]), [1]);
-    if (decIn.origImSize) feeds[decIn.origImSize] = new ort.Tensor('float32', new Float32Array([SAM2_INPUT_SIZE, SAM2_INPUT_SIZE]), [2]);
-
-    const missing = decoder.inputNames.filter(n => !(n in feeds));
-    if (missing.length) {
-      // Tell the user which inputs we couldn't auto-fill so they can patch the
-      // mapping in mapDecoderInputs() rather than hit a cryptic ORT error.
-      console.warn('[SAM2] Decoder inputs not auto-mapped:', missing, 'Available:', decoder.inputNames);
-    }
+    const feeds = {
+      input_points: new ort.Tensor('float32', coords, [1, 1, N, 2]),
+      input_labels: new ort.Tensor('int64', labels, [1, 1, N]),
+      // The decoder requires input_boxes but interprets [1,1,4] zeros as a
+      // real box prompt at (0,0,0,0), which fights the click and tanks IoU.
+      // A zero-length [1,0,4] tensor is the correct "no box" sentinel.
+      input_boxes: new ort.Tensor('float32', new Float32Array(0), [1, 0, 4]),
+      'image_embeddings.0': embeds.e0,
+      'image_embeddings.1': embeds.e1,
+      'image_embeddings.2': embeds.e2,
+    };
 
     const out = await decoder.run(feeds);
-    const maskTensor = decOut.masks ? out[decOut.masks] : out[decoder.outputNames[0]];
-    return maskTensorToCanvas(maskTensor, transform);
+    const masks = out.pred_masks;     // [1, 1, 3, 256, 256]
+    const ious = out.iou_scores;      // [1, 1, 3]
+
+    // Pick the candidate with highest predicted IoU.
+    let bestIdx = 0, bestIou = -Infinity;
+    for (let k = 0; k < ious.data.length; k++) {
+      if (ious.data[k] > bestIou) { bestIou = ious.data[k]; bestIdx = k; }
+    }
+    return maskPlaneToCanvas(masks, bestIdx, transform);
   }
 
   function reset() {
-    imageEmbed = null;
-    feats0 = null;
-    feats1 = null;
+    embeds = null;
     transform = null;
   }
 
-  function isReady() { return imageEmbed !== null; }
+  function isReady() { return embeds !== null; }
 
   onProgress?.({ stage: 'ready' });
   return { setImage, predict, reset, isReady };
 }
 
-async function createSession(buf, label) {
-  // Try WebGPU first (Chrome/Edge/Safari recent), fall back to WASM. ORT
-  // throws if the requested EP isn't available, so we catch and retry.
-  const ctx = { model: label, bytes: buf.byteLength, ua: navigator.userAgent };
+async function createSession(parts, dataPath, label) {
+  const ctx = { model: label, graphBytes: parts.graph.byteLength, dataBytes: parts.data.byteLength, ua: navigator.userAgent };
+  const opts = {
+    executionProviders: ['webgpu', 'wasm'],
+    externalData: [{ data: parts.data, path: dataPath }],
+  };
   try {
-    return await ort.InferenceSession.create(buf, { executionProviders: ['webgpu', 'wasm'] });
+    return await ort.InferenceSession.create(parts.graph, opts);
   } catch (e) {
     console.warn('[SAM2] WebGPU init failed, falling back to WASM:', { ...ctx, message: decodeOrtError(e) || e.message });
     try {
-      return await ort.InferenceSession.create(buf, { executionProviders: ['wasm'] });
+      return await ort.InferenceSession.create(parts.graph, { ...opts, executionProviders: ['wasm'] });
     } catch (e2) {
       const decoded = decodeOrtError(e2);
       console.error('[SAM2] WASM init failed:', { ...ctx, message: decoded || e2.message });
-      // Rethrow with a real string so callers' describeError() surfaces it
-      // instead of the raw WASM heap pointer that ORT-Web hands back.
       if (decoded) throw new Error(`${label}: ${decoded}`);
       throw e2;
     }
@@ -315,7 +298,6 @@ function findOrtHeap() {
   for (const c of candidates) {
     if (c?.HEAPU8 instanceof Uint8Array) return c.HEAPU8;
   }
-  // Last resort: scan the ort module for any object with a HEAPU8 Uint8Array.
   if (ort) {
     for (const k of Object.keys(ort)) {
       const v = ort[k];
