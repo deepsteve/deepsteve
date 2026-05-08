@@ -178,12 +178,12 @@ export async function initSAM2(onProgress) {
   onProgress?.({ stage: 'encoder-fetch' });
   const encoderBuf = await fetchWithCache(MODELS.encoder, p => onProgress?.({ stage: 'encoder-fetch', ...p }));
   onProgress?.({ stage: 'encoder-init' });
-  const encoder = await createSession(encoderBuf);
+  const encoder = await createSession(encoderBuf, 'encoder');
 
   onProgress?.({ stage: 'decoder-fetch' });
   const decoderBuf = await fetchWithCache(MODELS.decoder, p => onProgress?.({ stage: 'decoder-fetch', ...p }));
   onProgress?.({ stage: 'decoder-init' });
-  const decoder = await createSession(decoderBuf);
+  const decoder = await createSession(decoderBuf, 'decoder');
 
   const decIn = mapDecoderInputs(decoder.inputNames);
   const decOut = mapDecoderOutputs(decoder.outputNames);
@@ -256,13 +256,42 @@ export async function initSAM2(onProgress) {
   return { setImage, predict, reset, isReady };
 }
 
-async function createSession(buf) {
+async function createSession(buf, label) {
   // Try WebGPU first (Chrome/Edge/Safari recent), fall back to WASM. ORT
   // throws if the requested EP isn't available, so we catch and retry.
+  const ctx = { model: label, bytes: buf.byteLength, ua: navigator.userAgent };
   try {
     return await ort.InferenceSession.create(buf, { executionProviders: ['webgpu', 'wasm'] });
   } catch (e) {
-    console.warn('[SAM2] WebGPU unavailable, falling back to WASM:', e.message);
-    return await ort.InferenceSession.create(buf, { executionProviders: ['wasm'] });
+    console.warn('[SAM2] WebGPU init failed, falling back to WASM:', { ...ctx, message: decodeOrtError(e) || e.message });
+    try {
+      return await ort.InferenceSession.create(buf, { executionProviders: ['wasm'] });
+    } catch (e2) {
+      const decoded = decodeOrtError(e2);
+      console.error('[SAM2] WASM init failed:', { ...ctx, message: decoded || e2.message });
+      // Rethrow with a real string so callers' describeError() surfaces it
+      // instead of the raw WASM heap pointer that ORT-Web hands back.
+      if (decoded) throw new Error(`${label}: ${decoded}`);
+      throw e2;
+    }
+  }
+}
+
+// ORT-Web throws errors whose .message is a numeric pointer into the WASM
+// linear memory rather than a string. Walk the heap from that offset to the
+// next NUL byte and decode as UTF-8. Returns null when the error isn't an
+// ORT pointer-message, or when the heap isn't reachable.
+export function decodeOrtError(e) {
+  if (!e || typeof e.message !== 'number') return null;
+  const wasm = globalThis.ort?.env?.wasm;
+  const heap = wasm?.HEAPU8 || wasm?.module?.HEAPU8;
+  if (!heap) return null;
+  try {
+    let end = e.message;
+    while (end < heap.length && heap[end] !== 0) end++;
+    const str = new TextDecoder().decode(heap.subarray(e.message, end));
+    return str || null;
+  } catch {
+    return null;
   }
 }
