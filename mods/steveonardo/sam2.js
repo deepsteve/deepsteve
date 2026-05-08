@@ -164,10 +164,11 @@ export async function initSAM2(onProgress) {
   // Single-threaded WASM works without cross-origin isolation; SAB threads need COOP/COEP.
   ort.env.wasm.numThreads = 1;
 
-  // Verbose ORT logs print the underlying init failure to console before any
-  // raw heap-pointer throw, which is the only diagnostic we get.
-  ort.env.logLevel = 'verbose';
-  ort.env.debug = true;
+  // Run inference in a Web Worker so the encoder (~6s) doesn't freeze the UI.
+  // The worker needs an absolute wasmPaths since its base URL differs from
+  // the iframe document.
+  ort.env.wasm.proxy = true;
+  ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.20.1/dist/';
 
   onProgress?.({ stage: 'encoder-fetch' });
   const encParts = await fetchModelPair(MODELS.encoder, p => onProgress?.({ stage: 'encoder-fetch', ...p }));
