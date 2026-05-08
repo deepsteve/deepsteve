@@ -9,8 +9,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends zsh curl && rm 
 
 # Stub out launchctl/systemctl — not available in Docker
 RUN printf '#!/bin/sh\nexit 0\n' > /usr/local/bin/launchctl && chmod +x /usr/local/bin/launchctl \
- && printf '#!/bin/sh\nexit 0\n' > /usr/local/bin/systemctl && chmod +x /usr/local/bin/systemctl \
- && curl -fsSL deepsteve.com/install.sh | bash
+ && printf '#!/bin/sh\nexit 0\n' > /usr/local/bin/systemctl && chmod +x /usr/local/bin/systemctl
+
+# Download install.sh and run as separate commands so curl failures (e.g. transient
+# DNS errors on CI runners) fail the build instead of silently piping empty input
+# to bash. Retry a few times to tolerate flaky resolvers.
+RUN for i in 1 2 3 4 5; do \
+      curl -fsSL --retry 3 --retry-delay 2 --retry-connrefused \
+           --connect-timeout 10 --max-time 60 \
+           deepsteve.com/install.sh -o /tmp/install.sh && break; \
+      echo "curl attempt $i failed, retrying..."; sleep 5; \
+    done \
+ && test -s /tmp/install.sh \
+ && bash /tmp/install.sh \
+ && test -s /root/.deepsteve/server.js
 
 WORKDIR /root/.deepsteve
 

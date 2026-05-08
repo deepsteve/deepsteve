@@ -12,7 +12,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends zsh curl && rm 
 COPY install.sh /tmp/install.sh
 RUN printf '#!/bin/sh\nexit 0\n' > /usr/local/bin/launchctl && chmod +x /usr/local/bin/launchctl \
  && printf '#!/bin/sh\nexit 0\n' > /usr/local/bin/systemctl && chmod +x /usr/local/bin/systemctl \
- && bash /tmp/install.sh
+ && bash /tmp/install.sh \
+ && test -s /root/.deepsteve/server.js
 
 WORKDIR /root/.deepsteve
 
