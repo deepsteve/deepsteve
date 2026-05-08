@@ -44,6 +44,7 @@
   }
   button.fg.active { background: #2a8a4a; border-color: #4aaa6a; }
   button.bg.active { background: #aa4040; border-color: #cc6060; }
+  button.box.active { background: #c98a18; border-color: #e6a72f; }
   .status {
     margin-left: auto;
     font-size: 12px;
@@ -159,7 +160,8 @@
     <div class="group">
       <button id="mode-fg" class="fg" title="Mark foreground points">+ Foreground</button>
       <button id="mode-bg" class="bg" title="Mark background points">− Background</button>
-      <button id="btn-clear-points" title="Clear current points">Clear</button>
+      <button id="mode-box" class="box" title="Drag a box around the object">⬚ Box</button>
+      <button id="btn-clear-points" title="Clear current points and box">Clear</button>
       <button id="btn-apply" title="Crop image to current mask">Apply mask</button>
     </div>
     <div id="status" class="status">Initializing…</div>

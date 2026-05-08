@@ -196,27 +196,41 @@ export async function initSAM2(onProgress) {
     transform = t;
   }
 
-  async function predict(points) {
+  async function predict(points, box) {
     if (!embeds) throw new Error('setImage() must be called before predict()');
-    if (points.length === 0) return null;
+    if (!points?.length && !box) return null;
 
-    const N = points.length;
+    // The decoder needs at least one entry in input_points; pad with a
+    // sentinel point (label = -1) when the prompt is box-only.
+    const pts = points?.length ? points : [{ x: 0, y: 0, label: -1 }];
+    const N = pts.length;
     const coords = new Float32Array(N * 2);
     const labels = new BigInt64Array(N);
-    points.forEach((p, i) => {
+    pts.forEach((p, i) => {
       const [mx, my] = mapPoint(p, transform);
       coords[i * 2] = mx;
       coords[i * 2 + 1] = my;
-      labels[i] = BigInt(p.label);  // 1=foreground, 0=background
+      labels[i] = BigInt(p.label);  // 1=fg, 0=bg, -1=padding/box-only
     });
+
+    // Box: corner-to-corner in 1024-space, shape [1,1,4]. Empty [1,0,4] when
+    // there is no box — passing [1,1,4] zeros gets read as a real box at the
+    // origin and tanks IoU.
+    let boxData, boxDims;
+    if (box) {
+      const [x1, y1] = mapPoint({ x: box.x1, y: box.y1 }, transform);
+      const [x2, y2] = mapPoint({ x: box.x2, y: box.y2 }, transform);
+      boxData = new Float32Array([x1, y1, x2, y2]);
+      boxDims = [1, 1, 4];
+    } else {
+      boxData = new Float32Array(0);
+      boxDims = [1, 0, 4];
+    }
 
     const feeds = {
       input_points: new ort.Tensor('float32', coords, [1, 1, N, 2]),
       input_labels: new ort.Tensor('int64', labels, [1, 1, N]),
-      // The decoder requires input_boxes but interprets [1,1,4] zeros as a
-      // real box prompt at (0,0,0,0), which fights the click and tanks IoU.
-      // A zero-length [1,0,4] tensor is the correct "no box" sentinel.
-      input_boxes: new ort.Tensor('float32', new Float32Array(0), [1, 0, 4]),
+      input_boxes: new ort.Tensor('float32', boxData, boxDims),
       'image_embeddings.0': embeds.e0,
       'image_embeddings.1': embeds.e1,
       'image_embeddings.2': embeds.e2,

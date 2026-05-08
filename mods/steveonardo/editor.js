@@ -15,6 +15,7 @@ const clearPtsBtn = document.getElementById('btn-clear-points');
 const applyBtn = document.getElementById('btn-apply');
 const modeFgBtn = document.getElementById('mode-fg');
 const modeBgBtn = document.getElementById('mode-bg');
+const modeBoxBtn = document.getElementById('mode-box');
 const fileInput = document.getElementById('file-input');
 
 const imageCtx = imageCanvas.getContext('2d');
@@ -23,8 +24,10 @@ const overlayCtx = overlayCanvas.getContext('2d');
 let undo = null;
 let sam2 = null;
 let sam2Ready = false;
-let mode = 'fg'; // 'fg' or 'bg'
+let mode = 'fg'; // 'fg' | 'bg' | 'box'
 let points = [];      // [{x, y, label}]  in bitmap-space
+let box = null;       // { x1, y1, x2, y2 } in bitmap-space, or null
+let dragBox = null;   // in-progress drag, same shape as `box`
 let lastMaskCanvas = null;
 
 function setStatus(text) { statusEl.textContent = text; }
@@ -40,6 +43,8 @@ function setMode(next) {
   mode = next;
   modeFgBtn.classList.toggle('active', mode === 'fg');
   modeBgBtn.classList.toggle('active', mode === 'bg');
+  modeBoxBtn.classList.toggle('active', mode === 'box');
+  stage.style.cursor = mode === 'box' ? 'crosshair' : '';
 }
 
 function hasImage() {
@@ -68,7 +73,7 @@ function updateButtons() {
   const ready = hasImage();
   copyBtn.disabled = !ready;
   applyBtn.disabled = !ready || !lastMaskCanvas;
-  clearPtsBtn.disabled = points.length === 0;
+  clearPtsBtn.disabled = points.length === 0 && !box;
 }
 
 function clearOverlay() {
@@ -85,6 +90,20 @@ function drawPoints() {
     overlayCtx.strokeStyle = 'rgba(0,0,0,0.6)';
     overlayCtx.stroke();
   }
+}
+
+function drawBox(b) {
+  if (!b) return;
+  const x = Math.min(b.x1, b.x2);
+  const y = Math.min(b.y1, b.y2);
+  const w = Math.abs(b.x2 - b.x1);
+  const h = Math.abs(b.y2 - b.y1);
+  overlayCtx.save();
+  overlayCtx.lineWidth = Math.max(2, imageCanvas.width / 400);
+  overlayCtx.strokeStyle = 'rgba(255, 200, 60, 0.95)';
+  overlayCtx.setLineDash([Math.max(6, imageCanvas.width / 120), Math.max(4, imageCanvas.width / 180)]);
+  overlayCtx.strokeRect(x, y, w, h);
+  overlayCtx.restore();
 }
 
 function drawMask(maskCanvas) {
@@ -105,6 +124,7 @@ function repaintOverlay() {
   clearOverlay();
   if (lastMaskCanvas) drawMask(lastMaskCanvas);
   else drawPoints();
+  drawBox(dragBox || box);
 }
 
 async function pushUndoSnapshot() {
@@ -121,6 +141,8 @@ async function loadBitmap(bitmap) {
   overlayCanvas.height = bitmap.height;
   imageCtx.drawImage(bitmap, 0, 0);
   points = [];
+  box = null;
+  dragBox = null;
   lastMaskCanvas = null;
   clearOverlay();
   dropHint.style.display = 'none';
@@ -228,6 +250,8 @@ async function doUndo() {
   overlayCanvas.height = bitmap.height;
   imageCtx.drawImage(bitmap, 0, 0);
   points = [];
+  box = null;
+  dragBox = null;
   lastMaskCanvas = null;
   clearOverlay();
   dropHint.style.display = 'none';
@@ -281,16 +305,99 @@ pasteBtn.addEventListener('click', async () => {
   }
 });
 
-// ─── SAM2 click prompts ────────────────────────────────────────────────────
+// ─── SAM2 click + box prompts ──────────────────────────────────────────────
 
 modeFgBtn.addEventListener('click', () => setMode('fg'));
 modeBgBtn.addEventListener('click', () => setMode('bg'));
+modeBoxBtn.addEventListener('click', () => setMode('box'));
 
 clearPtsBtn.addEventListener('click', () => {
   points = [];
+  box = null;
+  dragBox = null;
   lastMaskCanvas = null;
   clearOverlay();
   updateButtons();
+});
+
+// Translate a pointer event into bitmap-space coordinates on the image canvas,
+// or null if the event is outside the image.
+function eventToBitmap(e) {
+  const rect = imageCanvas.getBoundingClientRect();
+  if (e.clientX < rect.left || e.clientX > rect.right) return null;
+  if (e.clientY < rect.top || e.clientY > rect.bottom) return null;
+  return {
+    x: (e.clientX - rect.left) * (imageCanvas.width / rect.width),
+    y: (e.clientY - rect.top) * (imageCanvas.height / rect.height),
+  };
+}
+
+async function runDecoder() {
+  if (points.length === 0 && !box) {
+    lastMaskCanvas = null;
+    repaintOverlay();
+    updateButtons();
+    return;
+  }
+  setStatus('Running decoder…');
+  try {
+    const maskCanvas = await sam2.predict(points, box);
+    lastMaskCanvas = maskCanvas;
+    repaintOverlay();
+    setStatus('Mask updated. Refine with more clicks, or Apply to crop.');
+    updateButtons();
+  } catch (err) {
+    console.error(err);
+    setStatus('Decoder failed: ' + err.message);
+  }
+}
+
+// Box mode: drag a rectangle. Other modes: single click drops a point.
+let dragMode = null;  // 'box' while a box drag is in flight, else null
+
+stage.addEventListener('mousedown', e => {
+  if (!hasImage() || !sam2Ready) return;
+  if (mode !== 'box') return;
+  if (e.button !== 0) return;
+  const p = eventToBitmap(e);
+  if (!p) return;
+  e.preventDefault();
+  dragMode = 'box';
+  dragBox = { x1: p.x, y1: p.y, x2: p.x, y2: p.y };
+  repaintOverlay();
+});
+
+stage.addEventListener('mousemove', e => {
+  if (dragMode !== 'box') return;
+  const rect = imageCanvas.getBoundingClientRect();
+  // Allow drag past the edges; clamp to bitmap bounds.
+  const x = Math.min(Math.max((e.clientX - rect.left) * (imageCanvas.width / rect.width), 0), imageCanvas.width);
+  const y = Math.min(Math.max((e.clientY - rect.top) * (imageCanvas.height / rect.height), 0), imageCanvas.height);
+  dragBox.x2 = x;
+  dragBox.y2 = y;
+  repaintOverlay();
+});
+
+window.addEventListener('mouseup', async e => {
+  if (dragMode !== 'box') return;
+  dragMode = null;
+  const w = Math.abs(dragBox.x2 - dragBox.x1);
+  const h = Math.abs(dragBox.y2 - dragBox.y1);
+  // Treat tiny drags as accidental — discard rather than confuse the model.
+  if (w < 4 || h < 4) {
+    dragBox = null;
+    repaintOverlay();
+    return;
+  }
+  box = {
+    x1: Math.min(dragBox.x1, dragBox.x2),
+    y1: Math.min(dragBox.y1, dragBox.y2),
+    x2: Math.max(dragBox.x1, dragBox.x2),
+    y2: Math.max(dragBox.y1, dragBox.y2),
+  };
+  dragBox = null;
+  updateButtons();
+  await runDecoder();
 });
 
 stage.addEventListener('click', async e => {
@@ -299,26 +406,13 @@ stage.addEventListener('click', async e => {
     showToast('SAM2 still loading — try again in a moment');
     return;
   }
-  // Map the screen click to bitmap-space coordinates.
-  const rect = imageCanvas.getBoundingClientRect();
-  if (e.clientX < rect.left || e.clientX > rect.right) return;
-  if (e.clientY < rect.top || e.clientY > rect.bottom) return;
-  const x = (e.clientX - rect.left) * (imageCanvas.width / rect.width);
-  const y = (e.clientY - rect.top) * (imageCanvas.height / rect.height);
-  points.push({ x, y, label: mode === 'fg' ? 1 : 0 });
+  // Box mode swallows clicks via mousedown/mouseup; ignore here.
+  if (mode === 'box') return;
+  const p = eventToBitmap(e);
+  if (!p) return;
+  points.push({ x: p.x, y: p.y, label: mode === 'fg' ? 1 : 0 });
   updateButtons();
-
-  setStatus('Running decoder…');
-  try {
-    const maskCanvas = await sam2.predict(points);
-    lastMaskCanvas = maskCanvas;
-    repaintOverlay();
-    setStatus('Mask updated. Click again to refine, or Apply to crop.');
-    updateButtons();
-  } catch (err) {
-    console.error(err);
-    setStatus('Decoder failed: ' + err.message);
-  }
+  await runDecoder();
 });
 
 applyBtn.addEventListener('click', async () => {
@@ -330,6 +424,8 @@ applyBtn.addEventListener('click', async () => {
   imageCtx.drawImage(lastMaskCanvas, 0, 0);
   imageCtx.restore();
   points = [];
+  box = null;
+  dragBox = null;
   lastMaskCanvas = null;
   clearOverlay();
   updateButtons();
