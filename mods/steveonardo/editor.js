@@ -1,5 +1,5 @@
 import { createUndoStore } from './storage.js';
-import { initSAM2 } from './sam2.js';
+import { initSAM2, decodeOrtError } from './sam2.js';
 
 const imageCanvas = document.getElementById('image');
 const overlayCanvas = document.getElementById('overlay');
@@ -361,7 +361,9 @@ function getTabIdFromBridge() {
 function describeError(e) {
   if (!e) return 'unknown error';
   if (typeof e === 'string') return e;
-  if (e.message) return e.message;
+  const ortMsg = decodeOrtError(e);
+  if (ortMsg) return ortMsg;
+  if (e.message) return String(e.message);
   if (e.name) return e.name;
   try { return JSON.stringify(e); } catch { return String(e); }
 }
