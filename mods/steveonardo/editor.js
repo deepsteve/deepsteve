@@ -11,6 +11,8 @@ const undoBtn = document.getElementById('btn-undo');
 const loadBtn = document.getElementById('btn-load');
 const pasteBtn = document.getElementById('btn-paste');
 const copyBtn = document.getElementById('btn-copy');
+const newBtn = document.getElementById('btn-new');
+const saveBtn = document.getElementById('btn-save');
 const clearPtsBtn = document.getElementById('btn-clear-points');
 const applyBtn = document.getElementById('btn-apply');
 const deleteBtn = document.getElementById('btn-delete');
@@ -76,6 +78,8 @@ function updateButtons() {
   const ready = hasImage();
   const haveMask = !!lastMaskCanvas;
   copyBtn.disabled = !ready;
+  saveBtn.disabled = !ready;
+  newBtn.disabled = !ready;
   applyBtn.disabled = !ready || !haveMask;
   deleteBtn.disabled = !ready || !haveMask;
   invertBtn.disabled = !ready || !haveMask;
@@ -286,9 +290,69 @@ window.addEventListener('keydown', e => {
   if ((e.key === 'Backspace' || e.key === 'Delete') && lastMaskCanvas) {
     e.preventDefault();
     applyMaskWithOp('destination-out');
+    return;
+  }
+  // Ctrl/Cmd+S → save as PNG.
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
+    e.preventDefault();
+    saveCanvasOrSelection();
   }
 });
 undoBtn.addEventListener('click', doUndo);
+
+// ─── New (reset canvas) ───────────────────────────────────────────────────
+
+newBtn.addEventListener('click', async () => {
+  if (!hasImage()) return;
+  await pushUndoSnapshot();
+  // Setting width clears the bitmap; collapse the wrap to 0×0 so the
+  // drop-hint reappears in the centered stage.
+  imageCanvas.width = 0;
+  imageCanvas.height = 0;
+  overlayCanvas.width = 0;
+  overlayCanvas.height = 0;
+  const wrap = imageCanvas.parentElement;
+  wrap.style.width = '';
+  wrap.style.height = '';
+  points = [];
+  box = null;
+  dragBox = null;
+  lastMaskCanvas = null;
+  if (sam2) sam2.reset();
+  dropHint.style.display = '';
+  setStatus('Drop or paste an image to begin.');
+  updateButtons();
+});
+
+// ─── Save (PNG download — selection if active, else full canvas) ──────────
+
+async function saveCanvasOrSelection() {
+  if (!hasImage()) return;
+  const out = document.createElement('canvas');
+  out.width = imageCanvas.width;
+  out.height = imageCanvas.height;
+  const octx = out.getContext('2d');
+  octx.drawImage(imageCanvas, 0, 0);
+  let suffix = '';
+  if (lastMaskCanvas) {
+    octx.globalCompositeOperation = 'destination-in';
+    octx.drawImage(lastMaskCanvas, 0, 0);
+    suffix = '-selection';
+  }
+  const blob = await new Promise(r => out.toBlob(r, 'image/png'));
+  if (!blob) { showToast('Save failed'); return; }
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+  a.download = `steveonardo-${ts}${suffix}.png`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 5000);
+  showToast(suffix ? 'Selection saved' : 'Image saved');
+}
+saveBtn.addEventListener('click', saveCanvasOrSelection);
 
 // ─── Load via file picker ──────────────────────────────────────────────────
 
