@@ -175,6 +175,12 @@ export async function initSAM2(onProgress) {
   // jsDelivr serves the matching .wasm assets next to ort.min.js automatically.
   // wasmPaths is left at default unless overridden.
 
+  // ORT-Web throws raw heap pointers as errors — useless to surface in the UI.
+  // Turn on verbose logging so the underlying failure (op name, OOM, etc.)
+  // prints to the dev-tools console before the throw.
+  ort.env.logLevel = 'verbose';
+  ort.env.debug = true;
+
   onProgress?.({ stage: 'encoder-fetch' });
   const encoderBuf = await fetchWithCache(MODELS.encoder, p => onProgress?.({ stage: 'encoder-fetch', ...p }));
   onProgress?.({ stage: 'encoder-init' });
@@ -277,21 +283,44 @@ async function createSession(buf, label) {
   }
 }
 
-// ORT-Web throws errors whose .message is a numeric pointer into the WASM
-// linear memory rather than a string. Walk the heap from that offset to the
-// next NUL byte and decode as UTF-8. Returns null when the error isn't an
-// ORT pointer-message, or when the heap isn't reachable.
+// ORT-Web throws raw WASM heap pointers (or errors whose .message is one).
+// Decoding them requires reaching the WASM module's HEAPU8, which ORT does
+// not expose publicly. We try a handful of likely places and give up
+// gracefully — the verbose console log set in initSAM2 is the real fallback.
 export function decodeOrtError(e) {
-  if (!e || typeof e.message !== 'number') return null;
-  const wasm = globalThis.ort?.env?.wasm;
-  const heap = wasm?.HEAPU8 || wasm?.module?.HEAPU8;
+  const ptr = typeof e === 'number' ? e
+            : typeof e?.message === 'number' ? e.message
+            : null;
+  if (ptr == null) return null;
+  const heap = findOrtHeap();
   if (!heap) return null;
   try {
-    let end = e.message;
+    let end = ptr;
     while (end < heap.length && heap[end] !== 0) end++;
-    const str = new TextDecoder().decode(heap.subarray(e.message, end));
+    const str = new TextDecoder().decode(heap.subarray(ptr, end));
     return str || null;
   } catch {
     return null;
   }
+}
+
+function findOrtHeap() {
+  const ort = globalThis.ort;
+  const candidates = [
+    ort?.env?.wasm,
+    ort?.env?.wasm?.module,
+    globalThis.ortWasmThreaded,
+    globalThis.ortWasm,
+  ];
+  for (const c of candidates) {
+    if (c?.HEAPU8 instanceof Uint8Array) return c.HEAPU8;
+  }
+  // Last resort: scan the ort module for any object with a HEAPU8 Uint8Array.
+  if (ort) {
+    for (const k of Object.keys(ort)) {
+      const v = ort[k];
+      if (v && typeof v === 'object' && v.HEAPU8 instanceof Uint8Array) return v.HEAPU8;
+    }
+  }
+  return null;
 }

@@ -46,6 +46,24 @@ function hasImage() {
   return imageCanvas.width > 0 && imageCanvas.height > 0;
 }
 
+// Size the canvas-wrap so the bitmap object-fits inside the stage.
+// Both canvases use width/height: 100% on the wrap, so as long as the wrap
+// has the right pixel size everything else falls out automatically.
+function fitCanvasToStage() {
+  if (!hasImage()) return;
+  const sw = stage.clientWidth;
+  const sh = stage.clientHeight;
+  if (sw === 0 || sh === 0) return;
+  const ratio = Math.min(sw / imageCanvas.width, sh / imageCanvas.height);
+  const w = Math.max(1, Math.floor(imageCanvas.width * ratio));
+  const h = Math.max(1, Math.floor(imageCanvas.height * ratio));
+  const wrap = imageCanvas.parentElement;
+  wrap.style.width = w + 'px';
+  wrap.style.height = h + 'px';
+}
+
+window.addEventListener('resize', fitCanvasToStage);
+
 function updateButtons() {
   const ready = hasImage();
   copyBtn.disabled = !ready;
@@ -106,6 +124,7 @@ async function loadBitmap(bitmap) {
   lastMaskCanvas = null;
   clearOverlay();
   dropHint.style.display = 'none';
+  fitCanvasToStage();
   updateButtons();
 
   if (sam2Ready) {
@@ -212,6 +231,7 @@ async function doUndo() {
   lastMaskCanvas = null;
   clearOverlay();
   dropHint.style.display = 'none';
+  fitCanvasToStage();
   updateButtons();
   if (sam2Ready) {
     setStatus('Encoding image…');
@@ -366,10 +386,14 @@ function getTabIdFromBridge() {
 })();
 
 function describeError(e) {
-  if (!e) return 'unknown error';
+  if (e == null) return 'unknown error';
   if (typeof e === 'string') return e;
   const ortMsg = decodeOrtError(e);
   if (ortMsg) return ortMsg;
+  // ORT-Web throws raw heap pointers we can't decode without internal access;
+  // tell the user where the real error lives so they can act on it.
+  if (typeof e === 'number') return 'WASM init failed (see browser console for details)';
+  if (typeof e?.message === 'number') return 'WASM init failed (see browser console for details)';
   if (e.message) return String(e.message);
   if (e.name) return e.name;
   try { return JSON.stringify(e); } catch { return String(e); }
