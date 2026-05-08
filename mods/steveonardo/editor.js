@@ -13,6 +13,9 @@ const pasteBtn = document.getElementById('btn-paste');
 const copyBtn = document.getElementById('btn-copy');
 const clearPtsBtn = document.getElementById('btn-clear-points');
 const applyBtn = document.getElementById('btn-apply');
+const deleteBtn = document.getElementById('btn-delete');
+const invertBtn = document.getElementById('btn-invert');
+const copySelBtn = document.getElementById('btn-copy-sel');
 const modeFgBtn = document.getElementById('mode-fg');
 const modeBgBtn = document.getElementById('mode-bg');
 const modeBoxBtn = document.getElementById('mode-box');
@@ -71,8 +74,12 @@ window.addEventListener('resize', fitCanvasToStage);
 
 function updateButtons() {
   const ready = hasImage();
+  const haveMask = !!lastMaskCanvas;
   copyBtn.disabled = !ready;
-  applyBtn.disabled = !ready || !lastMaskCanvas;
+  applyBtn.disabled = !ready || !haveMask;
+  deleteBtn.disabled = !ready || !haveMask;
+  invertBtn.disabled = !ready || !haveMask;
+  copySelBtn.disabled = !ready || !haveMask;
   clearPtsBtn.disabled = points.length === 0 && !box;
 }
 
@@ -267,12 +274,18 @@ async function doUndo() {
 }
 
 window.addEventListener('keydown', e => {
-  // Only trap Ctrl/Cmd+Z when no input/textarea is focused.
+  // Don't intercept while typing in an input.
   const tag = (document.activeElement?.tagName || '').toLowerCase();
   if (tag === 'input' || tag === 'textarea') return;
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z' && !e.shiftKey) {
     e.preventDefault();
     doUndo();
+    return;
+  }
+  // Backspace / Delete → erase the current selection (matches Photoshop).
+  if ((e.key === 'Backspace' || e.key === 'Delete') && lastMaskCanvas) {
+    e.preventDefault();
+    applyMaskWithOp('destination-out');
   }
 });
 undoBtn.addEventListener('click', doUndo);
@@ -418,12 +431,13 @@ stage.addEventListener('click', async e => {
   await runDecoder();
 });
 
-applyBtn.addEventListener('click', async () => {
+// Compositing helper: apply the current mask to imageCanvas with the given
+// composite op, snapshot for undo, then clear the selection state.
+async function applyMaskWithOp(op) {
   if (!lastMaskCanvas || !hasImage()) return;
   await pushUndoSnapshot();
-  // Multiply the image by the mask: keep masked pixels, knock the rest to transparent.
   imageCtx.save();
-  imageCtx.globalCompositeOperation = 'destination-in';
+  imageCtx.globalCompositeOperation = op;
   imageCtx.drawImage(lastMaskCanvas, 0, 0);
   imageCtx.restore();
   points = [];
@@ -432,6 +446,47 @@ applyBtn.addEventListener('click', async () => {
   lastMaskCanvas = null;
   clearOverlay();
   updateButtons();
+}
+
+// Keep the selection: erase everything outside the mask.
+applyBtn.addEventListener('click', () => applyMaskWithOp('destination-in'));
+
+// Delete the selection: erase pixels inside the mask, keep the rest.
+deleteBtn.addEventListener('click', () => applyMaskWithOp('destination-out'));
+
+// Invert the mask in place — flip the alpha channel of lastMaskCanvas so
+// "selected" and "not selected" swap. Re-run repaintOverlay to reflect it.
+invertBtn.addEventListener('click', () => {
+  if (!lastMaskCanvas) return;
+  const w = lastMaskCanvas.width, h = lastMaskCanvas.height;
+  const ctx = lastMaskCanvas.getContext('2d');
+  const img = ctx.getImageData(0, 0, w, h);
+  const d = img.data;
+  for (let i = 0; i < d.length; i += 4) d[i + 3] = 255 - d[i + 3];
+  ctx.putImageData(img, 0, 0);
+  repaintOverlay();
+});
+
+// Copy just the selection to the clipboard: render the masked image into a
+// scratch canvas at the same size, with everything outside the mask
+// transparent, then write that PNG.
+copySelBtn.addEventListener('click', async () => {
+  if (!lastMaskCanvas || !hasImage()) return;
+  try {
+    const out = document.createElement('canvas');
+    out.width = imageCanvas.width;
+    out.height = imageCanvas.height;
+    const octx = out.getContext('2d');
+    octx.drawImage(imageCanvas, 0, 0);
+    octx.globalCompositeOperation = 'destination-in';
+    octx.drawImage(lastMaskCanvas, 0, 0);
+    const blob = await new Promise(r => out.toBlob(r, 'image/png'));
+    await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
+    showToast('Selection copied');
+  } catch (e) {
+    console.error(e);
+    showToast('Copy failed: ' + e.message);
+  }
 });
 
 // ─── Init: bridge → tabId → undo store; SAM2 in parallel ──────────────────
