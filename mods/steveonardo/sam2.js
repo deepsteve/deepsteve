@@ -186,14 +186,23 @@ export async function initSAM2(onProgress) {
   async function setImage(bitmap) {
     const { tensor, transform: t } = letterboxToTensor(bitmap);
     const out = await encoder.run({ pixel_values: tensor });
-    embeds = {
-      e0: out['image_embeddings.0'],
-      e1: out['image_embeddings.1'],
-      e2: out['image_embeddings.2'],
-    };
-    if (!embeds.e0 || !embeds.e1 || !embeds.e2) {
+    if (!out['image_embeddings.0'] || !out['image_embeddings.1'] || !out['image_embeddings.2']) {
       throw new Error(`Unexpected encoder outputs: ${encoder.outputNames.join(', ')}`);
     }
+    // Copy the data out of the worker-owned tensors immediately. With
+    // proxy:true, feeding a Tensor into a later .run() transfers its
+    // ArrayBuffer to the worker and detaches the main-thread copy, so we
+    // can't reuse the same Tensor across multiple predict() calls. Stash
+    // typed-array copies and mint fresh Tensors per predict instead.
+    const grab = name => ({
+      data: new Float32Array(out[name].data),
+      dims: out[name].dims,
+    });
+    embeds = {
+      e0: grab('image_embeddings.0'),
+      e1: grab('image_embeddings.1'),
+      e2: grab('image_embeddings.2'),
+    };
     transform = t;
   }
 
@@ -228,13 +237,17 @@ export async function initSAM2(onProgress) {
       boxDims = [1, 0, 4];
     }
 
+    // Mint fresh Tensors from our cached typed arrays each call. ORT in
+    // proxy mode will transfer the new tensors' buffers, but we keep the
+    // master copy in `embeds` untouched.
+    const mk = e => new ort.Tensor('float32', new Float32Array(e.data), e.dims);
     const feeds = {
       input_points: new ort.Tensor('float32', coords, [1, 1, N, 2]),
       input_labels: new ort.Tensor('int64', labels, [1, 1, N]),
       input_boxes: new ort.Tensor('float32', boxData, boxDims),
-      'image_embeddings.0': embeds.e0,
-      'image_embeddings.1': embeds.e1,
-      'image_embeddings.2': embeds.e2,
+      'image_embeddings.0': mk(embeds.e0),
+      'image_embeddings.1': mk(embeds.e1),
+      'image_embeddings.2': mk(embeds.e2),
     };
 
     const out = await decoder.run(feeds);

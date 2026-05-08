@@ -411,6 +411,9 @@ stage.addEventListener('click', async e => {
   const p = eventToBitmap(e);
   if (!p) return;
   points.push({ x: p.x, y: p.y, label: mode === 'fg' ? 1 : 0 });
+  // Repaint immediately so the dot appears the moment you click — predict
+  // takes ~100ms in proxy mode and the latency was visible.
+  repaintOverlay();
   updateButtons();
   await runDecoder();
 });
