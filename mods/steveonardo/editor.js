@@ -354,6 +354,14 @@ function getTabIdFromBridge() {
     }
   } catch (e) {
     console.error('[Steveonardo] SAM2 init failed:', e);
-    setStatus('SAM2 unavailable: ' + e.message + ' (canvas editing still works)');
+    setStatus('SAM2 unavailable: ' + describeError(e) + ' (canvas editing still works)');
   }
 })();
+
+function describeError(e) {
+  if (!e) return 'unknown error';
+  if (typeof e === 'string') return e;
+  if (e.message) return e.message;
+  if (e.name) return e.name;
+  try { return JSON.stringify(e); } catch { return String(e); }
+}
