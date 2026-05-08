@@ -26,5 +26,5 @@ jobs:
       - name: Check embedded package.json matches source
         run: |
           # Extract the embedded package.json from the generated installer
-          sed -n "/cat > \"\\\$INSTALL_DIR\/package.json\"/,/^DEEPSTEVE_FILE_EOF$/{/cat >/d;/^DEEPSTEVE_FILE_EOF$/d;p;}" install.sh > /tmp/embedded-package.json
+          LC_ALL=C sed -n "/cat > \"\\\$INSTALL_DIR\/package.json\"/,/^DEEPSTEVE_FILE_EOF$/{/cat >/d;/^DEEPSTEVE_FILE_EOF$/d;p;}" install.sh > /tmp/embedded-package.json
           diff package.json /tmp/embedded-package.json || { echo "Embedded package.json differs from source — regenerate install.sh with ./release.sh"; exit 1; }
