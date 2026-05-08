@@ -166,6 +166,13 @@ window.addEventListener('paste', async e => {
   }
 });
 
+// If the parent page has focus, Ctrl/Cmd+V is dispatched there and never reaches
+// this iframe. Reclaim focus when the pointer enters the editor so the user
+// doesn't need a priming click.
+document.documentElement.addEventListener('mouseenter', () => {
+  if (!document.hasFocus()) window.focus();
+});
+
 // ─── Copy (right-click or button) ──────────────────────────────────────────
 
 async function copyCanvasToClipboard() {
