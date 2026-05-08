@@ -98,12 +98,21 @@
     align-items: center;
     justify-content: center;
     flex-direction: column;
-    gap: 8px;
+    gap: 16px;
     color: #6a6a8a;
     font-size: 14px;
     pointer-events: none;
     text-align: center;
     padding: 20px;
+  }
+  #drop-hint img.logo {
+    max-width: min(60%, 360px);
+    max-height: 50%;
+    object-fit: contain;
+    opacity: 0.7;
+    filter: drop-shadow(0 4px 24px rgba(0, 0, 0, 0.5));
+    user-select: none;
+    -webkit-user-drag: none;
   }
   #drop-hint .big { font-size: 18px; color: #8a8aaa; }
   #drop-hint .kbd {
@@ -161,6 +170,7 @@
       <canvas id="overlay" width="0" height="0"></canvas>
     </div>
     <div id="drop-hint">
+      <img class="logo" src="./steveonardo.png" alt="Steveonardo">
       <div class="big">Drop an image here</div>
       <div>or paste with <span class="kbd">Ctrl/⌘+V</span> · undo with <span class="kbd">Ctrl/⌘+Z</span> · right-click to copy</div>
     </div>
