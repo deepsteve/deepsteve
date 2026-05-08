@@ -1506,6 +1506,8 @@ function _switchToPanel(modId) {
 
   _showPanel();
 
+  _focusIframe(panelMods.get(modId)?.iframe);
+
   localStorage.setItem(ACTIVE_PANEL_KEY, modId);
 }
 
@@ -1750,6 +1752,17 @@ function _hideMod() {
 }
 
 /**
+ * Focus a mod iframe so keyboard events (paste, shortcuts) land inside it
+ * without requiring a click first.
+ */
+function _focusIframe(iframeEl) {
+  if (!iframeEl) return;
+  const focus = () => { try { iframeEl.contentWindow?.focus(); } catch {} };
+  focus();
+  iframeEl.addEventListener('load', focus, { once: true });
+}
+
+/**
  * Destroy the current iframe.
  */
 function _destroyIframe() {
@@ -1768,6 +1781,7 @@ function showModView() {
   modContainer.style.display = 'flex';
   backBtn.style.display = 'none';
   modViewVisible = true;
+  _focusIframe(iframe);
 }
 
 /**
