@@ -1713,6 +1713,7 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
       ws.send(JSON.stringify({ type: 'redraw' }));
       session.scrollControl.scrollToBottom();
     }
+    ModManager.notifyWSReconnected();
   };
 
   return ready;

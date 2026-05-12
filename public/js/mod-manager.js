@@ -48,6 +48,7 @@ let sceneUpdateCallbacks = [];       // [{modId, cb}] — callbacks for scene-up
 let sceneQueryCallbacks = [];        // [{modId, cb}] — callbacks for scene-query-request
 let sceneSnapshotCallbacks = [];     // [{modId, cb}] — callbacks for scene-snapshot-request
 let babyBrowserCallbacks = [];       // [{modId, cb}] — callbacks for baby-browser-request
+let wsReconnectedCallbacks = [];     // [{modId, cb}] — fired when any session WS reconnects
 let activeSessionCallbacks = [];     // [{modId, cb}] — callbacks for active session changes
 let getActiveSessionIdFn = null;     // set from appHooks
 let deepsteveVersion = null;   // set from /api/mods response
@@ -1609,6 +1610,7 @@ function _unloadPanelMod(modId) {
   sceneQueryCallbacks = sceneQueryCallbacks.filter(e => e.modId !== modId);
   sceneSnapshotCallbacks = sceneSnapshotCallbacks.filter(e => e.modId !== modId);
   babyBrowserCallbacks = babyBrowserCallbacks.filter(e => e.modId !== modId);
+  wsReconnectedCallbacks = wsReconnectedCallbacks.filter(e => e.modId !== modId);
   settingsCallbacks = settingsCallbacks.filter(e => e.modId !== modId);
   sessionCallbacks = sessionCallbacks.filter(e => e.modId !== modId);
   activeSessionCallbacks = activeSessionCallbacks.filter(e => e.modId !== modId);
@@ -1886,6 +1888,12 @@ function notifyBabyBrowserRequest(req) {
   }
 }
 
+function notifyWSReconnected() {
+  for (const entry of wsReconnectedCallbacks) {
+    try { entry.cb(); } catch (e) { console.error('WS reconnected callback error:', e); }
+  }
+}
+
 /**
  * Notify panel mods of a scene-update request (called from app.js on WS broadcast).
  */
@@ -2070,6 +2078,13 @@ function _injectBridgeAPI(iframeEl, modId, tabInstanceId) {
           babyBrowserCallbacks = babyBrowserCallbacks.filter(e => e !== entry);
         };
       },
+      onWSReconnected(cb) {
+        const entry = { modId, cb };
+        wsReconnectedCallbacks.push(entry);
+        return () => {
+          wsReconnectedCallbacks = wsReconnectedCallbacks.filter(e => e !== entry);
+        };
+      },
       setPanelBadge(text) {
         const tab = panelTabs.get(modId);
         if (!tab) return;
@@ -2132,6 +2147,7 @@ function handleModChanged(modId) {
     browserConsoleCallbacks = browserConsoleCallbacks.filter(e => e.modId !== modId);
     screenshotCaptureCallbacks = screenshotCaptureCallbacks.filter(e => e.modId !== modId);
     babyBrowserCallbacks = babyBrowserCallbacks.filter(e => e.modId !== modId);
+    wsReconnectedCallbacks = wsReconnectedCallbacks.filter(e => e.modId !== modId);
     settingsCallbacks = settingsCallbacks.filter(e => e.modId !== modId);
     sessionCallbacks = sessionCallbacks.filter(e => e.modId !== modId);
     activeSessionCallbacks = activeSessionCallbacks.filter(e => e.modId !== modId);
@@ -2195,6 +2211,7 @@ export const ModManager = {
   notifySceneQueryRequest,
   notifySceneSnapshotRequest,
   notifyBabyBrowserRequest,
+  notifyWSReconnected,
   injectBridgeAPI: _injectBridgeAPI,
   isModViewVisible,
   isModActive,

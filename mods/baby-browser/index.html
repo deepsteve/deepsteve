@@ -189,7 +189,7 @@
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ tabId: tabInstanceId, url: navHistory[historyIndex] || '' }),
-      }).catch(() => {});
+      }).catch(e => console.warn('Baby Browser register failed:', e));
     }
 
     function initBridge() {
@@ -199,6 +199,13 @@
       }
 
       tabInstanceId = window.deepsteve.getTabInstanceId();
+
+      // Re-register on WebSocket reconnect (e.g. after daemon restart) — the
+      // server's activeTabs Map is in-memory only, so without this the tab is
+      // "lost" until the page reloads. See deepsteve/deepsteve#474.
+      if (window.deepsteve.onWSReconnected) {
+        window.deepsteve.onWSReconnected(() => registerWithServer());
+      }
 
       window.deepsteve.onBabyBrowserRequest(async (req) => {
         const { requestId, action } = req;
