@@ -18,6 +18,7 @@ import { init as initCommandPalette, setEnabled as setCommandPaletteEnabled, set
 import { init as initHashCommands, beforeSend as hashCommandsBeforeSend, setWaitingForInput as setHashCommandsWaiting, setEnabled as setHashCommandsEnabled } from './hash-commands.js';
 import { init as initOverviewMode, setEnabled as setOverviewModeEnabled, setShortcut as setOverviewModeShortcut, setDefaultLayout as setOverviewDefaultLayout, toggle as toggleOverviewMode, isOverviewActive, updateFocus as updateOverviewFocus, onTabsReordered as onOverviewTabsReordered } from './overview-mode.js';
 import { init as initTerminalSearch, attachSearchAddon, closeIfOpen as closeTerminalSearch } from './terminal-search.js';
+import { createChatView } from './chat-view.js';
 import { nsKey } from './storage-namespace.js';
 
 // Configuration
@@ -1769,7 +1770,15 @@ function initTerminal(id, ws, cwd, initialName, { hasScrollback = false, pending
 
   // Store session in memory
   const searchAddon = attachSearchAddon(term);
-  sessions.set(id, { term, fit, ws, container, cwd, name, waitingForInput: false, hasUnseenActivity: false, scrollControl, searchAddon });
+  const sessionEntry = { term, fit, ws, container, cwd, name, waitingForInput: false, hasUnseenActivity: false, scrollControl, searchAddon, chatViewActive: false };
+  sessions.set(id, sessionEntry);
+
+  // Build the alternative chat view (parser + DOM) as a sibling of .xterm.
+  // It stays inactive until the user toggles it; until then the parser
+  // is detached and incurs zero cost.
+  const chatView = createChatView(sessionEntry);
+  container.appendChild(chatView.element);
+  sessionEntry.chatView = chatView;
 
   // Suppress scroll during init to prevent onWriteParsed races with
   // buffered data flush and scrollback replay
@@ -2040,8 +2049,13 @@ function switchTo(id) {
     clearNotification(id);
     updateTitle();
     updateAppBadge();
+    updateChatToggleVisibility();
 
     if (session.type === 'mod-tab' || session.type === 'display-tab') return;
+
+    // If chat view is active for this tab, the xterm element is hidden —
+    // skip fit/focus/scroll, none of those apply.
+    if (session.chatViewActive) return;
 
     setHashCommandsWaiting(!!session.waitingForInput);
     session.scrollControl.suppressScroll();
@@ -2053,6 +2067,42 @@ function switchTo(id) {
         requestAnimationFrame(() => {
           session.scrollControl.scrollToBottom();
         });
+      }
+    });
+  }
+}
+
+/** Show or hide the chat-toggle button based on the active session type. */
+function updateChatToggleVisibility() {
+  const btn = document.getElementById('chat-toggle-btn');
+  if (!btn) return;
+  const active = activeId ? sessions.get(activeId) : null;
+  const visible = !!(active && active.term && active.chatView);
+  btn.style.display = visible ? '' : 'none';
+  if (visible) {
+    btn.classList.toggle('active', !!active.chatViewActive);
+  }
+}
+
+/** Toggle the chat view for the active session (or force a specific state). */
+function toggleChatView(force) {
+  if (!activeId) return;
+  const session = sessions.get(activeId);
+  if (!session || !session.term || !session.chatView) return;
+  const next = typeof force === 'boolean' ? force : !session.chatViewActive;
+  session.chatViewActive = next;
+  session.container.classList.toggle('chat-view-active', next);
+  session.chatView.setActive(next);
+  updateChatToggleVisibility();
+  if (!next) {
+    // Returning to terminal view — re-fit and restore focus/scroll.
+    setHashCommandsWaiting(!!session.waitingForInput);
+    session.scrollControl.suppressScroll();
+    requestAnimationFrame(() => {
+      try { fitTerminal(session.term, session.fit, session.ws); }
+      finally {
+        session.term.focus();
+        requestAnimationFrame(() => session.scrollControl.scrollToBottom());
       }
     });
   }
@@ -2286,6 +2336,7 @@ function killSession(id) {
     try { session.ws.sendJSON({ type: 'close-session' }); } catch {}
 
     if (session.resizeObserver) session.resizeObserver.disconnect();
+    if (session.chatView) session.chatView.dispose();
     session.ws.close();
     session.term.dispose();
     session.container.remove();
@@ -3386,6 +3437,17 @@ async function init() {
   document.getElementById('new-btn').addEventListener('click', () => quickNewSession());
   document.getElementById('new-btn-dropdown').addEventListener('click', (e) => showNewTabMenu(e));
   document.getElementById('issue-btn').addEventListener('click', () => showIssuePicker());
+  document.getElementById('chat-toggle-btn')?.addEventListener('click', () => toggleChatView());
+  document.addEventListener('keydown', (e) => {
+    // Cmd+/ (Mac) or Ctrl+/ — toggle chat view for the active session.
+    if (e.key === '/' && (e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey) {
+      if (!activeId) return;
+      const s = sessions.get(activeId);
+      if (!s || !s.term || !s.chatView) return;
+      e.preventDefault();
+      toggleChatView();
+    }
+  });
   // Prefetch issues on hover so results are cached when the dialog opens
   let issuePrefetching = false;
   document.getElementById('issue-btn').addEventListener('mouseenter', () => {
