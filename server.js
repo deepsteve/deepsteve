@@ -315,6 +315,7 @@ const SETTINGS_SCHEMA = [
   { name: 'autoUpdateCheckEnabled',     type: 'boolean', default: true },
   { name: 'autoUpdateCheckIntervalHours', type: 'number', default: 6, clamp: [1, 168] },
   { name: 'autoUpdateApply',            type: 'boolean', default: true },
+  { name: 'sessionLogEnabled',          type: 'boolean', default: false },
 ];
 
 // Settings whose default must exist in `settings` but that flow through
@@ -435,6 +436,64 @@ let tmuxEngine = null;
       saveSettings();
     }
   }
+}
+
+// --- Session lifecycle event bus (issue #485) ---
+// Core emits 'open'/'close' events here; the session-lifecycle mod subscribes and
+// records them to a JSONL log when settings.sessionLogEnabled is on. Kept generic
+// (no log-specific logic) so other mods could observe lifecycle too.
+const sessionLog = new (require('events'))();
+const liveSnapshots = new Map(); // id → metadata snapshot, kept until the close event fires
+const closeReasons = new Map();  // id → why it closed (set before the pty exits)
+
+// Emit an 'open' event for a genuinely new session. Snapshots metadata so the
+// later 'close' event still has it after the shell entry is deleted. Not called
+// for restores/reconnects (those re-attach an existing session, not a new tab).
+function emitSessionOpen(id) {
+  const e = shells.get(id);
+  if (!e || e.agentType === 'tmux-attach') return; // tmux-attach is ephemeral
+  const snap = {
+    session_id: id,
+    name: e.name || null,
+    cwd: e.cwd || null,
+    agentType: e.agentType || 'claude',
+    worktree: e.worktree || null,
+    windowId: e.windowId || null,
+    claudeSessionId: e.claudeSessionId || null,
+    planMode: !!e.planMode,
+    createdAt: e.createdAt || Date.now(),
+  };
+  liveSnapshots.set(id, snap);
+  sessionLog.emit('event', { type: 'open', ts: Date.now(), ...snap });
+}
+
+// Emit a 'close' event. Driven by the universal engine 'exit' funnel below, so it
+// fires once per session regardless of how it ended. Reason comes from closeReasons
+// (set by killShell callers) or defaults to 'exited' for natural process exits.
+function recordSessionClose(id) {
+  const snap = liveSnapshots.get(id);
+  if (!snap) return; // never tracked, or already recorded
+  const ts = Date.now();
+  sessionLog.emit('event', {
+    type: 'close',
+    ts,
+    session_id: id,
+    name: snap.name,
+    cwd: snap.cwd,
+    agentType: snap.agentType,
+    worktree: snap.worktree,
+    reason: closeReasons.get(id) || 'exited',
+    durationMs: snap.createdAt ? ts - snap.createdAt : null,
+  });
+  liveSnapshots.delete(id);
+  closeReasons.delete(id);
+}
+
+// Universal close funnel: every engine emits 'exit' for any session that ends,
+// regardless of which spawn path created it — so one listener per engine catches
+// all closes without touching the ~8 inline onExit() handlers.
+for (const eng of [ptyEngine, tmuxEngine].filter(Boolean)) {
+  eng.on('exit', (id) => recordSessionClose(id));
 }
 
 function getDefaultEngine() {
@@ -1191,9 +1250,12 @@ function wireShellOutput(id) {
 }
 
 // Gracefully kill a shell
-function killShell(entry, id) {
+function killShell(entry, id, reason = 'closed') {
   if (entry.killed) return;
   entry.killed = true;
+  // Record why this session is closing; the engine 'exit' funnel reads it when the
+  // pty actually exits (closeReasons survives the shells.delete that happens first).
+  closeReasons.set(id, reason);
   const eng = entry.engine || ptyEngine;
 
   // tmux-attach sessions manage their own PTY — just detach
@@ -1416,7 +1478,7 @@ async function shutdown(signal) {
   log(`Gracefully exiting ${entries.length} shells...`);
   for (const [id, entry] of entries) {
     try {
-      killShell(entry, id);
+      killShell(entry, id, 'shutdown');
     } catch {}
   }
 
@@ -2048,6 +2110,7 @@ app.post('/api/window-configs/:id/apply', (req, res) => {
     spawnSession(sessionEngine, id, agentType, spawnArgs, cwd, { cols: 120, rows: 40, env: sessionEnv(id, { name, windowId: windowId || null, cwd, agentType }) });
     shells.set(id, { clients: new Set(), cwd, claudeSessionId, agentType, engine: sessionEngine, engineType, worktree: null, windowId: windowId || null, name, waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now() });
     wireShellOutput(id);
+    emitSessionOpen(id);
     if (agentConfig.supportsSessionWatch) watchClaudeSessionDir(id);
     sessionEngine.onExit(id, () => {
       if (agentConfig.supportsSessionWatch) unwatchClaudeSessionDir(id);
@@ -2399,6 +2462,7 @@ app.post('/api/start-automation', (req, res) => {
   spawnSession(sessionEngine, id, agentType, spawnArgs, cwd, { cols: 120, rows: 40, env: sessionEnv(id, { name, windowId: windowId || null, cwd, agentType }) });
   shells.set(id, { clients: new Set(), cwd, claudeSessionId, agentType, engine: sessionEngine, engineType, worktree: null, windowId: windowId || null, name, waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now() });
   wireShellOutput(id);
+  emitSessionOpen(id);
   if (prompt) deliverPromptWhenReady(id, prompt);
   if (agentConfig.supportsSessionWatch) watchClaudeSessionDir(id);
   sessionEngine.onExit(id, () => {
@@ -2606,7 +2670,7 @@ app.post('/api/shells/killall', (req, res) => {
   const killed = [];
   for (const [id, entry] of shells) {
     killed.push({ id, pid: (entry.engine || ptyEngine).getPid(id) });
-    killShell(entry, id);
+    killShell(entry, id, 'killed');
     shells.delete(id);
   }
   res.json({ killed });
@@ -2634,7 +2698,7 @@ app.delete('/api/shells/:id', (req, res) => {
       lastActivity: entry.lastActivity || null, createdAt: entry.createdAt || null,
       closed: true
     };
-    killShell(entry, id);
+    killShell(entry, id, 'closed');
     shells.delete(id);
     log(`Killed active shell ${id}, preserved as closed`);
     saveState();
@@ -2732,7 +2796,7 @@ app.post('/api/shells/clear-disconnected', (req, res) => {
   for (const [id, entry] of shells) {
     if (entry.clients.size === 0) {
       cleared.push(id);
-      killShell(entry, id);
+      killShell(entry, id, 'disconnected');
       shells.delete(id);
     }
   }
@@ -2904,6 +2968,7 @@ app.post('/api/start-issue', (req, res) => {
   spawnSession(sessionEngine, id, agentType, spawnArgs, worktreeCwd, { cols: 120, rows: 40, env: sessionEnv(id, { name, worktree, windowId: windowId || null, cwd: worktreeCwd, agentType }) });
   shells.set(id, { clients: new Set(), cwd: worktreeCwd, claudeSessionId: claudeSessionId, agentType, engine: sessionEngine, engineType, worktree: worktree || null, windowId: windowId || null, name, planMode: !!settings.wandPlanMode, waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now(), loading: true });
   wireShellOutput(id);
+  emitSessionOpen(id);
   // Route any synchronous prompt through deliverPromptWhenReady so agents
   // get a one-shot onIdleOnce callback or their configured delay.
   if (prompt) deliverPromptWhenReady(id, prompt);
@@ -3450,6 +3515,7 @@ function handleWsConnection(ws, req) {
     spawnSession(sessionEngine, id, agentType, spawnArgs, worktreeCwd, { cols: initialCols, rows: initialRows, env: sessionEnv(id, { name, worktree, cwd: worktreeCwd, agentType }) });
     shells.set(id, { clients: new Set(), cwd: worktreeCwd, claudeSessionId: sessionId, agentType, engine: sessionEngine, engineType, worktree: worktree || null, name: name || null, planMode: spawnedPlanMode, waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now() });
     wireShellOutput(id);
+    emitSessionOpen(id);
     if (agentConfig.supportsSessionWatch) watchClaudeSessionDir(id);
     sessionEngine.onExit(id, () => { if (!shuttingDown) { if (agentConfig.supportsSessionWatch) unwatchClaudeSessionDir(id); notifyClientsShellExited(id); shells.delete(id); saveState(); } });
     saveState();
@@ -3503,7 +3569,7 @@ function handleWsConnection(ws, req) {
             lastActivity: entry.lastActivity || null, createdAt: entry.createdAt || null,
             closed: true
           };
-          killShell(entry, id);
+          killShell(entry, id, 'user-closed');
           shells.delete(id);
           saveState();
         } else {
@@ -3533,7 +3599,7 @@ function handleWsConnection(ws, req) {
         if (entry.clients.size === 0) {
           // Preserve session info so it can be restored on next connect
           savedState[id] = { cwd: entry.cwd, claudeSessionId: entry.claudeSessionId, agentType: entry.agentType || 'claude', worktree: entry.worktree || null, name: entry.name || null, planMode: !!entry.planMode, lastActivity: entry.lastActivity || null };
-          killShell(entry, id);
+          killShell(entry, id, 'disconnected');
           shells.delete(id);
           saveState();
         }
@@ -3572,7 +3638,7 @@ function broadcastToWindow(windowId, msg) {
 }
 
 // Initialize MCP server (async, ~100ms for dynamic import)
-initMCP({ app, shells, wss, broadcast, broadcastToWindow, log, MODS_DIR, closeSession, spawnSession, sessionEnv, getSpawnArgs, mcpConfigArgs, getAgentConfig, wireShellOutput, watchClaudeSessionDir, unwatchClaudeSessionDir, saveState, validateWorktree, ensureWorktree, sessionPaths, submitToShell, fetchIssueFromGitHub, deliverPromptWhenReady, reloadClients, deliverToWindow, settings, isShuttingDown: () => shuttingDown, displayTabs, setDisplayTab, deleteDisplayTab, screenshots, setScreenshot, deleteScreenshot, getScreenshotPath, getDefaultEngine }).catch(e => log('MCP init failed:', e.message));
+initMCP({ app, shells, wss, broadcast, broadcastToWindow, log, MODS_DIR, closeSession, spawnSession, sessionEnv, getSpawnArgs, mcpConfigArgs, getAgentConfig, wireShellOutput, watchClaudeSessionDir, unwatchClaudeSessionDir, saveState, validateWorktree, ensureWorktree, sessionPaths, submitToShell, fetchIssueFromGitHub, deliverPromptWhenReady, reloadClients, deliverToWindow, settings, isShuttingDown: () => shuttingDown, displayTabs, setDisplayTab, deleteDisplayTab, screenshots, setScreenshot, deleteScreenshot, getScreenshotPath, getDefaultEngine, sessionLog, emitSessionOpen }).catch(e => log('MCP init failed:', e.message));
 
 // Watch themes directory for changes and broadcast to clients
 let themeWatchDebounce = null;

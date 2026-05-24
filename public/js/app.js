@@ -598,6 +598,7 @@ settingsBtn?.addEventListener('click', async () => {
   const currentAutoUpdateCheckEnabled = settingsData.autoUpdateCheckEnabled !== undefined ? settingsData.autoUpdateCheckEnabled : true;
   const currentAutoUpdateCheckIntervalHours = settingsData.autoUpdateCheckIntervalHours || 6;
   const currentAutoUpdateApply = settingsData.autoUpdateApply !== undefined ? settingsData.autoUpdateApply : true;
+  const currentSessionLogEnabled = !!settingsData.sessionLogEnabled;
   const currentDefaultAgent = settingsData.defaultAgent || 'claude';
   const currentOpencodeBinary = settingsData.opencodeBinary || 'opencode';
   const currentGeminiBinary = settingsData.geminiBinary || 'gemini';
@@ -731,6 +732,16 @@ settingsBtn?.addEventListener('click', async () => {
         </label>
         <p style="font-size: 11px; color: var(--ds-text-secondary); margin-top: 4px;">
           Lets agents type into terminals via the <code>meta_type</code> tool — self-driving loops are possible. Off by default.
+        </p>
+      </div>
+      <div class="settings-section">
+        <h3>Log Session Lifecycle</h3>
+        <label style="font-size: 13px; color: var(--ds-text-primary); cursor: pointer; display: flex; align-items: center; gap: 8px;">
+          <input type="checkbox" id="session-log-enabled" ${currentSessionLogEnabled ? 'checked' : ''} style="accent-color: var(--ds-accent-green);">
+          Enabled
+        </label>
+        <p style="font-size: 11px; color: var(--ds-text-secondary); margin-top: 4px;">
+          Record an append-only log of session opens and closes to ~/.deepsteve/session-lifecycle.jsonl. Agents can read it (read_session_log) or fetch /api/session-lifecycle to recap what happened. Off by default.
         </p>
       </div>
       <div class="settings-section">
@@ -1398,7 +1409,8 @@ settingsBtn?.addEventListener('click', async () => {
     const autoUpdateCheckEnabled = overlay.querySelector('#auto-update-check-enabled').checked;
     const autoUpdateCheckIntervalHours = Math.max(1, Math.min(168, Number(overlay.querySelector('#auto-update-check-interval-hours').value) || 6));
     const autoUpdateApply = overlay.querySelector('#auto-update-apply').checked;
-    const settingsPayload = { shellProfile, maxIssueTitleLength: newMaxTitle, wandPlanMode, wandPromptTemplate, symlinkWorktreeSettings, cmdTabSwitch, cmdTabSwitchHoldMs, commandPaletteEnabled, commandPaletteShortcut, hashCommandsEnabled, metaControlsEnabled, overviewDefaultLayout, enabledAgents, opencodeBinary, geminiBinary, piBinary, windowConfigs: editingConfigs, engine: selectedEngine, scrollbackKB, autoUpdateCheckEnabled, autoUpdateCheckIntervalHours, autoUpdateApply };
+    const sessionLogEnabled = overlay.querySelector('#session-log-enabled').checked;
+    const settingsPayload = { shellProfile, maxIssueTitleLength: newMaxTitle, wandPlanMode, wandPromptTemplate, symlinkWorktreeSettings, cmdTabSwitch, cmdTabSwitchHoldMs, commandPaletteEnabled, commandPaletteShortcut, hashCommandsEnabled, metaControlsEnabled, overviewDefaultLayout, enabledAgents, opencodeBinary, geminiBinary, piBinary, windowConfigs: editingConfigs, engine: selectedEngine, scrollbackKB, autoUpdateCheckEnabled, autoUpdateCheckIntervalHours, autoUpdateApply, sessionLogEnabled };
     let resp = await fetch('/api/settings', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

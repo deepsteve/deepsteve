@@ -1,0 +1,10 @@
+{
+  "name": "Log Session Lifecycle",
+  "version": "0.1.0",
+  "minDeepsteveVersion": "0.15.0",
+  "description": "Append-only log of session opens/closes for agent-readable recaps. Off by default; turn on \"Log session lifecycle\" in Settings to start recording.",
+  "enabledByDefault": false,
+  "tools": [
+    { "name": "read_session_log", "description": "Read the session lifecycle event log (opens/closes) to summarize what happened across sessions" }
+  ]
+}

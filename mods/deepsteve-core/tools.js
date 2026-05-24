@@ -17,6 +17,7 @@ function init(context) {
     validateWorktree, ensureWorktree, sessionPaths, submitToShell,
     fetchIssueFromGitHub, deliverPromptWhenReady,
     reloadClients, deliverToWindow, settings, log, isShuttingDown,
+    emitSessionOpen,
   } = context;
 
   return {
@@ -176,6 +177,7 @@ function init(context) {
           loading: true,
         });
         wireShellOutput(id);
+        emitSessionOpen(id);
 
         if (agentConfig.supportsSessionWatch) watchClaudeSessionDir(id);
         sessionEngine.onExit(id, () => {
@@ -265,6 +267,7 @@ function init(context) {
             waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now(),
           });
           wireShellOutput(id);
+          emitSessionOpen(id);
           if (hasCommand) {
             // A login shell (`zsh -l`) needs a moment to source profile files and
             // initialize ZLE before typed input renders cleanly at the prompt. tty
@@ -329,6 +332,7 @@ function init(context) {
           waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now(),
         });
         wireShellOutput(id);
+        emitSessionOpen(id);
 
         if (prompt && agentConfig.initialPromptDelay > 0) {
           shells.get(id).initialPrompt = null;
