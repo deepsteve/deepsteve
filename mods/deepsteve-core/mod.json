@@ -8,6 +8,7 @@
     { "name": "get_my_session_id", "description": "Get this session's deepsteve ID (no params needed)" },
     { "name": "get_session_info", "description": "Get session metadata by deepsteve session ID" },
     { "name": "close_session", "description": "Close a session and its browser tab" },
+    { "name": "meta_type", "description": "Type text into a session's terminal and optionally press Enter" },
     { "name": "start_issue", "description": "Open a new deepsteve session for a GitHub issue" },
     { "name": "open_terminal", "description": "Open a new terminal session with an optional prompt" }
   ]

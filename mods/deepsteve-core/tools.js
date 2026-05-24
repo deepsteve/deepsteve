@@ -74,6 +74,32 @@ function init(context) {
         return { content: [{ type: 'text', text: `Session "${targetId}" closed.` }] };
       },
     },
+    meta_type: {
+      description: 'Type text into a deepsteve session\'s terminal, optionally pressing Enter to submit. With no session_id, types into the calling session. Requires the Meta Controls setting to be enabled (off by default).',
+      schema: {
+        text: z.string().describe('The text to type into the terminal.'),
+        session_id: z.string().optional().describe('Target session ID. If omitted, types into the calling session.'),
+        submit: z.boolean().optional().describe('Press Enter to submit after typing (default true). Set false to stage input without submitting.'),
+      },
+      handler: async ({ text, session_id, submit }, extra) => {
+        if (!settings.metaControlsEnabled) {
+          return { content: [{ type: 'text', text: 'Meta Controls is disabled. Enable it in deepsteve Settings to use meta_type.' }] };
+        }
+        const targetId = session_id || extra?.requestInfo?.url?.searchParams?.get('shellId');
+        const entry = targetId ? shells.get(targetId) : null;
+        if (!entry) {
+          return { content: [{ type: 'text', text: `Session "${targetId || 'unknown'}" not found.` }] };
+        }
+        const doSubmit = submit !== false; // default true
+        if (doSubmit) {
+          submitToShell(targetId, text);      // writes text, then \r after 1s (Ink-safe)
+        } else {
+          entry.engine.write(targetId, text); // stage text without Enter
+        }
+        log(`[MCP] meta_type: target=${targetId}, len=${text.length}, submit=${doSubmit}`);
+        return { content: [{ type: 'text', text: JSON.stringify({ session_id: targetId, typed: text.length, submitted: doSubmit }) }] };
+      },
+    },
     start_issue: {
       description: 'Open a new deepsteve session for a GitHub issue. Fetches the issue body from GitHub, creates a worktree, and starts an agent with the issue prompt. The new tab opens in the same browser window as the caller.',
       schema: {

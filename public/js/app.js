@@ -594,6 +594,7 @@ settingsBtn?.addEventListener('click', async () => {
   const currentCommandPaletteShortcut = settingsData.commandPaletteShortcut || 'Meta+k';
   const currentHashCommandsEnabled = settingsData.hashCommandsEnabled !== undefined ? settingsData.hashCommandsEnabled : true;
   const currentOverviewDefaultLayout = settingsData.overviewDefaultLayout || 'tall';
+  const currentMetaControlsEnabled = !!settingsData.metaControlsEnabled;
   const currentAutoUpdateCheckEnabled = settingsData.autoUpdateCheckEnabled !== undefined ? settingsData.autoUpdateCheckEnabled : true;
   const currentAutoUpdateCheckIntervalHours = settingsData.autoUpdateCheckIntervalHours || 6;
   const currentAutoUpdateApply = settingsData.autoUpdateApply !== undefined ? settingsData.autoUpdateApply : true;
@@ -721,6 +722,16 @@ settingsBtn?.addEventListener('click', async () => {
           <input type="checkbox" id="hash-commands-enabled" ${currentHashCommandsEnabled ? 'checked' : ''} style="accent-color: var(--ds-accent-green);">
           Enabled <span style="font-size: 11px; color: var(--ds-text-secondary);">(# prefix for instant actions)</span>
         </label>
+      </div>
+      <div class="settings-section">
+        <h3>Meta Controls</h3>
+        <label style="font-size: 13px; color: var(--ds-text-primary); cursor: pointer; display: flex; align-items: center; gap: 8px;">
+          <input type="checkbox" id="meta-controls-enabled" ${currentMetaControlsEnabled ? 'checked' : ''} style="accent-color: var(--ds-accent-green);">
+          Enabled
+        </label>
+        <p style="font-size: 11px; color: var(--ds-text-secondary); margin-top: 4px;">
+          Lets agents type into terminals via the <code>meta_type</code> tool — self-driving loops are possible. Off by default.
+        </p>
       </div>
       <div class="settings-section">
         <h3>Enabled Agents</h3>
@@ -1372,6 +1383,7 @@ settingsBtn?.addEventListener('click', async () => {
     const commandPaletteEnabled = overlay.querySelector('#command-palette-enabled').checked;
     const commandPaletteShortcut = overlay.querySelector('#command-palette-shortcut').value;
     const hashCommandsEnabled = overlay.querySelector('#hash-commands-enabled').checked;
+    const metaControlsEnabled = overlay.querySelector('#meta-controls-enabled').checked;
     const overviewDefaultLayout = overlay.querySelector('#overview-default-layout').value;
     const enabledAgents = [];
     if (overlay.querySelector('#agent-claude').checked) enabledAgents.push('claude');
@@ -1386,7 +1398,7 @@ settingsBtn?.addEventListener('click', async () => {
     const autoUpdateCheckEnabled = overlay.querySelector('#auto-update-check-enabled').checked;
     const autoUpdateCheckIntervalHours = Math.max(1, Math.min(168, Number(overlay.querySelector('#auto-update-check-interval-hours').value) || 6));
     const autoUpdateApply = overlay.querySelector('#auto-update-apply').checked;
-    const settingsPayload = { shellProfile, maxIssueTitleLength: newMaxTitle, wandPlanMode, wandPromptTemplate, symlinkWorktreeSettings, cmdTabSwitch, cmdTabSwitchHoldMs, commandPaletteEnabled, commandPaletteShortcut, hashCommandsEnabled, overviewDefaultLayout, enabledAgents, opencodeBinary, geminiBinary, piBinary, windowConfigs: editingConfigs, engine: selectedEngine, scrollbackKB, autoUpdateCheckEnabled, autoUpdateCheckIntervalHours, autoUpdateApply };
+    const settingsPayload = { shellProfile, maxIssueTitleLength: newMaxTitle, wandPlanMode, wandPromptTemplate, symlinkWorktreeSettings, cmdTabSwitch, cmdTabSwitchHoldMs, commandPaletteEnabled, commandPaletteShortcut, hashCommandsEnabled, metaControlsEnabled, overviewDefaultLayout, enabledAgents, opencodeBinary, geminiBinary, piBinary, windowConfigs: editingConfigs, engine: selectedEngine, scrollbackKB, autoUpdateCheckEnabled, autoUpdateCheckIntervalHours, autoUpdateApply };
     let resp = await fetch('/api/settings', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
