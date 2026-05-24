@@ -14,7 +14,7 @@ function init(context) {
   const {
     shells, closeSession, spawnSession, sessionEnv, getSpawnArgs, mcpConfigArgs, getAgentConfig, wireShellOutput, getDefaultEngine,
     watchClaudeSessionDir, unwatchClaudeSessionDir, saveState,
-    validateWorktree, ensureWorktree, submitToShell,
+    validateWorktree, ensureWorktree, sessionPaths, submitToShell,
     fetchIssueFromGitHub, deliverPromptWhenReady,
     reloadClients, deliverToWindow, settings, log, isShuttingDown,
   } = context;
@@ -32,7 +32,7 @@ function init(context) {
       },
     },
     get_session_info: {
-      description: 'Get live session metadata (tab name, cwd, worktree) for a deepsteve session. Use `get_my_session_id` to get your session ID.',
+      description: 'Get live session metadata for a deepsteve session: tab name, cwd (your actual working directory — the worktree path for worktree sessions), repoRoot (the main repo checkout), and worktree (the worktree name, or null). Use `get_my_session_id` to get your session ID.',
       schema: {
         session_id: z.string().describe('The deepsteve session ID. Use `get_my_session_id` to get this value.'),
       },
@@ -42,11 +42,13 @@ function init(context) {
           return { content: [{ type: 'text', text: `Session "${session_id}" not found.` }] };
         }
         const fallbackName = entry.cwd ? path.basename(entry.cwd) : 'shell';
+        const { cwd, repoRoot } = sessionPaths(entry);
         return {
           content: [{ type: 'text', text: JSON.stringify({
             id: session_id,
             name: entry.name || fallbackName || 'root',
-            cwd: entry.cwd,
+            cwd,
+            repoRoot,
             worktree: entry.worktree || null,
             windowId: entry.windowId || null,
             agentType: entry.agentType || 'claude',
@@ -136,7 +138,7 @@ function init(context) {
         const sessionEngine = getDefaultEngine();
         const engineType = sessionEngine.constructor.name === 'TmuxEngine' ? 'tmux' : 'node-pty';
         log(`[MCP] start_issue #${number}: id=${id}, agent=${effectiveAgentType}, engine=${engineType}, worktree=${worktree || 'none'}, cwd=${spawnCwd}`);
-        spawnSession(sessionEngine, id, effectiveAgentType, spawnArgs, spawnCwd, { cols: 120, rows: 40, env: sessionEnv(id, { name, worktree, windowId }) });
+        spawnSession(sessionEngine, id, effectiveAgentType, spawnArgs, spawnCwd, { cols: 120, rows: 40, env: sessionEnv(id, { name, worktree, windowId, cwd: spawnCwd, agentType: effectiveAgentType }) });
         shells.set(id, {
           clients: new Set(), cwd: spawnCwd,
           claudeSessionId, agentType: effectiveAgentType,
@@ -227,7 +229,7 @@ function init(context) {
           const shellEngine = getDefaultEngine();
           const shellEngineType = shellEngine.constructor.name === 'TmuxEngine' ? 'tmux' : 'node-pty';
           log(`[MCP] open_terminal (shell): id=${id}, engine=${shellEngineType}, cwd=${effectiveCwd}, caller=${session_id}${hasCommand ? `, command=${JSON.stringify(rawCommand)}` : ''}`);
-          spawnSession(shellEngine, id, 'terminal', [], effectiveCwd, { cols: 120, rows: 40, env: sessionEnv(id, { name: tabName, windowId }) });
+          spawnSession(shellEngine, id, 'terminal', [], effectiveCwd, { cols: 120, rows: 40, env: sessionEnv(id, { name: tabName, windowId, cwd: effectiveCwd, agentType: 'terminal' }) });
           shells.set(id, {
             clients: new Set(), cwd: effectiveCwd,
             claudeSessionId: null, agentType: 'terminal',
@@ -290,7 +292,7 @@ function init(context) {
         // Forked sessions don't pass --permission-mode plan in spawnArgs, so record
         // planMode=false for them regardless of the caller-supplied plan_mode arg.
         const recordedPlanMode = (fork && caller.claudeSessionId) ? false : !!plan_mode;
-        spawnSession(sessionEngine2, id, effectiveAgentType, spawnArgs, spawnCwd, { cols: 120, rows: 40, env: sessionEnv(id, { name: tabName, worktree: validatedWorktree, windowId }) });
+        spawnSession(sessionEngine2, id, effectiveAgentType, spawnArgs, spawnCwd, { cols: 120, rows: 40, env: sessionEnv(id, { name: tabName, worktree: validatedWorktree, windowId, cwd: spawnCwd, agentType: effectiveAgentType }) });
         shells.set(id, {
           clients: new Set(), cwd: spawnCwd,
           claudeSessionId, agentType: effectiveAgentType,
