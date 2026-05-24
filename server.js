@@ -108,6 +108,14 @@ function log(...args) {
   const ts = new Date().toISOString().slice(11, 23);
   console.log(`[${ts}]`, ...args);
 }
+
+// Session-lifecycle tracing for debugging session-ID / planMode divergence (issue #491).
+// Emits one JSON line per event into the daemon log, greppable via [session-trace].
+// `ts` (epoch ms) lets analysis order events across restarts independent of the log
+// prefix. Correlate a tab's whole lifecycle by its `shell`, `name`, and `worktree`.
+function traceSession(event, fields) {
+  log('[session-trace]', JSON.stringify({ event, ts: Date.now(), ...fields }));
+}
 const STATE_FILE = path.join(os.homedir(), '.deepsteve', 'state.json');
 const DISPLAY_TABS_DIR = path.join(os.homedir(), '.deepsteve', 'display-tabs');
 const SCREENSHOTS_DIR = path.join(os.homedir(), '.deepsteve', 'screenshots');
@@ -947,6 +955,7 @@ function watchClaudeSessionDir(shellId) {
         if (!head.includes(e.claudeSessionId)) return;
 
         log(`Session ${shellId} detected session fork via fs.watch: ${e.claudeSessionId} → ${sessionId}`);
+        traceSession('SESSIONID-CHANGE', { source: 'fs-watch', shell: shellId, name: e.name || null, worktree: e.worktree || null, cwd: e.cwd, claudeOld: e.claudeSessionId, claude: sessionId, planModeBefore: !!e.planMode, planModeAfter: false });
         e.claudeSessionId = sessionId;
         // Forks happen when the user approves a plan, runs /clear, or otherwise
         // starts a new conversation. In all cases the user has moved past plan
@@ -962,6 +971,7 @@ function watchClaudeSessionDir(shellId) {
             const head = fs.readFileSync(path.join(projectDir, filename), 'utf8').slice(0, 32768);
             if (!head.includes(e2.claudeSessionId)) return;
             log(`Session ${shellId} detected fork (retry): ${e2.claudeSessionId} → ${sessionId}`);
+            traceSession('SESSIONID-CHANGE', { source: 'fs-watch-retry', shell: shellId, name: e2.name || null, worktree: e2.worktree || null, cwd: e2.cwd, claudeOld: e2.claudeSessionId, claude: sessionId, planModeBefore: !!e2.planMode, planModeAfter: false });
             e2.claudeSessionId = sessionId;
             e2.planMode = false;
             saveState();
@@ -1105,6 +1115,7 @@ function wireShellOutput(id) {
         const newSessionId = resumeMatch[1];
         if (newSessionId !== e.claudeSessionId) {
           log(`Session ${id} claude session updated: ${e.claudeSessionId} → ${newSessionId}`);
+          traceSession('SESSIONID-CHANGE', { source: 'pty-output', shell: id, name: e.name || null, worktree: e.worktree || null, cwd: e.cwd, claudeOld: e.claudeSessionId, claude: newSessionId, planModeBefore: !!e.planMode, planModeAfter: false, shuttingDown: !!shuttingDown });
           e.claudeSessionId = newSessionId;
           // Session ID changed (fork on /clear, plan approved, etc.) — user has
           // left the plan-mode conversation, so don't re-apply --permission-mode
@@ -1181,6 +1192,7 @@ function killShell(entry, id) {
   const pid = eng.getPid(id);
   const config = getAgentConfig(entry.agentType);
   log(`Killing shell ${id} (pid=${pid}, agent=${entry.agentType || 'claude'}, waitingForInput=${entry.waitingForInput})`);
+  traceSession('CLOSE', { shell: id, name: entry.name || null, worktree: entry.worktree || null, cwd: entry.cwd, claude: entry.claudeSessionId, planMode: !!entry.planMode, pid, agent: entry.agentType || 'claude', waitingForInput: !!entry.waitingForInput, shuttingDown: !!shuttingDown });
 
   // Clean up idle timer and engine data listener
   clearTimeout(entry.idleTimer);
@@ -1416,6 +1428,7 @@ async function shutdown(signal) {
     for (const [sid, sentry] of shells) {
       if (sentry.agentType === 'tmux-attach') continue;
       state[sid] = { cwd: sentry.cwd, claudeSessionId: sentry.claudeSessionId, agentType: sentry.agentType || 'claude', engineType: sentry.engineType || 'node-pty', worktree: sentry.worktree || null, name: sentry.name || null, planMode: !!sentry.planMode, lastActivity: sentry.lastActivity || null };
+      traceSession('PERSIST', { phase: 'shutdown-final', shell: sid, name: sentry.name || null, worktree: sentry.worktree || null, claude: sentry.claudeSessionId, planMode: !!sentry.planMode });
     }
     const merged = { ...savedState, ...state };
     try {
@@ -3318,6 +3331,8 @@ function handleWsConnection(ws, req) {
       const sessionEngine = getEngineByType(savedEngineType);
       const restoredEngineType = sessionEngine === tmuxEngine ? 'tmux' : 'node-pty';
       log(`Restoring session ${id} in ${cwd} (agent: ${savedAgentType}, engine: ${restoredEngineType}, session: ${claudeSessionId}, worktree: ${savedWorktree || 'none'}, planMode: ${savedPlanMode})`);
+      const restoredName = name || restored.name || null;
+      traceSession('SPAWN', { path: 'resume', shell: id, name: restoredName, worktree: savedWorktree || null, cwd, claude: claudeSessionId, planMode: savedPlanMode, agent: savedAgentType, engine: restoredEngineType });
       const ptySize = { cols: initialCols, rows: initialRows };
 
       const resumeArgs = getResumeArgs(savedAgentType, {
@@ -3327,7 +3342,6 @@ function handleWsConnection(ws, req) {
         shellId: id
       });
 
-      const restoredName = name || restored.name || null;
       spawnSession(sessionEngine, id, savedAgentType, resumeArgs, cwd, { ...ptySize, env: sessionEnv(id, { name: restoredName, worktree: savedWorktree, windowId: restored.windowId, cwd, agentType: savedAgentType }) });
       const startTime = Date.now();
       shells.set(id, { clients: new Set(), cwd, claudeSessionId, agentType: savedAgentType, engine: sessionEngine, engineType: restoredEngineType, worktree: savedWorktree, name: restoredName, planMode: savedPlanMode, restored: true, waitingForInput: false, lastActivity: Date.now(), createdAt: restored.createdAt || Date.now(), windowId: restored.windowId || null });
@@ -3342,6 +3356,7 @@ function handleWsConnection(ws, req) {
           log(`Session ${id} exited after ${elapsed}ms, --resume likely failed. Falling back to -c`);
           const newClaudeSessionId = randomUUID();
           const entry = shells.get(id);
+          traceSession('SPAWN', { path: 'fallback', shell: id, name: entry?.name || null, worktree: entry?.worktree || null, cwd, claudeOld: claudeSessionId, claude: newClaudeSessionId, planMode: !!entry?.planMode, elapsedMs: elapsed });
           const fallbackArgs = ['-c', '--fork-session', '--session-id', newClaudeSessionId];
           if (entry && entry.planMode) fallbackArgs.push('--permission-mode', 'plan');
           if (entry && entry.worktree) fallbackArgs.push('--worktree', entry.worktree);
@@ -3389,6 +3404,8 @@ function handleWsConnection(ws, req) {
     // so record planMode=false for forked sessions even if the URL param was set.
     let spawnArgs;
     let spawnedPlanMode;
+    let spawnPath = 'new';
+    let parentShell = null, parentClaude = null, parentWorktree = null;
     if (forkFrom && shells.has(forkFrom)) {
       const parent = shells.get(forkFrom);
       spawnArgs = ['--resume', parent.claudeSessionId, '--fork-session', '--session-id', sessionId];
@@ -3396,6 +3413,10 @@ function handleWsConnection(ws, req) {
       else if (parent.worktree) spawnArgs.push('--worktree', parent.worktree);
       spawnArgs.push(...mcpConfigArgs(agentType, id));
       spawnedPlanMode = false;
+      spawnPath = 'fork';
+      parentShell = forkFrom;
+      parentClaude = parent.claudeSessionId;
+      parentWorktree = parent.worktree || null;
       log(`[WS] Forking from shell ${forkFrom} (parent claude session: ${parent.claudeSessionId})`);
     } else {
       spawnArgs = getSpawnArgs(agentType, {
@@ -3410,6 +3431,7 @@ function handleWsConnection(ws, req) {
     const sessionEngine = getEngineByType(requestedEngine || settings.engine);
     const engineType = sessionEngine === tmuxEngine ? 'tmux' : 'node-pty';
     log(`[WS] Creating NEW shell: oldId=${oldId}, newId=${id}, agent=${agentType}, engine=${engineType}, session=${sessionId}, worktree=${worktree || 'none'}, cwd=${worktreeCwd}, planMode=${spawnedPlanMode}`);
+    traceSession('SPAWN', { path: spawnPath, shell: id, oldId: oldId || null, name: name || null, worktree: worktree || null, cwd: worktreeCwd, claude: sessionId, planMode: spawnedPlanMode, agent: agentType, engine: engineType, parentShell, parentClaude, parentWorktree });
     spawnSession(sessionEngine, id, agentType, spawnArgs, worktreeCwd, { cols: initialCols, rows: initialRows, env: sessionEnv(id, { name, worktree, cwd: worktreeCwd, agentType }) });
     shells.set(id, { clients: new Set(), cwd: worktreeCwd, claudeSessionId: sessionId, agentType, engine: sessionEngine, engineType, worktree: worktree || null, name: name || null, planMode: spawnedPlanMode, waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now() });
     wireShellOutput(id);
