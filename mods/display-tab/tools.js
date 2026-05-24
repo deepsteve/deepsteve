@@ -83,6 +83,52 @@ function init(context) {
       },
     },
 
+    edit_display_tab: {
+      description: 'Edit a display tab by replacing an exact substring (like the Edit tool). Faster than update_display_tab for small changes — no need to resend the whole document. Errors if old_string is not found, or matches more than once unless replace_all is set.',
+      schema: {
+        tab_id: z.string().describe('The display tab ID returned by create_display_tab'),
+        old_string: z.string().describe('Exact substring to find in the current HTML'),
+        new_string: z.string().describe('Replacement string'),
+        replace_all: z.boolean().optional().describe('Replace every occurrence (default false)'),
+      },
+      handler: async ({ tab_id, old_string, new_string, replace_all }) => {
+        if (!displayTabs.has(tab_id)) {
+          return { content: [{ type: 'text', text: `Display tab "${tab_id}" not found.` }] };
+        }
+        if (old_string === '') {
+          return { content: [{ type: 'text', text: 'old_string must not be empty.' }] };
+        }
+        if (old_string === new_string) {
+          return { content: [{ type: 'text', text: 'old_string and new_string are identical — no change.' }] };
+        }
+
+        const html = displayTabs.get(tab_id);
+        // split-count doubles as the uniqueness check and the reported replacement count.
+        const count = html.split(old_string).length - 1;
+        if (count === 0) {
+          return { content: [{ type: 'text', text: `old_string not found in display tab "${tab_id}".` }] };
+        }
+        if (count > 1 && !replace_all) {
+          return { content: [{ type: 'text', text: `old_string is not unique (${count} matches). Set replace_all:true or provide a longer, unique string.` }] };
+        }
+
+        // split/join (not String.replace) so $-sequences in new_string are treated literally.
+        // When replace_all is false, count===1 here, so this replaces exactly the one match.
+        const updated = html.split(old_string).join(new_string);
+        setDisplayTab(tab_id, updated);
+        log(`[MCP] edit_display_tab: id=${tab_id}, replacements=${count}`);
+
+        // Broadcast to all clients so the iframe reloads
+        for (const client of reloadClients) {
+          if (client.readyState === 1) {
+            client.send(JSON.stringify({ type: 'update-display-tab', id: tab_id }));
+          }
+        }
+
+        return { content: [{ type: 'text', text: JSON.stringify({ id: tab_id, replacements: count }) }] };
+      },
+    },
+
     close_display_tab: {
       description: 'Close a display tab.',
       schema: {
