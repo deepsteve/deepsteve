@@ -12,6 +12,33 @@ function screenshotUrl(id) {
   return `/api/screenshots/${id}.png`;
 }
 
+/**
+ * Render a DOM element to a PNG data URL.
+ *
+ * modern-screenshot can't see inside an <iframe>, so when the target is (or wraps) a
+ * same-origin iframe — display tabs (`/api/display-tab/...`) and mod panels — we capture
+ * the iframe's own document instead. The iframe is same-origin and sandboxed with
+ * `allow-same-origin`, so its contentDocument is reachable.
+ */
+async function captureElementToPng(el) {
+  const iframe = el.tagName === 'IFRAME' ? el : el.querySelector('iframe');
+  if (iframe) {
+    let doc = null;
+    try { doc = iframe.contentDocument; } catch { /* cross-origin */ }
+    if (!doc || !doc.documentElement) {
+      throw new Error('Cannot read iframe content (not yet loaded or cross-origin)');
+    }
+    const node = doc.documentElement;
+    const bodyBg = doc.body && (doc.defaultView || window).getComputedStyle(doc.body).backgroundColor;
+    return window.modernScreenshot.domToPng(node, {
+      width: iframe.clientWidth || node.scrollWidth,
+      height: iframe.clientHeight || node.scrollHeight,
+      backgroundColor: bodyBg && bodyBg !== 'rgba(0, 0, 0, 0)' ? bodyBg : '#ffffff',
+    });
+  }
+  return window.modernScreenshot.domToPng(el);
+}
+
 function ScreenshotsPanel() {
   const [screenshots, setScreenshots] = useState([]);
   const [selectedId, setSelectedId] = useState(null);
@@ -71,13 +98,15 @@ function ScreenshotsPanel() {
     setCapturing(true);
     setStatus(null);
     try {
-      const xtermEl = parent.document.querySelector('.terminal-container.active .xterm');
-      if (!xtermEl) {
-        showStatus('No active terminal', 'error');
+      const activeContainer = parent.document.querySelector('.terminal-container.active');
+      // Terminal tabs render an .xterm; display tabs / mod panels render an <iframe>.
+      const target = activeContainer && (activeContainer.querySelector('.xterm') || activeContainer.querySelector('iframe'));
+      if (!target) {
+        showStatus('No active tab to capture', 'error');
         setCapturing(false);
         return;
       }
-      const dataUrl = await window.modernScreenshot.domToPng(xtermEl);
+      const dataUrl = await captureElementToPng(target);
       const res = await fetch('/api/screenshots', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -147,7 +176,7 @@ function ScreenshotsPanel() {
           });
           return;
         }
-        const dataUrl = await window.modernScreenshot.domToPng(el);
+        const dataUrl = await captureElementToPng(el);
         // Let the server persist into the collection + broadcast — no local add here.
         await fetch('/api/screenshots/result', {
           method: 'POST',
@@ -324,7 +353,7 @@ function ScreenshotsPanel() {
             color: '#8b949e',
             fontSize: 13,
           }}>
-            Capture a screenshot of the active terminal viewport.
+            Capture a screenshot of the active tab (terminal or display tab).
           </div>
         )}
       </div>

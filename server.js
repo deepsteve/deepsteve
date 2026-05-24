@@ -120,6 +120,10 @@ app.use(express.static('public', {
 app.use('/mods', express.static('mods'));
 app.use((req, res, next) => {
   if (req.path === '/mcp') return next(); // MCP SDK parses its own body
+  // Screenshot routes carry base64 PNGs (often >> 100KB) and declare their own
+  // express.json({ limit: '50mb' }). Skip the default-100KB global parser here, or
+  // it runs first and rejects them with PayloadTooLargeError before they reach the route.
+  if (req.path.startsWith('/api/screenshots')) return next();
   express.json()(req, res, next);
 });
 
