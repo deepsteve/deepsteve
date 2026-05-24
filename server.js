@@ -1143,7 +1143,21 @@ function wireShellOutput(id) {
         }
       }
       // Track lastBelTime for deliverPromptWhenReady fallback
-      if (data.includes('\x07')) e.lastBelTime = Date.now();
+      if (data.includes('\x07')) {
+        e.lastBelTime = Date.now();
+        // A BEL is the agent's readiness signal — it has reached its input prompt.
+        // If a prompt was queued before the first BEL (the WS create path queues it
+        // ~11ms in, well before Claude's first bell at ~400ms), fire the queued
+        // callback now instead of waiting for the 2s idle timer below. Claude's
+        // streaming startup output keeps resetting that timer, delaying submission
+        // by ~12s (#492). Single-shot: onIdleOnce is nulled here so the idle timer
+        // won't double-fire it.
+        if (e.onIdleOnce) {
+          const cb = e.onIdleOnce;
+          e.onIdleOnce = null;
+          try { cb(); } catch (err) { log(`[bel] onIdleOnce threw: ${err.message}`); }
+        }
+      }
 
       // Silence-based idle detection: if no PTY output for 2s, mark as waiting.
       // Any output resets the timer and clears waiting state.
