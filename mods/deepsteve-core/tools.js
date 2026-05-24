@@ -2,6 +2,14 @@ const { z } = require('zod');
 const { randomUUID } = require('crypto');
 const path = require('path');
 
+// Derive a short, single-line tab name from a shell command (used when a
+// terminal tab is opened with a `command` but no explicit `name`).
+function deriveTabName(cmd) {
+  const oneLine = cmd.replace(/\s+/g, ' ').trim();
+  const MAX = 24;
+  return oneLine.length > MAX ? oneLine.slice(0, MAX - 1) + '…' : oneLine;
+}
+
 function init(context) {
   const {
     shells, closeSession, spawnSession, sessionEnv, getSpawnArgs, mcpConfigArgs, getAgentConfig, wireShellOutput, getDefaultEngine,
@@ -188,6 +196,7 @@ function init(context) {
       description: 'Open a new deepsteve terminal session (new tab). Inherits context (cwd, worktree, agent type) from the calling session. The new tab opens in the same browser window as the caller.',
       schema: {
         prompt: z.string().optional().describe('Initial prompt to send to the new session'),
+        command: z.string().optional().describe('Shell command to auto-run on startup (plain terminal tabs only). Runs as if typed at the prompt; the tab stays open afterward. Ignored for agent sessions.'),
         name: z.string().optional().describe('Tab name for the new session'),
         session_id: z.string().optional().describe('Caller session ID (auto-detected if omitted)'),
         cwd: z.string().optional().describe('Working directory (defaults to caller\'s cwd)'),
@@ -196,7 +205,7 @@ function init(context) {
         plan_mode: z.boolean().optional().describe('Start in plan mode'),
         fork: z.boolean().optional().describe('Fork the calling session\'s Claude conversation into the new tab'),
       },
-      handler: async ({ session_id, prompt, name, cwd, worktree, agent_type, plan_mode, fork }, extra) => {
+      handler: async ({ session_id, prompt, command, name, cwd, worktree, agent_type, plan_mode, fork }, extra) => {
         const callerId = session_id || extra?.requestInfo?.url?.searchParams?.get('shellId');
         const caller = callerId ? shells.get(callerId) : null;
         if (!caller) {
@@ -211,10 +220,13 @@ function init(context) {
 
         if (!effectiveAgentType) {
           // Plain shell — no agent, no flags, no session tracking
-          const tabName = name || undefined;
+          const rawCommand = typeof command === 'string' ? command.trim() : '';
+          const hasCommand = rawCommand.length > 0;
+          // Auto-name the tab from the command when no explicit name was given.
+          const tabName = name || (hasCommand ? deriveTabName(rawCommand) : undefined);
           const shellEngine = getDefaultEngine();
           const shellEngineType = shellEngine.constructor.name === 'TmuxEngine' ? 'tmux' : 'node-pty';
-          log(`[MCP] open_terminal (shell): id=${id}, engine=${shellEngineType}, cwd=${effectiveCwd}, caller=${session_id}`);
+          log(`[MCP] open_terminal (shell): id=${id}, engine=${shellEngineType}, cwd=${effectiveCwd}, caller=${session_id}${hasCommand ? `, command=${JSON.stringify(rawCommand)}` : ''}`);
           spawnSession(shellEngine, id, 'terminal', [], effectiveCwd, { cols: 120, rows: 40, env: sessionEnv(id, { name: tabName, windowId }) });
           shells.set(id, {
             clients: new Set(), cwd: effectiveCwd,
@@ -225,12 +237,24 @@ function init(context) {
             waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now(),
           });
           wireShellOutput(id);
+          if (hasCommand) {
+            // A login shell (`zsh -l`) needs a moment to source profile files and
+            // initialize ZLE before typed input renders cleanly at the prompt. tty
+            // line discipline buffers input either way, so the command still runs;
+            // the delay just gives clean echo. No Ink workaround (submitToShell's
+            // text/\r split) is needed for a plain shell — a single write with a
+            // trailing newline submits the line atomically.
+            setTimeout(() => {
+              if (!shells.has(id)) return; // tab may have closed during the delay
+              shellEngine.write(id, rawCommand + '\n');
+            }, 600);
+          }
           shellEngine.onExit(id, () => {
             if (!isShuttingDown()) { shells.delete(id); saveState(); }
           });
           saveState();
           deliverToWindow({ type: 'open-session', id, cwd: effectiveCwd, name: tabName, windowId }, windowId);
-          return { content: [{ type: 'text', text: JSON.stringify({ id, name: tabName || id, cwd: effectiveCwd, worktree: null }) }] };
+          return { content: [{ type: 'text', text: JSON.stringify({ id, name: tabName || id, cwd: effectiveCwd, worktree: null, command: hasCommand ? rawCommand : null }) }] };
         }
 
         // Agent session
@@ -298,4 +322,4 @@ function init(context) {
   };
 }
 
-module.exports = { init };
+module.exports = { init, deriveTabName };
