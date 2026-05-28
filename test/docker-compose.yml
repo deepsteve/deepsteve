@@ -24,4 +24,6 @@ services:
         condition: service_healthy
     environment:
       - DEEPSTEVE_URL=http://server:3000
-    command: ["sh", "-c", "node --test --test-concurrency=1 --test-timeout 60000 test/integration/*.test.js"]
+    # Run files serially (one process each); tmux IS installed here, so run all.
+    # See test/run-integration.sh for why --test-concurrency=1 isn't enough.
+    command: ["sh", "test/run-integration.sh"]

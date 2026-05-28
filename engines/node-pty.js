@@ -34,6 +34,13 @@ class NodePtyEngine extends Engine {
         try { cb({ exitCode, signal }); } catch {}
       }
       this.emit('exit', id, exitCode, signal);
+      // The pty is dead, so drop it from the map. Otherwise getPid()/kill() keep
+      // returning its old pid, and killShell()'s delayed SIGTERM/SIGKILL escalation
+      // (server.js) will signal that pid 8–10s later — by which point the OS may
+      // have recycled it for an unrelated process (e.g. a freshly spawned session),
+      // killing the wrong process. Skip the delete if an exit handler already
+      // re-spawned a fresh pty under the same id (the Claude --resume fallback path).
+      if (this._ptys.get(id) === entry) this._ptys.delete(id);
     });
   }
 

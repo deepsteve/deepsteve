@@ -19,7 +19,15 @@ async function openTerminal(args) {
   await client.connect(transport);
   try {
     const res = await client.callTool({ name: 'open_terminal', arguments: args });
-    return JSON.parse(res.content[0].text);
+    const text = res.content[0].text;
+    try {
+      return JSON.parse(text);
+    } catch {
+      // open_terminal returns a plain-text message (not JSON) on failure, e.g.
+      // `Session "<id>" not found.` Surface it directly instead of as a cryptic
+      // "Unexpected token" JSON parse error.
+      throw new Error(`open_terminal did not return JSON: ${text}`);
+    }
   } finally {
     await client.close();
   }

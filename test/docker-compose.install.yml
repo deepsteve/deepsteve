@@ -24,5 +24,6 @@ services:
         condition: service_healthy
     environment:
       - DEEPSTEVE_URL=http://server:3000
-    # Exclude tmux-engine tests — install.sh does not install tmux
-    command: ["sh", "-c", "node --test --test-concurrency=1 --test-timeout 60000 test/integration/server-health.test.js test/integration/session-lifecycle.test.js test/integration/settings-api.test.js test/integration/websocket.test.js"]
+    # Run files serially (one process each); skip tmux — install.sh has no tmux.
+    # See test/run-integration.sh for why --test-concurrency=1 isn't enough.
+    command: ["sh", "test/run-integration.sh", "tmux-engine"]
