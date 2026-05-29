@@ -35,15 +35,26 @@ async function openTerminal(args) {
 
 describe('open_terminal command parameter', () => {
   const clients = [];
+  // Tabs open_terminal spawns get no WsClient, so they aren't covered by
+  // `clients`. Record their ids here so afterEach's per-session cleanup deletes
+  // them instead of leaking them onto the shared server.
+  const spawnedIds = [];
   function createClient() {
     const c = new WsClient();
     clients.push(c);
     return c;
   }
+  // Wrapper around openTerminal that records the spawned tab id for cleanup.
+  async function spawnTerminal(args) {
+    const result = await openTerminal(args);
+    if (result && result.id) spawnedIds.push(result.id);
+    return result;
+  }
 
   afterEach(async () => {
-    await cleanupSessions(clients);
+    await cleanupSessions(clients, spawnedIds);
     clients.length = 0;
+    spawnedIds.length = 0;
   });
 
   it('auto-runs the command and stays open at the shell prompt', async () => {
@@ -52,7 +63,7 @@ describe('open_terminal command parameter', () => {
     await caller.connect({ new: '1', agentType: 'terminal', cwd: '/tmp' });
 
     const marker = 'cmd_ran_marker_123';
-    const result = await openTerminal({
+    const result = await spawnTerminal({
       session_id: caller.sessionId,
       command: `echo ${marker}`,
       cwd: '/tmp',
@@ -73,7 +84,7 @@ describe('open_terminal command parameter', () => {
     const caller = createClient();
     await caller.connect({ new: '1', agentType: 'terminal', cwd: '/tmp' });
 
-    const result = await openTerminal({
+    const result = await spawnTerminal({
       session_id: caller.sessionId,
       command: 'echo hi',
       name: 'my-custom-tab',
@@ -86,7 +97,7 @@ describe('open_terminal command parameter', () => {
     const caller = createClient();
     await caller.connect({ new: '1', agentType: 'terminal', cwd: '/tmp' });
 
-    const result = await openTerminal({
+    const result = await spawnTerminal({
       session_id: caller.sessionId,
       command: '   ',
       cwd: '/tmp',

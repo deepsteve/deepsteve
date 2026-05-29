@@ -74,6 +74,12 @@ describe('Session Lifecycle', () => {
     assert.strictEqual(active.length, 0, 'session should no longer be active');
   });
 
+  // NOTE: this is the one test that exercises the GLOBAL killall endpoint and
+  // asserts the server has zero active sessions afterward. It is inherently
+  // hostile to concurrency — both its action (kill everything) and its assertion
+  // (nothing left) are server-wide — so it requires the suite to run serially
+  // (see test/run-integration.sh). Per-session cleanup elsewhere keeps the rest
+  // of the suite from cross-contaminating; this test is the deliberate exception.
   it('POST /api/shells/killall removes all active sessions', async () => {
     const client1 = createClient();
     const client2 = createClient();

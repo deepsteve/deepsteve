@@ -1,13 +1,17 @@
 #!/bin/sh
 # Run each integration test file in its own `node --test` process, one at a time.
 #
-# Serial execution is REQUIRED, not just nice-to-have: the suite assumes
-# exclusive access to the single shared server. cleanupSessions() (test/helpers/
-# ws-client.js) calls the GLOBAL POST /api/shells/killall after every test, and
-# the "killall removes all active sessions" test asserts the server has zero
-# active sessions. If a second test file is creating or holding sessions at the
-# same time, one file's killall wipes another file's in-flight session — the
-# victim then sees "Session <id> not found" (e.g. open_terminal's caller lookup).
+# Serial execution is REQUIRED, not just nice-to-have: the suite shares one
+# server, and the "killall removes all active sessions" tests (session-lifecycle,
+# tmux-engine) exercise the GLOBAL POST /api/shells/killall and assert the server
+# has zero active sessions afterward. Those are inherently server-wide, so if a
+# second file is creating or holding sessions at the same time, the killall wipes
+# it and the victim sees "Session <id> not found" (e.g. open_terminal's caller).
+#
+# Per-test cleanup is already scoped to a test's own sessions (cleanupSessions()
+# in test/helpers/ws-client.js deletes only owned ids, never the global killall),
+# so the high-frequency afterEach path no longer cross-contaminates. Serial
+# execution remains required only for the two deliberate global killall tests.
 #
 # We deliberately do NOT rely on `node --test --test-concurrency=1` for this: that
 # flag is honored inconsistently across Node 22.x patch releases. #493 added it and

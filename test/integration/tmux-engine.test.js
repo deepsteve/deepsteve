@@ -164,6 +164,8 @@ describe('Tmux Engine', () => {
     assert.ok(output.includes('/tmp'), 'shell should start in /tmp');
   });
 
+  // Like the node-pty killall test: exercises the GLOBAL endpoint and asserts a
+  // server-wide zero, so it requires serial execution (test/run-integration.sh).
   it('POST /api/shells/killall removes all tmux sessions', async () => {
     const client1 = createClient();
     const client2 = createClient();

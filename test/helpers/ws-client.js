@@ -206,15 +206,39 @@ class WsClient {
 }
 
 /**
- * Clean up all sessions between tests.
+ * Clean up the sessions a single test created, between tests.
  *
- * Strategy: send 'exit\r' via WS to make shells terminate immediately,
- * then call killall to clean up the server map. This avoids the stale
- * killShell timer problem (Ctrl+C → 8s → SIGTERM → 2s → SIGKILL) where
- * background timers can SIGTERM new processes that reused the old PID.
- * When the shell is already dead, those timers safely no-op.
+ * Deletes ONLY the sessions this test owns — the ids of the passed `clients`
+ * plus any `extraIds` (e.g. tabs open_terminal spawned without a WsClient
+ * attached). It deliberately does NOT call the global POST /api/shells/killall:
+ * this runs in afterEach after every test, and the suite shares one server, so
+ * a global kill would wipe sessions owned by other test files running against
+ * the same server. That cross-contamination is what produced the intermittent
+ * `open_terminal: Session "<id>" not found` flake (the victim's caller session
+ * got killed mid-test). Scoping cleanup to owned ids removes the blast radius.
+ *
+ * Strategy: send 'exit\r' so shells terminate naturally first (a clean PTY exit
+ * avoids killShell's Ctrl+C → 8s SIGTERM → 2s SIGKILL escalation timers, which
+ * can otherwise SIGTERM a process that reused the old PID). Then DELETE any that
+ * are still alive with force=1 to bypass the connected-clients guard. Already-
+ * exited shells return 404 and are safely ignored.
+ *
+ * Note: a force-DELETEd survivor is removed from the active shells map but kept
+ * in savedState as `closed` (normal tab-close semantics), so it lingers in GET
+ * /api/shells as a closed entry. That's harmless — every assertion filters on
+ * `status === 'active'`, and closed sessions are gone from the lookup map that
+ * open_terminal's caller resolution uses.
+ *
+ * @param {WsClient[]} clients - clients whose sessions to delete
+ * @param {string[]} [extraIds] - extra session ids to delete (untracked tabs)
  */
-async function cleanupSessions(clients) {
+async function cleanupSessions(clients, extraIds = []) {
+  // Capture owned ids BEFORE close() nulls out sessionId. A Set dedupes the
+  // case where a client is attached to an id that's also in extraIds.
+  const ids = new Set();
+  for (const c of clients) if (c.sessionId) ids.add(c.sessionId);
+  for (const id of extraIds) if (id) ids.add(id);
+
   // Send exit to each connected client's shell
   for (const c of clients) {
     try { c.sendInput('exit\r'); } catch {}
@@ -225,8 +249,11 @@ async function cleanupSessions(clients) {
   // Close WS connections
   for (const c of clients) c.close();
 
-  // Clean up server state
-  await httpPost('/api/shells/killall').catch(() => {});
+  // Delete only this test's own sessions (force=1 bypasses the connected-clients
+  // guard for any shell that didn't exit on its own).
+  await Promise.all(
+    [...ids].map(id => httpDelete(`/api/shells/${id}?force=1`).catch(() => {}))
+  );
   await new Promise(r => setTimeout(r, 500));
 }
 
