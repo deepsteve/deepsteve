@@ -985,6 +985,18 @@ function claudeProjectDir(cwd, worktree) {
   return path.join(CLAUDE_PROJECTS_DIR, dirName);
 }
 
+// True if another live shell already owns this claude session id — i.e. it was
+// deliberately spawned by deepsteve (e.g. a fork tab via `--fork-session
+// --session-id <new>`), not a self-fork of `exceptShellId`. Fork files embed the
+// parent's session id, so without this guard the parent's watcher would mistake a
+// child fork's .jsonl for its own fork and steal the child's id (#497).
+function sessionIdOwnedByOtherShell(sessionId, exceptShellId) {
+  for (const [sid, e] of shells) {
+    if (sid !== exceptShellId && e.claudeSessionId === sessionId) return true;
+  }
+  return false;
+}
+
 function watchClaudeSessionDir(shellId) {
   const entry = shells.get(shellId);
   if (!entry) return;
@@ -1014,6 +1026,14 @@ function watchClaudeSessionDir(shellId) {
         const head = fs.readFileSync(newFile, 'utf8').slice(0, 32768);
         if (!head.includes(e.claudeSessionId)) return;
 
+        // A fork tab spawned off this session creates a .jsonl that references our
+        // id, but it belongs to another live shell. Don't claim it as our own fork
+        // (#497) — that would point both tabs at the same session.
+        if (sessionIdOwnedByOtherShell(sessionId, shellId)) {
+          log(`Session ${shellId} ignoring ${sessionId} — owned by another tab (deepsteve fork)`);
+          return;
+        }
+
         log(`Session ${shellId} detected session fork via fs.watch: ${e.claudeSessionId} → ${sessionId}`);
         traceSession('SESSIONID-CHANGE', { source: 'fs-watch', shell: shellId, name: e.name || null, worktree: e.worktree || null, cwd: e.cwd, claudeOld: e.claudeSessionId, claude: sessionId, planModeBefore: !!e.planMode, planModeAfter: false });
         e.claudeSessionId = sessionId;
@@ -1030,6 +1050,10 @@ function watchClaudeSessionDir(shellId) {
             if (!e2 || sessionId === e2.claudeSessionId) return;
             const head = fs.readFileSync(path.join(projectDir, filename), 'utf8').slice(0, 32768);
             if (!head.includes(e2.claudeSessionId)) return;
+            if (sessionIdOwnedByOtherShell(sessionId, shellId)) {
+              log(`Session ${shellId} ignoring ${sessionId} — owned by another tab (deepsteve fork)`);
+              return;
+            }
             log(`Session ${shellId} detected fork (retry): ${e2.claudeSessionId} → ${sessionId}`);
             traceSession('SESSIONID-CHANGE', { source: 'fs-watch-retry', shell: shellId, name: e2.name || null, worktree: e2.worktree || null, cwd: e2.cwd, claudeOld: e2.claudeSessionId, claude: sessionId, planModeBefore: !!e2.planMode, planModeAfter: false });
             e2.claudeSessionId = sessionId;
@@ -1173,7 +1197,9 @@ function wireShellOutput(id) {
       const resumeMatch = plain.match(/claude --resume ([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/);
       if (resumeMatch) {
         const newSessionId = resumeMatch[1];
-        if (newSessionId !== e.claudeSessionId) {
+        // Don't adopt an id another live shell already owns (e.g. a fork tab); that
+        // would point both tabs at the same session (#497).
+        if (newSessionId !== e.claudeSessionId && !sessionIdOwnedByOtherShell(newSessionId, id)) {
           log(`Session ${id} claude session updated: ${e.claudeSessionId} → ${newSessionId}`);
           traceSession('SESSIONID-CHANGE', { source: 'pty-output', shell: id, name: e.name || null, worktree: e.worktree || null, cwd: e.cwd, claudeOld: e.claudeSessionId, claude: newSessionId, planModeBefore: !!e.planMode, planModeAfter: false, shuttingDown: !!shuttingDown });
           e.claudeSessionId = newSessionId;
