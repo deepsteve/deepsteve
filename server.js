@@ -1066,6 +1066,11 @@ function unwatchClaudeSessionDir(shellId) {
  * they land in different readable events.
  */
 function submitToShell(id, text, eng) {
+  // Mark this as a submission so the idle classifier doesn't treat the agent's
+  // resulting work as "waiting for input" until its next completion BEL. Covers
+  // auto-submitted initialPrompts and meta_type as well as graceful /exit.
+  const e = shells.get(id);
+  if (e) e.lastInputTime = Date.now();
   (eng || getEngine(id)).write(id, text);
   setTimeout(() => (eng || getEngine(id)).write(id, '\r'), 1000);
 }
@@ -1228,17 +1233,31 @@ function wireShellOutput(id) {
       }
       clearTimeout(e.idleTimer);
       e.idleTimer = setTimeout(() => {
-        if (!e.waitingForInput) {
-          e.waitingForInput = true;
-          const stateMsg = JSON.stringify({ type: 'state', waiting: true });
-          e.clients.forEach((c) => c.send(stateMsg));
-
+        // Fire any queued prompt regardless of the waiting decision below
+        // (single-shot — nulled so the BEL path above can't double-fire it).
+        const fireOnce = () => {
           if (e.onIdleOnce) {
             const cb = e.onIdleOnce;
             e.onIdleOnce = null;
             try { cb(); } catch (err) { log(`[idle] onIdleOnce threw: ${err.message}`); }
           }
+        };
+        if (e.waitingForInput) { fireOnce(); return; }
+
+        // BEL-gated classifier (#500). Silence alone is ambiguous: a long, quiet
+        // tool call (bash, slow network) looks identical to sitting at the prompt.
+        // The agent emits a BEL when it actually reaches its input prompt, so only
+        // flip to "waiting" when a BEL has fired since the user last submitted.
+        // Fallback: a session that has never emitted a BEL (terminal bell disabled)
+        // keeps the legacy silence-only heuristic so detection still works there.
+        const bellEver = !!e.lastBelTime;
+        const bellSinceInput = e.lastBelTime && e.lastBelTime >= (e.lastInputTime || 0);
+        if (bellSinceInput || !bellEver) {
+          e.waitingForInput = true;
+          const stateMsg = JSON.stringify({ type: 'state', waiting: true });
+          e.clients.forEach((c) => c.send(stateMsg));
         }
+        fireOnce();
       }, 2000);
     }
     e.clients.forEach((c) => c.send(data));
@@ -3581,6 +3600,7 @@ function handleWsConnection(ws, req) {
     } catch {}
     // User sent input - update activity and clear waiting/idle state
     entry.lastActivity = Date.now();
+    entry.lastInputTime = Date.now();
     clearTimeout(entry.idleTimer);
     if (entry.waitingForInput) {
       entry.waitingForInput = false;

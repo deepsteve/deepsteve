@@ -50,6 +50,7 @@ let sceneSnapshotCallbacks = [];     // [{modId, cb}] — callbacks for scene-sn
 let babyBrowserCallbacks = [];       // [{modId, cb}] — callbacks for baby-browser-request
 let wsReconnectedCallbacks = [];     // [{modId, cb}] — fired when any session WS reconnects
 let activeSessionCallbacks = [];     // [{modId, cb}] — callbacks for active session changes
+let userActivityCallbacks = [];      // [{modId, cb}] — fired when the user types into a terminal
 let getActiveSessionIdFn = null;     // set from appHooks
 let deepsteveVersion = null;   // set from /api/mods response
 let panelWidth = 360;
@@ -1614,6 +1615,7 @@ function _unloadPanelMod(modId) {
   settingsCallbacks = settingsCallbacks.filter(e => e.modId !== modId);
   sessionCallbacks = sessionCallbacks.filter(e => e.modId !== modId);
   activeSessionCallbacks = activeSessionCallbacks.filter(e => e.modId !== modId);
+  userActivityCallbacks = userActivityCallbacks.filter(e => e.modId !== modId);
 
   // If it was the visible panel, switch to another or collapse
   if (visiblePanelId === modId) {
@@ -1730,6 +1732,7 @@ function _hideMod() {
   localStorage.removeItem(ACTIVE_VIEW_KEY);
   sessionCallbacks = sessionCallbacks.filter(e => e.modId !== hiddenModId);
   activeSessionCallbacks = activeSessionCallbacks.filter(e => e.modId !== hiddenModId);
+  userActivityCallbacks = userActivityCallbacks.filter(e => e.modId !== hiddenModId);
   if (hiddenModId) {
     settingsCallbacks = settingsCallbacks.filter(e => e.modId !== hiddenModId);
   }
@@ -1824,6 +1827,16 @@ function notifyActiveSessionChanged(id) {
 function notifySessionsChanged(sessionList) {
   for (const entry of sessionCallbacks) {
     try { entry.cb(sessionList); } catch (e) { console.error('Mod callback error:', e); }
+  }
+}
+
+/**
+ * Notify mods that the user typed into a terminal (called from app.js onUserInput).
+ * Used by the action-required mod to block auto-cycle while the user is interacting.
+ */
+function notifyUserActivity(sessionId) {
+  for (const entry of userActivityCallbacks) {
+    try { entry.cb(sessionId); } catch (e) { console.error('User activity callback error:', e); }
   }
 }
 
@@ -1979,6 +1992,19 @@ function _injectBridgeAPI(iframeEl, modId, tabInstanceId) {
         return () => {
           activeSessionCallbacks = activeSessionCallbacks.filter(e => e !== entry);
         };
+      },
+      onUserActivity(cb) {
+        const entry = { modId, cb };
+        userActivityCallbacks.push(entry);
+        return () => {
+          userActivityCallbacks = userActivityCallbacks.filter(e => e !== entry);
+        };
+      },
+      showAutoCycleToast(opts) {
+        return hooks.showAutoCycleToast ? hooks.showAutoCycleToast(opts) : null;
+      },
+      hideAutoCycleToast() {
+        if (hooks.hideAutoCycleToast) hooks.hideAutoCycleToast();
       },
       createSession(cwd, opts) {
         return hooks.createSession(cwd, opts);
@@ -2200,6 +2226,7 @@ export const ModManager = {
   showModView,
   showTerminalForSession,
   notifySessionsChanged,
+  notifyUserActivity,
   notifyActiveSessionChanged,
   notifyTasksChanged,
   notifyAgentChatChanged,

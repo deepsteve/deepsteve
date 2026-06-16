@@ -471,6 +471,12 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
 .auto-apply-toast-countdown { color: var(--ds-text-secondary); font-size: 11px; }
 .auto-apply-toast-actions { display: flex; gap: 6px; }
 
+/* Auto-cycle "switching soon" toast (#500) — orange accent to match Action Required */
+.auto-cycle-toast {
+  border-color: #f0883e;
+  bottom: 16px;
+}
+
 /* Settings modal — scrollable with pinned header/footer */
 .settings-modal {
   width: 480px;

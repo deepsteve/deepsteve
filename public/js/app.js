@@ -575,6 +575,51 @@ function showAutoApplyToast(tag, deadline) {
   };
 }
 
+// Auto-cycle "switching soon" toast (#500). Driven by the action-required mod via the
+// bridge: it owns the policy; this is a self-counting countdown UI that lives in the main
+// window so it floats over the terminal you're looking at (not just the side panel).
+let autoCycleToastEl = null;
+let autoCycleCountdownTimer = null;
+function hideAutoCycleToast() {
+  if (autoCycleCountdownTimer) { clearInterval(autoCycleCountdownTimer); autoCycleCountdownTimer = null; }
+  if (autoCycleToastEl) { autoCycleToastEl.remove(); autoCycleToastEl = null; }
+}
+function showAutoCycleToast({ name, seconds = 5, onExpire, onCancel } = {}) {
+  hideAutoCycleToast();
+  const deadline = Date.now() + seconds * 1000;
+  let fired = false;
+  const finish = (cb) => {
+    if (fired) return;
+    fired = true;
+    hideAutoCycleToast();
+    try { cb && cb(); } catch (e) { console.error('Auto-cycle toast callback error:', e); }
+  };
+  autoCycleToastEl = document.createElement('div');
+  autoCycleToastEl.className = 'auto-apply-toast auto-cycle-toast';
+  const safeName = (name || 'next tab').replace(/[<>&]/g, '');
+  autoCycleToastEl.innerHTML = `
+    <div class="auto-apply-toast-body">
+      <strong>Switching to "${safeName}"</strong>
+      <span class="auto-apply-toast-countdown">in <span class="auto-cycle-remaining">…</span>s</span>
+    </div>
+    <div class="auto-apply-toast-actions">
+      <button type="button" class="btn-secondary auto-cycle-stay" style="font-size: 11px; padding: 4px 10px;">Stay</button>
+      <button type="button" class="btn-primary auto-cycle-go" style="font-size: 11px; padding: 4px 10px;">Go now</button>
+    </div>
+  `;
+  document.body.appendChild(autoCycleToastEl);
+  const remainingEl = autoCycleToastEl.querySelector('.auto-cycle-remaining');
+  const tick = () => {
+    const remaining = Math.max(0, Math.ceil((deadline - Date.now()) / 1000));
+    if (remainingEl) remainingEl.textContent = remaining;
+    if (remaining <= 0) finish(onExpire);
+  };
+  tick();
+  autoCycleCountdownTimer = setInterval(tick, 250);
+  autoCycleToastEl.querySelector('.auto-cycle-stay').onclick = () => finish(onCancel);
+  autoCycleToastEl.querySelector('.auto-cycle-go').onclick = () => finish(onExpire);
+}
+
 settingsBtn?.addEventListener('click', async () => {
   const [settingsData, themesData, versionData, defaultsData, enginesData] = await Promise.all([
     fetch('/api/settings').then(r => r.json()),
@@ -1780,6 +1825,7 @@ function initTerminal(id, ws, cwd, initialName, { hasScrollback = false, pending
     onUserInput: () => {
       clearNotification(id);
       updateOverviewFocus(id);
+      ModManager.notifyUserActivity(id);
     },
     container,
     beforeSend: (data) => hashCommandsBeforeSend(data, container)
@@ -3202,6 +3248,8 @@ async function init() {
         if (s.type === 'mod-tab' && s.modId === modId) killSession(id);
       }
     },
+    showAutoCycleToast,
+    hideAutoCycleToast,
   });
 
   // File drag-and-drop upload

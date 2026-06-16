@@ -1,5 +1,11 @@
 const { useState, useEffect, useCallback, useRef, useMemo } = React;
 
+// ─── Tunables ────────────────────────────────────────────────────────
+const TYPING_GRACE_MS = 3000;   // how long after a keystroke we treat you as "actively typing"
+const SNOOZE_MS = 20000;        // how long "Stay" defers the jump before re-offering it
+const POLL_MS = 2500;           // safety-net re-evaluation cadence
+const DEFAULT_TOAST_SECONDS = 5;
+
 // ─── Helpers ─────────────────────────────────────────────────────────
 
 function formatWaitTime(ms) {
@@ -55,6 +61,32 @@ function ToggleSwitch({ on, onToggle }) {
         Auto-cycle {on ? 'ON' : 'OFF'}
       </span>
     </div>
+  );
+}
+
+// ─── Nav button (◀ Prev / Next ▶) ────────────────────────────────────
+
+function NavButton({ label, onClick, disabled }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      style={{
+        fontSize: 12,
+        fontWeight: 600,
+        color: disabled ? '#484f58' : '#c9d1d9',
+        background: 'transparent',
+        border: '1px solid rgba(255,255,255,0.12)',
+        borderRadius: 5,
+        padding: '3px 8px',
+        cursor: disabled ? 'default' : 'pointer',
+      }}
+      onMouseEnter={e => { if (!disabled) e.currentTarget.style.background = 'rgba(255,255,255,0.06)'; }}
+      onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; }}
+    >
+      {label}
+    </button>
   );
 }
 
@@ -117,52 +149,150 @@ function QueueItem({ session, waitingSince, isActive, onFocus }) {
 function ActionRequiredPanel() {
   const [sessions, setSessions] = useState([]);
   const [activeSessionId, setActiveSessionId] = useState(null);
-  const [settings, setSettings] = useState({ autoSwitch: true, switchDelay: 100 });
+  const [settings, setSettings] = useState({ autoSwitch: true, toastSeconds: DEFAULT_TOAST_SECONDS });
 
-  // Refs for tracking state across callbacks
-  const waitingSinceRef = useRef(new Map());    // sessionId → timestamp
+  // Refs for tracking state across long-lived callbacks/timers.
+  const waitingSinceRef = useRef(new Map());   // sessionId → timestamp it started waiting
+  const sessionsRef = useRef([]);              // latest session list
   const activeIdRef = useRef(null);
   const settingsRef = useRef(settings);
-  const autoSwitchTimerRef = useRef(null);
-  const isAutoSwitchingRef = useRef(false);
+  const dwellTargetRef = useRef(null);         // the tab we're currently parked on
+  const lastActivityRef = useRef(0);           // last keystroke time (typing detection)
+  const toastTargetRef = useRef(null);         // candidate id the countdown toast is for
+  const snoozeUntilRef = useRef(0);            // "Stay" defers the jump until this time
+  const reevalTimerRef = useRef(null);         // deferred re-evaluation (typing grace / snooze)
   const pollIntervalRef = useRef(null);
+  const isAutoSwitchingRef = useRef(false);    // marks switches we initiate (so they don't disable auto-cycle)
 
-  // Keep refs in sync
   useEffect(() => { activeIdRef.current = activeSessionId; }, [activeSessionId]);
   useEffect(() => { settingsRef.current = settings; }, [settings]);
 
-  // Derive queue: sessions waiting for input, sorted by wait start time
-  const queue = useMemo(() => {
-    return sessions
-      .filter(s => s.waitingForInput)
-      .sort((a, b) => {
-        const aTime = waitingSinceRef.current.get(a.id) || Infinity;
-        const bTime = waitingSinceRef.current.get(b.id) || Infinity;
-        return aTime - bTime;
-      });
-  }, [sessions]);
+  // Stable sort: who has been waiting longest goes first.
+  const byWaitingSince = useCallback((a, b) => {
+    const aTime = waitingSinceRef.current.get(a.id) || Infinity;
+    const bTime = waitingSinceRef.current.get(b.id) || Infinity;
+    return aTime - bTime;
+  }, []);
 
-  // Helper: find next waiting session, excluding a given id
-  function findNextWaiting(sessionList, excludeId) {
-    return sessionList
-      .filter(s => s.waitingForInput && s.id !== excludeId)
-      .sort((a, b) => {
-        const aTime = waitingSinceRef.current.get(a.id) || Infinity;
-        const bTime = waitingSinceRef.current.get(b.id) || Infinity;
-        return aTime - bTime;
-      })[0] || null;
-  }
+  // Derived queue for rendering: waiting tabs, longest-waiting first.
+  const queue = useMemo(
+    () => sessions.filter(s => s.waitingForInput).sort(byWaitingSince),
+    [sessions, byWaitingSince]
+  );
 
-  // Helper: schedule an auto-switch to a session
-  function scheduleAutoSwitch(targetId) {
-    if (autoSwitchTimerRef.current) clearTimeout(autoSwitchTimerRef.current);
-    const delay = Math.max(100, Math.min(500, settingsRef.current.switchDelay || 100));
-    autoSwitchTimerRef.current = setTimeout(() => {
-      autoSwitchTimerRef.current = null;
-      isAutoSwitchingRef.current = true;
-      window.deepsteve.focusSession(targetId);
-    }, delay);
-  }
+  const findNextWaiting = useCallback((sessionList, excludeId) => {
+    return sessionList.filter(s => s.waitingForInput && s.id !== excludeId).sort(byWaitingSince)[0] || null;
+  }, [byWaitingSince]);
+
+  const hideToast = useCallback(() => {
+    if (toastTargetRef.current) {
+      toastTargetRef.current = null;
+      window.deepsteve?.hideAutoCycleToast?.();
+    }
+  }, []);
+
+  const scheduleReeval = useCallback((ms) => {
+    if (reevalTimerRef.current) clearTimeout(reevalTimerRef.current);
+    reevalTimerRef.current = setTimeout(() => {
+      reevalTimerRef.current = null;
+      evaluate(sessionsRef.current);
+    }, Math.max(50, ms));
+  }, []);
+
+  // Perform a switch we initiate: dwell on the target until it stops waiting.
+  const doSwitch = useCallback((id) => {
+    hideToast();
+    snoozeUntilRef.current = 0;
+    isAutoSwitchingRef.current = true;
+    dwellTargetRef.current = id;
+    window.deepsteve?.focusSession?.(id);
+  }, [hideToast]);
+
+  const showToastFor = useCallback((candidate) => {
+    const seconds = Math.max(1, Math.min(60, settingsRef.current.toastSeconds || DEFAULT_TOAST_SECONDS));
+    toastTargetRef.current = candidate.id;
+    window.deepsteve.showAutoCycleToast({
+      name: candidate.name,
+      seconds,
+      onExpire: () => {
+        toastTargetRef.current = null;
+        const list = sessionsRef.current;
+        const target = list.find(x => x.id === candidate.id);
+        if (target && target.waitingForInput) doSwitch(candidate.id);
+        else evaluate(list);
+      },
+      onCancel: () => {
+        // "Stay" — defer the jump briefly, then re-offer it.
+        toastTargetRef.current = null;
+        snoozeUntilRef.current = Date.now() + SNOOZE_MS;
+        scheduleReeval(SNOOZE_MS + 50);
+      },
+    });
+  }, [doSwitch, scheduleReeval]);
+
+  // The single decision point for moving between tabs.
+  const evaluate = useCallback((sessionList) => {
+    if (!sessionList) return;
+    const s = settingsRef.current;
+    if (!s.autoSwitch) { hideToast(); return; }
+
+    const activeId = activeIdRef.current;
+    const dwell = dwellTargetRef.current;
+
+    // DWELL: parked on a tab that's still waiting → stay put, even if others wait too.
+    const dwellSession = dwell ? sessionList.find(x => x.id === dwell) : null;
+    if (dwellSession && dwellSession.waitingForInput) { hideToast(); return; }
+    if (dwell) dwellTargetRef.current = null; // resolved or gone — look for the next
+
+    // If the active tab itself is waiting, treat it as the dwell target and stay.
+    const activeSession = sessionList.find(x => x.id === activeId);
+    if (activeSession && activeSession.waitingForInput) {
+      dwellTargetRef.current = activeId;
+      snoozeUntilRef.current = 0;
+      hideToast();
+      return;
+    }
+
+    const candidate = findNextWaiting(sessionList, null);
+    if (!candidate) { hideToast(); return; }
+
+    // "Stay" snooze in effect — hold off, then re-evaluate.
+    if (snoozeUntilRef.current && Date.now() < snoozeUntilRef.current) {
+      hideToast();
+      scheduleReeval(snoozeUntilRef.current - Date.now() + 50);
+      return;
+    }
+
+    // Typing block: actively interacting → no toast, no jump. Resume after the grace window.
+    const sinceType = Date.now() - (lastActivityRef.current || 0);
+    if (sinceType < TYPING_GRACE_MS) {
+      hideToast();
+      scheduleReeval(TYPING_GRACE_MS - sinceType + 50);
+      return;
+    }
+
+    // Already counting down toward this candidate — let the toast keep running.
+    if (toastTargetRef.current === candidate.id) return;
+
+    showToastFor(candidate);
+  }, [findNextWaiting, hideToast, scheduleReeval, showToastFor]);
+
+  // Manual prev/next through the waiting queue (buttons + arrow keys). Keeps auto-cycle ON.
+  const handleNav = useCallback((dir) => {
+    const list = sessionsRef.current || [];
+    const q = list.filter(x => x.waitingForInput).sort(byWaitingSince);
+    if (!q.length) return;
+    let idx = q.findIndex(x => x.id === activeIdRef.current);
+    if (idx === -1) idx = q.findIndex(x => x.id === dwellTargetRef.current);
+    if (idx === -1) idx = dir > 0 ? 0 : q.length - 1;
+    else idx = (idx + dir + q.length) % q.length;
+    doSwitch(q[idx].id);
+  }, [byWaitingSince, doSwitch]);
+
+  const handleFocus = useCallback((id) => {
+    // Clicking a queue item is navigation within the menu — dwell there, keep auto-cycle on.
+    doSwitch(id);
+  }, [doSwitch]);
 
   // ── Bridge: settings ──
   useEffect(() => {
@@ -173,47 +303,45 @@ function ActionRequiredPanel() {
   // ── Bridge: active session changes ──
   useEffect(() => {
     if (!window.deepsteve) return;
-
     if (window.deepsteve.getActiveSessionId) {
       setActiveSessionId(window.deepsteve.getActiveSessionId());
     }
-
-    if (window.deepsteve.onActiveSessionChanged) {
-      return window.deepsteve.onActiveSessionChanged((id) => {
-        // Auto-switch initiated by us — don't cancel
-        if (isAutoSwitchingRef.current) {
-          isAutoSwitchingRef.current = false;
-          setActiveSessionId(id);
-          return;
-        }
-
-        // Manual switch — cancel any pending auto-switch and turn off auto-cycle
-        if (autoSwitchTimerRef.current) {
-          clearTimeout(autoSwitchTimerRef.current);
-          autoSwitchTimerRef.current = null;
-        }
-
-        if (settingsRef.current.autoSwitch) {
-          if (window.deepsteve.updateSetting) {
-            window.deepsteve.updateSetting('autoSwitch', false);
-          }
-        }
-
+    if (!window.deepsteve.onActiveSessionChanged) return;
+    return window.deepsteve.onActiveSessionChanged((id) => {
+      if (isAutoSwitchingRef.current) {
+        // A switch we initiated (auto-cycle, prev/next, or queue click) — keep auto-cycle on.
+        isAutoSwitchingRef.current = false;
         setActiveSessionId(id);
-      });
-    }
-  }, []);
+        return;
+      }
+      // Genuine manual switch (user clicked a terminal tab outside the panel) → stop auto-cycling.
+      hideToast();
+      if (reevalTimerRef.current) { clearTimeout(reevalTimerRef.current); reevalTimerRef.current = null; }
+      dwellTargetRef.current = null;
+      snoozeUntilRef.current = 0;
+      if (settingsRef.current.autoSwitch && window.deepsteve.updateSetting) {
+        window.deepsteve.updateSetting('autoSwitch', false);
+      }
+      setActiveSessionId(id);
+    });
+  }, [hideToast]);
 
-  // ── Bridge: session changes (core auto-switch logic) ──
+  // ── Bridge: user typing (typing blocks auto-cycle; cancels a pending toast) ──
+  useEffect(() => {
+    if (!window.deepsteve?.onUserActivity) return;
+    return window.deepsteve.onUserActivity(() => {
+      lastActivityRef.current = Date.now();
+      if (toastTargetRef.current) hideToast();
+      scheduleReeval(TYPING_GRACE_MS + 50);
+    });
+  }, [hideToast, scheduleReeval]);
+
+  // ── Bridge: session changes (waiting state + the core evaluation) ──
   useEffect(() => {
     if (!window.deepsteve) return;
-
     return window.deepsteve.onSessionsChanged((sessionList) => {
       const now = Date.now();
-      const currentActiveId = activeIdRef.current;
-      const currentSettings = settingsRef.current;
-
-      // Track waitingSince timestamps
+      // Track when each session started waiting.
       for (const s of sessionList) {
         if (s.waitingForInput && !waitingSinceRef.current.has(s.id)) {
           waitingSinceRef.current.set(s.id, now);
@@ -221,92 +349,69 @@ function ActionRequiredPanel() {
           waitingSinceRef.current.delete(s.id);
         }
       }
-
-      // Clean up removed sessions
+      // Drop removed sessions.
       const currentIds = new Set(sessionList.map(s => s.id));
       for (const id of waitingSinceRef.current.keys()) {
         if (!currentIds.has(id)) waitingSinceRef.current.delete(id);
       }
-
-      // Auto-switch: if active session isn't waiting, switch to next waiting one
-      if (currentSettings.autoSwitch) {
-        const currActive = sessionList.find(s => s.id === currentActiveId);
-        if (!currActive?.waitingForInput) {
-          const next = findNextWaiting(sessionList, null);
-          if (next && !autoSwitchTimerRef.current) {
-            scheduleAutoSwitch(next.id);
-          }
-        }
-      }
-
+      sessionsRef.current = sessionList;
       setSessions(sessionList);
+      evaluate(sessionList);
     });
-  }, []);
+  }, [evaluate]);
 
-  // Cancel timers on unmount
+  // ── Keyboard: arrow keys move prev/next when the panel iframe is focused ──
   useEffect(() => {
-    return () => {
-      if (autoSwitchTimerRef.current) clearTimeout(autoSwitchTimerRef.current);
-      if (pollIntervalRef.current) clearInterval(pollIntervalRef.current);
+    const onKey = (e) => {
+      if (e.metaKey || e.ctrlKey || e.altKey || e.shiftKey) return;
+      if (e.key === 'ArrowDown' || e.key === 'ArrowRight') { e.preventDefault(); handleNav(1); }
+      else if (e.key === 'ArrowUp' || e.key === 'ArrowLeft') { e.preventDefault(); handleNav(-1); }
     };
-  }, []);
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [handleNav]);
 
-  // Poll for waiting tabs independently of events
+  // ── Polling safety net + teardown when auto-cycle turns off ──
   useEffect(() => {
     if (settings.autoSwitch) {
       pollIntervalRef.current = setInterval(() => {
-        const sessionList = window.deepsteve?.getSessions() || [];
-        const currentActiveId = activeIdRef.current;
-        const currActive = sessionList.find(s => s.id === currentActiveId);
-        if (!currActive?.waitingForInput) {
-          const next = findNextWaiting(sessionList, null);
-          if (next && !autoSwitchTimerRef.current) {
-            scheduleAutoSwitch(next.id);
-          }
-        }
-      }, 10000);
+        evaluate(window.deepsteve?.getSessions?.() || sessionsRef.current);
+      }, POLL_MS);
     } else {
-      if (pollIntervalRef.current) {
-        clearInterval(pollIntervalRef.current);
-        pollIntervalRef.current = null;
-      }
+      hideToast();
+      if (reevalTimerRef.current) { clearTimeout(reevalTimerRef.current); reevalTimerRef.current = null; }
+      dwellTargetRef.current = null;
+      snoozeUntilRef.current = 0;
     }
     return () => {
-      if (pollIntervalRef.current) {
-        clearInterval(pollIntervalRef.current);
-        pollIntervalRef.current = null;
-      }
+      if (pollIntervalRef.current) { clearInterval(pollIntervalRef.current); pollIntervalRef.current = null; }
     };
-  }, [settings.autoSwitch]);
+  }, [settings.autoSwitch, evaluate, hideToast]);
+
+  // ── Teardown on unmount ──
+  useEffect(() => {
+    return () => {
+      if (pollIntervalRef.current) clearInterval(pollIntervalRef.current);
+      if (reevalTimerRef.current) clearTimeout(reevalTimerRef.current);
+      hideToast();
+    };
+  }, [hideToast]);
 
   const handleToggle = useCallback(() => {
     const newValue = !settingsRef.current.autoSwitch;
-    if (window.deepsteve?.updateSetting) {
-      window.deepsteve.updateSetting('autoSwitch', newValue);
-    }
-
+    // Apply optimistically so evaluate() sees the new value before the settings round-trip.
+    settingsRef.current = { ...settingsRef.current, autoSwitch: newValue };
+    window.deepsteve?.updateSetting?.('autoSwitch', newValue);
     if (newValue) {
-      // Toggling ON: immediately jump to first visible waiting tab
-      const sessions = window.deepsteve?.getSessions() || [];
-      const next = findNextWaiting(sessions, null);
-      if (next) {
-        isAutoSwitchingRef.current = true;
-        window.deepsteve.focusSession(next.id);
-      }
+      snoozeUntilRef.current = 0;
+      evaluate(sessionsRef.current);
     } else {
-      // Toggling OFF: cancel any pending auto-switch
-      if (autoSwitchTimerRef.current) {
-        clearTimeout(autoSwitchTimerRef.current);
-        autoSwitchTimerRef.current = null;
-      }
+      hideToast();
+      if (reevalTimerRef.current) { clearTimeout(reevalTimerRef.current); reevalTimerRef.current = null; }
+      dwellTargetRef.current = null;
+      snoozeUntilRef.current = 0;
     }
-  }, []);
-
-  const handleFocus = useCallback((id) => {
-    if (window.deepsteve) {
-      window.deepsteve.focusSession(id);
-    }
-  }, []);
+  }, [evaluate, hideToast]);
 
   // Queue depth visual intensity
   const queueDepth = queue.length;
@@ -316,7 +421,7 @@ function ActionRequiredPanel() {
     : 'rgba(248,81,73,0.5)';
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100vh' }}>
+    <div tabIndex={0} style={{ display: 'flex', flexDirection: 'column', height: '100vh', outline: 'none' }}>
       <style>{`
         @keyframes pulse {
           0%, 100% { opacity: 1; }
@@ -331,18 +436,25 @@ function ActionRequiredPanel() {
       {/* Toggle */}
       <ToggleSwitch on={settings.autoSwitch} onToggle={handleToggle} />
 
-      {/* Queue header */}
+      {/* Queue header + prev/next controls */}
       <div style={{
         padding: '12px 12px 8px',
         borderBottom: '1px solid rgba(255,255,255,0.06)',
         flexShrink: 0,
+        display: 'flex',
+        alignItems: 'center',
+        gap: 8,
       }}>
-        <div style={{ fontSize: 14, fontWeight: 600, color: '#f0f6fc' }}>
+        <div style={{ flex: 1, minWidth: 0, fontSize: 14, fontWeight: 600, color: '#f0f6fc' }}>
           {queueDepth > 0 ? (
             <span>{queueDepth} tab{queueDepth !== 1 ? 's' : ''} waiting</span>
           ) : (
             'No tabs waiting'
           )}
+        </div>
+        <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
+          <NavButton label="◀ Prev" onClick={() => handleNav(-1)} disabled={queueDepth < 2} />
+          <NavButton label="Next ▶" onClick={() => handleNav(1)} disabled={queueDepth < 2} />
         </div>
       </div>
 
