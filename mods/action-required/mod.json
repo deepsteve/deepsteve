@@ -9,7 +9,7 @@
   "panel": { "position": "right", "defaultWidth": 320, "minWidth": 200 },
   "toolbar": { "label": "Action Required" },
   "settings": [
-    { "key": "autoSwitch", "type": "boolean", "label": "Auto-cycle tabs", "description": "Automatically switch to next waiting tab after input is sent", "default": true },
-    { "key": "switchDelay", "type": "number", "label": "Switch delay (ms)", "description": "Delay before auto-switching to next tab (100-500ms)", "default": 100 }
+    { "key": "autoSwitch", "type": "boolean", "label": "Auto-cycle tabs", "description": "Dwell on a waiting tab until you respond, then move to the next one", "default": true },
+    { "key": "toastSeconds", "type": "number", "label": "Switch countdown (s)", "description": "Seconds the 'switching soon' toast counts down before moving to the next waiting tab (typing cancels it)", "default": 5 }
   ]
 }
