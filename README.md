@@ -6,7 +6,7 @@
 
 https://deepsteve.com
 
-Run multiple AI agent sessions side-by-side in your browser, each with full terminal capabilities and persistent conversation history. Supports **Claude Code** with experimental support for **Hermes**, **OpenCode**, and **Gemini**.
+Run multiple AI agent sessions side-by-side in your browser, each with full terminal capabilities and persistent conversation history. Supports **Claude Code** with experimental support for **Hermes** and **OpenCode**.
 
 <p align="center">
   <img src="screenshots/deepsteve-preview.png" alt="deepsteve — full app with tabs and tasks panel" width="800">
@@ -23,11 +23,11 @@ Run multiple AI agent sessions side-by-side in your browser, each with full term
 
 ## Terminal Engines
 
-deepsteve currently uses **node-pty** to run agent sessions (Claude Code, OpenCode, Gemini) as child processes on a Node server, connected to the browser via WebSocket. **tmux** support is currently being implemented as an alternative backend — running sessions inside tmux panes instead of node-pty, enabling native session persistence and detach/reattach without the Node process staying alive.
+deepsteve currently uses **node-pty** to run agent sessions (Claude Code, OpenCode) as child processes on a Node server, connected to the browser via WebSocket. **tmux** support is currently being implemented as an alternative backend — running sessions inside tmux panes instead of node-pty, enabling native session persistence and detach/reattach without the Node process staying alive.
 
 ## Features
 
-- **Multiple sessions** - Open as many Claude Code, OpenCode, or Gemini instances as you need in separate tabs
+- **Multiple sessions** - Open as many Claude Code or OpenCode instances as you need in separate tabs
 - **Real terminal emulation** - PTY support via xterm.js.
 - **Session persistence** - Conversations survive server restarts and page refreshes
 - **GitHub issue picker** - Pick an issue from any repo and launch a session with a worktree and prompt
@@ -46,7 +46,7 @@ curl -fsSL deepsteve.com/install.sh | bash
 
 - macOS
 - Node.js
-- [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [OpenCode](https://github.com/google/opencode), or [Gemini CLI](https://github.com/google/gemini-cli) installed
+- [Claude Code](https://docs.anthropic.com/en/docs/claude-code) or [OpenCode](https://github.com/google/opencode) installed
 
 ## Installation (from source)
 

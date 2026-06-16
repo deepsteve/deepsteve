@@ -601,7 +601,6 @@ settingsBtn?.addEventListener('click', async () => {
   const currentSessionLogEnabled = !!settingsData.sessionLogEnabled;
   const currentDefaultAgent = settingsData.defaultAgent || 'claude';
   const currentOpencodeBinary = settingsData.opencodeBinary || 'opencode';
-  const currentGeminiBinary = settingsData.geminiBinary || 'gemini';
   const currentPiBinary = settingsData.piBinary || 'pi';
   const currentScrollbackKB = settingsData.scrollbackKB || 100;
   const agents = window.__deepsteveAgents || [];
@@ -762,14 +761,6 @@ settingsBtn?.addEventListener('click', async () => {
           <input type="text" id="opencode-binary" value="${escapeHtml(currentOpencodeBinary)}" placeholder="opencode" style="width: 200px; padding: 4px 8px; border-radius: 4px; border: 1px solid var(--ds-border); background: var(--ds-bg-secondary); color: var(--ds-text-primary);">
         </div>
         <label style="font-size: 13px; color: var(--ds-text-primary); cursor: pointer; display: flex; align-items: center; gap: 8px; margin-bottom: 8px;">
-          <input type="checkbox" id="agent-gemini" ${agents.find(a => a.id === 'gemini')?.enabled ? 'checked' : ''} ${agents.find(a => a.id === 'gemini')?.available ? '' : 'disabled'} style="accent-color: var(--ds-accent-green);">
-          Gemini (experimental)${agents.find(a => a.id === 'gemini')?.available ? '' : ' (not installed)'}
-        </label>
-        <div id="gemini-binary-row" style="display: ${agents.find(a => a.id === 'gemini')?.enabled ? 'block' : 'none'}; margin-top: 8px;">
-          <label style="font-size: 12px; color: var(--ds-text-secondary);">Binary path</label>
-          <input type="text" id="gemini-binary" value="${escapeHtml(currentGeminiBinary)}" placeholder="gemini" style="width: 200px; padding: 4px 8px; border-radius: 4px; border: 1px solid var(--ds-border); background: var(--ds-bg-secondary); color: var(--ds-text-primary);">
-        </div>
-        <label style="font-size: 13px; color: var(--ds-text-primary); cursor: pointer; display: flex; align-items: center; gap: 8px; margin-bottom: 8px;">
           <input type="checkbox" id="agent-pi" ${agents.find(a => a.id === 'pi')?.enabled ? 'checked' : ''} ${agents.find(a => a.id === 'pi')?.available ? '' : 'disabled'} style="accent-color: var(--ds-accent-green);">
           Pi (experimental)${agents.find(a => a.id === 'pi')?.available ? '' : ' (not installed)'}
         </label>
@@ -924,13 +915,6 @@ settingsBtn?.addEventListener('click', async () => {
   const opencodeBinaryRow = overlay.querySelector('#opencode-binary-row');
   agentOpencodeCheckbox?.addEventListener('change', () => {
     opencodeBinaryRow.style.display = agentOpencodeCheckbox.checked ? 'block' : 'none';
-  });
-
-  // Show/hide Gemini binary path input based on checkbox
-  const agentGeminiCheckbox = overlay.querySelector('#agent-gemini');
-  const geminiBinaryRow = overlay.querySelector('#gemini-binary-row');
-  agentGeminiCheckbox?.addEventListener('change', () => {
-    geminiBinaryRow.style.display = agentGeminiCheckbox.checked ? 'block' : 'none';
   });
 
   // Show/hide Pi binary path input based on checkbox
@@ -1158,7 +1142,6 @@ settingsBtn?.addEventListener('click', async () => {
             <option value="claude" ${t.agentType === 'claude' ? 'selected' : ''}>Claude</option>
             <option value="hermes" ${t.agentType === 'hermes' ? 'selected' : ''}>Hermes</option>
             <option value="opencode" ${t.agentType === 'opencode' ? 'selected' : ''}>OpenCode</option>
-            <option value="gemini" ${t.agentType === 'gemini' ? 'selected' : ''}>Gemini</option>
             <option value="pi" ${t.agentType === 'pi' ? 'selected' : ''}>Pi</option>
           </select>`;
         }
@@ -1399,10 +1382,8 @@ settingsBtn?.addEventListener('click', async () => {
     const enabledAgents = [];
     if (overlay.querySelector('#agent-claude').checked) enabledAgents.push('claude');
     if (overlay.querySelector('#agent-opencode').checked) enabledAgents.push('opencode');
-    if (overlay.querySelector('#agent-gemini').checked) enabledAgents.push('gemini');
     if (overlay.querySelector('#agent-pi').checked) enabledAgents.push('pi');
     const opencodeBinary = overlay.querySelector('#opencode-binary').value || 'opencode';
-    const geminiBinary = overlay.querySelector('#gemini-binary').value || 'gemini';
     const piBinary = overlay.querySelector('#pi-binary').value || 'pi';
     const selectedEngine = overlay.querySelector('#engine-select')?.value || 'node-pty';
     const scrollbackKB = Math.max(1, Math.min(10000, Math.round(Number(overlay.querySelector('#scrollback-kb').value)) || 100));
@@ -1410,7 +1391,7 @@ settingsBtn?.addEventListener('click', async () => {
     const autoUpdateCheckIntervalHours = Math.max(1, Math.min(168, Number(overlay.querySelector('#auto-update-check-interval-hours').value) || 6));
     const autoUpdateApply = overlay.querySelector('#auto-update-apply').checked;
     const sessionLogEnabled = overlay.querySelector('#session-log-enabled').checked;
-    const settingsPayload = { shellProfile, maxIssueTitleLength: newMaxTitle, wandPlanMode, wandPromptTemplate, symlinkWorktreeSettings, cmdTabSwitch, cmdTabSwitchHoldMs, commandPaletteEnabled, commandPaletteShortcut, hashCommandsEnabled, metaControlsEnabled, overviewDefaultLayout, enabledAgents, opencodeBinary, geminiBinary, piBinary, windowConfigs: editingConfigs, engine: selectedEngine, scrollbackKB, autoUpdateCheckEnabled, autoUpdateCheckIntervalHours, autoUpdateApply, sessionLogEnabled };
+    const settingsPayload = { shellProfile, maxIssueTitleLength: newMaxTitle, wandPlanMode, wandPromptTemplate, symlinkWorktreeSettings, cmdTabSwitch, cmdTabSwitchHoldMs, commandPaletteEnabled, commandPaletteShortcut, hashCommandsEnabled, metaControlsEnabled, overviewDefaultLayout, enabledAgents, opencodeBinary, piBinary, windowConfigs: editingConfigs, engine: selectedEngine, scrollbackKB, autoUpdateCheckEnabled, autoUpdateCheckIntervalHours, autoUpdateApply, sessionLogEnabled };
     let resp = await fetch('/api/settings', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

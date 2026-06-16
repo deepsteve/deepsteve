@@ -252,7 +252,7 @@ Issue description:
 
 Please read the issue carefully, understand the codebase context, and implement the changes needed.`;
 
-const AGENT_TYPES = ['claude', 'hermes', 'opencode', 'gemini', 'pi'];
+const AGENT_TYPES = ['claude', 'hermes', 'opencode', 'pi'];
 
 function validateConfigTab(t) {
   const type = t.type || 'terminal';
@@ -303,7 +303,6 @@ const SETTINGS_SCHEMA = [
   { name: 'defaultAgent',               type: 'enum',    default: 'claude', values: AGENT_TYPES, broadcast: false },
   { name: 'hermesBinary',               type: 'string',  default: 'hermes',   fallbackOnEmpty: true, broadcast: false },
   { name: 'opencodeBinary',             type: 'string',  default: 'opencode', fallbackOnEmpty: true, broadcast: false },
-  { name: 'geminiBinary',               type: 'string',  default: 'gemini',   fallbackOnEmpty: true, broadcast: false },
   { name: 'piBinary',                   type: 'string',  default: 'pi',       fallbackOnEmpty: true, broadcast: false },
   { name: 'symlinkWorktreeSettings',    type: 'boolean', default: false },
   { name: 'windowConfigs',              type: 'custom',  default: [],
@@ -704,7 +703,7 @@ function broadcastSkills() {
  * Spawn a session using the specified engine.
  * @param {Engine} eng - Engine instance to use
  * @param {string} id - Session ID
- * @param {string} agentType - 'claude', 'opencode', or 'gemini'
+ * @param {string} agentType - 'claude', 'hermes', 'opencode', or 'pi'
  * @param {string[]} args - Agent CLI arguments
  * @param {string} cwd - Working directory
  * @param {{ cols?: number, rows?: number, env?: object }} opts
@@ -739,7 +738,7 @@ function spawnSession(eng, id, agentType, args, cwd, { cols = 120, rows = 40, en
     : agentType === 'hermes' ? (settings.hermesBinary || 'hermes')
     : agentType === 'opencode' ? (settings.opencodeBinary || 'opencode')
     : agentType === 'pi' ? (settings.piBinary || 'pi')
-    : (settings.geminiBinary || 'gemini');
+    : 'claude';
   const quoted = args.map(a => `'${a.replace(/'/g, "'\\''")}'`).join(' ');
   eng.spawn(id, 'zsh', ['-l', '-c', `${bin} ${quoted}`], cwd, { cols, rows, env });
 }
@@ -767,18 +766,6 @@ const AGENT_CONFIGS = {
     exitMethod: 'ctrl-c',
     initialPromptDelay: 3000,
     resumeFlag: '--resume',
-    resumeDefault: '-c'
-  },
-  gemini: {
-    supportsWorktree: false,
-    supportsSessionId: false, // Managed internally
-    supportsSessionWatch: false,
-    emitsBel: false,
-    exitMethod: 'ctrl-c',
-    initialPromptDelay: 3000,
-    planModeFlag: '--approval-mode',
-    planModeValue: 'plan',
-    resumeFlag: '-r',
     resumeDefault: '-c'
   },
   opencode: {
@@ -1279,7 +1266,7 @@ function killShell(entry, id, reason = 'closed') {
   }
 
   if (config.exitMethod === 'ctrl-c') {
-    // Agent just needs Ctrl+C (OpenCode, Gemini)
+    // Agent just needs Ctrl+C (Hermes, OpenCode)
     try { eng.write(id, '\x03'); } catch {}
   } else if (config.exitMethod === 'sigterm') {
     // pi: SIGTERM triggers its graceful shutdown handler. Ctrl+C is "cancel turn," not quit.
@@ -1867,15 +1854,6 @@ app.get('/api/agents', (req, res) => {
   } catch {}
   // Auto-enable available agents
   agents.push({ id: 'opencode', name: 'OpenCode (experimental)', shortName: 'OC', available: opencodeAvailable, enabled: opencodeAvailable, isDefault: defaultAgent === 'opencode' });
-  // Check if gemini is installed
-  let geminiAvailable = false;
-  try {
-    const bin = settings.geminiBinary || 'gemini';
-    execSync(`zsh -l -c 'which ${bin}'`, { timeout: 5000, stdio: 'pipe' });
-    geminiAvailable = true;
-  } catch {}
-  // Auto-enable available agents
-  agents.push({ id: 'gemini', name: 'Gemini (experimental)', shortName: 'Gem', available: geminiAvailable, enabled: geminiAvailable, isDefault: defaultAgent === 'gemini' });
   // Check if pi is installed
   let piAvailable = false;
   try {
