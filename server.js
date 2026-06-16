@@ -315,6 +315,7 @@ const SETTINGS_SCHEMA = [
   { name: 'autoUpdateCheckIntervalHours', type: 'number', default: 6, clamp: [1, 168] },
   { name: 'autoUpdateApply',            type: 'boolean', default: true },
   { name: 'sessionLogEnabled',          type: 'boolean', default: false },
+  { name: 'displayTabAudioIndicator',   type: 'boolean', default: true, broadcast: false },
 ];
 
 // Settings whose default must exist in `settings` but that flow through
@@ -2582,10 +2583,52 @@ app.post('/api/mods/uninstall', (req, res) => {
   }
 });
 
+// Injected into display-tab HTML so the tab can signal when it is emitting audio.
+// Runs first in the document (before content scripts) so it can patch AudioNode.connect
+// to non-invasively tap each AudioContext's output, plus watch <audio>/<video> elements.
+// Reports an "emitting" boolean to the parent window via postMessage; app.js toggles a
+// speaker icon on the matching tab.
+function audioDetectorScript(tabId) {
+  return `<script>(function(){
+var TAB_ID=${JSON.stringify(String(tabId))};
+var emitting=false;
+function report(v){if(v===emitting)return;emitting=v;try{parent.postMessage({type:'ds-audio-state',tabId:TAB_ID,emitting:v},'*');}catch(e){}}
+var analysers=[];
+var AC=window.AudioContext||window.webkitAudioContext;
+if(AC){var origConnect=AudioNode.prototype.connect;
+AudioNode.prototype.connect=function(dest){try{
+var ctx=dest&&dest.context;
+var isOffline=window.OfflineAudioContext&&ctx instanceof window.OfflineAudioContext;
+if(ctx&&!isOffline&&dest===ctx.destination){
+if(!ctx.__dsAnalyser){var a=ctx.createAnalyser();a.fftSize=256;ctx.__dsAnalyser=a;analysers.push(a);}
+origConnect.call(this,ctx.__dsAnalyser);}
+}catch(e){}return origConnect.apply(this,arguments);};}
+function webAudioAudible(){for(var i=0;i<analysers.length;i++){var a=analysers[i],buf=new Uint8Array(a.fftSize);a.getByteTimeDomainData(buf);for(var j=0;j<buf.length;j++){if(Math.abs(buf[j]-128)>2)return true;}}return false;}
+function mediaAudible(){var els=document.querySelectorAll('audio,video');for(var i=0;i<els.length;i++){var m=els[i];if(!m.paused&&!m.ended&&!m.muted&&m.volume>0&&m.currentTime>0)return true;}return false;}
+setInterval(function(){report(webAudioAudible()||mediaAudible());},400);
+window.addEventListener('pagehide',function(){report(false);});
+})();</scr`+`ipt>`;
+}
+
+// Insert the detector script so it runs before any content script. Prefer just after the
+// opening <head>; fall back to after <html>, then <body>, then prepend. Avoid emitting
+// content before <!DOCTYPE> (would trigger quirks mode for existing display tabs).
+function injectAudioDetector(html, tabId) {
+  const tag = audioDetectorScript(tabId);
+  let m = html.match(/<head[^>]*>/i);
+  if (m) return html.slice(0, m.index + m[0].length) + tag + html.slice(m.index + m[0].length);
+  m = html.match(/<html[^>]*>/i);
+  if (m) return html.slice(0, m.index + m[0].length) + tag + html.slice(m.index + m[0].length);
+  m = html.match(/<body[^>]*>/i);
+  if (m) return html.slice(0, m.index + m[0].length) + tag + html.slice(m.index + m[0].length);
+  return tag + html;
+}
+
 app.get('/api/display-tab/:id', (req, res) => {
-  const html = displayTabs.get(req.params.id);
+  let html = displayTabs.get(req.params.id);
   if (!html) return res.status(404).send('Not found');
   if (req.method === 'HEAD') return res.type('html').end();
+  if (settings.displayTabAudioIndicator) html = injectAudioDetector(html, req.params.id);
   res.type('html').send(html);
 });
 
