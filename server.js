@@ -1088,9 +1088,11 @@ function deliverPromptWhenReady(id, prompt) {
   function submitAndNotify() {
     submitToShell(id, prompt);
     const entry = shells.get(id);
-    if (entry?.loading) {
+    if (entry?.loading || entry?.prefill) {
+      const wasPrefill = !!entry.prefill;
       entry.loading = false;
-      deliverToWindow({ type: 'prompt-submitted', id, windowId: entry.windowId || null }, entry.windowId || null);
+      entry.prefill = false;
+      deliverToWindow({ type: 'prompt-submitted', id, windowId: entry.windowId || null, prefill: wasPrefill }, entry.windowId || null);
     }
   }
 
@@ -2438,7 +2440,7 @@ app.post('/api/start-automation', (req, res) => {
 
   log(`[API] start-automation "${automationId}": id=${id}, agent=${agentType}, engine=${engineType}, cwd=${cwd}`);
   spawnSession(sessionEngine, id, agentType, spawnArgs, cwd, { cols: 120, rows: 40, env: sessionEnv(id, { name, windowId: windowId || null, cwd, agentType }) });
-  shells.set(id, { clients: new Set(), cwd, claudeSessionId, agentType, engine: sessionEngine, engineType, worktree: null, windowId: windowId || null, name, waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now() });
+  shells.set(id, { clients: new Set(), cwd, claudeSessionId, agentType, engine: sessionEngine, engineType, worktree: null, windowId: windowId || null, name, waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now(), prefill: true });
   wireShellOutput(id);
   emitSessionOpen(id);
   if (prompt) deliverPromptWhenReady(id, prompt);
@@ -2449,7 +2451,7 @@ app.post('/api/start-automation', (req, res) => {
   });
   saveState();
 
-  deliverToWindow({ type: 'open-session', id, cwd, name, windowId }, windowId);
+  deliverToWindow({ type: 'open-session', id, cwd, name, windowId, prefill: true }, windowId);
   res.json({ id, name });
 });
 
