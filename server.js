@@ -296,6 +296,8 @@ const SETTINGS_SCHEMA = [
   { name: 'overviewModeShortcut',       type: 'string',  default: 'Meta+o' },
   { name: 'overviewDefaultLayout',      type: 'enum',    default: 'tall', values: ['tall', 'tiled'] },
   { name: 'metaControlsEnabled',        type: 'boolean', default: false },
+  { name: 'inheritRemoteControl',       type: 'boolean', default: true },
+  { name: 'inheritRemoteControlOnFork', type: 'boolean', default: true },
   { name: 'enabledAgents',              type: 'array',   default: ['claude', 'hermes', 'opencode', 'pi'],
     itemEnum: AGENT_TYPES, nonEmpty: true, broadcast: false,
     sideEffect: (val, s) => { s.defaultAgent = val[0]; },
@@ -1146,6 +1148,36 @@ function deliverPromptWhenReady(id, prompt) {
       setTimeout(submitAndNotify, 500);
     };
   }
+}
+
+/**
+ * True if the session's recent terminal output shows Claude Code's "/rc active"
+ * footer — i.e. Remote Control is currently on. Claude redraws this footer on
+ * every frame, so the latest state lives in the tail of the scrollback. We scan
+ * only the last few KB (ANSI-stripped) so this is a single cheap substring test,
+ * run once at child-tab creation (never on the PTY data path).
+ */
+function sessionHasRemoteControl(id) {
+  const e = shells.get(id);
+  if (!e || !e.scrollback || !e.scrollback.length) return false;
+  const tail = e.scrollback.join('').slice(-8192);
+  return stripEscapeSequences(tail).includes('/rc active');
+}
+
+/**
+ * When a new tab/fork is opened from a parent session that has Remote Control on,
+ * re-issue `/rc` in the child so it inherits remote control. Gated per-path by the
+ * inheritRemoteControl / inheritRemoteControlOnFork settings. Reuses the existing
+ * prepopulate-and-send path (deliverPromptWhenReady) — no new infrastructure.
+ */
+function maybeInheritRemoteControl({ newId, agentType, isFork, parentId }) {
+  if (agentType !== 'claude') return;  // /rc is a Claude Code feature
+  const enabled = isFork ? settings.inheritRemoteControlOnFork : settings.inheritRemoteControl;
+  if (!enabled) return;
+  if (!parentId || parentId === newId || !shells.has(parentId)) return;
+  if (!sessionHasRemoteControl(parentId)) return;
+  log(`[rc-inherit] parent ${parentId} has /rc active -> enabling /rc in new ${isFork ? 'fork' : 'tab'} ${newId}`);
+  deliverPromptWhenReady(newId, '/rc');
 }
 
 /**
@@ -3584,6 +3616,13 @@ function handleWsConnection(ws, req) {
     shells.set(id, { clients: new Set(), cwd: worktreeCwd, claudeSessionId: sessionId, agentType, engine: sessionEngine, engineType, worktree: worktree || null, name: name || null, planMode: spawnedPlanMode, waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now() });
     wireShellOutput(id);
     emitSessionOpen(id);
+    // Inherit Claude's Remote Control (/rc) from the parent tab/fork if it had it on.
+    maybeInheritRemoteControl({
+      newId: id,
+      agentType,
+      isFork: spawnPath === 'fork',
+      parentId: spawnPath === 'fork' ? forkFrom : url.searchParams.get('rcParent'),
+    });
     if (agentConfig.supportsSessionWatch) watchClaudeSessionDir(id);
     sessionEngine.onExit(id, () => { if (!shuttingDown) { if (agentConfig.supportsSessionWatch) unwatchClaudeSessionDir(id); notifyClientsShellExited(id); shells.delete(id); saveState(); } });
     saveState();

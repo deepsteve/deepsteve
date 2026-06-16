@@ -641,6 +641,8 @@ settingsBtn?.addEventListener('click', async () => {
   const currentHashCommandsEnabled = settingsData.hashCommandsEnabled !== undefined ? settingsData.hashCommandsEnabled : true;
   const currentOverviewDefaultLayout = settingsData.overviewDefaultLayout || 'tall';
   const currentMetaControlsEnabled = !!settingsData.metaControlsEnabled;
+  const currentInheritRc = settingsData.inheritRemoteControl !== false;
+  const currentInheritRcFork = settingsData.inheritRemoteControlOnFork !== false;
   const currentAutoUpdateCheckEnabled = settingsData.autoUpdateCheckEnabled !== undefined ? settingsData.autoUpdateCheckEnabled : true;
   const currentAutoUpdateCheckIntervalHours = settingsData.autoUpdateCheckIntervalHours || 6;
   const currentAutoUpdateApply = settingsData.autoUpdateApply !== undefined ? settingsData.autoUpdateApply : true;
@@ -777,6 +779,20 @@ settingsBtn?.addEventListener('click', async () => {
         </label>
         <p style="font-size: 11px; color: var(--ds-text-secondary); margin-top: 4px;">
           Lets agents type into terminals via the <code>meta_type</code> tool — self-driving loops are possible. Off by default.
+        </p>
+      </div>
+      <div class="settings-section">
+        <h3>Remote Control Inheritance</h3>
+        <label style="font-size: 13px; color: var(--ds-text-primary); cursor: pointer; display: flex; align-items: center; gap: 8px;">
+          <input type="checkbox" id="inherit-rc-newtab" ${currentInheritRc ? 'checked' : ''} style="accent-color: var(--ds-accent-green);">
+          New tabs
+        </label>
+        <label style="font-size: 13px; color: var(--ds-text-primary); cursor: pointer; display: flex; align-items: center; gap: 8px; margin-top: 6px;">
+          <input type="checkbox" id="inherit-rc-fork" ${currentInheritRcFork ? 'checked' : ''} style="accent-color: var(--ds-accent-green);">
+          Forks
+        </label>
+        <p style="font-size: 11px; color: var(--ds-text-secondary); margin-top: 4px;">
+          When a tab already has Claude Code's <code>/rc</code> (remote control) active, automatically run <code>/rc</code> in new tabs / forks opened from it. On by default.
         </p>
       </div>
       <div class="settings-section">
@@ -1437,7 +1453,9 @@ settingsBtn?.addEventListener('click', async () => {
     const autoUpdateCheckIntervalHours = Math.max(1, Math.min(168, Number(overlay.querySelector('#auto-update-check-interval-hours').value) || 6));
     const autoUpdateApply = overlay.querySelector('#auto-update-apply').checked;
     const sessionLogEnabled = overlay.querySelector('#session-log-enabled').checked;
-    const settingsPayload = { shellProfile, maxIssueTitleLength: newMaxTitle, wandPlanMode, wandPromptTemplate, symlinkWorktreeSettings, cmdTabSwitch, cmdTabSwitchHoldMs, commandPaletteEnabled, commandPaletteShortcut, hashCommandsEnabled, metaControlsEnabled, overviewDefaultLayout, enabledAgents, opencodeBinary, piBinary, windowConfigs: editingConfigs, engine: selectedEngine, scrollbackKB, autoUpdateCheckEnabled, autoUpdateCheckIntervalHours, autoUpdateApply, sessionLogEnabled };
+    const inheritRemoteControl = overlay.querySelector('#inherit-rc-newtab').checked;
+    const inheritRemoteControlOnFork = overlay.querySelector('#inherit-rc-fork').checked;
+    const settingsPayload = { shellProfile, maxIssueTitleLength: newMaxTitle, wandPlanMode, wandPromptTemplate, symlinkWorktreeSettings, cmdTabSwitch, cmdTabSwitchHoldMs, commandPaletteEnabled, commandPaletteShortcut, hashCommandsEnabled, metaControlsEnabled, inheritRemoteControl, inheritRemoteControlOnFork, overviewDefaultLayout, enabledAgents, opencodeBinary, piBinary, windowConfigs: editingConfigs, engine: selectedEngine, scrollbackKB, autoUpdateCheckEnabled, autoUpdateCheckIntervalHours, autoUpdateApply, sessionLogEnabled };
     let resp = await fetch('/api/settings', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1547,7 +1565,7 @@ function createTmuxAttachSession(tmuxSessionName) {
  */
 function createSession(cwd, existingId = null, isNew = false, opts = {}) {
   const { cols, rows } = measureTerminalSize();
-  const ws = createWebSocket({ id: existingId, cwd, isNew, worktree: opts.worktree, name: opts.name, planMode: opts.planMode, agentType: opts.agentType, cols, rows, windowId: getWindowId(), fork: opts.fork });
+  const ws = createWebSocket({ id: existingId, cwd, isNew, worktree: opts.worktree, name: opts.name, planMode: opts.planMode, agentType: opts.agentType, cols, rows, windowId: getWindowId(), fork: opts.fork, rcParent: opts.rcParent });
 
   // Promise that resolves when the session is fully initialized (terminal created)
   let resolveReady;
@@ -2463,7 +2481,8 @@ function renameSession(id) {
 function quickNewSession() {
   const active = activeId && sessions.get(activeId);
   const cwd = active?.cwd || '~';
-  createSession(cwd, null, true, { agentType: getDefaultAgentType() });
+  // Pass the active tab as the parent so the new tab can inherit its /rc state.
+  createSession(cwd, null, true, { agentType: getDefaultAgentType(), rcParent: activeId });
 }
 
 function quickNewTerminal() {
