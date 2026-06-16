@@ -2,6 +2,9 @@
  * Tab UI management for terminal tabs
  */
 
+// Speaker icon shown on a tab while it is emitting audio (inline SVG, inherits currentColor).
+const SPEAKER_SVG = '<svg viewBox="0 0 16 16"><path d="M8 2 4 5H1v6h3l4 3V2z" fill="currentColor"/><path d="M11 5a4 4 0 0 1 0 6" stroke="currentColor" fill="none" stroke-width="1.4" stroke-linecap="round"/></svg>';
+
 // Drag reorder state
 const MOVE_THRESHOLD = 5;
 let dragState = null;
@@ -326,6 +329,7 @@ export const TabManager = {
     tab.title = name;
     tab.innerHTML = `
       <span class="badge"></span>
+      <span class="speaker-icon" aria-hidden="true" title="Emitting audio">${SPEAKER_SVG}</span>
       <span class="tab-label">${name}</span>
       <span class="close">&#10005;</span>
     `;
@@ -406,6 +410,7 @@ export const TabManager = {
     tab.id = 'tab-' + sessionId;
     tab.innerHTML = `
       <span class="badge"></span>
+      <span class="speaker-icon" aria-hidden="true" title="Emitting audio">${SPEAKER_SVG}</span>
       <span class="tab-label">${name}</span>
       <span class="close">&#10005;</span>
     `;
@@ -481,6 +486,14 @@ export const TabManager = {
   updateBadge(sessionId, visible) {
     const badge = document.querySelector('#tab-' + sessionId + ' .badge');
     if (badge) badge.classList.toggle('visible', visible);
+  },
+
+  /**
+   * Show/hide the speaker icon on a tab (driven by display-tab audio detection).
+   */
+  updateSpeakerIcon(sessionId, active) {
+    const el = document.querySelector('#tab-' + sessionId + ' .speaker-icon');
+    if (el) el.classList.toggle('active', !!active);
   },
 
   /**

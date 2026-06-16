@@ -63,6 +63,9 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
 .tab .close:hover { opacity: 1; color: var(--ds-accent-red); }
 .tab .badge { width: 8px; height: 8px; background: var(--ds-accent-blue); border-radius: 50%; display: inline-block; visibility: hidden; flex-shrink: 0; }
 .tab .badge.visible { visibility: visible; }
+.tab .speaker-icon { display: none; flex-shrink: 0; width: 13px; height: 13px; color: var(--ds-accent-blue); }
+.tab .speaker-icon.active { display: inline-flex; align-items: center; }
+.tab .speaker-icon svg { width: 100%; height: 100%; }
 .tab .tab-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tab.placeholder { animation: tab-connecting 1.2s ease-in-out infinite; }
 @keyframes tab-connecting { 0%, 100% { opacity: 0.4; } 50% { opacity: 0.8; } }

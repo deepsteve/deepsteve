@@ -1967,7 +1967,7 @@ function createDisplayTab(id, name, opts = {}) {
   sessions.set(id, {
     term: null, fit: null, ws: null, container, cwd: null,
     name: tabName, waitingForInput: false, hasUnseenActivity: false, scrollControl: null,
-    type: 'display-tab',
+    type: 'display-tab', emittingAudio: false,
   });
 
   TabSessions.add({ id, name: tabName, type: 'display-tab' });
@@ -2008,6 +2008,18 @@ function createDisplayTab(id, name, opts = {}) {
 
   ModManager.notifySessionsChanged(getSessionList());
 }
+
+// Display tabs post {type:'ds-audio-state', tabId, emitting} from the detector script
+// injected by the server. Toggle a speaker icon on the matching tab. The icon reflects
+// audio state regardless of which tab is active (unlike the unread .badge).
+window.addEventListener('message', (e) => {
+  const d = e.data;
+  if (!d || d.type !== 'ds-audio-state') return;
+  const s = sessions.get(d.tabId);
+  if (!s || s.type !== 'display-tab') return;
+  s.emittingAudio = !!d.emitting;
+  TabManager.updateSpeakerIcon(d.tabId, s.emittingAudio);
+});
 
 /**
  * Switch to a specific session tab
@@ -3252,6 +3264,9 @@ async function init() {
         if (session?.type === 'display-tab') {
           const iframe = session.container.querySelector('iframe');
           if (iframe) iframe.src = `/api/display-tab/${msg.id}?t=${Date.now()}`;
+          // Clear audio indicator during reload; the reloaded detector re-reports state.
+          session.emittingAudio = false;
+          TabManager.updateSpeakerIcon(msg.id, false);
         }
       }
       if (msg.type === 'close-display-tab') {
