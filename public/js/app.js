@@ -15,6 +15,7 @@ import { ModManager } from './mod-manager.js';
 import { initFileDrop } from './file-drop.js';
 import { init as initCmdHoldMode, setEnabled as setCmdHoldModeEnabled, setHoldMs as setCmdHoldModeHoldMs } from './cmd-tab-switch.js';
 import { init as initCommandPalette, setEnabled as setCommandPaletteEnabled, setShortcut as setCommandPaletteShortcut } from './command-palette.js';
+import { init as initProgressBar, start as progressStart, done as progressDone } from './progress-bar.js';
 import { init as initHashCommands, beforeSend as hashCommandsBeforeSend, setWaitingForInput as setHashCommandsWaiting, setEnabled as setHashCommandsEnabled } from './hash-commands.js';
 import { init as initOverviewMode, setEnabled as setOverviewModeEnabled, setShortcut as setOverviewModeShortcut, setDefaultLayout as setOverviewDefaultLayout, toggle as toggleOverviewMode, isOverviewActive, updateFocus as updateOverviewFocus, onTabsReordered as onOverviewTabsReordered } from './overview-mode.js';
 import { init as initTerminalSearch, attachSearchAddon, closeIfOpen as closeTerminalSearch } from './terminal-search.js';
@@ -3240,6 +3241,7 @@ async function init() {
         // Server created a session (e.g. via /api/start-issue) — open a tab for it
         if (msg.windowId && msg.windowId !== getWindowId()) return;
         createSession(msg.cwd, msg.id, false, { name: msg.name, allowDuplicate: true, initialPrompt: msg.initialPrompt, loading: msg.loading });
+        if (msg.prefill) progressStart(msg.id);
       }
       if (msg.type === 'deliver-prompt') {
         // Async prompt delivery (e.g. GitHub issue fetch completed after tab opened)
@@ -3250,6 +3252,7 @@ async function init() {
       }
       if (msg.type === 'prompt-submitted') {
         dismissLoadingBanner(msg.id);
+        if (msg.prefill) progressDone(msg.id);
       }
       if (msg.type === 'open-display-tab') {
         if (msg.windowId && msg.windowId !== getWindowId()) return;
@@ -3298,6 +3301,9 @@ async function init() {
     getActiveTabId: () => activeId,
     switchToTab: switchTo,
   });
+
+  // Initialize the top-of-page progress bar (automation prefill feedback)
+  initProgressBar();
 
   // Initialize Command Palette (Cmd+K by default, on by default)
   initCommandPalette({
