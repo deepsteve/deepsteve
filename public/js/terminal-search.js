@@ -1,5 +1,5 @@
 /**
- * Terminal Search — Ctrl+F / Cmd+F to search within terminal scrollback.
+ * Terminal Search — Cmd+F to search within terminal scrollback.
  *
  * Uses xterm-addon-search for match highlighting and navigation.
  * Follows the init/setEnabled pattern from command-palette.js.
@@ -35,8 +35,9 @@ export function closeIfOpen() {
 function onKeyDown(e) {
   if (!enabled) return;
 
-  // Ctrl+F / Cmd+F to open search
-  if ((e.metaKey || e.ctrlKey) && e.key === 'f' && !e.shiftKey && !e.altKey) {
+  // Cmd+F to open search (Mac-native). Ctrl+F is intentionally NOT matched so it
+  // passes through to the PTY for vim/terminal control sequences (e.g. <C-f>).
+  if (e.metaKey && e.key === 'f' && !e.ctrlKey && !e.shiftKey && !e.altKey) {
     e.preventDefault();
     e.stopPropagation();
     if (isOpen) {

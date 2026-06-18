@@ -3416,7 +3416,7 @@ async function init() {
     },
   });
 
-  // Initialize Terminal Search (Ctrl+F / Cmd+F)
+  // Initialize Terminal Search (Cmd+F)
   initTerminalSearch({
     getActiveSession: () => {
       if (!activeId) return null;
