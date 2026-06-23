@@ -49,11 +49,14 @@ Steps:
        - If it exists, check it out in the main worktree: `git -C <main_path> checkout <target>` (this fails if the main worktree is dirty — if so, show the error and STOP), then set `merge_dir` = `main_path`. Tell the user you switched the main worktree to `<target>` to perform the merge.
        - If it doesn't exist, tell the user the branch `<target>` wasn't found and STOP.
 
-7. **Merge**: Run `git -C <merge_dir> merge <branch> --no-edit` to merge the worktree branch into `<target>` from the directory that has it checked out. Do NOT use `git checkout <target>` in the current worktree — it is checked out in `<merge_dir>`.
+7. **Check the target checkout, then merge**:
+   - First confirm the target checkout isn't dirty: run `git -C <merge_dir> status --porcelain`. If it prints any lines, the **target** checkout at `<merge_dir>` has uncommitted changes that `git merge` will refuse to overwrite (it aborts pre-flight, leaving `<target>` untouched). STOP and tell the user: the target checkout — `<merge_dir>`, **not** the current worktree — has uncommitted changes; they should commit or stash them *in that checkout*, then re-run `/merge`. Do NOT auto-commit, stash, or rebase their changes yourself — that WIP is separate work in the main checkout.
+   - Otherwise, run `git -C <merge_dir> merge <branch> --no-edit` to merge the worktree branch into `<target>` from the directory that has it checked out. Do NOT use `git checkout <target>` in the current worktree — it is checked out in `<merge_dir>`.
 
 8. **Handle the result**:
    - **Success**: Tell the user the branch was successfully merged into `<target>`. Show the merge output. Then continue to steps 9 and 10.
    - **Conflict**: Run `git -C <merge_dir> merge --abort` to leave `<target>` clean. Then rebase the worktree branch onto the target (`git rebase <target>`), resolve any conflicts, and retry the merge from step 7. If the rebase itself fails with conflicts you cannot resolve, abort the rebase (`git rebase --abort`), tell the user, and STOP.
+   - **Local changes in the target** (`error: Your local changes ... would be overwritten by merge`, with no merge actually started — no `MERGE_HEAD`): the step-7 guard should have caught this, but if it slips through, handle it the same way — STOP and tell the user to commit or stash WIP in `<merge_dir>`, then re-run `/merge`. Do NOT run `git merge --abort` (there is no merge in progress) or rebase — this is **not** a Conflict, and rebasing the branch can't fix a dirty target.
    - **Other failure**: Show the error output to the user. STOP here — do not proceed to steps 9 or 10.
 
 9. **Close the GitHub issue** (success only): If `branch` matches `*github-issue-<n>*`, run `gh issue close <n> --comment "Merged into <target>."`. Otherwise skip silently.
