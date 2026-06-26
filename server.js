@@ -3139,6 +3139,20 @@ app.post('/api/request-restart', (req, res) => {
   }
 });
 
+// Confirmation text for the `./restart.sh --force` path (#504). The server owns
+// the wording so restart.sh can echo it back into Claude Code's permission
+// prompt — the human-visible acceptance gate that replaces the in-app modal —
+// and re-validate it before restarting. Returned as plain text because the
+// value IS the display string. `shells.size` is the active-PTY count (the
+// blast radius); saved/closed sessions live in `savedState` and aren't
+// interrupted by a restart.
+app.get('/api/restart-prompt', (req, res) => {
+  const n = shells.size;
+  res.type('text/plain').send(
+    `Restarting - ${n} active session${n === 1 ? '' : 's'} will be interrupted`
+  );
+});
+
 reconcileSkills();
 
 const server = app.listen(PORT, BIND, () => {

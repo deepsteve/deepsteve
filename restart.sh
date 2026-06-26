@@ -1,20 +1,86 @@
 #!/bin/bash
 # Restart deepsteve daemon - just run ./restart.sh
-# Pass --refresh to force browser page reload after restart.
+#
+# Flags:
+#   --refresh   force a browser page reload after restart (default: silent
+#               WebSocket reconnect).
+#   --force     skip the in-app browser confirmation modal. Acceptance instead
+#               moves to Claude Code's permission prompt for this command
+#               (#504), in two steps:
+#                 1) ./restart.sh --force
+#                      -> prints the live session count and the exact confirm
+#                         command to run (no restart, read-only).
+#                 2) ./restart.sh --force --prompt "<text from step 1>"
+#                      -> restarts after re-validating <text> against the
+#                         server's current message.
+#               Do NOT allowlist this command: the guarantee that a restart can
+#               never happen unilaterally depends on it staying prompt-gated.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REFRESH=0
+FORCE=0
+HAS_PROMPT=0
+FORCE_PROMPT=""
+BG=0
+BG_DIR=""
 
-# Parse flags (before --bg re-exec)
-for arg in "$@"; do
-    case "$arg" in
+# Detect the internal background re-exec first; its positional args
+# (--bg <dir>) must be read before we consume the rest as flags.
+if [[ "$1" == "--bg" ]]; then
+    BG=1
+    BG_DIR="$2"
+    shift 2
+fi
+
+# Parse flags (applies to both the user invocation and the --bg re-exec).
+while [ $# -gt 0 ]; do
+    case "$1" in
         --refresh) REFRESH=1 ;;
+        --force)   FORCE=1 ;;
+        --prompt)  HAS_PROMPT=1; shift; FORCE_PROMPT="$1" ;;
     esac
+    shift
 done
 
 # Re-exec in background if not already
-if [[ "$1" != "--bg" ]]; then
-    # Ask browser for confirmation before restarting
+if [ "$BG" != 1 ]; then
+    # --- Forced restart path (#504): bypass the in-app browser modal. ---
+    # Acceptance moves to Claude Code's permission prompt for this command. The
+    # server owns the confirmation wording; we echo it back and re-validate so a
+    # stale or forged message can't slip through.
+    if [ "$FORCE" = 1 ]; then
+        SERVER_PROMPT=$(curl -s -m 10 http://localhost:3000/api/restart-prompt 2>/dev/null)
+        if [ -z "$SERVER_PROMPT" ]; then
+            # Daemon unreachable: deterministic text so step 1 and step 2 agree.
+            SERVER_PROMPT="Restarting DeepSteve (daemon not running - no active sessions)"
+        fi
+
+        REFRESH_ARG=""
+        [ "$REFRESH" = 1 ] && REFRESH_ARG=" --refresh"
+
+        if [ "$HAS_PROMPT" != 1 ]; then
+            # Step 1: report the live blast radius and the exact confirm command.
+            echo "$SERVER_PROMPT"
+            echo "To confirm, run: ./restart.sh --force --prompt \"$SERVER_PROMPT\"$REFRESH_ARG"
+            exit 0
+        fi
+
+        if [ "$FORCE_PROMPT" != "$SERVER_PROMPT" ]; then
+            # Echoed text is stale/forged — refuse and reprint the current one.
+            echo "Confirmation text does not match the current server state."
+            echo "$SERVER_PROMPT"
+            echo "Re-run: ./restart.sh --force --prompt \"$SERVER_PROMPT\"$REFRESH_ARG"
+            exit 1
+        fi
+
+        # Confirmed — graceful restart, skipping the browser modal entirely.
+        nohup "$0" --bg "$SCRIPT_DIR" $([ "$REFRESH" = 1 ] && echo --refresh) >/dev/null 2>&1 &
+        disown
+        echo "Restarting in background..."
+        exit 0
+    fi
+
+    # Default path: ask the browser(s) for confirmation before restarting.
     RESULT=$(curl -s -m 120 -X POST http://localhost:3000/api/request-restart 2>/dev/null | grep -o '"result":"[^"]*"' | cut -d'"' -f4)
     if [ "$RESULT" != "confirmed" ]; then
         echo "Restart cancelled."
@@ -27,7 +93,7 @@ if [[ "$1" != "--bg" ]]; then
     exit 0
 fi
 
-SCRIPT_DIR="$2"
+SCRIPT_DIR="$BG_DIR"
 cd "$SCRIPT_DIR"
 
 cp package.json ~/.deepsteve/
