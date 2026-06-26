@@ -59,7 +59,7 @@ let termStationCanvas = null;     // off-screen canvas for placeholder
 let termStationSessionId = null;  // currently displayed session
 let termMirrorTerm = null;        // mirror xterm.js Terminal instance
 let termMirrorWs = null;          // mirror WebSocket connection
-let termMirrorCanvas = null;      // CanvasAddon's canvas element
+let termMirrorCanvas = null;      // WebglAddon's canvas element
 
 const monkeyState = {};        // id → { mesh, vel, pos, onGround, score, ... }
 const _v1 = new THREE.Vector3();
@@ -1441,32 +1441,43 @@ function showTermPlaceholder(msg, color = '#00ff88') {
   termStationMesh.material.needsUpdate = true;
 }
 
-// Mirror terminal: one reusable offscreen xterm + CanvasAddon.
+// Mirror terminal: one reusable offscreen xterm + WebglAddon.
 // Data piped from parent's onSessionData bridge (raw WS output forwarding).
 let _mirrorUnsub = null; // unsubscribe function for data listener
+
+// WebglAddon renders into a WebGL <canvas>, but xterm also adds a transparent 2D
+// `.xterm-link-layer` canvas that comes first in the DOM — so querySelector('canvas')
+// returns the wrong one. Pick the canvas with a WebGL context so THREE.CanvasTexture
+// samples actual terminal pixels, not the empty overlay.
+function webglCanvasOf(container) {
+  return [...container.querySelectorAll('canvas')].find(c => c.getContext('webgl2'))
+    || container.querySelector('canvas');
+}
 
 function ensureMirrorTerminal() {
   if (termMirrorTerm) return;
   const parentDoc = parent.document;
   const Terminal = parent.window.Terminal;
-  const CanvasAddon = parent.window.CanvasAddon?.CanvasAddon;
-  if (!Terminal || !CanvasAddon) {
-    console.warn('[MonkeyCode] Terminal or CanvasAddon not loaded yet');
+  const WebglAddon = parent.window.WebglAddon?.WebglAddon;
+  if (!Terminal || !WebglAddon) {
+    console.warn('[MonkeyCode] Terminal or WebglAddon not loaded yet');
     return;
   }
   let container = parentDoc.getElementById('monkey-term-mirror');
   if (!container) {
     container = parentDoc.createElement('div');
     container.id = 'monkey-term-mirror';
-    // On-screen (so IntersectionObserver considers it visible and CanvasAddon renders)
+    // On-screen (so IntersectionObserver considers it visible and WebglAddon renders)
     // but behind everything and non-interactive
     container.style.cssText = 'position:fixed; left:0; top:0; width:1600px; height:800px; overflow:hidden; z-index:-1; pointer-events:none; opacity:0.01;';
     parentDoc.body.appendChild(container);
   }
   termMirrorTerm = new Terminal({ fontSize: 14, cols: 80, rows: 24 });
   termMirrorTerm.open(container);
-  termMirrorTerm.loadAddon(new CanvasAddon());
-  termMirrorCanvas = container.querySelector('canvas');
+  // preserveDrawingBuffer:true so THREE.CanvasTexture can read the WebGL canvas
+  // back (the buffer is otherwise cleared after compositing and samples blank).
+  termMirrorTerm.loadAddon(new WebglAddon(true));
+  termMirrorCanvas = webglCanvasOf(container);
 }
 
 // Pre-create mirror terminal at startup so it's ready before VR starts
@@ -1512,8 +1523,9 @@ function updateTerminalStation(sessionId) {
     // Match mirror terminal dimensions to source terminal
     if (termMirrorTerm.cols !== srcTerm.cols || termMirrorTerm.rows !== srcTerm.rows) {
       termMirrorTerm.resize(srcTerm.cols, srcTerm.rows);
-      // Update canvas reference after resize (CanvasAddon may recreate it)
-      const newCanvas = termMirrorTerm.element?.closest('#monkey-term-mirror')?.querySelector('canvas');
+      // Update canvas reference after resize (WebglAddon may recreate it)
+      const mirrorContainer = termMirrorTerm.element?.closest('#monkey-term-mirror');
+      const newCanvas = mirrorContainer ? webglCanvasOf(mirrorContainer) : null;
       if (newCanvas && newCanvas !== termMirrorCanvas) {
         termMirrorCanvas = newCanvas;
         termMirrorTexture = new THREE.CanvasTexture(termMirrorCanvas);
@@ -1531,7 +1543,7 @@ function updateTerminalStation(sessionId) {
     }
     if (lines.length) termMirrorTerm.write(lines.join('\r\n'));
 
-    // Force CanvasAddon to render after IntersectionObserver has fired
+    // Force WebglAddon to render after IntersectionObserver has fired
     setTimeout(() => {
       if (termMirrorTerm) termMirrorTerm.refresh(0, termMirrorTerm.rows - 1);
     }, 150);
@@ -1564,7 +1576,7 @@ function updateTerminalStation_tick() {
   if (termMirrorTexture && termStationSessionId) {
     termMirrorTexture.needsUpdate = true;
   }
-  // Throttled refresh to force CanvasAddon to render new data to canvas (~4/sec)
+  // Throttled refresh to force WebglAddon to render new data to canvas (~4/sec)
   if (termMirrorTerm && termStationSessionId) {
     const now = performance.now();
     if (now - _lastMirrorRefresh > 250) {
