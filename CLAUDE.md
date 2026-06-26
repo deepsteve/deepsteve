@@ -13,6 +13,13 @@ Use `--refresh` when changes affect anything the browser loads (frontend JS/CSS/
 
 **`Restart cancelled.` has two causes.** `./restart.sh` first POSTs to `/api/request-restart`, which shows a confirm dialog in the browser. The script prints `Restart cancelled.` and exits if either (a) the user actively dismissed the dialog, or (b) nobody responded within the 60s timeout. Don't assume it was an explicit rejection — the user may have been away from the screen. Ask them to retry or confirm when they're ready rather than silently giving up.
 
+**`--force` skips the in-app modal (#504).** When you can't (or don't want to) confirm in the browser, `--force` moves acceptance to **Claude Code's own permission prompt** for the command instead. It is a deliberate two-step so the user sees the blast radius before accepting:
+```bash
+./restart.sh --force                       # step 1: prints "Restarting - N active sessions will be interrupted" + the exact confirm command. No restart.
+./restart.sh --force --prompt "Restarting - 3 active sessions will be interrupted"   # step 2: restarts after re-checking the text
+```
+The server owns the wording (`GET /api/restart-prompt`, derived from the live session count); step 2 re-validates the echoed `--prompt` text against the server and aborts if it's stale or forged, so the number you approve is always the real one. The forced path still does a full graceful deploy + restart (it just skips the `/api/request-restart` POST). **Do not allowlist `./restart.sh` (especially the `--force --prompt` form)** — the guarantee that a restart can never happen unilaterally (e.g. by an agent) rests entirely on that command staying behind Claude Code's permission prompt.
+
 **Worktree sessions:** `./restart.sh` deploys from the directory it lives in — it sets `SCRIPT_DIR="$(dirname "$0")"` and copies that directory's `server.js`, `mods/*`, `public/*`, etc. into `~/.deepsteve/`. So running the **worktree's own** `./restart.sh --refresh` *does* deploy that worktree's edits without merging first — handy for testing a change in place. Caveat: it also stamps `.install-source.json` with the worktree path as `sourcePath`, and the in-app auto-update (git-pull) runs against that path. Since worktrees are temporary and sit on feature branches, prefer running `./restart.sh` from the **main repo checkout** for a durable install, and re-run it there after merging.
 
 ### View logs:
