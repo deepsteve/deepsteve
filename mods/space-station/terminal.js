@@ -44,12 +44,21 @@ export function initTerminal(termStation) {
 
 // ── Terminal mirror ─────────────────────────────────────────────────────────
 
+// WebglAddon renders into a WebGL <canvas>, but xterm also adds a transparent 2D
+// `.xterm-link-layer` canvas that comes first in the DOM — so querySelector('canvas')
+// returns the wrong one. Pick the canvas with a WebGL context so THREE.CanvasTexture
+// samples actual terminal pixels, not the empty overlay.
+function webglCanvasOf(container) {
+  return [...container.querySelectorAll('canvas')].find(c => c.getContext('webgl2'))
+    || container.querySelector('canvas');
+}
+
 function ensureMirrorTerminal() {
   if (termMirrorTerm) return;
   const parentDoc = parent.document;
   const Terminal = parent.window.Terminal;
-  const CanvasAddon = parent.window.CanvasAddon?.CanvasAddon;
-  if (!Terminal || !CanvasAddon) return;
+  const WebglAddon = parent.window.WebglAddon?.WebglAddon;
+  if (!Terminal || !WebglAddon) return;
 
   let container = parentDoc.getElementById('robot-term-mirror');
   if (!container) {
@@ -60,8 +69,10 @@ function ensureMirrorTerminal() {
   }
   termMirrorTerm = new Terminal({ fontSize: 14, cols: 80, rows: 24 });
   termMirrorTerm.open(container);
-  termMirrorTerm.loadAddon(new CanvasAddon());
-  termMirrorCanvas = container.querySelector('canvas');
+  // preserveDrawingBuffer:true so THREE.CanvasTexture can read the WebGL canvas
+  // back (the buffer is otherwise cleared after compositing and samples blank).
+  termMirrorTerm.loadAddon(new WebglAddon(true));
+  termMirrorCanvas = webglCanvasOf(container);
 }
 
 function _drawTermLog() {
@@ -117,7 +128,8 @@ export function updateTerminalStation(sessionId) {
 
     if (termMirrorTerm.cols !== srcTerm.cols || termMirrorTerm.rows !== srcTerm.rows) {
       termMirrorTerm.resize(srcTerm.cols, srcTerm.rows);
-      const newCanvas = termMirrorTerm.element?.closest('#robot-term-mirror')?.querySelector('canvas');
+      const mirrorContainer = termMirrorTerm.element?.closest('#robot-term-mirror');
+      const newCanvas = mirrorContainer ? webglCanvasOf(mirrorContainer) : null;
       if (newCanvas && newCanvas !== termMirrorCanvas) {
         termMirrorCanvas = newCanvas;
         termMirrorTexture = new THREE.CanvasTexture(termMirrorCanvas);
