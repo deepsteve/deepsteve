@@ -1797,6 +1797,17 @@ function showLoadingBanner(sessionId, container) {
   const banner = document.createElement('div');
   banner.className = 'loading-banner';
   banner.innerHTML = '<span class="loading-banner-spinner"></span> Reading GitHub issue and populating tab\u2026';
+  // "Enable input" override: input is blocked server-side while the issue prompt is
+  // auto-submitted (#512); this lets the user take control immediately if they want.
+  const btn = document.createElement('button');
+  btn.className = 'loading-banner-override';
+  btn.textContent = 'Enable input';
+  btn.addEventListener('click', () => {
+    const sess = sessions.get(sessionId);
+    if (sess?.ws) sess.ws.sendJSON({ type: 'unblock-input' });
+    dismissLoadingBanner(sessionId);
+  });
+  banner.appendChild(btn);
   container.prepend(banner);
   banner._loadingTimeout = setTimeout(() => dismissLoadingBanner(sessionId), 60000);
 }

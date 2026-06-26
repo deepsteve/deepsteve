@@ -1085,8 +1085,18 @@ function submitToShell(id, text, eng) {
   // auto-submitted initialPrompts and meta_type as well as graceful /exit.
   const e = shells.get(id);
   if (e) e.lastInputTime = Date.now();
-  (eng || getEngine(id)).write(id, text);
-  setTimeout(() => (eng || getEngine(id)).write(id, '\r'), 1000);
+  const engine = eng || getEngine(id);
+  engine.write(id, text);
+  // Returns a Promise that resolves once the deferred Enter has been written, so
+  // callers (deliverPromptWhenReady) can re-enable input exactly when the submit
+  // completes (#512). Existing callers ignore the return value (backward compatible).
+  // The \r write is wrapped because the PTY may have died during the 1s window.
+  return new Promise((resolve) => {
+    setTimeout(() => {
+      try { engine.write(id, '\r'); } catch {}
+      resolve();
+    }, 1000);
+  });
 }
 
 /**
@@ -1117,15 +1127,41 @@ function deliverPromptWhenReady(id, prompt) {
   const config = getAgentConfig(e.agentType);
   log(`[deliverPrompt] id=${id} waitingForInput=${e.waitingForInput} initialPromptDelay=${config.initialPromptDelay} promptLen=${prompt.length}`);
 
+  // Block user keystrokes while we auto-populate this tab, so the user can't
+  // interleave input with the injected prompt and corrupt the submission (#512).
+  // Scoped to loading/prefill flows only, so input is never silently dropped
+  // without a visible cue (the loading banner / prefill progress bar, which carry
+  // an "Enable input" override button). Cleared when the deferred Enter lands
+  // (submitAndNotify below), the user clicks override, or a 60s safety timer
+  // (matches the client banner auto-dismiss) fires in case the agent never goes
+  // idle and submitAndNotify never runs.
+  if (e.loading || e.prefill) {
+    e.inputBlocked = true;
+    clearTimeout(e.inputBlockTimer);
+    e.inputBlockTimer = setTimeout(() => {
+      const ent = shells.get(id);
+      if (ent) { ent.inputBlocked = false; ent.inputBlockTimer = null; }
+      log(`[deliverPrompt] id=${id} inputBlock safety timeout fired — re-enabling input`);
+    }, 60000);
+  }
+
   function submitAndNotify() {
-    submitToShell(id, prompt);
-    const entry = shells.get(id);
-    if (entry?.loading || entry?.prefill) {
-      const wasPrefill = !!entry.prefill;
-      entry.loading = false;
-      entry.prefill = false;
-      deliverToWindow({ type: 'prompt-submitted', id, windowId: entry.windowId || null, prefill: wasPrefill }, entry.windowId || null);
-    }
+    // Re-enable input only after the deferred Enter has actually been written, so
+    // the banner dismiss, the unblock, and a truthful "prompt-submitted" event all
+    // coincide with the submission landing (#512).
+    submitToShell(id, prompt).then(() => {
+      const entry = shells.get(id);
+      if (!entry) return;
+      entry.inputBlocked = false;
+      clearTimeout(entry.inputBlockTimer);
+      entry.inputBlockTimer = null;
+      if (entry.loading || entry.prefill) {
+        const wasPrefill = !!entry.prefill;
+        entry.loading = false;
+        entry.prefill = false;
+        deliverToWindow({ type: 'prompt-submitted', id, windowId: entry.windowId || null, prefill: wasPrefill }, entry.windowId || null);
+      }
+    });
   }
 
   if (e.waitingForInput) {
@@ -1340,6 +1376,7 @@ function killShell(entry, id, reason = 'closed') {
 
   // Clean up idle timer and engine data listener
   clearTimeout(entry.idleTimer);
+  clearTimeout(entry.inputBlockTimer);
   if (entry._engineDataHandler) {
     eng.removeListener('data', entry._engineDataHandler);
     entry._engineDataHandler = null;
@@ -3663,6 +3700,13 @@ function handleWsConnection(ws, req) {
         return;
       }
       if (parsed.type === 'rename') { entry.name = parsed.name || null; return; }
+      if (parsed.type === 'unblock-input') {
+        // Manual override from the loading banner's "Enable input" button (#512).
+        entry.inputBlocked = false;
+        clearTimeout(entry.inputBlockTimer);
+        entry.inputBlockTimer = null;
+        return;
+      }
       if (parsed.type === 'close-session') {
         entry.clients.delete(ws);
         ws.close();
@@ -3686,6 +3730,11 @@ function handleWsConnection(ws, req) {
       }
       }
     } catch {}
+    // Drop user keystrokes while an auto-injected prompt is being submitted, so
+    // typing can't interleave with the injected text (#512). Control messages
+    // (resize/rename/unblock-input/close-session) already returned above, so they
+    // still work as escape hatches.
+    if (entry.inputBlocked) return;
     // User sent input - update activity and clear waiting/idle state
     entry.lastActivity = Date.now();
     entry.lastInputTime = Date.now();
