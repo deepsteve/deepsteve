@@ -731,10 +731,25 @@ function sessionEnv(id, { name, worktree, windowId, cwd, agentType } = {}) {
   };
 }
 
+// Daemon-internal env vars from the launchd plist (release.sh) that must NOT leak
+// into agent PTYs / command shells. Leaking PORT lets an agent's port-cleanup kill
+// the daemon (#517); NODE_ENV=production silently alters agent tooling.
+const DAEMON_INTERNAL_ENV_KEYS = ['PORT', 'NODE_ENV', 'DEEPSTEVE_BIND', 'DEEPSTEVE_HTTPS', 'DEEPSTEVE_HTTPS_PORT'];
+
+// Base env for any process we spawn on the agent's behalf: a fresh copy of the
+// daemon's env with the daemon-internal keys stripped, then `extraEnv` layered on
+// top. Strip from the copy *first* so an explicit extraEnv value is never deleted,
+// and never return process.env by reference (the caller would mutate the daemon).
+function childBaseEnv(extraEnv) {
+  const env = { ...process.env };
+  for (const k of DAEMON_INTERNAL_ENV_KEYS) delete env[k];
+  return extraEnv ? { ...env, ...extraEnv } : env;
+}
+
 function spawnSession(eng, id, agentType, args, cwd, { cols = 120, rows = 40, env: extraEnv } = {}) {
-  const env = extraEnv ? { ...process.env, ...extraEnv } : process.env;
+  const env = childBaseEnv(extraEnv);
   if (agentType === 'terminal') {
-    eng.spawn(id, 'zsh', ['-l'], cwd, { cols, rows, env });
+    eng.spawn(id, 'zsh', ['-l'], cwd, { cols, rows, env, stripEnv: DAEMON_INTERNAL_ENV_KEYS });
     return;
   }
   const bin = agentType === 'claude' ? 'claude'
@@ -743,7 +758,7 @@ function spawnSession(eng, id, agentType, args, cwd, { cols = 120, rows = 40, en
     : agentType === 'pi' ? (settings.piBinary || 'pi')
     : 'claude';
   const quoted = args.map(a => `'${a.replace(/'/g, "'\\''")}'`).join(' ');
-  eng.spawn(id, 'zsh', ['-l', '-c', `${bin} ${quoted}`], cwd, { cols, rows, env });
+  eng.spawn(id, 'zsh', ['-l', '-c', `${bin} ${quoted}`], cwd, { cols, rows, env, stripEnv: DAEMON_INTERNAL_ENV_KEYS });
 }
 
 // Agent capabilities and argument mapping
@@ -2105,7 +2120,7 @@ app.post('/api/commands/execute', (req, res) => {
 
   try {
     const output = execSync(`zsh -l -c '${filePath.replace(/'/g, "'\\''")}'`, {
-      env: { ...process.env, ...env },
+      env: childBaseEnv(env),
       cwd: env.DEEPSTEVE_CWD,
       timeout: 30000,
       encoding: 'utf8',

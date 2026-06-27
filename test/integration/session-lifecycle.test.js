@@ -36,6 +36,25 @@ describe('Session Lifecycle', () => {
     assert.ok(output.includes('hello_test_123'));
   });
 
+  it('does not leak daemon-internal env (PORT/NODE_ENV) into spawned shells (#517)', async () => {
+    const client = createClient();
+    await client.connect({ new: '1', agentType: 'terminal', cwd: '/tmp' });
+
+    await client.waitForOutput(/[#$%>]/, 10000);
+    client.rawOutput = '';
+
+    // The terminal echoes the typed command too, so the literal `[$PORT]` appears
+    // in the output. We only want the EXECUTED result line, where the brackets hold
+    // expanded values and therefore contain no `$` — `[^$\]]*` matches that line
+    // only. On a leak the brackets hold `3000`/`production`; clean, they're empty.
+    client.sendInput('echo "PORTCHECK[$PORT][$NODE_ENV]KCEHCTROP"\r');
+    const out = await client.waitForOutput(/PORTCHECK\[[^$\]]*\]\[[^$\]]*\]KCEHCTROP/, 10000);
+    const m = out.match(/PORTCHECK\[([^$\]]*)\]\[([^$\]]*)\]KCEHCTROP/);
+    assert.ok(m, `result line not found in output: ${out}`);
+    assert.strictEqual(m[1], '', `daemon PORT leaked into agent shell: "${m[1]}"`);
+    assert.strictEqual(m[2], '', `daemon NODE_ENV leaked into agent shell: "${m[2]}"`);
+  });
+
   it('session appears in GET /api/shells', async () => {
     const client = createClient();
     const session = await client.connect({ new: '1', agentType: 'terminal', cwd: '/tmp' });

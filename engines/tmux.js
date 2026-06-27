@@ -72,7 +72,7 @@ class TmuxEngine extends Engine {
     return SESSION_PREFIX + id;
   }
 
-  spawn(id, cmd, args, cwd, { cols = 120, rows = 40, env } = {}) {
+  spawn(id, cmd, args, cwd, { cols = 120, rows = 40, env, stripEnv = [] } = {}) {
     const sessionName = this._tmuxSessionName(id);
 
     // spawnSession wraps commands in zsh -l -c <cmd>. tmux new-session
@@ -97,6 +97,14 @@ class TmuxEngine extends Engine {
           extraEnv[key] = val;
         }
       }
+    }
+
+    // #517: daemon-internal vars (PORT, NODE_ENV, …) are absent from `env`, so the
+    // diff loop above won't forward them — but the tmux server inherited them from
+    // the daemon, so sessions would still see PORT=3000. Set each to empty to
+    // override that inheritance.
+    for (const key of stripEnv) {
+      if (process.env[key] !== undefined) extraEnv[key] = '';
     }
 
     if (this._supportsEnvFlag) {
