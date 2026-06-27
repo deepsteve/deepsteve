@@ -1,3 +1,5 @@
+import * as React from 'react';
+import * as ReactDOM from 'react-dom/client';
 const { useState, useEffect, useRef, useCallback } = React;
 
 const MAX_ENTRIES = 500;

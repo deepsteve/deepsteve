@@ -1,3 +1,5 @@
+import * as React from 'react';
+import * as ReactDOM from 'react-dom/client';
 const { useState, useEffect, useCallback } = React;
 
 const APPROACH_PRESETS = ['cautious', 'bold', 'thorough', 'creative', 'methodical', 'move-fast'];

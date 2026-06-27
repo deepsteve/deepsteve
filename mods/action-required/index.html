@@ -16,9 +16,12 @@
 </head>
 <body>
   <div id="action-root"></div>
-  <script src="https://cdn.jsdelivr.net/npm/react@18/umd/react.production.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/react-dom@18/umd/react-dom.production.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/@babel/standalone/babel.min.js"></script>
+  <script type="importmap">{ "imports": {
+    "react": "https://esm.sh/react@18.3.1",
+    "react/jsx-runtime": "https://esm.sh/react@18.3.1/jsx-runtime",
+    "react-dom/client": "https://esm.sh/react-dom@18.3.1/client"
+  }}</script>
+  <script src="https://cdn.jsdelivr.net/npm/@babel/standalone@8.0.3/babel.min.js"></script>
   <script type="text/babel" data-type="module" src="action-required.jsx"></script>
 </body>
 </html>
