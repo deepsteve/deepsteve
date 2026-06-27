@@ -1628,7 +1628,10 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
             if (sess) showLoadingBanner(msg.id, sess.container);
           }
           if (opts.initialPrompt) {
-            ws.sendJSON({ type: 'initialPrompt', text: opts.initialPrompt });
+            // Forward `loading` so the server marks this shell as a loading session
+            // (blocks input + emits prompt-submitted to dismiss the banner) for the
+            // client-initiated issue-start path, mirroring /api/start-issue (#495).
+            ws.sendJSON({ type: 'initialPrompt', text: opts.initialPrompt, loading: opts.loading });
           }
           // Apply persisted waiting state from the server. This restores the
           // busy/idle flag after a reconnect so close-confirm and the hash
@@ -3126,7 +3129,10 @@ async function showIssuePicker() {
       initialPrompt: prompt,
       planMode: wandPlanMode,
       name: truncateTitle(`#${selectedIssue.number} ${selectedIssue.title}`),
-      agentType: getDefaultAgentType()
+      agentType: getDefaultAgentType(),
+      // Show the loading banner + block input while the issue prompt auto-submits,
+      // matching the server-initiated /api/start-issue path (#495, #512).
+      loading: true
     });
   }
 

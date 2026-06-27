@@ -3710,6 +3710,10 @@ function handleWsConnection(ws, req) {
       if (parsed.type === 'resize') { getEngine(id).resize(id, parsed.cols, parsed.rows); return; }
       if (parsed.type === 'redraw') { return; } // no-op: Ink echoes \x0c as ^L garbage; scrollback replay handles reconnect
       if (parsed.type === 'initialPrompt') {
+        // Client-initiated issue-start (magic wand) marks the prompt as `loading` so
+        // we block input and emit prompt-submitted to dismiss the banner, matching the
+        // server-initiated /api/start-issue path (#495, #512).
+        if (parsed.loading) entry.loading = true;
         deliverPromptWhenReady(id, parsed.text);
         return;
       }
