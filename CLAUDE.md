@@ -1,6 +1,6 @@
 # deepsteve
 
-Web UI for running multiple Claude Code instances in browser tabs.
+DeepSteve is a node server that manages Agent (Claude Code, etc) instances and a Web UI that lets you connect to them in the browser and automate the Agents. Agents running inside of DeepSteve can interact with the DeepSteve system itself, writing custom browser-based UIs as well as interact with each other.
 
 ## Development Workflow
 
