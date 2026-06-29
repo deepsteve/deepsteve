@@ -1,6 +1,6 @@
 # deepsteve
 
-Web UI for running multiple Claude Code instances in browser tabs using real PTYs.
+Web UI for running multiple Claude Code instances in browser tabs.
 
 ## Development Workflow
 
