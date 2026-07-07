@@ -647,6 +647,7 @@ settingsBtn?.addEventListener('click', async () => {
   const currentAutoUpdateCheckIntervalHours = settingsData.autoUpdateCheckIntervalHours || 6;
   const currentAutoUpdateApply = settingsData.autoUpdateApply !== undefined ? settingsData.autoUpdateApply : true;
   const currentSessionLogEnabled = !!settingsData.sessionLogEnabled;
+  const currentScheduledTasksEnabled = settingsData.scheduledTasksEnabled !== false;
   const currentDefaultAgent = settingsData.defaultAgent || 'claude';
   const currentOpencodeBinary = settingsData.opencodeBinary || 'opencode';
   const currentPiBinary = settingsData.piBinary || 'pi';
@@ -803,6 +804,16 @@ settingsBtn?.addEventListener('click', async () => {
         </label>
         <p style="font-size: 11px; color: var(--ds-text-secondary); margin-top: 4px;">
           Record an append-only log of session opens and closes to ~/.deepsteve/session-lifecycle.jsonl. Agents can read it (read_session_log) or fetch /api/session-lifecycle to recap what happened. Off by default.
+        </p>
+      </div>
+      <div class="settings-section">
+        <h3>Scheduled Tasks</h3>
+        <label style="font-size: 13px; color: var(--ds-text-primary); cursor: pointer; display: flex; align-items: center; gap: 8px;">
+          <input type="checkbox" id="scheduled-tasks-enabled" ${currentScheduledTasksEnabled ? 'checked' : ''} style="accent-color: var(--ds-accent-green);">
+          Run scheduled tasks
+        </label>
+        <p style="font-size: 11px; color: var(--ds-text-secondary); margin-top: 4px;">
+          Master switch for the locally-queued cron. When on, tasks in the Scheduled panel run on this machine at their cron time (local time), with full MCP access. Overdue tasks catch up once at startup. On by default.
         </p>
       </div>
       <div class="settings-section">
@@ -1453,9 +1464,10 @@ settingsBtn?.addEventListener('click', async () => {
     const autoUpdateCheckIntervalHours = Math.max(1, Math.min(168, Number(overlay.querySelector('#auto-update-check-interval-hours').value) || 6));
     const autoUpdateApply = overlay.querySelector('#auto-update-apply').checked;
     const sessionLogEnabled = overlay.querySelector('#session-log-enabled').checked;
+    const scheduledTasksEnabled = overlay.querySelector('#scheduled-tasks-enabled').checked;
     const inheritRemoteControl = overlay.querySelector('#inherit-rc-newtab').checked;
     const inheritRemoteControlOnFork = overlay.querySelector('#inherit-rc-fork').checked;
-    const settingsPayload = { shellProfile, maxIssueTitleLength: newMaxTitle, wandPlanMode, wandPromptTemplate, symlinkWorktreeSettings, cmdTabSwitch, cmdTabSwitchHoldMs, commandPaletteEnabled, commandPaletteShortcut, hashCommandsEnabled, metaControlsEnabled, inheritRemoteControl, inheritRemoteControlOnFork, overviewDefaultLayout, enabledAgents, opencodeBinary, piBinary, windowConfigs: editingConfigs, engine: selectedEngine, scrollbackKB, autoUpdateCheckEnabled, autoUpdateCheckIntervalHours, autoUpdateApply, sessionLogEnabled };
+    const settingsPayload = { shellProfile, maxIssueTitleLength: newMaxTitle, wandPlanMode, wandPromptTemplate, symlinkWorktreeSettings, cmdTabSwitch, cmdTabSwitchHoldMs, commandPaletteEnabled, commandPaletteShortcut, hashCommandsEnabled, metaControlsEnabled, inheritRemoteControl, inheritRemoteControlOnFork, overviewDefaultLayout, enabledAgents, opencodeBinary, piBinary, windowConfigs: editingConfigs, engine: selectedEngine, scrollbackKB, autoUpdateCheckEnabled, autoUpdateCheckIntervalHours, autoUpdateApply, sessionLogEnabled, scheduledTasksEnabled };
     let resp = await fetch('/api/settings', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1700,6 +1712,8 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
         }
       } else if (msg.type === 'tasks') {
         ModManager.notifyTasksChanged(msg.tasks);
+      } else if (msg.type === 'scheduled-tasks') {
+        ModManager.notifyScheduledTasksChanged();
       } else if (msg.type === 'agent-chat') {
         ModManager.notifyAgentChatChanged(msg.channels);
       } else if (msg.type === 'browser-eval-request') {

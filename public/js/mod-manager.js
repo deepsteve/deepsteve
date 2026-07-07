@@ -39,6 +39,7 @@ let visiblePanelId = null;       // which panel is currently VISIBLE (or null)
 let panelTabsContainer = null;   // #panel-tabs DOM element
 let panelTabs = new Map();       // modId → tab button element
 let taskCallbacks = [];          // [{modId, cb}] — callbacks for task broadcasts
+let scheduledTaskCallbacks = []; // [{modId, cb}] — callbacks for scheduled-task broadcasts
 let agentChatCallbacks = [];     // [{modId, cb}] — callbacks for agent-chat broadcasts
 let browserEvalCallbacks = [];   // [{modId, cb}] — callbacks for browser-eval-request
 let browserConsoleCallbacks = []; // [{modId, cb}] — callbacks for browser-console-request
@@ -1603,6 +1604,7 @@ function _unloadPanelMod(modId) {
 
   // Filter out callbacks for this mod
   taskCallbacks = taskCallbacks.filter(e => e.modId !== modId);
+  scheduledTaskCallbacks = scheduledTaskCallbacks.filter(e => e.modId !== modId);
   agentChatCallbacks = agentChatCallbacks.filter(e => e.modId !== modId);
   browserEvalCallbacks = browserEvalCallbacks.filter(e => e.modId !== modId);
   browserConsoleCallbacks = browserConsoleCallbacks.filter(e => e.modId !== modId);
@@ -1847,6 +1849,20 @@ function notifyTasksChanged(tasks) {
 }
 
 /**
+ * Notify panel mods that scheduled tasks changed (called from app.js on the
+ * `scheduled-tasks` WS broadcast, which carries no payload). Re-fetch once and
+ * fan the fresh state out to every subscriber.
+ */
+function notifyScheduledTasksChanged() {
+  if (scheduledTaskCallbacks.length === 0) return;
+  fetch('/api/scheduled-tasks').then(r => r.json()).then(data => {
+    for (const entry of scheduledTaskCallbacks) {
+      try { entry.cb(data); } catch (e) { console.error('Scheduled-task callback error:', e); }
+    }
+  }).catch(() => {});
+}
+
+/**
  * Notify panel mods that agent chat has changed (called from app.js on WS broadcast).
  */
 function notifyAgentChatChanged(channels) {
@@ -2037,6 +2053,17 @@ function _injectBridgeAPI(iframeEl, modId, tabInstanceId) {
           taskCallbacks = taskCallbacks.filter(e => e !== entry);
         };
       },
+      onScheduledTasksChanged(cb) {
+        const entry = { modId, cb };
+        scheduledTaskCallbacks.push(entry);
+        // Fire immediately with the full current state from the server
+        fetch('/api/scheduled-tasks').then(r => r.json()).then(data => {
+          try { cb(data); } catch {}
+        }).catch(() => {});
+        return () => {
+          scheduledTaskCallbacks = scheduledTaskCallbacks.filter(e => e !== entry);
+        };
+      },
       onAgentChatChanged(cb) {
         const entry = { modId, cb };
         agentChatCallbacks.push(entry);
@@ -2168,6 +2195,7 @@ function handleModChanged(modId) {
   if (panelEntry) {
     // Clear stale callbacks for this mod before reload triggers re-injection
     taskCallbacks = taskCallbacks.filter(e => e.modId !== modId);
+    scheduledTaskCallbacks = scheduledTaskCallbacks.filter(e => e.modId !== modId);
     agentChatCallbacks = agentChatCallbacks.filter(e => e.modId !== modId);
     browserEvalCallbacks = browserEvalCallbacks.filter(e => e.modId !== modId);
     browserConsoleCallbacks = browserConsoleCallbacks.filter(e => e.modId !== modId);
@@ -2229,6 +2257,7 @@ export const ModManager = {
   notifyUserActivity,
   notifyActiveSessionChanged,
   notifyTasksChanged,
+  notifyScheduledTasksChanged,
   notifyAgentChatChanged,
   notifyBrowserEvalRequest,
   notifyBrowserConsoleRequest,

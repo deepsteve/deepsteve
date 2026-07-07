@@ -1,0 +1,18 @@
+{
+  "name": "Scheduled Tasks",
+  "version": "0.1.0",
+  "minDeepsteveVersion": "0.4.0",
+  "description": "Locally-queued cron for recurring agent tasks (with full MCP access), organized by project",
+  "enabledByDefault": true,
+  "entry": "index.html",
+  "display": "panel",
+  "panel": { "position": "right", "defaultWidth": 380, "minWidth": 240 },
+  "toolbar": { "label": "Scheduled" },
+  "tools": [
+    { "name": "schedule_task", "description": "Schedule a recurring local agent task" },
+    { "name": "list_scheduled_tasks", "description": "List scheduled tasks (by project, group, or all)" },
+    { "name": "update_scheduled_task", "description": "Update a scheduled task" },
+    { "name": "unschedule_task", "description": "Delete a scheduled task" },
+    { "name": "run_scheduled_task_now", "description": "Run a scheduled task immediately" }
+  ]
+}

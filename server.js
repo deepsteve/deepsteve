@@ -318,6 +318,7 @@ const SETTINGS_SCHEMA = [
   { name: 'autoUpdateApply',            type: 'boolean', default: true },
   { name: 'sessionLogEnabled',          type: 'boolean', default: false },
   { name: 'displayTabAudioIndicator',   type: 'boolean', default: true, broadcast: false },
+  { name: 'scheduledTasksEnabled',      type: 'boolean', default: true },
 ];
 
 // Settings whose default must exist in `settings` but that flow through

@@ -1,0 +1,395 @@
+import * as React from 'react';
+import * as ReactDOM from 'react-dom/client';
+const { useState, useEffect, useCallback, useMemo } = React;
+
+const DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+const DAY_FULL = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+const AGENTS = ['claude', 'hermes', 'opencode', 'pi'];
+
+const C = {
+  border: 'var(--ds-border, #30363d)',
+  bg2: 'var(--ds-bg-secondary, #161b22)',
+  text: 'var(--ds-text-primary, #c9d1d9)',
+  dim: 'var(--ds-text-secondary, #8b949e)',
+  accent: 'var(--ds-accent, #58a6ff)',
+  green: '#3fb950',
+  red: '#f85149',
+  amber: '#d29922',
+};
+
+// --- small time + cron helpers (display + form preview only) ---
+function relTime(ms) {
+  if (!ms) return 'n/a';
+  const diff = ms - Date.now();
+  const abs = Math.abs(diff);
+  const mins = Math.round(abs / 60000);
+  const hrs = Math.round(abs / 3600000);
+  const days = Math.round(abs / 86400000);
+  let s;
+  if (mins < 1) s = 'now';
+  else if (mins < 60) s = `${mins}m`;
+  else if (hrs < 24) s = `${hrs}h`;
+  else s = `${days}d`;
+  if (s === 'now') return 'now';
+  return diff >= 0 ? `in ${s}` : `${s} ago`;
+}
+function absTime(ms) { return ms ? new Date(ms).toLocaleString() : 'n/a'; }
+const pad = (n) => String(n).padStart(2, '0');
+
+// Minimal client describe for the live form preview. The saved task carries the
+// authoritative `schedule` from the server; this only powers the editor preview.
+function describeCron(str) {
+  const f = String(str || '').trim().split(/\s+/);
+  if (f.length !== 5) return str || '';
+  const [m, h, dom, mon, dow] = f;
+  const isNum = (x) => /^\d+$/.test(x);
+  if (str.trim() === '* * * * *') return 'Every minute';
+  if (isNum(m) && h === '*' && dom === '*' && mon === '*' && dow === '*') return `Every hour at :${pad(+m)}`;
+  if (isNum(m) && isNum(h) && mon === '*') {
+    const time = `${pad(+h)}:${pad(+m)}`;
+    if (dom === '*' && dow === '*') return `Every day at ${time}`;
+    if (dom === '*' && dow !== '*') {
+      const days = dow.split(',').filter(isNum).map((d) => DAY_FULL[+d % 7]);
+      return days.length ? `Every ${days.join(', ')} at ${time}` : str;
+    }
+    if (dom !== '*' && dow === '*' && isNum(dom)) return `Monthly on day ${+dom} at ${time}`;
+  }
+  return str;
+}
+
+// --- cron builder <-> form fields ---
+function buildCron(mode, fld) {
+  const [h, m] = (fld.time || '09:00').split(':').map((x) => parseInt(x, 10) || 0);
+  switch (mode) {
+    case 'hourly': return `${fld.minute || 0} * * * *`;
+    case 'daily': return `${m} ${h} * * *`;
+    case 'weekly': {
+      const days = (fld.days && fld.days.length ? fld.days : [1]).slice().sort((a, b) => a - b);
+      return `${m} ${h} * * ${days.join(',')}`;
+    }
+    case 'monthly': return `${m} ${h} ${fld.dom || 1} * *`;
+    case 'custom': default: return fld.raw || '0 9 * * *';
+  }
+}
+// Best-effort: detect which builder mode a cron string fits, to prefill on edit.
+function cronToForm(cron) {
+  const f = String(cron || '0 9 * * *').trim().split(/\s+/);
+  const base = { time: '09:00', minute: 0, days: [1], dom: 1, raw: cron || '0 9 * * *' };
+  if (f.length !== 5) return { mode: 'custom', fld: base };
+  const [m, h, dom, mon, dow] = f;
+  const isNum = (x) => /^\d+$/.test(x);
+  if (isNum(m) && h === '*' && dom === '*' && mon === '*' && dow === '*') return { mode: 'hourly', fld: { ...base, minute: +m } };
+  if (isNum(m) && isNum(h) && mon === '*') {
+    const time = `${pad(+h)}:${pad(+m)}`;
+    if (dom === '*' && dow === '*') return { mode: 'daily', fld: { ...base, time } };
+    if (dom === '*' && dow.split(',').every(isNum)) return { mode: 'weekly', fld: { ...base, time, days: dow.split(',').map(Number) } };
+    if (isNum(dom) && dow === '*') return { mode: 'monthly', fld: { ...base, time, dom: +dom } };
+  }
+  return { mode: 'custom', fld: base };
+}
+
+function api(method, url, body) {
+  return fetch(url, {
+    method,
+    headers: body ? { 'Content-Type': 'application/json' } : undefined,
+    body: body ? JSON.stringify(body) : undefined,
+  }).then(async (r) => {
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
+    return data;
+  });
+}
+
+// ------------------------------------------------------------------ Task card
+function StatusBadge({ status }) {
+  const map = { started: C.accent, completed: C.green, error: C.red };
+  const label = { started: 'running', completed: 'done', error: 'error' }[status] || status;
+  if (!status) return null;
+  return <span style={{ color: map[status] || C.dim, fontSize: 11, border: `1px solid ${map[status] || C.dim}`, borderRadius: 4, padding: '0 5px' }}>{label}</span>;
+}
+
+function TaskCard({ task, onEdit }) {
+  const [open, setOpen] = useState(false);
+  const last = task.runs && task.runs[0];
+  const runNow = () => api('POST', `/api/scheduled-tasks/${task.id}/run`).catch((e) => alert(e.message));
+  const toggle = () => api('POST', `/api/scheduled-tasks/${task.id}/enabled`, { enabled: !task.enabled }).catch((e) => alert(e.message));
+  const del = () => { if (confirm(`Delete "${task.title}"?`)) api('DELETE', `/api/scheduled-tasks/${task.id}`).catch((e) => alert(e.message)); };
+
+  return (
+    <div style={{ border: `1px solid ${C.border}`, borderRadius: 6, padding: 10, marginBottom: 8, background: C.bg2, opacity: task.enabled ? 1 : 0.6 }}>
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 6 }}>
+        <div style={{ fontWeight: 600, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis' }}>{task.title}</div>
+        <StatusBadge status={last && last.status} />
+      </div>
+      <div style={{ fontSize: 12, color: C.dim, marginTop: 3 }}>{task.schedule || task.cron}</div>
+      <div style={{ fontSize: 12, marginTop: 4, display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+        <span title={absTime(task.nextRun)}>next: <b>{task.enabled ? relTime(task.nextRun) : 'paused'}</b></span>
+        {task.lastRun ? <span title={absTime(task.lastRun)}>last: {relTime(task.lastRun)}</span> : null}
+      </div>
+      <div style={{ display: 'flex', gap: 6, marginTop: 8, flexWrap: 'wrap' }}>
+        <button onClick={runNow} style={btn()}>Run now</button>
+        <button onClick={toggle} style={btn()}>{task.enabled ? 'Pause' : 'Resume'}</button>
+        <button onClick={() => onEdit(task)} style={btn()}>Edit</button>
+        <button onClick={del} style={btn(C.red)}>Delete</button>
+        {task.runs && task.runs.length ? <button onClick={() => setOpen(!open)} style={btn()}>{open ? 'Hide' : 'History'}</button> : null}
+      </div>
+      {open && task.runs && (
+        <div style={{ marginTop: 8, borderTop: `1px solid ${C.border}`, paddingTop: 6 }}>
+          {task.runs.map((r, i) => (
+            <div key={i} style={{ fontSize: 11, color: C.dim, display: 'flex', gap: 8, padding: '1px 0' }}>
+              <span>{absTime(r.startedAt)}</span>
+              <StatusBadge status={r.status} />
+              <span style={{ opacity: 0.6 }}>{r.sessionId}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function btn(color) {
+  return { background: 'transparent', color: color || C.text, border: `1px solid ${color || C.border}`, borderRadius: 4, padding: '3px 8px', fontSize: 12, cursor: 'pointer' };
+}
+function input() {
+  return { width: '100%', background: 'var(--ds-bg-primary, #0d1117)', color: C.text, border: `1px solid ${C.border}`, borderRadius: 4, padding: '6px 8px', fontSize: 13, marginTop: 2 };
+}
+function label() { return { fontSize: 12, color: C.dim, marginTop: 10, display: 'block' }; }
+
+// ------------------------------------------------------------------ Task form
+function TaskForm({ task, projects, onClose }) {
+  const initial = task || {};
+  const initForm = cronToForm(initial.cron || '0 9 * * 1');
+  const [title, setTitle] = useState(initial.title || '');
+  const [prompt, setPrompt] = useState(initial.prompt || '');
+  const [project, setProject] = useState(initial.project || (projects[0] && projects[0].root) || '');
+  const [customPath, setCustomPath] = useState('');
+  const [agentType, setAgentType] = useState(initial.agentType || 'claude');
+  const [planMode, setPlanMode] = useState(!!initial.planMode);
+  const [mode, setMode] = useState(initForm.mode);
+  const [fld, setFld] = useState(initForm.fld);
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState('');
+
+  const cronStr = useMemo(() => buildCron(mode, fld), [mode, fld]);
+  const setF = (patch) => setFld((p) => ({ ...p, ...patch }));
+
+  const save = async () => {
+    setErr('');
+    if (!title.trim()) return setErr('Title is required');
+    if (!prompt.trim()) return setErr('Prompt is required');
+    const proj = project === '__custom__' ? customPath.trim() : project;
+    const body = { title: title.trim(), prompt: prompt.trim(), cron: cronStr, project: proj, agentType, planMode };
+    setSaving(true);
+    try {
+      if (task && task.id) await api('PUT', `/api/scheduled-tasks/${task.id}`, body);
+      else await api('POST', '/api/scheduled-tasks', body);
+      onClose();
+    } catch (e) { setErr(e.message); setSaving(false); }
+  };
+
+  return (
+    <div style={{ border: `1px solid ${C.accent}`, borderRadius: 6, padding: 12, marginBottom: 10, background: C.bg2 }}>
+      <div style={{ fontWeight: 600, marginBottom: 4 }}>{task && task.id ? 'Edit task' : 'New scheduled task'}</div>
+
+      <label style={label()}>Title</label>
+      <input style={input()} value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Weekly analytics report" />
+
+      <label style={label()}>Prompt (runs each time)</label>
+      <textarea style={{ ...input(), minHeight: 72, resize: 'vertical', fontFamily: 'inherit' }} value={prompt} onChange={(e) => setPrompt(e.target.value)} placeholder="Generate the weekly GA report using the analytics MCP and post it to…" />
+
+      <label style={label()}>Project</label>
+      <select style={input()} value={project} onChange={(e) => setProject(e.target.value)}>
+        <option value="">No project (home)</option>
+        {projects.map((p) => <option key={p.root} value={p.root}>{p.name}</option>)}
+        <option value="__custom__">Custom path…</option>
+      </select>
+      {project === '__custom__' && (
+        <input style={{ ...input(), marginTop: 6 }} value={customPath} onChange={(e) => setCustomPath(e.target.value)} placeholder="/Users/me/github/my-repo" />
+      )}
+
+      <label style={label()}>Schedule</label>
+      <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+        {['hourly', 'daily', 'weekly', 'monthly', 'custom'].map((mo) => (
+          <button key={mo} onClick={() => setMode(mo)} style={{ ...btn(mode === mo ? C.accent : undefined), textTransform: 'capitalize' }}>{mo}</button>
+        ))}
+      </div>
+      <div style={{ marginTop: 8 }}>
+        {mode === 'hourly' && (
+          <div>At minute <input type="number" min="0" max="59" style={{ ...input(), width: 70, display: 'inline-block' }} value={fld.minute} onChange={(e) => setF({ minute: Math.max(0, Math.min(59, +e.target.value)) })} /></div>
+        )}
+        {(mode === 'daily' || mode === 'weekly' || mode === 'monthly') && (
+          <div>At time <input type="time" style={{ ...input(), width: 120, display: 'inline-block' }} value={fld.time} onChange={(e) => setF({ time: e.target.value })} /></div>
+        )}
+        {mode === 'weekly' && (
+          <div style={{ marginTop: 6, display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+            {DAY_NAMES.map((d, i) => {
+              const on = fld.days.includes(i);
+              return <button key={i} onClick={() => setF({ days: on ? fld.days.filter((x) => x !== i) : [...fld.days, i] })} style={btn(on ? C.accent : undefined)}>{d}</button>;
+            })}
+          </div>
+        )}
+        {mode === 'monthly' && (
+          <div style={{ marginTop: 6 }}>On day <input type="number" min="1" max="31" style={{ ...input(), width: 70, display: 'inline-block' }} value={fld.dom} onChange={(e) => setF({ dom: Math.max(1, Math.min(31, +e.target.value)) })} /></div>
+        )}
+        {mode === 'custom' && (
+          <input style={input()} value={fld.raw} onChange={(e) => setF({ raw: e.target.value })} placeholder="0 9 * * 1  (min hour dom mon dow)" />
+        )}
+      </div>
+      <div style={{ fontSize: 12, color: C.accent, marginTop: 6 }}>{describeCron(cronStr)} — <span style={{ color: C.dim }}>cron: {cronStr} (local time)</span></div>
+
+      <div style={{ display: 'flex', gap: 12, marginTop: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+        <label style={{ fontSize: 12, color: C.dim }}>Agent{' '}
+          <select style={{ ...input(), width: 120, display: 'inline-block', marginTop: 0 }} value={agentType} onChange={(e) => setAgentType(e.target.value)}>
+            {AGENTS.map((a) => <option key={a} value={a}>{a}</option>)}
+          </select>
+        </label>
+        <label style={{ fontSize: 12, color: C.dim }}><input type="checkbox" checked={planMode} onChange={(e) => setPlanMode(e.target.checked)} /> plan mode</label>
+      </div>
+      {agentType !== 'claude' && <div style={{ fontSize: 11, color: C.amber, marginTop: 4 }}>Note: only claude is wired for deepsteve MCP tools.</div>}
+
+      {err && <div style={{ color: C.red, fontSize: 12, marginTop: 8 }}>{err}</div>}
+      <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+        <button onClick={save} disabled={saving} style={{ ...btn(C.accent), fontWeight: 600 }}>{saving ? 'Saving…' : 'Save'}</button>
+        <button onClick={onClose} style={btn()}>Cancel</button>
+      </div>
+    </div>
+  );
+}
+
+// ------------------------------------------------------------------ Groups
+function GroupsManager({ groups, projects, onClose }) {
+  const [name, setName] = useState('');
+  const [sel, setSel] = useState([]);
+  const create = async () => {
+    if (!name.trim()) return;
+    await api('POST', '/api/project-groups', { name: name.trim(), projects: sel });
+    setName(''); setSel([]);
+  };
+  const toggle = (root) => setSel((s) => (s.includes(root) ? s.filter((x) => x !== root) : [...s, root]));
+  const del = (n) => api('DELETE', `/api/project-groups/${encodeURIComponent(n)}`).catch((e) => alert(e.message));
+  const nameOf = (root) => { const p = projects.find((x) => x.root === root); return p ? p.name : root; };
+
+  return (
+    <div style={{ border: `1px solid ${C.border}`, borderRadius: 6, padding: 12, marginBottom: 10, background: C.bg2 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+        <div style={{ fontWeight: 600 }}>Project groups</div>
+        <button onClick={onClose} style={btn()}>Close</button>
+      </div>
+      {groups.map((g) => (
+        <div key={g.name} style={{ marginTop: 8, fontSize: 12 }}>
+          <b>{g.name}</b> <button onClick={() => del(g.name)} style={{ ...btn(C.red), padding: '0 6px', marginLeft: 6 }}>×</button>
+          <div style={{ color: C.dim, marginTop: 2 }}>{(g.projects || []).map(nameOf).join(', ') || '(no repos)'}</div>
+        </div>
+      ))}
+      <div style={{ borderTop: `1px solid ${C.border}`, marginTop: 10, paddingTop: 8 }}>
+        <label style={label()}>New group name</label>
+        <input style={input()} value={name} onChange={(e) => setName(e.target.value)} placeholder="acme" />
+        <label style={label()}>Repos in group</label>
+        <div style={{ maxHeight: 160, overflow: 'auto' }}>
+          {projects.map((p) => (
+            <label key={p.root} style={{ display: 'block', fontSize: 12, padding: '2px 0' }}>
+              <input type="checkbox" checked={sel.includes(p.root)} onChange={() => toggle(p.root)} /> {p.name}
+            </label>
+          ))}
+          {projects.length === 0 && <div style={{ fontSize: 12, color: C.dim }}>No known projects yet.</div>}
+        </div>
+        <button onClick={create} style={{ ...btn(C.accent), marginTop: 8 }}>Create group</button>
+      </div>
+    </div>
+  );
+}
+
+// ------------------------------------------------------------------ Root
+function App() {
+  const [data, setData] = useState({ tasks: [], groups: [], projects: [], enabled: true });
+  const [filter, setFilter] = useState({ type: 'all', value: '' });
+  const [editing, setEditing] = useState(null); // null | 'new' | task
+  const [showGroups, setShowGroups] = useState(false);
+
+  useEffect(() => {
+    let unsub = null;
+    function setup() {
+      unsub = window.deepsteve.onScheduledTasksChanged((d) => setData(d || { tasks: [], groups: [], projects: [], enabled: true }));
+    }
+    if (window.deepsteve) setup();
+    else {
+      let n = 0;
+      const t = setInterval(() => { if (window.deepsteve) { clearInterval(t); setup(); } else if (++n > 100) clearInterval(t); }, 100);
+    }
+    return () => { if (unsub) unsub(); };
+  }, []);
+
+  const siblingsOf = useCallback((proj) => {
+    const set = new Set([proj]);
+    for (const g of data.groups) if ((g.projects || []).includes(proj)) for (const p of g.projects) set.add(p);
+    return set;
+  }, [data.groups]);
+
+  const visible = useMemo(() => {
+    if (filter.type === 'project') return data.tasks.filter((t) => (t.project || '') === filter.value);
+    if (filter.type === 'group') {
+      const g = data.groups.find((x) => x.name === filter.value);
+      const set = new Set(g ? g.projects || [] : []);
+      return data.tasks.filter((t) => set.has(t.project));
+    }
+    return data.tasks;
+  }, [data, filter]);
+
+  // group visible tasks by project for display
+  const sections = useMemo(() => {
+    const byProj = new Map();
+    for (const t of visible) {
+      const key = t.project || '';
+      if (!byProj.has(key)) byProj.set(key, []);
+      byProj.get(key).push(t);
+    }
+    const nameOf = (root) => { const p = data.projects.find((x) => x.root === root); return p ? p.name : (root ? root.split('/').pop() : 'No project'); };
+    return [...byProj.entries()].sort((a, b) => nameOf(a[0]).localeCompare(nameOf(b[0]))).map(([root, ts]) => ({ root, name: nameOf(root), tasks: ts }));
+  }, [visible, data.projects]);
+
+  return (
+    <div style={{ padding: 12, color: C.text, fontSize: 13 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+        <div style={{ fontWeight: 700, fontSize: 15, flex: 1 }}>⏰ Scheduled</div>
+        <button onClick={() => { setEditing('new'); setShowGroups(false); }} style={btn(C.accent)}>+ New</button>
+        <button onClick={() => { setShowGroups(!showGroups); setEditing(null); }} style={btn()}>Groups</button>
+      </div>
+
+      {!data.enabled && (
+        <div style={{ fontSize: 12, color: C.amber, border: `1px solid ${C.amber}`, borderRadius: 4, padding: '6px 8px', marginBottom: 8 }}>
+          Scheduler is off. Enable “Run scheduled tasks” in Settings.
+        </div>
+      )}
+
+      <div style={{ display: 'flex', gap: 6, marginBottom: 10, alignItems: 'center' }}>
+        <span style={{ fontSize: 12, color: C.dim }}>Show</span>
+        <select
+          style={{ ...input(), marginTop: 0, flex: 1 }}
+          value={`${filter.type}:${filter.value}`}
+          onChange={(e) => { const [type, ...rest] = e.target.value.split(':'); setFilter({ type, value: rest.join(':') }); }}
+        >
+          <option value="all:">All projects</option>
+          {data.groups.length > 0 && <optgroup label="Groups">{data.groups.map((g) => <option key={g.name} value={`group:${g.name}`}>Group: {g.name}</option>)}</optgroup>}
+          {data.projects.length > 0 && <optgroup label="Projects">{data.projects.map((p) => <option key={p.root} value={`project:${p.root}`}>{p.name}</option>)}</optgroup>}
+        </select>
+      </div>
+
+      {showGroups && <GroupsManager groups={data.groups} projects={data.projects} onClose={() => setShowGroups(false)} />}
+      {editing && <TaskForm task={editing === 'new' ? null : editing} projects={data.projects} onClose={() => setEditing(null)} />}
+
+      {sections.length === 0 && !editing && (
+        <div style={{ color: C.dim, fontSize: 13, marginTop: 20, textAlign: 'center' }}>No scheduled tasks yet.<br />Click <b>+ New</b> to create one.</div>
+      )}
+
+      {sections.map((sec) => (
+        <div key={sec.root} style={{ marginBottom: 14 }}>
+          <div style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: 0.5, color: C.dim, marginBottom: 6, borderBottom: `1px solid ${C.border}`, paddingBottom: 3 }}>{sec.name}</div>
+          {sec.tasks.map((t) => <TaskCard key={t.id} task={t} onEdit={(task) => { setEditing(task); setShowGroups(false); }} />)}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('sched-root')).render(<App />);

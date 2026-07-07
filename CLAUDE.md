@@ -105,6 +105,17 @@ Skills are slash commands that agents can invoke (e.g. `/chat`, `/merge`). Sourc
 - **Frontmatter**: Each skill `.md` has YAML frontmatter with `name` (slash command name), `description`, and optional `argument-hint`. The `name` field determines the slash command (e.g. `name: chat` → `/chat`).
 - **ID from filename**: `chat.md` → skill ID `chat`, installed as `~/.claude/commands/deepsteve/chat.md`, invoked as `/chat`.
 
+### Scheduled Tasks (locally-queued cron)
+
+The `scheduled-tasks` mod (`mods/scheduled-tasks/`) runs recurring agent tasks **on this machine** on a cron schedule. Unlike Claude Code's cloud `/schedule` (egress-restricted), a scheduled run is just a normal local Claude session, so it gets the project's MCP servers for free — the intended use is recurring MCP-dependent work (e.g. a weekly analytics report). Issue #521.
+
+- **Self-contained tasks**: each task stores its own `prompt` + canonical `project` (git repo root) + 5-field `cron`. Persisted to `~/.deepsteve/scheduled-tasks.json`; project groups (named sets of repo roots) live in `~/.deepsteve/project-groups.json`. Both use the load-on-start / write-through pattern (like `mods/tasks/`).
+- **Scheduler lives in the mod**: `init(context)` (called by `initMCP`) starts a `setInterval` tick (~30s) using the spawn helpers on the shared `context` object; the run recipe mirrors `/api/start-automation` (`spawnSession` → `shells.set` → `wireShellOutput` → `emitSessionOpen` → `deliverPromptWhenReady` → `deliverToWindow`). No windowId / no forced browser — unattended runs queue their tab via `pendingOpens` and surface when a browser next connects. `server.js`'s only contribution is the `scheduledTasksEnabled` kill-switch setting.
+- **Cron is local time**, 5 fields (`min hour dom mon dow`), parsed/matched by `mods/scheduled-tasks/cron.js` (dependency-free; supports `*`, `n`, `a,b`, `a-b`, `*/n`; classic dom/dow OR rule). The UI offers preset builders (hourly/daily/weekly/monthly) plus a raw field.
+- **Catch-up once**: on startup (after a ~10s settle), any enabled task whose `nextRun` is in the past runs **once**, then resumes — one catch-up per task regardless of how many occurrences were missed. An **overlap guard** skips firing if the task's previous run's session is still alive.
+- **Scoping**: `list_scheduled_tasks` defaults to the caller's own project (`sessionPaths(entry).repoRoot`); `scope:'group'` adds sibling repos sharing a project group; `scope:'all'` lists everything. MCP tools: `schedule_task`, `list_scheduled_tasks`, `update_scheduled_task`, `unschedule_task`, `run_scheduled_task_now`. The panel (right side) groups tasks by project, with a scope filter, run history, and group management.
+- **`scheduledTasksEnabled` setting** (default on) is the master switch; the tick reads it live (settings object is mutated in place), so toggling it in Settings stops/starts the scheduler with no restart — the correct gate because a mod's UI enable/disable is client-side only.
+
 ### Gotchas and Non-Obvious Behavior
 
 - **Ink input parsing**: `shell.write("text\r")` doesn't work for submitting to Claude. Text and `\r` must be sent separately with a 1s delay (`submitToShell()`), because Ink only recognizes Enter when `\r` arrives as its own stdin read.
