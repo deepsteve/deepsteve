@@ -55,6 +55,11 @@ body {
   margin: 0 !important;
 }
 
+/* Inset + round the context rows so a full-width highlight can't sit flush in the
+   panel's rounded corners (which read as the row "overflowing" near the top). */
+.context-list { padding: 2px 6px; }
+.context-row { border-radius: 8px; }
+
 /* The CRT monitor bezel lives on #app-main (the terminal side) only, so the
    context panel to its left is a distinct, standalone monitor rather than being
    wrapped together with the terminal. */
