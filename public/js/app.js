@@ -19,6 +19,7 @@ import { init as initProgressBar, start as progressStart, done as progressDone }
 import { init as initHashCommands, beforeSend as hashCommandsBeforeSend, setWaitingForInput as setHashCommandsWaiting, setEnabled as setHashCommandsEnabled } from './hash-commands.js';
 import { init as initOverviewMode, setEnabled as setOverviewModeEnabled, setShortcut as setOverviewModeShortcut, setDefaultLayout as setOverviewDefaultLayout, toggle as toggleOverviewMode, isOverviewActive, updateFocus as updateOverviewFocus, onTabsReordered as onOverviewTabsReordered } from './overview-mode.js';
 import { init as initTerminalSearch, attachSearchAddon, closeIfOpen as closeTerminalSearch } from './terminal-search.js';
+import { init as initContextViews, setEnabled as setContextViewsEnabled, applyFilter as refreshContextFilter, requestNewTabInContext } from './context-views.js';
 import { nsKey } from './storage-namespace.js';
 
 // Configuration
@@ -266,6 +267,9 @@ function applySettings(settings) {
   if (settings.overviewDefaultLayout !== undefined) {
     setOverviewDefaultLayout(settings.overviewDefaultLayout);
   }
+  if (settings.contextViewsEnabled !== undefined) {
+    setContextViewsEnabled(settings.contextViewsEnabled);
+  }
   if (settings.symlinkWorktreeSettings !== undefined) {
     const el = document.querySelector('#symlink-worktree-settings');
     if (el) el.checked = settings.symlinkWorktreeSettings;
@@ -355,6 +359,16 @@ function getSessionList() {
     waitingForInput: s.waitingForInput || false,
     type: s.type || 'terminal',
   }));
+}
+
+/**
+ * Notify listeners that the tab set changed. Fans out to the mod system and
+ * re-applies the context-views filter (so newly added/removed tabs are
+ * shown/hidden according to the active context).
+ */
+function notifyTabsChanged() {
+  ModManager.notifySessionsChanged(getSessionList());
+  refreshContextFilter();
 }
 
 // Expose session internals for mods that need direct terminal access (e.g. reparenting)
@@ -639,6 +653,7 @@ settingsBtn?.addEventListener('click', async () => {
   const currentCommandPaletteEnabled = settingsData.commandPaletteEnabled !== undefined ? settingsData.commandPaletteEnabled : true;
   const currentCommandPaletteShortcut = settingsData.commandPaletteShortcut || 'Meta+k';
   const currentHashCommandsEnabled = settingsData.hashCommandsEnabled !== undefined ? settingsData.hashCommandsEnabled : true;
+  const currentContextViewsEnabled = settingsData.contextViewsEnabled !== undefined ? settingsData.contextViewsEnabled : true;
   const currentOverviewDefaultLayout = settingsData.overviewDefaultLayout || 'tall';
   const currentMetaControlsEnabled = !!settingsData.metaControlsEnabled;
   const currentInheritRc = settingsData.inheritRemoteControl !== false;
@@ -771,6 +786,16 @@ settingsBtn?.addEventListener('click', async () => {
           <input type="checkbox" id="hash-commands-enabled" ${currentHashCommandsEnabled ? 'checked' : ''} style="accent-color: var(--ds-accent-green);">
           Enabled <span style="font-size: 11px; color: var(--ds-text-secondary);">(# prefix for instant actions)</span>
         </label>
+      </div>
+      <div class="settings-section">
+        <h3>Context Views</h3>
+        <label style="font-size: 13px; color: var(--ds-text-primary); cursor: pointer; display: flex; align-items: center; gap: 8px;">
+          <input type="checkbox" id="context-views-enabled" ${currentContextViewsEnabled ? 'checked' : ''} style="accent-color: var(--ds-accent-green);">
+          Enabled <span style="font-size: 11px; color: var(--ds-text-secondary);">(group tabs into folder-based contexts)</span>
+        </label>
+        <p style="font-size: 11px; color: var(--ds-text-secondary); margin-top: 4px;">
+          Adds the ◧ sidecar toggle next to the layout switcher. ⌘C toggles the sidecar (only when no text is selected — otherwise it copies), ⌘↑/⌘↓ switch contexts. Disable to free ⌘C for copy.
+        </p>
       </div>
       <div class="settings-section">
         <h3>Meta Controls</h3>
@@ -1450,6 +1475,7 @@ settingsBtn?.addEventListener('click', async () => {
     const commandPaletteEnabled = overlay.querySelector('#command-palette-enabled').checked;
     const commandPaletteShortcut = overlay.querySelector('#command-palette-shortcut').value;
     const hashCommandsEnabled = overlay.querySelector('#hash-commands-enabled').checked;
+    const contextViewsEnabled = overlay.querySelector('#context-views-enabled').checked;
     const metaControlsEnabled = overlay.querySelector('#meta-controls-enabled').checked;
     const overviewDefaultLayout = overlay.querySelector('#overview-default-layout').value;
     const enabledAgents = [];
@@ -1467,7 +1493,7 @@ settingsBtn?.addEventListener('click', async () => {
     const scheduledTasksEnabled = overlay.querySelector('#scheduled-tasks-enabled').checked;
     const inheritRemoteControl = overlay.querySelector('#inherit-rc-newtab').checked;
     const inheritRemoteControlOnFork = overlay.querySelector('#inherit-rc-fork').checked;
-    const settingsPayload = { shellProfile, maxIssueTitleLength: newMaxTitle, wandPlanMode, wandPromptTemplate, symlinkWorktreeSettings, cmdTabSwitch, cmdTabSwitchHoldMs, commandPaletteEnabled, commandPaletteShortcut, hashCommandsEnabled, metaControlsEnabled, inheritRemoteControl, inheritRemoteControlOnFork, overviewDefaultLayout, enabledAgents, opencodeBinary, piBinary, windowConfigs: editingConfigs, engine: selectedEngine, scrollbackKB, autoUpdateCheckEnabled, autoUpdateCheckIntervalHours, autoUpdateApply, sessionLogEnabled, scheduledTasksEnabled };
+    const settingsPayload = { shellProfile, maxIssueTitleLength: newMaxTitle, wandPlanMode, wandPromptTemplate, symlinkWorktreeSettings, cmdTabSwitch, cmdTabSwitchHoldMs, commandPaletteEnabled, commandPaletteShortcut, hashCommandsEnabled, contextViewsEnabled, metaControlsEnabled, inheritRemoteControl, inheritRemoteControlOnFork, overviewDefaultLayout, enabledAgents, opencodeBinary, piBinary, windowConfigs: editingConfigs, engine: selectedEngine, scrollbackKB, autoUpdateCheckEnabled, autoUpdateCheckIntervalHours, autoUpdateApply, sessionLogEnabled, scheduledTasksEnabled };
     let resp = await fetch('/api/settings', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1484,6 +1510,7 @@ settingsBtn?.addEventListener('click', async () => {
     setCommandPaletteEnabled(commandPaletteEnabled);
     setCommandPaletteShortcut(commandPaletteShortcut);
     setHashCommandsEnabled(hashCommandsEnabled);
+    setContextViewsEnabled(contextViewsEnabled);
     // Refresh agents data if agent settings changed
     const prevEnabled = (window.__deepsteveAgents || []).filter(a => a.enabled).map(a => a.id).sort().join(',');
     const newEnabled = enabledAgents.sort().join(',');
@@ -1655,7 +1682,7 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
             if (sess) {
               sess.waitingForInput = true;
               if (msg.id === activeId) setHashCommandsWaiting(true);
-              ModManager.notifySessionsChanged(getSessionList());
+              notifyTabsChanged();
             }
           }
         }
@@ -1708,7 +1735,7 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
           if (msg.waiting) {
             showNotification(sid, s.name || getDefaultTabName(s.cwd));
           }
-          ModManager.notifySessionsChanged(getSessionList());
+          notifyTabsChanged();
         }
       } else if (msg.type === 'tasks') {
         ModManager.notifyTasksChanged(msg.tasks);
@@ -1894,7 +1921,7 @@ function initTerminal(id, ws, cwd, initialName, { hasScrollback = false, pending
       const reordered = orderedIds.map(id => tabList.find(s => s.id === id)).filter(Boolean);
       TabSessions.save(reordered);
       SessionStore.reorderSessions(getWindowId(), orderedIds);
-      ModManager.notifySessionsChanged(getSessionList());
+      notifyTabsChanged();
       onOverviewTabsReordered(orderedIds);
     },
     getLiveWindows: () => WindowManager.getLiveWindows(),
@@ -1951,7 +1978,7 @@ function initTerminal(id, ws, cwd, initialName, { hasScrollback = false, pending
   updateEmptyState();
 
   // Notify mods of session list change
-  ModManager.notifySessionsChanged(getSessionList());
+  notifyTabsChanged();
 }
 
 /**
@@ -2006,7 +2033,7 @@ function createModTab(modId, opts = {}) {
       const reordered = orderedIds.map(id => tabList.find(s => s.id === id)).filter(Boolean);
       TabSessions.save(reordered);
       SessionStore.reorderSessions(getWindowId(), orderedIds);
-      ModManager.notifySessionsChanged(getSessionList());
+      notifyTabsChanged();
       onOverviewTabsReordered(orderedIds);
     },
     getLiveWindows: () => [],
@@ -2036,7 +2063,7 @@ function createModTab(modId, opts = {}) {
   ro.observe(container);
   sessions.get(id).resizeObserver = ro;
 
-  ModManager.notifySessionsChanged(getSessionList());
+  notifyTabsChanged();
 }
 
 /**
@@ -2076,7 +2103,7 @@ function createDisplayTab(id, name, opts = {}) {
       const reordered = orderedIds.map(id => tabList.find(s => s.id === id)).filter(Boolean);
       TabSessions.save(reordered);
       SessionStore.reorderSessions(getWindowId(), orderedIds);
-      ModManager.notifySessionsChanged(getSessionList());
+      notifyTabsChanged();
       onOverviewTabsReordered(orderedIds);
     },
     getLiveWindows: () => WindowManager.getLiveWindows(),
@@ -2098,7 +2125,7 @@ function createDisplayTab(id, name, opts = {}) {
   ro.observe(container);
   sessions.get(id).resizeObserver = ro;
 
-  ModManager.notifySessionsChanged(getSessionList());
+  notifyTabsChanged();
 }
 
 // Display tabs post {type:'ds-audio-state', tabId, emitting} from the detector script
@@ -2231,6 +2258,11 @@ async function restoreSessions(sessionList, opts = {}) {
     }
     switchTo(target);
   }
+
+  // Re-apply the context filter once all tabs exist and the active tab is
+  // chosen — if the saved active tab isn't in the active context, this moves
+  // to the first in-context tab.
+  refreshContextFilter();
 }
 
 /**
@@ -2424,7 +2456,7 @@ function killSession(id) {
   updateEmptyState();
 
   // Notify mods of session list change
-  ModManager.notifySessionsChanged(getSessionList());
+  notifyTabsChanged();
 }
 
 /**
@@ -2478,7 +2510,7 @@ async function sendToWindow(id, targetWindowId) {
   }
 
   updateEmptyState();
-  ModManager.notifySessionsChanged(getSessionList());
+  notifyTabsChanged();
 }
 
 /**
@@ -2499,7 +2531,7 @@ function renameSession(id) {
     if (tabEntry) { tabEntry.name = name; TabSessions.save(tabList); }
     // Tell server so it persists across tab close/restore (skip for mod tabs — no WS)
     if (session.ws) session.ws.sendJSON({ type: 'rename', name });
-    ModManager.notifySessionsChanged(getSessionList());
+    notifyTabsChanged();
   });
 }
 
@@ -2507,6 +2539,9 @@ function renameSession(id) {
  * Quick new session in same repo as active session
  */
 function quickNewSession() {
+  // If a context is selected and the active tab isn't already inside it, open
+  // the new tab in the context's repo instead (folder-based context, #522).
+  if (requestNewTabInContext()) return;
   const active = activeId && sessions.get(activeId);
   const cwd = active?.cwd || '~';
   // Pass the active tab as the parent so the new tab can inherit its /rc state.
@@ -3296,6 +3331,27 @@ async function init() {
     hideAutoCycleToast,
   });
 
+  // Initialize Context Views (folder-based tab grouping + left sidecar).
+  // Must run after ModManager.init() — the rail mounts into #content-row.
+  initContextViews({
+    getOrderedTabIds: () => [...document.querySelectorAll('#tabs-list .tab')].map(t => t.id.replace('tab-', '')),
+    getActiveTabId: () => activeId,
+    getTabCwd: (id) => sessions.get(id)?.cwd || null,
+    getTabName: (id) => {
+      const s = sessions.get(id);
+      return s?.name || getDefaultTabName(s?.cwd || '');
+    },
+    switchToTab: switchTo,
+    getSelectionText: () => {
+      const s = activeId && sessions.get(activeId);
+      if (s?.term?.hasSelection?.()) return s.term.getSelection();
+      return window.getSelection?.()?.toString() || '';
+    },
+    createSessionInDir: (cwd) => createSession(cwd, null, true, { agentType: getDefaultAgentType() }),
+    showDirPicker: () => showDirectoryPicker(),
+    getRecentDirs: () => SessionStore.getRecentDirs(),
+  });
+
   // File drag-and-drop upload
   initFileDrop({
     getActiveSession: () => {
@@ -3482,7 +3538,7 @@ async function init() {
       const tabEntry = tabList.find(s => s.id === activeId);
       if (tabEntry) { tabEntry.name = finalName; TabSessions.save(tabList); }
       SessionStore.updateSession(getWindowId(), activeId, { name: finalName });
-      ModManager.notifySessionsChanged(getSessionList());
+      notifyTabsChanged();
     },
     restart: () => { fetch('/api/request-restart', { method: 'POST' }); },
     focusTerminal: () => {

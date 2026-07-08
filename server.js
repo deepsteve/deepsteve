@@ -291,6 +291,7 @@ const SETTINGS_SCHEMA = [
   { name: 'cmdTabSwitchHoldMs',         type: 'number',  default: 1000, clamp: [0, Infinity], fallback: 0 },
   { name: 'commandPaletteEnabled',      type: 'boolean', default: true },
   { name: 'hashCommandsEnabled',        type: 'boolean', default: true },
+  { name: 'contextViewsEnabled',        type: 'boolean', default: true },
   { name: 'commandPaletteShortcut',     type: 'string',  default: 'Meta+k' },
   { name: 'overviewModeEnabled',        type: 'boolean', default: true },
   { name: 'overviewModeShortcut',       type: 'string',  default: 'Meta+o' },
