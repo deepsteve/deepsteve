@@ -22,14 +22,28 @@
   --ds-shadow: rgba(0, 0, 0, 0.4);
   --ds-reconnect-overlay: rgba(13, 17, 23, 0.75);
   --ds-reconnect-glow: rgba(240, 136, 62, 0.3);
+
+  /* Context panel (left rail) — fully theme-overridable. Base theme keeps it a
+     flush, square-edged column; themes (e.g. retro-monitor) round it and add a
+     gap/shadow so it reads like a distinct panel. */
+  --ds-context-width: 200px;
+  --ds-context-bg: var(--ds-bg-secondary);
+  --ds-context-border: 1px solid var(--ds-border);   /* full shorthand so a theme can set a thick bezel */
+  --ds-context-radius: 0px;
+  --ds-context-gap: 0px;
+  --ds-context-shadow: none;
 }
 
 * { margin: 0; box-sizing: border-box; }
 html, body { overscroll-behavior: none; }  /* Prevent swipe back/forward gestures */
 body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-family: system-ui; height: 100vh; overflow: hidden; touch-action: none; }
 
-/* App container - flexbox for layout switching */
-#app-container { display: flex; flex-direction: column; height: 100vh; }
+/* App container - flexbox for layout switching.
+   Always a row: [ #context-rail | #app-main ]. #app-main owns the horizontal /
+   vertical tab-layout switch (it is the column that #tabs + #content-row live in),
+   so the context rail can sit full-height to the left of everything. */
+#app-container { display: flex; flex-direction: row; height: 100vh; }
+#app-main { display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; }
 
 /* Tabs - horizontal layout (default) */
 #tabs { display: flex; gap: 2px; padding: 4px 8px; background: var(--ds-bg-secondary); align-items: center; flex-shrink: 0; }
@@ -75,8 +89,10 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
 #tabs-list.tab-drag-active .tab:not(.dragging) { pointer-events: none; transition: transform 0.15s ease; }
 #tabs.tab-switch-mode { outline: 2px solid var(--ds-accent-blue); outline-offset: -2px; border-radius: 4px; }
 
-/* Vertical layout mode */
-#app-container.vertical-layout { flex-direction: row; }
+/* Vertical layout mode — #app-container is always a row; the horizontal/vertical
+   switch flips #app-main (the tabs+content column) into a row so #tabs becomes a
+   left sidebar. The context rail stays left of #app-main in both modes. */
+#app-container.vertical-layout #app-main { flex-direction: row; }
 
 #app-container.vertical-layout #tabs {
   flex-direction: column;
@@ -880,15 +896,22 @@ kbd {
 /* Filtered-out tabs (not in the active context) */
 .tab.context-hidden { display: none !important; }
 
-/* Left sidecar rail — lives as the first child of #content-row */
+/* Left context panel — full-height column, left of everything (first child of
+   #app-container). Look is driven entirely by the --ds-context-* custom
+   properties so a theme can restyle it (width, colour, rounding, gap, shadow)
+   without touching this rule. */
 #context-rail {
   display: none;
   flex-direction: column;
   flex-shrink: 0;
-  width: 180px;
-  background: var(--ds-bg-secondary);
-  border-right: 1px solid var(--ds-border);
+  width: var(--ds-context-width);
+  margin: var(--ds-context-gap);
+  background: var(--ds-context-bg);
+  border: var(--ds-context-border);
+  border-radius: var(--ds-context-radius);
+  box-shadow: var(--ds-context-shadow);
   overflow-y: auto;
+  overflow-x: hidden;
 }
 .context-rail-header { font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--ds-text-secondary); padding: 10px 12px 6px; }
 .context-list { display: flex; flex-direction: column; }

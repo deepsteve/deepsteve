@@ -794,7 +794,7 @@ settingsBtn?.addEventListener('click', async () => {
           Enabled <span style="font-size: 11px; color: var(--ds-text-secondary);">(group tabs into folder-based contexts)</span>
         </label>
         <p style="font-size: 11px; color: var(--ds-text-secondary); margin-top: 4px;">
-          Adds the ◧ sidecar toggle next to the layout switcher. ⌘C toggles the sidecar (only when no text is selected — otherwise it copies), ⌘↑/⌘↓ switch contexts. Disable to free ⌘C for copy.
+          Adds the ◧ context panel toggle next to the layout switcher. ⌘P toggles the panel, ⌘↑/⌘↓ switch contexts.
         </p>
       </div>
       <div class="settings-section">
@@ -3331,8 +3331,8 @@ async function init() {
     hideAutoCycleToast,
   });
 
-  // Initialize Context Views (folder-based tab grouping + left sidecar).
-  // Must run after ModManager.init() — the rail mounts into #content-row.
+  // Initialize Context Views (folder-based tab grouping + left panel).
+  // Must run after ModManager.init() — the rail mounts as #app-container's first child.
   initContextViews({
     getOrderedTabIds: () => [...document.querySelectorAll('#tabs-list .tab')].map(t => t.id.replace('tab-', '')),
     getActiveTabId: () => activeId,
@@ -3342,11 +3342,6 @@ async function init() {
       return s?.name || getDefaultTabName(s?.cwd || '');
     },
     switchToTab: switchTo,
-    getSelectionText: () => {
-      const s = activeId && sessions.get(activeId);
-      if (s?.term?.hasSelection?.()) return s.term.getSelection();
-      return window.getSelection?.()?.toString() || '';
-    },
     createSessionInDir: (cwd) => createSession(cwd, null, true, { agentType: getDefaultAgentType() }),
     showDirPicker: () => showDirectoryPicker(),
     getRecentDirs: () => SessionStore.getRecentDirs(),

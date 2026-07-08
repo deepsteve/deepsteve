@@ -96,7 +96,9 @@ function setupResizer() {
   document.addEventListener('mousemove', (e) => {
     if (!isDragging) return;
 
-    let newWidth = e.clientX;
+    // Width is measured from the tab strip's own left edge, not the viewport, so
+    // the full-height context rail sitting to its left doesn't offset the drag.
+    let newWidth = e.clientX - tabs.getBoundingClientRect().left;
 
     // Enforce minimum width
     if (newWidth < MIN_SIDEBAR_WIDTH) {

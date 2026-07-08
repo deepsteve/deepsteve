@@ -9,10 +9,11 @@
  * shows everything. Tabs with no cwd (mod/display tabs) are treated as global
  * and stay visible in every context.
  *
- * UI: a left sidecar rail (#context-rail) toggled by the #context-toggle button
- * (next to the layout switcher) or by Cmd+C — but Cmd+C only toggles when there
- * is no text selection, otherwise it falls through to native copy so terminal
- * copy keeps working. Cmd+Up / Cmd+Down cycle through [All, ...contexts].
+ * UI: a left context panel (#context-rail) toggled by the #context-toggle button
+ * (next to the layout switcher) or by Cmd+P — preventDefault'd so the browser's
+ * Print dialog never opens. Cmd+Up / Cmd+Down cycle through [All, ...contexts].
+ * Chord: Cmd+P then A (Cmd held the whole time) jumps to the "All" view — the A
+ * is gated behind Cmd+P so a bare Cmd+A stays native (terminal/input select-all).
  *
  * Self-contained module following the cmd-tab-switch.js / command-palette.js
  * pattern: init(callbacks), setEnabled(val), plus applyFilter()/
@@ -29,6 +30,7 @@ let enabled = true;
 let contexts = [];          // [{ id, name, dirs: [] }]
 let activeContextId = null; // null = view all
 let sidebarOpen = false;
+let cmdChordArmed = false;  // true between a Cmd+P press and the Cmd release — see onKeyDown
 
 let cb = {};       // callbacks injected by app.js
 let rail = null;   // #context-rail element
@@ -150,7 +152,7 @@ function renderRail() {
 
   const hint = document.createElement('div');
   hint.className = 'context-hint';
-  hint.textContent = '⌘↑/↓ switch · ⌘C hide';
+  hint.textContent = '⌘↑/↓ switch · ⌘P hide · ⌘P→A all';
   rail.appendChild(hint);
 }
 
@@ -189,7 +191,7 @@ function setSidebar(open) {
   if (rail) rail.style.display = open ? 'flex' : 'none';
   if (toggleBtn) {
     toggleBtn.classList.toggle('active', open);
-    toggleBtn.title = open ? 'Hide contexts' : 'Show contexts';
+    toggleBtn.title = open ? 'Hide contexts (⌘P)' : 'Show contexts (⌘P)';
   }
   if (open) renderRail();
   window.dispatchEvent(new Event('resize'));
@@ -231,7 +233,7 @@ function cycleContext(dir) {
   showToast(activeContextId ? (getActiveContext()?.name || 'Context') : 'All tabs');
 }
 
-// True for real form fields where Cmd+C / Cmd+Arrow should stay native. The
+// True for real form fields where Cmd+P / Cmd+Arrow should stay native. The
 // terminal's own xterm-helper-textarea is deliberately excluded so shortcuts
 // still work while a terminal is focused.
 function isFormField(el) {
@@ -246,22 +248,26 @@ function onKeyDown(e) {
   if (!enabled || !e.metaKey) return;
   if (isFormField(e.target)) return;
 
-  // Cmd+C — toggle the sidecar, UNLESS text is selected. deepsteve uses the
-  // WebGL renderer, so a terminal selection isn't a native DOM selection and
-  // Cmd+C may not copy on its own. When something is selected we copy it
-  // explicitly (so terminal copy keeps working) and swallow the event so it
-  // never also toggles; with nothing selected, Cmd+C toggles the sidecar.
-  if (e.code === 'KeyC' && !e.ctrlKey && !e.altKey && !e.shiftKey) {
-    const sel = cb.getSelectionText ? cb.getSelectionText() : '';
-    if (sel && sel.length) {
-      e.preventDefault();
-      e.stopPropagation();
-      navigator.clipboard?.writeText(sel).catch(() => {});
-      return;
-    }
+  // Cmd+P — toggle the context panel. We swallow the event (preventDefault) so
+  // the browser's Print dialog never opens. Unlike the old Cmd+C binding, this
+  // needs no copy special-casing since Cmd+P doesn't collide with terminal copy.
+  // Also arms the Cmd+P→A chord until Cmd is released (see onKeyUp).
+  if (e.code === 'KeyP' && !e.ctrlKey && !e.altKey && !e.shiftKey) {
     e.preventDefault();
     e.stopPropagation();
+    cmdChordArmed = true;
     toggleSidebar();
+    return;
+  }
+
+  // Cmd+P then A (Cmd held) — jump to the "All" view. Only fires while the chord
+  // is armed by a preceding Cmd+P, so a bare Cmd+A stays native (select-all).
+  if (e.code === 'KeyA' && cmdChordArmed && !e.ctrlKey && !e.altKey && !e.shiftKey) {
+    e.preventDefault();
+    e.stopPropagation();
+    if (!sidebarOpen) setSidebar(true);
+    selectContext(null);
+    showToast('All tabs');
     return;
   }
 
@@ -272,6 +278,11 @@ function onKeyDown(e) {
     e.stopPropagation();
     cycleContext(e.code === 'ArrowDown' ? 1 : -1);
   }
+}
+
+// Releasing Cmd closes the Cmd+P→A chord window.
+function onKeyUp(e) {
+  if (e.key === 'Meta' || e.code === 'MetaLeft' || e.code === 'MetaRight') cmdChordArmed = false;
 }
 
 // ------------------------------------------------------ new tab in a context
@@ -500,19 +511,21 @@ export function init(callbacks) {
   toggleBtn = document.getElementById('context-toggle');
   if (toggleBtn) toggleBtn.addEventListener('click', toggleSidebar);
 
-  // Mount the rail as the left-most child of #content-row (created by
-  // ModManager.init before this runs). Falls back to before #terminals.
+  // Mount the rail as the left-most child of #app-container so it spans the full
+  // height to the LEFT of everything (tab strip + terminal), not tucked under the
+  // tabs. #app-main wraps the tabs + content column; the rail sits before it.
   rail = document.createElement('div');
   rail.id = 'context-rail';
-  const contentRow = document.getElementById('content-row');
-  const terminals = document.getElementById('terminals');
-  if (contentRow) contentRow.insertBefore(rail, contentRow.firstChild);
-  else if (terminals) terminals.parentNode.insertBefore(rail, terminals);
+  const appContainer = document.getElementById('app-container');
+  const appMain = document.getElementById('app-main');
+  if (appContainer && appMain) appContainer.insertBefore(rail, appMain);
+  else if (appContainer) appContainer.insertBefore(rail, appContainer.firstChild);
 
   setSidebar(sidebarOpen);
   applyFilter();
 
   document.addEventListener('keydown', onKeyDown, true);
+  document.addEventListener('keyup', onKeyUp, true);
 }
 
 export function setEnabled(val) {

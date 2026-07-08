@@ -11,9 +11,11 @@
 </head>
 <body>
   <div id="app-container">
+    <!-- #context-rail is mounted here (as #app-container's first child) by context-views.js -->
+    <div id="app-main">
     <div id="tabs">
+      <button id="context-toggle" class="layout-btn" title="Show contexts (⌘P)" tabindex="-1">◧</button>
       <button id="layout-toggle" class="layout-btn" title="Switch to vertical tabs" tabindex="-1">▤</button>
-      <button id="context-toggle" class="layout-btn" title="Show contexts" tabindex="-1">◧</button>
       <div id="tabs-list-wrapper">
         <div id="tabs-list"></div>
         <div id="tabs-arrows">
@@ -78,6 +80,7 @@
         <button id="empty-state-btn" class="empty-state-btn">+ New</button>
         <div id="empty-state-configs" class="empty-state-configs"></div>
       </div>
+    </div>
     </div>
   </div>
   <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@6.0.0/lib/xterm.js" integrity="sha384-f/1U6Z9wM4D71a5eRXEZnyOTMOvjqxr2XLwh+Go1OvIl3L3tOcvUrzudnhbECwl4" crossorigin="anonymous"></script>

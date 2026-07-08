@@ -6,6 +6,16 @@
   --ds-text-primary: #d0d0d0;
   --ds-text-secondary: #999;
   --ds-text-bright: #fff;
+
+  /* Context panel — its own standalone CRT bezel sitting to the LEFT of the
+     terminal monitor: same 4px bezel, 18px rounding and inset highlight as the
+     terminal, plus a gap so it reads as a separate unit rather than joined. */
+  --ds-context-width: 200px;
+  --ds-context-bg: #2a2a2a;
+  --ds-context-border: 4px solid #999;
+  --ds-context-radius: 18px;
+  --ds-context-gap: 8px;
+  --ds-context-shadow: inset 0 0 0 2px #777, inset 0 0 8px rgba(0,0,0,0.3);
 }
 
 /* Give tabs room to clear the rounded top corners */
@@ -28,10 +38,27 @@ body {
   padding: 12px 25px 25px 25px;
 }
 
+/* #app-container is the outer row [ #context-rail | #app-main ] — it just fills
+   the padded body; it carries NO bezel, so the rail stays a separate panel. The
+   gap between the two panels lives here (not as a rail margin) so the rail's top
+   and bottom stay flush with the terminal instead of being inset. */
 #app-container {
   flex: 1 !important;
   min-height: 0 !important;
   height: auto !important;
+  gap: var(--ds-context-gap);
+}
+
+/* No margin — the rail aligns top/bottom/left with the terminal; the gap to the
+   terminal is the #app-container gap above. */
+#context-rail {
+  margin: 0 !important;
+}
+
+/* The CRT monitor bezel lives on #app-main (the terminal side) only, so the
+   context panel to its left is a distinct, standalone monitor rather than being
+   wrapped together with the terminal. */
+#app-main {
   border-radius: 18px;
   overflow: clip;
   border: 4px solid #999;
