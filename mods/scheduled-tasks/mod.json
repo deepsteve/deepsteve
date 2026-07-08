@@ -13,6 +13,8 @@
     { "name": "list_scheduled_tasks", "description": "List scheduled tasks (by project, group, or all)" },
     { "name": "update_scheduled_task", "description": "Update a scheduled task" },
     { "name": "unschedule_task", "description": "Delete a scheduled task" },
-    { "name": "run_scheduled_task_now", "description": "Run a scheduled task immediately" }
+    { "name": "run_scheduled_task_now", "description": "Run a scheduled task immediately" },
+    { "name": "scheduled_task_started", "description": "Mark the current scheduled-task run as started" },
+    { "name": "scheduled_task_finished", "description": "Mark the current scheduled-task run as finished (success + summary)" }
   ]
 }

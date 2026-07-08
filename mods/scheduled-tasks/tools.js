@@ -24,6 +24,16 @@ const MAX_RUNS = 20;          // per-task run history is bounded
 const TICK_MS = 30 * 1000;    // cron granularity is 1 min; 30s never misses a minute
 const CATCHUP_DELAY_MS = 10 * 1000; // let the daemon settle before the overdue pass
 
+// Run status lifecycle (interactive Claude sessions don't exit when they finish,
+// so completion is driven by the agent self-reporting via MCP — issue #525):
+//   queued    — session spawned, prompt delivered, agent hasn't engaged yet
+//   running   — agent called scheduled_task_started
+//   succeeded / failed — agent called scheduled_task_finished
+//   ended     — session closed with no self-report (fallback; crash or manual close)
+// ACTIVE = not yet self-reported terminal; used by the overlap guard + onExit fallback.
+// Legacy 'started'/'completed' rows (pre-#525) still render in the UI badge.
+const ACTIVE_STATUSES = new Set(['queued', 'running', 'started']);
+
 // --- Persistent state (load on start, write-through on mutate) ---
 let tasks = [];
 let groups = [];
@@ -120,6 +130,34 @@ function safeNextRun(cronStr, from) {
   catch (e) { if (ctx) ctx.log(`[scheduled] bad cron "${cronStr}": ${e.message}`); return null; }
 }
 
+// Wrap a task's prompt with the scheduled-run contract: tell the agent this is an
+// automated scheduled run and have it self-report via the MCP tools so the run
+// record reflects real work rather than the session lifecycle (#525).
+function scheduledRunPrompt(task) {
+  return [
+    `⏰ This is an automated scheduled task run: "${task.title}" (task ${task.id}).`,
+    ``,
+    `Before you start, call the \`scheduled_task_started\` tool to mark this run as started.`,
+    `When you're done, call \`scheduled_task_finished\` with a one-line \`summary\` of what you did`,
+    `(pass \`success: false\` if the task could not be completed). These record that the work actually ran.`,
+    ``,
+    `Your task:`,
+    task.prompt,
+  ].join('\n');
+}
+
+// Find the task + run for a calling session's shellId, mirroring the run<->session
+// link recorded in runTask (run.sessionId === the spawned shellId). Returns
+// { task, run } or null when the caller isn't a scheduled run.
+function findRunByShell(shellId) {
+  if (!shellId) return null;
+  for (const task of tasks) {
+    const run = (task.runs || []).find(r => r.sessionId === shellId);
+    if (run) return { task, run };
+  }
+  return null;
+}
+
 // Spawn a session for a task and record the run. Returns the new shell id, or
 // null if the run was skipped (overlap guard) or the scheduler isn't ready.
 function runTask(task, reason) {
@@ -130,9 +168,11 @@ function runTask(task, reason) {
     deliverPromptWhenReady, deliverToWindow, saveState, isShuttingDown, log,
   } = ctx;
 
-  // Overlap guard: don't stack a run on a still-running previous run.
+  // Overlap guard: don't stack a run on a still-running previous run. A run that
+  // has self-reported terminal (succeeded/failed) no longer blocks the next fire,
+  // even though its idle tab may still be alive.
   const last = task.runs && task.runs[0];
-  if (last && last.status === 'started' && shells.has(last.sessionId)) {
+  if (last && ACTIVE_STATUSES.has(last.status) && shells.has(last.sessionId)) {
     log(`[scheduled] "${task.title}" (${task.id}) skipped — previous run ${last.sessionId} still active`);
     return null;
   }
@@ -158,22 +198,35 @@ function runTask(task, reason) {
   });
   wireShellOutput(id);
   emitSessionOpen(id);
-  if (task.prompt) deliverPromptWhenReady(id, task.prompt);
+  // Deliver the task prompt. For MCP-capable agents (claude today), wrap it with
+  // the scheduled-run contract so the agent self-reports start/finish (#525);
+  // agents without deepsteve MCP get the raw prompt as before.
+  if (task.prompt) {
+    const mcpWired = ctx.mcpConfigArgs(agentType, id).length > 0;
+    deliverPromptWhenReady(id, mcpWired ? scheduledRunPrompt(task) : task.prompt);
+  }
   if (agentConfig.supportsSessionWatch) watchClaudeSessionDir(id);
   sessionEngine.onExit(id, () => {
     if (agentConfig.supportsSessionWatch) unwatchClaudeSessionDir(id);
-    // Flip this run's status to completed before the core removes the shell.
-    const t = tasks.find(x => x.id === task.id);
-    const run = t && t.runs.find(r => r.sessionId === id);
-    if (run && run.status === 'started') { run.status = 'completed'; run.endedAt = Date.now(); saveTasks(); broadcastTasks(); }
-    if (!isShuttingDown()) { shells.delete(id); saveState(); }
+    // A daemon restart persists + resumes this session (same shellId), so the run
+    // can still be self-reported afterwards — don't touch it while shutting down.
+    // A real close with no self-report becomes 'ended' (we know it stopped, but
+    // not that the work completed).
+    if (!isShuttingDown()) {
+      const t = tasks.find(x => x.id === task.id);
+      const run = t && t.runs.find(r => r.sessionId === id);
+      if (run && ACTIVE_STATUSES.has(run.status)) {
+        run.status = 'ended'; run.endedAt = Date.now(); saveTasks(); broadcastTasks();
+      }
+      shells.delete(id); saveState();
+    }
   });
   saveState();
 
   const now = Date.now();
   task.lastRun = now;
   task.runs = task.runs || [];
-  task.runs.unshift({ startedAt: now, sessionId: id, status: 'started', endedAt: null });
+  task.runs.unshift({ startedAt: now, sessionId: id, status: 'queued', endedAt: null, agentStartedAt: null, success: null, summary: null });
   if (task.runs.length > MAX_RUNS) task.runs.length = MAX_RUNS;
   saveTasks();
   broadcastTasks();
@@ -229,7 +282,7 @@ function startScheduler() {
 
 // --- CRUD used by both MCP tools and REST ---------------------------------
 
-function createTask({ title, prompt, cron: cronStr, project, agentType, planMode, enabled, createdBy }) {
+function createTask({ title, prompt, cron: cronStr, project, agentType, planMode, enabled, createdBy, keepOpen, keepOpenOnFailure }) {
   cron.parseCron(cronStr); // throws on invalid — caller catches
   const now = Date.now();
   const task = {
@@ -239,6 +292,11 @@ function createTask({ title, prompt, cron: cronStr, project, agentType, planMode
     project: project || '',
     agentType: agentType || 'claude',
     planMode: !!planMode,
+    // Auto-close is the default: the tab closes when the agent self-reports
+    // finished, unless keepOpen (always keep) or keepOpenOnFailure (keep on a
+    // failed run) is set. Both default off. See scheduled_task_finished (#525).
+    keepOpen: !!keepOpen,
+    keepOpenOnFailure: !!keepOpenOnFailure,
     cron: cronStr.trim(),
     enabled: enabled !== false,
     createdAt: now,
@@ -262,6 +320,8 @@ function updateTask(id, fields) {
   if (fields.project !== undefined) task.project = fields.project || '';
   if (fields.agentType !== undefined) task.agentType = fields.agentType || 'claude';
   if (fields.planMode !== undefined) task.planMode = !!fields.planMode;
+  if (fields.keepOpen !== undefined) task.keepOpen = !!fields.keepOpen;
+  if (fields.keepOpenOnFailure !== undefined) task.keepOpenOnFailure = !!fields.keepOpenOnFailure;
   if (fields.enabled !== undefined) task.enabled = !!fields.enabled;
   // Recompute next run from any schedule/enable change.
   task.nextRun = task.enabled ? safeNextRun(task.cron, Date.now()) : null;
@@ -291,10 +351,14 @@ function taskView(task) {
     schedule: cron.describe(task.cron),
     agentType: task.agentType,
     planMode: !!task.planMode,
+    keepOpen: !!task.keepOpen,
+    keepOpenOnFailure: !!task.keepOpenOnFailure,
     enabled: !!task.enabled,
     nextRun: task.nextRun,
     lastRun: task.lastRun,
     lastStatus: lastRun ? lastRun.status : null,
+    lastSuccess: lastRun && lastRun.success != null ? lastRun.success : null,
+    lastSummary: lastRun && lastRun.summary ? lastRun.summary : null,
   };
 }
 
@@ -304,7 +368,10 @@ function formatTaskLines(list) {
     const v = taskView(t);
     const state = v.enabled ? '' : ' (disabled)';
     const next = v.nextRun ? new Date(v.nextRun).toLocaleString() : 'n/a';
-    return `#${v.id} "${v.title}"${state}\n  ${v.schedule} (cron: ${v.cron})\n  project: ${v.project || 'none'}\n  next run: ${next}${v.lastRun ? `; last run: ${new Date(v.lastRun).toLocaleString()} [${v.lastStatus}]` : ''}`;
+    const lastLine = v.lastRun
+      ? `\n  last run: ${new Date(v.lastRun).toLocaleString()} [${v.lastStatus}]${v.lastSummary ? ` — ${v.lastSummary}` : ''}`
+      : '';
+    return `#${v.id} "${v.title}"${state}\n  ${v.schedule} (cron: ${v.cron})\n  project: ${v.project || 'none'}\n  next run: ${next}${lastLine}`;
   }).join('\n\n');
 }
 
@@ -326,15 +393,18 @@ function init(context) {
         project: z.string().optional().describe('Repo path to run in (canonicalized to its git root). Defaults to the calling session\'s project.'),
         agent_type: z.string().optional().describe('Agent to run (default "claude" — the MCP-capable agent).'),
         plan_mode: z.boolean().optional().describe('Start the agent in plan mode (default false).'),
+        keep_open: z.boolean().optional().describe('Keep the tab open after each run finishes instead of auto-closing (default false).'),
+        keep_open_on_failure: z.boolean().optional().describe('Keep the tab open when a run fails, even if auto-close is on (default false).'),
         enabled: z.boolean().optional().describe('Whether the schedule is active (default true).'),
       },
-      handler: async ({ title, prompt, cron: cronStr, project, agent_type, plan_mode, enabled }, extra) => {
+      handler: async ({ title, prompt, cron: cronStr, project, agent_type, plan_mode, keep_open, keep_open_on_failure, enabled }, extra) => {
         let task;
         try {
           task = createTask({
             title, prompt, cron: cronStr,
             project: resolveProject(project, callerShellId(extra)),
             agentType: agent_type, planMode: plan_mode, enabled,
+            keepOpen: keep_open, keepOpenOnFailure: keep_open_on_failure,
             createdBy: callerShellId(extra),
           });
         } catch (e) {
@@ -378,9 +448,11 @@ function init(context) {
         project: z.string().optional(),
         agent_type: z.string().optional(),
         plan_mode: z.boolean().optional(),
+        keep_open: z.boolean().optional().describe('Keep the tab open after each run finishes instead of auto-closing.'),
+        keep_open_on_failure: z.boolean().optional().describe('Keep the tab open when a run fails, even if auto-close is on.'),
         enabled: z.boolean().optional(),
       },
-      handler: async ({ id, title, prompt, cron: cronStr, project, agent_type, plan_mode, enabled }, extra) => {
+      handler: async ({ id, title, prompt, cron: cronStr, project, agent_type, plan_mode, keep_open, keep_open_on_failure, enabled }, extra) => {
         const fields = {};
         if (title !== undefined) fields.title = title;
         if (prompt !== undefined) fields.prompt = prompt;
@@ -388,6 +460,8 @@ function init(context) {
         if (project !== undefined) fields.project = resolveProject(project, callerShellId(extra));
         if (agent_type !== undefined) fields.agentType = agent_type;
         if (plan_mode !== undefined) fields.planMode = plan_mode;
+        if (keep_open !== undefined) fields.keepOpen = keep_open;
+        if (keep_open_on_failure !== undefined) fields.keepOpenOnFailure = keep_open_on_failure;
         if (enabled !== undefined) fields.enabled = enabled;
         let task;
         try { task = updateTask(id, fields); }
@@ -416,6 +490,56 @@ function init(context) {
         return { content: [{ type: 'text', text: shellId ? `Running #${id} now (session ${shellId}).` : `#${id} not started (a previous run may still be active).` }] };
       },
     },
+
+    // --- Self-reporting (called by the scheduled-run agent itself, #525) ---
+    // The caller is identified by its shellId (baked into its MCP URL); no params
+    // needed to locate the run. Both are no-ops (with a friendly message) when the
+    // caller isn't a scheduled run.
+    scheduled_task_started: {
+      description: 'Mark the current scheduled-task run as started. Call this once, before you begin the work, when you are running as a scheduled task. Takes no parameters — the run is identified from your session.',
+      schema: {},
+      handler: async (_args, extra) => {
+        const found = findRunByShell(callerShellId(extra));
+        if (!found) return { content: [{ type: 'text', text: 'This session is not a scheduled task run — nothing to mark.' }] };
+        const { task, run } = found;
+        run.status = 'running';
+        run.agentStartedAt = Date.now();
+        saveTasks();
+        broadcastTasks();
+        return { content: [{ type: 'text', text: `Marked scheduled run of "${task.title}" (#${task.id}) as started.` }] };
+      },
+    },
+
+    scheduled_task_finished: {
+      description: 'Mark the current scheduled-task run as finished. Call this once, when you are done, if you are running as a scheduled task. Pass a one-line summary of what you did; set success:false if the task could not be completed. The tab may auto-close afterwards depending on the task\'s settings.',
+      schema: {
+        success: z.boolean().optional().describe('Whether the task completed successfully (default true).'),
+        summary: z.string().optional().describe('One-line summary of what was done (or why it failed).'),
+      },
+      handler: async ({ success, summary }, extra) => {
+        const shellId = callerShellId(extra);
+        const found = findRunByShell(shellId);
+        if (!found) return { content: [{ type: 'text', text: 'This session is not a scheduled task run — nothing to mark.' }] };
+        const { task, run } = found;
+        const ok = success !== false; // default true
+        run.status = ok ? 'succeeded' : 'failed';
+        run.success = ok;
+        run.summary = summary ? String(summary) : null;
+        run.endedAt = Date.now();
+        saveTasks();
+        broadcastTasks();
+        // Auto-close is the default; keepOpen always keeps, keepOpenOnFailure keeps
+        // a failed run open for inspection. Closing acks this response first (the
+        // core's killShell defers teardown), and the now-terminal status means the
+        // onExit fallback won't overwrite it.
+        const stayOpen = task.keepOpen || (!ok && task.keepOpenOnFailure);
+        let closed = false;
+        if (!stayOpen && shellId && ctx.shells.has(shellId)) {
+          try { ctx.closeSession(shellId); closed = true; } catch (e) { log_(`auto-close failed for ${shellId}: ${e.message}`); }
+        }
+        return { content: [{ type: 'text', text: `Marked scheduled run of "${task.title}" (#${task.id}) as ${run.status}.${closed ? ' Closing this session.' : ''}` }] };
+      },
+    },
   };
 }
 
@@ -439,6 +563,7 @@ function registerRoutes(app, context) {
       const task = createTask({
         title: b.title, prompt: b.prompt, cron: b.cron, project: projectRoot,
         agentType: b.agentType, planMode: b.planMode, enabled: b.enabled,
+        keepOpen: b.keepOpen, keepOpenOnFailure: b.keepOpenOnFailure,
       });
       res.json({ task });
     } catch (e) {

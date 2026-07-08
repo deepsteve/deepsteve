@@ -102,8 +102,17 @@ function api(method, url, body) {
 
 // ------------------------------------------------------------------ Task card
 function StatusBadge({ status }) {
-  const map = { started: C.accent, completed: C.green, error: C.red };
-  const label = { started: 'running', completed: 'done', error: 'error' }[status] || status;
+  // Self-reported run lifecycle (#525): queued → running → done/failed, plus
+  // 'ended' when a session closed without self-reporting. Legacy started/completed
+  // rows (pre-#525) still map so old history renders.
+  const map = {
+    queued: C.amber, running: C.accent, succeeded: C.green, failed: C.red, ended: C.dim,
+    started: C.accent, completed: C.green, error: C.red,
+  };
+  const label = {
+    queued: 'queued', running: 'running', succeeded: 'done', failed: 'failed', ended: 'ended',
+    started: 'running', completed: 'done', error: 'error',
+  }[status] || status;
   if (!status) return null;
   return <span style={{ color: map[status] || C.dim, fontSize: 11, border: `1px solid ${map[status] || C.dim}`, borderRadius: 4, padding: '0 5px' }}>{label}</span>;
 }
@@ -136,10 +145,13 @@ function TaskCard({ task, onEdit }) {
       {open && task.runs && (
         <div style={{ marginTop: 8, borderTop: `1px solid ${C.border}`, paddingTop: 6 }}>
           {task.runs.map((r, i) => (
-            <div key={i} style={{ fontSize: 11, color: C.dim, display: 'flex', gap: 8, padding: '1px 0' }}>
-              <span>{absTime(r.startedAt)}</span>
-              <StatusBadge status={r.status} />
-              <span style={{ opacity: 0.6 }}>{r.sessionId}</span>
+            <div key={i} style={{ padding: '1px 0' }}>
+              <div style={{ fontSize: 11, color: C.dim, display: 'flex', gap: 8 }}>
+                <span>{absTime(r.startedAt)}</span>
+                <StatusBadge status={r.status} />
+                <span style={{ opacity: 0.6 }}>{r.sessionId}</span>
+              </div>
+              {r.summary ? <div style={{ fontSize: 11, color: C.dim, opacity: 0.85, marginLeft: 2 }}>{r.summary}</div> : null}
             </div>
           ))}
         </div>
@@ -166,6 +178,8 @@ function TaskForm({ task, projects, onClose }) {
   const [customPath, setCustomPath] = useState('');
   const [agentType, setAgentType] = useState(initial.agentType || 'claude');
   const [planMode, setPlanMode] = useState(!!initial.planMode);
+  const [keepOpen, setKeepOpen] = useState(!!initial.keepOpen);
+  const [keepOpenOnFailure, setKeepOpenOnFailure] = useState(!!initial.keepOpenOnFailure);
   const [mode, setMode] = useState(initForm.mode);
   const [fld, setFld] = useState(initForm.fld);
   const [saving, setSaving] = useState(false);
@@ -179,7 +193,7 @@ function TaskForm({ task, projects, onClose }) {
     if (!title.trim()) return setErr('Title is required');
     if (!prompt.trim()) return setErr('Prompt is required');
     const proj = project === '__custom__' ? customPath.trim() : project;
-    const body = { title: title.trim(), prompt: prompt.trim(), cron: cronStr, project: proj, agentType, planMode };
+    const body = { title: title.trim(), prompt: prompt.trim(), cron: cronStr, project: proj, agentType, planMode, keepOpen, keepOpenOnFailure };
     setSaving(true);
     try {
       if (task && task.id) await api('PUT', `/api/scheduled-tasks/${task.id}`, body);
@@ -246,7 +260,14 @@ function TaskForm({ task, projects, onClose }) {
         </label>
         <label style={{ fontSize: 12, color: C.dim }}><input type="checkbox" checked={planMode} onChange={(e) => setPlanMode(e.target.checked)} /> plan mode</label>
       </div>
-      {agentType !== 'claude' && <div style={{ fontSize: 11, color: C.amber, marginTop: 4 }}>Note: only claude is wired for deepsteve MCP tools.</div>}
+      <div style={{ display: 'flex', gap: 12, marginTop: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+        <label style={{ fontSize: 12, color: C.dim }}><input type="checkbox" checked={keepOpen} onChange={(e) => setKeepOpen(e.target.checked)} /> keep tab open when finished</label>
+        <label style={{ fontSize: 12, color: C.dim, opacity: keepOpen ? 0.5 : 1 }} title={keepOpen ? 'Redundant while “keep tab open when finished” is on.' : 'Keep the tab open only when the run fails.'}>
+          <input type="checkbox" checked={keepOpen || keepOpenOnFailure} disabled={keepOpen} onChange={(e) => setKeepOpenOnFailure(e.target.checked)} /> keep open on failure
+        </label>
+      </div>
+      <div style={{ fontSize: 11, color: C.dim, marginTop: 4 }}>By default the tab auto-closes when the agent reports finished.</div>
+      {agentType !== 'claude' && <div style={{ fontSize: 11, color: C.amber, marginTop: 4 }}>Note: only claude is wired for deepsteve MCP tools (self-report + auto-close).</div>}
 
       {err && <div style={{ color: C.red, fontSize: 12, marginTop: 8 }}>{err}</div>}
       <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
