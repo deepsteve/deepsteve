@@ -19,7 +19,6 @@ const { z } = require('zod');
 const cron = require('./cron');
 
 const TASKS_FILE = path.join(os.homedir(), '.deepsteve', 'scheduled-tasks.json');
-const GROUPS_FILE = path.join(os.homedir(), '.deepsteve', 'project-groups.json');
 const MAX_RUNS = 20;          // per-task run history is bounded
 const TICK_MS = 30 * 1000;    // cron granularity is 1 min; 30s never misses a minute
 const CATCHUP_DELAY_MS = 10 * 1000; // let the daemon settle before the overdue pass
@@ -35,17 +34,16 @@ const CATCHUP_DELAY_MS = 10 * 1000; // let the daemon settle before the overdue 
 const ACTIVE_STATUSES = new Set(['queued', 'running', 'started']);
 
 // --- Persistent state (load on start, write-through on mutate) ---
+// Tasks live here; the named groups that drive scope:'group' are now the shared
+// server-owned "contexts" (#526), read live via ctx.getContexts() — this mod no
+// longer stores project-groups.json of its own.
 let tasks = [];
-let groups = [];
 let ctx = null;               // set in init(); shared with registerRoutes
 let schedulerStarted = false;
 
 try {
   if (fs.existsSync(TASKS_FILE)) tasks = JSON.parse(fs.readFileSync(TASKS_FILE, 'utf8')) || [];
 } catch { tasks = []; }
-try {
-  if (fs.existsSync(GROUPS_FILE)) groups = JSON.parse(fs.readFileSync(GROUPS_FILE, 'utf8')) || [];
-} catch { groups = []; }
 
 function writeJson(file, data) {
   try {
@@ -58,8 +56,17 @@ function writeJson(file, data) {
   }
 }
 function saveTasks() { writeJson(TASKS_FILE, tasks); }
-function saveGroups() { writeJson(GROUPS_FILE, groups); }
 function broadcastTasks() { if (ctx) ctx.broadcast({ type: 'scheduled-tasks' }); }
+
+// The shared contexts (#526), from server core via the initMCP ctx. Empty on an
+// older core that doesn't expose them (group scope then falls back to self-only).
+function getContexts() { return (ctx && ctx.getContexts) ? ctx.getContexts() : []; }
+function pathInside(p, dir) {
+  if (ctx && ctx.pathInside) return ctx.pathInside(p, dir);
+  if (!p || !dir) return false;
+  const base = String(dir).replace(/\/+$/, '');
+  return p === base || p.startsWith(base + '/');
+}
 
 // --- Project resolution ---------------------------------------------------
 
@@ -96,7 +103,7 @@ function displayName(project) {
 function knownProjects() {
   const roots = new Set();
   for (const t of tasks) if (t.project) roots.add(t.project);
-  for (const g of groups) for (const p of (g.projects || [])) if (p) roots.add(p);
+  for (const c of getContexts()) for (const d of (c.dirs || [])) if (d) roots.add(d);
   if (ctx) {
     for (const entry of ctx.shells.values()) {
       try { const { repoRoot } = ctx.sessionPaths(entry); if (repoRoot) roots.add(repoRoot); } catch {}
@@ -112,15 +119,17 @@ function knownProjects() {
   });
 }
 
-// Projects that share at least one group with `project` (includes itself).
-function groupSiblings(project) {
-  const sibs = new Set([project]);
-  for (const g of groups) {
-    if ((g.projects || []).includes(project)) {
-      for (const p of g.projects) sibs.add(p);
+// Folders that define `project`'s group scope: the dirs of every context that
+// contains `project` (by folder prefix), plus `project` itself. A task is "in the
+// group" when its repo root is inside/equals one of these folders.
+function groupScopeDirs(project) {
+  const dirs = new Set(project ? [project] : []);
+  for (const c of getContexts()) {
+    if ((c.dirs || []).some(d => pathInside(project, d))) {
+      for (const d of c.dirs) dirs.add(d);
     }
   }
-  return sibs;
+  return [...dirs];
 }
 
 // --- Scheduling core ------------------------------------------------------
@@ -428,8 +437,8 @@ function init(context) {
         if (effScope === 'project') {
           list = tasks.filter(t => t.project === proj);
         } else if (effScope === 'group') {
-          const sibs = groupSiblings(proj);
-          list = tasks.filter(t => sibs.has(t.project));
+          const dirs = groupScopeDirs(proj);
+          list = tasks.filter(t => dirs.some(d => pathInside(t.project, d)));
         }
         const header = effScope === 'all' ? 'All scheduled tasks:'
           : effScope === 'group' ? `Scheduled tasks in ${displayName(proj)}'s group:`
@@ -552,7 +561,9 @@ function registerRoutes(app, context) {
     // Enrich each task with a human-readable schedule + project name for the panel,
     // keeping the full stored fields (prompt, runs, nextRun) for editing/history.
     const enriched = tasks.map(t => ({ ...t, schedule: cron.describe(t.cron), projectName: displayName(t.project) }));
-    res.json({ tasks: enriched, groups, projects: knownProjects(), enabled: !!ctx.settings.scheduledTasksEnabled });
+    // Groups (now the shared "contexts") arrive over /api/contexts + the 'contexts'
+    // broadcast, not in this payload.
+    res.json({ tasks: enriched, projects: knownProjects(), enabled: !!ctx.settings.scheduledTasksEnabled });
   });
 
   app.post('/api/scheduled-tasks', (req, res) => {
@@ -602,30 +613,8 @@ function registerRoutes(app, context) {
     res.json({ task });
   });
 
-  // --- Project groups ---
-  app.get('/api/project-groups', (req, res) => res.json({ groups, projects: knownProjects() }));
-
-  app.post('/api/project-groups', (req, res) => {
-    const b = req.body || {};
-    const name = String(b.name || '').trim();
-    if (!name) return res.status(400).json({ error: 'Group name required' });
-    const projects = Array.isArray(b.projects) ? b.projects.filter(Boolean) : [];
-    const existing = groups.find(g => g.name === name);
-    if (existing) existing.projects = projects;
-    else groups.push({ name, projects });
-    saveGroups();
-    if (ctx) ctx.broadcast({ type: 'scheduled-tasks' });
-    res.json({ groups });
-  });
-
-  app.delete('/api/project-groups/:name', (req, res) => {
-    const idx = groups.findIndex(g => g.name === req.params.name);
-    if (idx === -1) return res.status(404).json({ error: 'Group not found' });
-    groups.splice(idx, 1);
-    saveGroups();
-    if (ctx) ctx.broadcast({ type: 'scheduled-tasks' });
-    res.json({ deleted: req.params.name });
-  });
+  // Named groups moved to server core as the shared "contexts" (#526):
+  // GET/POST/DELETE /api/contexts live in server.js. The panel edits groups there.
 }
 
 module.exports = { init, registerRoutes };

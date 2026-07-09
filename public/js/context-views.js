@@ -22,7 +22,10 @@
 
 import { nsKey } from './storage-namespace.js';
 
-const CONTEXTS_KEY = nsKey('deepsteve-contexts');       // localStorage: definitions (durable)
+// Context definitions are server-owned (#526): they are the same entity as the
+// Scheduled Tasks "project groups", loaded from /api/contexts and kept fresh by
+// the 'contexts' WS broadcast (app.js → setContexts). Only the per-window VIEW
+// state (which context is active, whether the rail is open) stays client-side.
 const ACTIVE_KEY = nsKey('deepsteve-context-active');   // sessionStorage: active id (per window)
 const SIDEBAR_KEY = nsKey('deepsteve-context-sidebar'); // sessionStorage: open state (per window)
 
@@ -38,14 +41,25 @@ let toggleBtn = null;
 
 // ---------------------------------------------------------------- persistence
 
-function loadContexts() {
-  try {
-    const v = JSON.parse(localStorage.getItem(CONTEXTS_KEY));
-    return Array.isArray(v) ? v : [];
-  } catch { return []; }
+// Definitions come from the server. Fetch once on init; live updates arrive via
+// setContexts() (called by app.js on the 'contexts' broadcast).
+function fetchContexts() {
+  fetch('/api/contexts')
+    .then(r => r.json())
+    .then(d => setContexts(d.contexts || []))
+    .catch(() => {});
 }
-function saveContexts() {
-  localStorage.setItem(CONTEXTS_KEY, JSON.stringify(contexts));
+// Persist a single upsert / delete to the server. The server broadcasts the new
+// full list back to every window (setContexts), so we don't reconcile by hand.
+function saveContext(c) {
+  fetch('/api/contexts', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(c),
+  }).catch(() => {});
+}
+function deleteContextOnServer(id) {
+  fetch('/api/contexts/' + encodeURIComponent(id), { method: 'DELETE' }).catch(() => {});
 }
 function loadActive() {
   return sessionStorage.getItem(ACTIVE_KEY) || null;
@@ -180,7 +194,15 @@ function makeRow(id, name, active, ctx) {
 function selectContext(id) {
   activeContextId = id;
   saveActive();
+  notifyActive();
   applyFilter();
+}
+
+// Tell app.js (→ the scheduled-tasks panel) which context is active. Half of the
+// bidirectional sync; the other half is setActiveContext(), called when the panel
+// picks a group.
+function notifyActive() {
+  cb.onActiveContextChanged?.(activeContextId);
 }
 
 // -------------------------------------------------------------------- sidebar
@@ -229,6 +251,7 @@ function cycleContext(dir) {
     : (idx <= 0 ? order.length - 1 : idx - 1);
   activeContextId = order[next];
   saveActive();
+  notifyActive();
   applyFilter();
   showToast(activeContextId ? (getActiveContext()?.name || 'Context') : 'All tabs');
 }
@@ -454,8 +477,8 @@ function openContextEditor(ctx) {
     del.textContent = 'Delete';
     del.onclick = () => {
       contexts = contexts.filter(c => c.id !== draft.id);
-      if (activeContextId === draft.id) { activeContextId = null; saveActive(); }
-      saveContexts();
+      if (activeContextId === draft.id) { activeContextId = null; saveActive(); notifyActive(); }
+      deleteContextOnServer(draft.id);
       overlay.remove();
       applyFilter();
     };
@@ -474,6 +497,8 @@ function openContextEditor(ctx) {
   save.onclick = () => {
     const name = nameInput.value.trim();
     if (!name) { nameInput.focus(); return; }
+    // Optimistic local upsert so the rail updates immediately; the server
+    // broadcast (setContexts) reconciles this and every other window.
     const existing = contexts.find(c => c.id === draft.id);
     if (existing) {
       existing.name = name;
@@ -481,9 +506,10 @@ function openContextEditor(ctx) {
     } else {
       contexts.push({ id: draft.id, name, dirs: draft.dirs });
     }
-    saveContexts();
+    saveContext({ id: draft.id, name, dirs: draft.dirs });
     activeContextId = draft.id; // focus the context we just saved
     saveActive();
+    notifyActive();
     overlay.remove();
     applyFilter();
   };
@@ -503,9 +529,8 @@ function openContextEditor(ctx) {
 
 export function init(callbacks) {
   cb = callbacks || {};
-  contexts = loadContexts();
-  activeContextId = loadActive();
-  if (activeContextId && !contexts.find(c => c.id === activeContextId)) activeContextId = null;
+  contexts = [];                    // seeded from the server by fetchContexts() below
+  activeContextId = loadActive();   // restored per-window; validated once contexts arrive
   sidebarOpen = loadSidebar();
 
   toggleBtn = document.getElementById('context-toggle');
@@ -526,6 +551,36 @@ export function init(callbacks) {
 
   document.addEventListener('keydown', onKeyDown, true);
   document.addEventListener('keyup', onKeyUp, true);
+
+  fetchContexts(); // seed definitions from the server (single source of truth)
+}
+
+// Called by app.js when the server pushes the full context list (initial load +
+// every 'contexts' broadcast). Re-validates the active id and re-filters.
+export function setContexts(list) {
+  contexts = Array.isArray(list) ? list : [];
+  if (activeContextId && !contexts.find(c => c.id === activeContextId)) {
+    activeContextId = null;
+    saveActive();
+    notifyActive();
+  }
+  applyFilter();
+}
+
+// Bidirectional-in: the scheduled-tasks panel picked a group → make it active
+// here too. Guards against a no-op / feedback loop and ignores unknown ids.
+export function setActiveContext(id) {
+  const next = id || null;
+  if (next === activeContextId) return;
+  if (next && !contexts.find(c => c.id === next)) return;
+  activeContextId = next;
+  saveActive();
+  notifyActive();
+  applyFilter();
+}
+
+export function getActiveContextId() {
+  return activeContextId;
 }
 
 export function setEnabled(val) {
