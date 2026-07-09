@@ -223,15 +223,15 @@ function init(context) {
       },
     },
     open_terminal: {
-      description: 'Open a new deepsteve terminal session (new tab). Inherits context (cwd, worktree, agent type) from the calling session. The new tab opens in the same browser window as the caller.',
+      description: 'Open a new tab in the caller\'s browser window. IMPORTANT: by default (no `agent_type`) this opens a PLAIN TERMINAL (zsh) — NOT a Claude/agent session — and `prompt` is IGNORED. To open a Claude Code (or other agent) session — one that runs slash commands like /rc and actually receives `prompt` — you MUST pass `agent_type` (e.g. "claude"); or pass `fork: true` to inherit the caller\'s agent type. It does NOT auto-inherit the caller\'s agent type otherwise. Inherits cwd/worktree from the caller.',
       schema: {
-        prompt: z.string().optional().describe('Initial prompt to send to the new session'),
+        prompt: z.string().optional().describe('Initial prompt to send to the new session. Delivered ONLY to agent sessions (requires `agent_type` or `fork`); IGNORED for a plain terminal — use `command` for those.'),
         command: z.string().optional().describe('Shell command to auto-run on startup (plain terminal tabs only). Runs as if typed at the prompt; the tab stays open afterward. Ignored for agent sessions.'),
         name: z.string().optional().describe('Tab name for the new session'),
         session_id: z.string().optional().describe('Caller session ID (auto-detected if omitted)'),
         cwd: z.string().optional().describe('Working directory (defaults to caller\'s cwd)'),
         worktree: z.string().optional().describe('Worktree name'),
-        agent_type: z.string().optional().describe('Agent type (defaults to caller\'s)'),
+        agent_type: z.string().optional().describe('Agent type for an AGENT session, e.g. "claude" or "pi". OMIT this → a plain terminal (zsh), NOT the caller\'s agent. To inherit the caller\'s agent type instead, pass `fork: true`.'),
         plan_mode: z.boolean().optional().describe('Start in plan mode'),
         fork: z.boolean().optional().describe('Fork the calling session\'s Claude conversation into the new tab'),
       },

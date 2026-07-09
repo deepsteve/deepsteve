@@ -10,6 +10,6 @@
     { "name": "close_session", "description": "Close a session and its browser tab" },
     { "name": "meta_type", "description": "Type text into a session's terminal and optionally press Enter" },
     { "name": "start_issue", "description": "Open a new deepsteve session for a GitHub issue" },
-    { "name": "open_terminal", "description": "Open a new terminal session with an optional prompt" }
+    { "name": "open_terminal", "description": "Open a new tab: plain terminal by default, or a Claude/agent session if agent_type is passed" }
   ]
 }
