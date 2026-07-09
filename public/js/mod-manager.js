@@ -52,7 +52,11 @@ let babyBrowserCallbacks = [];       // [{modId, cb}] — callbacks for baby-bro
 let wsReconnectedCallbacks = [];     // [{modId, cb}] — fired when any session WS reconnects
 let activeSessionCallbacks = [];     // [{modId, cb}] — callbacks for active session changes
 let userActivityCallbacks = [];      // [{modId, cb}] — fired when the user types into a terminal
+let contextCallbacks = [];           // [{modId, cb}] — fired when the shared contexts (#526) change
+let activeContextCallbacks = [];     // [{modId, cb}] — fired when the active context changes
 let getActiveSessionIdFn = null;     // set from appHooks
+let getActiveContextIdFn = null;     // set from appHooks — reads the active context (#526)
+let setActiveContextFn = null;       // set from appHooks — drives the active context (#526)
 let deepsteveVersion = null;   // set from /api/mods response
 let panelWidth = 360;
 const MIN_PANEL_WIDTH = 200;
@@ -158,6 +162,8 @@ function _refreshCardToggles(overlay) {
 function init(appHooks) {
   hooks = appHooks;
   getActiveSessionIdFn = appHooks.getActiveSessionId || null;
+  getActiveContextIdFn = appHooks.getActiveContextId || null;
+  setActiveContextFn = appHooks.setActiveContext || null;
 
   // Wrap #terminals in a row container for side-by-side panel layout
   const terminals = document.getElementById('terminals');
@@ -1618,6 +1624,8 @@ function _unloadPanelMod(modId) {
   sessionCallbacks = sessionCallbacks.filter(e => e.modId !== modId);
   activeSessionCallbacks = activeSessionCallbacks.filter(e => e.modId !== modId);
   userActivityCallbacks = userActivityCallbacks.filter(e => e.modId !== modId);
+  contextCallbacks = contextCallbacks.filter(e => e.modId !== modId);
+  activeContextCallbacks = activeContextCallbacks.filter(e => e.modId !== modId);
 
   // If it was the visible panel, switch to another or collapse
   if (visiblePanelId === modId) {
@@ -1863,6 +1871,26 @@ function notifyScheduledTasksChanged() {
 }
 
 /**
+ * Notify panel mods that the shared contexts changed (#526) — called from app.js
+ * on the `contexts` WS broadcast, which carries the full list. Fan it out directly.
+ */
+function notifyContextsChanged(contexts) {
+  for (const entry of contextCallbacks) {
+    try { entry.cb(contexts || []); } catch (e) { console.error('Contexts callback error:', e); }
+  }
+}
+
+/**
+ * Notify panel mods that the active context changed (#526) — the other half of the
+ * bidirectional sync. Called from app.js when the Context View rail switches context.
+ */
+function notifyActiveContextChanged(id) {
+  for (const entry of activeContextCallbacks) {
+    try { entry.cb(id || null); } catch (e) { console.error('Active-context callback error:', e); }
+  }
+}
+
+/**
  * Notify panel mods that agent chat has changed (called from app.js on WS broadcast).
  */
 function notifyAgentChatChanged(channels) {
@@ -2064,6 +2092,31 @@ function _injectBridgeAPI(iframeEl, modId, tabInstanceId) {
           scheduledTaskCallbacks = scheduledTaskCallbacks.filter(e => e !== entry);
         };
       },
+      // --- Shared contexts / groups (#526) ---
+      // The named groups the panel scopes by ARE the Context View's contexts.
+      onContextsChanged(cb) {
+        const entry = { modId, cb };
+        contextCallbacks.push(entry);
+        // Fire immediately with the current list from the server.
+        fetch('/api/contexts').then(r => r.json()).then(d => {
+          try { cb(d.contexts || []); } catch {}
+        }).catch(() => {});
+        return () => {
+          contextCallbacks = contextCallbacks.filter(e => e !== entry);
+        };
+      },
+      onActiveContextChanged(cb) {
+        const entry = { modId, cb };
+        activeContextCallbacks.push(entry);
+        // Fire immediately with the current active context id.
+        if (getActiveContextIdFn) { try { cb(getActiveContextIdFn()); } catch {} }
+        return () => {
+          activeContextCallbacks = activeContextCallbacks.filter(e => e !== entry);
+        };
+      },
+      setActiveContext(id) {
+        if (setActiveContextFn) setActiveContextFn(id || null);
+      },
       onAgentChatChanged(cb) {
         const entry = { modId, cb };
         agentChatCallbacks.push(entry);
@@ -2205,7 +2258,9 @@ function handleModChanged(modId) {
     settingsCallbacks = settingsCallbacks.filter(e => e.modId !== modId);
     sessionCallbacks = sessionCallbacks.filter(e => e.modId !== modId);
     activeSessionCallbacks = activeSessionCallbacks.filter(e => e.modId !== modId);
-  
+    contextCallbacks = contextCallbacks.filter(e => e.modId !== modId);
+    activeContextCallbacks = activeContextCallbacks.filter(e => e.modId !== modId);
+
     panelEntry.iframe.src = panelEntry.iframe.src.replace(/(\?v=\d+)?$/, `?v=${Date.now()}`);
   }
 }
@@ -2258,6 +2313,8 @@ export const ModManager = {
   notifyActiveSessionChanged,
   notifyTasksChanged,
   notifyScheduledTasksChanged,
+  notifyContextsChanged,
+  notifyActiveContextChanged,
   notifyAgentChatChanged,
   notifyBrowserEvalRequest,
   notifyBrowserConsoleRequest,

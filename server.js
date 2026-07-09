@@ -120,6 +120,10 @@ const STATE_FILE = path.join(os.homedir(), '.deepsteve', 'state.json');
 const DISPLAY_TABS_DIR = path.join(os.homedir(), '.deepsteve', 'display-tabs');
 const SCREENSHOTS_DIR = path.join(os.homedir(), '.deepsteve', 'screenshots');
 const SETTINGS_FILE = path.join(os.homedir(), '.deepsteve', 'settings.json');
+const CONTEXTS_FILE = path.join(os.homedir(), '.deepsteve', 'contexts.json');
+// Legacy scheduled-tasks "project groups" file (#521). Superseded by contexts.json
+// (#526); read once on first load to migrate, then left in place untouched.
+const LEGACY_GROUPS_FILE = path.join(os.homedir(), '.deepsteve', 'project-groups.json');
 const RESTARTING_FLAG = path.join(os.homedir(), '.deepsteve', '.restarting');
 const app = express();
 app.use(express.static('public', {
@@ -1522,6 +1526,84 @@ try {
   }
 } catch (e) {
   console.error('Failed to load screenshots:', e.message);
+}
+
+// --- Contexts (#526) -------------------------------------------------------
+// A context = { id, name, dirs: [absolute folder paths] }. It is the single,
+// server-owned grouping shared by the Context View (filters the tab strip) and
+// the Scheduled Tasks panel (its "project group" scoping). Membership is by
+// folder prefix: a tab belongs if its cwd is inside a dir; a task belongs if its
+// repo root is inside/equals a dir (see pathInside). The scheduled-tasks mod
+// reads these via ctx.getContexts(); the Context View reads them over /api/contexts.
+let contexts = [];
+
+function genContextId() { return randomUUID().slice(0, 8); }
+
+// True when path `p` is `dir` itself or nested inside it (trailing slashes ignored).
+// Shared with the scheduled-tasks mod (via the initMCP ctx) so folder-prefix
+// membership means the same thing on both sides.
+function pathInside(p, dir) {
+  if (!p || !dir) return false;
+  const base = String(dir).replace(/\/+$/, '');
+  return p === base || p.startsWith(base + '/');
+}
+
+function saveContexts() {
+  try {
+    fs.mkdirSync(path.dirname(CONTEXTS_FILE), { recursive: true });
+    const tmp = CONTEXTS_FILE + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify(contexts, null, 2));
+    fs.renameSync(tmp, CONTEXTS_FILE);
+  } catch (e) {
+    console.error('Failed to save contexts:', e.message);
+  }
+}
+
+// Load contexts from disk; on first run, migrate legacy project-groups.json
+// ({name, projects} → {id, name, dirs}) so existing scheduled-tasks groups carry over.
+function loadContexts() {
+  try {
+    if (fs.existsSync(CONTEXTS_FILE)) {
+      const v = JSON.parse(fs.readFileSync(CONTEXTS_FILE, 'utf8'));
+      contexts = (Array.isArray(v) ? v : [])
+        .filter(c => c && typeof c.name === 'string')
+        .map(c => ({ id: c.id || genContextId(), name: c.name, dirs: Array.isArray(c.dirs) ? c.dirs.filter(Boolean) : [] }));
+      return;
+    }
+  } catch (e) {
+    console.error('Failed to load contexts:', e.message);
+  }
+  // No contexts.json yet — migrate from legacy project-groups.json if present.
+  try {
+    if (fs.existsSync(LEGACY_GROUPS_FILE)) {
+      const groups = JSON.parse(fs.readFileSync(LEGACY_GROUPS_FILE, 'utf8'));
+      if (Array.isArray(groups) && groups.length) {
+        contexts = groups
+          .filter(g => g && typeof g.name === 'string')
+          .map(g => ({ id: genContextId(), name: g.name, dirs: Array.isArray(g.projects) ? g.projects.filter(Boolean) : [] }));
+        saveContexts();
+        log(`Migrated ${contexts.length} project group(s) from project-groups.json into contexts.json`);
+      }
+    }
+  } catch (e) {
+    console.error('Failed to migrate project groups:', e.message);
+  }
+}
+loadContexts();
+
+function broadcastContexts() {
+  const msg = JSON.stringify({ type: 'contexts', contexts });
+  for (const client of wss.clients) {
+    if (client.readyState === 1) client.send(msg);
+  }
+  if (httpsWss) {
+    for (const client of httpsWss.clients) {
+      if (client.readyState === 1) client.send(msg);
+    }
+  }
+  for (const client of reloadClients) {
+    if (client.readyState === 1) client.send(msg);
+  }
 }
 
 // Save state on shutdown
@@ -3021,6 +3103,34 @@ app.post('/api/git-roots', express.json(), (req, res) => {
   res.json({ roots });
 });
 
+// --- Contexts (#526): the unified grouping shared by the Context View and the
+// Scheduled Tasks panel. Upsert is keyed by `id` (client-generated on create so
+// the creating window can focus it immediately). ---
+app.get('/api/contexts', (req, res) => res.json({ contexts }));
+
+app.post('/api/contexts', (req, res) => {
+  const b = req.body || {};
+  const name = String(b.name || '').trim();
+  if (!name) return res.status(400).json({ error: 'Context name required' });
+  const dirs = Array.isArray(b.dirs) ? b.dirs.filter(Boolean) : [];
+  const id = (b.id && String(b.id)) || genContextId();
+  const existing = contexts.find(c => c.id === id);
+  if (existing) { existing.name = name; existing.dirs = dirs; }
+  else contexts.push({ id, name, dirs });
+  saveContexts();
+  broadcastContexts();
+  res.json({ contexts });
+});
+
+app.delete('/api/contexts/:id', (req, res) => {
+  const idx = contexts.findIndex(c => c.id === req.params.id);
+  if (idx === -1) return res.status(404).json({ error: 'Context not found' });
+  contexts.splice(idx, 1);
+  saveContexts();
+  broadcastContexts();
+  res.json({ deleted: req.params.id });
+});
+
 const issueCache = new Map(); // key: `${cwd}:${limit}` → { data, ts }
 const ISSUE_CACHE_TTL = 10000; // 10 seconds
 
@@ -3830,7 +3940,7 @@ function broadcastToWindow(windowId, msg) {
 }
 
 // Initialize MCP server (async, ~100ms for dynamic import)
-initMCP({ app, shells, wss, broadcast, broadcastToWindow, log, MODS_DIR, closeSession, spawnSession, sessionEnv, getSpawnArgs, mcpConfigArgs, getAgentConfig, wireShellOutput, watchClaudeSessionDir, unwatchClaudeSessionDir, saveState, validateWorktree, ensureWorktree, sessionPaths, submitToShell, fetchIssueFromGitHub, deliverPromptWhenReady, reloadClients, deliverToWindow, settings, isShuttingDown: () => shuttingDown, displayTabs, setDisplayTab, deleteDisplayTab, screenshots, setScreenshot, deleteScreenshot, getScreenshotPath, getDefaultEngine, sessionLog, emitSessionOpen }).catch(e => log('MCP init failed:', e.message));
+initMCP({ app, shells, wss, broadcast, broadcastToWindow, log, MODS_DIR, closeSession, spawnSession, sessionEnv, getSpawnArgs, mcpConfigArgs, getAgentConfig, wireShellOutput, watchClaudeSessionDir, unwatchClaudeSessionDir, saveState, validateWorktree, ensureWorktree, sessionPaths, submitToShell, fetchIssueFromGitHub, deliverPromptWhenReady, reloadClients, deliverToWindow, settings, isShuttingDown: () => shuttingDown, displayTabs, setDisplayTab, deleteDisplayTab, screenshots, setScreenshot, deleteScreenshot, getScreenshotPath, getDefaultEngine, sessionLog, emitSessionOpen, getContexts: () => contexts, pathInside }).catch(e => log('MCP init failed:', e.message));
 
 // Watch themes directory for changes and broadcast to clients
 let themeWatchDebounce = null;

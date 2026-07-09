@@ -19,7 +19,7 @@ import { init as initProgressBar, start as progressStart, done as progressDone }
 import { init as initHashCommands, beforeSend as hashCommandsBeforeSend, setWaitingForInput as setHashCommandsWaiting, setEnabled as setHashCommandsEnabled } from './hash-commands.js';
 import { init as initOverviewMode, setEnabled as setOverviewModeEnabled, setShortcut as setOverviewModeShortcut, setDefaultLayout as setOverviewDefaultLayout, toggle as toggleOverviewMode, isOverviewActive, updateFocus as updateOverviewFocus, onTabsReordered as onOverviewTabsReordered } from './overview-mode.js';
 import { init as initTerminalSearch, attachSearchAddon, closeIfOpen as closeTerminalSearch } from './terminal-search.js';
-import { init as initContextViews, setEnabled as setContextViewsEnabled, applyFilter as refreshContextFilter, requestNewTabInContext } from './context-views.js';
+import { init as initContextViews, setEnabled as setContextViewsEnabled, applyFilter as refreshContextFilter, requestNewTabInContext, setContexts as applyServerContexts, setActiveContext as setActiveContextFromPanel, getActiveContextId } from './context-views.js';
 import { nsKey } from './storage-namespace.js';
 
 // Configuration
@@ -1741,6 +1741,10 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
         ModManager.notifyTasksChanged(msg.tasks);
       } else if (msg.type === 'scheduled-tasks') {
         ModManager.notifyScheduledTasksChanged();
+      } else if (msg.type === 'contexts') {
+        // Unified groups (#526): update the tab-strip rail and any panel subscribers.
+        applyServerContexts(msg.contexts);
+        ModManager.notifyContextsChanged(msg.contexts);
       } else if (msg.type === 'agent-chat') {
         ModManager.notifyAgentChatChanged(msg.channels);
       } else if (msg.type === 'browser-eval-request') {
@@ -3329,6 +3333,9 @@ async function init() {
     },
     showAutoCycleToast,
     hideAutoCycleToast,
+    // Unified groups/contexts (#526): let a panel read + drive the active context.
+    getActiveContextId: () => getActiveContextId(),
+    setActiveContext: (id) => setActiveContextFromPanel(id),
   });
 
   // Initialize Context Views (folder-based tab grouping + left panel).
@@ -3345,6 +3352,9 @@ async function init() {
     createSessionInDir: (cwd) => createSession(cwd, null, true, { agentType: getDefaultAgentType() }),
     showDirPicker: () => showDirectoryPicker(),
     getRecentDirs: () => SessionStore.getRecentDirs(),
+    // Bidirectional group/context sync (#526): tell the scheduled-tasks panel
+    // which context is active whenever the rail changes it.
+    onActiveContextChanged: (id) => ModManager.notifyActiveContextChanged(id),
   });
 
   // File drag-and-drop upload
@@ -3379,6 +3389,10 @@ async function init() {
       if (msg.type === 'theme') applyTheme(msg.css || '');
       if (msg.type === 'settings') applySettings(msg);
       if (msg.type === 'skills-changed') ModManager.handleSkillsChanged(msg.enabledSkills);
+      if (msg.type === 'contexts') {
+        applyServerContexts(msg.contexts);
+        ModManager.notifyContextsChanged(msg.contexts);
+      }
       if (msg.type === 'open-session') {
         // Server created a session (e.g. via /api/start-issue) — open a tab for it
         if (msg.windowId && msg.windowId !== getWindowId()) return;

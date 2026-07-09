@@ -1,6 +1,6 @@
 import * as React from 'react';
 import * as ReactDOM from 'react-dom/client';
-const { useState, useEffect, useCallback, useMemo } = React;
+const { useState, useEffect, useMemo } = React;
 
 const DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const DAY_FULL = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
@@ -98,6 +98,20 @@ function api(method, url, body) {
     if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
     return data;
   });
+}
+
+// Match the 8-char ids the Context View / server mint for contexts (#526).
+function genId() {
+  try { return crypto.randomUUID().slice(0, 8); }
+  catch { return Math.random().toString(36).slice(2, 10); }
+}
+
+// A task's repo root belongs to a context folder when it equals or nests inside
+// it — the same folder-prefix rule the server and Context View use (#526).
+function inside(p, dir) {
+  if (!p || !dir) return false;
+  const base = String(dir).replace(/\/+$/, '');
+  return p === base || p.startsWith(base + '/');
 }
 
 // ------------------------------------------------------------------ Task card
@@ -279,32 +293,40 @@ function TaskForm({ task, projects, onClose }) {
 }
 
 // ------------------------------------------------------------------ Groups
-function GroupsManager({ groups, projects, onClose }) {
+// Groups here are the shared "contexts" (#526): the same entity the Context View
+// rail manages. This editor picks members from the known-repo list; the rail can
+// also add arbitrary folders. Saving a name that already exists merges the picked
+// repos into that context (never wipes its other folders).
+function GroupsManager({ contexts, projects, onClose }) {
   const [name, setName] = useState('');
   const [sel, setSel] = useState([]);
   const create = async () => {
-    if (!name.trim()) return;
-    await api('POST', '/api/project-groups', { name: name.trim(), projects: sel });
+    const nm = name.trim();
+    if (!nm) return;
+    const existing = contexts.find((c) => c.name === nm);
+    const id = existing ? existing.id : genId();
+    const dirs = existing ? [...new Set([...(existing.dirs || []), ...sel])] : sel;
+    await api('POST', '/api/contexts', { id, name: nm, dirs }).catch((e) => alert(e.message));
     setName(''); setSel([]);
   };
   const toggle = (root) => setSel((s) => (s.includes(root) ? s.filter((x) => x !== root) : [...s, root]));
-  const del = (n) => api('DELETE', `/api/project-groups/${encodeURIComponent(n)}`).catch((e) => alert(e.message));
+  const del = (id) => api('DELETE', `/api/contexts/${encodeURIComponent(id)}`).catch((e) => alert(e.message));
   const nameOf = (root) => { const p = projects.find((x) => x.root === root); return p ? p.name : root; };
 
   return (
     <div style={{ border: `1px solid ${C.border}`, borderRadius: 6, padding: 12, marginBottom: 10, background: C.bg2 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-        <div style={{ fontWeight: 600 }}>Project groups</div>
+        <div style={{ fontWeight: 600 }}>Groups (contexts)</div>
         <button onClick={onClose} style={btn()}>Close</button>
       </div>
-      {groups.map((g) => (
-        <div key={g.name} style={{ marginTop: 8, fontSize: 12 }}>
-          <b>{g.name}</b> <button onClick={() => del(g.name)} style={{ ...btn(C.red), padding: '0 6px', marginLeft: 6 }}>×</button>
-          <div style={{ color: C.dim, marginTop: 2 }}>{(g.projects || []).map(nameOf).join(', ') || '(no repos)'}</div>
+      {contexts.map((g) => (
+        <div key={g.id} style={{ marginTop: 8, fontSize: 12 }}>
+          <b>{g.name}</b> <button onClick={() => del(g.id)} style={{ ...btn(C.red), padding: '0 6px', marginLeft: 6 }}>×</button>
+          <div style={{ color: C.dim, marginTop: 2 }}>{(g.dirs || []).map(nameOf).join(', ') || '(no folders)'}</div>
         </div>
       ))}
       <div style={{ borderTop: `1px solid ${C.border}`, marginTop: 10, paddingTop: 8 }}>
-        <label style={label()}>New group name</label>
+        <label style={label()}>Group name</label>
         <input style={input()} value={name} onChange={(e) => setName(e.target.value)} placeholder="acme" />
         <label style={label()}>Repos in group</label>
         <div style={{ maxHeight: 160, overflow: 'auto' }}>
@@ -315,7 +337,7 @@ function GroupsManager({ groups, projects, onClose }) {
           ))}
           {projects.length === 0 && <div style={{ fontSize: 12, color: C.dim }}>No known projects yet.</div>}
         </div>
-        <button onClick={create} style={{ ...btn(C.accent), marginTop: 8 }}>Create group</button>
+        <button onClick={create} style={{ ...btn(C.accent), marginTop: 8 }}>Save group</button>
       </div>
     </div>
   );
@@ -323,39 +345,40 @@ function GroupsManager({ groups, projects, onClose }) {
 
 // ------------------------------------------------------------------ Root
 function App() {
-  const [data, setData] = useState({ tasks: [], groups: [], projects: [], enabled: true });
+  const [data, setData] = useState({ tasks: [], projects: [], enabled: true });
+  const [contexts, setContexts] = useState([]); // the shared groups (#526)
   const [filter, setFilter] = useState({ type: 'all', value: '' });
   const [editing, setEditing] = useState(null); // null | 'new' | task
   const [showGroups, setShowGroups] = useState(false);
 
   useEffect(() => {
-    let unsub = null;
+    const unsubs = [];
     function setup() {
-      unsub = window.deepsteve.onScheduledTasksChanged((d) => setData(d || { tasks: [], groups: [], projects: [], enabled: true }));
+      const ds = window.deepsteve;
+      unsubs.push(ds.onScheduledTasksChanged((d) => setData(d || { tasks: [], projects: [], enabled: true })));
+      // Groups the panel scopes by ARE the Context View's contexts (#526).
+      if (ds.onContextsChanged) unsubs.push(ds.onContextsChanged((list) => setContexts(list || [])));
+      // Follow the context selected in the rail (context → panel filter).
+      if (ds.onActiveContextChanged) unsubs.push(ds.onActiveContextChanged((id) =>
+        setFilter(id ? { type: 'group', value: id } : { type: 'all', value: '' })));
     }
     if (window.deepsteve) setup();
     else {
       let n = 0;
       const t = setInterval(() => { if (window.deepsteve) { clearInterval(t); setup(); } else if (++n > 100) clearInterval(t); }, 100);
     }
-    return () => { if (unsub) unsub(); };
+    return () => { for (const u of unsubs) { try { u(); } catch {} } };
   }, []);
-
-  const siblingsOf = useCallback((proj) => {
-    const set = new Set([proj]);
-    for (const g of data.groups) if ((g.projects || []).includes(proj)) for (const p of g.projects) set.add(p);
-    return set;
-  }, [data.groups]);
 
   const visible = useMemo(() => {
     if (filter.type === 'project') return data.tasks.filter((t) => (t.project || '') === filter.value);
     if (filter.type === 'group') {
-      const g = data.groups.find((x) => x.name === filter.value);
-      const set = new Set(g ? g.projects || [] : []);
-      return data.tasks.filter((t) => set.has(t.project));
+      const c = contexts.find((x) => x.id === filter.value);
+      const dirs = c ? (c.dirs || []) : [];
+      return data.tasks.filter((t) => dirs.some((d) => inside(t.project, d)));
     }
     return data.tasks;
-  }, [data, filter]);
+  }, [data, contexts, filter]);
 
   // group visible tasks by project for display
   const sections = useMemo(() => {
@@ -388,15 +411,23 @@ function App() {
         <select
           style={{ ...input(), marginTop: 0, flex: 1 }}
           value={`${filter.type}:${filter.value}`}
-          onChange={(e) => { const [type, ...rest] = e.target.value.split(':'); setFilter({ type, value: rest.join(':') }); }}
+          onChange={(e) => {
+            const [type, ...rest] = e.target.value.split(':');
+            const value = rest.join(':');
+            setFilter({ type, value });
+            // Bidirectional (#526): group / all selections also drive the rail's
+            // active context; a per-project selection stays panel-local.
+            if (type === 'group') window.deepsteve.setActiveContext?.(value);
+            else if (type === 'all') window.deepsteve.setActiveContext?.(null);
+          }}
         >
           <option value="all:">All projects</option>
-          {data.groups.length > 0 && <optgroup label="Groups">{data.groups.map((g) => <option key={g.name} value={`group:${g.name}`}>Group: {g.name}</option>)}</optgroup>}
+          {contexts.length > 0 && <optgroup label="Groups">{contexts.map((g) => <option key={g.id} value={`group:${g.id}`}>Group: {g.name}</option>)}</optgroup>}
           {data.projects.length > 0 && <optgroup label="Projects">{data.projects.map((p) => <option key={p.root} value={`project:${p.root}`}>{p.name}</option>)}</optgroup>}
         </select>
       </div>
 
-      {showGroups && <GroupsManager groups={data.groups} projects={data.projects} onClose={() => setShowGroups(false)} />}
+      {showGroups && <GroupsManager contexts={contexts} projects={data.projects} onClose={() => setShowGroups(false)} />}
       {editing && <TaskForm task={editing === 'new' ? null : editing} projects={data.projects} onClose={() => setEditing(null)} />}
 
       {sections.length === 0 && !editing && (
