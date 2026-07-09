@@ -35,6 +35,7 @@ let cmdChordArmed = false;  // true between a Cmd+P press and the Cmd release �
 let cb = {};       // callbacks injected by app.js
 let rail = null;   // #context-rail element
 let toggleBtn = null;
+let emptyOverlay = null; // #context-empty-state — covers the terminal area when the active context has no tabs
 
 // ---------------------------------------------------------------- persistence
 
@@ -90,6 +91,19 @@ function activeContextHasTabs() {
 
 // --------------------------------------------------------------------- filter
 
+// Show/hide the empty-context placeholder over the terminal area. It's an
+// opaque overlay (z-index above terminal containers) rather than a real tab, so
+// the previously-active terminal stays alive underneath and reappears the moment
+// the overlay is hidden — no activeId/container juggling needed in app.js.
+function setEmptyOverlay(show) {
+  if (!emptyOverlay) return;
+  const wasHidden = emptyOverlay.classList.contains('hidden');
+  emptyOverlay.classList.toggle('hidden', !show);
+  // Move focus onto the button when it first appears so keystrokes don't leak to
+  // the covered terminal's (still-focused) hidden textarea.
+  if (show && wasHidden) emptyOverlay.querySelector('button')?.focus();
+}
+
 export function applyFilter() {
   if (!enabled) return;
   const ctx = getActiveContext();
@@ -112,6 +126,10 @@ export function applyFilter() {
       document.getElementById('tab-' + activeTab)?.classList.contains('context-hidden');
     if (activeHidden && firstVisible) cb.switchToTab?.(firstVisible);
   }
+
+  // A context with no matching tabs has no terminal to show — cover the stale
+  // one with the empty-state placeholder. Any other state hides it.
+  setEmptyOverlay(!!ctx && firstVisible === null);
 
   renderRail();
 }
@@ -521,6 +539,24 @@ export function init(callbacks) {
   if (appContainer && appMain) appContainer.insertBefore(rail, appMain);
   else if (appContainer) appContainer.insertBefore(rail, appContainer.firstChild);
 
+  // Empty-context placeholder — an opaque overlay over the terminal area, shown
+  // when the active context has no matching tabs (see setEmptyOverlay).
+  const terminals = document.getElementById('terminals');
+  if (terminals) {
+    emptyOverlay = document.createElement('div');
+    emptyOverlay.id = 'context-empty-state';
+    emptyOverlay.className = 'hidden';
+    const msg = document.createElement('div');
+    msg.className = 'context-empty-msg';
+    msg.textContent = 'No tabs in this context.';
+    const btn = document.createElement('button');
+    btn.className = 'context-empty-new';
+    btn.textContent = '+ New tab in this context';
+    btn.onclick = () => newTabInActiveContext();
+    emptyOverlay.append(msg, btn);
+    terminals.appendChild(emptyOverlay);
+  }
+
   setSidebar(sidebarOpen);
   applyFilter();
 
@@ -533,6 +569,7 @@ export function setEnabled(val) {
   if (toggleBtn) toggleBtn.style.display = enabled ? '' : 'none';
   if (!enabled) {
     setSidebar(false);
+    setEmptyOverlay(false);
     // Un-hide any filtered tabs so disabling the feature reveals everything.
     document.querySelectorAll('.tab.context-hidden').forEach(t => t.classList.remove('context-hidden'));
   } else {

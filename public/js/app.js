@@ -308,6 +308,16 @@ function updateEmptyState() {
   if (el) el.classList.toggle('hidden', sessions.size > 0);
 }
 
+// Ordered tab ids from the strip. getAllTabIds() is context-filter unaware (use
+// where the full set matters: applying the context filter, saving a window
+// config). getVisibleTabIds() drops tabs the active context hides — so tab
+// navigation stays in-context — and equals getAllTabIds() whenever no context
+// filter is active (the "All" view / disabled feature un-hide every tab).
+const getAllTabIds = () =>
+  [...document.querySelectorAll('#tabs-list .tab')].map(t => t.id.replace('tab-', ''));
+const getVisibleTabIds = () =>
+  [...document.querySelectorAll('#tabs-list .tab:not(.context-hidden)')].map(t => t.id.replace('tab-', ''));
+
 let windowConfigs = [];
 
 function renderEmptyStateConfigs() {
@@ -1331,7 +1341,7 @@ settingsBtn?.addEventListener('click', async () => {
   overlay.querySelector('#settings-new-config').onclick = () => showConfigEditor(-1);
   overlay.querySelector('#settings-save-current').onclick = async () => {
     const currentTabs = [];
-    const orderedIds = [...document.querySelectorAll('#tabs-list .tab')].map(t => t.id.replace('tab-', ''));
+    const orderedIds = getAllTabIds();
     for (const id of orderedIds) {
       const s = sessions.get(id);
       if (!s) continue;
@@ -3334,7 +3344,7 @@ async function init() {
   // Initialize Context Views (folder-based tab grouping + left panel).
   // Must run after ModManager.init() — the rail mounts as #app-container's first child.
   initContextViews({
-    getOrderedTabIds: () => [...document.querySelectorAll('#tabs-list .tab')].map(t => t.id.replace('tab-', '')),
+    getOrderedTabIds: getAllTabIds,
     getActiveTabId: () => activeId,
     getTabCwd: (id) => sessions.get(id)?.cwd || null,
     getTabName: (id) => {
@@ -3442,7 +3452,7 @@ async function init() {
 
   // Initialize Cmd hold mode (tab switching — capture-phase listeners, off by default)
   initCmdHoldMode({
-    getOrderedTabIds: () => [...document.querySelectorAll('#tabs-list .tab')].map(t => t.id.replace('tab-', '')),
+    getOrderedTabIds: getVisibleTabIds,
     getActiveTabId: () => activeId,
     switchToTab: switchTo,
   });
@@ -3452,7 +3462,7 @@ async function init() {
 
   // Initialize Command Palette (Cmd+K by default, on by default)
   initCommandPalette({
-    getOrderedTabIds: () => [...document.querySelectorAll('#tabs-list .tab')].map(t => t.id.replace('tab-', '')),
+    getOrderedTabIds: getVisibleTabIds,
     getActiveTabId: () => activeId,
     getTabName: (id) => {
       const s = sessions.get(id);
@@ -3477,7 +3487,7 @@ async function init() {
 
   // Initialize Overview Mode (Cmd+O by default)
   initOverviewMode({
-    getOrderedTabIds: () => [...document.querySelectorAll('#tabs-list .tab')].map(t => t.id.replace('tab-', '')),
+    getOrderedTabIds: getVisibleTabIds,
     getActiveTabId: () => activeId,
     getSession: (id) => sessions.get(id),
     getTabName: (id) => {
