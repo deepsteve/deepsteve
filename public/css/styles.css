@@ -896,6 +896,15 @@ kbd {
 /* Filtered-out tabs (not in the active context) */
 .tab.context-hidden { display: none !important; }
 
+/* Empty-context placeholder — opaque overlay covering the terminal area (above
+   the absolutely-positioned .terminal-container siblings) when the active
+   context has no matching tabs. */
+#context-empty-state { position: absolute; inset: 0; z-index: 10; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px; background: var(--ds-bg-primary); user-select: none; }
+#context-empty-state.hidden { display: none; }
+.context-empty-msg { color: var(--ds-text-secondary); font-size: 14px; }
+.context-empty-new { padding: 8px 20px; font-size: 14px; font-family: inherit; color: var(--ds-text-primary); background: var(--ds-bg-tertiary); border: 1px solid var(--ds-border); border-radius: 6px; cursor: pointer; opacity: 0.85; transition: opacity 0.15s, background 0.15s; }
+.context-empty-new:hover { opacity: 1; background: var(--ds-bg-secondary); }
+
 /* Left context panel — full-height column, left of everything (first child of
    #app-container). Look is driven entirely by the --ds-context-* custom
    properties so a theme can restyle it (width, colour, rounding, gap, shadow)
