@@ -931,6 +931,20 @@ kbd {
 .context-row-edit { opacity: 0; font-size: 12px; padding: 0 2px; }
 .context-row:hover .context-row-edit { opacity: 0.55; }
 .context-row-edit:hover { opacity: 1; }
+/* Tab-count badge (#529). --ds-border (not --ds-bg-tertiary) so the pill stays
+   legible on active/hover rows, which use --ds-bg-tertiary as their background. */
+.context-row-count {
+  flex-shrink: 0;              /* label is flex:1 and truncates; badge must not shrink */
+  min-width: 18px;
+  padding: 0 6px;
+  border-radius: 9px;
+  background: var(--ds-border);
+  color: var(--ds-text-secondary);
+  font-size: 10px;
+  line-height: 16px;
+  text-align: center;
+  font-variant-numeric: tabular-nums; /* 1- vs 2-digit counts don't jitter */
+}
 .context-empty-note { padding: 8px 12px; font-size: 11px; color: var(--ds-text-secondary); cursor: pointer; line-height: 1.4; }
 .context-empty-note:hover { color: var(--ds-text-primary); }
 .context-add { margin-top: auto; padding: 9px 12px; cursor: pointer; color: var(--ds-accent-green-soft); font-size: 13px; border-top: 1px solid var(--ds-border); }

@@ -103,6 +103,19 @@ function activeContextHasTabs() {
   return ids.some(id => tabInContext(cb.getTabCwd?.(id), ctx));
 }
 
+// Owned-tab count for the rail badge (#529). "All" (ctx null) → every tab. A real
+// context → only tabs whose real cwd is inside its dirs; no-cwd global tabs
+// (mod/display) are excluded so they don't inflate every context. This means the
+// per-context counts intentionally won't sum to the "All" total.
+function contextTabCount(ctx) {
+  const ids = cb.getOrderedTabIds ? cb.getOrderedTabIds() : [];
+  if (!ctx) return ids.length;
+  return ids.reduce((n, id) => {
+    const cwd = cb.getTabCwd?.(id);
+    return n + (cwd && tabInContext(cwd, ctx) ? 1 : 0);
+  }, 0);
+}
+
 // --------------------------------------------------------------------- filter
 
 // Show/hide the empty-context placeholder over the terminal area. It's an
@@ -197,6 +210,15 @@ function makeRow(id, name, active, ctx) {
   label.className = 'context-row-label';
   label.textContent = name;
   row.appendChild(label);
+
+  const n = contextTabCount(ctx);
+  if (n > 0) {
+    const count = document.createElement('span');
+    count.className = 'context-row-count';
+    count.textContent = n;
+    count.title = n + (n === 1 ? ' tab' : ' tabs');
+    row.appendChild(count);
+  }
 
   if (ctx) {
     const edit = document.createElement('span');
