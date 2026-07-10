@@ -139,6 +139,14 @@ function safeNextRun(cronStr, from) {
   catch (e) { if (ctx) ctx.log(`[scheduled] bad cron "${cronStr}": ${e.message}`); return null; }
 }
 
+// Next fire time for a task. A one-shot (#528) fires at its next cron match and then
+// retires: once it has fired (firedAt set) it never re-arms — returning null here is
+// what makes it run exactly once. Recurring tasks always recompute from their cron.
+function nextRunFor(task, from) {
+  if (task.once && task.firedAt) return null;
+  return safeNextRun(task.cron, from);
+}
+
 // Wrap a task's prompt with the scheduled-run contract: tell the agent this is an
 // automated scheduled run and have it self-report via the MCP tools so the run
 // record reflects real work rather than the session lifecycle (#525).
@@ -252,14 +260,21 @@ function tick() {
   let changed = false;
   for (const task of tasks) {
     if (!task.enabled) continue;
-    if (task.nextRun == null) { task.nextRun = safeNextRun(task.cron, now); changed = true; continue; }
+    if (task.once && task.firedAt) continue; // one-shot already fired — done, never again
+    if (task.nextRun == null) { task.nextRun = nextRunFor(task, now); changed = true; continue; }
     if (task.nextRun <= now) {
-      runTask(task, 'schedule');
-      task.nextRun = safeNextRun(task.cron, now);
+      const started = runTask(task, 'schedule');
+      if (task.once) {
+        // Retire on a successful fire; if overlap-skipped (started == null) leave nextRun
+        // (a past time) so the next tick retries the missed fire.
+        if (started) { task.firedAt = now; task.nextRun = null; }
+      } else {
+        task.nextRun = nextRunFor(task, now);
+      }
       changed = true;
     }
   }
-  if (changed) saveTasks();
+  if (changed) { saveTasks(); broadcastTasks(); }
 }
 
 // One-shot startup pass: run each genuinely-overdue task ONCE (catch-up), then
@@ -271,11 +286,22 @@ function runCatchUp() {
   let changed = false;
   for (const task of tasks) {
     if (!task.enabled) continue;
+    if (task.once && task.firedAt) continue; // one-shot already fired — never re-run or re-arm
     if (task.nextRun != null && task.nextRun <= now) {
       log_(`catch-up running overdue "${task.title}" (${task.id})`);
-      runTask(task, 'catch-up');
+      const started = runTask(task, 'catch-up');
+      if (task.once) {
+        // Retire on a successful catch-up fire; if overlap-skipped, leave nextRun to retry.
+        if (started) { task.firedAt = now; task.nextRun = null; changed = true; }
+        continue; // never recompute a one-shot forward
+      }
+    } else if (task.once) {
+      // A one-shot not yet due: leave nextRun alone (its absolute time is already correct).
+      // Only backfill a missing nextRun (e.g. re-enabled while the daemon was down).
+      if (task.nextRun == null) { task.nextRun = nextRunFor(task, now); changed = true; }
+      continue;
     }
-    if (task.nextRun == null || task.nextRun <= now) { task.nextRun = safeNextRun(task.cron, now); changed = true; }
+    if (task.nextRun == null || task.nextRun <= now) { task.nextRun = nextRunFor(task, now); changed = true; }
   }
   if (changed) { saveTasks(); broadcastTasks(); }
 }
@@ -291,8 +317,8 @@ function startScheduler() {
 
 // --- CRUD used by both MCP tools and REST ---------------------------------
 
-function createTask({ title, prompt, cron: cronStr, project, agentType, planMode, enabled, createdBy, keepOpen, keepOpenOnFailure }) {
-  cron.parseCron(cronStr); // throws on invalid — caller catches
+function createTask({ title, prompt, cron: cronStr, once, project, agentType, planMode, enabled, createdBy, keepOpen, keepOpenOnFailure }) {
+  cron.parseCron(cronStr); // throws on invalid — caller catches (a one-shot still uses a cron)
   const now = Date.now();
   const task = {
     id: randomUUID().slice(0, 8),
@@ -307,13 +333,18 @@ function createTask({ title, prompt, cron: cronStr, project, agentType, planMode
     keepOpen: !!keepOpen,
     keepOpenOnFailure: !!keepOpenOnFailure,
     cron: cronStr.trim(),
+    // One-shot (#528): fires at the next cron match then retires (firedAt set). firedAt
+    // stays null on a manual Run now — only the scheduled/catch-up fire retires it.
+    once: !!once,
+    firedAt: null,
     enabled: enabled !== false,
     createdAt: now,
     createdBy: createdBy || null,
     lastRun: null,
-    nextRun: safeNextRun(cronStr, now),
+    nextRun: null,
     runs: [],
   };
+  task.nextRun = nextRunFor(task, now);
   tasks.push(task);
   saveTasks();
   broadcastTasks();
@@ -331,9 +362,11 @@ function updateTask(id, fields) {
   if (fields.planMode !== undefined) task.planMode = !!fields.planMode;
   if (fields.keepOpen !== undefined) task.keepOpen = !!fields.keepOpen;
   if (fields.keepOpenOnFailure !== undefined) task.keepOpenOnFailure = !!fields.keepOpenOnFailure;
+  if (fields.once !== undefined) task.once = !!fields.once;
   if (fields.enabled !== undefined) task.enabled = !!fields.enabled;
-  // Recompute next run from any schedule/enable change.
-  task.nextRun = task.enabled ? safeNextRun(task.cron, Date.now()) : null;
+  // Recompute next run from any schedule/enable change. A one-shot that has already
+  // fired stays retired (nextRunFor returns null via its firedAt guard).
+  task.nextRun = task.enabled ? nextRunFor(task, Date.now()) : null;
   saveTasks();
   broadcastTasks();
   return task;
@@ -348,6 +381,19 @@ function deleteTask(id) {
   return true;
 }
 
+// Human-readable schedule for the panel/tools. A one-shot's cron (e.g. "0 15 * * *")
+// would read as "Every day at 15:00", which is misleading for a run-once — so show the
+// concrete single fire time instead, or "fired …" once it has retired (#528).
+function scheduleLabel(task) {
+  if (task.once) {
+    if (task.firedAt) return `One-shot · fired ${new Date(task.firedAt).toLocaleString()}`;
+    return task.nextRun
+      ? `One-shot · ${new Date(task.nextRun).toLocaleString()}`
+      : `One-shot · ${cron.describe(task.cron)}`;
+  }
+  return cron.describe(task.cron);
+}
+
 // Compact one task for tool/JSON output.
 function taskView(task) {
   const lastRun = task.runs && task.runs[0];
@@ -357,7 +403,10 @@ function taskView(task) {
     project: task.project || null,
     projectName: displayName(task.project),
     cron: task.cron,
-    schedule: cron.describe(task.cron),
+    schedule: scheduleLabel(task),
+    once: !!task.once,
+    firedAt: task.firedAt || null,
+    done: !!(task.once && task.firedAt),
     agentType: task.agentType,
     planMode: !!task.planMode,
     keepOpen: !!task.keepOpen,
@@ -375,12 +424,14 @@ function formatTaskLines(list) {
   if (list.length === 0) return 'No scheduled tasks.';
   return list.map(t => {
     const v = taskView(t);
-    const state = v.enabled ? '' : ' (disabled)';
+    const state = v.done ? ' (one-shot, done)' : v.once ? ' (one-shot)' : v.enabled ? '' : ' (disabled)';
     const next = v.nextRun ? new Date(v.nextRun).toLocaleString() : 'n/a';
+    // A retired one-shot has no next run — don't print a misleading "n/a".
+    const nextLine = v.done ? '' : `\n  next run: ${next}`;
     const lastLine = v.lastRun
       ? `\n  last run: ${new Date(v.lastRun).toLocaleString()} [${v.lastStatus}]${v.lastSummary ? ` — ${v.lastSummary}` : ''}`
       : '';
-    return `#${v.id} "${v.title}"${state}\n  ${v.schedule} (cron: ${v.cron})\n  project: ${v.project || 'none'}\n  next run: ${next}${lastLine}`;
+    return `#${v.id} "${v.title}"${state}\n  ${v.schedule} (cron: ${v.cron})\n  project: ${v.project || 'none'}${nextLine}${lastLine}`;
   }).join('\n\n');
 }
 
@@ -394,11 +445,12 @@ function init(context) {
 
   return {
     schedule_task: {
-      description: 'Schedule a recurring local agent task that runs on this machine (with full access to the project\'s MCP servers). Tasks are organized by project. Use for recurring reports/maintenance/digests that need local MCP — e.g. a weekly analytics report.',
+      description: 'Schedule a local agent task that runs on this machine (with full access to the project\'s MCP servers). Tasks are organized by project. Recurring by default; pass once:true for a run-once task that fires at the next cron match and then retires itself (no need to unschedule it afterward). Use for reports/maintenance/digests that need local MCP — e.g. a weekly analytics report.',
       schema: {
         title: z.string().describe('Short title for the task'),
         prompt: z.string().describe('The prompt/instructions the agent runs each time'),
-        cron: z.string().describe('5-field cron in local time: "min hour day-of-month month day-of-week". E.g. "0 9 * * 1" = every Monday 9am.'),
+        cron: z.string().describe('5-field cron in local time: "min hour day-of-month month day-of-week". E.g. "0 9 * * 1" = every Monday 9am. For a one-shot (once:true), this is just the next matching time to fire at.'),
+        once: z.boolean().optional().describe('Run exactly once at the next cron match, then retire (kept as a done row). Default false (recurring).'),
         project: z.string().optional().describe('Repo path to run in (canonicalized to its git root). Defaults to the calling session\'s project.'),
         agent_type: z.string().optional().describe('Agent to run (default "claude" — the MCP-capable agent).'),
         plan_mode: z.boolean().optional().describe('Start the agent in plan mode (default false).'),
@@ -406,11 +458,11 @@ function init(context) {
         keep_open_on_failure: z.boolean().optional().describe('Keep the tab open when a run fails, even if auto-close is on (default false).'),
         enabled: z.boolean().optional().describe('Whether the schedule is active (default true).'),
       },
-      handler: async ({ title, prompt, cron: cronStr, project, agent_type, plan_mode, keep_open, keep_open_on_failure, enabled }, extra) => {
+      handler: async ({ title, prompt, cron: cronStr, once, project, agent_type, plan_mode, keep_open, keep_open_on_failure, enabled }, extra) => {
         let task;
         try {
           task = createTask({
-            title, prompt, cron: cronStr,
+            title, prompt, cron: cronStr, once,
             project: resolveProject(project, callerShellId(extra)),
             agentType: agent_type, planMode: plan_mode, enabled,
             keepOpen: keep_open, keepOpenOnFailure: keep_open_on_failure,
@@ -454,6 +506,7 @@ function init(context) {
         title: z.string().optional(),
         prompt: z.string().optional(),
         cron: z.string().optional().describe('New 5-field cron (local time)'),
+        once: z.boolean().optional().describe('Make this a run-once task (fires at the next cron match, then retires) or back to recurring.'),
         project: z.string().optional(),
         agent_type: z.string().optional(),
         plan_mode: z.boolean().optional(),
@@ -461,11 +514,12 @@ function init(context) {
         keep_open_on_failure: z.boolean().optional().describe('Keep the tab open when a run fails, even if auto-close is on.'),
         enabled: z.boolean().optional(),
       },
-      handler: async ({ id, title, prompt, cron: cronStr, project, agent_type, plan_mode, keep_open, keep_open_on_failure, enabled }, extra) => {
+      handler: async ({ id, title, prompt, cron: cronStr, once, project, agent_type, plan_mode, keep_open, keep_open_on_failure, enabled }, extra) => {
         const fields = {};
         if (title !== undefined) fields.title = title;
         if (prompt !== undefined) fields.prompt = prompt;
         if (cronStr !== undefined) fields.cron = cronStr;
+        if (once !== undefined) fields.once = once;
         if (project !== undefined) fields.project = resolveProject(project, callerShellId(extra));
         if (agent_type !== undefined) fields.agentType = agent_type;
         if (plan_mode !== undefined) fields.planMode = plan_mode;
@@ -560,7 +614,7 @@ function registerRoutes(app, context) {
   app.get('/api/scheduled-tasks', (req, res) => {
     // Enrich each task with a human-readable schedule + project name for the panel,
     // keeping the full stored fields (prompt, runs, nextRun) for editing/history.
-    const enriched = tasks.map(t => ({ ...t, schedule: cron.describe(t.cron), projectName: displayName(t.project) }));
+    const enriched = tasks.map(t => ({ ...t, schedule: scheduleLabel(t), projectName: displayName(t.project) }));
     // Groups (now the shared "contexts") arrive over /api/contexts + the 'contexts'
     // broadcast, not in this payload.
     res.json({ tasks: enriched, projects: knownProjects(), enabled: !!ctx.settings.scheduledTasksEnabled });
@@ -572,7 +626,7 @@ function registerRoutes(app, context) {
     if (projectRoot) projectRoot = resolveProject(projectRoot, null);
     try {
       const task = createTask({
-        title: b.title, prompt: b.prompt, cron: b.cron, project: projectRoot,
+        title: b.title, prompt: b.prompt, cron: b.cron, once: b.once, project: projectRoot,
         agentType: b.agentType, planMode: b.planMode, enabled: b.enabled,
         keepOpen: b.keepOpen, keepOpenOnFailure: b.keepOpenOnFailure,
       });

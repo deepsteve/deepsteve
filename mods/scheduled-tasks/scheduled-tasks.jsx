@@ -134,25 +134,29 @@ function StatusBadge({ status }) {
 function TaskCard({ task, onEdit }) {
   const [open, setOpen] = useState(false);
   const last = task.runs && task.runs[0];
+  // A one-shot that has fired is retired ("done"): keep the row + history, but it will
+  // never run again, so hide the schedule/run controls and just offer Delete (#528).
+  const done = !!(task.once && task.firedAt);
   const runNow = () => api('POST', `/api/scheduled-tasks/${task.id}/run`).catch((e) => alert(e.message));
   const toggle = () => api('POST', `/api/scheduled-tasks/${task.id}/enabled`, { enabled: !task.enabled }).catch((e) => alert(e.message));
   const del = () => { if (confirm(`Delete "${task.title}"?`)) api('DELETE', `/api/scheduled-tasks/${task.id}`).catch((e) => alert(e.message)); };
 
   return (
-    <div style={{ border: `1px solid ${C.border}`, borderRadius: 6, padding: 10, marginBottom: 8, background: C.bg2, opacity: task.enabled ? 1 : 0.6 }}>
+    <div style={{ border: `1px solid ${C.border}`, borderRadius: 6, padding: 10, marginBottom: 8, background: C.bg2, opacity: done ? 0.7 : task.enabled ? 1 : 0.6 }}>
       <div style={{ display: 'flex', alignItems: 'baseline', gap: 6 }}>
         <div style={{ fontWeight: 600, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis' }}>{task.title}</div>
+        {task.once ? <span style={{ fontSize: 10, color: done ? C.green : C.dim, border: `1px solid ${done ? C.green : C.border}`, borderRadius: 4, padding: '0 4px', whiteSpace: 'nowrap' }}>{done ? 'one-shot ✓' : 'one-shot'}</span> : null}
         <StatusBadge status={last && last.status} />
       </div>
       <div style={{ fontSize: 12, color: C.dim, marginTop: 3 }}>{task.schedule || task.cron}</div>
       <div style={{ fontSize: 12, marginTop: 4, display: 'flex', gap: 12, flexWrap: 'wrap' }}>
-        <span title={absTime(task.nextRun)}>next: <b>{task.enabled ? relTime(task.nextRun) : 'paused'}</b></span>
+        {!done ? <span title={absTime(task.nextRun)}>next: <b>{task.enabled ? relTime(task.nextRun) : 'paused'}</b></span> : null}
         {task.lastRun ? <span title={absTime(task.lastRun)}>last: {relTime(task.lastRun)}</span> : null}
       </div>
       <div style={{ display: 'flex', gap: 6, marginTop: 8, flexWrap: 'wrap' }}>
-        <button onClick={runNow} style={btn()}>Run now</button>
-        <button onClick={toggle} style={btn()}>{task.enabled ? 'Pause' : 'Resume'}</button>
-        <button onClick={() => onEdit(task)} style={btn()}>Edit</button>
+        {!done ? <button onClick={runNow} style={btn()}>Run now</button> : null}
+        {!done ? <button onClick={toggle} style={btn()}>{task.enabled ? 'Pause' : 'Resume'}</button> : null}
+        {!done ? <button onClick={() => onEdit(task)} style={btn()}>Edit</button> : null}
         <button onClick={del} style={btn(C.red)}>Delete</button>
         {task.runs && task.runs.length ? <button onClick={() => setOpen(!open)} style={btn()}>{open ? 'Hide' : 'History'}</button> : null}
       </div>
@@ -194,6 +198,7 @@ function TaskForm({ task, projects, onClose }) {
   const [planMode, setPlanMode] = useState(!!initial.planMode);
   const [keepOpen, setKeepOpen] = useState(!!initial.keepOpen);
   const [keepOpenOnFailure, setKeepOpenOnFailure] = useState(!!initial.keepOpenOnFailure);
+  const [once, setOnce] = useState(!!initial.once);
   const [mode, setMode] = useState(initForm.mode);
   const [fld, setFld] = useState(initForm.fld);
   const [saving, setSaving] = useState(false);
@@ -207,7 +212,7 @@ function TaskForm({ task, projects, onClose }) {
     if (!title.trim()) return setErr('Title is required');
     if (!prompt.trim()) return setErr('Prompt is required');
     const proj = project === '__custom__' ? customPath.trim() : project;
-    const body = { title: title.trim(), prompt: prompt.trim(), cron: cronStr, project: proj, agentType, planMode, keepOpen, keepOpenOnFailure };
+    const body = { title: title.trim(), prompt: prompt.trim(), cron: cronStr, once, project: proj, agentType, planMode, keepOpen, keepOpenOnFailure };
     setSaving(true);
     try {
       if (task && task.id) await api('PUT', `/api/scheduled-tasks/${task.id}`, body);
@@ -265,6 +270,11 @@ function TaskForm({ task, projects, onClose }) {
         )}
       </div>
       <div style={{ fontSize: 12, color: C.accent, marginTop: 6 }}>{describeCron(cronStr)} — <span style={{ color: C.dim }}>cron: {cronStr} (local time)</span></div>
+
+      <label style={{ fontSize: 12, color: C.dim, marginTop: 8, display: 'block' }}>
+        <input type="checkbox" checked={once} onChange={(e) => setOnce(e.target.checked)} /> run once (retire after it fires)
+      </label>
+      {once && <div style={{ fontSize: 11, color: C.amber, marginTop: 2 }}>Runs a single time, at the next moment this schedule matches, then marks itself done.</div>}
 
       <div style={{ display: 'flex', gap: 12, marginTop: 10, alignItems: 'center', flexWrap: 'wrap' }}>
         <label style={{ fontSize: 12, color: C.dim }}>Agent{' '}
