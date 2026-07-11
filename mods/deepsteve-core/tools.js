@@ -12,7 +12,7 @@ function deriveTabName(cmd) {
 
 function init(context) {
   const {
-    shells, closeSession, spawnSession, sessionEnv, getSpawnArgs, mcpConfigArgs, getAgentConfig, wireShellOutput, getDefaultEngine,
+    shells, closeSession, spawnSession, sessionEnv, getSpawnArgs, mcpConfigArgs, getAgentConfig, wireShellOutput, getDefaultEngine, getForegroundCommand,
     watchClaudeSessionDir, unwatchClaudeSessionDir, saveState,
     validateWorktree, ensureWorktree, sessionPaths, submitToShell,
     fetchIssueFromGitHub, deliverPromptWhenReady,
@@ -33,7 +33,7 @@ function init(context) {
       },
     },
     get_session_info: {
-      description: 'Get live session metadata for a deepsteve session: tab name, cwd (your actual working directory — the worktree path for worktree sessions), repoRoot (the main repo checkout), and worktree (the worktree name, or null). Use `get_my_session_id` to get your session ID.',
+      description: 'Get live session metadata for a deepsteve session: tab name, cwd (your actual working directory — the worktree path for worktree sessions), repoRoot (the main repo checkout), worktree (the worktree name, or null), and runningCommand (for a plain terminal session, the command running in it right now, or null if it is idle at its prompt; always null for agent sessions). Use `get_my_session_id` to get your session ID.',
       schema: {
         session_id: z.string().describe('The deepsteve session ID. Use `get_my_session_id` to get this value.'),
       },
@@ -53,6 +53,7 @@ function init(context) {
             worktree: entry.worktree || null,
             windowId: entry.windowId || null,
             agentType: entry.agentType || 'claude',
+            runningCommand: entry.agentType === 'terminal' ? getForegroundCommand(session_id) : null,
             createdAt: entry.createdAt || null,
             elapsedMs: entry.createdAt ? Date.now() - entry.createdAt : null,
           }, null, 2) }]
