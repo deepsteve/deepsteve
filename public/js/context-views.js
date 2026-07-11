@@ -38,6 +38,7 @@ let cmdChordArmed = false;  // true between a Cmd+P press and the Cmd release �
 let cb = {};       // callbacks injected by app.js
 let rail = null;   // #context-rail element
 let toggleBtn = null;
+let indicatorEl = null; // #context-indicator — muted active-context name shown next to the toggle when the rail is closed (#531)
 let emptyOverlay = null; // #context-empty-state — covers the terminal area when the active context has no tabs
 
 // ---------------------------------------------------------------- persistence
@@ -146,6 +147,21 @@ export function applyFilter() {
   setEmptyOverlay(!!ctx && firstVisible === null);
 
   renderRail();
+  updateIndicator();
+}
+
+// Muted active-context name shown right of the ◧ toggle, but only while the rail
+// is closed and a real context is filtering (in "All" nothing is hidden, so the
+// label stays blank). This is the sole "which context?" cue when the menu is
+// collapsed (#531). Driven from applyFilter() + setSidebar(), the two choke
+// points every context / open-close transition already passes through.
+function updateIndicator() {
+  if (!indicatorEl) return;
+  const ctx = getActiveContext();               // null in "All"
+  const show = enabled && !sidebarOpen && !!ctx; // rail closed + real context
+  indicatorEl.textContent = show ? ctx.name : '';
+  indicatorEl.classList.toggle('hidden', !show);
+  indicatorEl.title = show ? `Context: ${ctx.name} — click to open (⌘P)` : '';
 }
 
 // ----------------------------------------------------------------- rail (DOM)
@@ -234,6 +250,7 @@ function setSidebar(open) {
     toggleBtn.title = open ? 'Hide contexts (⌘P)' : 'Show contexts (⌘P)';
   }
   if (open) renderRail();
+  updateIndicator();
   window.dispatchEvent(new Event('resize'));
 }
 
@@ -552,7 +569,20 @@ export function init(callbacks) {
   sidebarOpen = loadSidebar();
 
   toggleBtn = document.getElementById('context-toggle');
-  if (toggleBtn) toggleBtn.addEventListener('click', toggleSidebar);
+  if (toggleBtn) {
+    toggleBtn.addEventListener('click', toggleSidebar);
+    // Muted active-context label injected right after the toggle (like the rail
+    // itself, it's created here rather than hard-coded in index.html). Clicking
+    // it opens the rail — it's only ever visible while the rail is closed.
+    indicatorEl = document.createElement('span');
+    indicatorEl.id = 'context-indicator';
+    indicatorEl.className = 'hidden';
+    indicatorEl.addEventListener('click', () => {
+      setSidebar(true);
+      document.activeElement?.blur();
+    });
+    toggleBtn.insertAdjacentElement('afterend', indicatorEl);
+  }
 
   // Mount the rail as the left-most child of #app-container so it spans the full
   // height to the LEFT of everything (tab strip + terminal), not tucked under the

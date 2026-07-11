@@ -893,6 +893,21 @@ kbd {
 /* ---- Context Views (#522) ---- */
 #context-toggle.active { color: var(--ds-accent-blue); background: var(--ds-bg-tertiary); }
 
+/* Muted active-context label shown next to the toggle when the rail is closed (#531) */
+#context-indicator {
+  font-size: 11px;
+  color: var(--ds-text-secondary);
+  cursor: pointer;
+  margin-left: 2px;
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  user-select: none;
+}
+#context-indicator:hover { color: var(--ds-text-primary); }
+#context-indicator.hidden { display: none; }
+
 /* Filtered-out tabs (not in the active context) */
 .tab.context-hidden { display: none !important; }
 
