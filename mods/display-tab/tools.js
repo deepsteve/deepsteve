@@ -2,28 +2,33 @@ const { z } = require('zod');
 const { randomUUID } = require('crypto');
 
 function init(context) {
-  const { shells, reloadClients, pendingOpens, log, displayTabs, setDisplayTab, deleteDisplayTab } = context;
+  const { shells, reloadClients, pendingOpens, log, displayTabs, setDisplayTab, deleteDisplayTab, sessionPaths } = context;
 
   return {
     create_display_tab: {
-      description: 'Create a new browser tab displaying arbitrary HTML content (charts, dashboards, reports). The HTML is rendered in a sandboxed iframe. Pass your DEEPSTEVE_SESSION_ID so the tab opens in the same browser window.',
+      description: 'Create a new browser tab displaying arbitrary HTML content (charts, dashboards, reports). The HTML is rendered in a sandboxed iframe. Pass your DEEPSTEVE_SESSION_ID so the tab opens in the same browser window and is scoped to your Context View (it appears only in the context/project you spawned it from, like a regular session tab).',
       schema: {
-        session_id: z.string().describe('Your DEEPSTEVE_SESSION_ID env var — used to target the correct browser window'),
+        session_id: z.string().describe('Your DEEPSTEVE_SESSION_ID env var — targets the correct browser window and scopes the tab to your context'),
         html: z.string().describe('Full HTML content to display (can include inline CSS/JS, e.g. Chart.js visualizations)'),
         name: z.string().optional().describe('Tab name (defaults to "Display")'),
       },
       handler: async ({ session_id, html, name }) => {
         const caller = shells.get(session_id);
         const windowId = caller?.windowId || null;
+        // Scope the display tab to the caller's context: the Context Views filter
+        // matches a tab's cwd against each context's folders (prefix). Without a cwd
+        // a display tab is treated as global and shows in every context (#530).
+        const cwd = caller ? sessionPaths(caller).cwd : null;
         const tabName = name || 'Display';
         const id = randomUUID().slice(0, 8);
 
         setDisplayTab(id, html);
-        log(`[MCP] create_display_tab: id=${id}, name=${tabName}, caller=${session_id}`);
+        log(`[MCP] create_display_tab: id=${id}, name=${tabName}, caller=${session_id}, cwd=${cwd || '(none)'}`);
 
         // Notify browser to open the display tab (same window-targeting as open_terminal)
         const readyClients = [...reloadClients].filter(c => c.readyState === 1);
-        const openMsg = JSON.stringify({ type: 'open-display-tab', id, name: tabName, windowId });
+        const openMsg = JSON.stringify({ type: 'open-display-tab', id, name: tabName, cwd, windowId });
+        const broadcastMsg = JSON.stringify({ type: 'open-display-tab', id, name: tabName, cwd });
         let delivered = false;
 
         if (windowId) {
@@ -35,7 +40,6 @@ function init(context) {
             }
           }
           if (!delivered && readyClients.length > 0) {
-            const broadcastMsg = JSON.stringify({ type: 'open-display-tab', id, name: tabName });
             for (const client of readyClients) {
               if (client.readyState === 1) client.send(broadcastMsg);
             }
@@ -47,11 +51,11 @@ function init(context) {
           }
         }
         if (!delivered && readyClients.length > 0) {
-          readyClients[0].send(JSON.stringify({ type: 'open-display-tab', id, name: tabName }));
+          readyClients[0].send(broadcastMsg);
           delivered = true;
         }
         if (!delivered) {
-          pendingOpens.push(JSON.stringify({ type: 'open-display-tab', id, name: tabName }));
+          pendingOpens.push(broadcastMsg);
         }
 
         return { content: [{ type: 'text', text: JSON.stringify({ id, name: tabName }) }] };

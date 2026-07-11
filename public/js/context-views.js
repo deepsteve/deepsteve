@@ -6,8 +6,9 @@
  * context when its cwd is inside one of those folders (prefix match), so
  * subdirectories AND worktree sessions (<repo>/.claude/worktrees/...) are
  * included automatically. Selecting a context hides non-matching tabs; "All"
- * shows everything. Tabs with no cwd (mod/display tabs) are treated as global
- * and stay visible in every context.
+ * shows everything. Display tabs carry the cwd of the session that spawned them
+ * (#530), so they scope to that context like any session tab. Tabs with no cwd
+ * (mod tabs) are treated as global and stay visible in every context.
  *
  * UI: a left context panel (#context-rail) toggled by the #context-toggle button
  * (next to the layout switcher) or by Cmd+P — preventDefault'd so the browser's

@@ -2097,14 +2097,17 @@ function createDisplayTab(id, name, opts = {}) {
   container.appendChild(iframe);
 
   const tabName = name || 'Display';
+  // cwd = the spawning session's dir, so Context Views scopes this tab to the
+  // context it was created from (#530). null → global (e.g. saved-layout tabs).
+  const cwd = opts.cwd || null;
   sessions.set(id, {
-    term: null, fit: null, ws: null, container, cwd: null,
+    term: null, fit: null, ws: null, container, cwd,
     name: tabName, waitingForInput: false, hasUnseenActivity: false, scrollControl: null,
     type: 'display-tab', emittingAudio: false,
   });
 
-  TabSessions.add({ id, name: tabName, type: 'display-tab' });
-  SessionStore.addSession(getWindowId(), { id, name: tabName, type: 'display-tab' });
+  TabSessions.add({ id, name: tabName, type: 'display-tab', cwd });
+  SessionStore.addSession(getWindowId(), { id, name: tabName, type: 'display-tab', cwd });
 
   const tabCallbacks = {
     onSwitch: (sessionId) => switchTo(sessionId),
@@ -2234,7 +2237,7 @@ async function restoreSessions(sessionList, opts = {}) {
       return fetch(`/api/display-tab/${entry.id}`, { method: 'HEAD' })
         .then(resp => {
           if (resp.ok) {
-            createDisplayTab(entry.id, entry.name, { restoreActive: true });
+            createDisplayTab(entry.id, entry.name, { restoreActive: true, cwd: entry.cwd });
             return entry.id;
           }
           return null; // server no longer has it
@@ -3422,7 +3425,7 @@ async function init() {
       }
       if (msg.type === 'open-display-tab') {
         if (msg.windowId && msg.windowId !== getWindowId()) return;
-        createDisplayTab(msg.id, msg.name);
+        createDisplayTab(msg.id, msg.name, { cwd: msg.cwd });
       }
       if (msg.type === 'open-browser-tab') {
         if (msg.windowId && msg.windowId !== getWindowId()) return;
