@@ -820,7 +820,7 @@ const AGENT_CONFIGS = {
     supportsSessionId: false,
     supportsSessionWatch: false,
     emitsBel: false,
-    exitMethod: 'ctrl-c',
+    exitMethod: 'sighup', // interactive login zsh ignores SIGINT (trapped by ZLE) and often SIGTERM; SIGHUP = tty hung up → runs .zlogout and exits
     initialPromptDelay: 0,
   }
 };
@@ -1409,6 +1409,11 @@ function killShell(entry, id, reason = 'closed') {
   } else if (config.exitMethod === 'sigterm') {
     // pi: SIGTERM triggers its graceful shutdown handler. Ctrl+C is "cancel turn," not quit.
     try { eng.kill(id, 'SIGTERM'); } catch {}
+  } else if (config.exitMethod === 'sighup') {
+    // Plain terminal: SIGHUP is the "tty hung up" signal an interactive login
+    // shell exits on. SIGINT (Ctrl+C) is trapped by ZLE; SIGTERM is often ignored.
+    // The +8s/+10s SIGTERM/SIGKILL escalation below stays as the net.
+    try { eng.kill(id, 'SIGHUP'); } catch {}
   } else if (config.exitMethod === 'exit-cmd') {
     // Agent supports /exit command (Claude)
     if (entry.waitingForInput) {
@@ -3000,6 +3005,24 @@ app.get('/api/shells/:id/state', (req, res) => {
   res.json({ waitingForInput: entry.waitingForInput || false });
 });
 
+// Best-effort: the command running in a plain-terminal session right now, or
+// null when the shell is idle at its prompt. macOS-only (ps), computed on demand.
+function getForegroundCommand(id) {
+  try {
+    const entry = shells.get(id);
+    if (!entry) return null;
+    const pid = (entry.engine || ptyEngine).getPid(id);
+    if (!pid) return null;
+    // The tty's foreground process group. If it's the shell itself, we're idle.
+    const tpgid = parseInt(execFileSync('/bin/ps', ['-o', 'tpgid=', '-p', String(pid)],
+      { encoding: 'utf8', timeout: 2000 }).trim(), 10);
+    if (!tpgid || tpgid === pid) return null;
+    const out = execFileSync('/bin/ps', ['-o', 'command=', '-g', String(tpgid)],
+      { encoding: 'utf8', timeout: 2000 }).trim();
+    return out ? out.split('\n').map(s => s.trim()).filter(Boolean).join(' | ') : null;
+  } catch { return null; }
+}
+
 app.get('/api/shells/:id/info', (req, res) => {
   const id = req.params.id;
   const entry = shells.get(id);
@@ -3014,6 +3037,7 @@ app.get('/api/shells/:id/info', (req, res) => {
     worktree: entry.worktree || null,
     windowId: entry.windowId || null,
     agentType: entry.agentType || 'claude',
+    runningCommand: entry.agentType === 'terminal' ? getForegroundCommand(id) : null,
     createdAt: entry.createdAt || null,
     elapsedMs: entry.createdAt ? Date.now() - entry.createdAt : null,
   });
@@ -3940,7 +3964,7 @@ function broadcastToWindow(windowId, msg) {
 }
 
 // Initialize MCP server (async, ~100ms for dynamic import)
-initMCP({ app, shells, wss, broadcast, broadcastToWindow, log, MODS_DIR, closeSession, spawnSession, sessionEnv, getSpawnArgs, mcpConfigArgs, getAgentConfig, wireShellOutput, watchClaudeSessionDir, unwatchClaudeSessionDir, saveState, validateWorktree, ensureWorktree, sessionPaths, submitToShell, fetchIssueFromGitHub, deliverPromptWhenReady, reloadClients, deliverToWindow, settings, isShuttingDown: () => shuttingDown, displayTabs, setDisplayTab, deleteDisplayTab, screenshots, setScreenshot, deleteScreenshot, getScreenshotPath, getDefaultEngine, sessionLog, emitSessionOpen, getContexts: () => contexts, pathInside }).catch(e => log('MCP init failed:', e.message));
+initMCP({ app, shells, wss, broadcast, broadcastToWindow, log, MODS_DIR, closeSession, spawnSession, sessionEnv, getSpawnArgs, mcpConfigArgs, getAgentConfig, wireShellOutput, watchClaudeSessionDir, unwatchClaudeSessionDir, saveState, validateWorktree, ensureWorktree, sessionPaths, submitToShell, fetchIssueFromGitHub, deliverPromptWhenReady, reloadClients, deliverToWindow, settings, isShuttingDown: () => shuttingDown, displayTabs, setDisplayTab, deleteDisplayTab, screenshots, setScreenshot, deleteScreenshot, getScreenshotPath, getDefaultEngine, getForegroundCommand, sessionLog, emitSessionOpen, getContexts: () => contexts, pathInside }).catch(e => log('MCP init failed:', e.message));
 
 // Watch themes directory for changes and broadcast to clients
 let themeWatchDebounce = null;
