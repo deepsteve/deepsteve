@@ -71,3 +71,33 @@ body {
     inset 0 0 0 2px #777,
     inset 0 0 8px rgba(0,0,0,0.3);
 }
+
+/* #535 — in the retro terminal theme the closed-context title is NOT shown next
+   to the tabs; render it as a dashed ruled line across the top of the terminal:
+   -------------------- Deep Steve -------------------- */
+#context-indicator { display: none !important; }
+
+#context-rule-title {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 16px 4px;
+  font-size: 12px;
+  color: var(--ds-text-secondary);
+  white-space: nowrap;
+  user-select: none;
+  cursor: pointer;
+  background: var(--ds-bg-primary);
+}
+#context-rule-title::before,
+#context-rule-title::after {
+  content: "";
+  flex: 1;
+  border-top: 1px dashed var(--ds-border);
+}
+#context-rule-title:hover { color: var(--ds-text-primary); }
+#context-rule-title.hidden { display: none; }
+
+/* The rule is a horizontal-layout flourish; in vertical tab layout #app-main is a
+   row, so a full-width band would be wrong — hide it there. */
+#app-container.vertical-layout #context-rule-title { display: none; }

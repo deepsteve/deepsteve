@@ -40,6 +40,7 @@ let cb = {};       // callbacks injected by app.js
 let rail = null;   // #context-rail element
 let toggleBtn = null;
 let indicatorEl = null; // #context-indicator — muted active-context name shown next to the toggle when the rail is closed (#531)
+let ruleTitleEl = null; // #context-rule-title — dashed ruled variant of the same label shown at the top of the terminal in the retro-monitor theme (#535)
 
 // ---------------------------------------------------------------- persistence
 
@@ -165,12 +166,19 @@ export function applyFilter() {
 // collapsed (#531). Driven from applyFilter() + setSidebar(), the two choke
 // points every context / open-close transition already passes through.
 function updateIndicator() {
-  if (!indicatorEl) return;
   const ctx = getActiveContext();               // null in "All"
   const show = enabled && !sidebarOpen && !!ctx; // rail closed + real context
-  indicatorEl.textContent = show ? ctx.name : '';
-  indicatorEl.classList.toggle('hidden', !show);
-  indicatorEl.title = show ? `Context: ${ctx.name} — click to open (⌘P)` : '';
+  const name = show ? ctx.name : '';
+  const tip  = show ? `Context: ${ctx.name} — click to open (⌘P)` : '';
+  // Drive both presentations: the tab-strip label (#context-indicator) and the
+  // ruled terminal title (#context-rule-title). CSS picks which one is visible —
+  // the retro-monitor theme hides the former and reveals the latter (#535).
+  for (const el of [indicatorEl, ruleTitleEl]) {
+    if (!el) continue;
+    el.textContent = name;
+    el.classList.toggle('hidden', !show);
+    el.title = tip;
+  }
 }
 
 // ----------------------------------------------------------------- rail (DOM)
@@ -611,6 +619,24 @@ export function init(callbacks) {
   const appMain = document.getElementById('app-main');
   if (appContainer && appMain) appContainer.insertBefore(rail, appMain);
   else if (appContainer) appContainer.insertBefore(rail, appContainer.firstChild);
+
+  // Ruled terminal-title variant of the closed-context label (#535). Mounted as a
+  // flex child of #app-main directly before #terminals, so it's a full-width band
+  // below the tab strip and above the terminal (inside the retro CRT bezel). It's
+  // display:none in every theme by default; the retro-monitor theme reveals it as
+  // a dashed rule and hides the tab-strip #context-indicator instead. Kept in sync
+  // by updateIndicator(); clicking it opens the rail like the indicator.
+  const terminals = document.getElementById('terminals');
+  if (appMain && terminals) {
+    ruleTitleEl = document.createElement('div');
+    ruleTitleEl.id = 'context-rule-title';
+    ruleTitleEl.className = 'hidden';
+    ruleTitleEl.addEventListener('click', () => {
+      setSidebar(true);
+      document.activeElement?.blur();
+    });
+    appMain.insertBefore(ruleTitleEl, terminals);
+  }
 
   setSidebar(sidebarOpen);
   applyFilter();

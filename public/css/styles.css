@@ -918,6 +918,11 @@ kbd {
 #context-indicator:hover { color: var(--ds-text-primary); }
 #context-indicator.hidden { display: none; }
 
+/* Ruled terminal-title variant of the closed-context label — hidden by default;
+   only the retro-monitor theme reveals it as a dashed rule at the top of the
+   terminal instead of the tab-strip #context-indicator (#535). */
+#context-rule-title { display: none; }
+
 /* Filtered-out tabs (not in the active context) */
 .tab.context-hidden { display: none !important; }
 
