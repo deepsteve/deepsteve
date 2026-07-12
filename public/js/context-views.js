@@ -64,6 +64,23 @@ function saveContext(c) {
 function deleteContextOnServer(id) {
   fetch('/api/contexts/' + encodeURIComponent(id), { method: 'DELETE' }).catch(() => {});
 }
+// Persist a drag-to-reorder (#532). Send the full id order; the server rebuilds
+// its array and broadcasts the new list back (setContexts) to every window.
+function persistOrder(order) {
+  fetch('/api/contexts/reorder', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ order }),
+  }).catch(() => {});
+}
+// Delete a context locally (optimistic) + on the server. Shared by the editor
+// modal's Delete button and the row right-click menu (#532).
+function deleteContext(ctx) {
+  contexts = contexts.filter(c => c.id !== ctx.id);
+  if (activeContextId === ctx.id) { activeContextId = null; saveActive(); notifyActive(); }
+  deleteContextOnServer(ctx.id);
+  applyFilter();
+}
 function loadActive() {
   return sessionStorage.getItem(ACTIVE_KEY) || null;
 }
@@ -217,14 +234,13 @@ function renderRail() {
 
   const hint = document.createElement('div');
   hint.className = 'context-hint';
-  hint.textContent = '⌘↑/↓ switch · ⌘P hide · ⌘P→A all';
+  hint.textContent = '⌘↑/↓ switch · ⌘P hide · right-click to edit · drag to reorder';
   rail.appendChild(hint);
 }
 
 function makeRow(id, name, active, ctx) {
   const row = document.createElement('div');
   row.className = 'context-row' + (active ? ' active' : '');
-  row.onclick = () => selectContext(id);
 
   const label = document.createElement('span');
   label.className = 'context-row-label';
@@ -241,14 +257,174 @@ function makeRow(id, name, active, ctx) {
   }
 
   if (ctx) {
-    const edit = document.createElement('span');
-    edit.className = 'context-row-edit';
-    edit.textContent = '✎';
-    edit.title = 'Edit context';
-    edit.onclick = (e) => { e.stopPropagation(); openContextEditor(ctx); };
-    row.appendChild(edit);
+    // Real contexts: Edit/Delete via right-click menu (keeps the row to just
+    // name + badge so everything aligns), and drag-to-reorder. Click selects.
+    // A data attribute both marks the row draggable and identifies it in the
+    // reorder/drag logic. The "All" row (ctx null) gets none of this, so it
+    // stays pinned at the top and non-draggable.
+    row.dataset.contextId = ctx.id;
+    row.title = 'Right-click to edit · drag to reorder';
+    row.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      showRowMenu(e.clientX, e.clientY, ctx);
+    });
+    wireRowDrag(row, ctx);
+  } else {
+    row.onclick = () => selectContext(id);
   }
   return row;
+}
+
+// -------------------------------------------------------- row right-click menu
+
+let rowMenu = null;
+function hideRowMenu() {
+  if (rowMenu) { rowMenu.remove(); rowMenu = null; }
+  document.removeEventListener('keydown', onRowMenuKey, true);
+}
+function onRowMenuKey(e) {
+  if (e.key === 'Escape') { e.preventDefault(); hideRowMenu(); }
+}
+function showRowMenu(x, y, ctx) {
+  hideRowMenu();
+
+  const menu = document.createElement('div');
+  menu.className = 'context-menu context-row-menu';
+
+  const edit = document.createElement('div');
+  edit.className = 'context-menu-item';
+  edit.textContent = 'Edit';
+  edit.onclick = () => { hideRowMenu(); openContextEditor(ctx); };
+  menu.appendChild(edit);
+
+  const del = document.createElement('div');
+  del.className = 'context-menu-item';
+  del.textContent = 'Delete';
+  del.style.color = 'var(--ds-accent-red)';
+  del.onclick = () => {
+    hideRowMenu();
+    if (confirm(`Delete context "${ctx.name}"?`)) deleteContext(ctx);
+  };
+  menu.appendChild(del);
+
+  menu.style.left = x + 'px';
+  menu.style.top = y + 'px';
+  document.body.appendChild(menu);
+
+  // Nudge back on-screen if it would overflow (mirror tab-manager positioning).
+  const rect = menu.getBoundingClientRect();
+  if (rect.right > window.innerWidth) menu.style.left = (window.innerWidth - rect.width - 8) + 'px';
+  if (rect.bottom > window.innerHeight) menu.style.top = (window.innerHeight - rect.height - 8) + 'px';
+
+  rowMenu = menu;
+  // Dismiss on the next outside click (deferred so this menu's own opening
+  // click/contextmenu doesn't immediately close it) and on Escape.
+  setTimeout(() => {
+    document.addEventListener('click', function onDoc(e) {
+      if (rowMenu && !rowMenu.contains(e.target)) { hideRowMenu(); }
+      document.removeEventListener('click', onDoc, true);
+    }, true);
+  }, 0);
+  document.addEventListener('keydown', onRowMenuKey, true);
+}
+
+// ------------------------------------------------------- row drag-to-reorder
+
+// Vertical drag adapted from tab-manager.js: start only after the pointer moves
+// past a small threshold (so a plain click still selects); reorder the real DOM
+// rows live; persist the new order on release. Only rows carrying
+// data-contextId participate, so the "All" row can never be displaced.
+const ROW_MOVE_THRESHOLD = 5;
+let rowDrag = null; // { row } while a drag is in progress
+
+function wireRowDrag(row, ctx) {
+  const onPointerDown = (e) => {
+    if (e.button && e.button !== 0) return; // left button / touch only
+    const startX = e.touches ? e.touches[0].clientX : e.clientX;
+    const startY = e.touches ? e.touches[0].clientY : e.clientY;
+    let dragging = false;
+
+    const onMove = (me) => {
+      const cx = me.touches ? me.touches[0].clientX : me.clientX;
+      const cy = me.touches ? me.touches[0].clientY : me.clientY;
+      if (!dragging && (Math.abs(cx - startX) > ROW_MOVE_THRESHOLD || Math.abs(cy - startY) > ROW_MOVE_THRESHOLD)) {
+        dragging = true;
+        startRowDrag(row);
+      }
+    };
+    const onUp = () => {
+      cleanup();
+      if (!dragging) selectContext(ctx.id); // no drag → treat as a click
+    };
+    const cleanup = () => {
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('touchmove', onMove);
+      document.removeEventListener('mouseup', onUp);
+      document.removeEventListener('touchend', onUp);
+    };
+
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('touchmove', onMove, { passive: true });
+    document.addEventListener('mouseup', onUp);
+    document.addEventListener('touchend', onUp);
+  };
+
+  row.addEventListener('mousedown', onPointerDown);
+  row.addEventListener('touchstart', onPointerDown, { passive: true });
+}
+
+function startRowDrag(row) {
+  rowDrag = { row };
+  row.classList.add('dragging');
+  document.body.style.cursor = 'grabbing';
+  document.body.style.userSelect = 'none';
+  document.addEventListener('mousemove', onRowDragMove);
+  document.addEventListener('touchmove', onRowDragMove, { passive: false });
+  document.addEventListener('mouseup', endRowDrag);
+  document.addEventListener('touchend', endRowDrag);
+  document.addEventListener('visibilitychange', endRowDrag);
+}
+
+function onRowDragMove(e) {
+  if (!rowDrag) return;
+  e.preventDefault();
+  const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+  const list = rowDrag.row.parentNode;
+  if (!list) return;
+  const rows = [...list.querySelectorAll('.context-row')].filter(r => r.dataset.contextId);
+  for (const other of rows) {
+    if (other === rowDrag.row) continue;
+    const rect = other.getBoundingClientRect();
+    if (clientY < rect.top + rect.height / 2) {
+      list.insertBefore(rowDrag.row, other);
+      return;
+    }
+  }
+  list.appendChild(rowDrag.row); // past all rows → move to end
+}
+
+function endRowDrag() {
+  if (!rowDrag) return;
+  const { row } = rowDrag;
+  rowDrag = null;
+  row.classList.remove('dragging');
+  document.body.style.cursor = '';
+  document.body.style.userSelect = '';
+  document.removeEventListener('mousemove', onRowDragMove);
+  document.removeEventListener('touchmove', onRowDragMove);
+  document.removeEventListener('mouseup', endRowDrag);
+  document.removeEventListener('touchend', endRowDrag);
+  document.removeEventListener('visibilitychange', endRowDrag);
+
+  const list = row.parentNode;
+  if (!list) return;
+  const order = [...list.querySelectorAll('.context-row')].map(r => r.dataset.contextId).filter(Boolean);
+  // Optimistic local reorder so the rail is stable immediately; the server
+  // broadcast (setContexts) reconciles this and every other window.
+  const byId = new Map(contexts.map(c => [c.id, c]));
+  contexts = order.map(id => byId.get(id)).filter(Boolean);
+  persistOrder(order);
+  renderRail(); // rebuild rows with fresh handlers / cleared drag state
 }
 
 function selectContext(id) {
@@ -537,11 +713,8 @@ function openContextEditor(ctx) {
     del.className = 'btn-danger';
     del.textContent = 'Delete';
     del.onclick = () => {
-      contexts = contexts.filter(c => c.id !== draft.id);
-      if (activeContextId === draft.id) { activeContextId = null; saveActive(); notifyActive(); }
-      deleteContextOnServer(draft.id);
+      deleteContext(draft);
       overlay.remove();
-      applyFilter();
     };
     btns.appendChild(del);
   }

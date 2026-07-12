@@ -949,9 +949,9 @@ kbd {
 .context-row:hover { background: var(--ds-bg-tertiary); color: var(--ds-text-primary); }
 .context-row.active { color: var(--ds-text-bright); background: var(--ds-bg-tertiary); border-left-color: var(--ds-accent-blue); }
 .context-row-label { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.context-row-edit { opacity: 0; font-size: 12px; padding: 0 2px; }
-.context-row:hover .context-row-edit { opacity: 0.55; }
-.context-row-edit:hover { opacity: 1; }
+/* Drag-to-reorder (#532): dim the row being dragged; the real DOM row moves
+   live between slots as the pointer crosses each sibling's midpoint. */
+.context-row.dragging { opacity: 0.4; }
 /* Tab-count badge (#529). --ds-border (not --ds-bg-tertiary) so the pill stays
    legible on active/hover rows, which use --ds-bg-tertiary as their background. */
 .context-row-count {

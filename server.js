@@ -3118,6 +3118,23 @@ app.delete('/api/contexts/:id', (req, res) => {
   res.json({ deleted: req.params.id });
 });
 
+// Reorder contexts (#532): the client sends the full id order after a rail
+// drag-to-reorder. Rebuild the array to match, then persist + broadcast so every
+// window reflects it. Ids the client didn't list are appended defensively so a
+// stale client can never drop a context.
+app.post('/api/contexts/reorder', (req, res) => {
+  const order = Array.isArray(req.body?.order) ? req.body.order.map(String) : null;
+  if (!order) return res.status(400).json({ error: 'order array required' });
+  const byId = new Map(contexts.map(c => [c.id, c]));
+  const next = [];
+  for (const id of order) { const c = byId.get(id); if (c) { next.push(c); byId.delete(id); } }
+  for (const c of byId.values()) next.push(c);
+  contexts = next;
+  saveContexts();
+  broadcastContexts();
+  res.json({ contexts });
+});
+
 // --- Recent sessions (issue #533) ---
 
 app.get('/api/recent-sessions', (req, res) => {
