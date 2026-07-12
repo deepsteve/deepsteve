@@ -19,7 +19,7 @@ import { init as initProgressBar, start as progressStart, done as progressDone }
 import { init as initHashCommands, beforeSend as hashCommandsBeforeSend, setWaitingForInput as setHashCommandsWaiting, setEnabled as setHashCommandsEnabled } from './hash-commands.js';
 import { init as initOverviewMode, setEnabled as setOverviewModeEnabled, setShortcut as setOverviewModeShortcut, setDefaultLayout as setOverviewDefaultLayout, toggle as toggleOverviewMode, isOverviewActive, updateFocus as updateOverviewFocus, onTabsReordered as onOverviewTabsReordered } from './overview-mode.js';
 import { init as initTerminalSearch, attachSearchAddon, closeIfOpen as closeTerminalSearch } from './terminal-search.js';
-import { init as initContextViews, setEnabled as setContextViewsEnabled, applyFilter as refreshContextFilter, requestNewTabInContext, setContexts as applyServerContexts, setActiveContext as setActiveContextFromPanel, getActiveContextId } from './context-views.js';
+import { init as initContextViews, setEnabled as setContextViewsEnabled, applyFilter as refreshContextFilter, requestNewTabInContext, setContexts as applyServerContexts, setActiveContext as setActiveContextFromPanel, getActiveContextId, activeContextIsEmpty } from './context-views.js';
 import { nsKey } from './storage-namespace.js';
 
 // Configuration
@@ -302,9 +302,23 @@ function updateTitle() {
   document.title = count > 0 ? `(${count}) deepsteve` : 'deepsteve';
 }
 
+// The #empty-state welcome screen covers the terminal area both when there are no
+// tabs at all AND when the active context has no matching tabs (#534) — the latter
+// reuses the same nice screen instead of a separate bland overlay. The .context-empty
+// class (CSS) lifts it above the still-alive stale terminal and drops the cross-repo
+// config shortcuts (they aren't context-scoped).
 function updateEmptyState() {
   const el = document.getElementById('empty-state');
-  if (el) el.classList.toggle('hidden', sessions.size > 0);
+  if (!el) return;
+  const noSessions = sessions.size === 0;
+  const contextEmpty = !noSessions && activeContextIsEmpty();
+  const show = noSessions || contextEmpty;
+  const wasHidden = el.classList.contains('hidden');
+  el.classList.toggle('hidden', !show);
+  el.classList.toggle('context-empty', contextEmpty);
+  // Covering a live terminal? Move focus onto the button so keystrokes don't leak
+  // into the covered terminal's still-focused hidden textarea.
+  if (show && wasHidden && !noSessions) document.getElementById('empty-state-btn')?.focus();
 }
 
 // Ordered tab ids from the strip. getAllTabIds() is context-filter unaware (use
@@ -3089,6 +3103,7 @@ async function init() {
       return s?.name || getDefaultTabName(s?.cwd || '');
     },
     switchToTab: switchTo,
+    updateEmptyState,
     createSessionInDir: (cwd) => createSession(cwd, null, true, { agentType: getDefaultAgentType() }),
     showDirPicker: () => showDirectoryPicker(),
     getRecentDirs: () => SessionStore.getRecentDirs(),

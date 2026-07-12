@@ -768,6 +768,12 @@ kbd {
 #empty-state .empty-state-recent:empty { display: none; }
 #empty-state .empty-state-recent .recent-session-btn { padding: 6px 16px; font-size: 13px; font-family: inherit; color: var(--ds-text-primary); background: transparent; border: 1px solid var(--ds-border); border-radius: 6px; cursor: pointer; opacity: 0.7; transition: opacity 0.15s, background 0.15s; }
 #empty-state .empty-state-recent .recent-session-btn:hover { opacity: 1; background: var(--ds-bg-tertiary); }
+/* Empty-context reuse (#534): when #empty-state covers a stale terminal for an active
+   context with no matching tabs, lift it above the absolutely-positioned
+   .terminal-container siblings and drop the recent-sessions shortcuts (cross-repo /
+   global, not context-scoped) so the view focuses on "+ New" in this context. */
+#empty-state.context-empty { z-index: 12; }
+#empty-state.context-empty .empty-state-recent { display: none; }
 
 /* Recent-sessions section in directory picker modal */
 .modal .recent-section { display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; }
@@ -914,15 +920,6 @@ kbd {
 
 /* Filtered-out tabs (not in the active context) */
 .tab.context-hidden { display: none !important; }
-
-/* Empty-context placeholder — opaque overlay covering the terminal area (above
-   the absolutely-positioned .terminal-container siblings) when the active
-   context has no matching tabs. */
-#context-empty-state { position: absolute; inset: 0; z-index: 10; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px; background: var(--ds-bg-primary); user-select: none; }
-#context-empty-state.hidden { display: none; }
-.context-empty-msg { color: var(--ds-text-secondary); font-size: 14px; }
-.context-empty-new { padding: 8px 20px; font-size: 14px; font-family: inherit; color: var(--ds-text-primary); background: var(--ds-bg-tertiary); border: 1px solid var(--ds-border); border-radius: 6px; cursor: pointer; opacity: 0.85; transition: opacity 0.15s, background 0.15s; }
-.context-empty-new:hover { opacity: 1; background: var(--ds-bg-secondary); }
 
 /* Left context panel — full-height column, left of everything (first child of
    #app-container). Look is driven entirely by the --ds-context-* custom
