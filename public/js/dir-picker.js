@@ -26,17 +26,36 @@ function esc(s) {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
-export function showDirectoryPicker({ configs = [] } = {}) {
+function relTime(ts) {
+  if (!ts) return '';
+  const s = Math.max(0, Math.floor((Date.now() - ts) / 1000));
+  if (s < 60) return 'just now';
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ago`;
+  return `${Math.floor(h / 24)}d ago`;
+}
+
+export function showDirectoryPicker({ recentSessions = [] } = {}) {
   return new Promise(async (resolve) => {
     const home = await fetchHome();
     const defaultPath = SessionStore.getLastCwd() || home;
     const alwaysUse = SessionStore.getAlwaysUse();
 
-    const configsHtml = configs.length > 0 ? `
-        <div class="config-section">
-          ${configs.map(c => `<button class="config-btn" data-config-id="${esc(c.id)}" title="Open ${c.tabs.length} tab${c.tabs.length === 1 ? '' : 's'}">${esc(c.name)}</button>`).join('')}
+    const recentHtml = recentSessions.length > 0 ? `
+        <div class="recent-section">
+          <div class="recent-label">Recent sessions</div>
+          ${recentSessions.map(r => {
+            const label = r.name || (r.cwd ? r.cwd.split('/').pop() : '') || 'session';
+            const meta = [r.cwd, r.agentType, relTime(r.updatedAt)].filter(Boolean).join(' · ');
+            return `<button class="recent-session-btn" data-recent-key="${esc(r.key)}" title="${esc(meta)}">
+              <span class="recent-name">${esc(label)}</span>
+              <span class="recent-meta">${esc(meta)}</span>
+            </button>`;
+          }).join('')}
         </div>
-        <div class="config-separator"></div>
+        <div class="recent-separator"></div>
     ` : '';
 
     const overlay = document.createElement('div');
@@ -44,7 +63,7 @@ export function showDirectoryPicker({ configs = [] } = {}) {
     overlay.innerHTML = `
       <div class="modal">
         <h2>Select working directory</h2>
-        ${configsHtml}
+        ${recentHtml}
         <div class="path-wrap">
           <input type="text" id="cwd-input" value="${defaultPath}">
           <button class="path-up" id="up-btn">&#8593;</button>
@@ -63,11 +82,11 @@ export function showDirectoryPicker({ configs = [] } = {}) {
     `;
     document.body.appendChild(overlay);
 
-    // Config button click handlers
-    overlay.querySelectorAll('.config-btn[data-config-id]').forEach(btn => {
+    // Recent-session button click handlers
+    overlay.querySelectorAll('.recent-session-btn[data-recent-key]').forEach(btn => {
       btn.onclick = () => {
         overlay.remove();
-        resolve({ type: 'config', configId: btn.dataset.configId });
+        resolve({ type: 'recent', key: btn.dataset.recentKey });
       };
     });
 

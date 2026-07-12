@@ -74,12 +74,12 @@ To add a setting, append one entry to `SETTINGS_SCHEMA`:
 { name: 'myNewSetting', type: 'boolean', default: false }
 ```
 
-Supported `type` values: `string` (opt-in `fallbackOnEmpty` restores the default when an empty string is POSTed), `boolean`, `number` (opt-in `clamp: [lo, hi]`, `round: true`, `fallback` for the NaN/0 case), `enum` (`values: [...]` or `values: () => [...]` for runtime-dependent enums like `engine`), `array` (`itemEnum` filters, `nonEmpty: true` rejects empty writes), and `custom` (provide a `sanitize(raw)` that returns `null` to reject or a cleaned value to accept — used by `windowConfigs`).
+Supported `type` values: `string` (opt-in `fallbackOnEmpty` restores the default when an empty string is POSTed), `boolean`, `number` (opt-in `clamp: [lo, hi]`, `round: true`, `fallback` for the NaN/0 case), `enum` (`values: [...]` or `values: () => [...]` for runtime-dependent enums like `engine`), `array` (`itemEnum` filters, `nonEmpty: true` rejects empty writes), and `custom` (provide a `sanitize(raw)` that returns `null` to reject or a cleaned value to accept — for a setting whose shape none of the built-in types cover).
 
 Optional per-entry hooks:
 - `broadcast: false` — omit from the WebSocket `settings` message (use for server-internal fields like `wandPlanMode` or binary paths).
 - `sideEffect: (val, s) => { ... }` — mutate other settings on accept (e.g. `enabledAgents` re-points `defaultAgent`). Schema declaration order matters: a field later in the array can override a side-effect earlier in the same POST.
-- `logValue: v => '...'` — customize the `Settings updated: ...` log line (used by `wandPromptTemplate` and `windowConfigs`).
+- `logValue: v => '...'` — customize the `Settings updated: ...` log line (used by `wandPromptTemplate` and `enabledAgents`).
 
 The client sends fields by name in the POST body and applies them locally on save (`app.js`). Always verify that a second open browser window picks up the change via WebSocket.
 

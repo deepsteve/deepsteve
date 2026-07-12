@@ -763,16 +763,20 @@ kbd {
 #empty-state .empty-state-title { color: var(--ds-accent-blue); opacity: 0.4; font-size: 12px; margin-top: 8px; }
 #empty-state .empty-state-btn { margin-top: 24px; padding: 8px 20px; font-size: 14px; font-family: inherit; color: var(--ds-text-primary); background: var(--ds-bg-tertiary); border: 1px solid var(--ds-border); border-radius: 6px; cursor: pointer; opacity: 0.7; transition: opacity 0.15s, background 0.15s; }
 #empty-state .empty-state-btn:hover { opacity: 1; background: var(--ds-bg-secondary); }
-#empty-state .empty-state-configs { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; justify-content: center; max-width: 600px; }
-#empty-state .empty-state-configs:empty { display: none; }
+/* Recent-sessions restore list (issue #533): empty state + directory picker modal */
+#empty-state .empty-state-recent { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; justify-content: center; max-width: 600px; }
+#empty-state .empty-state-recent:empty { display: none; }
+#empty-state .empty-state-recent .recent-session-btn { padding: 6px 16px; font-size: 13px; font-family: inherit; color: var(--ds-text-primary); background: transparent; border: 1px solid var(--ds-border); border-radius: 6px; cursor: pointer; opacity: 0.7; transition: opacity 0.15s, background 0.15s; }
+#empty-state .empty-state-recent .recent-session-btn:hover { opacity: 1; background: var(--ds-bg-tertiary); }
 
-/* Shared config button styles (used in empty state and directory picker modal) */
-.config-btn { padding: 6px 16px; font-size: 13px; font-family: inherit; color: var(--ds-text-primary); background: transparent; border: 1px solid var(--ds-border); border-radius: 6px; cursor: pointer; opacity: 0.7; transition: opacity 0.15s, background 0.15s; }
-.config-btn:hover { opacity: 1; background: var(--ds-bg-tertiary); }
-
-/* Config section in directory picker modal */
-.modal .config-section { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
-.modal .config-separator { border-bottom: 1px solid var(--ds-border); margin-bottom: 12px; }
+/* Recent-sessions section in directory picker modal */
+.modal .recent-section { display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; }
+.modal .recent-section .recent-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--ds-text-secondary); opacity: 0.7; margin-bottom: 2px; }
+.modal .recent-section .recent-session-btn { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; text-align: left; padding: 6px 10px; font-family: inherit; color: var(--ds-text-primary); background: transparent; border: 1px solid var(--ds-border); border-radius: 6px; cursor: pointer; transition: background 0.15s; }
+.modal .recent-section .recent-session-btn:hover { background: var(--ds-bg-tertiary); }
+.modal .recent-section .recent-name { font-size: 13px; }
+.modal .recent-section .recent-meta { font-size: 11px; color: var(--ds-text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
+.modal .recent-separator { border-bottom: 1px solid var(--ds-border); margin-bottom: 12px; }
 @keyframes empty-state-fade-in { from { opacity: 0; } to { opacity: 1; } }
 
 /* File drop zone overlay */

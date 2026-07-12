@@ -274,10 +274,9 @@ function applySettings(settings) {
     const el = document.querySelector('#symlink-worktree-settings');
     if (el) el.checked = settings.symlinkWorktreeSettings;
   }
-  if (settings.windowConfigs !== undefined) {
-    windowConfigs = settings.windowConfigs;
-    renderEmptyStateConfigs();
-    window.dispatchEvent(new CustomEvent('deepsteve-window-configs', { detail: windowConfigs }));
+  if (settings.recentSessionsLimit !== undefined) {
+    const el = document.querySelector('#recent-sessions-limit');
+    if (el) el.value = settings.recentSessionsLimit;
   }
 }
 
@@ -309,54 +308,79 @@ function updateEmptyState() {
 }
 
 // Ordered tab ids from the strip. getAllTabIds() is context-filter unaware (use
-// where the full set matters: applying the context filter, saving a window
-// config). getVisibleTabIds() drops tabs the active context hides — so tab
-// navigation stays in-context — and equals getAllTabIds() whenever no context
-// filter is active (the "All" view / disabled feature un-hide every tab).
+// where the full set matters: applying the context filter). getVisibleTabIds()
+// drops tabs the active context hides — so tab navigation stays in-context —
+// and equals getAllTabIds() whenever no context filter is active (the "All"
+// view / disabled feature un-hide every tab).
 const getAllTabIds = () =>
   [...document.querySelectorAll('#tabs-list .tab')].map(t => t.id.replace('tab-', ''));
 const getVisibleTabIds = () =>
   [...document.querySelectorAll('#tabs-list .tab:not(.context-hidden)')].map(t => t.id.replace('tab-', ''));
 
-let windowConfigs = [];
+// --- Recent sessions (issue #533): a server-side ring buffer of the last N
+// session configs, restorable from any browser/window/tab. See renderEmptyStateRecent
+// (empty-state buttons) and restoreRecentSession (the restore action).
+let recentSessions = [];
 
-function renderEmptyStateConfigs() {
-  const container = document.getElementById('empty-state-configs');
+function relativeTime(ts) {
+  if (!ts) return '';
+  const s = Math.max(0, Math.floor((Date.now() - ts) / 1000));
+  if (s < 60) return 'just now';
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ago`;
+  return `${Math.floor(h / 24)}d ago`;
+}
+
+function renderEmptyStateRecent() {
+  const container = document.getElementById('empty-state-recent');
   if (!container) return;
   container.innerHTML = '';
-  for (const config of windowConfigs) {
+  for (const r of recentSessions) {
     const btn = document.createElement('button');
-    btn.className = 'config-btn';
-    btn.textContent = config.name;
-    btn.title = `Open ${config.tabs.length} tab${config.tabs.length === 1 ? '' : 's'}`;
-    btn.onclick = async () => {
+    btn.className = 'recent-session-btn';
+    const label = r.name || getDefaultTabName(r.cwd) || r.cwd || 'session';
+    btn.textContent = label;
+    const parts = [r.cwd, r.agentType, relativeTime(r.updatedAt)].filter(Boolean);
+    btn.title = `Restore ${label}\n${parts.join(' · ')}`;
+    btn.onclick = () => {
       btn.disabled = true;
-      btn.textContent = 'Opening...';
-      try {
-        await fetch(`/api/window-configs/${config.id}/apply`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ windowId: getWindowId() })
-        });
-      } catch (e) {
-        console.error('Failed to apply window config:', e);
-      }
+      btn.textContent = 'Restoring…';
+      restoreRecentSession(r.key);
     };
     container.appendChild(btn);
   }
 }
 
-async function loadWindowConfigs() {
+async function loadRecentSessions() {
   try {
-    const resp = await fetch('/api/window-configs');
+    const resp = await fetch('/api/recent-sessions');
     const data = await resp.json();
-    windowConfigs = data.configs || [];
-    renderEmptyStateConfigs();
+    recentSessions = data.sessions || [];
+    renderEmptyStateRecent();
   } catch {}
 }
 
-// Load configs on startup
-loadWindowConfigs();
+// Restore a recent session: the server pre-seeds savedState under a fresh id, then
+// we connect to it — the normal reconnect path resumes the conversation (with the
+// server's 5s resume-fail → fork fallback). The restored tab then behaves like any
+// live tab (claudeSessionId tracked into TabSessions, persisted to both stores).
+async function restoreRecentSession(key) {
+  let r;
+  try {
+    const resp = await fetch(`/api/recent-sessions/${encodeURIComponent(key)}/restore`, { method: 'POST' });
+    if (!resp.ok) return;
+    r = await resp.json();
+  } catch { return; }
+  if (!r || !r.id) return;
+  TabManager.addPlaceholderTab(r.id, r.name || getDefaultTabName(r.cwd));
+  updateEmptyState();
+  createSession(r.cwd, r.id, false, { name: r.name, agentType: r.agentType, allowDuplicate: true });
+}
+
+// Load recent sessions on startup
+loadRecentSessions();
 
 /**
  * Build a session list for the mod bridge API
@@ -677,6 +701,7 @@ settingsBtn?.addEventListener('click', async () => {
   const currentOpencodeBinary = settingsData.opencodeBinary || 'opencode';
   const currentPiBinary = settingsData.piBinary || 'pi';
   const currentScrollbackKB = settingsData.scrollbackKB || 100;
+  const currentRecentSessionsLimit = settingsData.recentSessionsLimit ?? 8;
   const agents = window.__deepsteveAgents || [];
   const themes = themesData.themes || [];
   const activeTheme = themesData.active || '';
@@ -695,7 +720,6 @@ settingsBtn?.addEventListener('click', async () => {
           <button class="settings-tab active" data-tab="general">General</button>
           <button class="settings-tab" data-tab="terminal">Terminal</button>
           <button class="settings-tab" data-tab="github">GitHub</button>
-          <button class="settings-tab" data-tab="workspaces">Workspaces</button>
           <button class="settings-tab" data-tab="tips">Tips</button>
         </div>
       </div>
@@ -902,6 +926,16 @@ settingsBtn?.addEventListener('click', async () => {
           KB
         </label>
       </div>
+      <div class="settings-section">
+        <h3>Recent Sessions</h3>
+        <p style="font-size: 13px; color: var(--ds-text-secondary); margin-bottom: 8px;">
+          How many recently-opened session configs to keep for restore (from the directory picker or empty state, in any browser/window). Set to 0 to disable.
+        </p>
+        <label style="font-size: 13px; color: var(--ds-text-primary); display: flex; align-items: center; gap: 8px;">
+          <input type="number" id="recent-sessions-limit" value="${currentRecentSessionsLimit}" min="0" max="50" step="1" style="width: 80px; padding: 4px 6px; background: var(--ds-bg-primary); border: 1px solid var(--ds-border); border-radius: 4px; color: var(--ds-text-primary); font-size: 13px;">
+          sessions
+        </label>
+      </div>
       </div>
       <div class="settings-tab-content" data-tab="github">
       <div class="settings-section">
@@ -935,19 +969,6 @@ settingsBtn?.addEventListener('click', async () => {
         <p style="font-size: 11px; color: var(--ds-text-secondary); margin-top: 4px;">
           Shares tool permissions from the parent repo so worktrees don't re-prompt.
         </p>
-      </div>
-      </div>
-      <div class="settings-tab-content" data-tab="workspaces">
-      <div class="settings-section">
-        <h3>Workspace Configs</h3>
-        <p style="font-size: 13px; color: var(--ds-text-secondary); margin-bottom: 8px;">
-          Saved tab layouts. Click a config in the empty state to open all its tabs at once.
-        </p>
-        <div id="settings-window-configs"></div>
-        <div style="display: flex; gap: 8px; margin-top: 8px;">
-          <button class="btn-secondary" id="settings-new-config" style="font-size: 12px; padding: 4px 12px;">+ New Config</button>
-          <button class="btn-secondary" id="settings-save-current" style="font-size: 12px; padding: 4px 12px;">Save Current Tabs</button>
-        </div>
       </div>
       </div>
       <div class="settings-tab-content" data-tab="tips">
@@ -1175,273 +1196,6 @@ settingsBtn?.addEventListener('click', async () => {
   };
   window.addEventListener('deepsteve:version-status', versionStatusHandler);
 
-  // Window Configs management
-  let editingConfigs = JSON.parse(JSON.stringify(windowConfigs));
-  const configsContainer = overlay.querySelector('#settings-window-configs');
-
-  function renderConfigsList() {
-    configsContainer.innerHTML = '';
-    if (editingConfigs.length === 0) {
-      configsContainer.innerHTML = '<p style="font-size: 12px; color: var(--ds-text-secondary); opacity: 0.6;">No configs saved yet.</p>';
-      return;
-    }
-    for (let i = 0; i < editingConfigs.length; i++) {
-      const config = editingConfigs[i];
-      const row = document.createElement('div');
-      row.style.cssText = 'display: flex; align-items: center; gap: 8px; margin-bottom: 6px; padding: 6px 8px; background: var(--ds-bg-primary); border: 1px solid var(--ds-border); border-radius: 4px;';
-      row.innerHTML = `
-        <span style="flex: 1; font-size: 13px; color: var(--ds-text-primary);">${escapeHtml(config.name)}</span>
-        <span style="font-size: 11px; color: var(--ds-text-secondary);">${config.tabs.length} tab${config.tabs.length === 1 ? '' : 's'}</span>
-        <button class="btn-secondary config-edit-btn" data-idx="${i}" style="padding: 2px 8px; font-size: 11px;">Edit</button>
-        <button class="btn-secondary config-delete-btn" data-idx="${i}" style="padding: 2px 8px; font-size: 11px; color: var(--ds-accent-red, #f85149);">Delete</button>
-      `;
-      configsContainer.appendChild(row);
-    }
-    configsContainer.querySelectorAll('.config-delete-btn').forEach(btn => {
-      btn.onclick = async () => {
-        const idx = Number(btn.dataset.idx);
-        const config = editingConfigs[idx];
-        if (!config) return;
-        const ok = await showDeleteConfigConfirmDialog(config.name);
-        if (!ok) return;
-        // Configs added in this modal session and not yet saved have id === '',
-        // so skip the server call and just remove them locally.
-        if (config.id) {
-          try {
-            const resp = await fetch(`/api/window-configs/${config.id}`, { method: 'DELETE' });
-            if (!resp.ok) {
-              const err = await resp.json().catch(() => ({}));
-              alert(`Delete failed: ${err.error || resp.statusText}`);
-              return;
-            }
-          } catch (e) {
-            alert(`Delete failed: ${e.message}`);
-            return;
-          }
-        }
-        editingConfigs.splice(idx, 1);
-        renderConfigsList();
-      };
-    });
-    configsContainer.querySelectorAll('.config-edit-btn').forEach(btn => {
-      btn.onclick = () => showConfigEditor(Number(btn.dataset.idx));
-    });
-  }
-
-  function showConfigEditor(idx) {
-    const isNew = idx === -1;
-    const config = isNew ? { id: '', name: '', tabs: [{ name: '', cwd: '', agentType: 'claude' }] } : JSON.parse(JSON.stringify(editingConfigs[idx]));
-    const editorOverlay = document.createElement('div');
-    editorOverlay.className = 'modal-overlay';
-    editorOverlay.style.zIndex = '1001';
-
-    function renderEditor() {
-      const tabRows = config.tabs.map((t, ti) => {
-        const tabType = t.type || 'terminal';
-        let fields = '';
-        if (tabType === 'display-tab') {
-          fields = `<span style="flex: 1; font-size: 12px; color: var(--ds-text-secondary); padding: 4px 6px;">(Display Tab)</span>`;
-        } else if (tabType === 'baby-browser') {
-          fields = `<input type="text" class="config-tab-url" data-ti="${ti}" value="${escapeHtml(t.url || '')}" placeholder="https://example.com" style="flex: 1; padding: 4px 6px; background: var(--ds-bg-primary); border: 1px solid var(--ds-border); border-radius: 4px; color: var(--ds-text-primary); font-size: 12px;">`;
-        } else {
-          fields = `
-          <input type="text" class="config-tab-cwd" data-ti="${ti}" value="${escapeHtml(t.cwd || '')}" placeholder="/path/to/project" style="flex: 1; padding: 4px 6px; background: var(--ds-bg-primary); border: 1px solid var(--ds-border); border-radius: 4px; color: var(--ds-text-primary); font-size: 12px;">
-          <select class="config-tab-agent" data-ti="${ti}" style="padding: 4px 6px; background: var(--ds-bg-primary); border: 1px solid var(--ds-border); border-radius: 4px; color: var(--ds-text-primary); font-size: 12px;">
-            <option value="claude" ${t.agentType === 'claude' ? 'selected' : ''}>Claude</option>
-            <option value="hermes" ${t.agentType === 'hermes' ? 'selected' : ''}>Hermes</option>
-            <option value="opencode" ${t.agentType === 'opencode' ? 'selected' : ''}>OpenCode</option>
-            <option value="pi" ${t.agentType === 'pi' ? 'selected' : ''}>Pi</option>
-          </select>`;
-        }
-        return `
-        <div style="display: flex; gap: 6px; margin-bottom: 4px; align-items: center;">
-          <input type="text" class="config-tab-name" data-ti="${ti}" value="${escapeHtml(t.name)}" placeholder="Tab name" style="width: 120px; padding: 4px 6px; background: var(--ds-bg-primary); border: 1px solid var(--ds-border); border-radius: 4px; color: var(--ds-text-primary); font-size: 12px;">
-          ${fields}
-          <button class="btn-secondary config-tab-remove" data-ti="${ti}" style="padding: 2px 6px; font-size: 11px;" ${config.tabs.length <= 1 ? 'disabled' : ''}>&times;</button>
-        </div>
-      `;
-      }).join('');
-
-      editorOverlay.innerHTML = `
-        <div class="modal" style="max-width: 600px;">
-          <h3 style="margin-bottom: 12px;">${isNew ? 'New' : 'Edit'} Window Config</h3>
-          <div style="margin-bottom: 12px;">
-            <label style="font-size: 12px; color: var(--ds-text-secondary);">Config Name</label>
-            <input type="text" id="config-editor-name" value="${escapeHtml(config.name)}" placeholder="My Config" style="width: 100%; padding: 6px 8px; background: var(--ds-bg-primary); border: 1px solid var(--ds-border); border-radius: 4px; color: var(--ds-text-primary); font-size: 13px; margin-top: 4px;">
-          </div>
-          <div style="margin-bottom: 8px;">
-            <label style="font-size: 12px; color: var(--ds-text-secondary);">Tabs</label>
-          </div>
-          <div id="config-editor-tabs">${tabRows}</div>
-          <button class="btn-secondary" id="config-add-tab" style="font-size: 11px; padding: 3px 10px; margin-top: 4px;">+ Add Tab</button>
-          <div class="modal-buttons" style="margin-top: 16px;">
-            <button class="btn-secondary" id="config-editor-cancel">Cancel</button>
-            <button class="btn-primary" id="config-editor-save">Save</button>
-          </div>
-        </div>
-      `;
-
-      editorOverlay.querySelector('#config-editor-cancel').onclick = () => editorOverlay.remove();
-      editorOverlay.querySelector('#config-add-tab').onclick = () => {
-        syncTabInputs();
-        config.tabs.push({ name: '', cwd: '', agentType: 'claude' });
-        renderEditor();
-      };
-      editorOverlay.querySelectorAll('.config-tab-remove').forEach(btn => {
-        btn.onclick = () => {
-          syncTabInputs();
-          config.tabs.splice(Number(btn.dataset.ti), 1);
-          renderEditor();
-        };
-      });
-      editorOverlay.querySelector('#config-editor-save').onclick = () => {
-        syncTabInputs();
-        config.name = editorOverlay.querySelector('#config-editor-name').value.trim();
-        if (!config.name) return alert('Config name is required');
-        const validTabs = config.tabs.filter(t => {
-          const type = t.type || 'terminal';
-          if (type === 'display-tab') return !!t.html;
-          if (type === 'baby-browser') return true;
-          return t.cwd && t.cwd.trim();
-        });
-        if (validTabs.length === 0) return alert('At least one valid tab is required');
-        config.tabs = validTabs;
-        if (isNew) {
-          editingConfigs.push(config);
-        } else {
-          editingConfigs[idx] = config;
-        }
-        editorOverlay.remove();
-        renderConfigsList();
-      };
-      editorOverlay.onclick = (e) => { if (e.target === editorOverlay) editorOverlay.remove(); };
-    }
-
-    function syncTabInputs() {
-      editorOverlay.querySelectorAll('.config-tab-name').forEach(input => {
-        config.tabs[Number(input.dataset.ti)].name = input.value;
-      });
-      editorOverlay.querySelectorAll('.config-tab-cwd').forEach(input => {
-        config.tabs[Number(input.dataset.ti)].cwd = input.value;
-      });
-      editorOverlay.querySelectorAll('.config-tab-agent').forEach(select => {
-        config.tabs[Number(select.dataset.ti)].agentType = select.value;
-      });
-      editorOverlay.querySelectorAll('.config-tab-url').forEach(input => {
-        config.tabs[Number(input.dataset.ti)].url = input.value;
-      });
-    }
-
-    renderEditor();
-    document.body.appendChild(editorOverlay);
-  }
-
-  renderConfigsList();
-
-  overlay.querySelector('#settings-new-config').onclick = () => showConfigEditor(-1);
-  overlay.querySelector('#settings-save-current').onclick = async () => {
-    const currentTabs = [];
-    const orderedIds = getAllTabIds();
-    for (const id of orderedIds) {
-      const s = sessions.get(id);
-      if (!s) continue;
-      if (s.type === 'display-tab') {
-        try {
-          const resp = await fetch(`/api/display-tab/${id}`);
-          if (resp.ok) {
-            currentTabs.push({ type: 'display-tab', name: s.name || 'Display', html: await resp.text() });
-          }
-        } catch {}
-      } else if (s.type === 'mod-tab' && s.modId === 'baby-browser') {
-        let url = '';
-        try {
-          const iframe = s.container?.querySelector('iframe');
-          if (iframe?.contentWindow) {
-            const urlInput = iframe.contentDocument?.getElementById('url');
-            if (urlInput) url = urlInput.value || '';
-          }
-        } catch {}
-        currentTabs.push({ type: 'baby-browser', name: s.name || 'Baby Browser', url });
-      } else if (s.cwd) {
-        currentTabs.push({ type: 'terminal', name: s.name || '', cwd: s.cwd, agentType: s.agentType || 'claude' });
-      }
-    }
-    if (currentTabs.length === 0) return alert('No tabs open to save');
-
-    const pickerOverlay = document.createElement('div');
-    pickerOverlay.className = 'modal-overlay';
-    pickerOverlay.style.zIndex = '1001';
-
-    const checked = currentTabs.map(() => true);
-
-    function renderPicker() {
-      const allChecked = checked.every(Boolean);
-      const tabRows = currentTabs.map((t, i) => {
-        let detail = '';
-        if (t.type === 'display-tab') detail = '(Display Tab)';
-        else if (t.type === 'baby-browser') detail = t.url || '(no url)';
-        else detail = t.cwd;
-        return `
-        <div style="display: flex; gap: 8px; align-items: center; padding: 6px 0; border-bottom: 1px solid var(--ds-border);">
-          <input type="checkbox" class="save-tab-check" data-i="${i}" ${checked[i] ? 'checked' : ''} style="margin: 0;">
-          <span style="min-width: 100px; font-size: 12px; color: var(--ds-text-primary);">${escapeHtml(t.name || '(unnamed)')}</span>
-          <span style="flex: 1; font-size: 11px; color: var(--ds-text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${escapeHtml(detail)}</span>
-        </div>
-      `;
-      }).join('');
-
-      pickerOverlay.innerHTML = `
-        <div class="modal" style="max-width: 550px;">
-          <h3 style="margin-bottom: 12px;">Save Current Tabs</h3>
-          <div style="margin-bottom: 12px;">
-            <label style="font-size: 12px; color: var(--ds-text-secondary);">Config Name</label>
-            <input type="text" id="save-tabs-name" placeholder="My Config" style="width: 100%; padding: 6px 8px; background: var(--ds-bg-primary); border: 1px solid var(--ds-border); border-radius: 4px; color: var(--ds-text-primary); font-size: 13px; margin-top: 4px;">
-          </div>
-          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
-            <label style="font-size: 12px; color: var(--ds-text-secondary);">Select Tabs</label>
-            <button class="btn-secondary" id="save-tabs-toggle" style="font-size: 11px; padding: 2px 8px;">${allChecked ? 'Deselect All' : 'Select All'}</button>
-          </div>
-          <div style="max-height: 250px; overflow-y: auto;">${tabRows}</div>
-          <div class="modal-buttons" style="margin-top: 16px;">
-            <button class="btn-secondary" id="save-tabs-cancel">Cancel</button>
-            <button class="btn-primary" id="save-tabs-save">Save</button>
-          </div>
-        </div>
-      `;
-
-      pickerOverlay.querySelectorAll('.save-tab-check').forEach(cb => {
-        cb.onchange = () => {
-          checked[Number(cb.dataset.i)] = cb.checked;
-          renderPicker();
-        };
-      });
-      pickerOverlay.querySelector('#save-tabs-toggle').onclick = () => {
-        const newVal = !checked.every(Boolean);
-        checked.fill(newVal);
-        renderPicker();
-      };
-      pickerOverlay.querySelector('#save-tabs-cancel').onclick = () => pickerOverlay.remove();
-      pickerOverlay.querySelector('#save-tabs-save').onclick = () => {
-        const name = pickerOverlay.querySelector('#save-tabs-name').value.trim();
-        if (!name) return alert('Please enter a config name');
-        const selectedTabs = currentTabs.filter((_, i) => checked[i]);
-        if (selectedTabs.length === 0) return alert('Please select at least one tab');
-        const existingIdx = editingConfigs.findIndex(c => c.name.trim().toLowerCase() === name.toLowerCase());
-        if (existingIdx !== -1) {
-          if (!confirm(`A config named "${name}" already exists. Overwrite it?`)) return;
-          editingConfigs[existingIdx] = { id: editingConfigs[existingIdx].id, name, tabs: selectedTabs };
-        } else {
-          editingConfigs.push({ id: '', name, tabs: selectedTabs });
-        }
-        pickerOverlay.remove();
-        renderConfigsList();
-      };
-    }
-
-    renderPicker();
-    document.body.appendChild(pickerOverlay);
-  };
-
   // Command palette shortcut capture
   const shortcutBtn = overlay.querySelector('#command-palette-shortcut-btn');
   const shortcutInput = overlay.querySelector('#command-palette-shortcut');
@@ -1496,6 +1250,7 @@ settingsBtn?.addEventListener('click', async () => {
     const piBinary = overlay.querySelector('#pi-binary').value || 'pi';
     const selectedEngine = overlay.querySelector('#engine-select')?.value || 'node-pty';
     const scrollbackKB = Math.max(1, Math.min(10000, Math.round(Number(overlay.querySelector('#scrollback-kb').value)) || 100));
+    const recentSessionsLimit = Math.max(0, Math.min(50, Math.round(Number(overlay.querySelector('#recent-sessions-limit').value)) || 0));
     const autoUpdateCheckEnabled = overlay.querySelector('#auto-update-check-enabled').checked;
     const autoUpdateCheckIntervalHours = Math.max(1, Math.min(168, Number(overlay.querySelector('#auto-update-check-interval-hours').value) || 6));
     const autoUpdateApply = overlay.querySelector('#auto-update-apply').checked;
@@ -1503,7 +1258,7 @@ settingsBtn?.addEventListener('click', async () => {
     const scheduledTasksEnabled = overlay.querySelector('#scheduled-tasks-enabled').checked;
     const inheritRemoteControl = overlay.querySelector('#inherit-rc-newtab').checked;
     const inheritRemoteControlOnFork = overlay.querySelector('#inherit-rc-fork').checked;
-    const settingsPayload = { shellProfile, maxIssueTitleLength: newMaxTitle, wandPlanMode, wandPromptTemplate, symlinkWorktreeSettings, cmdTabSwitch, cmdTabSwitchHoldMs, commandPaletteEnabled, commandPaletteShortcut, hashCommandsEnabled, contextViewsEnabled, metaControlsEnabled, inheritRemoteControl, inheritRemoteControlOnFork, overviewDefaultLayout, enabledAgents, opencodeBinary, piBinary, windowConfigs: editingConfigs, engine: selectedEngine, scrollbackKB, autoUpdateCheckEnabled, autoUpdateCheckIntervalHours, autoUpdateApply, sessionLogEnabled, scheduledTasksEnabled };
+    const settingsPayload = { shellProfile, maxIssueTitleLength: newMaxTitle, wandPlanMode, wandPromptTemplate, symlinkWorktreeSettings, cmdTabSwitch, cmdTabSwitchHoldMs, commandPaletteEnabled, commandPaletteShortcut, hashCommandsEnabled, contextViewsEnabled, metaControlsEnabled, inheritRemoteControl, inheritRemoteControlOnFork, overviewDefaultLayout, enabledAgents, opencodeBinary, piBinary, engine: selectedEngine, scrollbackKB, recentSessionsLimit, autoUpdateCheckEnabled, autoUpdateCheckIntervalHours, autoUpdateApply, sessionLogEnabled, scheduledTasksEnabled };
     let resp = await fetch('/api/settings', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -2350,29 +2105,6 @@ function showCloseDisplayTabDialog() {
   });
 }
 
-function showDeleteConfigConfirmDialog(name) {
-  return new Promise(resolve => {
-    const overlay = document.createElement('div');
-    overlay.className = 'modal-overlay';
-    overlay.style.zIndex = '1002';
-    overlay.innerHTML = `
-      <div class="modal">
-        <h2>Delete workspace config?</h2>
-        <p style="font-size:13px;color:var(--ds-text-secondary);margin-bottom:16px;">"${escapeHtml(name)}" will be permanently removed.</p>
-        <div class="modal-buttons">
-          <button class="btn-secondary" id="delete-config-cancel">Cancel</button>
-          <button class="btn-danger" id="delete-config-ok">Delete</button>
-        </div>
-      </div>`;
-    document.body.appendChild(overlay);
-
-    const cleanup = (result) => { overlay.remove(); resolve(result); };
-    overlay.querySelector('#delete-config-cancel').onclick = () => cleanup(false);
-    overlay.querySelector('#delete-config-ok').onclick = () => cleanup(true);
-    overlay.onclick = (e) => { if (e.target === overlay) cleanup(false); };
-  });
-}
-
 function showRestartConfirmDialog() {
   let resolve;
   const promise = new Promise(r => { resolve = r; });
@@ -3015,18 +2747,13 @@ async function promptWorktreeSession() {
  * Prompt for directory and create session
  */
 async function promptRepoSession() {
-  const result = await showDirectoryPicker({ configs: windowConfigs });
+  // Refresh the recent-sessions list so the picker shows the latest (also kept
+  // current via the 'recent-sessions' WS broadcast while a tab is open).
+  await loadRecentSessions();
+  const result = await showDirectoryPicker({ recentSessions });
   if (result === null) return;
-  if (result && typeof result === 'object' && result.type === 'config') {
-    try {
-      await fetch(`/api/window-configs/${result.configId}/apply`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ windowId: getWindowId() })
-      });
-    } catch (e) {
-      console.error('Failed to apply window config:', e);
-    }
+  if (result && typeof result === 'object' && result.type === 'recent') {
+    await restoreRecentSession(result.key);
     return;
   }
   createSession(result, null, true, { agentType: getDefaultAgentType() });
@@ -3403,6 +3130,10 @@ async function init() {
         applyServerContexts(msg.contexts);
         ModManager.notifyContextsChanged(msg.contexts);
       }
+      if (msg.type === 'recent-sessions') {
+        recentSessions = msg.sessions || [];
+        renderEmptyStateRecent();
+      }
       if (msg.type === 'open-session') {
         // Server created a session (e.g. via /api/start-issue) — open a tab for it
         if (msg.windowId && msg.windowId !== getWindowId()) return;
@@ -3629,34 +3360,6 @@ async function init() {
   });
 
   WindowManager.startHeartbeat();
-
-  // Check for ?config=<name> or ?config_id=<id> URL parameter
-  const urlParams = new URLSearchParams(window.location.search);
-  const configName = urlParams.get('config');
-  const configId = urlParams.get('config_id');
-  if ((configName || configId) && !isExistingTab) {
-    // Ensure configs are loaded (the top-level call is fire-and-forget)
-    await loadWindowConfigs();
-    const match = windowConfigs.find(c =>
-      configId ? c.id === configId : c.name === configName
-    );
-    if (match) {
-      // Clean URL so refresh uses TabSessions, not re-apply
-      history.replaceState(null, '', window.location.pathname);
-      try {
-        await fetch(`/api/window-configs/${match.id}/apply`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ windowId: getWindowId() })
-        });
-      } catch (e) {
-        console.error('Failed to apply window config from URL:', e);
-      }
-      // Sessions arrive via open-session WebSocket messages
-      return;
-    }
-    // Config not found — fall through to normal init
-  }
 
   // TabSessions (sessionStorage) is the authoritative per-tab source.
   // It survives page refresh and doesn't depend on localStorage window-ID mapping.
