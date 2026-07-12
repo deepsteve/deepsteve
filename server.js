@@ -121,6 +121,8 @@ const DISPLAY_TABS_DIR = path.join(os.homedir(), '.deepsteve', 'display-tabs');
 const SCREENSHOTS_DIR = path.join(os.homedir(), '.deepsteve', 'screenshots');
 const SETTINGS_FILE = path.join(os.homedir(), '.deepsteve', 'settings.json');
 const CONTEXTS_FILE = path.join(os.homedir(), '.deepsteve', 'contexts.json');
+// Ring buffer of the last N session configs, for cross-browser restore (#533).
+const RECENT_SESSIONS_FILE = path.join(os.homedir(), '.deepsteve', 'recent-sessions.json');
 // Legacy scheduled-tasks "project groups" file (#521). Superseded by contexts.json
 // (#526); read once on first load to migrate, then left in place untouched.
 const LEGACY_GROUPS_FILE = path.join(os.homedir(), '.deepsteve', 'project-groups.json');
@@ -258,33 +260,6 @@ Please read the issue carefully, understand the codebase context, and implement 
 
 const AGENT_TYPES = ['claude', 'hermes', 'opencode', 'pi'];
 
-function validateConfigTab(t) {
-  const type = t.type || 'terminal';
-  if (type === 'terminal') return typeof t.cwd === 'string';
-  if (type === 'display-tab') return typeof t.html === 'string';
-  if (type === 'baby-browser') return typeof t.url === 'string';
-  return false;
-}
-
-function sanitizeConfigTab(t) {
-  const type = t.type || 'terminal';
-  if (type === 'display-tab') return { type, name: t.name || '', html: t.html };
-  if (type === 'baby-browser') return { type, name: t.name || '', url: t.url };
-  // terminal (default)
-  return { name: t.name || '', cwd: t.cwd, agentType: t.agentType || 'claude' };
-}
-
-function sanitizeWindowConfigs(raw) {
-  if (!Array.isArray(raw)) return null;
-  return raw
-    .filter(c => c && typeof c === 'object' && typeof c.name === 'string' && Array.isArray(c.tabs))
-    .map(c => ({
-      id: c.id || randomUUID().slice(0, 8),
-      name: c.name,
-      tabs: c.tabs.filter(t => t && typeof t === 'object' && validateConfigTab(t)).map(sanitizeConfigTab),
-    }));
-}
-
 const SETTINGS_SCHEMA = [
   { name: 'shellProfile',               type: 'string',  default: '~/.zshrc' },
   { name: 'maxIssueTitleLength',        type: 'number',  default: 25, clamp: [10, 200] },
@@ -312,9 +287,8 @@ const SETTINGS_SCHEMA = [
   { name: 'opencodeBinary',             type: 'string',  default: 'opencode', fallbackOnEmpty: true, broadcast: false },
   { name: 'piBinary',                   type: 'string',  default: 'pi',       fallbackOnEmpty: true, broadcast: false },
   { name: 'symlinkWorktreeSettings',    type: 'boolean', default: false },
-  { name: 'windowConfigs',              type: 'custom',  default: [],
-    sanitize: sanitizeWindowConfigs,
-    logValue: v => `(${v.length} configs)` },
+  { name: 'recentSessionsLimit',        type: 'number',  default: 8, clamp: [0, 50], round: true,
+    sideEffect: (val, s) => { trimRecentSessions(); } },
   { name: 'scrollbackKB',               type: 'number',  default: SCROLLBACK_DEFAULT_KB, clamp: [1, 10000], round: true },
   { name: 'engine',                     type: 'enum',    default: 'node-pty',
     values: () => tmuxEngine ? ['node-pty', 'tmux'] : ['node-pty'] },
@@ -674,8 +648,6 @@ function broadcastSettings() {
     if (entry.broadcast === false) continue;
     payload[entry.name] = settings[entry.name];
   }
-  // Defensive fallback in case an older settings.json on disk lacks this field.
-  if (payload.windowConfigs == null) payload.windowConfigs = [];
   const msg = JSON.stringify(payload);
   for (const client of wss.clients) {
     if (client.readyState === 1) client.send(msg);
@@ -1053,6 +1025,7 @@ function watchClaudeSessionDir(shellId) {
         // mode, so don't re-apply --permission-mode plan on the next restart.
         e.planMode = false;
         saveState();
+        recordRecentSession(shellId);  // keep the ring-buffer entry's claudeSessionId current
       } catch (err) {
         log(`Session ${shellId} fork check failed for ${filename}: ${err.message}, retrying in 200ms`);
         setTimeout(() => {
@@ -1070,6 +1043,7 @@ function watchClaudeSessionDir(shellId) {
             e2.claudeSessionId = sessionId;
             e2.planMode = false;
             saveState();
+            recordRecentSession(shellId);
           } catch (retryErr) {
             log(`Session ${shellId} fork retry failed for ${filename}: ${retryErr.message}`);
           }
@@ -1609,6 +1583,98 @@ function broadcastContexts() {
   for (const client of reloadClients) {
     if (client.readyState === 1) client.send(msg);
   }
+}
+
+// --- Recent sessions ring buffer (issue #533) ---
+// A durable, most-recent-first list of the last N session configs. Populated from
+// the PTY spawn paths (new/resume/fork), so it captures every real agent session —
+// closed or live, this browser or another. Restore pre-seeds savedState[newId] and
+// lets the normal reconnect branch resume via `claude --resume` (with its existing
+// 5s resume-fail → fork fallback). Excludes plain terminals (nothing to resume) and
+// display/mod tabs (they never reach these paths). Separate from the debug-only
+// session-lifecycle log (mods/session-lifecycle), which is gated off by default.
+let recentSessions = [];
+
+function saveRecentSessions() {
+  try {
+    fs.mkdirSync(path.dirname(RECENT_SESSIONS_FILE), { recursive: true });
+    const tmp = RECENT_SESSIONS_FILE + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify(recentSessions, null, 2));
+    fs.renameSync(tmp, RECENT_SESSIONS_FILE);
+  } catch (e) {
+    console.error('Failed to save recent sessions:', e.message);
+  }
+}
+
+function loadRecentSessions() {
+  try {
+    if (fs.existsSync(RECENT_SESSIONS_FILE)) {
+      const v = JSON.parse(fs.readFileSync(RECENT_SESSIONS_FILE, 'utf8'));
+      recentSessions = (Array.isArray(v) ? v : []).filter(r => r && r.key);
+    }
+  } catch (e) {
+    console.error('Failed to load recent sessions:', e.message);
+  }
+}
+loadRecentSessions();
+
+function broadcastRecentSessions() {
+  const N = settings.recentSessionsLimit || 0;
+  const msg = JSON.stringify({ type: 'recent-sessions', sessions: recentSessions.slice(0, N) });
+  for (const client of wss.clients) {
+    if (client.readyState === 1) client.send(msg);
+  }
+  if (httpsWss) {
+    for (const client of httpsWss.clients) {
+      if (client.readyState === 1) client.send(msg);
+    }
+  }
+  // reloadClients is the always-connected live-reload channel — reaches the empty
+  // state (which has no session WebSocket) so the recent list stays live there too.
+  for (const client of reloadClients) {
+    if (client.readyState === 1) client.send(msg);
+  }
+}
+
+// Truncate the buffer to the current limit (called when the setting is lowered).
+function trimRecentSessions() {
+  const N = settings.recentSessionsLimit || 0;
+  const before = recentSessions.length;
+  if (before > N) recentSessions.length = N;
+  if (recentSessions.length !== before) { saveRecentSessions(); broadcastRecentSessions(); }
+}
+
+// Upsert a session's current config into the ring buffer. Reads the live shell entry
+// so name/cwd/claudeSessionId are always fresh. Dual-key dedup keeps one entry per
+// lineage across both cross-browser resume (new shellId, same claudeSessionId) and
+// Claude fork (same shellId, new claudeSessionId).
+function recordRecentSession(id) {
+  const N = settings.recentSessionsLimit || 0;
+  if (!N) {
+    if (recentSessions.length) { recentSessions = []; saveRecentSessions(); broadcastRecentSessions(); }
+    return;
+  }
+  const e = shells.get(id);
+  if (!e || e.agentType === 'terminal' || e.agentType === 'tmux-attach') return;
+  const entry = {
+    key: e.claudeSessionId || id,
+    shellId: id,
+    claudeSessionId: e.claudeSessionId || null,
+    cwd: e.cwd || null,
+    agentType: e.agentType || 'claude',
+    worktree: e.worktree || null,
+    name: e.name || null,
+    planMode: !!e.planMode,
+    engineType: e.engineType || 'node-pty',
+    createdAt: e.createdAt || Date.now(),
+    updatedAt: Date.now(),
+  };
+  recentSessions = recentSessions.filter(r =>
+    r.shellId !== id && !(entry.claudeSessionId && r.claudeSessionId === entry.claudeSessionId));
+  recentSessions.unshift(entry);
+  if (recentSessions.length > N) recentSessions.length = N;
+  saveRecentSessions();
+  broadcastRecentSessions();
 }
 
 // Save state on shutdown
@@ -2221,110 +2287,6 @@ app.post('/api/commands/execute', (req, res) => {
   }
 });
 
-// --- Window Configs CRUD + Apply ---
-
-app.get('/api/window-configs', (req, res) => {
-  res.json({ configs: settings.windowConfigs || [] });
-});
-
-app.post('/api/window-configs', (req, res) => {
-  const { id, name, tabs } = req.body;
-  if (!name || typeof name !== 'string') return res.status(400).json({ error: 'name is required' });
-  if (!Array.isArray(tabs) || tabs.length === 0) return res.status(400).json({ error: 'tabs array is required' });
-
-  const validTabs = tabs.filter(t => t && typeof t === 'object' && validateConfigTab(t)).map(sanitizeConfigTab);
-  if (validTabs.length === 0) return res.status(400).json({ error: 'at least one valid tab is required' });
-
-  if (!settings.windowConfigs) settings.windowConfigs = [];
-
-  if (id) {
-    // Update existing
-    const idx = settings.windowConfigs.findIndex(c => c.id === id);
-    if (idx === -1) return res.status(404).json({ error: 'config not found' });
-    settings.windowConfigs[idx] = { id, name, tabs: validTabs };
-  } else {
-    // Create new
-    const newId = randomUUID().slice(0, 8);
-    settings.windowConfigs.push({ id: newId, name, tabs: validTabs });
-  }
-
-  saveSettings();
-  broadcastSettings();
-  res.json({ configs: settings.windowConfigs });
-});
-
-app.delete('/api/window-configs/:id', (req, res) => {
-  if (!settings.windowConfigs) return res.status(404).json({ error: 'config not found' });
-  const idx = settings.windowConfigs.findIndex(c => c.id === req.params.id);
-  if (idx === -1) return res.status(404).json({ error: 'config not found' });
-  settings.windowConfigs.splice(idx, 1);
-  saveSettings();
-  broadcastSettings();
-  res.json({ configs: settings.windowConfigs });
-});
-
-app.post('/api/window-configs/:id/apply', (req, res) => {
-  const config = (settings.windowConfigs || []).find(c => c.id === req.params.id);
-  if (!config) return res.status(404).json({ error: 'config not found' });
-
-  const { windowId } = req.body || {};
-  const createdSessions = [];
-
-  for (const tab of config.tabs) {
-    const tabType = tab.type || 'terminal';
-
-    if (tabType === 'display-tab') {
-      const id = randomUUID().slice(0, 8);
-      const name = tab.name || 'Display';
-      setDisplayTab(id, tab.html);
-      createdSessions.push({ id, name, type: 'display-tab' });
-      deliverToWindow({ type: 'open-display-tab', id, name, windowId: windowId || undefined }, windowId);
-      continue;
-    }
-
-    if (tabType === 'baby-browser') {
-      const name = tab.name || 'Baby Browser';
-      const url = tab.url || '';
-      createdSessions.push({ name, type: 'baby-browser', url });
-      deliverToWindow({ type: 'open-mod-tab', modId: 'baby-browser', name, url, windowId: windowId || undefined }, windowId);
-      continue;
-    }
-
-    // terminal (default)
-    const cwd = tab.cwd.startsWith('~') ? path.join(os.homedir(), tab.cwd.slice(1)) : tab.cwd;
-    if (!fs.existsSync(cwd)) {
-      log(`[API] window-configs apply: cwd not found: ${cwd}, skipping`);
-      continue;
-    }
-
-    const agentType = tab.agentType || settings.defaultAgent || 'claude';
-    const agentConfig = getAgentConfig(agentType);
-    const id = randomUUID().slice(0, 8);
-    const claudeSessionId = randomUUID();
-    const spawnArgs = getSpawnArgs(agentType, { sessionId: claudeSessionId, shellId: id });
-    const name = tab.name || path.basename(cwd);
-
-    const sessionEngine = getDefaultEngine();
-    const engineType = sessionEngine === tmuxEngine ? 'tmux' : 'node-pty';
-    spawnSession(sessionEngine, id, agentType, spawnArgs, cwd, { cols: 120, rows: 40, env: sessionEnv(id, { name, windowId: windowId || null, cwd, agentType }) });
-    shells.set(id, { clients: new Set(), cwd, claudeSessionId, agentType, engine: sessionEngine, engineType, worktree: null, windowId: windowId || null, name, waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now() });
-    wireShellOutput(id);
-    emitSessionOpen(id);
-    if (agentConfig.supportsSessionWatch) watchClaudeSessionDir(id);
-    sessionEngine.onExit(id, () => {
-      if (agentConfig.supportsSessionWatch) unwatchClaudeSessionDir(id);
-      if (!shuttingDown) { notifyClientsShellExited(id); shells.delete(id); saveState(); }
-    });
-
-    createdSessions.push({ id, name, cwd });
-    deliverToWindow({ type: 'open-session', id, cwd, name, windowId: windowId || undefined }, windowId);
-  }
-
-  saveState();
-  log(`[API] window-configs apply: config="${config.name}", created ${createdSessions.length} sessions`);
-  res.json({ sessions: createdSessions });
-});
-
 app.get('/api/themes', (req, res) => {
   res.json({ themes: listThemes(), active: settings.activeTheme || null });
 });
@@ -2662,6 +2624,7 @@ app.post('/api/start-automation', (req, res) => {
   shells.set(id, { clients: new Set(), cwd, claudeSessionId, agentType, engine: sessionEngine, engineType, worktree: null, windowId: windowId || null, name, waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now(), prefill: true });
   wireShellOutput(id);
   emitSessionOpen(id);
+  recordRecentSession(id);
   if (prompt) deliverPromptWhenReady(id, prompt);
   if (agentConfig.supportsSessionWatch) watchClaudeSessionDir(id);
   sessionEngine.onExit(id, () => {
@@ -3155,6 +3118,44 @@ app.delete('/api/contexts/:id', (req, res) => {
   res.json({ deleted: req.params.id });
 });
 
+// --- Recent sessions (issue #533) ---
+
+app.get('/api/recent-sessions', (req, res) => {
+  const N = settings.recentSessionsLimit || 0;
+  res.json({ sessions: recentSessions.slice(0, N) });
+});
+
+// Restore a recent session: mint a fresh shell id, pre-seed savedState[newId] with
+// the stored config, and return the id. The client then connects to it, hitting the
+// normal reconnect branch which resumes via `claude --resume` (and its 5s fork
+// fallback if the conversation is gone). This reuses the resume path with zero
+// duplication and works from any browser.
+app.post('/api/recent-sessions/:key/restore', (req, res) => {
+  const r = recentSessions.find(s => s.key === req.params.key);
+  if (!r) return res.status(404).json({ error: 'Recent session not found' });
+  const newId = randomUUID().slice(0, 8);
+  savedState[newId] = {
+    cwd: r.cwd,
+    claudeSessionId: r.claudeSessionId,
+    agentType: r.agentType,
+    engineType: r.engineType,
+    worktree: r.worktree,
+    name: r.name,
+    planMode: r.planMode,
+    createdAt: r.createdAt,
+    windowId: null,
+  };
+  saveState();
+  res.json({ id: newId, cwd: r.cwd, name: r.name, agentType: r.agentType });
+});
+
+app.delete('/api/recent-sessions/:key', (req, res) => {
+  const before = recentSessions.length;
+  recentSessions = recentSessions.filter(s => s.key !== req.params.key);
+  if (recentSessions.length !== before) { saveRecentSessions(); broadcastRecentSessions(); }
+  res.json({ ok: true });
+});
+
 const issueCache = new Map(); // key: `${cwd}:${limit}` → { data, ts }
 const ISSUE_CACHE_TTL = 10000; // 10 seconds
 
@@ -3257,6 +3258,7 @@ app.post('/api/start-issue', (req, res) => {
   shells.set(id, { clients: new Set(), cwd: worktreeCwd, claudeSessionId: claudeSessionId, agentType, engine: sessionEngine, engineType, worktree: worktree || null, windowId: windowId || null, name, planMode: !!settings.wandPlanMode, waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now(), loading: true });
   wireShellOutput(id);
   emitSessionOpen(id);
+  recordRecentSession(id);
   // Route any synchronous prompt through deliverPromptWhenReady so agents
   // get a one-shot onIdleOnce callback or their configured delay.
   if (prompt) deliverPromptWhenReady(id, prompt);
@@ -3728,6 +3730,7 @@ function handleWsConnection(ws, req) {
       const startTime = Date.now();
       shells.set(id, { clients: new Set(), cwd, claudeSessionId, agentType: savedAgentType, engine: sessionEngine, engineType: restoredEngineType, worktree: savedWorktree, name: restoredName, planMode: savedPlanMode, restored: true, waitingForInput: false, lastActivity: Date.now(), createdAt: restored.createdAt || Date.now(), windowId: restored.windowId || null });
       wireShellOutput(id);
+      recordRecentSession(id);  // bump recency on same-browser reconnect + cross-browser restore
       if (agentConfig.supportsSessionWatch) watchClaudeSessionDir(id);
       sessionEngine.onExit(id, () => {
         if (agentConfig.supportsSessionWatch) unwatchClaudeSessionDir(id);
@@ -3751,6 +3754,7 @@ function handleWsConnection(ws, req) {
             entry.scrollback = [];
             entry.scrollbackSize = 0;
             wireShellOutput(id);
+            recordRecentSession(id);  // resume failed → fork; keep the ring-buffer entry current
             watchClaudeSessionDir(id);
             sessionEngine.onExit(id, () => { if (!shuttingDown) { unwatchClaudeSessionDir(id); notifyClientsShellExited(id); shells.delete(id); saveState(); } });
             saveState();
@@ -3818,6 +3822,7 @@ function handleWsConnection(ws, req) {
     shells.set(id, { clients: new Set(), cwd: worktreeCwd, claudeSessionId: sessionId, agentType, engine: sessionEngine, engineType, worktree: worktree || null, name: name || null, planMode: spawnedPlanMode, waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now() });
     wireShellOutput(id);
     emitSessionOpen(id);
+    recordRecentSession(id);
     // Inherit Claude's Remote Control (/rc) from the parent tab/fork if it had it on.
     maybeInheritRemoteControl({
       newId: id,
