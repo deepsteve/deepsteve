@@ -280,10 +280,18 @@ function makeRow(id, name, active, ctx) {
 let rowMenu = null;
 function hideRowMenu() {
   if (rowMenu) { rowMenu.remove(); rowMenu = null; }
+  document.removeEventListener('click', onRowMenuDocClick, true);
   document.removeEventListener('keydown', onRowMenuKey, true);
 }
 function onRowMenuKey(e) {
   if (e.key === 'Escape') { e.preventDefault(); hideRowMenu(); }
+}
+// Close on any click outside the menu. Kept as a stable reference (not a
+// self-removing one-shot) so it survives an inside-menu click that isn't on an
+// item — the listener stays until the menu is actually hidden, so a later
+// outside click still dismisses it.
+function onRowMenuDocClick(e) {
+  if (rowMenu && !rowMenu.contains(e.target)) hideRowMenu();
 }
 function showRowMenu(x, y, ctx) {
   hideRowMenu();
@@ -317,13 +325,10 @@ function showRowMenu(x, y, ctx) {
   if (rect.bottom > window.innerHeight) menu.style.top = (window.innerHeight - rect.height - 8) + 'px';
 
   rowMenu = menu;
-  // Dismiss on the next outside click (deferred so this menu's own opening
-  // click/contextmenu doesn't immediately close it) and on Escape.
+  // Dismiss on any outside click (deferred so this menu's own opening
+  // right-click doesn't immediately close it) and on Escape.
   setTimeout(() => {
-    document.addEventListener('click', function onDoc(e) {
-      if (rowMenu && !rowMenu.contains(e.target)) { hideRowMenu(); }
-      document.removeEventListener('click', onDoc, true);
-    }, true);
+    if (rowMenu === menu) document.addEventListener('click', onRowMenuDocClick, true);
   }, 0);
   document.addEventListener('keydown', onRowMenuKey, true);
 }
