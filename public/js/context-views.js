@@ -808,7 +808,12 @@ export function init(callbacks) {
       setSidebar(true);
       document.activeElement?.blur();
     });
-    appMain.insertBefore(ruleTitleEl, terminals);
+    // Anchor to the direct child of #app-main holding the terminal area so the band
+    // stays full-width above it (mod-manager may wrap #terminals in #content-row).
+    let anchor = terminals;
+    while (anchor.parentNode && anchor.parentNode !== appMain) anchor = anchor.parentNode;
+    if (anchor.parentNode === appMain) appMain.insertBefore(ruleTitleEl, anchor);
+    else appMain.appendChild(ruleTitleEl);
   }
 
   setSidebar(sidebarOpen);
