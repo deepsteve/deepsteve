@@ -72,32 +72,33 @@ body {
     inset 0 0 8px rgba(0,0,0,0.3);
 }
 
-/* #535 — in the retro terminal theme the closed-context title is NOT shown next
-   to the tabs; render it as a dashed ruled line across the top of the terminal:
-   -------------------- Deep Steve -------------------- */
+/* #535 — in the retro terminal theme the closed-context title is NOT shown next to
+   the tabs. Instead it's inset into the monitor's top frame line, like a fieldset
+   legend: a thin label centered on the top bezel edge, its background matching the
+   body margin so it "breaks" the grey frame line —  —— Deep Steve —— */
 #context-indicator { display: none !important; }
 
+/* Positioning context so the label can straddle #app-main's top bezel edge; it must
+   live outside #app-main (overflow:clip) to avoid being cropped. */
+#app-container { position: relative; }
+
 #context-rule-title {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 6px 16px 4px;
+  display: block;
+  position: absolute;
+  top: -6px;                    /* straddle the monitor's top frame line */
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 5;
+  padding: 0 10px;
   font-size: 12px;
   color: var(--ds-text-secondary);
+  background: #1a1a1a;          /* body margin color — breaks the grey bezel line */
   white-space: nowrap;
   user-select: none;
   cursor: pointer;
-  background: var(--ds-bg-primary);
-}
-#context-rule-title::before,
-#context-rule-title::after {
-  content: "";
-  flex: 1;
-  border-top: 1px dashed var(--ds-border);
 }
 #context-rule-title:hover { color: var(--ds-text-primary); }
 #context-rule-title.hidden { display: none; }
 
-/* The rule is a horizontal-layout flourish; in vertical tab layout #app-main is a
-   row, so a full-width band would be wrong — hide it there. */
+/* In vertical tab layout the monitor frame differs; hide the inset label there. */
 #app-container.vertical-layout #context-rule-title { display: none; }

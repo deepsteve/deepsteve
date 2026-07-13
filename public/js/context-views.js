@@ -793,14 +793,14 @@ export function init(callbacks) {
   if (appContainer && appMain) appContainer.insertBefore(rail, appMain);
   else if (appContainer) appContainer.insertBefore(rail, appContainer.firstChild);
 
-  // Ruled terminal-title variant of the closed-context label (#535). Mounted as a
-  // flex child of #app-main directly before #terminals, so it's a full-width band
-  // below the tab strip and above the terminal (inside the retro CRT bezel). It's
-  // display:none in every theme by default; the retro-monitor theme reveals it as
-  // a dashed rule and hides the tab-strip #context-indicator instead. Kept in sync
-  // by updateIndicator(); clicking it opens the rail like the indicator.
-  const terminals = document.getElementById('terminals');
-  if (appMain && terminals) {
+  // Closed-context label variant for the retro-monitor CRT theme (#535). It is
+  // display:none in every theme by default; the retro-monitor theme reveals it and
+  // insets it into the monitor's top frame line (like a fieldset legend), hiding the
+  // tab-strip #context-indicator instead. Mounted as a child of #app-container (not
+  // #app-main, whose overflow:clip would crop a label straddling its top bezel edge)
+  // so it can sit on the frame line. Kept in sync by updateIndicator(); clicking it
+  // opens the rail like the indicator.
+  if (appContainer) {
     ruleTitleEl = document.createElement('div');
     ruleTitleEl.id = 'context-rule-title';
     ruleTitleEl.className = 'hidden';
@@ -808,12 +808,7 @@ export function init(callbacks) {
       setSidebar(true);
       document.activeElement?.blur();
     });
-    // Anchor to the direct child of #app-main holding the terminal area so the band
-    // stays full-width above it (mod-manager may wrap #terminals in #content-row).
-    let anchor = terminals;
-    while (anchor.parentNode && anchor.parentNode !== appMain) anchor = anchor.parentNode;
-    if (anchor.parentNode === appMain) appMain.insertBefore(ruleTitleEl, anchor);
-    else appMain.appendChild(ruleTitleEl);
+    appContainer.insertBefore(ruleTitleEl, appContainer.firstChild);
   }
 
   setSidebar(sidebarOpen);
