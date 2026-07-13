@@ -103,7 +103,10 @@ mkdir -p ~/.deepsteve/engines
 cp engines/*.js ~/.deepsteve/engines/
 cp -r public/* ~/.deepsteve/public/
 mkdir -p ~/.deepsteve/themes
-cp -n themes/*.css ~/.deepsteve/themes/ 2>/dev/null || true
+# Force-overwrite built-in themes so CSS edits actually redeploy. cp -n silently
+# skipped any theme that already existed, stranding theme updates on installs that
+# already had the file (user-added themes not in the repo are still left untouched).
+cp -f themes/*.css ~/.deepsteve/themes/ 2>/dev/null || true
 mkdir -p ~/.deepsteve/mods
 cp -r mods/* ~/.deepsteve/mods/ 2>/dev/null || true
 
