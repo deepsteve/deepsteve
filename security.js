@@ -102,10 +102,17 @@ function createSecurity(cfg) {
     ? getLanAddresses().filter(a => a !== 'localhost' && a !== '127.0.0.1')
     : [];
 
+  // Operator escape-hatch hosts (--allow-host / DEEPSTEVE_ALLOW_HOST), normalized ONCE and shared by
+  // both the port-stripped HTTP/WS allowlist (`allowedHosts`) and the port-qualified MCP allowlist
+  // (`mcpAllowedHosts`) below. Deriving both from one source keeps them from diverging — a divergence
+  // is exactly what broke the docker integration tests: the test container reaches us as `server:3000`,
+  // which was allowed for HTTP/WS but still rejected by the MCP SDK's DNS-rebinding guard.
+  const normalizedAllowHosts = allowHosts.map(h => hostnameOf(h) || String(h).trim().toLowerCase()).filter(Boolean);
+
   const allowedHosts = new Set([
     ...LOOPBACK_HOSTS,
     ...lanHosts.map(h => h.toLowerCase()),
-    ...allowHosts.map(h => hostnameOf(h) || String(h).trim().toLowerCase()).filter(Boolean),
+    ...normalizedAllowHosts,
   ]);
 
   const httpOrigins = ['localhost', '127.0.0.1', '[::1]'].map(h => `http://${h}:${port}`);
@@ -119,8 +126,10 @@ function createSecurity(cfg) {
   ]);
 
   // The MCP SDK's DNS-rebinding guard does an exact includes() on the FULL Host header (host:port),
-  // so this list is port-qualified — distinct from `allowedHosts`, which is port-stripped.
-  const mcpHostBases = ['localhost', '127.0.0.1', '[::1]', ...lanHosts];
+  // so this list is port-qualified — distinct from `allowedHosts`, which is port-stripped. It folds
+  // in the same operator allowHosts (via normalizedAllowHosts) so an allowlisted host is honored on
+  // the MCP surface too, not just HTTP/WS.
+  const mcpHostBases = ['localhost', '127.0.0.1', '[::1]', ...lanHosts, ...normalizedAllowHosts];
   const mcpAllowedHosts = [
     ...mcpHostBases.map(h => `${h}:${port}`),
     ...(httpsEnabled ? mcpHostBases.map(h => `${h}:${httpsPort}`) : []),
