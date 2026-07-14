@@ -15,6 +15,12 @@
 //
 // Token transport is cookie (browser) or bearer (everything else). We deliberately do NOT accept a
 // `?token=` query param anywhere, so the secret never lands in server logs or `ps` output.
+//
+// The canonical browser origin is http://deepsteve.localhost:PORT (#544/#545). Plain `localhost`
+// shares one cookie jar with every other local dev app (cookies key on host, not port), and
+// Firefox's per-host cookie cap evicts our cookie when that shared jar fills. `*.localhost`
+// resolves to loopback (RFC 6761), so deepsteve.localhost is still localhost-only but gets its own
+// jar — and makes other localhost apps cross-site, so SameSite=Strict actively excludes them.
 
 const fs = require('fs');
 const path = require('path');
@@ -23,6 +29,13 @@ const crypto = require('crypto');
 
 const AUTH_TOKEN_FILE = path.join(os.homedir(), '.deepsteve', 'auth-token');
 const COOKIE_NAME = 'ds_auth';
+// Canonical UI host (#545): loopback per RFC 6761, but its own cookie "site" — isolated from the
+// shared `localhost` jar whose per-host cap is what evicted ds_auth (#544).
+const UI_HOST = 'deepsteve.localhost';
+// Rolling window: setAuthCookie re-issues the cookie on every HTML page load, so this is the
+// maximum *idle* lifetime, not a hard logout. Persistent (vs the old session cookie) both to
+// survive browser restarts and because session cookies are browsers' preferred purge target.
+const COOKIE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 
 // Read the per-install secret, creating it (0600) on first run. The server is the sole
 // authoritative creator and calls this before app.listen, so the token exists before any request,
@@ -83,19 +96,22 @@ function parseCookies(cookieHeader) {
  *   httpsEnabled              — whether the HTTPS/LAN listener is on
  *   getLanAddresses           — () => string[] of localhost + LAN IPv4s (from server.js)
  *   allowOrigins, allowHosts  — operator escape-hatch widening lists (--allow-origin/--allow-host)
+ *   canonicalRedirect         — bounce browser page loads on localhost to UI_HOST (default true;
+ *                               --no-canonical-redirect turns it off)
  *   log                       — logger
  */
 function createSecurity(cfg) {
   const {
     port, httpsPort, httpsEnabled,
-    getLanAddresses, allowOrigins = [], allowHosts = [], log = () => {},
+    getLanAddresses, allowOrigins = [], allowHosts = [],
+    canonicalRedirect = true, log = () => {},
   } = cfg;
 
   const token = loadOrCreateToken(log);
   const tokenHash = crypto.createHash('sha256').update(token).digest();
 
   // --- Allowlists (computed once at boot, like the HTTPS cert SANs) ---
-  const LOOPBACK_HOSTS = ['localhost', '127.0.0.1', '::1'];
+  const LOOPBACK_HOSTS = ['localhost', '127.0.0.1', '::1', UI_HOST];
   // LAN IPs are only trusted when HTTPS/LAN mode is on (they only make sense there, and the certs
   // are minted for exactly these addresses). Plain HTTP stays loopback-only.
   const lanHosts = httpsEnabled
@@ -115,9 +131,12 @@ function createSecurity(cfg) {
     ...normalizedAllowHosts,
   ]);
 
-  const httpOrigins = ['localhost', '127.0.0.1', '[::1]'].map(h => `http://${h}:${port}`);
+  // One host-base list feeds the Origin allowlist and the MCP host allowlist below, so the two
+  // can't drift apart. ([::1] is bracketed here because origins/Host headers carry the brackets.)
+  const originHostBases = ['localhost', '127.0.0.1', '[::1]', UI_HOST];
+  const httpOrigins = originHostBases.map(h => `http://${h}:${port}`);
   const httpsOrigins = httpsEnabled
-    ? ['localhost', '127.0.0.1', '[::1]', ...lanHosts].map(h => `https://${h}:${httpsPort}`)
+    ? [...originHostBases, ...lanHosts].map(h => `https://${h}:${httpsPort}`)
     : [];
   const allowedOrigins = new Set([
     ...httpOrigins,
@@ -129,7 +148,7 @@ function createSecurity(cfg) {
   // so this list is port-qualified — distinct from `allowedHosts`, which is port-stripped. It folds
   // in the same operator allowHosts (via normalizedAllowHosts) so an allowlisted host is honored on
   // the MCP surface too, not just HTTP/WS.
-  const mcpHostBases = ['localhost', '127.0.0.1', '[::1]', ...lanHosts, ...normalizedAllowHosts];
+  const mcpHostBases = [...originHostBases, ...lanHosts, ...normalizedAllowHosts];
   const mcpAllowedHosts = [
     ...mcpHostBases.map(h => `${h}:${port}`),
     ...(httpsEnabled ? mcpHostBases.map(h => `${h}:${httpsPort}`) : []),
@@ -189,19 +208,44 @@ function createSecurity(cfg) {
     next();
   }
 
-  // 2. Set the auth cookie on page loads. Keyed off the REQUEST (GET + Accept: text/html) because
+  // 2. Bounce browser page loads on the shared loopback names to the canonical UI origin
+  //    (#544/#545): the localhost jar fills with other apps' cookies and Firefox's per-host cap
+  //    evicts ds_auth; deepsteve.localhost is its own site and jar. Navigations only (GET +
+  //    Accept: text/html) — curl/agents/docker healthchecks send Accept: */* and bearer clients
+  //    are skipped outright, so nothing non-browser ever bounces. Never redirects --allow-host /
+  //    LAN hosts (deliberate operator choices) or UI_HOST itself (no loop). Always 302 — a cached
+  //    permanent redirect would outlive the --no-canonical-redirect escape hatch.
+  const REDIRECT_SOURCE_HOSTS = new Set(['localhost', '127.0.0.1', '::1']);
+  function canonicalHostRedirect(req, res, next) {
+    if (!canonicalRedirect) return next();
+    if (req.method !== 'GET') return next();
+    if (!String(req.headers.accept || '').includes('text/html')) return next();
+    if (req.headers.authorization) return next();
+    if (!REDIRECT_SOURCE_HOSTS.has(hostnameOf(req.headers.host))) return next();
+    // Keep the ORIGINAL port, not our listen port — an SSH tunnel can map us to any local port,
+    // and *.localhost resolves on the browser's machine, so the tunnel keeps working.
+    const host = String(req.headers.host || '');
+    const m = host.startsWith('[') ? /\]:(\d+)$/.exec(host) : /:(\d+)$/.exec(host);
+    const portSuffix = m ? `:${m[1]}` : '';
+    return res.redirect(302, `${req.secure ? 'https' : 'http'}://${UI_HOST}${portSuffix}${req.originalUrl}`);
+  }
+
+  // 3. Set the auth cookie on page loads. Keyed off the REQUEST (GET + Accept: text/html) because
   //    this runs before express.static streams the body. Runs after hostGuard, so only allowlisted
-  //    hosts ever receive the cookie (a rebinding victim gets a 403 first).
+  //    hosts ever receive the cookie (a rebinding victim gets a 403 first) — and after
+  //    canonicalHostRedirect, so a bounced navigation never deposits a cookie into the localhost
+  //    jar (that jar's pollution is the bug this fixes).
   function setAuthCookie(req, res, next) {
     if (req.method === 'GET' && String(req.headers.accept || '').includes('text/html')) {
       res.cookie(COOKIE_NAME, token, {
         httpOnly: true, sameSite: 'strict', path: '/', secure: !!req.secure,
+        maxAge: COOKIE_MAX_AGE_MS,
       });
     }
     next();
   }
 
-  // 3. Token gate — registered as a POSITIONAL middleware before the body-parser and every route
+  // 4. Token gate — registered as a POSITIONAL middleware before the body-parser and every route
   //    (and before the async-mounted /mcp + mod routes), giving default-deny coverage of current
   //    and future endpoints. Static files are served ahead of this and never reach it.
   function authGate(req, res, next) {
@@ -261,9 +305,9 @@ function createSecurity(cfg) {
     cookieName: COOKIE_NAME,
     allowedHosts, allowedOrigins, mcpAllowedHosts,
     isAllowedHost, isAllowedOrigin, validToken,
-    hostGuard, setAuthCookie, authGate, verifyWsClient,
+    hostGuard, canonicalHostRedirect, setAuthCookie, authGate, verifyWsClient,
     _rateLimit: { lockedOut, recordFailure }, // exposed for tests
   };
 }
 
-module.exports = { createSecurity, AUTH_TOKEN_FILE, COOKIE_NAME };
+module.exports = { createSecurity, AUTH_TOKEN_FILE, COOKIE_NAME, UI_HOST };

@@ -8,11 +8,17 @@ const path = require('path');
 const os = require('os');
 const net = require('net');
 const { initMCP } = require('./mcp-server');
-const { createSecurity } = require('./security');
+const { createSecurity, UI_HOST } = require('./security');
 const NodePtyEngine = require('./engines/node-pty');
 const TmuxEngine = require('./engines/tmux');
 
 const PORT = process.env.PORT || 3000;
+// Canonical browser URL (#545): deepsteve.localhost is loopback (RFC 6761) but has its own cookie
+// jar, so ds_auth can't be evicted by other localhost apps filling the shared jar (#544). Agent/CLI
+// loopback traffic (DEEPSTEVE_API_URL, MCP config, restart.sh curls) deliberately stays on plain
+// localhost — it authenticates by bearer, carries no cookies, and must not depend on *.localhost
+// resolving for non-browser resolvers.
+const UI_URL = `http://${UI_HOST}:${PORT}`;
 
 function parseBindAddress() {
   const args = process.argv.slice(2);
@@ -57,6 +63,9 @@ function envList(name) {
 // Operator escape hatches (widen the trust boundary; auth itself is always on and has no off switch).
 const ALLOW_ORIGINS = [...parseCLIValues('allow-origin'), ...envList('DEEPSTEVE_ALLOW_ORIGIN')];
 const ALLOW_HOSTS = [...parseCLIValues('allow-host'), ...envList('DEEPSTEVE_ALLOW_HOST')];
+// Escape hatch for the localhost → deepsteve.localhost browser redirect (#545), for the rare
+// setup where *.localhost doesn't resolve (minimal Linux without systemd-resolved).
+const CANONICAL_REDIRECT = !(parseCLIFlag('no-canonical-redirect') || process.env.DEEPSTEVE_NO_CANONICAL_REDIRECT === '1');
 const CERTS_DIR = path.join(os.homedir(), '.deepsteve', 'certs');
 const AUTOMATIONS_DIR = path.join(os.homedir(), '.deepsteve', 'automations');
 
@@ -118,7 +127,7 @@ function deliverToWindow(msg, targetWindowId, { openBrowser } = {}) {
     // Keep windowId for flush routing
     pendingOpens.push(JSON.stringify(msgObj));
     if (openBrowser) {
-      exec(`open "http://localhost:${PORT}"`);
+      exec(`open "${UI_URL}"`);
     }
   }
 }
@@ -158,6 +167,7 @@ const security = createSecurity({
   getLanAddresses,
   allowOrigins: ALLOW_ORIGINS,
   allowHosts: ALLOW_HOSTS,
+  canonicalRedirect: CANONICAL_REDIRECT,
   log,
 });
 const AUTH_TOKEN = security.token;
@@ -165,7 +175,11 @@ const AUTH_TOKEN = security.token;
 // 1. Host-header guard first — blocks DNS rebinding (the rebind domain shows up in Host) on every
 //    request, static included.
 app.use(security.hostGuard);
-// 2. Hand the auth cookie to page loads (keyed off the request; runs before static streams).
+// 2. Bounce browser navigations on localhost to the canonical deepsteve.localhost origin (#545).
+//    After hostGuard (a rebinding victim still 403s), before setAuthCookie (a bounced page load
+//    must not deposit a cookie into the shared localhost jar — that jar's eviction is bug #544).
+app.use(security.canonicalHostRedirect);
+// 3. Hand the auth cookie to page loads (keyed off the request; runs before static streams).
 app.use(security.setAuthCookie);
 // Static assets are served ahead of the token gate: they carry no secrets and must load to
 // bootstrap the UI (the cookie is HttpOnly; cross-origin pages can't read our responses under SOP).
@@ -176,7 +190,7 @@ app.use('/mods', express.static('mods'));
 // Public, unauthenticated readiness probe — lets live-reload detect "server back up" on a deploy
 // that turns auth on, before the reloaded page has re-acquired its cookie. Must stay above the gate.
 app.get('/healthz', (req, res) => res.json({ ok: true }));
-// 3. Token gate — POSITIONAL, not a trailing catch-all: registered here it precedes every inline
+// 4. Token gate — POSITIONAL, not a trailing catch-all: registered here it precedes every inline
 //    /api route and the async-mounted /mcp + mod routes, so it default-denies all of them (and any
 //    future control endpoint). The static handlers above short-circuit real files before this runs.
 app.use(security.authGate);
@@ -591,11 +605,19 @@ function getLanAddresses() {
   return [...addrs];
 }
 
+// Cert SANs = LAN addresses + the canonical UI host (#545). Kept out of getLanAddresses() itself,
+// which also feeds security.js's lanHosts filtering and the Quest LAN log line. Must be used by
+// BOTH certsMatchCurrentIPs and ensureCerts, or the SAN comparison never matches and certs
+// regenerate on every boot.
+function certSans() {
+  return [...getLanAddresses(), UI_HOST];
+}
+
 function certsMatchCurrentIPs() {
   const metaFile = path.join(CERTS_DIR, 'meta.json');
   try {
     const meta = JSON.parse(fs.readFileSync(metaFile, 'utf8'));
-    const currentIPs = getLanAddresses().sort().join(',');
+    const currentIPs = certSans().sort().join(',');
     const savedIPs = (meta.sans || []).sort().join(',');
     if (currentIPs !== savedIPs) return false;
     // Check if cert files exist
@@ -620,7 +642,7 @@ async function ensureCerts() {
   }
 
   fs.mkdirSync(CERTS_DIR, { recursive: true });
-  const sans = getLanAddresses();
+  const sans = certSans();
   log(`HTTPS: Generating certificates for: ${sans.join(', ')}`);
 
   // Try mkcert first (locally-trusted, no browser warnings)
@@ -3452,7 +3474,7 @@ app.post('/api/start-issue', (req, res) => {
   // Notify browser to open the new session
   log(`[API] start-issue: windowId=${windowId}, sessionId=${id}, readyClients=${readyClients.length}, clientWindowIds=[${readyClients.map(c => c.windowId).join(',')}]`);
   deliverToWindow({ type: 'open-session', id, cwd, name, windowId, loading: true }, windowId, { openBrowser: true });
-  res.json({ id, name, url: `http://localhost:${PORT}` });
+  res.json({ id, name, url: UI_URL });
 });
 
 // restart.sh calls this before restarting. Server asks browser(s) for
@@ -3515,7 +3537,7 @@ app.get('/api/restart-prompt', (req, res) => {
 reconcileSkills();
 
 const server = app.listen(PORT, BIND, () => {
-  log(`HTTP server listening on ${BIND}:${PORT}`);
+  log(`HTTP server listening on ${BIND}:${PORT} — UI at ${UI_URL}`);
   // Auto-open browser if no clients connect within 5s of startup.
   // Skipped on restart: restart.sh writes .restarting before unloading the
   // old daemon, so existing browsers get a chance to silently reconnect
@@ -3536,7 +3558,7 @@ const server = app.listen(PORT, BIND, () => {
       const connected = [...reloadClients].filter(c => c.readyState === 1);
       if (connected.length === 0) {
         log('No browser connected after startup, opening default browser');
-        exec(`open "http://localhost:${PORT}"`);
+        exec(`open "${UI_URL}"`);
       }
     }, 5000);
   }

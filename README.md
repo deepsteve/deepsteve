@@ -61,7 +61,7 @@ If you've cloned the repo:
 
 ## Usage
 
-Open [http://localhost:3000](http://localhost:3000) in your browser.
+Open [http://deepsteve.localhost:3000](http://deepsteve.localhost:3000) in your browser (`*.localhost` resolves to loopback; `http://localhost:3000` also works and redirects there).
 
 - Click **+** to create a new Claude Code session in any directory
 - Click the **GitHub icon** to pick an issue — deepsteve creates a worktree and starts a session with the issue as a prompt
@@ -120,6 +120,7 @@ launchctl list | grep deepsteve        # check status
 
 - Binds to `localhost:3000` only by default — not accessible from the network
 - **Token-authenticated** on every surface (WebSocket, MCP, REST): a Host allowlist + Origin allowlist + a per-install secret at `~/.deepsteve/auth-token` (`0600`) close the cross-origin / DNS-rebinding hole. The browser gets the token as an HttpOnly cookie; other clients send it as `Authorization: Bearer <token>`. Widen access with `--allow-origin` / `--allow-host`.
+- The UI lives on **`http://deepsteve.localhost:3000`** — still loopback-only (RFC 6761), but with its own browser cookie jar so the auth cookie can't be evicted when other local dev apps fill the shared `localhost` jar. Browser navigations to `localhost:3000` get a 302 there; disable with `--no-canonical-redirect` (or `DEEPSTEVE_NO_CANONICAL_REDIRECT=1`) if `*.localhost` doesn't resolve on your system.
 - Each session runs Claude Code with the permissions of the user who installed deepsteve
 
 ## Running on Meta Quest (WebXR)

@@ -332,7 +332,7 @@ if command -v opencode &>/dev/null; then
     ' "$OC_CONFIG" 2>/dev/null || true
 fi
 
-echo "deepsteve installed and running at http://localhost:3000"
+echo "deepsteve installed and running at http://deepsteve.localhost:3000"
 echo "To uninstall: ~/.deepsteve/uninstall.sh"
 echo ""
 echo "⚠️  Security: DeepSteve is localhost-only and token-authenticated (~/.deepsteve/auth-token)."
