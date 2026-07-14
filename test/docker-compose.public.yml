@@ -8,6 +8,24 @@ services:
     environment:
       - PORT=3000
       - DEEPSTEVE_BIND=0.0.0.0
+      # Auth (#536): the test container reaches us as http://server:3000, so allowlist that host.
+      - DEEPSTEVE_ALLOW_HOST=server
+    volumes:
+      # Token-only volume (#539): the app lives IN /root/.deepsteve here (unlike docker-compose.yml,
+      # where it's in /app), so sharing that whole dir would risk running stale installed code from
+      # a persisted volume. Instead share just the token via a neutral path; regenerated every start.
+      - ds_token:/auth
+    # Seed a fresh random token before the server starts: loadOrCreateToken() (security.js) reuses
+    # a non-empty ~/.deepsteve/auth-token verbatim, so this is the token the server serves. The
+    # healthcheck only passes after listen, so the test container always sees the final token.
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        node -e 'process.stdout.write(require("crypto").randomBytes(32).toString("hex"))' > /auth/token
+        install -m 600 /auth/token /root/.deepsteve/auth-token
+        exec node server.js
     healthcheck:
       # /healthz is the public readiness endpoint; /api/version is now auth-gated (#536).
       test: ["CMD", "curl", "-sf", "http://localhost:3000/healthz"]
@@ -25,6 +43,18 @@ services:
         condition: service_healthy
     environment:
       - DEEPSTEVE_URL=http://server:3000
-    # Run files serially (one process each); skip tmux — install.sh has no tmux.
+    volumes:
+      - ds_token:/auth   # read the server-seeded auth token (#539)
+    # Copy the token where the test helper reads it (~/.deepsteve/auth-token), then run files
+    # serially (one process each); skip tmux — install.sh has no tmux.
     # See test/run-integration.sh for why --test-concurrency=1 isn't enough.
-    command: ["sh", "test/run-integration.sh", "tmux-engine"]
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        cp /auth/token /root/.deepsteve/auth-token
+        exec sh test/run-integration.sh tmux-engine
+
+volumes:
+  ds_token:
