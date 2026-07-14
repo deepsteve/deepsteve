@@ -29,10 +29,12 @@ import { nsKey } from './storage-namespace.js';
 // state (which context is active, whether the rail is open) stays client-side.
 const ACTIVE_KEY = nsKey('deepsteve-context-active');   // sessionStorage: active id (per window)
 const SIDEBAR_KEY = nsKey('deepsteve-context-sidebar'); // sessionStorage: open state (per window)
+const LAST_TAB_KEY = nsKey('deepsteve-context-last-tab'); // sessionStorage: { [contextId]: tabId } (per window, #541)
 
 let enabled = true;
 let contexts = [];          // [{ id, name, dirs: [] }]
 let activeContextId = null; // null = view all
+let lastTabByContext = {};  // { contextId: tabId } — last tab viewed while that context was active (#541)
 let sidebarOpen = false;
 let cmdChordArmed = false;  // true between a Cmd+P press and the Cmd release — see onKeyDown
 
@@ -93,6 +95,12 @@ function loadSidebar() {
 }
 function saveSidebar() {
   sessionStorage.setItem(SIDEBAR_KEY, sidebarOpen ? '1' : '0');
+}
+function loadLastTabs() {
+  try { return JSON.parse(sessionStorage.getItem(LAST_TAB_KEY)) || {}; } catch { return {}; }
+}
+function saveLastTabs() {
+  sessionStorage.setItem(LAST_TAB_KEY, JSON.stringify(lastTabByContext));
 }
 
 function genId() {
@@ -159,13 +167,19 @@ export function applyFilter() {
     if (visible && !firstVisible) firstVisible = id;
   }
 
-  // If a context is active and the current active tab is now hidden, move to
-  // the first visible tab that belongs to the context.
+  // If a context is active and the current active tab is now hidden, restore the
+  // tab last viewed in this context (#541); fall back to the first visible tab
+  // when there's no memory yet or the remembered tab is gone / no longer matches.
   if (ctx) {
     const activeTab = cb.getActiveTabId?.();
     const activeHidden = !activeTab ||
       document.getElementById('tab-' + activeTab)?.classList.contains('context-hidden');
-    if (activeHidden && firstVisible) cb.switchToTab?.(firstVisible);
+    if (activeHidden) {
+      const remembered = lastTabByContext[ctx.id];
+      const rEl = remembered ? document.getElementById('tab-' + remembered) : null;
+      const target = (rEl && !rEl.classList.contains('context-hidden')) ? remembered : firstVisible;
+      if (target) cb.switchToTab?.(target);
+    }
   }
 
   // A context with no matching tabs has no terminal to show — ask app.js to
@@ -437,6 +451,21 @@ function selectContext(id) {
   saveActive();
   notifyActive();
   applyFilter();
+}
+
+// Called by app.js's switchTo() on every tab activation: remember the tab as the
+// active context's last-viewed tab so switching back restores it (#541). The
+// "All" view needs no memory (nothing is hidden there). An out-of-context
+// activation (e.g. the close-fallback picking a context-hidden neighbor before
+// applyFilter corrects it) must not clobber the memory.
+export function noteActiveTab(tabId) {
+  if (!enabled || !tabId) return;
+  const ctx = getActiveContext();
+  if (!ctx) return;
+  if (!tabInContext(cb.getTabCwd?.(tabId), ctx)) return;
+  if (lastTabByContext[ctx.id] === tabId) return;
+  lastTabByContext[ctx.id] = tabId;
+  saveLastTabs();
 }
 
 // Tell app.js (→ the scheduled-tasks panel) which context is active. Half of the
@@ -771,6 +800,7 @@ export function init(callbacks) {
   contexts = [];                    // seeded from the server by fetchContexts() below
   activeContextId = loadActive();   // restored per-window; validated once contexts arrive
   sidebarOpen = loadSidebar();
+  lastTabByContext = loadLastTabs(); // stale tab ids are validated at restore time (#541)
 
   toggleBtn = document.getElementById('context-toggle');
   if (toggleBtn) {
@@ -834,6 +864,12 @@ export function setContexts(list) {
     saveActive();
     notifyActive();
   }
+  // Drop last-tab memory for contexts that no longer exist (#541).
+  let pruned = false;
+  for (const id of Object.keys(lastTabByContext)) {
+    if (!contexts.find(c => c.id === id)) { delete lastTabByContext[id]; pruned = true; }
+  }
+  if (pruned) saveLastTabs();
   applyFilter();
 }
 

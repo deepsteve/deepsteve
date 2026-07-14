@@ -19,7 +19,7 @@ import { init as initProgressBar, start as progressStart, done as progressDone }
 import { init as initHashCommands, beforeSend as hashCommandsBeforeSend, setWaitingForInput as setHashCommandsWaiting, setEnabled as setHashCommandsEnabled } from './hash-commands.js';
 import { init as initOverviewMode, setEnabled as setOverviewModeEnabled, setShortcut as setOverviewModeShortcut, setDefaultLayout as setOverviewDefaultLayout, toggle as toggleOverviewMode, isOverviewActive, updateFocus as updateOverviewFocus, onTabsReordered as onOverviewTabsReordered } from './overview-mode.js';
 import { init as initTerminalSearch, attachSearchAddon, closeIfOpen as closeTerminalSearch } from './terminal-search.js';
-import { init as initContextViews, setEnabled as setContextViewsEnabled, applyFilter as refreshContextFilter, requestNewTabInContext, setContexts as applyServerContexts, setActiveContext as setActiveContextFromPanel, getActiveContextId, activeContextIsEmpty } from './context-views.js';
+import { init as initContextViews, setEnabled as setContextViewsEnabled, applyFilter as refreshContextFilter, requestNewTabInContext, setContexts as applyServerContexts, setActiveContext as setActiveContextFromPanel, getActiveContextId, activeContextIsEmpty, noteActiveTab } from './context-views.js';
 import { nsKey } from './storage-namespace.js';
 
 // Configuration
@@ -2020,6 +2020,7 @@ function switchTo(id) {
   // Activate new
   activeId = id;
   ActiveTab.set(id);
+  noteActiveTab(id); // remember as the active context's last-viewed tab (#541)
   updateOverviewFocus(id);
   ModManager.notifyActiveSessionChanged(id);
   const session = sessions.get(id);
