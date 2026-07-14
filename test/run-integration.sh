@@ -28,7 +28,10 @@ set -e
 skip="${1:-}"
 
 for f in test/integration/*.test.js; do
-  if [ -n "$skip" ] && echo "$f" | grep -q "$skip"; then
+  # -E so SKIP_PATTERN can be an alternation, e.g. "security-auth|tmux-engine" (the public-install
+  # suite skips both). A single-word pattern behaves identically under -E, so existing callers are
+  # unaffected.
+  if [ -n "$skip" ] && echo "$f" | grep -Eq "$skip"; then
     echo "--- skipping $f ---"
     continue
   fi
