@@ -954,6 +954,10 @@ function getResumeArgs(agentType, { sessionId, planMode, worktree, shellId }) {
     args.push(config.resumeFlag, sessionId);
     if (agentType === 'opencode') args.push('--continue');
   } else {
+    // resumeDefault is cwd-scoped ("continue most recent"), which can adopt a
+    // sibling tab's conversation (#542). For claude this branch only fires on
+    // legacy state entries with no saved session id (no longer written); other
+    // agents have no per-session resume, so cwd-scoped continue is their best.
     args.push(config.resumeDefault);
   }
 
@@ -1787,6 +1791,15 @@ function recordRecentSession(id) {
 
 // Save state on shutdown
 let stateFrozen = false;  // Set during shutdown to prevent onExit handlers from overwriting
+
+// Single serializer for state.json entries. saveState() and the shutdown-final
+// snapshot must write the same shape: the final snapshot wins in the merge, so any
+// field it omits is silently wiped for every live shell on a graceful restart
+// (configDir was lost this way, breaking #537 profile resumes — #542).
+function serializeShellEntry(entry) {
+  return { cwd: entry.cwd, claudeSessionId: entry.claudeSessionId, agentType: entry.agentType || 'claude', configDir: entry.configDir || null, engineType: entry.engineType || 'node-pty', worktree: entry.worktree || null, name: entry.name || null, planMode: !!entry.planMode, lastActivity: entry.lastActivity || null, createdAt: entry.createdAt || null, windowId: entry.windowId || null };
+}
+
 function saveState() {
   if (stateFrozen) {
     log(`[saveState] BLOCKED — state frozen during shutdown`);
@@ -1795,7 +1808,7 @@ function saveState() {
   const state = {};
   for (const [id, entry] of shells) {
     if (entry.agentType === 'tmux-attach') continue; // ephemeral — don't persist
-    state[id] = { cwd: entry.cwd, claudeSessionId: entry.claudeSessionId, agentType: entry.agentType || 'claude', configDir: entry.configDir || null, engineType: entry.engineType || 'node-pty', worktree: entry.worktree || null, name: entry.name || null, planMode: !!entry.planMode, lastActivity: entry.lastActivity || null, createdAt: entry.createdAt || null, windowId: entry.windowId || null };
+    state[id] = serializeShellEntry(entry);
   }
   // Merge with any saved state that wasn't reconnected yet
   const merged = { ...savedState, ...state };
@@ -1886,7 +1899,7 @@ async function shutdown(signal) {
     const state = {};
     for (const [sid, sentry] of shells) {
       if (sentry.agentType === 'tmux-attach') continue;
-      state[sid] = { cwd: sentry.cwd, claudeSessionId: sentry.claudeSessionId, agentType: sentry.agentType || 'claude', engineType: sentry.engineType || 'node-pty', worktree: sentry.worktree || null, name: sentry.name || null, planMode: !!sentry.planMode, lastActivity: sentry.lastActivity || null };
+      state[sid] = serializeShellEntry(sentry);
       traceSession('PERSIST', { phase: 'shutdown-final', shell: sid, name: sentry.name || null, worktree: sentry.worktree || null, claude: sentry.claudeSessionId, planMode: !!sentry.planMode });
     }
     const merged = { ...savedState, ...state };
@@ -3880,57 +3893,90 @@ function handleWsConnection(ws, req) {
       const savedEngineType = restored.engineType || 'node-pty';
       const sessionEngine = getEngineByType(savedEngineType);
       const restoredEngineType = sessionEngine === tmuxEngine ? 'tmux' : 'node-pty';
+
+      // Claude only writes <sessionId>.jsonl once the first message is sent, so a
+      // tab that was opened but never prompted has no transcript and `--resume` is
+      // guaranteed to fail. Falling back to `-c` then continues the most recent
+      // conversation for this cwd — a SIBLING tab's — which is how N same-project
+      // tabs collapsed onto one conversation after a restart (#542). Spawn fresh
+      // instead, reusing the same session id: it was never used, so nothing is
+      // lost, and state.json/TabSessions stay stable.
+      let spawnFresh = false;
+      if (agentConfig.supportsSessionWatch && claudeSessionId) {
+        const transcript = path.join(claudeProjectDir(cwd, savedWorktree, restored.configDir), `${claudeSessionId}.jsonl`);
+        spawnFresh = !fs.existsSync(transcript);
+        if (spawnFresh) log(`Session ${id} has no transcript at ${transcript} — spawning fresh instead of --resume`);
+      }
+
       log(`Restoring session ${id} in ${cwd} (agent: ${savedAgentType}, engine: ${restoredEngineType}, session: ${claudeSessionId}, worktree: ${savedWorktree || 'none'}, planMode: ${savedPlanMode})`);
       const restoredName = name || restored.name || null;
-      traceSession('SPAWN', { path: 'resume', shell: id, name: restoredName, worktree: savedWorktree || null, cwd, claude: claudeSessionId, planMode: savedPlanMode, agent: savedAgentType, engine: restoredEngineType });
+      traceSession('SPAWN', { path: spawnFresh ? 'fresh' : 'resume', shell: id, name: restoredName, worktree: savedWorktree || null, cwd, claude: claudeSessionId, planMode: savedPlanMode, agent: savedAgentType, engine: restoredEngineType });
       const ptySize = { cols: initialCols, rows: initialRows };
 
-      const resumeArgs = getResumeArgs(savedAgentType, {
-        sessionId: claudeSessionId,
-        planMode: savedPlanMode,
-        worktree: savedWorktree,
-        shellId: id
-      });
+      const argOpts = { sessionId: claudeSessionId, planMode: savedPlanMode, worktree: savedWorktree, shellId: id };
+      const startArgs = spawnFresh ? getSpawnArgs(savedAgentType, argOpts) : getResumeArgs(savedAgentType, argOpts);
 
-      spawnSession(sessionEngine, id, savedAgentType, resumeArgs, cwd, { ...ptySize, env: sessionEnv(id, { name: restoredName, worktree: savedWorktree, windowId: restored.windowId, cwd, agentType: savedAgentType, configDir: restored.configDir }) });
-      const startTime = Date.now();
+      spawnSession(sessionEngine, id, savedAgentType, startArgs, cwd, { ...ptySize, env: sessionEnv(id, { name: restoredName, worktree: savedWorktree, windowId: restored.windowId, cwd, agentType: savedAgentType, configDir: restored.configDir }) });
       shells.set(id, { clients: new Set(), cwd, claudeSessionId, agentType: savedAgentType, configDir: restored.configDir || null, engine: sessionEngine, engineType: restoredEngineType, worktree: savedWorktree, name: restoredName, planMode: savedPlanMode, restored: true, waitingForInput: false, lastActivity: Date.now(), createdAt: restored.createdAt || Date.now(), windowId: restored.windowId || null });
       wireShellOutput(id);
       recordRecentSession(id);  // bump recency on same-browser reconnect + cross-browser restore
       if (agentConfig.supportsSessionWatch) watchClaudeSessionDir(id);
-      sessionEngine.onExit(id, () => {
-        if (agentConfig.supportsSessionWatch) unwatchClaudeSessionDir(id);
-        if (shuttingDown) return;  // Don't overwrite state file during shutdown
-        const elapsed = Date.now() - startTime;
-        if (elapsed < 5000 && claudeSessionId && agentConfig.supportsSessionWatch) {
-          // --resume failed quickly, fall back to continuing last conversation
-          log(`Session ${id} exited after ${elapsed}ms, --resume likely failed. Falling back to -c`);
-          const newClaudeSessionId = randomUUID();
+
+      // Bounded respawn chain for fast-failing restores. Never fall back to
+      // `claude -c` here: -c is cwd-scoped, so it would adopt another tab's
+      // conversation (#542). A restored tab may only resume its OWN session or
+      // start empty.
+      //   attempt 0 (resume)         → fast exit → retry the same --resume once
+      //                                (covers transient spawn failures with a good transcript)
+      //   attempt 1 (retry or fresh) → fast exit → fresh session under a NEW id
+      //                                (transcript unusable, or the reused --session-id collided)
+      //   attempt 2                  → fast exit → plain cleanup, no further respawns
+      let restoreAttempt = spawnFresh ? 1 : 0;
+      const armRestoreExit = () => {
+        const attemptStart = Date.now();
+        sessionEngine.onExit(id, () => {
+          if (agentConfig.supportsSessionWatch) unwatchClaudeSessionDir(id);
+          if (shuttingDown) return;  // Don't overwrite state file during shutdown
+          const elapsed = Date.now() - attemptStart;
           const entry = shells.get(id);
-          traceSession('SPAWN', { path: 'fallback', shell: id, name: entry?.name || null, worktree: entry?.worktree || null, cwd, claudeOld: claudeSessionId, claude: newClaudeSessionId, planMode: !!entry?.planMode, elapsedMs: elapsed });
-          const fallbackArgs = ['-c', '--fork-session', '--session-id', newClaudeSessionId];
-          if (entry && entry.planMode) fallbackArgs.push('--permission-mode', 'plan');
-          if (entry && entry.worktree) fallbackArgs.push('--worktree', entry.worktree);
-          fallbackArgs.push(...mcpConfigArgs('claude', id));
-          sessionEngine.destroy(id);
-          spawnSession(sessionEngine, id, 'claude', fallbackArgs, cwd, { cols: initialCols, rows: initialRows, env: sessionEnv(id, { name: entry?.name, worktree: entry?.worktree, windowId: entry?.windowId, cwd, agentType: 'claude', configDir: entry?.configDir }) });
-          if (entry) {
-            entry.claudeSessionId = newClaudeSessionId;
-            entry.killed = false;
-            entry.scrollback = [];
-            entry.scrollbackSize = 0;
-            wireShellOutput(id);
-            recordRecentSession(id);  // resume failed → fork; keep the ring-buffer entry current
-            watchClaudeSessionDir(id);
-            sessionEngine.onExit(id, () => { if (!shuttingDown) { unwatchClaudeSessionDir(id); notifyClientsShellExited(id); shells.delete(id); saveState(); } });
+          if (elapsed >= 5000 || !claudeSessionId || !agentConfig.supportsSessionWatch || !entry || restoreAttempt >= 2) {
+            notifyClientsShellExited(id);
+            shells.delete(id);
             saveState();
+            return;
           }
-        } else {
-          notifyClientsShellExited(id);
-          shells.delete(id);
+          restoreAttempt++;
+          let tracePath;
+          let respawnArgs;
+          let newClaudeSessionId = null;
+          if (restoreAttempt === 1) {
+            // --resume died fast despite a transcript on disk — transient spawn
+            // failure (observed during rapid double-restarts). Same args, one retry.
+            tracePath = 'resume-retry';
+            respawnArgs = getResumeArgs(savedAgentType, { sessionId: entry.claudeSessionId, planMode: entry.planMode, worktree: entry.worktree, shellId: id });
+          } else {
+            // The retry also died fast (unusable transcript), or the fresh spawn's
+            // reused --session-id collided. Start over under a new id — last attempt.
+            tracePath = 'fresh-fallback';
+            newClaudeSessionId = randomUUID();
+            respawnArgs = getSpawnArgs(savedAgentType, { sessionId: newClaudeSessionId, planMode: entry.planMode, worktree: entry.worktree, shellId: id });
+          }
+          log(`Session ${id} exited after ${elapsed}ms — respawning (${tracePath})`);
+          traceSession('SPAWN', { path: tracePath, shell: id, name: entry.name || null, worktree: entry.worktree || null, cwd, claudeOld: entry.claudeSessionId, claude: newClaudeSessionId || entry.claudeSessionId, planMode: !!entry.planMode, elapsedMs: elapsed });
+          sessionEngine.destroy(id);
+          spawnSession(sessionEngine, id, savedAgentType, respawnArgs, cwd, { ...ptySize, env: sessionEnv(id, { name: entry.name, worktree: entry.worktree, windowId: entry.windowId, cwd, agentType: savedAgentType, configDir: entry.configDir }) });
+          if (newClaudeSessionId) entry.claudeSessionId = newClaudeSessionId;
+          entry.killed = false;
+          entry.scrollback = [];
+          entry.scrollbackSize = 0;
+          wireShellOutput(id);
+          recordRecentSession(id);
+          watchClaudeSessionDir(id);
+          armRestoreExit();
           saveState();
-        }
-      });
+        });
+      };
+      armRestoreExit();
       delete savedState[id];
       saveState();
     } else {
