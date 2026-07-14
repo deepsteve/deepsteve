@@ -195,16 +195,20 @@ done
 # --- Start new server ---
 launchctl load ~/Library/LaunchAgents/com.deepsteve.plist
 
-# Register deepsteve as a global MCP server with Claude Code (idempotent), AFTER the server is up so
-# the auth token exists (#536). The per-session deepsteve config injected at spawn time is separate
-# and already carries the token; this global registration is only for `claude` runs outside deepsteve.
-if command -v claude &>/dev/null; then
-    # Wait up to ~15s for the freshly-booted server's public health endpoint.
+# Global MCP registrations run AFTER the server is up so the auth token exists (#536/#538).
+# Wait up to ~15s for the freshly-booted server's public health endpoint.
+if command -v claude &>/dev/null || command -v opencode &>/dev/null; then
     WAITED=0
     while [ "$WAITED" -lt 15 ] && ! curl -sf -m 2 http://localhost:3000/healthz >/dev/null 2>&1; do
         sleep 1
         WAITED=$((WAITED + 1))
     done
+fi
+
+# Register deepsteve as a global MCP server with Claude Code (idempotent). The per-session
+# deepsteve config injected at spawn time is separate and already carries the token; this global
+# registration is only for `claude` runs outside deepsteve.
+if command -v claude &>/dev/null; then
     build_auth_header   # re-read the now-created token
     if [ ${#AUTH_HEADER[@]} -gt 0 ]; then
         claude mcp add --transport http deepsteve http://localhost:3000/mcp \
@@ -212,4 +216,29 @@ if command -v claude &>/dev/null; then
     else
         claude mcp add --transport http deepsteve http://localhost:3000/mcp 2>/dev/null || true
     fi
+fi
+
+# Configure OpenCode global MCP (idempotent upsert; also heals pre-#538 unauthenticated configs).
+# The {file:...} reference makes opencode read the token at its own startup, so the secret never
+# lands in this (non-0600) config file and token rotation needs no re-write (#538).
+if command -v opencode &>/dev/null; then
+    OC_CONFIG_DIR="$HOME/.config/opencode"
+    OC_CONFIG="$OC_CONFIG_DIR/opencode.json"
+    mkdir -p "$OC_CONFIG_DIR"
+    node -e '
+        const fs = require("fs"), os = require("os"), path = require("path");
+        const p = process.argv[1];
+        let cfg = null;
+        try { cfg = JSON.parse(fs.readFileSync(p, "utf8")); } catch {}
+        if (!cfg || typeof cfg !== "object") cfg = { "$schema": "https://opencode.ai/config.json" };
+        if (!cfg.mcp) cfg.mcp = {};
+        const entry = { type: "remote", url: "http://127.0.0.1:3000/mcp" };
+        // opencode errors out at config load on a {file:...} pointing at a missing file, so
+        // only reference the token if the server actually created it.
+        if (fs.existsSync(path.join(os.homedir(), ".deepsteve", "auth-token"))) {
+            entry.headers = { Authorization: "Bearer {file:~/.deepsteve/auth-token}" };
+        }
+        cfg.mcp.deepsteve = entry;
+        fs.writeFileSync(p, JSON.stringify(cfg, null, 2) + "\n");
+    ' "$OC_CONFIG" 2>/dev/null || true
 fi

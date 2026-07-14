@@ -269,39 +269,9 @@ cat > "$INSTALL_DIR/.install-source.json" <<MARKEREOF
 }
 MARKEREOF
 
-# NOTE: the global `claude mcp add` registration is deferred to AFTER the server starts (below),
-# because it now needs the auth token (#536), which the server creates on first boot.
-
-# Configure OpenCode global MCP (merges with existing config)
-if command -v opencode &>/dev/null; then
-    OC_CONFIG_DIR="$HOME/.config/opencode"
-    OC_CONFIG="$OC_CONFIG_DIR/opencode.json"
-    mkdir -p "$OC_CONFIG_DIR"
-    if [ -f "$OC_CONFIG" ]; then
-        # Merge deepsteve MCP into existing config
-        node -e '
-            const fs = require("fs");
-            const p = process.argv[1];
-            let cfg = {};
-            try { cfg = JSON.parse(fs.readFileSync(p, "utf8")); } catch {}
-            if (!cfg.mcp) cfg.mcp = {};
-            cfg.mcp.deepsteve = { type: "remote", url: "http://127.0.0.1:3000/mcp" };
-            fs.writeFileSync(p, JSON.stringify(cfg, null, 2) + "\n");
-        ' "$OC_CONFIG" 2>/dev/null || true
-    else
-        cat > "$OC_CONFIG" << 'OC_EOF'
-{
-  "$schema": "https://opencode.ai/config.json",
-  "mcp": {
-    "deepsteve": {
-      "type": "remote",
-      "url": "http://127.0.0.1:3000/mcp"
-    }
-  }
-}
-OC_EOF
-    fi
-fi
+# NOTE: the global Claude Code and OpenCode MCP registrations are deferred to AFTER the server
+# starts (below), because they need the auth token (#536/#538), which the server creates on
+# first boot.
 
 if [ "$OS" = "Darwin" ]; then
   launchctl unload "$SERVICE_PATH" 2>/dev/null
@@ -315,14 +285,19 @@ else
   fi
 fi
 
-# Register deepsteve as a global MCP server with Claude Code, AFTER the server is up so the auth
-# token exists (#536). deepsteve-spawned claude sessions get a separate per-session config carrying
-# the token; this global one is only for `claude` runs outside deepsteve.
-if command -v claude &>/dev/null; then
+# Global MCP registrations run AFTER the server is up so the auth token exists (#536/#538).
+# Wait up to ~15s for the freshly-booted server's public health endpoint.
+if command -v claude &>/dev/null || command -v opencode &>/dev/null; then
     WAITED=0
     while [ "$WAITED" -lt 15 ] && ! curl -sf -m 2 http://localhost:3000/healthz >/dev/null 2>&1; do
         sleep 1; WAITED=$((WAITED + 1))
     done
+fi
+
+# Register deepsteve as a global MCP server with Claude Code. deepsteve-spawned claude sessions
+# get a separate per-session config carrying the token; this global one is only for `claude` runs
+# outside deepsteve.
+if command -v claude &>/dev/null; then
     DS_TOKEN=$(cat "$HOME/.deepsteve/auth-token" 2>/dev/null)
     if [ -n "$DS_TOKEN" ]; then
         claude mcp add --scope user --transport http deepsteve http://localhost:3000/mcp \
@@ -330,6 +305,31 @@ if command -v claude &>/dev/null; then
     else
         claude mcp add --scope user --transport http deepsteve http://localhost:3000/mcp 2>/dev/null || true
     fi
+fi
+
+# Configure OpenCode global MCP (merges with existing config). The {file:...} reference makes
+# opencode read the token at its own startup, so the secret never lands in this (non-0600) config
+# file and token rotation needs no re-write (#538).
+if command -v opencode &>/dev/null; then
+    OC_CONFIG_DIR="$HOME/.config/opencode"
+    OC_CONFIG="$OC_CONFIG_DIR/opencode.json"
+    mkdir -p "$OC_CONFIG_DIR"
+    node -e '
+        const fs = require("fs"), os = require("os"), path = require("path");
+        const p = process.argv[1];
+        let cfg = null;
+        try { cfg = JSON.parse(fs.readFileSync(p, "utf8")); } catch {}
+        if (!cfg || typeof cfg !== "object") cfg = { "$schema": "https://opencode.ai/config.json" };
+        if (!cfg.mcp) cfg.mcp = {};
+        const entry = { type: "remote", url: "http://127.0.0.1:3000/mcp" };
+        // opencode errors out at config load on a {file:...} pointing at a missing file, so
+        // only reference the token if the server actually created it.
+        if (fs.existsSync(path.join(os.homedir(), ".deepsteve", "auth-token"))) {
+            entry.headers = { Authorization: "Bearer {file:~/.deepsteve/auth-token}" };
+        }
+        cfg.mcp.deepsteve = entry;
+        fs.writeFileSync(p, JSON.stringify(cfg, null, 2) + "\n");
+    ' "$OC_CONFIG" 2>/dev/null || true
 fi
 
 echo "deepsteve installed and running at http://localhost:3000"

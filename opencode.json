@@ -3,7 +3,10 @@
   "mcp": {
     "deepsteve": {
       "type": "remote",
-      "url": "http://127.0.0.1:3000/mcp"
+      "url": "http://127.0.0.1:3000/mcp",
+      "headers": {
+        "Authorization": "Bearer {env:DEEPSTEVE_API_TOKEN}"
+      }
     }
   }
 }
