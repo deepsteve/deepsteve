@@ -8,7 +8,7 @@ const { randomUUID } = require('crypto');
  * scans mods for tools.js files, and mounts routes on the Express app.
  */
 async function initMCP(context) {
-  const { app, broadcast, log, MODS_DIR } = context;
+  const { app, security, broadcast, log, MODS_DIR } = context;
 
   // Dynamic import of ESM-only SDK
   const { McpServer } = await import('@modelcontextprotocol/sdk/server/mcp.js');
@@ -61,8 +61,18 @@ async function initMCP(context) {
       server.tool(name, def.description, def.schema, def.handler);
     }
 
+    // Defense-in-depth mirroring the MCP SDK's DNS-rebinding fix (#536). allowedHosts must be
+    // port-qualified — the SDK matches the FULL Host header exactly; Origin is validated only when
+    // present, so Origin-less agent clients still pass. The Express Host guard + token gate that
+    // already run ahead of /mcp remain the primary controls.
+    const dnsProtect = security ? {
+      enableDnsRebindingProtection: true,
+      allowedHosts: security.mcpAllowedHosts,
+      allowedOrigins: [...security.allowedOrigins],
+    } : {};
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: () => randomUUID(),
+      ...dnsProtect,
     });
 
     server.connect(transport);

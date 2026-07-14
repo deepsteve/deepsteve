@@ -96,7 +96,9 @@ export function initLiveReload({ onMessage, onShowRestartConfirm, onShowReloadOv
     setInterval(async () => {
       if (reloading) return;
       try {
-        const res = await fetch('/api/home', { cache: 'no-store' });
+        // Public, unauthenticated readiness probe (#536): a cookieless tab (e.g. across the deploy
+        // that first turns auth on) can still detect "server back up" and reload to acquire the cookie.
+        const res = await fetch('/healthz', { cache: 'no-store' });
         if (res.ok) {
           reloading = true;
           console.log('[live-reload] server is back, reloading page...');
@@ -126,7 +128,9 @@ export function initLiveReload({ onMessage, onShowRestartConfirm, onShowReloadOv
   function pollAndReconnect() {
     const interval = setInterval(async () => {
       try {
-        const res = await fetch('/api/home', { cache: 'no-store' });
+        // Public, unauthenticated readiness probe (#536): a cookieless tab (e.g. across the deploy
+        // that first turns auth on) can still detect "server back up" and reload to acquire the cookie.
+        const res = await fetch('/healthz', { cache: 'no-store' });
         if (res.ok) {
           clearInterval(interval);
           console.log('[live-reload] server is back, reconnecting WS...');

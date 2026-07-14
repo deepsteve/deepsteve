@@ -8,8 +8,15 @@ services:
     environment:
       - PORT=3000
       - DEEPSTEVE_BIND=0.0.0.0
+      # Auth (#536): the test container reaches us as http://server:3000, so allowlist that host.
+      - DEEPSTEVE_ALLOW_HOST=server
+    volumes:
+      # Share the auto-generated ~/.deepsteve/auth-token so the test container authenticates with the
+      # REAL token (no override). The app lives in /app here, so /root/.deepsteve is data-only.
+      - ds_home:/root/.deepsteve
     healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:3000/api/version"]
+      # /healthz is the public, unauthenticated readiness endpoint; /api/version is now auth-gated.
+      test: ["CMD", "curl", "-sf", "http://localhost:3000/healthz"]
       interval: 2s
       timeout: 5s
       retries: 15
@@ -24,6 +31,11 @@ services:
         condition: service_healthy
     environment:
       - DEEPSTEVE_URL=http://server:3000
+    volumes:
+      - ds_home:/root/.deepsteve   # read the server's real auth token (#536)
     # Run files serially (one process each); tmux IS installed here, so run all.
     # See test/run-integration.sh for why --test-concurrency=1 isn't enough.
     command: ["sh", "test/run-integration.sh"]
+
+volumes:
+  ds_home:

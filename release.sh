@@ -123,6 +123,7 @@ embed_text() {
 embed_text "package.json" "package.json"
 embed_text "server.js" "server.js"
 embed_text "mcp-server.js" "mcp-server.js"
+embed_text "security.js" "security.js"
 
 # Engine files
 embed_text "engines/engine.js" "engines/engine.js"
@@ -268,9 +269,8 @@ cat > "$INSTALL_DIR/.install-source.json" <<MARKEREOF
 }
 MARKEREOF
 
-if command -v claude &>/dev/null; then
-    claude mcp add --scope user --transport http deepsteve http://localhost:3000/mcp 2>/dev/null || true
-fi
+# NOTE: the global `claude mcp add` registration is deferred to AFTER the server starts (below),
+# because it now needs the auth token (#536), which the server creates on first boot.
 
 # Configure OpenCode global MCP (merges with existing config)
 if command -v opencode &>/dev/null; then
@@ -315,11 +315,28 @@ else
   fi
 fi
 
+# Register deepsteve as a global MCP server with Claude Code, AFTER the server is up so the auth
+# token exists (#536). deepsteve-spawned claude sessions get a separate per-session config carrying
+# the token; this global one is only for `claude` runs outside deepsteve.
+if command -v claude &>/dev/null; then
+    WAITED=0
+    while [ "$WAITED" -lt 15 ] && ! curl -sf -m 2 http://localhost:3000/healthz >/dev/null 2>&1; do
+        sleep 1; WAITED=$((WAITED + 1))
+    done
+    DS_TOKEN=$(cat "$HOME/.deepsteve/auth-token" 2>/dev/null)
+    if [ -n "$DS_TOKEN" ]; then
+        claude mcp add --scope user --transport http deepsteve http://localhost:3000/mcp \
+            --header "Authorization: Bearer $DS_TOKEN" 2>/dev/null || true
+    else
+        claude mcp add --scope user --transport http deepsteve http://localhost:3000/mcp 2>/dev/null || true
+    fi
+fi
+
 echo "deepsteve installed and running at http://localhost:3000"
 echo "To uninstall: ~/.deepsteve/uninstall.sh"
 echo ""
-echo "⚠️  Security: DeepSteve has no authentication. It is localhost-only."
-echo "   Do not expose port 3000 to a network or the public internet."
+echo "⚠️  Security: DeepSteve is localhost-only and token-authenticated (~/.deepsteve/auth-token)."
+echo "   Binding to a network address (--bind) still exposes control to anyone who can reach it."
 POSTAMBLE
 
 chmod +x "$OUT"

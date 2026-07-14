@@ -11,23 +11,40 @@
  * - Client sends JSON for control messages: { type: 'resize' }, { type: 'rename' }, etc.
  */
 const WebSocket = require('ws');
+const fs = require('fs');
+const os = require('os');
+const nodePath = require('path');
 
 const BASE_URL = process.env.DEEPSTEVE_URL || 'http://localhost:3000';
 
+// Auth (#536): the server under test auto-generates ~/.deepsteve/auth-token (0600). We read that
+// REAL token — deliberately no override — and present it as a bearer, exactly as a non-browser
+// client (an agent, or restart.sh) does. Server and tests share $HOME (local run) or the .deepsteve
+// volume (docker-compose), so this is the same file the server just wrote.
+function readAuthToken() {
+  try {
+    return fs.readFileSync(nodePath.join(os.homedir(), '.deepsteve', 'auth-token'), 'utf8').trim();
+  } catch {
+    return '';
+  }
+}
+const AUTH_TOKEN = readAuthToken();
+const authHeaders = AUTH_TOKEN ? { Authorization: `Bearer ${AUTH_TOKEN}` } : {};
+
 function httpGet(path) {
-  return fetch(`${BASE_URL}${path}`).then(r => r.json());
+  return fetch(`${BASE_URL}${path}`, { headers: { ...authHeaders } }).then(r => r.json());
 }
 
 function httpPost(path, body) {
   return fetch(`${BASE_URL}${path}`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...authHeaders },
     body: JSON.stringify(body),
   }).then(r => r.json());
 }
 
 function httpDelete(path) {
-  return fetch(`${BASE_URL}${path}`, { method: 'DELETE' }).then(r => r.json());
+  return fetch(`${BASE_URL}${path}`, { method: 'DELETE', headers: { ...authHeaders } }).then(r => r.json());
 }
 
 class WsClient {
@@ -53,7 +70,8 @@ class WsClient {
       }
       const url = `${wsUrl}/?${params}`;
 
-      this.ws = new WebSocket(url);
+      // Bearer auth (#536), the non-browser WS path — no Origin/cookie needed.
+      this.ws = new WebSocket(url, { headers: { ...authHeaders } });
 
       const timeout = setTimeout(() => {
         reject(new Error('WebSocket connection timed out'));
@@ -257,4 +275,4 @@ async function cleanupSessions(clients, extraIds = []) {
   await new Promise(r => setTimeout(r, 500));
 }
 
-module.exports = { WsClient, httpGet, httpPost, httpDelete, cleanupSessions, BASE_URL };
+module.exports = { WsClient, httpGet, httpPost, httpDelete, cleanupSessions, BASE_URL, AUTH_TOKEN };

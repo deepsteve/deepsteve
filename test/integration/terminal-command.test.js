@@ -1,6 +1,6 @@
 const { describe, it, afterEach } = require('node:test');
 const assert = require('node:assert');
-const { WsClient, cleanupSessions, BASE_URL } = require('../helpers/ws-client');
+const { WsClient, cleanupSessions, BASE_URL, AUTH_TOKEN } = require('../helpers/ws-client');
 const { deriveTabName } = require('../../mods/deepsteve-core/tools');
 
 /**
@@ -14,7 +14,10 @@ const { deriveTabName } = require('../../mods/deepsteve-core/tools');
 async function openTerminal(args) {
   const { Client } = await import('@modelcontextprotocol/sdk/client/index.js');
   const { StreamableHTTPClientTransport } = await import('@modelcontextprotocol/sdk/client/streamableHttp.js');
-  const transport = new StreamableHTTPClientTransport(new URL(`${BASE_URL}/mcp`));
+  // Bearer auth (#536): agents reach /mcp with the token in a header; mirror that here.
+  const transport = new StreamableHTTPClientTransport(new URL(`${BASE_URL}/mcp`), {
+    requestInit: { headers: { Authorization: `Bearer ${AUTH_TOKEN}` } },
+  });
   const client = new Client({ name: 'terminal-command-test', version: '1.0.0' });
   await client.connect(transport);
   try {

@@ -42,6 +42,21 @@ while [ $# -gt 0 ]; do
     shift
 done
 
+# Auth token (#536): the daemon owns ~/.deepsteve/auth-token and is its sole creator. Read it (if
+# present) so our control curls to the running daemon authenticate. Absent (very first install,
+# daemon never booted) → no header, which is harmless: the old/absent daemon has no auth to satisfy.
+AUTH_TOKEN_FILE="$HOME/.deepsteve/auth-token"
+AUTH_HEADER=()
+build_auth_header() {
+    AUTH_HEADER=()
+    if [ -f "$AUTH_TOKEN_FILE" ]; then
+        local tok
+        tok=$(cat "$AUTH_TOKEN_FILE" 2>/dev/null)
+        [ -n "$tok" ] && AUTH_HEADER=(-H "Authorization: Bearer $tok")
+    fi
+}
+build_auth_header
+
 # Re-exec in background if not already
 if [ "$BG" != 1 ]; then
     # --- Forced restart path (#504): bypass the in-app browser modal. ---
@@ -49,7 +64,7 @@ if [ "$BG" != 1 ]; then
     # server owns the confirmation wording; we echo it back and re-validate so a
     # stale or forged message can't slip through.
     if [ "$FORCE" = 1 ]; then
-        SERVER_PROMPT=$(curl -s -m 10 http://localhost:3000/api/restart-prompt 2>/dev/null)
+        SERVER_PROMPT=$(curl -s -m 10 "${AUTH_HEADER[@]}" http://localhost:3000/api/restart-prompt 2>/dev/null)
         if [ -z "$SERVER_PROMPT" ]; then
             # Daemon unreachable: deterministic text so step 1 and step 2 agree.
             SERVER_PROMPT="Restarting DeepSteve (daemon not running - no active sessions)"
@@ -81,7 +96,7 @@ if [ "$BG" != 1 ]; then
     fi
 
     # Default path: ask the browser(s) for confirmation before restarting.
-    RESULT=$(curl -s -m 120 -X POST http://localhost:3000/api/request-restart 2>/dev/null | grep -o '"result":"[^"]*"' | cut -d'"' -f4)
+    RESULT=$(curl -s -m 120 "${AUTH_HEADER[@]}" -X POST http://localhost:3000/api/request-restart 2>/dev/null | grep -o '"result":"[^"]*"' | cut -d'"' -f4)
     if [ "$RESULT" != "confirmed" ]; then
         echo "Restart cancelled."
         exit 0
@@ -99,6 +114,7 @@ cd "$SCRIPT_DIR"
 cp package.json ~/.deepsteve/
 cp server.js ~/.deepsteve/
 cp mcp-server.js ~/.deepsteve/
+cp security.js ~/.deepsteve/
 mkdir -p ~/.deepsteve/engines
 cp engines/*.js ~/.deepsteve/engines/
 cp -r public/* ~/.deepsteve/public/
@@ -142,10 +158,8 @@ cat > ~/.deepsteve/.install-source.json <<MARKEREOF
 }
 MARKEREOF
 
-# Register deepsteve as MCP server with Claude Code (idempotent)
-if command -v claude &>/dev/null; then
-    claude mcp add --transport http deepsteve http://localhost:3000/mcp 2>/dev/null || true
-fi
+# NOTE: the global `claude mcp add` registration is deferred to AFTER the server starts (below),
+# because it now needs the auth token (#536) which the server creates on first boot.
 
 # Signal the server to tell browsers to reload (only with --refresh)
 if [ "$REFRESH" = 1 ]; then
@@ -180,3 +194,22 @@ done
 
 # --- Start new server ---
 launchctl load ~/Library/LaunchAgents/com.deepsteve.plist
+
+# Register deepsteve as a global MCP server with Claude Code (idempotent), AFTER the server is up so
+# the auth token exists (#536). The per-session deepsteve config injected at spawn time is separate
+# and already carries the token; this global registration is only for `claude` runs outside deepsteve.
+if command -v claude &>/dev/null; then
+    # Wait up to ~15s for the freshly-booted server's public health endpoint.
+    WAITED=0
+    while [ "$WAITED" -lt 15 ] && ! curl -sf -m 2 http://localhost:3000/healthz >/dev/null 2>&1; do
+        sleep 1
+        WAITED=$((WAITED + 1))
+    done
+    build_auth_header   # re-read the now-created token
+    if [ ${#AUTH_HEADER[@]} -gt 0 ]; then
+        claude mcp add --transport http deepsteve http://localhost:3000/mcp \
+            --header "Authorization: Bearer $(cat "$AUTH_TOKEN_FILE" 2>/dev/null)" 2>/dev/null || true
+    else
+        claude mcp add --transport http deepsteve http://localhost:3000/mcp 2>/dev/null || true
+    fi
+fi

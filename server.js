@@ -8,6 +8,7 @@ const path = require('path');
 const os = require('os');
 const net = require('net');
 const { initMCP } = require('./mcp-server');
+const { createSecurity } = require('./security');
 const NodePtyEngine = require('./engines/node-pty');
 const TmuxEngine = require('./engines/tmux');
 
@@ -38,6 +39,24 @@ function parseCLIValue(name) {
 }
 const HTTPS_ENABLED = parseCLIFlag('https') || process.env.DEEPSTEVE_HTTPS === '1';
 const HTTPS_PORT = parseInt(parseCLIValue('https-port') || process.env.DEEPSTEVE_HTTPS_PORT) || 3443;
+
+// Like parseCLIValue but collects ALL occurrences of a repeatable flag (--allow-origin,
+// --allow-host). Used for the auth escape-hatch that widens the Origin/Host allowlists (#536).
+function parseCLIValues(name) {
+  const args = process.argv.slice(2);
+  const out = [];
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === '--' + name && args[i + 1]) out.push(args[i + 1]);
+    else if (args[i].startsWith('--' + name + '=')) out.push(args[i].slice(name.length + 3));
+  }
+  return out;
+}
+function envList(name) {
+  return (process.env[name] || '').split(',').map(s => s.trim()).filter(Boolean);
+}
+// Operator escape hatches (widen the trust boundary; auth itself is always on and has no off switch).
+const ALLOW_ORIGINS = [...parseCLIValues('allow-origin'), ...envList('DEEPSTEVE_ALLOW_ORIGIN')];
+const ALLOW_HOSTS = [...parseCLIValues('allow-host'), ...envList('DEEPSTEVE_ALLOW_HOST')];
 const CERTS_DIR = path.join(os.homedir(), '.deepsteve', 'certs');
 const AUTOMATIONS_DIR = path.join(os.homedir(), '.deepsteve', 'automations');
 
@@ -128,10 +147,39 @@ const RECENT_SESSIONS_FILE = path.join(os.homedir(), '.deepsteve', 'recent-sessi
 const LEGACY_GROUPS_FILE = path.join(os.homedir(), '.deepsteve', 'project-groups.json');
 const RESTARTING_FLAG = path.join(os.homedir(), '.deepsteve', '.restarting');
 const app = express();
+
+// Security layer (#536): Host allowlist, Origin allowlist, per-install token auth, and failure
+// rate limiting — the single source of truth shared by the HTTP, WebSocket, and MCP surfaces.
+// Created before app.listen so the token exists before any request / session spawn / MCP config.
+const security = createSecurity({
+  port: PORT,
+  httpsPort: HTTPS_PORT,
+  httpsEnabled: HTTPS_ENABLED,
+  getLanAddresses,
+  allowOrigins: ALLOW_ORIGINS,
+  allowHosts: ALLOW_HOSTS,
+  log,
+});
+const AUTH_TOKEN = security.token;
+
+// 1. Host-header guard first — blocks DNS rebinding (the rebind domain shows up in Host) on every
+//    request, static included.
+app.use(security.hostGuard);
+// 2. Hand the auth cookie to page loads (keyed off the request; runs before static streams).
+app.use(security.setAuthCookie);
+// Static assets are served ahead of the token gate: they carry no secrets and must load to
+// bootstrap the UI (the cookie is HttpOnly; cross-origin pages can't read our responses under SOP).
 app.use(express.static('public', {
   setHeaders: (res) => res.setHeader('Cache-Control', 'no-cache')
 }));
 app.use('/mods', express.static('mods'));
+// Public, unauthenticated readiness probe — lets live-reload detect "server back up" on a deploy
+// that turns auth on, before the reloaded page has re-acquired its cookie. Must stay above the gate.
+app.get('/healthz', (req, res) => res.json({ ok: true }));
+// 3. Token gate — POSITIONAL, not a trailing catch-all: registered here it precedes every inline
+//    /api route and the async-mounted /mcp + mod routes, so it default-denies all of them (and any
+//    future control endpoint). The static handlers above short-circuit real files before this runs.
+app.use(security.authGate);
 app.use((req, res, next) => {
   if (req.path === '/mcp') return next(); // MCP SDK parses its own body
   // Screenshot routes carry base64 PNGs (often >> 100KB) and declare their own
@@ -706,6 +754,9 @@ function sessionEnv(id, { name, worktree, windowId, cwd, agentType } = {}) {
     DEEPSTEVE_CWD: agentCwd,
     DEEPSTEVE_WINDOW_ID: windowId || '',
     DEEPSTEVE_API_URL: `http://localhost:${PORT}`,
+    // Bearer token for authenticating REST calls to $DEEPSTEVE_API_URL (#536). Delivered only to
+    // agent PTYs via this env (never in the daemon's own process.env, so childBaseEnv can't leak it).
+    DEEPSTEVE_API_TOKEN: AUTH_TOKEN,
   };
 }
 
@@ -808,9 +859,29 @@ function spawnAgent(id, agentType, args, cwd, opts = {}) {
 
 function mcpConfigArgs(agentType, shellId) {
   if (agentType !== 'claude' || !shellId) return [];
-  return ['--mcp-config', JSON.stringify({
-    mcpServers: { deepsteve: { type: 'http', url: `http://localhost:${PORT}/mcp?shellId=${shellId}` } }
-  })];
+  // The MCP config carries the auth bearer token (#536). Write it to a per-shell 0600 file and pass
+  // the PATH (claude's --mcp-config accepts file paths) — never inline JSON in argv, which `ps`
+  // exposes to every other local user.
+  const dir = path.join(os.homedir(), '.deepsteve', 'mcp-configs');
+  const file = path.join(dir, `${shellId}.json`);
+  const config = {
+    mcpServers: {
+      deepsteve: {
+        type: 'http',
+        url: `http://localhost:${PORT}/mcp?shellId=${shellId}`,
+        headers: { Authorization: `Bearer ${AUTH_TOKEN}` },
+      },
+    },
+  };
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(file, JSON.stringify(config), { mode: 0o600 });
+    fs.chmodSync(file, 0o600);
+  } catch (e) {
+    log(`mcpConfigArgs: failed to write ${file}: ${e.message}`);
+    return [];
+  }
+  return ['--mcp-config', file];
 }
 
 // Per-shell session dir for pi. Isolates each tab's session JSONL so `-c`
@@ -3482,7 +3553,9 @@ function deleteScreenshot(id) {
 function getScreenshotPath(id) {
   return path.join(SCREENSHOTS_DIR, `${id}.png`);
 }
-const wss = new WebSocketServer({ server });
+// verifyClient runs during the HTTP upgrade, before the handshake completes, so a page failing the
+// Host/Origin/token checks never gets a live socket (#536).
+const wss = new WebSocketServer({ server, verifyClient: security.verifyWsClient });
 
 // HTTPS server (created async if enabled)
 let httpsServer = null;
@@ -3493,11 +3566,11 @@ if (HTTPS_ENABLED) {
     try {
       const certs = await ensureCerts();
       httpsServer = https.createServer({ key: certs.key, cert: certs.cert }, app);
-      httpsWss = new WebSocketServer({ server: httpsServer });
+      httpsWss = new WebSocketServer({ server: httpsServer, verifyClient: security.verifyWsClient });
       httpsWss.on('connection', handleWsConnection);
       httpsServer.listen(HTTPS_PORT, BIND, () => {
         const addrs = getLanAddresses().filter(a => a !== 'localhost' && a !== '127.0.0.1');
-        log(`HTTPS server listening on ${BIND}:${HTTPS_PORT} (WARNING: no authentication)`);
+        log(`HTTPS server listening on ${BIND}:${HTTPS_PORT}`);
         if (addrs.length > 0) {
           log(`HTTPS: Connect from Quest/LAN at https://${addrs[0]}:${HTTPS_PORT}`);
         }
@@ -3986,7 +4059,7 @@ function broadcastToWindow(windowId, msg) {
 }
 
 // Initialize MCP server (async, ~100ms for dynamic import)
-initMCP({ app, shells, wss, broadcast, broadcastToWindow, log, MODS_DIR, closeSession, spawnSession, sessionEnv, getSpawnArgs, mcpConfigArgs, getAgentConfig, wireShellOutput, watchClaudeSessionDir, unwatchClaudeSessionDir, saveState, validateWorktree, ensureWorktree, sessionPaths, submitToShell, fetchIssueFromGitHub, deliverPromptWhenReady, reloadClients, deliverToWindow, settings, isShuttingDown: () => shuttingDown, displayTabs, setDisplayTab, deleteDisplayTab, screenshots, setScreenshot, deleteScreenshot, getScreenshotPath, getDefaultEngine, getForegroundCommand, sessionLog, emitSessionOpen, getContexts: () => contexts, pathInside }).catch(e => log('MCP init failed:', e.message));
+initMCP({ app, security, shells, wss, broadcast, broadcastToWindow, log, MODS_DIR, closeSession, spawnSession, sessionEnv, getSpawnArgs, mcpConfigArgs, getAgentConfig, wireShellOutput, watchClaudeSessionDir, unwatchClaudeSessionDir, saveState, validateWorktree, ensureWorktree, sessionPaths, submitToShell, fetchIssueFromGitHub, deliverPromptWhenReady, reloadClients, deliverToWindow, settings, isShuttingDown: () => shuttingDown, displayTabs, setDisplayTab, deleteDisplayTab, screenshots, setScreenshot, deleteScreenshot, getScreenshotPath, getDefaultEngine, getForegroundCommand, sessionLog, emitSessionOpen, getContexts: () => contexts, pathInside }).catch(e => log('MCP init failed:', e.message));
 
 // Watch themes directory for changes and broadcast to clients
 let themeWatchDebounce = null;

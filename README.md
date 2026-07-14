@@ -19,7 +19,7 @@ Run multiple AI agent sessions side-by-side in your browser, each with full term
 
 **Requires macOS.** deepsteve uses macOS LaunchAgents for daemon management and macOS-specific paths for logs and state.
 
-> **Security notice:** DeepSteve has no authentication, no CORS restrictions, and no WebSocket origin checking. It is designed for **localhost use only**. Do not expose it to a network or the public internet.
+> **Security notice:** DeepSteve is **localhost-first with token authentication**. Every surface (web UI WebSocket, MCP endpoint, REST APIs) enforces a Host allowlist, an Origin allowlist, and a per-install bearer token — closing the drive-by-webpage / DNS-rebinding hole. The browser is authenticated transparently via an HttpOnly cookie (no login screen). Auth is always on; do not expose it to an untrusted network regardless.
 
 ## Terminal Engines
 
@@ -96,7 +96,7 @@ The command name is derived from the filename (hyphens → spaces, title-cased).
 { "name": "Say Hello", "description": "Prints a friendly greeting" }
 ```
 
-Scripts receive environment variables: `DEEPSTEVE_SESSION_ID` (active tab's shell ID), `DEEPSTEVE_CWD` (that tab's working directory), `DEEPSTEVE_TAB_NAME`, `DEEPSTEVE_WORKTREE`, `DEEPSTEVE_WINDOW_ID`, and `DEEPSTEVE_API_URL`.
+Scripts receive environment variables: `DEEPSTEVE_SESSION_ID` (active tab's shell ID), `DEEPSTEVE_CWD` (that tab's working directory), `DEEPSTEVE_TAB_NAME`, `DEEPSTEVE_WORKTREE`, `DEEPSTEVE_WINDOW_ID`, `DEEPSTEVE_API_URL`, and `DEEPSTEVE_API_TOKEN` (send as `Authorization: Bearer $DEEPSTEVE_API_TOKEN` when calling the REST API).
 
 ## Themes
 
@@ -118,8 +118,8 @@ launchctl list | grep deepsteve        # check status
 
 ## Security
 
-- Binds to `localhost:3000` only — not accessible from the network
-- No authentication — anyone with local access to the machine can use it
+- Binds to `localhost:3000` only by default — not accessible from the network
+- **Token-authenticated** on every surface (WebSocket, MCP, REST): a Host allowlist + Origin allowlist + a per-install secret at `~/.deepsteve/auth-token` (`0600`) close the cross-origin / DNS-rebinding hole. The browser gets the token as an HttpOnly cookie; other clients send it as `Authorization: Bearer <token>`. Widen access with `--allow-origin` / `--allow-host`.
 - Each session runs Claude Code with the permissions of the user who installed deepsteve
 
 ## Running on Meta Quest (WebXR)

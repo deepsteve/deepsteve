@@ -9,7 +9,8 @@ services:
       - PORT=3000
       - DEEPSTEVE_BIND=0.0.0.0
     healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:3000/api/version"]
+      # /healthz is the public readiness endpoint; /api/version is now auth-gated (#536).
+      test: ["CMD", "curl", "-sf", "http://localhost:3000/healthz"]
       interval: 2s
       timeout: 5s
       retries: 15
