@@ -346,6 +346,19 @@ const SETTINGS_SCHEMA = [
   { name: 'sessionLogEnabled',          type: 'boolean', default: false },
   { name: 'displayTabAudioIndicator',   type: 'boolean', default: true, broadcast: false },
   { name: 'scheduledTasksEnabled',      type: 'boolean', default: true },
+  // Custom Claude Code config profiles (#537): each row = { id, name, configDir }.
+  // A profile is agentType:'claude' + a CLAUDE_CONFIG_DIR — NOT a new agent type.
+  // broadcast:false — the browser reads profiles via GET /api/agents (like enabledAgents).
+  { name: 'customAgentConfigs',         type: 'custom',  default: [], broadcast: false,
+    sanitize: (raw) => {
+      if (!Array.isArray(raw)) return null;
+      return raw.map(r => ({
+        id: (r && r.id) || genContextId(),
+        name: String((r && r.name) || '').trim(),
+        configDir: String((r && r.configDir) || '').trim(),
+      })).filter(r => r.name && r.configDir);
+    },
+    logValue: v => v.map(r => r.name).join(',') || '(none)' },
 ];
 
 // Settings whose default must exist in `settings` but that flow through
@@ -487,6 +500,7 @@ function emitSessionOpen(id) {
     name: e.name || null,
     cwd: e.cwd || null,
     agentType: e.agentType || 'claude',
+    configDir: e.configDir || null,
     worktree: e.worktree || null,
     windowId: e.windowId || null,
     claudeSessionId: e.claudeSessionId || null,
@@ -545,6 +559,20 @@ function getShellProfilePath() {
   let p = settings.shellProfile || '~/.zshrc';
   if (p.startsWith('~')) p = path.join(os.homedir(), p.slice(1));
   return p;
+}
+
+// Resolve a custom-config-profile id (#537) to its absolute config dir, or null.
+// Tilde-expanded here (once) so the concrete path is what gets persisted/injected —
+// the durable per-session identity is the resolved dir, not the profile id, so a
+// renamed/deleted profile never breaks a running or restored session.
+function resolveConfigDir(profileId) {
+  if (!profileId) return null;
+  const list = Array.isArray(settings.customAgentConfigs) ? settings.customAgentConfigs : [];
+  const p = list.find(x => x.id === profileId);
+  if (!p || !p.configDir) return null;
+  let dir = p.configDir;
+  if (dir.startsWith('~')) dir = path.join(os.homedir(), dir.slice(1));
+  return dir;
 }
 
 // --- HTTPS certificate management ---
@@ -737,7 +765,7 @@ function broadcastSkills() {
  * @param {string} cwd - Working directory
  * @param {{ cols?: number, rows?: number, env?: object }} opts
  */
-function sessionEnv(id, { name, worktree, windowId, cwd, agentType } = {}) {
+function sessionEnv(id, { name, worktree, windowId, cwd, agentType, configDir } = {}) {
   // DEEPSTEVE_CWD is the agent's actual working directory. For agents with native
   // --worktree support (Claude), the PTY is spawned in the main repo but the agent
   // operates in .claude/worktrees/<name>, so resolve to that subdir. The worktree dir
@@ -757,6 +785,9 @@ function sessionEnv(id, { name, worktree, windowId, cwd, agentType } = {}) {
     // Bearer token for authenticating REST calls to $DEEPSTEVE_API_URL (#536). Delivered only to
     // agent PTYs via this env (never in the daemon's own process.env, so childBaseEnv can't leak it).
     DEEPSTEVE_API_TOKEN: AUTH_TOKEN,
+    // Custom Claude config profile (#537): point Claude at an alternate config dir.
+    // Emitted only for profile sessions, so plain sessions stay byte-for-byte identical.
+    ...(configDir ? { CLAUDE_CONFIG_DIR: configDir } : {}),
   };
 }
 
@@ -1027,7 +1058,7 @@ function symlinkWorktreeClaudeSettings(parentCwd, worktreePath) {
 const CLAUDE_PROJECTS_DIR = path.join(os.homedir(), '.claude', 'projects');
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
-function claudeProjectDir(cwd, worktree) {
+function claudeProjectDir(cwd, worktree, configDir) {
   // Claude Code stores sessions in a directory named after the resolved cwd.
   // For worktree sessions, the cwd is <repo>/.claude/worktrees/<name>.
   let resolvedCwd = cwd;
@@ -1036,7 +1067,12 @@ function claudeProjectDir(cwd, worktree) {
   }
   // Claude Code encodes cwds by replacing all non-alphanumeric/non-dash chars with dashes
   const dirName = resolvedCwd.replace(/[^a-zA-Z0-9-]/g, '-');
-  return path.join(CLAUDE_PROJECTS_DIR, dirName);
+  // CLAUDE_CONFIG_DIR (#537) relocates Claude's entire config root — including session
+  // transcripts — to <configDir>/projects, so a profile session's .jsonl files live
+  // there, not under ~/.claude/projects. Watching the right dir keeps fork detection
+  // and resumable-session-id tracking working for profile sessions.
+  const base = configDir ? path.join(configDir, 'projects') : CLAUDE_PROJECTS_DIR;
+  return path.join(base, dirName);
 }
 
 // True if another live shell already owns this claude session id — i.e. it was
@@ -1055,7 +1091,7 @@ function watchClaudeSessionDir(shellId) {
   const entry = shells.get(shellId);
   if (!entry) return;
 
-  const projectDir = claudeProjectDir(entry.cwd, entry.worktree);
+  const projectDir = claudeProjectDir(entry.cwd, entry.worktree, entry.configDir);
 
   // Ensure the directory exists before watching
   try { fs.mkdirSync(projectDir, { recursive: true }); } catch (err) {
@@ -1733,6 +1769,7 @@ function recordRecentSession(id) {
     claudeSessionId: e.claudeSessionId || null,
     cwd: e.cwd || null,
     agentType: e.agentType || 'claude',
+    configDir: e.configDir || null,
     worktree: e.worktree || null,
     name: e.name || null,
     planMode: !!e.planMode,
@@ -1758,7 +1795,7 @@ function saveState() {
   const state = {};
   for (const [id, entry] of shells) {
     if (entry.agentType === 'tmux-attach') continue; // ephemeral — don't persist
-    state[id] = { cwd: entry.cwd, claudeSessionId: entry.claudeSessionId, agentType: entry.agentType || 'claude', engineType: entry.engineType || 'node-pty', worktree: entry.worktree || null, name: entry.name || null, planMode: !!entry.planMode, lastActivity: entry.lastActivity || null, createdAt: entry.createdAt || null, windowId: entry.windowId || null };
+    state[id] = { cwd: entry.cwd, claudeSessionId: entry.claudeSessionId, agentType: entry.agentType || 'claude', configDir: entry.configDir || null, engineType: entry.engineType || 'node-pty', worktree: entry.worktree || null, name: entry.name || null, planMode: !!entry.planMode, lastActivity: entry.lastActivity || null, createdAt: entry.createdAt || null, windowId: entry.windowId || null };
   }
   // Merge with any saved state that wasn't reconnected yet
   const merged = { ...savedState, ...state };
@@ -2220,6 +2257,24 @@ app.get('/api/agents', (req, res) => {
     piAvailable = true;
   } catch {}
   agents.push({ id: 'pi', name: 'Pi (experimental)', shortName: 'Pi', available: piAvailable, enabled: piAvailable, isDefault: defaultAgent === 'pi' });
+  // Custom Claude config profiles (#537): appended at the END so they render last in
+  // every picker. id is 'config:<pid>' so the client distinguishes them; the runtime
+  // agentType stays 'claude' (resolved to a CLAUDE_CONFIG_DIR at spawn). configDir is
+  // tilde-expanded here for display + the client's configDir→name badge lookup.
+  const profiles = Array.isArray(settings.customAgentConfigs) ? settings.customAgentConfigs : [];
+  for (const p of profiles) {
+    agents.push({
+      id: 'config:' + p.id,
+      name: p.name,
+      shortName: (p.name || '').trim().slice(0, 2).toUpperCase() || 'CC',
+      available: true,
+      enabled: true,
+      isDefault: false,
+      custom: true,
+      profileId: p.id,
+      configDir: resolveConfigDir(p.id),
+    });
+  }
   res.json({ agents, defaultAgent });
 });
 
@@ -2338,7 +2393,7 @@ app.post('/api/commands/execute', (req, res) => {
   const filePath = path.join(COMMANDS_DIR, match);
   const shell = sessionId ? shells.get(sessionId) : null;
   const env = {
-    ...sessionEnv(sessionId || '', { name: shell?.name, worktree: shell?.worktree, windowId: shell?.windowId, cwd: shell?.cwd, agentType: shell?.agentType }),
+    ...sessionEnv(sessionId || '', { name: shell?.name, worktree: shell?.worktree, windowId: shell?.windowId, cwd: shell?.cwd, agentType: shell?.agentType, configDir: shell?.configDir }),
     // Run the command in the agent's real working dir (the worktree for worktree
     // sessions); sessionPaths returns an existing dir suitable for execSync's cwd.
     DEEPSTEVE_CWD: (shell ? sessionPaths(shell).cwd : '') || process.cwd(),
@@ -2664,12 +2719,14 @@ app.post('/api/start-automation', (req, res) => {
   // Resolve windowId and agentType from caller's session
   let windowId = rawWindowId;
   let agentType = 'claude';
+  let configDir = null;  // inherit the caller's custom config profile, if any (#537)
   let cwd = process.env.HOME;
   if (sessionId) {
     const callerEntry = shells.get(sessionId);
     if (callerEntry) {
       if (!windowId && callerEntry.windowId) windowId = callerEntry.windowId;
       if (callerEntry.agentType) agentType = callerEntry.agentType;
+      if (callerEntry.configDir) configDir = callerEntry.configDir;
       if (callerEntry.cwd) cwd = callerEntry.cwd;
     }
   }
@@ -2691,8 +2748,8 @@ app.post('/api/start-automation', (req, res) => {
   const engineType = sessionEngine === tmuxEngine ? 'tmux' : 'node-pty';
 
   log(`[API] start-automation "${automationId}": id=${id}, agent=${agentType}, engine=${engineType}, cwd=${cwd}`);
-  spawnSession(sessionEngine, id, agentType, spawnArgs, cwd, { cols: 120, rows: 40, env: sessionEnv(id, { name, windowId: windowId || null, cwd, agentType }) });
-  shells.set(id, { clients: new Set(), cwd, claudeSessionId, agentType, engine: sessionEngine, engineType, worktree: null, windowId: windowId || null, name, waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now(), prefill: true });
+  spawnSession(sessionEngine, id, agentType, spawnArgs, cwd, { cols: 120, rows: 40, env: sessionEnv(id, { name, windowId: windowId || null, cwd, agentType, configDir }) });
+  shells.set(id, { clients: new Set(), cwd, claudeSessionId, agentType, configDir: configDir || null, engine: sessionEngine, engineType, worktree: null, windowId: windowId || null, name, waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now(), prefill: true });
   wireShellOutput(id);
   emitSessionOpen(id);
   recordRecentSession(id);
@@ -2936,8 +2993,8 @@ app.delete('/api/screenshots/:id', (req, res) => {
 });
 
 app.get('/api/shells', (req, res) => {
-  const active = [...shells.entries()].map(([id, entry]) => ({ id, pid: (entry.engine || ptyEngine).getPid(id), cwd: entry.cwd, name: entry.name || null, agentType: entry.agentType || 'claude', engineType: entry.engineType || 'node-pty', status: 'active', lastActivity: entry.lastActivity || null, connectedClients: entry.clients.size }));
-  const saved = Object.entries(savedState).map(([id, entry]) => ({ id, cwd: entry.cwd, name: entry.name || null, agentType: entry.agentType || 'claude', engineType: entry.engineType || 'node-pty', status: entry.closed ? 'closed' : 'saved', lastActivity: entry.lastActivity || null, connectedClients: 0 }));
+  const active = [...shells.entries()].map(([id, entry]) => ({ id, pid: (entry.engine || ptyEngine).getPid(id), cwd: entry.cwd, name: entry.name || null, agentType: entry.agentType || 'claude', configDir: entry.configDir || null, engineType: entry.engineType || 'node-pty', status: 'active', lastActivity: entry.lastActivity || null, connectedClients: entry.clients.size }));
+  const saved = Object.entries(savedState).map(([id, entry]) => ({ id, cwd: entry.cwd, name: entry.name || null, agentType: entry.agentType || 'claude', configDir: entry.configDir || null, engineType: entry.engineType || 'node-pty', status: entry.closed ? 'closed' : 'saved', lastActivity: entry.lastActivity || null, connectedClients: 0 }));
   res.json({ shells: [...active, ...saved] });
 });
 
@@ -2968,6 +3025,7 @@ app.delete('/api/shells/:id', (req, res) => {
     savedState[id] = {
       cwd: entry.cwd, claudeSessionId: entry.claudeSessionId,
       agentType: entry.agentType || 'claude',
+      configDir: entry.configDir || null,
       worktree: entry.worktree || null, name: entry.name || null,
       planMode: !!entry.planMode,
       lastActivity: entry.lastActivity || null, createdAt: entry.createdAt || null,
@@ -3071,6 +3129,7 @@ app.get('/api/shells/:id/info', (req, res) => {
     worktree: entry.worktree || null,
     windowId: entry.windowId || null,
     agentType: entry.agentType || 'claude',
+    configDir: entry.configDir || null,
     runningCommand: entry.agentType === 'terminal' ? getForegroundCommand(id) : null,
     createdAt: entry.createdAt || null,
     elapsedMs: entry.createdAt ? Date.now() - entry.createdAt : null,
@@ -3226,6 +3285,7 @@ app.post('/api/recent-sessions/:key/restore', (req, res) => {
     cwd: r.cwd,
     claudeSessionId: r.claudeSessionId,
     agentType: r.agentType,
+    configDir: r.configDir || null,
     engineType: r.engineType,
     worktree: r.worktree,
     name: r.name,
@@ -3281,12 +3341,20 @@ app.post('/api/start-issue', (req, res) => {
   // Resolve windowId, agentType, and cwd: explicit value, or look up from caller's session
   let windowId = rawWindowId;
   let agentType = rawAgentType;
+  let configDir = null;  // custom config profile (#537)
   let cwd = rawCwd;
+  // A profile selected as the default agent arrives as agentType='config:<pid>' (or an
+  // explicit configProfile field). Resolve it to a concrete dir; the runtime agentType
+  // stays 'claude'. Resolve BEFORE caller inheritance so it takes precedence.
+  let configProfile = req.body.configProfile || null;
+  if (agentType && agentType.startsWith('config:')) { configProfile = agentType.slice('config:'.length); agentType = 'claude'; }
+  if (configProfile) configDir = resolveConfigDir(configProfile);
   if (sessionId) {
     const callerEntry = shells.get(sessionId);
     if (callerEntry) {
       if (!windowId && callerEntry.windowId) windowId = callerEntry.windowId;
       if (!agentType && callerEntry.agentType) agentType = callerEntry.agentType;
+      if (!configDir && callerEntry.configDir) configDir = callerEntry.configDir;
       if (!cwd && callerEntry.cwd) cwd = callerEntry.cwd;
     }
   }
@@ -3342,8 +3410,8 @@ app.post('/api/start-issue', (req, res) => {
   const sessionEngine = getDefaultEngine();
   const engineType = sessionEngine === tmuxEngine ? 'tmux' : 'node-pty';
   log(`[API] start-issue #${number}: id=${id}, agent=${agentType}, engine=${engineType}, worktree=${worktree || 'none'}, cwd=${worktreeCwd}`);
-  spawnSession(sessionEngine, id, agentType, spawnArgs, worktreeCwd, { cols: 120, rows: 40, env: sessionEnv(id, { name, worktree, windowId: windowId || null, cwd: worktreeCwd, agentType }) });
-  shells.set(id, { clients: new Set(), cwd: worktreeCwd, claudeSessionId: claudeSessionId, agentType, engine: sessionEngine, engineType, worktree: worktree || null, windowId: windowId || null, name, planMode: !!settings.wandPlanMode, waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now(), loading: true });
+  spawnSession(sessionEngine, id, agentType, spawnArgs, worktreeCwd, { cols: 120, rows: 40, env: sessionEnv(id, { name, worktree, windowId: windowId || null, cwd: worktreeCwd, agentType, configDir }) });
+  shells.set(id, { clients: new Set(), cwd: worktreeCwd, claudeSessionId: claudeSessionId, agentType, configDir: configDir || null, engine: sessionEngine, engineType, worktree: worktree || null, windowId: windowId || null, name, planMode: !!settings.wandPlanMode, waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now(), loading: true });
   wireShellOutput(id);
   emitSessionOpen(id);
   recordRecentSession(id);
@@ -3496,6 +3564,7 @@ if (tmuxEngine) {
           cwd: meta.cwd,
           claudeSessionId: meta.claudeSessionId,
           agentType: meta.agentType || 'claude',
+          configDir: meta.configDir || null,
           engine: tmuxEngine,
           engineType: 'tmux',
           worktree: meta.worktree || null,
@@ -3781,9 +3850,16 @@ function handleWsConnection(ws, req) {
   const windowId = url.searchParams.get('windowId') || null;
   const initialCols = parseInt(url.searchParams.get('cols')) || 120;
   const initialRows = parseInt(url.searchParams.get('rows')) || 40;
-  const agentType = url.searchParams.get('agentType') || 'claude';
+  let agentType = url.searchParams.get('agentType') || 'claude';
   const forkFrom = url.searchParams.get('fork');
   const requestedEngine = url.searchParams.get('engine'); // optional per-session engine override
+  // Custom Claude config profile (#537): the client sends configProfile=<pid> with
+  // agentType=claude. Resolve to a concrete dir now — the resolved dir is the durable
+  // per-session identity (persisted below), so a later profile rename/delete can't break
+  // this session. Tolerate a stale client that packs the id into agentType as 'config:<pid>'.
+  let configProfile = url.searchParams.get('configProfile') || null;
+  if (agentType.startsWith('config:')) { configProfile = agentType.slice('config:'.length); agentType = 'claude'; }
+  let configDir = resolveConfigDir(configProfile);
 
   log(`[WS] Connection: id=${id}, cwd=${cwd}, createNew=${createNew}, worktree=${worktree}`);
   log(`[WS] Active shells: ${[...shells.keys()].join(', ') || 'none'}`);
@@ -3816,9 +3892,9 @@ function handleWsConnection(ws, req) {
         shellId: id
       });
 
-      spawnSession(sessionEngine, id, savedAgentType, resumeArgs, cwd, { ...ptySize, env: sessionEnv(id, { name: restoredName, worktree: savedWorktree, windowId: restored.windowId, cwd, agentType: savedAgentType }) });
+      spawnSession(sessionEngine, id, savedAgentType, resumeArgs, cwd, { ...ptySize, env: sessionEnv(id, { name: restoredName, worktree: savedWorktree, windowId: restored.windowId, cwd, agentType: savedAgentType, configDir: restored.configDir }) });
       const startTime = Date.now();
-      shells.set(id, { clients: new Set(), cwd, claudeSessionId, agentType: savedAgentType, engine: sessionEngine, engineType: restoredEngineType, worktree: savedWorktree, name: restoredName, planMode: savedPlanMode, restored: true, waitingForInput: false, lastActivity: Date.now(), createdAt: restored.createdAt || Date.now(), windowId: restored.windowId || null });
+      shells.set(id, { clients: new Set(), cwd, claudeSessionId, agentType: savedAgentType, configDir: restored.configDir || null, engine: sessionEngine, engineType: restoredEngineType, worktree: savedWorktree, name: restoredName, planMode: savedPlanMode, restored: true, waitingForInput: false, lastActivity: Date.now(), createdAt: restored.createdAt || Date.now(), windowId: restored.windowId || null });
       wireShellOutput(id);
       recordRecentSession(id);  // bump recency on same-browser reconnect + cross-browser restore
       if (agentConfig.supportsSessionWatch) watchClaudeSessionDir(id);
@@ -3837,7 +3913,7 @@ function handleWsConnection(ws, req) {
           if (entry && entry.worktree) fallbackArgs.push('--worktree', entry.worktree);
           fallbackArgs.push(...mcpConfigArgs('claude', id));
           sessionEngine.destroy(id);
-          spawnSession(sessionEngine, id, 'claude', fallbackArgs, cwd, { cols: initialCols, rows: initialRows, env: sessionEnv(id, { name: entry?.name, worktree: entry?.worktree, windowId: entry?.windowId, cwd, agentType: 'claude' }) });
+          spawnSession(sessionEngine, id, 'claude', fallbackArgs, cwd, { cols: initialCols, rows: initialRows, env: sessionEnv(id, { name: entry?.name, worktree: entry?.worktree, windowId: entry?.windowId, cwd, agentType: 'claude', configDir: entry?.configDir }) });
           if (entry) {
             entry.claudeSessionId = newClaudeSessionId;
             entry.killed = false;
@@ -3888,6 +3964,7 @@ function handleWsConnection(ws, req) {
       if (worktree) spawnArgs.push('--worktree', worktree);
       else if (parent.worktree) spawnArgs.push('--worktree', parent.worktree);
       spawnArgs.push(...mcpConfigArgs(agentType, id));
+      configDir = parent.configDir || configDir;  // fork inherits the parent's config profile (#537)
       spawnedPlanMode = false;
       spawnPath = 'fork';
       parentShell = forkFrom;
@@ -3908,8 +3985,8 @@ function handleWsConnection(ws, req) {
     const engineType = sessionEngine === tmuxEngine ? 'tmux' : 'node-pty';
     log(`[WS] Creating NEW shell: oldId=${oldId}, newId=${id}, agent=${agentType}, engine=${engineType}, session=${sessionId}, worktree=${worktree || 'none'}, cwd=${worktreeCwd}, planMode=${spawnedPlanMode}`);
     traceSession('SPAWN', { path: spawnPath, shell: id, oldId: oldId || null, name: name || null, worktree: worktree || null, cwd: worktreeCwd, claude: sessionId, planMode: spawnedPlanMode, agent: agentType, engine: engineType, parentShell, parentClaude, parentWorktree });
-    spawnSession(sessionEngine, id, agentType, spawnArgs, worktreeCwd, { cols: initialCols, rows: initialRows, env: sessionEnv(id, { name, worktree, cwd: worktreeCwd, agentType }) });
-    shells.set(id, { clients: new Set(), cwd: worktreeCwd, claudeSessionId: sessionId, agentType, engine: sessionEngine, engineType, worktree: worktree || null, name: name || null, planMode: spawnedPlanMode, waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now() });
+    spawnSession(sessionEngine, id, agentType, spawnArgs, worktreeCwd, { cols: initialCols, rows: initialRows, env: sessionEnv(id, { name, worktree, cwd: worktreeCwd, agentType, configDir }) });
+    shells.set(id, { clients: new Set(), cwd: worktreeCwd, claudeSessionId: sessionId, agentType, configDir: configDir || null, engine: sessionEngine, engineType, worktree: worktree || null, name: name || null, planMode: spawnedPlanMode, waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now() });
     wireShellOutput(id);
     emitSessionOpen(id);
     recordRecentSession(id);
@@ -3936,7 +4013,7 @@ function handleWsConnection(ws, req) {
   if (windowId) entry.windowId = windowId;
   const hasScrollback = entry.scrollback && entry.scrollback.length > 0;
   log(`[WS] Sending session response: id=${id}, restored=${entry.restored || false}, scrollback=${hasScrollback ? entry.scrollbackSize + 'B' : 'none'}, existingClients=${existingClients}`);
-  ws.send(JSON.stringify({ type: 'session', id, restored: entry.restored || false, cwd: entry.cwd, name: entry.name || null, agentType: entry.agentType || 'claude', engineType: entry.engineType || 'node-pty', claudeSessionId: entry.claudeSessionId || null, scrollback: hasScrollback, existingClients, waitingForInput: entry.waitingForInput || false }));
+  ws.send(JSON.stringify({ type: 'session', id, restored: entry.restored || false, cwd: entry.cwd, name: entry.name || null, agentType: entry.agentType || 'claude', configDir: entry.configDir || null, engineType: entry.engineType || 'node-pty', claudeSessionId: entry.claudeSessionId || null, scrollback: hasScrollback, existingClients, waitingForInput: entry.waitingForInput || false }));
 
   // Send buffered scrollback so the client can render the terminal immediately
   if (hasScrollback) {
@@ -3979,6 +4056,7 @@ function handleWsConnection(ws, req) {
           savedState[id] = {
             cwd: entry.cwd, claudeSessionId: entry.claudeSessionId,
             agentType: entry.agentType || 'claude',
+            configDir: entry.configDir || null,
             worktree: entry.worktree || null, name: entry.name || null,
             planMode: !!entry.planMode,
             lastActivity: entry.lastActivity || null, createdAt: entry.createdAt || null,
@@ -4019,7 +4097,7 @@ function handleWsConnection(ws, req) {
       entry.killTimer = setTimeout(() => {
         if (entry.clients.size === 0) {
           // Preserve session info so it can be restored on next connect
-          savedState[id] = { cwd: entry.cwd, claudeSessionId: entry.claudeSessionId, agentType: entry.agentType || 'claude', worktree: entry.worktree || null, name: entry.name || null, planMode: !!entry.planMode, lastActivity: entry.lastActivity || null };
+          savedState[id] = { cwd: entry.cwd, claudeSessionId: entry.claudeSessionId, agentType: entry.agentType || 'claude', configDir: entry.configDir || null, worktree: entry.worktree || null, name: entry.name || null, planMode: !!entry.planMode, lastActivity: entry.lastActivity || null };
           killShell(entry, id, 'disconnected');
           shells.delete(id);
           saveState();

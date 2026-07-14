@@ -278,6 +278,15 @@ function applySettings(settings) {
     const el = document.querySelector('#recent-sessions-limit');
     if (el) el.value = settings.recentSessionsLimit;
   }
+  // Enabled agents + custom config profiles (#537) aren't in the broadcast payload
+  // (broadcast:false), so re-fetch /api/agents to pick up changes made in another window
+  // and keep the pickers + badge mapping current. (`which` probes are fast.)
+  fetch('/api/agents').then(r => r.json()).then(data => {
+    window.__deepsteveAgents = data.agents || [];
+    const stillExists = window.__deepsteveAgents.some(a => a.id === window.__deepsteveDefaultAgent);
+    if (!stillExists) window.__deepsteveDefaultAgent = data.defaultAgent || 'claude';
+    if (typeof refreshEnginesDropdown === 'function') refreshEnginesDropdown();
+  }).catch(() => {});
 }
 
 // When the browser tab regains visibility, re-sync scroll position.
@@ -512,7 +521,16 @@ async function refreshSessionsDropdown() {
       const statusText = isThisTab ? 'connected' : isOtherWindow ? 'other window' : (isClosed ? (staleness ? `closed ${staleness}` : 'closed') : (staleness || (shell.status === 'saved' ? 'saved' : 'not connected')));
       const statusClass = isThisTab ? 'active' : isOtherWindow ? 'other-window' : (isClosed ? 'closed' : '');
       const canClose = !isThisTab && !isOtherWindow;
-      const agentLabel = shell.agentType === 'opencode' ? 'OpenCode' : (shell.agentType ? shell.agentType.charAt(0).toUpperCase() + shell.agentType.slice(1) : '');
+      // Custom config profile (#537): a profile session is agentType 'claude' + a configDir;
+      // label the tab with the profile's display name (mapped from the dir) so it's distinct
+      // from a plain Claude session. Fall back to the dir's basename if the profile is gone.
+      let agentLabel;
+      if (shell.configDir) {
+        const profile = (window.__deepsteveAgents || []).find(a => a.custom && a.configDir === shell.configDir);
+        agentLabel = profile ? profile.name : (shell.configDir.split('/').filter(Boolean).pop() || 'Claude');
+      } else {
+        agentLabel = shell.agentType === 'opencode' ? 'OpenCode' : (shell.agentType ? shell.agentType.charAt(0).toUpperCase() + shell.agentType.slice(1) : '');
+      }
 
       return `
         <div class="dropdown-item ${isThisTab ? 'connected' : 'clickable'} ${isClosed ? 'closed' : ''}" data-id="${shell.id}" data-cwd="${shell.cwd}" data-name="${escapeHtml(name)}"${isOtherWindow ? ' data-other-window="true"' : ''}>
@@ -716,6 +734,17 @@ settingsBtn?.addEventListener('click', async () => {
   const currentPiBinary = settingsData.piBinary || 'pi';
   const currentScrollbackKB = settingsData.scrollbackKB || 100;
   const currentRecentSessionsLimit = settingsData.recentSessionsLimit ?? 8;
+  // Custom Claude config profiles (#537): editable [name, configDir] rows.
+  const currentCustomConfigs = Array.isArray(settingsData.customAgentConfigs) ? settingsData.customAgentConfigs : [];
+  const inputStyle = 'padding:4px 8px; border-radius:4px; border:1px solid var(--ds-border); background:var(--ds-bg-secondary); color:var(--ds-text-primary); font-size:12px;';
+  const customConfigRowHtml = (name = '', dir = '', id = '') => `
+    <div class="custom-config-row" data-id="${escapeHtml(id)}" style="display:flex; gap:6px; align-items:center; margin-bottom:6px;">
+      <input type="text" class="cc-name" value="${escapeHtml(name)}" placeholder="Display name" style="${inputStyle} width:130px;">
+      <input type="text" class="cc-dir" value="${escapeHtml(dir)}" placeholder="~/.claude-alt" style="${inputStyle} flex:1; min-width:120px;">
+      <button type="button" class="cc-browse" style="padding:4px 8px; font-size:12px; border-radius:4px; border:1px solid var(--ds-border); background:var(--ds-bg-secondary); color:var(--ds-text-primary); cursor:pointer;">Browse…</button>
+      <button type="button" class="cc-remove" title="Remove" style="padding:4px 8px; font-size:12px; border-radius:4px; border:1px solid var(--ds-border); background:var(--ds-bg-secondary); color:var(--ds-text-secondary); cursor:pointer;">✕</button>
+    </div>`;
+  const customConfigsHtml = currentCustomConfigs.map(c => customConfigRowHtml(c.name, c.configDir, c.id)).join('');
   const agents = window.__deepsteveAgents || [];
   const themes = themesData.themes || [];
   const activeTheme = themesData.active || '';
@@ -914,6 +943,14 @@ settingsBtn?.addEventListener('click', async () => {
           <label style="font-size: 12px; color: var(--ds-text-secondary);">Binary path</label>
           <input type="text" id="pi-binary" value="${escapeHtml(currentPiBinary)}" placeholder="pi" style="width: 200px; padding: 4px 8px; border-radius: 4px; border: 1px solid var(--ds-border); background: var(--ds-bg-secondary); color: var(--ds-text-primary);">
         </div>
+        <div style="margin-top: 16px; border-top: 1px solid var(--ds-border); padding-top: 12px;">
+          <label style="font-size: 13px; color: var(--ds-text-primary); font-weight: 600;">Custom Claude configs</label>
+          <p style="font-size: 11px; color: var(--ds-text-secondary); margin: 4px 0 8px;">
+            Each profile opens a normal Claude Code session pinned to its own config directory (<code>CLAUDE_CONFIG_DIR</code>) — its own settings.json, credentials, and history. Use this to run an alternate provider, a second account, or a locked-down profile side by side. Profiles appear at the end of the agent list. <code>~</code> is expanded.
+          </p>
+          <div id="custom-configs-list">${customConfigsHtml}</div>
+          <button type="button" id="add-custom-config" style="margin-top: 4px; padding: 4px 10px; font-size: 12px; border-radius: 4px; border: 1px solid var(--ds-border); background: var(--ds-bg-secondary); color: var(--ds-text-primary); cursor: pointer;">+ Add config</button>
+        </div>
       </div>
       </div>
       <div class="settings-tab-content" data-tab="terminal">
@@ -1065,6 +1102,23 @@ settingsBtn?.addEventListener('click', async () => {
   const piBinaryRow = overlay.querySelector('#pi-binary-row');
   agentPiCheckbox?.addEventListener('change', () => {
     piBinaryRow.style.display = agentPiCheckbox.checked ? 'block' : 'none';
+  });
+
+  // Custom Claude config profiles (#537): add / remove rows + Browse via dir-picker.
+  const customConfigsList = overlay.querySelector('#custom-configs-list');
+  overlay.querySelector('#add-custom-config')?.addEventListener('click', () => {
+    customConfigsList.insertAdjacentHTML('beforeend', customConfigRowHtml());
+    customConfigsList.querySelector('.custom-config-row:last-child .cc-name')?.focus();
+  });
+  customConfigsList?.addEventListener('click', async (ev) => {
+    const removeBtn = ev.target.closest('.cc-remove');
+    if (removeBtn) { removeBtn.closest('.custom-config-row')?.remove(); return; }
+    const browseBtn = ev.target.closest('.cc-browse');
+    if (browseBtn) {
+      const dirInput = browseBtn.closest('.custom-config-row')?.querySelector('.cc-dir');
+      const result = await showDirectoryPicker();
+      if (typeof result === 'string' && result && dirInput) dirInput.value = result;
+    }
   });
 
   // Wand template reset button
@@ -1262,6 +1316,14 @@ settingsBtn?.addEventListener('click', async () => {
     if (overlay.querySelector('#agent-pi').checked) enabledAgents.push('pi');
     const opencodeBinary = overlay.querySelector('#opencode-binary').value || 'opencode';
     const piBinary = overlay.querySelector('#pi-binary').value || 'pi';
+    // Custom Claude config profiles (#537): collect rows; drop incomplete ones. Keep the
+    // existing id (data-id) so a profile's id is stable across saves (new rows have none;
+    // the server assigns one).
+    const customAgentConfigs = [...overlay.querySelectorAll('#custom-configs-list .custom-config-row')].map(row => ({
+      id: row.dataset.id || undefined,
+      name: row.querySelector('.cc-name').value.trim(),
+      configDir: row.querySelector('.cc-dir').value.trim(),
+    })).filter(c => c.name && c.configDir);
     const selectedEngine = overlay.querySelector('#engine-select')?.value || 'node-pty';
     const scrollbackKB = Math.max(1, Math.min(10000, Math.round(Number(overlay.querySelector('#scrollback-kb').value)) || 100));
     const recentSessionsLimit = Math.max(0, Math.min(50, Math.round(Number(overlay.querySelector('#recent-sessions-limit').value)) || 0));
@@ -1272,7 +1334,7 @@ settingsBtn?.addEventListener('click', async () => {
     const scheduledTasksEnabled = overlay.querySelector('#scheduled-tasks-enabled').checked;
     const inheritRemoteControl = overlay.querySelector('#inherit-rc-newtab').checked;
     const inheritRemoteControlOnFork = overlay.querySelector('#inherit-rc-fork').checked;
-    const settingsPayload = { shellProfile, maxIssueTitleLength: newMaxTitle, wandPlanMode, wandPromptTemplate, symlinkWorktreeSettings, cmdTabSwitch, cmdTabSwitchHoldMs, commandPaletteEnabled, commandPaletteShortcut, hashCommandsEnabled, contextViewsEnabled, metaControlsEnabled, inheritRemoteControl, inheritRemoteControlOnFork, overviewDefaultLayout, enabledAgents, opencodeBinary, piBinary, engine: selectedEngine, scrollbackKB, recentSessionsLimit, autoUpdateCheckEnabled, autoUpdateCheckIntervalHours, autoUpdateApply, sessionLogEnabled, scheduledTasksEnabled };
+    const settingsPayload = { shellProfile, maxIssueTitleLength: newMaxTitle, wandPlanMode, wandPromptTemplate, symlinkWorktreeSettings, cmdTabSwitch, cmdTabSwitchHoldMs, commandPaletteEnabled, commandPaletteShortcut, hashCommandsEnabled, contextViewsEnabled, metaControlsEnabled, inheritRemoteControl, inheritRemoteControlOnFork, overviewDefaultLayout, enabledAgents, opencodeBinary, piBinary, engine: selectedEngine, scrollbackKB, recentSessionsLimit, autoUpdateCheckEnabled, autoUpdateCheckIntervalHours, autoUpdateApply, sessionLogEnabled, scheduledTasksEnabled, customAgentConfigs };
     let resp = await fetch('/api/settings', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1290,18 +1352,17 @@ settingsBtn?.addEventListener('click', async () => {
     setCommandPaletteShortcut(commandPaletteShortcut);
     setHashCommandsEnabled(hashCommandsEnabled);
     setContextViewsEnabled(contextViewsEnabled);
-    // Refresh agents data if agent settings changed
-    const prevEnabled = (window.__deepsteveAgents || []).filter(a => a.enabled).map(a => a.id).sort().join(',');
-    const newEnabled = enabledAgents.sort().join(',');
-    if (prevEnabled !== newEnabled) {
-      try {
-        const agentsResp = await fetch('/api/agents');
-        const agentsData = await agentsResp.json();
-        window.__deepsteveAgents = agentsData.agents || [];
-        window.__deepsteveDefaultAgent = agentsData.defaultAgent || 'claude';
-        refreshEnginesDropdown();
-      } catch {}
-    }
+    // Refresh agents data — enabled set and/or custom config profiles (#537) may have
+    // changed (custom-config edits aren't reflected in the enabledAgents diff), so just
+    // re-fetch. Preserve the current picker selection if it still exists.
+    try {
+      const agentsResp = await fetch('/api/agents');
+      const agentsData = await agentsResp.json();
+      window.__deepsteveAgents = agentsData.agents || [];
+      const stillExists = window.__deepsteveAgents.some(a => a.id === window.__deepsteveDefaultAgent);
+      if (!stillExists) window.__deepsteveDefaultAgent = agentsData.defaultAgent || 'claude';
+      refreshEnginesDropdown();
+    } catch {}
     window.removeEventListener('deepsteve:version-status', versionStatusHandler);
     overlay.remove();
   };
@@ -1383,7 +1444,16 @@ function createTmuxAttachSession(tmuxSessionName) {
  */
 function createSession(cwd, existingId = null, isNew = false, opts = {}) {
   const { cols, rows } = measureTerminalSize();
-  const ws = createWebSocket({ id: existingId, cwd, isNew, worktree: opts.worktree, name: opts.name, planMode: opts.planMode, agentType: opts.agentType, cols, rows, windowId: getWindowId(), fork: opts.fork, rcParent: opts.rcParent });
+  // Custom Claude config profiles (#537): a profile is picked as agentType 'config:<pid>'.
+  // Resolve it here (the single WS-creation choke point) into a real agentType:'claude'
+  // plus a configProfile param the server maps to a CLAUDE_CONFIG_DIR.
+  let agentType = opts.agentType;
+  let configProfile;
+  if (typeof agentType === 'string' && agentType.startsWith('config:')) {
+    configProfile = agentType.slice('config:'.length);
+    agentType = 'claude';
+  }
+  const ws = createWebSocket({ id: existingId, cwd, isNew, worktree: opts.worktree, name: opts.name, planMode: opts.planMode, agentType, configProfile, cols, rows, windowId: getWindowId(), fork: opts.fork, rcParent: opts.rcParent });
 
   // Promise that resolves when the session is fully initialized (terminal created)
   let resolveReady;

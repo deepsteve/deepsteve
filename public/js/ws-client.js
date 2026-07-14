@@ -16,6 +16,7 @@ export function createWebSocket(options = {}) {
   if (options.name) params.set('name', options.name);
   if (options.planMode) params.set('planMode', '1');
   if (options.agentType && options.agentType !== 'claude') params.set('agentType', options.agentType);
+  if (options.configProfile) params.set('configProfile', options.configProfile); // custom Claude config profile (#537)
   if (options.windowId) params.set('windowId', options.windowId);
   if (options.fork) params.set('fork', options.fork);
   if (options.rcParent) params.set('rcParent', options.rcParent);
@@ -57,6 +58,7 @@ export function createWebSocket(options = {}) {
       if (options.cols) p.set('cols', options.cols);
       if (options.rows) p.set('rows', options.rows);
       if (options.agentType && options.agentType !== 'claude') p.set('agentType', options.agentType);
+      if (options.configProfile) p.set('configProfile', options.configProfile); // custom Claude config profile (#537)
       if (options.windowId) p.set('windowId', options.windowId);
       url = wsProto + location.host + '?' + p;
     },

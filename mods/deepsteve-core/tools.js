@@ -124,6 +124,7 @@ function init(context) {
         // Inherit from caller, allow overrides
         const effectiveCwd = cwd || caller.cwd;
         const effectiveAgentType = agent_type || caller.agentType || 'claude';
+        const effectiveConfigDir = caller.configDir || null;  // inherit custom config profile (#537)
         const windowId = caller.windowId || null;
 
         // Build prompt helper
@@ -166,10 +167,11 @@ function init(context) {
         const sessionEngine = getDefaultEngine();
         const engineType = sessionEngine.constructor.name === 'TmuxEngine' ? 'tmux' : 'node-pty';
         log(`[MCP] start_issue #${number}: id=${id}, agent=${effectiveAgentType}, engine=${engineType}, worktree=${worktree || 'none'}, cwd=${spawnCwd}`);
-        spawnSession(sessionEngine, id, effectiveAgentType, spawnArgs, spawnCwd, { cols: 120, rows: 40, env: sessionEnv(id, { name, worktree, windowId, cwd: spawnCwd, agentType: effectiveAgentType }) });
+        spawnSession(sessionEngine, id, effectiveAgentType, spawnArgs, spawnCwd, { cols: 120, rows: 40, env: sessionEnv(id, { name, worktree, windowId, cwd: spawnCwd, agentType: effectiveAgentType, configDir: effectiveConfigDir }) });
         shells.set(id, {
           clients: new Set(), cwd: spawnCwd,
           claudeSessionId, agentType: effectiveAgentType,
+          configDir: effectiveConfigDir,
           engine: sessionEngine, engineType,
           worktree: worktree || null, windowId,
           name, initialPrompt: null,
@@ -246,6 +248,10 @@ function init(context) {
         const effectiveCwd = cwd || caller.cwd;
         // agent_type provided → agent session; fork → inherit caller's agent; otherwise → plain shell
         const effectiveAgentType = agent_type || (fork ? (caller.agentType || 'claude') : null);
+        // Inherit the caller's custom config profile (#537) — for an agent session so it
+        // runs against the same CLAUDE_CONFIG_DIR, and for a plain terminal so a manually
+        // typed `claude` there uses the same profile too.
+        const effectiveConfigDir = caller.configDir || null;
         const windowId = caller.windowId || null;
         const id = randomUUID().slice(0, 8);
 
@@ -258,10 +264,11 @@ function init(context) {
           const shellEngine = getDefaultEngine();
           const shellEngineType = shellEngine.constructor.name === 'TmuxEngine' ? 'tmux' : 'node-pty';
           log(`[MCP] open_terminal (shell): id=${id}, engine=${shellEngineType}, cwd=${effectiveCwd}, caller=${session_id}${hasCommand ? `, command=${JSON.stringify(rawCommand)}` : ''}`);
-          spawnSession(shellEngine, id, 'terminal', [], effectiveCwd, { cols: 120, rows: 40, env: sessionEnv(id, { name: tabName, windowId, cwd: effectiveCwd, agentType: 'terminal' }) });
+          spawnSession(shellEngine, id, 'terminal', [], effectiveCwd, { cols: 120, rows: 40, env: sessionEnv(id, { name: tabName, windowId, cwd: effectiveCwd, agentType: 'terminal', configDir: effectiveConfigDir }) });
           shells.set(id, {
             clients: new Set(), cwd: effectiveCwd,
             claudeSessionId: null, agentType: 'terminal',
+            configDir: effectiveConfigDir,
             engine: shellEngine, engineType: shellEngineType,
             worktree: null, windowId,
             name: tabName, initialPrompt: null,
@@ -322,10 +329,11 @@ function init(context) {
         // Forked sessions don't pass --permission-mode plan in spawnArgs, so record
         // planMode=false for them regardless of the caller-supplied plan_mode arg.
         const recordedPlanMode = (fork && caller.claudeSessionId) ? false : !!plan_mode;
-        spawnSession(sessionEngine2, id, effectiveAgentType, spawnArgs, spawnCwd, { cols: 120, rows: 40, env: sessionEnv(id, { name: tabName, worktree: validatedWorktree, windowId, cwd: spawnCwd, agentType: effectiveAgentType }) });
+        spawnSession(sessionEngine2, id, effectiveAgentType, spawnArgs, spawnCwd, { cols: 120, rows: 40, env: sessionEnv(id, { name: tabName, worktree: validatedWorktree, windowId, cwd: spawnCwd, agentType: effectiveAgentType, configDir: effectiveConfigDir }) });
         shells.set(id, {
           clients: new Set(), cwd: spawnCwd,
           claudeSessionId, agentType: effectiveAgentType,
+          configDir: effectiveConfigDir,
           engine: sessionEngine2, engineType: engineType2,
           worktree: validatedWorktree, windowId,
           name: tabName, initialPrompt: prompt || null,
