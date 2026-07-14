@@ -343,9 +343,16 @@ function init(context) {
         wireShellOutput(id);
         emitSessionOpen(id);
 
-        if (prompt && agentConfig.initialPromptDelay > 0) {
+        // Deliver the prompt through the shared readiness pipeline (same as start_issue
+        // above and the server's other spawn paths). deliverPromptWhenReady handles BOTH
+        // delay-based agents (initialPromptDelay > 0) AND BEL agents like claude whose
+        // initialPromptDelay is 0 — for the latter it waits for the completion BEL /
+        // idle transition before submitting. The previous `initialPromptDelay > 0` guard
+        // here silently dropped the prompt for claude (delay 0), so open_terminal agent
+        // tabs came up empty.
+        if (prompt) {
           shells.get(id).initialPrompt = null;
-          setTimeout(() => submitToShell(id, prompt), agentConfig.initialPromptDelay);
+          deliverPromptWhenReady(id, prompt);
         }
 
         if (agentConfig.supportsSessionWatch) watchClaudeSessionDir(id);
