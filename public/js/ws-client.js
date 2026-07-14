@@ -2,6 +2,8 @@
  * WebSocket client wrapper with auto-reconnect
  */
 
+import { maybeHealAuth, noteAuthOk } from './auth-heal.js';
+
 export function createWebSocket(options = {}) {
   const params = new URLSearchParams();
 
@@ -23,7 +25,7 @@ export function createWebSocket(options = {}) {
 
   const wsProto = location.protocol === 'https:' ? 'wss://' : 'ws://';
   let url = wsProto + location.host + '?' + params;
-  let ws = new WebSocket(url);
+  let ws;
   let reconnectTimer = null;
   let isReconnecting = false;
 
@@ -76,6 +78,7 @@ export function createWebSocket(options = {}) {
     ws = new WebSocket(url);
 
     ws.onopen = () => {
+      noteAuthOk();
       if (isReconnecting) {
         isReconnecting = false;
         clearInterval(reconnectTimer);
@@ -100,6 +103,10 @@ export function createWebSocket(options = {}) {
         if (wrapper.onreconnecting) wrapper.onreconnecting();
 
         reconnectTimer = setInterval(() => {
+          if (window.__deepsteveReloadPending) return; // stop churn while a heal-reload navigates
+          // The browser can't see WHY an upgrade failed (always close code 1006), so probe over
+          // HTTP: no-op unless the server is up but rejecting our auth, then one guarded reload.
+          maybeHealAuth();
           if (ws.readyState === WebSocket.CLOSED) {
             connect();
           }
@@ -110,24 +117,7 @@ export function createWebSocket(options = {}) {
     };
   }
 
-  // Initial connection setup
-  ws.onopen = () => { if (wrapper.onopen) wrapper.onopen(); };
-  ws.onmessage = (e) => { if (wrapper.onmessage) wrapper.onmessage(e); };
-  ws.onerror = (e) => { if (wrapper.onerror) wrapper.onerror(e); };
-  ws.onclose = (e) => {
-    if (!isReconnecting && !e.wasClean && !window.__deepsteveReloadPending) {
-      isReconnecting = true;
-      if (wrapper.onreconnecting) wrapper.onreconnecting();
-
-      reconnectTimer = setInterval(() => {
-        if (ws.readyState === WebSocket.CLOSED) {
-          connect();
-        }
-      }, 1000);
-    }
-
-    if (wrapper.onclose) wrapper.onclose(e);
-  };
+  connect();
 
   return wrapper;
 }

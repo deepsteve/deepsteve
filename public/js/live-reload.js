@@ -14,6 +14,7 @@
  */
 
 import { nsChannel } from './storage-namespace.js';
+import { maybeHealAuth, forcePageReload, noteAuthOk } from './auth-heal.js';
 
 const State = {
   CONNECTED: 'connected',
@@ -42,6 +43,7 @@ export function initLiveReload({ onMessage, onShowRestartConfirm, onShowReloadOv
     ws = new WebSocket(wsProto + location.host + '?' + params);
 
     ws.onopen = () => {
+      noteAuthOk();
       setState(State.CONNECTED);
       lastPingTime = Date.now();
       if (pingTimer) clearInterval(pingTimer);
@@ -102,22 +104,7 @@ export function initLiveReload({ onMessage, onShowRestartConfirm, onShowReloadOv
         if (res.ok) {
           reloading = true;
           console.log('[live-reload] server is back, reloading page...');
-          // Use <meta http-equiv="refresh"> instead of location.reload().
-          // Firefox blocks location.reload() when ANY beforeunload handler is
-          // registered, regardless of what the handler does. Meta refresh
-          // bypasses beforeunload entirely.
-          const meta = document.createElement('meta');
-          meta.httpEquiv = 'refresh';
-          meta.content = '0;url=' + location.pathname + '?_=' + Date.now();
-          document.head.appendChild(meta);
-          // Watchdog: if meta-refresh silently fails to navigate, clear the
-          // reload flag so per-tab WS reconnects resume instead of wedging.
-          setTimeout(() => {
-            console.warn('[live-reload] meta-refresh did not navigate, falling back');
-            window.__deepsteveReloadPending = false;
-            reloading = false;
-            location.replace(location.pathname + '?_=' + Date.now());
-          }, 3000);
+          forcePageReload(() => { reloading = false; });
         }
       } catch {}
     }, 500);
@@ -134,6 +121,10 @@ export function initLiveReload({ onMessage, onShowRestartConfirm, onShowReloadOv
         if (res.ok) {
           clearInterval(interval);
           console.log('[live-reload] server is back, reconnecting WS...');
+          // /healthz is unauthenticated, so "server up" says nothing about our cookie. In a
+          // window with zero terminal sessions this socket is the only reconnect loop, so it
+          // must run the auth probe itself or a cookieless tab loops rejected upgrades forever.
+          maybeHealAuth();
           connect();
         }
       } catch {}
