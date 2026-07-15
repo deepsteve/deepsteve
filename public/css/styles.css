@@ -81,6 +81,11 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
 .tab .speaker-icon.active { display: inline-flex; align-items: center; }
 .tab .speaker-icon svg { width: 100%; height: 100%; }
 .tab .tab-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Per-tab identity (see tabIcon() in tab-manager.js), hidden everywhere by default. It is shown in
+   exactly one place — the collapsed icon rail — where it is all that's left of the tab. Anywhere a
+   label is visible the glyph is redundant at best and duplicated at worst: `⏰ ASO Daily Report`
+   would render its emoji as both the icon and the first character of its own label. */
+.tab .tab-icon { display: none; }
 .tab.placeholder { animation: tab-connecting 1.2s ease-in-out infinite; }
 @keyframes tab-connecting { 0%, 100% { opacity: 0.4; } 50% { opacity: 0.8; } }
 .tab.dragging { opacity: 0.3; }
@@ -98,13 +103,21 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
    overflowed every theme that insets the app (body padding + bezel) and the overflow was
    clipped away — taking the ⚙ with it (#550). #app-main is a flex row in this mode, so its
    default align-items:stretch already gives #tabs exactly the right height. */
+/* --ds-rail-width is the sidebar's ONLY floor, and CSS owns it: layout-manager.js reads it back
+   with getComputedStyle instead of keeping its own copy. #550 shipped a JS `MIN_SIDEBAR_WIDTH =
+   140` *and* a CSS `min-width: 140px` that had to agree by hand — and because the JS floor was
+   applied on drag AND re-applied to the restored value on init, the sidebar could not be taken
+   below 140px by dragging or by editing localStorage. Collapsing was unreachable by construction
+   (#552). Themes can override this var; nothing else may reintroduce a second floor. */
+#app-container.vertical-layout { --ds-rail-width: 48px; }
+
 #app-container.vertical-layout #tabs {
   flex-direction: column;
   align-items: stretch;
   padding: 12px 10px;
   gap: 2px;
   flex-shrink: 0;
-  min-width: 140px;
+  min-width: var(--ds-rail-width);
   border-right: none;
   box-shadow: 1px 0 0 0 var(--ds-border);
 }
@@ -258,6 +271,90 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
   margin-top: 0;
   margin-left: 4px;
 }
+
+/* ── Collapsed icon rail ──────────────────────────────────────────────────────────────────────
+   Dragging the sidebar down to --ds-rail-width collapses it to icons, the way Firefox's vertical
+   tabs do. Every row keeps its hit target and its `title`; only the text drops out. The bottom
+   cluster MUST collapse too rather than hide — a control that disappears at narrow widths is the
+   unreachable-⚙ bug of #550 wearing a different hat. */
+#app-container.vertical-layout.icon-rail #tabs { padding: 12px 6px; }
+
+#app-container.vertical-layout.icon-rail .tab {
+  padding: 8px 0;
+  justify-content: center;
+}
+/* The label is display:none, not width:0 — an ellipsized 1px label still reserves space and
+   knocks the icon off centre. */
+#app-container.vertical-layout.icon-rail .tab .tab-label,
+#app-container.vertical-layout.icon-rail .tab .close,
+#app-container.vertical-layout.icon-rail #new-btn-dropdown {
+  display: none;
+}
+/* The icon appears ONLY here, never in the expanded sidebar. Expanded, the label is already
+   visible and a tab named `⏰ ASO Daily Report` would render its emoji twice — once as the derived
+   icon and again as the first character of its own label. */
+#app-container.vertical-layout.icon-rail .tab .tab-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  border-radius: 5px;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
+  background: var(--ds-bg-tertiary);
+  color: var(--ds-text-secondary);
+}
+/* An emoji brings its own colour and silhouette; a monogram needs the chip behind it to read as an
+   icon rather than as a stray character. */
+#app-container.vertical-layout.icon-rail .tab .tab-icon.is-emoji {
+  background: transparent;
+  font-size: 15px;
+}
+#app-container.vertical-layout.icon-rail .tab.active .tab-icon {
+  background: var(--ds-accent-blue);
+  color: var(--ds-bg-primary);
+}
+#app-container.vertical-layout.icon-rail .tab.active .tab-icon.is-emoji { background: transparent; }
+
+/* The attention badge is the reason a collapsed rail is usable at all — it's how you see which
+   session wants you without reading a name. Float it onto the icon instead of letting it take
+   its own column. */
+#app-container.vertical-layout.icon-rail .tab .badge {
+  position: absolute;
+  top: 4px;
+  right: 6px;
+  z-index: 1;
+}
+
+/* font-size:0 hides the text node; ::before supplies the glyph. Lets the cluster collapse with no
+   markup change — the buttons carry bare text nodes today. These are stand-in text glyphs; #552
+   tracks replacing the whole set (including ⬜/▤) with inline SVG. */
+#app-container.vertical-layout.icon-rail #new-btn-group,
+#app-container.vertical-layout.icon-rail .dropdown,
+#app-container.vertical-layout.icon-rail #issue-btn,
+#app-container.vertical-layout.icon-rail .dropdown-btn {
+  width: 100%;
+}
+#app-container.vertical-layout.icon-rail .dropdown-btn {
+  font-size: 0;
+  text-align: center;
+  padding-left: 0;
+  padding-right: 0;
+}
+#app-container.vertical-layout.icon-rail .dropdown-btn::before {
+  font-size: 15px;
+  line-height: 1;
+}
+#app-container.vertical-layout.icon-rail #engines-btn::before   { content: '◈'; }
+/* NOT ⚡ — #issue-btn is already a bare ⚡, and collapsed there is no label to tell them apart. */
+#app-container.vertical-layout.icon-rail #automations-btn::before { content: '▶'; }
+#app-container.vertical-layout.icon-rail #sessions-btn::before  { content: '☰'; }
+#app-container.vertical-layout.icon-rail #mods-btn::before      { content: '⊞'; }
+#app-container.vertical-layout.icon-rail #settings-btn::before   { content: '⚙'; }
+#app-container.vertical-layout.icon-rail #new-btn { border-radius: 8px; }
 
 #app-container.vertical-layout #content-row {
   flex: 1;

@@ -5,8 +5,21 @@
 import { nsKey } from './storage-namespace.js';
 
 const STORAGE_KEY = nsKey('deepsteve-layout');
-const MIN_SIDEBAR_WIDTH = 140;
 const DEFAULT_SIDEBAR_WIDTH = 200;
+
+/**
+ * The collapsed rail's width, and with it the sidebar's only floor. CSS owns the number
+ * (`--ds-rail-width` on `#app-container.vertical-layout`) so themes can retune it and, more to the
+ * point, so there is exactly one of it. The old `MIN_SIDEBAR_WIDTH = 140` here had to agree with a
+ * `min-width: 140px` in styles.css by hand, and between them the sidebar could never collapse —
+ * the JS floor clamped both the drag and the restored value, and the CSS floor caught whatever got
+ * through (#552).
+ */
+function railWidth() {
+  const container = document.getElementById('app-container');
+  const declared = parseFloat(getComputedStyle(container).getPropertyValue('--ds-rail-width'));
+  return Number.isFinite(declared) && declared > 0 ? declared : 48;
+}
 
 let currentLayout = 'horizontal';
 let sidebarWidth = DEFAULT_SIDEBAR_WIDTH;
@@ -50,12 +63,16 @@ function applyLayout() {
   const toggleBtn = document.getElementById('layout-toggle');
 
   if (currentLayout === 'vertical') {
+    // vertical-layout first: --ds-rail-width is declared on that class, so railWidth() reads ''
+    // until it is on.
     container.classList.add('vertical-layout');
     tabs.style.width = sidebarWidth + 'px';
+    container.classList.toggle('icon-rail', sidebarWidth <= railWidth());
     toggleBtn.textContent = '⬜'; // Icon for vertical mode (click to go horizontal)
     toggleBtn.title = 'Switch to horizontal tabs';
   } else {
     container.classList.remove('vertical-layout');
+    container.classList.remove('icon-rail');
     tabs.style.width = '';
     toggleBtn.textContent = '▤'; // Icon for horizontal mode (click to go vertical)
     toggleBtn.title = 'Switch to vertical tabs';
@@ -100,9 +117,12 @@ function setupResizer() {
     // the full-height context rail sitting to its left doesn't offset the drag.
     let newWidth = e.clientX - tabs.getBoundingClientRect().left;
 
-    // Enforce minimum width
-    if (newWidth < MIN_SIDEBAR_WIDTH) {
-      newWidth = MIN_SIDEBAR_WIDTH;
+    // Drag past the point where a label could survive and the sidebar snaps shut to the icon rail,
+    // the way Firefox's vertical tabs do. The snap point is derived from the rail rather than being
+    // a second tunable — there is one width in play, and CSS declares it.
+    const rail = railWidth();
+    if (newWidth < rail * 2) {
+      newWidth = rail;
     }
 
     // Max width is 50% of viewport
@@ -113,6 +133,7 @@ function setupResizer() {
 
     sidebarWidth = newWidth;
     tabs.style.width = sidebarWidth + 'px';
+    document.getElementById('app-container').classList.toggle('icon-rail', sidebarWidth <= rail);
   });
 
   document.addEventListener('mouseup', () => {
@@ -135,7 +156,13 @@ export function initLayoutManager() {
   // Load saved preferences
   const saved = getSavedLayout();
   currentLayout = saved.layout;
-  sidebarWidth = Math.max(saved.sidebarWidth, MIN_SIDEBAR_WIDTH);
+  // No floor applied to the restored value on purpose. The old `Math.max(saved, 140)` is what made
+  // a collapsed sidebar impossible to persist — it silently re-inflated to 140px on every load, so
+  // even hand-editing localStorage couldn't stick (#552). Guard the value's *shape*, not its size;
+  // CSS min-width holds the real floor.
+  sidebarWidth = Number.isFinite(saved.sidebarWidth) && saved.sidebarWidth > 0
+    ? saved.sidebarWidth
+    : DEFAULT_SIDEBAR_WIDTH;
 
   // Setup toggle button
   const toggleBtn = document.getElementById('layout-toggle');

@@ -318,6 +318,51 @@ export function getDefaultTabName(cwd) {
   return cwd.split('/').filter(Boolean).pop() || 'root';
 }
 
+/**
+ * The tab's standing identity, shown in the vertical sidebar and the only thing left of a tab
+ * once the sidebar collapses to an icon rail. Firefox puts a favicon here; we have no such
+ * thing, so derive one from the name: a leading emoji if the name has one (⏰ scheduled runs,
+ * 💀/🔓 red-team tabs already lead with one), otherwise a monogram of the first letter or digit.
+ *
+ * Skipping to the first alphanumeric is what makes issue tabs distinguishable — `#549 Cmd+?`
+ * and `#551 Window→session` both start with `#`, so a naive first-character monogram would
+ * render every issue tab identically.
+ */
+export function tabIcon(name) {
+  const s = (name || '').trim();
+  if (!s) return { glyph: '•', isEmoji: false };
+
+  // First *grapheme*, not first code point. 👨‍👩‍👧 is three pictographs joined by ZWJ and 🇺🇸 is two
+  // regional indicators; taking codepoint[0] renders a different emoji than the tab shows.
+  const [first] = [...new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(s)];
+  const g = first?.segment ?? '';
+  if (/\p{Extended_Pictographic}|\p{Regional_Indicator}/u.test(g)) return { glyph: g, isEmoji: true };
+
+  // Issue tabs are the bulk of a real sidebar and they defeat a first-letter monogram: `#549`,
+  // `#551`, `#536` and `#540` all reduce to `5`, so the rail would show one identical chip per
+  // issue. The number is the identity, and its tail is what varies — `49`, `51`, `36`, `40`.
+  const issue = s.match(/^#(\d+)/);
+  if (issue) return { glyph: issue[1].slice(-2), isEmoji: false };
+
+  const alnum = s.match(/\p{Letter}|\p{Number}/u);
+  return { glyph: alnum ? alnum[0].toUpperCase() : '•', isEmoji: false };
+}
+
+/** Apply a tab's derived icon to its `.tab-icon` span (glyph + the emoji/monogram styling hook). */
+function paintTabIcon(tabEl, name) {
+  const el = tabEl.querySelector('.tab-icon');
+  if (!el) return;
+  const { glyph, isEmoji } = tabIcon(name);
+  el.textContent = glyph;
+  el.classList.toggle('is-emoji', isEmoji);
+}
+
+/** Inline markup for a fresh tab's icon, matching what paintTabIcon() would produce. */
+function tabIconHTML(name) {
+  const { glyph, isEmoji } = tabIcon(name);
+  return `<span class="tab-icon${isEmoji ? ' is-emoji' : ''}" aria-hidden="true">${glyph}</span>`;
+}
+
 export const TabManager = {
   /**
    * Create a tab element for a session
@@ -329,6 +374,7 @@ export const TabManager = {
     tab.title = name;
     tab.innerHTML = `
       <span class="badge"></span>
+      ${tabIconHTML(name)}
       <span class="speaker-icon" aria-hidden="true" title="Emitting audio">${SPEAKER_SVG}</span>
       <span class="tab-label">${name}</span>
       <span class="close">&#10005;</span>
@@ -410,6 +456,7 @@ export const TabManager = {
     tab.id = 'tab-' + sessionId;
     tab.innerHTML = `
       <span class="badge"></span>
+      ${tabIconHTML(name)}
       <span class="speaker-icon" aria-hidden="true" title="Emitting audio">${SPEAKER_SVG}</span>
       <span class="tab-label">${name}</span>
       <span class="close">&#10005;</span>
@@ -428,6 +475,7 @@ export const TabManager = {
     if (existing && existing.classList.contains('placeholder')) {
       existing.classList.remove('placeholder');
       existing.querySelector('.tab-label').textContent = name;
+      paintTabIcon(existing, name);
       this._wireTabEvents(existing, sessionId, callbacks);
       existing.scrollIntoView({ block: 'nearest', inline: 'nearest' });
       updateTabArrows();
@@ -455,6 +503,9 @@ export const TabManager = {
     const tab = document.getElementById('tab-' + sessionId);
     if (tab) {
       tab.querySelector('.tab-label').textContent = name;
+      // Collapsed, this glyph is the whole tab — a rename that left it stale would be invisible
+      // in the sidebar but wrong in the rail.
+      paintTabIcon(tab, name);
       tab.title = name;
     }
   },
