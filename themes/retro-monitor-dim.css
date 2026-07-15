@@ -8,8 +8,9 @@
   --ds-text-bright: #b0b0b0;
 }
 
-/* Give tabs room to clear the rounded top corners */
-#tabs {
+/* Give tabs room to clear the rounded top corners. Horizontal only: in vertical mode #tabs is a
+   sidebar, where this strip padding just eats 32px of its width (#550). */
+#app-container:not(.vertical-layout) #tabs {
   padding-top: 10px !important;
   padding-left: 16px !important;
   padding-right: 16px !important;

@@ -57,11 +57,16 @@ body {
 /* ── Tab bar — Win95 taskbar style ── */
 #tabs {
   background: #c0c0c0 !important;
+  box-shadow: inset 0 1px 0 #dfdfdf;
+  gap: 2px !important;
+}
+
+/* Horizontal only: the taskbar's bottom edge and its strip padding are both wrong for a sidebar,
+   where the padding just eats into the width (#550). The vertical block below draws the right edge. */
+#app-container:not(.vertical-layout) #tabs {
   border-bottom: 2px solid;
   border-bottom-color: #808080;
-  box-shadow: inset 0 1px 0 #dfdfdf;
   padding: 4px 4px 2px 4px !important;
-  gap: 2px !important;
 }
 
 /* ── Tabs — 3D raised buttons ── */
