@@ -278,18 +278,24 @@ function makeRow(id, name, active, ctx) {
     // Real contexts: Edit/Delete via right-click menu (keeps the row to just
     // name + badge so everything aligns), and drag-to-reorder. Click selects.
     // A data attribute both marks the row draggable and identifies it in the
-    // reorder/drag logic. The "All" row (ctx null) gets none of this, so it
+    // reorder/drag logic. The "All" row (ctx null) gets no data attribute, so it
     // stays pinned at the top and non-draggable.
     row.dataset.contextId = ctx.id;
     row.title = 'Right-click to edit · drag to reorder';
-    row.addEventListener('contextmenu', (e) => {
-      e.preventDefault();
-      showRowMenu(e.clientX, e.clientY, ctx);
-    });
     wireRowDrag(row, ctx);
   } else {
     row.onclick = () => selectContext(id);
+    row.title = 'Right-click to add a context';
   }
+  // Every row answers right-click with OUR menu, "All" included (#548). "All" is
+  // a synthetic view — no id, no dirs — so its menu offers New context instead of
+  // Edit/Delete. It still looks like a context row (same class, same list, right
+  // above real ones) and the rail hint advertises right-click, so falling through
+  // to the browser's native menu here read as a bug. showRowMenu picks the items.
+  row.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    showRowMenu(e.clientX, e.clientY, ctx);
+  });
   return row;
 }
 
@@ -318,27 +324,33 @@ function onRowMenuKey(e) {
 function onRowMenuDocMouseDown(e) {
   if (rowMenu && !rowMenu.contains(e.target)) hideRowMenu();
 }
+function addRowMenuItem(menu, label, onPick, color) {
+  const item = document.createElement('div');
+  item.className = 'context-menu-item';
+  item.textContent = label;
+  if (color) item.style.color = color;
+  item.onclick = () => { hideRowMenu(); onPick(); };
+  menu.appendChild(item);
+  return item;
+}
+
+// ctx null = the "All" row, which has nothing to edit or delete — it gets the one
+// action that makes sense there, reusing the same call as the rail's "+ New
+// context" button (#548).
 function showRowMenu(x, y, ctx) {
   hideRowMenu();
 
   const menu = document.createElement('div');
   menu.className = 'context-menu context-row-menu';
 
-  const edit = document.createElement('div');
-  edit.className = 'context-menu-item';
-  edit.textContent = 'Edit';
-  edit.onclick = () => { hideRowMenu(); openContextEditor(ctx); };
-  menu.appendChild(edit);
-
-  const del = document.createElement('div');
-  del.className = 'context-menu-item';
-  del.textContent = 'Delete';
-  del.style.color = 'var(--ds-accent-red)';
-  del.onclick = () => {
-    hideRowMenu();
-    if (confirm(`Delete context "${ctx.name}"?`)) deleteContext(ctx);
-  };
-  menu.appendChild(del);
+  if (ctx) {
+    addRowMenuItem(menu, 'Edit', () => openContextEditor(ctx));
+    addRowMenuItem(menu, 'Delete', () => {
+      if (confirm(`Delete context "${ctx.name}"?`)) deleteContext(ctx);
+    }, 'var(--ds-accent-red)');
+  } else {
+    addRowMenuItem(menu, 'New context', () => openContextEditor(null));
+  }
 
   menu.style.left = x + 'px';
   menu.style.top = y + 'px';
