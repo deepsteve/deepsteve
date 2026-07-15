@@ -12,7 +12,7 @@ function deriveTabName(cmd) {
 
 function init(context) {
   const {
-    shells, closeSession, spawnSession, sessionEnv, getSpawnArgs, mcpConfigArgs, getAgentConfig, wireShellOutput, getDefaultEngine, getForegroundCommand,
+    shells, closeSession, handleShellGone, spawnSession, sessionEnv, getSpawnArgs, mcpConfigArgs, getAgentConfig, wireShellOutput, getDefaultEngine, getForegroundCommand,
     watchClaudeSessionDir, unwatchClaudeSessionDir, saveState,
     validateWorktree, ensureWorktree, sessionPaths, submitToShell,
     fetchIssueFromGitHub, deliverPromptWhenReady,
@@ -185,7 +185,7 @@ function init(context) {
         if (agentConfig.supportsSessionWatch) watchClaudeSessionDir(id);
         sessionEngine.onExit(id, () => {
           if (agentConfig.supportsSessionWatch) unwatchClaudeSessionDir(id);
-          if (!isShuttingDown()) { shells.delete(id); saveState(); }
+          handleShellGone(id);
         });
         saveState();
 
@@ -289,7 +289,7 @@ function init(context) {
             }, 600);
           }
           shellEngine.onExit(id, () => {
-            if (!isShuttingDown()) { shells.delete(id); saveState(); }
+            handleShellGone(id);
           });
           saveState();
           deliverToWindow({ type: 'open-session', id, cwd: effectiveCwd, name: tabName, windowId }, windowId);
@@ -358,7 +358,7 @@ function init(context) {
         if (agentConfig.supportsSessionWatch) watchClaudeSessionDir(id);
         sessionEngine2.onExit(id, () => {
           if (agentConfig.supportsSessionWatch) unwatchClaudeSessionDir(id);
-          if (!isShuttingDown()) { shells.delete(id); saveState(); }
+          handleShellGone(id);
         });
         saveState();
 
