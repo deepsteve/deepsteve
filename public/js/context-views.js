@@ -294,17 +294,24 @@ function makeRow(id, name, active, ctx) {
 let rowMenu = null;
 function hideRowMenu() {
   if (rowMenu) { rowMenu.remove(); rowMenu = null; }
-  document.removeEventListener('click', onRowMenuDocClick, true);
+  document.removeEventListener('mousedown', onRowMenuDocMouseDown, true);
   document.removeEventListener('keydown', onRowMenuKey, true);
 }
 function onRowMenuKey(e) {
   if (e.key === 'Escape') { e.preventDefault(); hideRowMenu(); }
 }
-// Close on any click outside the menu. Kept as a stable reference (not a
-// self-removing one-shot) so it survives an inside-menu click that isn't on an
+// Close on any press outside the menu. Kept as a stable reference (not a
+// self-removing one-shot) so it survives an inside-menu press that isn't on an
 // item — the listener stays until the menu is actually hidden, so a later
-// outside click still dismisses it.
-function onRowMenuDocClick(e) {
+// outside press still dismisses it.
+//
+// Must be 'mousedown', NOT 'click' (#546): rows select on mouseup (wireRowDrag's
+// onUp → selectContext → applyFilter → renderRail), and renderRail wipes the rail
+// with innerHTML = ''. That detaches the pressed row mid-gesture, so the click the
+// browser dispatches afterwards has a propagation path of just the orphaned
+// row/list subtree — document isn't in it, and a click listener here never fires.
+// mousedown lands before the re-render, while the row is still attached.
+function onRowMenuDocMouseDown(e) {
   if (rowMenu && !rowMenu.contains(e.target)) hideRowMenu();
 }
 function showRowMenu(x, y, ctx) {
@@ -339,10 +346,11 @@ function showRowMenu(x, y, ctx) {
   if (rect.bottom > window.innerHeight) menu.style.top = (window.innerHeight - rect.height - 8) + 'px';
 
   rowMenu = menu;
-  // Dismiss on any outside click (deferred so this menu's own opening
-  // right-click doesn't immediately close it) and on Escape.
+  // Dismiss on any outside press (deferred so this menu's own opening
+  // right-click doesn't immediately close it) and on Escape. The guard keeps a
+  // stale queued timeout from re-registering for a menu that's already replaced.
   setTimeout(() => {
-    if (rowMenu === menu) document.addEventListener('click', onRowMenuDocClick, true);
+    if (rowMenu === menu) document.addEventListener('mousedown', onRowMenuDocMouseDown, true);
   }, 0);
   document.addEventListener('keydown', onRowMenuKey, true);
 }
