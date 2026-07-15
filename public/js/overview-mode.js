@@ -8,6 +8,7 @@
  */
 
 import { nsKey } from './storage-namespace.js';
+import { register } from './shortcuts.js';
 
 const LAYOUT_KEY = nsKey('deepsteve-overview-layout');
 
@@ -20,27 +21,13 @@ let defaultLayout = 'tall';
 let callbacks = {};
 let observer = null;
 
-function parseShortcut(str) {
-  const parts = str.split('+');
-  const key = parts.pop().toLowerCase();
-  const mods = {
-    meta: parts.some(p => p.toLowerCase() === 'meta'),
-    ctrl: parts.some(p => p.toLowerCase() === 'ctrl'),
-    shift: parts.some(p => p.toLowerCase() === 'shift'),
-    alt: parts.some(p => p.toLowerCase() === 'alt'),
-  };
-  return { key, mods };
-}
-
-function matchesShortcut(e) {
-  const sc = parseShortcut(shortcut);
-  if (e.key.toLowerCase() !== sc.key) return false;
-  if (sc.mods.meta !== e.metaKey) return false;
-  if (sc.mods.ctrl !== e.ctrlKey) return false;
-  if (sc.mods.shift !== e.shiftKey) return false;
-  if (sc.mods.alt !== e.altKey) return false;
-  return true;
-}
+const matchesShortcut = register({
+  id: 'overview-mode',
+  group: 'Views',
+  description: 'Toggle overview mode (all terminals at once)',
+  getShortcut: () => shortcut,
+  isEnabled: () => enabled,
+});
 
 function applyLayout() {
   const terminals = document.getElementById('terminals');

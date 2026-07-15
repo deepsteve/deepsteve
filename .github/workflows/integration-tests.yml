@@ -16,6 +16,17 @@ permissions:
   contents: read
 
 jobs:
+  # Headless frontend module tests (test/unit/*). No Docker, no server — they stub
+  # the few globals the modules touch and import them directly, so this finishes in
+  # seconds. Kept a separate job so a unit failure is legible on its own.
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+
+      - name: Run unit tests
+        run: npm run test:unit
+
   test:
     runs-on: ubuntu-latest
     steps:

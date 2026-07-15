@@ -2,6 +2,8 @@
  * Terminal setup and management using xterm.js
  */
 
+import { registerInfo } from './shortcuts.js';
+
 function getTerminalBackground() {
   return getComputedStyle(document.documentElement).getPropertyValue('--ds-bg-primary').trim() || '#0d1117';
 }
@@ -42,6 +44,15 @@ export function updateTerminalTheme(term) {
   term.options.theme = update;
 }
 
+// Doc-only (shortcuts.js): Shift+Enter is consumed inside xterm's
+// attachCustomKeyEventHandler below, not by a document-level matcher.
+registerInfo({
+  id: 'terminal-shift-enter',
+  group: 'Terminal',
+  description: 'Insert a newline without submitting (multi-line agent input)',
+  keys: ['⇧↩'],
+});
+
 export function setupTerminalIO(term, ws, { onUserInput, container, beforeSend } = {}) {
   // Note: ws.onmessage is set in app.js to handle JSON control messages
   // and route terminal data here via term.write()
@@ -62,7 +73,8 @@ export function setupTerminalIO(term, ws, { onUserInput, container, beforeSend }
     if (onUserInput) onUserInput();
   });
 
-  // Handle Shift+Enter for multi-line input
+  // Handle Shift+Enter for multi-line input.
+  // Listed in the shortcuts overlay via registerInfo('terminal-shift-enter') above.
   term.attachCustomKeyEventHandler((event) => {
     if (event.shiftKey && event.key === 'Enter') {
       if (event.type === 'keydown') {

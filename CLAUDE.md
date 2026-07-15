@@ -103,6 +103,28 @@ Cmd+K opens a command palette for keyboard-driven access to tabs, settings, and 
 - **API**: `GET /api/commands` returns built-in + custom commands. `POST /api/commands/execute` runs a custom command by ID.
 - **Client**: `command-palette.js` is a self-contained ES module (like `cmd-tab-switch.js`) with `init()`, `setEnabled()`, `setShortcut()` exports.
 
+### Keyboard Shortcuts (`public/js/shortcuts.js`)
+
+**Every global key binding is declared in the `shortcuts.js` registry, and the ⌘? overlay (`shortcuts-help.js`) renders `getAll()`. The list is never hand-maintained** — that's the whole point of #549, and before it there were four independent capture-phase listeners with `parseShortcut`/`matchesShortcut` copy-pasted verbatim into two of them.
+
+The registry is **load-bearing, not documentation**: `register()` returns the matcher the module must use in its `onKeyDown`, so there is no way to change a binding without editing its entry. Call it at **module scope**, not in `init()`, so the entry and the matcher are a single statement that can't be separated.
+
+```js
+const matchesShortcut = register({
+  id: 'command-palette', group: 'General',
+  description: 'Open the command palette',
+  getShortcut: () => shortcut,   // live setting value; or `shortcut: 'Meta+f'` if hard-coded
+  isEnabled: () => enabled,      // overlay hides the row when this is false
+});
+```
+
+- **`shortcut` xor `getShortcut`** — either may be a string **or a list of alternates**. Both throw if you pass both or neither.
+- **`match: 'key' | 'code'`** (default `'key'`) — `e.key` is the *layout character*, `e.code` the *physical key*. Letters that should survive Dvorak/AZERTY use `'code'` (context-views' ⌘P); punctuation **must** use `'key'` (⌘⇧? is `code:'Slash'` on US but `'Minus'` on German). `match:'code'` throws at import time if paired with `getShortcut` (the settings recorder only emits `e.key` tokens, so it could never fire) or with a key that has no code (`ArrowUp`).
+- **Strict modifier equality** is what keeps Ctrl+F reaching the PTY for vim's `<C-f>` while ⌘F opens search. Pinned by a test — don't loosen it.
+- **`registerInfo()`** is for bindings the matcher can't express (hold-⌘ tab switching, the ⌘P→A chord, xterm's Shift+Enter). These are *not* enforced, so put them **next to their real handler** and edit them together. `combine: 'then'` renders a sequence, `'or'` (default) renders alternates.
+- **`shortcutsHelpShortcut` defaults to a two-item list** (`['Meta+Shift+?', 'Meta+/']`). macOS auto-assigns ⌘⇧/ to the Help menu Search field of any app with a Help menu — Firefox and Chrome both have one — and a menu key equivalent is consumed before the page sees the keydown. ⌘/ is the fallback so the overlay can't ship unreachable. It's a `custom` schema type (not `string`) because the value is a list; `sanitize` also accepts a bare string, which is what the Settings rebind button posts.
+- **Tests**: `npm run test:unit`. `test/unit/shortcuts-registry.test.js` asserts the **exact set of registered ids** — if you add or rename a binding, update that list. That is the drift guard.
+
 ### Skills System
 
 Skills are slash commands that agents can invoke (e.g. `/chat`, `/merge`). Source files live in `skills/*.md`.

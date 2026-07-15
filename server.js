@@ -336,6 +336,17 @@ const SETTINGS_SCHEMA = [
   { name: 'commandPaletteShortcut',     type: 'string',  default: 'Meta+k' },
   { name: 'overviewModeEnabled',        type: 'boolean', default: true },
   { name: 'overviewModeShortcut',       type: 'string',  default: 'Meta+o' },
+  { name: 'shortcutsHelpEnabled',       type: 'boolean', default: true },
+  // Two defaults (#549): macOS gives ⌘⇧/ to the browser's Help menu, which eats the
+  // keydown before the page sees it. ⌘/ is the fallback so the overlay is always
+  // reachable. custom (not string) because the value is a list; sanitize also accepts
+  // a bare string, which is what the Settings rebind button posts.
+  { name: 'shortcutsHelpShortcut',      type: 'custom',  default: ['Meta+Shift+?', 'Meta+/'],
+    sanitize: (raw) => {
+      const arr = [].concat(raw).map(s => String(s || '').trim()).filter(Boolean);
+      return arr.length ? arr : null; // reject empty — never strand the user with no key
+    },
+    logValue: v => v.join(' or ') },
   { name: 'overviewDefaultLayout',      type: 'enum',    default: 'tall', values: ['tall', 'tiled'] },
   { name: 'metaControlsEnabled',        type: 'boolean', default: false },
   { name: 'inheritRemoteControl',       type: 'boolean', default: true },
@@ -2376,6 +2387,7 @@ const BUILTIN_COMMANDS = [
   { id: 'next-tab', type: 'builtin', name: 'Next Tab', description: 'Switch to next tab' },
   { id: 'prev-tab', type: 'builtin', name: 'Previous Tab', description: 'Switch to previous tab' },
   { id: 'overview-mode', type: 'builtin', name: 'Overview Mode', description: 'Show all terminals at once' },
+  { id: 'shortcuts-help', type: 'builtin', name: 'Keyboard Shortcuts', description: 'Show all keyboard shortcuts' },
 ];
 
 function getCustomCommands() {

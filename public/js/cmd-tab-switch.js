@@ -10,6 +10,8 @@
  * xterm.js sees them — no changes to terminal.js needed.
  */
 
+import { registerInfo } from './shortcuts.js';
+
 let enabled = false;
 let holdTimer = null;
 let tabSwitchModeActive = false;
@@ -26,6 +28,27 @@ const TAB_KEYS = new Set([
   'Comma', 'Period',
   'ArrowLeft', 'ArrowRight'
 ]);
+
+// Doc-only (shortcuts.js): hold-to-activate plus a whole key *set* is not something
+// the shared matcher can express. Keep these next to TAB_KEYS / onKeyDown — change
+// one, change the other. isEnabled hides them until cmdTabSwitch is turned on.
+registerInfo({
+  id: 'cmd-hold-jump',
+  group: 'Tabs',
+  description: 'Hold ⌘, then press a number to jump to that tab',
+  keys: ['Hold ⌘', '1–9'],
+  combine: 'then',
+  isEnabled: () => enabled,
+});
+
+registerInfo({
+  id: 'cmd-hold-cycle',
+  group: 'Tabs',
+  description: 'Hold ⌘, then step to the previous / next tab',
+  keys: ['Hold ⌘', ', . ← →'],
+  combine: 'then',
+  isEnabled: () => enabled,
+});
 
 function setTabSwitchMode(active) {
   tabSwitchModeActive = active;

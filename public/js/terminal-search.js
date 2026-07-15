@@ -5,12 +5,22 @@
  * Follows the init/setEnabled pattern from command-palette.js.
  */
 
+import { register } from './shortcuts.js';
+
 let enabled = true;
 let isOpen = false;
 let callbacks = {};
 let searchBarEl = null;
 let searchInputEl = null;
 let currentAddon = null;
+
+const matchesShortcut = register({
+  id: 'terminal-search',
+  group: 'Terminal',
+  description: 'Search the terminal scrollback',
+  shortcut: 'Meta+f',
+  isEnabled: () => enabled,
+});
 
 export function attachSearchAddon(term) {
   const addon = new SearchAddon.SearchAddon();
@@ -36,8 +46,10 @@ function onKeyDown(e) {
   if (!enabled) return;
 
   // Cmd+F to open search (Mac-native). Ctrl+F is intentionally NOT matched so it
-  // passes through to the PTY for vim/terminal control sequences (e.g. <C-f>).
-  if (e.metaKey && e.key === 'f' && !e.ctrlKey && !e.shiftKey && !e.altKey) {
+  // passes through to the PTY for vim/terminal control sequences (e.g. <C-f>) — the
+  // registry's matcher requires exact equality on all four modifiers, which is what
+  // preserves that.
+  if (matchesShortcut(e)) {
     e.preventDefault();
     e.stopPropagation();
     if (isOpen) {

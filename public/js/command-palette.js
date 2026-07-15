@@ -6,6 +6,8 @@
  * pattern as cmd-tab-switch.js.
  */
 
+import { register } from './shortcuts.js';
+
 let enabled = true;
 let shortcut = 'Meta+k';
 let isOpen = false;
@@ -18,27 +20,13 @@ let items = [];
 let selectedIndex = 0;
 let hasMouseMoved = false;
 
-function parseShortcut(str) {
-  const parts = str.split('+');
-  const key = parts.pop().toLowerCase();
-  const mods = {
-    meta: parts.some(p => p.toLowerCase() === 'meta'),
-    ctrl: parts.some(p => p.toLowerCase() === 'ctrl'),
-    shift: parts.some(p => p.toLowerCase() === 'shift'),
-    alt: parts.some(p => p.toLowerCase() === 'alt'),
-  };
-  return { key, mods };
-}
-
-function matchesShortcut(e) {
-  const sc = parseShortcut(shortcut);
-  if (e.key.toLowerCase() !== sc.key) return false;
-  if (sc.mods.meta !== e.metaKey) return false;
-  if (sc.mods.ctrl !== e.ctrlKey) return false;
-  if (sc.mods.shift !== e.shiftKey) return false;
-  if (sc.mods.alt !== e.altKey) return false;
-  return true;
-}
+const matchesShortcut = register({
+  id: 'command-palette',
+  group: 'General',
+  description: 'Open the command palette',
+  getShortcut: () => shortcut,
+  isEnabled: () => enabled,
+});
 
 function onKeyDown(e) {
   if (!enabled) return;
@@ -171,6 +159,9 @@ async function executeCommand(cmd) {
       }
       case 'overview-mode':
         callbacks.toggleOverviewMode?.();
+        break;
+      case 'shortcuts-help':
+        callbacks.showShortcutsHelp?.();
         break;
     }
   } else if (cmd.type === 'switch-tab') {

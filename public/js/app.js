@@ -15,12 +15,14 @@ import { ModManager } from './mod-manager.js';
 import { initFileDrop } from './file-drop.js';
 import { init as initCmdHoldMode, setEnabled as setCmdHoldModeEnabled, setHoldMs as setCmdHoldModeHoldMs } from './cmd-tab-switch.js';
 import { init as initCommandPalette, setEnabled as setCommandPaletteEnabled, setShortcut as setCommandPaletteShortcut } from './command-palette.js';
+import { init as initShortcutsHelp, setEnabled as setShortcutsHelpEnabled, setShortcut as setShortcutsHelpShortcut, open as openShortcutsHelp } from './shortcuts-help.js';
 import { init as initProgressBar, start as progressStart, done as progressDone } from './progress-bar.js';
 import { init as initHashCommands, beforeSend as hashCommandsBeforeSend, setWaitingForInput as setHashCommandsWaiting, setEnabled as setHashCommandsEnabled } from './hash-commands.js';
 import { init as initOverviewMode, setEnabled as setOverviewModeEnabled, setShortcut as setOverviewModeShortcut, setDefaultLayout as setOverviewDefaultLayout, toggle as toggleOverviewMode, isOverviewActive, updateFocus as updateOverviewFocus, onTabsReordered as onOverviewTabsReordered } from './overview-mode.js';
 import { init as initTerminalSearch, attachSearchAddon, closeIfOpen as closeTerminalSearch } from './terminal-search.js';
 import { init as initContextViews, setEnabled as setContextViewsEnabled, applyFilter as refreshContextFilter, requestNewTabInContext, setContexts as applyServerContexts, setActiveContext as setActiveContextFromPanel, getActiveContextId, activeContextIsEmpty, noteActiveTab, revealTabContext } from './context-views.js';
 import { nsKey } from './storage-namespace.js';
+import { formatShortcut } from './shortcuts.js';
 
 // Configuration
 let maxIssueTitleLength = 25;
@@ -254,6 +256,12 @@ function applySettings(settings) {
   }
   if (settings.commandPaletteShortcut !== undefined) {
     setCommandPaletteShortcut(settings.commandPaletteShortcut);
+  }
+  if (settings.shortcutsHelpEnabled !== undefined) {
+    setShortcutsHelpEnabled(settings.shortcutsHelpEnabled);
+  }
+  if (settings.shortcutsHelpShortcut !== undefined) {
+    setShortcutsHelpShortcut(settings.shortcutsHelpShortcut);
   }
   if (settings.hashCommandsEnabled !== undefined) {
     setHashCommandsEnabled(settings.hashCommandsEnabled);
@@ -718,6 +726,10 @@ settingsBtn?.addEventListener('click', async () => {
   const currentCmdTabSwitchHoldMs = settingsData.cmdTabSwitchHoldMs !== undefined ? settingsData.cmdTabSwitchHoldMs : 1000;
   const currentCommandPaletteEnabled = settingsData.commandPaletteEnabled !== undefined ? settingsData.commandPaletteEnabled : true;
   const currentCommandPaletteShortcut = settingsData.commandPaletteShortcut || 'Meta+k';
+  const currentShortcutsHelpEnabled = settingsData.shortcutsHelpEnabled !== undefined ? settingsData.shortcutsHelpEnabled : true;
+  // A list, not a string (#549) — the default binds ⌘⇧? and ⌘/ so a browser Help
+  // menu claiming ⌘⇧/ can't leave the overlay unreachable.
+  const currentShortcutsHelpShortcut = [].concat(settingsData.shortcutsHelpShortcut || ['Meta+Shift+?', 'Meta+/']);
   const currentHashCommandsEnabled = settingsData.hashCommandsEnabled !== undefined ? settingsData.hashCommandsEnabled : true;
   const currentContextViewsEnabled = settingsData.contextViewsEnabled !== undefined ? settingsData.contextViewsEnabled : true;
   const currentOverviewDefaultLayout = settingsData.overviewDefaultLayout || 'tall';
@@ -842,6 +854,23 @@ settingsBtn?.addEventListener('click', async () => {
         </label>
         <p style="font-size: 11px; color: var(--ds-text-secondary); margin-top: 4px;">
           Click the button and press a key combo to set the shortcut.
+        </p>
+      </div>
+      <div class="settings-section">
+        <h3>Keyboard Shortcuts Help</h3>
+        <label style="font-size: 13px; color: var(--ds-text-primary); cursor: pointer; display: flex; align-items: center; gap: 8px;">
+          <input type="checkbox" id="shortcuts-help-enabled" ${currentShortcutsHelpEnabled ? 'checked' : ''} style="accent-color: var(--ds-accent-green);">
+          Enabled
+        </label>
+        <label style="font-size: 13px; color: var(--ds-text-primary); display: flex; align-items: center; gap: 8px; margin-top: 8px;">
+          Shortcut:
+          <button type="button" id="shortcuts-help-shortcut-btn" style="padding: 4px 10px; background: var(--ds-bg-primary); border: 1px solid var(--ds-border); border-radius: 4px; color: var(--ds-text-primary); font-size: 13px; cursor: pointer; min-width: 60px;">${escapeHtml(currentShortcutsHelpShortcut.map(formatShortcut).join(' or '))}</button>
+          <input type="hidden" id="shortcuts-help-shortcut" value="${escapeHtml(JSON.stringify(currentShortcutsHelpShortcut))}">
+        </label>
+        <p style="font-size: 11px; color: var(--ds-text-secondary); margin-top: 4px;">
+          Opens an overlay listing every deepsteve keyboard shortcut. Defaults to two
+          combos because some browsers claim ⌘⇧? for their own Help menu; rebinding
+          replaces both with your single combo.
         </p>
       </div>
       <div class="settings-section">
@@ -1264,10 +1293,13 @@ settingsBtn?.addEventListener('click', async () => {
   };
   window.addEventListener('deepsteve:version-status', versionStatusHandler);
 
-  // Command palette shortcut capture
-  const shortcutBtn = overlay.querySelector('#command-palette-shortcut-btn');
-  const shortcutInput = overlay.querySelector('#command-palette-shortcut');
-  if (shortcutBtn) {
+  // Shortcut capture: click the button, press a combo. Produces the canonical
+  // Meta+Ctrl+Alt+Shift+key string that shortcuts.js parseShortcut() consumes.
+  // `serialize` exists because shortcutsHelpShortcut stores a list, not a string.
+  const wireShortcutRecorder = (btnSel, inputSel, serialize = (combo) => combo) => {
+    const shortcutBtn = overlay.querySelector(btnSel);
+    const shortcutInput = overlay.querySelector(inputSel);
+    if (!shortcutBtn || !shortcutInput) return;
     shortcutBtn.onclick = () => {
       shortcutBtn.textContent = 'Press key...';
       shortcutBtn.style.borderColor = 'var(--ds-accent-blue)';
@@ -1282,14 +1314,18 @@ settingsBtn?.addEventListener('click', async () => {
         if (e.shiftKey) parts.push('Shift');
         parts.push(e.key.toLowerCase());
         const combo = parts.join('+');
-        shortcutInput.value = combo;
+        shortcutInput.value = serialize(combo);
         shortcutBtn.textContent = formatShortcut(combo);
         shortcutBtn.style.borderColor = '';
         document.removeEventListener('keydown', handler, true);
       };
       document.addEventListener('keydown', handler, true);
     };
-  }
+  };
+  wireShortcutRecorder('#command-palette-shortcut-btn', '#command-palette-shortcut');
+  // JSON, not a comma-join: a combo can legitimately *be* a comma (Meta+,).
+  wireShortcutRecorder('#shortcuts-help-shortcut-btn', '#shortcuts-help-shortcut',
+    (combo) => JSON.stringify([combo]));
 
   overlay.querySelector('#settings-cancel').onclick = () => {
     window.removeEventListener('deepsteve:version-status', versionStatusHandler);
@@ -1306,6 +1342,16 @@ settingsBtn?.addEventListener('click', async () => {
     const cmdTabSwitchHoldMs = Math.max(0, Number(overlay.querySelector('#cmd-tab-switch-hold-ms').value) || 0);
     const commandPaletteEnabled = overlay.querySelector('#command-palette-enabled').checked;
     const commandPaletteShortcut = overlay.querySelector('#command-palette-shortcut').value;
+    const shortcutsHelpEnabled = overlay.querySelector('#shortcuts-help-enabled').checked;
+    // Stored as JSON (a list of alternates). Fall back to the raw value rather than
+    // throwing out of the whole save if it's somehow not parseable — the server's
+    // sanitize accepts a bare string too.
+    let shortcutsHelpShortcut;
+    try {
+      shortcutsHelpShortcut = JSON.parse(overlay.querySelector('#shortcuts-help-shortcut').value);
+    } catch {
+      shortcutsHelpShortcut = overlay.querySelector('#shortcuts-help-shortcut').value;
+    }
     const hashCommandsEnabled = overlay.querySelector('#hash-commands-enabled').checked;
     const contextViewsEnabled = overlay.querySelector('#context-views-enabled').checked;
     const metaControlsEnabled = overlay.querySelector('#meta-controls-enabled').checked;
@@ -1334,7 +1380,7 @@ settingsBtn?.addEventListener('click', async () => {
     const scheduledTasksEnabled = overlay.querySelector('#scheduled-tasks-enabled').checked;
     const inheritRemoteControl = overlay.querySelector('#inherit-rc-newtab').checked;
     const inheritRemoteControlOnFork = overlay.querySelector('#inherit-rc-fork').checked;
-    const settingsPayload = { shellProfile, maxIssueTitleLength: newMaxTitle, wandPlanMode, wandPromptTemplate, symlinkWorktreeSettings, cmdTabSwitch, cmdTabSwitchHoldMs, commandPaletteEnabled, commandPaletteShortcut, hashCommandsEnabled, contextViewsEnabled, metaControlsEnabled, inheritRemoteControl, inheritRemoteControlOnFork, overviewDefaultLayout, enabledAgents, opencodeBinary, piBinary, engine: selectedEngine, scrollbackKB, recentSessionsLimit, autoUpdateCheckEnabled, autoUpdateCheckIntervalHours, autoUpdateApply, sessionLogEnabled, scheduledTasksEnabled, customAgentConfigs };
+    const settingsPayload = { shellProfile, maxIssueTitleLength: newMaxTitle, wandPlanMode, wandPromptTemplate, symlinkWorktreeSettings, cmdTabSwitch, cmdTabSwitchHoldMs, commandPaletteEnabled, commandPaletteShortcut, shortcutsHelpEnabled, shortcutsHelpShortcut, hashCommandsEnabled, contextViewsEnabled, metaControlsEnabled, inheritRemoteControl, inheritRemoteControlOnFork, overviewDefaultLayout, enabledAgents, opencodeBinary, piBinary, engine: selectedEngine, scrollbackKB, recentSessionsLimit, autoUpdateCheckEnabled, autoUpdateCheckIntervalHours, autoUpdateApply, sessionLogEnabled, scheduledTasksEnabled, customAgentConfigs };
     let resp = await fetch('/api/settings', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1350,6 +1396,8 @@ settingsBtn?.addEventListener('click', async () => {
     setCmdHoldModeHoldMs(cmdTabSwitchHoldMs);
     setCommandPaletteEnabled(commandPaletteEnabled);
     setCommandPaletteShortcut(commandPaletteShortcut);
+    setShortcutsHelpEnabled(shortcutsHelpEnabled);
+    setShortcutsHelpShortcut(shortcutsHelpShortcut);
     setHashCommandsEnabled(hashCommandsEnabled);
     setContextViewsEnabled(contextViewsEnabled);
     // Refresh agents data — enabled set and/or custom config profiles (#537) may have
@@ -2858,19 +2906,6 @@ function escapeHtml(str) {
   return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
-function formatShortcut(shortcutStr) {
-  if (!shortcutStr) return '';
-  const parts = shortcutStr.split('+');
-  return parts.map(p => {
-    const low = p.toLowerCase();
-    if (low === 'meta') return '\u2318';
-    if (low === 'ctrl') return '\u2303';
-    if (low === 'alt') return '\u2325';
-    if (low === 'shift') return '\u21E7';
-    return p.toUpperCase();
-  }).join('');
-}
-
 /**
  * Show GitHub issue picker and create worktree session
  */
@@ -3315,6 +3350,17 @@ async function init() {
     openSettings: () => { document.getElementById('settings-btn')?.click(); },
     openMods: () => { document.getElementById('mods-btn')?.click(); },
     toggleOverviewMode: () => toggleOverviewMode(),
+    showShortcutsHelp: () => openShortcutsHelp(),
+    focusTerminal: () => {
+      if (activeId) {
+        const s = sessions.get(activeId);
+        if (s?.term) s.term.focus();
+      }
+    },
+  });
+
+  // Initialize the keyboard shortcuts overlay (Cmd+? / Cmd+/ by default)
+  initShortcutsHelp({
     focusTerminal: () => {
       if (activeId) {
         const s = sessions.get(activeId);

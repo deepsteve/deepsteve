@@ -26,6 +26,7 @@
  */
 
 import { nsKey } from './storage-namespace.js';
+import { register, registerInfo } from './shortcuts.js';
 
 // Context definitions are server-owned (#526): they are the same entity as the
 // Scheduled Tasks "project groups", loaded from /api/contexts and kept fresh by
@@ -583,6 +584,35 @@ function isFormField(el) {
   return !!el.isContentEditable;
 }
 
+// Cmd+P is matcher-backed; the chord and the cycle keys are doc-only because the
+// registry can't express "armed by a preceding key" or "two keys, one description".
+// All three live here so they get edited alongside onKeyDown right below.
+const matchesPanelToggle = register({
+  id: 'context-panel',
+  group: 'Views',
+  description: 'Toggle the context panel',
+  shortcut: 'Meta+p',
+  match: 'code', // e.code === 'KeyP' — pinned to the physical key, layout-independent
+  isEnabled: () => enabled,
+});
+
+registerInfo({
+  id: 'context-all',
+  group: 'Views',
+  description: 'Jump to the All view (Cmd held the whole time)',
+  keys: ['⌘P', '⌘A'],
+  combine: 'then',
+  isEnabled: () => enabled,
+});
+
+registerInfo({
+  id: 'context-cycle',
+  group: 'Views',
+  description: 'Cycle through All + your contexts',
+  keys: ['⌘↑', '⌘↓'],
+  isEnabled: () => enabled,
+});
+
 function onKeyDown(e) {
   if (!enabled || !e.metaKey) return;
   if (isFormField(e.target)) return;
@@ -591,7 +621,7 @@ function onKeyDown(e) {
   // the browser's Print dialog never opens. Unlike the old Cmd+C binding, this
   // needs no copy special-casing since Cmd+P doesn't collide with terminal copy.
   // Also arms the Cmd+P→A chord until Cmd is released (see onKeyUp).
-  if (e.code === 'KeyP' && !e.ctrlKey && !e.altKey && !e.shiftKey) {
+  if (matchesPanelToggle(e)) {
     e.preventDefault();
     e.stopPropagation();
     cmdChordArmed = true;
