@@ -80,7 +80,7 @@ describe('Session Lifecycle', () => {
     assert.ok(activeIds.includes(s2.id), 'second session in list');
   });
 
-  it('DELETE /api/shells/:id kills a session', async () => {
+  it('DELETE /api/shells/:id kills a session but leaves a closed tombstone (#561)', async () => {
     const client = createClient();
     const session = await client.connect({ new: '1', agentType: 'terminal', cwd: '/tmp' });
 
@@ -91,6 +91,31 @@ describe('Session Lifecycle', () => {
     const data = await httpGet('/api/shells');
     const active = data.shells.filter(s => s.id === session.id && s.status === 'active');
     assert.strictEqual(active.length, 0, 'session should no longer be active');
+    const tombstone = data.shells.find(s => s.id === session.id && s.status === 'closed');
+    assert.ok(tombstone, 'session should remain as a closed tombstone');
+    assert.ok(tombstone.closedAt, 'tombstone should carry a closedAt timestamp');
+  });
+
+  it('DELETE on a closed session is idempotent; ?forget=1 permanently removes (#561)', async () => {
+    const client = createClient();
+    const session = await client.connect({ new: '1', agentType: 'terminal', cwd: '/tmp' });
+
+    await httpDelete(`/api/shells/${session.id}?force=1`);
+    await new Promise(r => setTimeout(r, 500));
+
+    // Second DELETE without forget: no-op, tombstone survives
+    const second = await httpDelete(`/api/shells/${session.id}`);
+    assert.strictEqual(second.tombstone, true, 'repeat DELETE should report the tombstone');
+    let data = await httpGet('/api/shells');
+    assert.ok(data.shells.find(s => s.id === session.id && s.status === 'closed'),
+      'tombstone should survive a repeated DELETE');
+
+    // Explicit forget: permanently removed
+    const forgotten = await httpDelete(`/api/shells/${session.id}?forget=1`);
+    assert.strictEqual(forgotten.status, 'forgotten');
+    data = await httpGet('/api/shells');
+    assert.strictEqual(data.shells.filter(s => s.id === session.id).length, 0,
+      'forgotten session should be gone entirely');
   });
 
   // NOTE: this is the one test that exercises the GLOBAL killall endpoint and
@@ -102,8 +127,8 @@ describe('Session Lifecycle', () => {
   it('POST /api/shells/killall removes all active sessions', async () => {
     const client1 = createClient();
     const client2 = createClient();
-    await client1.connect({ new: '1', agentType: 'terminal', cwd: '/tmp' });
-    await client2.connect({ new: '1', agentType: 'terminal', cwd: '/tmp' });
+    const s1 = await client1.connect({ new: '1', agentType: 'terminal', cwd: '/tmp' });
+    const s2 = await client2.connect({ new: '1', agentType: 'terminal', cwd: '/tmp' });
 
     // Verify both are active before killall
     const before = await httpGet('/api/shells');
@@ -116,6 +141,13 @@ describe('Session Lifecycle', () => {
     const after = await httpGet('/api/shells');
     const activeAfter = after.shells.filter(s => s.status === 'active');
     assert.strictEqual(activeAfter.length, 0, 'no active sessions after killall');
+
+    // #561: killall must tombstone, never hard-delete — each killed session
+    // stays restorable as a closed entry.
+    for (const id of [s1.id, s2.id]) {
+      const tombstone = after.shells.find(s => s.id === id && s.status === 'closed');
+      assert.ok(tombstone, `killall should leave a closed tombstone for ${id}`);
+    }
   });
 
   it('session exits naturally when shell exits', async () => {
@@ -136,6 +168,9 @@ describe('Session Lifecycle', () => {
     const data = await httpGet('/api/shells');
     const active = data.shells.filter(s => s.id === session.id && s.status === 'active');
     assert.strictEqual(active.length, 0, 'session should be gone after exit');
+    // #561: even a natural exit leaves a restorable closed tombstone.
+    assert.ok(data.shells.find(s => s.id === session.id && s.status === 'closed'),
+      'natural exit should leave a closed tombstone');
   });
 
   it('can run a command and verify working directory', async () => {

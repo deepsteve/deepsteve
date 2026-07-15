@@ -378,6 +378,9 @@ const SETTINGS_SCHEMA = [
   { name: 'sessionLogEnabled',          type: 'boolean', default: false },
   { name: 'displayTabAudioIndicator',   type: 'boolean', default: true, broadcast: false },
   { name: 'scheduledTasksEnabled',      type: 'boolean', default: true },
+  // How long closed-session tombstones survive in state.json before the retention
+  // sweep prunes them (#561). Server-internal — no client UI reads it.
+  { name: 'closedSessionRetentionDays', type: 'number',  default: 30, clamp: [1, 365], round: true, broadcast: false },
   // Custom Claude Code config profiles (#537): each row = { id, name, configDir }.
   // A profile is agentType:'claude' + a CLAUDE_CONFIG_DIR — NOT a new agent type.
   // broadcast:false — the browser reads profiles via GET /api/agents (like enabledAgents).
@@ -1422,13 +1425,11 @@ function wireShellOutput(id) {
           // so it survives even if the process is killed mid-shutdown.
           if (shuttingDown) {
             try {
-              const current = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+              const current = loadStateFile();
               if (current[id]) {
                 current[id].claudeSessionId = newSessionId;
                 current[id].planMode = false;
-                const tmpFile = STATE_FILE + '.tmp';
-                fs.writeFileSync(tmpFile, JSON.stringify(current, null, 2));
-                fs.renameSync(tmpFile, STATE_FILE);
+                writeStateFile(current);
                 log(`Session ${id} patched state.json during shutdown`);
               }
             } catch (err) {
@@ -1585,15 +1586,47 @@ function killShell(entry, id, reason = 'closed') {
   }, 8000);
 }
 
-// Load saved state from previous run (shells that can be resumed)
-let savedState = {};
-try {
-  if (fs.existsSync(STATE_FILE)) {
-    savedState = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
-    log(`Loaded ${Object.keys(savedState).length} saved sessions: ${Object.entries(savedState).map(([id, e]) => `${id}→${(e.claudeSessionId || '?').slice(0, 8)}`).join(', ')}`);
+// All state.json writes funnel through here: rotate the current (last-known-good)
+// file to state.json.bak, then atomic tmp+rename — so a clobbered or corrupt state
+// file is always one write behind a recoverable copy (#561). No stateFrozen check
+// here by design: the freeze belongs to saveState(); the shutdown-final snapshot
+// and mid-shutdown patch must still be able to write.
+function writeStateFile(obj) {
+  fs.mkdirSync(path.dirname(STATE_FILE), { recursive: true });
+  try {
+    if (fs.existsSync(STATE_FILE)) fs.copyFileSync(STATE_FILE, STATE_FILE + '.bak');
+  } catch (e) {
+    console.error('Failed to rotate state backup:', e.message);
   }
-} catch (e) {
-  console.error('Failed to load state file:', e.message);
+  const tmpFile = STATE_FILE + '.tmp';
+  fs.writeFileSync(tmpFile, JSON.stringify(obj, null, 2));
+  fs.renameSync(tmpFile, STATE_FILE);
+}
+
+// Falls back to the .bak when state.json is missing or corrupt. Deliberately
+// resetting an install therefore requires removing BOTH files.
+function loadStateFile() {
+  try {
+    if (fs.existsSync(STATE_FILE)) return JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+  } catch (e) {
+    console.error(`state.json unreadable (${e.message}) — trying state.json.bak`);
+  }
+  try {
+    if (fs.existsSync(STATE_FILE + '.bak')) {
+      const bak = JSON.parse(fs.readFileSync(STATE_FILE + '.bak', 'utf8'));
+      console.error(`RECOVERED ${Object.keys(bak).length} sessions from state.json.bak`);
+      return bak;
+    }
+  } catch (bakErr) {
+    console.error('state.json.bak also unreadable:', bakErr.message);
+  }
+  return {};
+}
+
+// Load saved state from previous run (shells that can be resumed)
+let savedState = loadStateFile();
+if (Object.keys(savedState).length > 0) {
+  log(`Loaded ${Object.keys(savedState).length} saved sessions: ${Object.entries(savedState).map(([id, e]) => `${id}→${(e.claudeSessionId || '?').slice(0, 8)}`).join(', ')}`);
 }
 
 const displayTabs = new Map(); // id → HTML string (disk-backed in ~/.deepsteve/display-tabs/)
@@ -1840,6 +1873,37 @@ function serializeShellEntry(entry) {
   return { cwd: entry.cwd, claudeSessionId: entry.claudeSessionId, agentType: entry.agentType || 'claude', configDir: entry.configDir || null, engineType: entry.engineType || 'node-pty', worktree: entry.worktree || null, name: entry.name || null, planMode: !!entry.planMode, lastActivity: entry.lastActivity || null, createdAt: entry.createdAt || null, windowId: entry.windowId || null };
 }
 
+// #561: a session record is never hard-deleted by any runtime path. Every close
+// funnels through here and leaves a restorable tombstone (keeping claudeSessionId,
+// cwd, worktree, name, windowId, timestamps) so the restore/recents UI can always
+// resurrect it via --resume. Permanent removal happens only via an explicit
+// DELETE ?forget=1 (deliberate user action) or pruneClosedSessions() (retention).
+function tombstoneSession(id, entry, reason) {
+  if (entry.agentType === 'tmux-attach') return; // ephemeral — never persisted
+  savedState[id] = {
+    ...serializeShellEntry(entry),
+    closed: true,
+    closedAt: Date.now(),
+    closeReason: reason || closeReasons.get(id) || 'exited',
+  };
+}
+
+// Shared epilogue for every engine onExit handler: tombstone → notify tabs →
+// drop from the live map → persist. No-op during shutdown (the final snapshot
+// owns persistence, and a session being resumed after restart must stay
+// non-closed) and when an explicit close path already removed the shell (that
+// path wrote savedState itself — e.g. the ws-close grace path writes a
+// NON-closed entry that must not be overwritten with closed:true).
+function handleShellGone(id) {
+  if (shuttingDown) return;
+  const entry = shells.get(id);
+  if (!entry) return;
+  tombstoneSession(id, entry);
+  notifyClientsShellExited(id);
+  shells.delete(id);
+  saveState();
+}
+
 function saveState() {
   if (stateFrozen) {
     log(`[saveState] BLOCKED — state frozen during shutdown`);
@@ -1853,10 +1917,7 @@ function saveState() {
   // Merge with any saved state that wasn't reconnected yet
   const merged = { ...savedState, ...state };
   try {
-    fs.mkdirSync(path.dirname(STATE_FILE), { recursive: true });
-    const tmpFile = STATE_FILE + '.tmp';
-    fs.writeFileSync(tmpFile, JSON.stringify(merged, null, 2));
-    fs.renameSync(tmpFile, STATE_FILE);
+    writeStateFile(merged);
     log(`Saved ${Object.keys(merged).length} sessions to state file: ${Object.entries(merged).map(([id, e]) => `${id}→${(e.claudeSessionId || '?').slice(0, 8)}`).join(', ')}`);
   } catch (e) {
     console.error('Failed to save state:', e.message);
@@ -1865,6 +1926,32 @@ function saveState() {
 
 // Periodic state save to survive crashes (saveState() is normally only triggered on SIGTERM)
 setInterval(() => saveState(), 30000);
+
+// Retention sweep: the ONLY sanctioned hard-delete besides an explicit user
+// forget (DELETE ?forget=1) — #561. Non-closed entries are never pruned
+// regardless of age: they are restore candidates. Legacy tombstones with no
+// timestamp get stamped now so they receive a full retention window instead
+// of dying at first boot.
+function pruneClosedSessions() {
+  if (shuttingDown) return;
+  const days = settings.closedSessionRetentionDays || 30;
+  const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
+  let pruned = 0;
+  for (const [id, e] of Object.entries(savedState)) {
+    if (!e || !e.closed) continue;
+    const ts = e.closedAt || e.lastActivity || e.createdAt;
+    if (!ts) { e.closedAt = Date.now(); continue; }
+    if (ts < cutoff) { delete savedState[id]; pruned++; }
+  }
+  if (pruned > 0) {
+    log(`[retention] pruned ${pruned} closed sessions older than ${days}d`);
+    saveState();
+  }
+}
+// Boot sweep runs deferred, not at module top level: saveState() iterates the
+// `shells` Map, which is declared (const, TDZ) much further down this file.
+setTimeout(pruneClosedSessions, 10000);
+setInterval(pruneClosedSessions, 6 * 60 * 60 * 1000);
 
 async function shutdown(signal) {
   log(`Received ${signal}, saving state...`);
@@ -1944,9 +2031,7 @@ async function shutdown(signal) {
     }
     const merged = { ...savedState, ...state };
     try {
-      const tmpFile = STATE_FILE + '.tmp';
-      fs.writeFileSync(tmpFile, JSON.stringify(merged, null, 2));
-      fs.renameSync(tmpFile, STATE_FILE);
+      writeStateFile(merged);
       log(`Final state save: ${Object.keys(merged).length} sessions: ${Object.entries(merged).map(([id, e]) => `${id}→${(e.claudeSessionId || '?').slice(0, 8)}`).join(', ')}`);
     } catch (e) {
       console.error('Failed final state save:', e.message);
@@ -2814,7 +2899,7 @@ app.post('/api/start-automation', (req, res) => {
   if (agentConfig.supportsSessionWatch) watchClaudeSessionDir(id);
   sessionEngine.onExit(id, () => {
     if (agentConfig.supportsSessionWatch) unwatchClaudeSessionDir(id);
-    if (!shuttingDown) { notifyClientsShellExited(id); shells.delete(id); saveState(); }
+    handleShellGone(id);
   });
   saveState();
 
@@ -3051,7 +3136,7 @@ app.delete('/api/screenshots/:id', (req, res) => {
 
 app.get('/api/shells', (req, res) => {
   const active = [...shells.entries()].map(([id, entry]) => ({ id, pid: (entry.engine || ptyEngine).getPid(id), cwd: entry.cwd, name: entry.name || null, agentType: entry.agentType || 'claude', configDir: entry.configDir || null, engineType: entry.engineType || 'node-pty', status: 'active', lastActivity: entry.lastActivity || null, connectedClients: entry.clients.size }));
-  const saved = Object.entries(savedState).map(([id, entry]) => ({ id, cwd: entry.cwd, name: entry.name || null, agentType: entry.agentType || 'claude', configDir: entry.configDir || null, engineType: entry.engineType || 'node-pty', status: entry.closed ? 'closed' : 'saved', lastActivity: entry.lastActivity || null, connectedClients: 0 }));
+  const saved = Object.entries(savedState).map(([id, entry]) => ({ id, cwd: entry.cwd, name: entry.name || null, agentType: entry.agentType || 'claude', configDir: entry.configDir || null, engineType: entry.engineType || 'node-pty', status: entry.closed ? 'closed' : 'saved', lastActivity: entry.lastActivity || null, closedAt: entry.closedAt || null, closeReason: entry.closeReason || null, connectedClients: 0 }));
   res.json({ shells: [...active, ...saved] });
 });
 
@@ -3130,14 +3215,21 @@ app.post('/api/shells/killall', (req, res) => {
   const killed = [];
   for (const [id, entry] of shells) {
     killed.push({ id, pid: (entry.engine || ptyEngine).getPid(id) });
+    tombstoneSession(id, entry, 'killed');
+    notifyClientsShellExited(id);
     killShell(entry, id, 'killed');
     shells.delete(id);
   }
+  if (killed.length > 0) saveState();
   res.json({ killed });
 });
 
+// Permanent removal requires an explicit ?forget=1 — without it, DELETE is
+// idempotent on a closed session (the tombstone stays), so an automated caller
+// that retries a DELETE can never destroy a session record (#561).
 app.delete('/api/shells/:id', (req, res) => {
   const id = req.params.id;
+  const forget = req.query.forget === '1';
 
   // Check active shells
   if (shells.has(id)) {
@@ -3150,25 +3242,34 @@ app.delete('/api/shells/:id', (req, res) => {
       clearTimeout(entry.killTimer);
       entry.killTimer = null;
     }
-    savedState[id] = { ...serializeShellEntry(entry), closed: true };
+    if (forget) {
+      delete savedState[id];
+    } else {
+      tombstoneSession(id, entry, 'closed');
+    }
     killShell(entry, id, 'closed');
     shells.delete(id);
-    log(`Killed active shell ${id}, preserved as closed`);
+    log(`Killed active shell ${id}, ${forget ? 'forgotten' : 'preserved as closed'}`);
     saveState();
     return res.json({ killed: id, status: 'active' });
   }
 
-  // Check saved state — already-closed sessions are permanently deleted
+  // Check saved state
   if (savedState[id]) {
-    const wasClosed = savedState[id].closed;
-    if (wasClosed) {
+    if (forget) {
       delete savedState[id];
-      log(`Permanently removed closed session ${id}`);
+      log(`Permanently removed session ${id} (explicit forget)`);
       saveState();
-      return res.json({ killed: id, status: 'closed' });
+      return res.json({ killed: id, status: 'forgotten' });
+    }
+    if (savedState[id].closed) {
+      // Already a tombstone — idempotent no-op
+      return res.json({ killed: id, status: 'closed', tombstone: true });
     }
     // Non-closed saved session: mark as closed instead of deleting
     savedState[id].closed = true;
+    savedState[id].closedAt = Date.now();
+    savedState[id].closeReason = 'closed';
     log(`Marked saved session ${id} as closed`);
     saveState();
     return res.json({ killed: id, status: 'saved' });
@@ -3184,11 +3285,11 @@ function notifyClientsShellExited(id) {
   entry.clients.forEach((c) => { try { c.send(msg); } catch {} });
 }
 
-function closeSession(id) {
+function closeSession(id, reason = 'closed') {
   const entry = shells.get(id);
   if (!entry) return false;
 
-  log(`[closeSession] session ${id} closing`);
+  log(`[closeSession] session ${id} closing (${reason})`);
 
   // Notify connected browser clients to close this tab
   const closeMsg = JSON.stringify({ type: 'close-tab' });
@@ -3197,9 +3298,9 @@ function closeSession(id) {
   if (entry.killTimer) { clearTimeout(entry.killTimer); entry.killTimer = null; }
 
   unwatchClaudeSessionDir(id);
-  killShell(entry, id);
+  tombstoneSession(id, entry, reason);
+  killShell(entry, id, reason);
   shells.delete(id);
-  delete savedState[id];
   saveState();
 
   return true;
@@ -3256,19 +3357,25 @@ app.get('/api/shells/:id/info', (req, res) => {
   });
 });
 
+// "Clear disconnected" marks sessions closed — it never hard-deletes (#561).
+// Tombstones age out via pruneClosedSessions() or an explicit per-session forget.
 app.post('/api/shells/clear-disconnected', (req, res) => {
   const cleared = [];
 
-  // Remove saved sessions (no running PTY)
-  for (const id of Object.keys(savedState)) {
+  // Mark saved sessions (no running PTY) as closed
+  for (const [id, entry] of Object.entries(savedState)) {
+    if (entry.closed) continue; // already a tombstone
     cleared.push(id);
-    delete savedState[id];
+    entry.closed = true;
+    entry.closedAt = Date.now();
+    entry.closeReason = 'disconnected';
   }
 
   // Kill active shells with no connected clients
   for (const [id, entry] of shells) {
     if (entry.clients.size === 0) {
       cleared.push(id);
+      tombstoneSession(id, entry, 'disconnected');
       killShell(entry, id, 'disconnected');
       shells.delete(id);
     }
@@ -3541,7 +3648,7 @@ app.post('/api/start-issue', (req, res) => {
   if (agentConfig.supportsSessionWatch) watchClaudeSessionDir(id);
   sessionEngine.onExit(id, () => {
     if (agentConfig.supportsSessionWatch) unwatchClaudeSessionDir(id);
-    if (!shuttingDown) { notifyClientsShellExited(id); shells.delete(id); saveState(); }
+    handleShellGone(id);
   });
   saveState();
 
@@ -3703,9 +3810,9 @@ if (tmuxEngine) {
         if (agentConfig.supportsSessionWatch) watchClaudeSessionDir(id);
         tmuxEngine.onExit(id, () => {
           if (agentConfig.supportsSessionWatch) unwatchClaudeSessionDir(id);
-          if (!shuttingDown) { notifyClientsShellExited(id); shells.delete(id); saveState(); }
+          handleShellGone(id);
         });
-        delete savedState[id];
+        delete savedState[id]; // saved → live promotion, not a close
         log(`tmux: reattached session ${id} (${meta.name || meta.cwd})`);
       } else {
         log(`tmux: failed to reattach session ${id}`);
@@ -4057,9 +4164,7 @@ function handleWsConnection(ws, req) {
           const elapsed = Date.now() - attemptStart;
           const entry = shells.get(id);
           if (elapsed >= 5000 || !claudeSessionId || !agentConfig.supportsSessionWatch || !entry || restoreAttempt >= 2) {
-            notifyClientsShellExited(id);
-            shells.delete(id);
-            saveState();
+            handleShellGone(id);
             return;
           }
           restoreAttempt++;
@@ -4166,7 +4271,7 @@ function handleWsConnection(ws, req) {
       parentId: spawnPath === 'fork' ? forkFrom : url.searchParams.get('rcParent'),
     });
     if (agentConfig.supportsSessionWatch) watchClaudeSessionDir(id);
-    sessionEngine.onExit(id, () => { if (!shuttingDown) { if (agentConfig.supportsSessionWatch) unwatchClaudeSessionDir(id); notifyClientsShellExited(id); shells.delete(id); saveState(); } });
+    sessionEngine.onExit(id, () => { if (!shuttingDown && agentConfig.supportsSessionWatch) unwatchClaudeSessionDir(id); handleShellGone(id); });
     saveState();
   }
 
@@ -4221,7 +4326,7 @@ function handleWsConnection(ws, req) {
         ws.close();
         if (entry.clients.size === 0) {
           log(`[WS] close-session: last client detached from ${id}, killing shell`);
-          savedState[id] = { ...serializeShellEntry(entry), closed: true };
+          tombstoneSession(id, entry, 'user-closed');
           killShell(entry, id, 'user-closed');
           shells.delete(id);
           saveState();
@@ -4301,7 +4406,7 @@ function broadcastToWindow(windowId, msg) {
 }
 
 // Initialize MCP server (async, ~100ms for dynamic import)
-initMCP({ app, security, shells, wss, broadcast, broadcastToWindow, log, MODS_DIR, closeSession, spawnSession, sessionEnv, getSpawnArgs, mcpConfigArgs, getAgentConfig, wireShellOutput, watchClaudeSessionDir, unwatchClaudeSessionDir, saveState, validateWorktree, ensureWorktree, sessionPaths, submitToShell, fetchIssueFromGitHub, deliverPromptWhenReady, reloadClients, deliverToWindow, settings, isShuttingDown: () => shuttingDown, displayTabs, setDisplayTab, deleteDisplayTab, screenshots, setScreenshot, deleteScreenshot, getScreenshotPath, getDefaultEngine, getForegroundCommand, sessionLog, emitSessionOpen, getContexts: () => contexts, pathInside }).catch(e => log('MCP init failed:', e.message));
+initMCP({ app, security, shells, wss, broadcast, broadcastToWindow, log, MODS_DIR, closeSession, tombstoneSession, handleShellGone, spawnSession, sessionEnv, getSpawnArgs, mcpConfigArgs, getAgentConfig, wireShellOutput, watchClaudeSessionDir, unwatchClaudeSessionDir, saveState, validateWorktree, ensureWorktree, sessionPaths, submitToShell, fetchIssueFromGitHub, deliverPromptWhenReady, reloadClients, deliverToWindow, settings, isShuttingDown: () => shuttingDown, displayTabs, setDisplayTab, deleteDisplayTab, screenshots, setScreenshot, deleteScreenshot, getScreenshotPath, getDefaultEngine, getForegroundCommand, sessionLog, emitSessionOpen, getContexts: () => contexts, pathInside }).catch(e => log('MCP init failed:', e.message));
 
 // Watch themes directory for changes and broadcast to clients
 let themeWatchDebounce = null;

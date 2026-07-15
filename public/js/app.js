@@ -546,13 +546,15 @@ async function refreshSessionsDropdown() {
             <span class="session-name">${name}${showAgentBadge && agentLabel ? ` <span class="session-agent-badge">${agentLabel}</span>` : ''}</span>
             <span class="session-status ${statusClass}">${statusText}</span>
           </div>
-          ${canClose ? `<span class="session-close" data-id="${shell.id}">✕</span>` : ''}
+          ${canClose ? `<span class="session-close" data-id="${shell.id}"${isClosed ? ' data-closed="1"' : ''}>✕</span>` : ''}
         </div>
       `;
     }).join('');
 
-    // Add "Clear disconnected" button at the top — only count truly disconnected sessions
-    const disconnectedCount = allShells.filter(s => !connectedIds.has(s.id) && (s.connectedClients || 0) === 0).length;
+    // Add "Clear disconnected" button at the top — only count truly disconnected
+    // sessions. Closed tombstones are excluded: the endpoint never hard-deletes
+    // (#561), so they wouldn't be affected by the button.
+    const disconnectedCount = allShells.filter(s => !connectedIds.has(s.id) && (s.connectedClients || 0) === 0 && s.status !== 'closed').length;
     const clearBtn = document.createElement('div');
     clearBtn.className = 'dropdown-clear-disconnected' + (disconnectedCount === 0 ? ' disabled' : '');
     clearBtn.textContent = disconnectedCount > 0 ? `Clear disconnected (${disconnectedCount})` : 'Clear disconnected';
@@ -593,7 +595,10 @@ async function refreshSessionsDropdown() {
         e.stopPropagation();
         const id = btn.dataset.id;
         if (!(await confirmCloseSession(id))) return;
-        await fetch(`/api/shells/${id}`, { method: 'DELETE' });
+        // ✕ on an already-closed row is the deliberate permanent delete — the
+        // server only ever hard-forgets a session on an explicit ?forget=1 (#561).
+        const forget = btn.dataset.closed === '1';
+        await fetch(`/api/shells/${id}${forget ? '?forget=1' : ''}`, { method: 'DELETE' });
         await refreshSessionsDropdown();
       });
     });

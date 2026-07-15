@@ -71,6 +71,8 @@ When daemon restarts:
 4. When client reconnects with saved ID, spawns `claude --resume <claudeSessionId>` in saved cwd
 5. If `--resume` fails (exits within 5s), falls back to `claude -c --fork-session --session-id <newUUID>`
 
+**Session records are never hard-deleted by a runtime path (#561).** Every close/kill/wipe — killall, `closeSession()`, `DELETE /api/shells/:id`, natural PTY exit, clear-disconnected — writes a `closed: true` tombstone into state.json (keeping `claudeSessionId`, `cwd`, `worktree`, `name`, `windowId`, plus `closedAt`/`closeReason`), so reconnecting with the shell id can always resurrect the conversation via `--resume`. Never write `delete savedState[id]` in a close path; use `tombstoneSession()` (explicit closes) or `handleShellGone()` (engine `onExit` epilogue — also exposed on the MCP mod context). The only sanctioned purges are an explicit `DELETE /api/shells/:id?forget=1` (what the UI ✕ on an already-closed row sends, and what test cleanup uses) and the retention sweep `pruneClosedSessions()` (`closedSessionRetentionDays` setting, default 30 days; never touches non-closed entries). Every state.json write first rotates the previous file to `state.json.bak`, and the loader falls back to the `.bak` when state.json is missing or corrupt — so a full reset requires deleting both files.
+
 ### Security
 
 DeepSteve is **localhost-first with token authentication** (#536). The server binds to `127.0.0.1` by default (overridable with `--bind`). Every surface — the web UI WebSocket, the MCP HTTP endpoint, and all REST/control endpoints — is guarded *before* application code runs by three checks that live in `security.js`:

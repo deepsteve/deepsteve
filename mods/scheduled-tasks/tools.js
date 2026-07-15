@@ -235,7 +235,7 @@ function runTask(task, reason) {
       if (run && ACTIVE_STATUSES.has(run.status)) {
         run.status = 'ended'; run.endedAt = Date.now(); saveTasks(); broadcastTasks();
       }
-      shells.delete(id); saveState();
+      ctx.handleShellGone(id);
     }
   });
   saveState();
@@ -598,7 +598,7 @@ function init(context) {
         const stayOpen = task.keepOpen || (!ok && task.keepOpenOnFailure);
         let closed = false;
         if (!stayOpen && shellId && ctx.shells.has(shellId)) {
-          try { ctx.closeSession(shellId); closed = true; } catch (e) { log_(`auto-close failed for ${shellId}: ${e.message}`); }
+          try { ctx.closeSession(shellId, 'scheduled'); closed = true; } catch (e) { log_(`auto-close failed for ${shellId}: ${e.message}`); }
         }
         return { content: [{ type: 'text', text: `Marked scheduled run of "${task.title}" (#${task.id}) as ${run.status}.${closed ? ' Closing this session.' : ''}` }] };
       },

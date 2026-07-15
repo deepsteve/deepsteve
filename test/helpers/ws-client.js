@@ -311,15 +311,12 @@ class WsClient {
  *
  * Strategy: send 'exit\r' so shells terminate naturally first (a clean PTY exit
  * avoids killShell's Ctrl+C → 8s SIGTERM → 2s SIGKILL escalation timers, which
- * can otherwise SIGTERM a process that reused the old PID). Then DELETE any that
- * are still alive with force=1 to bypass the connected-clients guard. Already-
- * exited shells return 404 and are safely ignored.
- *
- * Note: a force-DELETEd survivor is removed from the active shells map but kept
- * in savedState as `closed` (normal tab-close semantics), so it lingers in GET
- * /api/shells as a closed entry. That's harmless — every assertion filters on
- * `status === 'active'`, and closed sessions are gone from the lookup map that
- * open_terminal's caller resolution uses.
+ * can otherwise SIGTERM a process that reused the old PID). Then DELETE any
+ * stragglers with force=1 (bypasses the connected-clients guard) AND forget=1:
+ * since #561 every close path — including a natural exit — leaves a `closed`
+ * tombstone in savedState, and only an explicit ?forget=1 permanently removes
+ * it. Forgetting here keeps test tombstones from accumulating in the shared
+ * daemon's state.json. Ids the server never saw return 404 and are ignored.
  *
  * @param {WsClient[]} clients - clients whose sessions to delete
  * @param {string[]} [extraIds] - extra session ids to delete (untracked tabs)
@@ -342,9 +339,10 @@ async function cleanupSessions(clients, extraIds = []) {
   for (const c of clients) c.close();
 
   // Delete only this test's own sessions (force=1 bypasses the connected-clients
-  // guard for any shell that didn't exit on its own).
+  // guard for any shell that didn't exit on its own; forget=1 removes the #561
+  // tombstone so tests don't pollute the daemon's state.json).
   await Promise.all(
-    [...ids].map(id => httpDelete(`/api/shells/${id}?force=1`).catch(() => {}))
+    [...ids].map(id => httpDelete(`/api/shells/${id}?force=1&forget=1`).catch(() => {}))
   );
   await new Promise(r => setTimeout(r, 500));
 }
