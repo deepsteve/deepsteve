@@ -45,6 +45,17 @@ launchctl unload ~/Library/LaunchAgents/com.deepsteve.plist
 ./install.sh
 ```
 
+### Running tests (#562 — the suite can never target the production daemon)
+
+`npm test` (= `test/run-integration.sh`) **auto-provisions a throwaway daemon** when `DEEPSTEVE_URL` is unset: scratch `HOME` (own auth-token/state/settings), random port, `DEEPSTEVE_TEST_MODE=1`, isolated `TMUX_TMPDIR`; torn down on exit. It is safe to run alongside the live daemon. The docker suites set `DEEPSTEVE_URL=http://server:3000` and skip provisioning.
+
+Safety layers (all three must hold — do not weaken any of them):
+- `test/helpers/ws-client.js` **requires `DEEPSTEVE_URL`** — importing it without one throws; there is no localhost:3000 fallback (that fallback once let a bare `npm test` wipe every live session).
+- Destructive helpers (`httpPost`, `httpDelete`, `WsClient.connect`) first verify the target reports `/api/version.testMode === true`, i.e. was started with `DEEPSTEVE_TEST_MODE=1`. There is no bypass; the public-install docker suite (published, pre-#562 server) stays red until the next release ships.
+- The server itself refuses `POST /api/shells/killall` (403) unless started in test mode.
+
+`DEEPSTEVE_TEST_MODE=1` (or `--test-mode`) also disables the startup browser auto-open and the auto-update check. Never set it on a real install. Guard regression tests live in `test/unit/ws-client-guard.test.js` (`npm run test:unit`).
+
 ## Architecture
 
 ### Overview
@@ -150,6 +161,7 @@ The `scheduled-tasks` mod (`mods/scheduled-tasks/`) runs recurring agent tasks *
 
 ### Gotchas and Non-Obvious Behavior
 
+- **tmux's default socket is per-UID, NOT per-HOME**: `engines/tmux.js` uses the default socket (`$TMUX_TMPDIR`-or-`/tmp`/`tmux-<uid>/`), so a second daemon started with a scratch `HOME` still sees the real daemon's `ds-*` tmux sessions — and the startup reattach path **kills any `ds-*` session missing from its (scratch) state.json as an orphan**. Any isolated/test daemon MUST set `TMUX_TMPDIR` to a scratch dir (`test/run-integration.sh` does).
 - **Ink input parsing**: `shell.write("text\r")` doesn't work for submitting to Claude. Text and `\r` must be sent separately with a 1s delay (`submitToShell()`), because Ink only recognizes Enter when `\r` arrives as its own stdin read.
 - **BEL detection / waiting classifier**: Claude emits `\x07` (BEL) when it reaches its input prompt — its "I need attention" signal. The server tracks `lastBelTime` (and `lastInputTime`, set whenever input is written to the PTY). `waitingForInput` flips true only after ~2s of PTY silence **and** a BEL has fired since the user last submitted (`lastBelTime >= lastInputTime`) — so a long, quiet tool call (bash, slow network) is no longer mis-classified as "waiting" (#500). Sessions that have never emitted a BEL (terminal bell disabled) fall back to the legacy silence-only heuristic. This `waitingForInput` state drives browser notifications, the hash-commands overlay, the overview waiting dot, the Action Required auto-cycle mod, and auto-submission of `initialPrompt`.
 - **Graceful shutdown**: The shutdown sequence tries `/exit` first (with Ctrl+C interrupt if Claude is busy), waits 8s, then SIGTERM, then 2s more, then SIGKILL. Process group kills (`-pid`) are attempted first for child process cleanup.

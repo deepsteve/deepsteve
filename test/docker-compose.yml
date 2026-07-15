@@ -10,6 +10,9 @@ services:
       - DEEPSTEVE_BIND=0.0.0.0
       # Auth (#536): the test container reaches us as http://server:3000, so allowlist that host.
       - DEEPSTEVE_ALLOW_HOST=server
+      # Test mode (#562): marks this disposable instance so /api/version reports testMode:true —
+      # the test helpers refuse destructive calls (and the server refuses killall) without it.
+      - DEEPSTEVE_TEST_MODE=1
     volumes:
       # Share the auto-generated ~/.deepsteve/auth-token so the test container authenticates with the
       # REAL token (no override). The app lives in /app here, so /root/.deepsteve is data-only.

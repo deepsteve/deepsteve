@@ -3,6 +3,12 @@
  * Wraps the `ws` package with convenience methods for creating sessions,
  * sending terminal input, and waiting for output patterns.
  *
+ * Safety (#562): DEEPSTEVE_URL is REQUIRED (no localhost fallback — importing this
+ * module without it throws), and every helper that can create or destroy sessions
+ * (httpPost, httpDelete, WsClient.connect) first verifies the target reports
+ * /api/version.testMode === true, i.e. was started with DEEPSTEVE_TEST_MODE=1.
+ * httpGet is deliberately ungated (read-only).
+ *
  * Protocol notes (from server.js):
  * - Server sends the first message as JSON: { type: 'session', id, ... } or { type: 'gone' }
  * - Terminal output is sent as raw strings (not JSON-wrapped)
@@ -15,12 +21,32 @@ const fs = require('fs');
 const os = require('os');
 const nodePath = require('path');
 
-const BASE_URL = process.env.DEEPSTEVE_URL || 'http://localhost:3000';
+// #562: NO fallback URL. A bare `npm test` once defaulted to http://localhost:3000 —
+// a developer's LIVE daemon — and the suite's killall destroyed every one of their
+// sessions. Refuse to guess; test/run-integration.sh provisions an isolated target.
+const BASE_URL = process.env.DEEPSTEVE_URL;
+if (!BASE_URL) {
+  throw new Error([
+    'DEEPSTEVE_URL is not set — refusing to pick a default target (#562: a bare run',
+    'once hit the live daemon on localhost:3000 and destroyed all of its sessions).',
+    '',
+    'Run the suite via `npm test`: test/run-integration.sh auto-provisions a throwaway',
+    'server (scratch HOME, random port, DEEPSTEVE_TEST_MODE=1) and tears it down after.',
+    '',
+    'To run a single file against your own isolated instance:',
+    '  SCRATCH=$(mktemp -d)',
+    '  HOME="$SCRATCH" PORT=3999 DEEPSTEVE_TEST_MODE=1 TMUX_TMPDIR="$SCRATCH/tmux" node server.js &',
+    '  HOME="$SCRATCH" DEEPSTEVE_URL=http://127.0.0.1:3999 node --test test/integration/<file>',
+    '(HOME must match the server\'s: the helper reads $HOME/.deepsteve/auth-token. TMUX_TMPDIR',
+    'isolates the per-UID tmux socket so the test daemon cannot touch real ds-* sessions.)',
+  ].join('\n'));
+}
 
 // Auth (#536): the server under test auto-generates ~/.deepsteve/auth-token (0600). We read that
 // REAL token — deliberately no override — and present it as a bearer, exactly as a non-browser
-// client (an agent, or restart.sh) does. Server and tests share $HOME (local run) or the .deepsteve
-// volume (docker-compose), so this is the same file the server just wrote.
+// client (an agent, or restart.sh) does. Server and tests share $HOME (run-integration.sh exports
+// the scratch HOME it provisioned, docker-compose shares the .deepsteve volume, and the manual
+// recipe above sets HOME on both sides), so this is the same file the server just wrote.
 function readAuthToken() {
   try {
     return fs.readFileSync(nodePath.join(os.homedir(), '.deepsteve', 'auth-token'), 'utf8').trim();
@@ -31,20 +57,64 @@ function readAuthToken() {
 const AUTH_TOKEN = readAuthToken();
 const authHeaders = AUTH_TOKEN ? { Authorization: `Bearer ${AUTH_TOKEN}` } : {};
 
+// #562 belt-and-suspenders: before anything that can create or destroy sessions, prove
+// the target is a disposable test instance. Only a server started with
+// DEEPSTEVE_TEST_MODE=1 reports testMode:true in /api/version — a live daemon reports
+// false, and a pre-#562 build has no field at all; both are refused. The promise is
+// memoized (rejection included), so each test process pays one GET and every later
+// destructive call fails fast with the same message.
+let verifyPromise = null;
+function ensureTestTarget() {
+  if (!verifyPromise) {
+    verifyPromise = (async () => {
+      let r;
+      try {
+        r = await fetch(`${BASE_URL}/api/version`, { headers: { ...authHeaders } });
+      } catch (e) {
+        throw new Error(
+          `#562 target check failed: cannot reach ${BASE_URL}/api/version (${e.message}); ` +
+          'refusing to run destructive test helpers.'
+        );
+      }
+      if (!r.ok) {
+        throw new Error(
+          `#562 target check failed: GET ${BASE_URL}/api/version returned ${r.status}. ` +
+          'If 401: the token read from $HOME/.deepsteve/auth-token does not match the server — ' +
+          'tests and the server under test must share HOME.'
+        );
+      }
+      const body = await r.json();
+      if (body.testMode !== true) {
+        throw new Error(
+          `REFUSING to run destructive test helpers against ${BASE_URL}: ` +
+          `/api/version.testMode=${JSON.stringify(body.testMode)} — this is NOT a test instance ` +
+          '(#562: a run like this once destroyed a live daemon\'s sessions). ' +
+          'Start the target with DEEPSTEVE_TEST_MODE=1.'
+        );
+      }
+    })();
+  }
+  return verifyPromise;
+}
+
 function httpGet(path) {
   return fetch(`${BASE_URL}${path}`, { headers: { ...authHeaders } }).then(r => r.json());
 }
 
-function httpPost(path, body) {
-  return fetch(`${BASE_URL}${path}`, {
+async function httpPost(path, body) {
+  await ensureTestTarget();
+  const r = await fetch(`${BASE_URL}${path}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...authHeaders },
     body: JSON.stringify(body),
-  }).then(r => r.json());
+  });
+  return r.json();
 }
 
-function httpDelete(path) {
-  return fetch(`${BASE_URL}${path}`, { method: 'DELETE', headers: { ...authHeaders } }).then(r => r.json());
+async function httpDelete(path) {
+  await ensureTestTarget();
+  const r = await fetch(`${BASE_URL}${path}`, { method: 'DELETE', headers: { ...authHeaders } });
+  return r.json();
 }
 
 class WsClient {
@@ -58,10 +128,14 @@ class WsClient {
 
   /**
    * Connect to the server and optionally create a new session.
+   * Verifies the target is a test instance first (#562) — connecting creates a
+   * session server-side, which on a live daemon would surface as a phantom tab
+   * in the user's browser.
    * @param {Object} opts - Query parameters (agentType, cwd, new, id, name, etc.)
    * @returns {Promise<Object>} The session message from the server
    */
-  connect(opts = {}) {
+  async connect(opts = {}) {
+    await ensureTestTarget();
     return new Promise((resolve, reject) => {
       const wsUrl = BASE_URL.replace(/^http/, 'ws');
       const params = new URLSearchParams();

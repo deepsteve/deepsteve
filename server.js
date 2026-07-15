@@ -46,6 +46,13 @@ function parseCLIValue(name) {
 const HTTPS_ENABLED = parseCLIFlag('https') || process.env.DEEPSTEVE_HTTPS === '1';
 const HTTPS_PORT = parseInt(parseCLIValue('https-port') || process.env.DEEPSTEVE_HTTPS_PORT) || 3443;
 
+// Test mode (#562): marks this daemon as a disposable test instance. Surfaced as
+// /api/version.testMode so the integration-test helpers can refuse to run destructive
+// calls against anything else; also the only mode that honors POST /api/shells/killall,
+// and disables the browser auto-open + auto-update check (side effects a test run must
+// not have). A production daemon never sets this — there is no reason to.
+const TEST_MODE = parseCLIFlag('test-mode') || process.env.DEEPSTEVE_TEST_MODE === '1';
+
 // Like parseCLIValue but collects ALL occurrences of a repeatable flag (--allow-origin,
 // --allow-host). Used for the auth escape-hatch that widens the Origin/Host allowlists (#536).
 function parseCLIValues(name) {
@@ -2232,6 +2239,9 @@ app.get('/api/version', (req, res) => {
     latest: versionStatus.latest,
     updateAvailable: versionStatus.updateAvailable,
     status: versionStatus,
+    // Always present as a boolean (#562): test helpers require `testMode === true`,
+    // which uniformly refuses both a live daemon (false) and a pre-#562 build (absent).
+    testMode: TEST_MODE,
   });
 });
 
@@ -3108,6 +3118,15 @@ app.get('/api/windows', (req, res) => {
 });
 
 app.post('/api/shells/killall', (req, res) => {
+  // #562: killall destroys EVERY session on this server. Its only callers are the
+  // integration tests; a stray test run against a live daemon once wiped all of a
+  // developer's sessions. Only a DEEPSTEVE_TEST_MODE=1 instance will honor it.
+  if (!TEST_MODE) {
+    return res.status(403).json({
+      error: 'Refused: /api/shells/killall is test-only (destroys every session on this server). ' +
+             'It is enabled only when the server runs with DEEPSTEVE_TEST_MODE=1. See #562.',
+    });
+  }
   const killed = [];
   for (const [id, entry] of shells) {
     killed.push({ id, pid: (entry.engine || ptyEngine).getPid(id) });
@@ -3604,12 +3623,16 @@ reconcileSkills();
 
 const server = app.listen(PORT, BIND, () => {
   log(`HTTP server listening on ${BIND}:${PORT} — UI at ${UI_URL}`);
+  if (TEST_MODE) {
+    log('*** DEEPSTEVE_TEST_MODE: disposable test instance — killall enabled, browser auto-open and auto-update check disabled ***');
+  }
   // Auto-open browser if no clients connect within 5s of startup.
   // Skipped on restart: restart.sh writes .restarting before unloading the
   // old daemon, so existing browsers get a chance to silently reconnect
   // without a phantom new tab racing in. Cold starts (no marker) keep the
-  // original behavior.
-  let skipAutoOpen = false;
+  // original behavior. Also skipped in test mode — a throwaway test daemon
+  // must never pop a tab in (or expose itself to) the developer's browser.
+  let skipAutoOpen = TEST_MODE;
   try {
     if (fs.existsSync(RESTARTING_FLAG)) {
       fs.unlinkSync(RESTARTING_FLAG);
@@ -3633,13 +3656,13 @@ const server = app.listen(PORT, BIND, () => {
   // server is listening (so the GitHub fetch doesn't block boot).
   loadInstallSource();
   refreshGitTreeClean();
-  if (settings.autoUpdateCheckEnabled) {
+  if (settings.autoUpdateCheckEnabled && !TEST_MODE) {
     setTimeout(() => {
       checkForUpdates().catch(e => log(`[auto-update] startup check failed: ${e.message}`));
     }, 5000);
     restartUpdateTimer();
   } else {
-    log('[auto-update] background check disabled by settings');
+    log(`[auto-update] background check disabled by ${TEST_MODE ? 'test mode' : 'settings'}`);
   }
 });
 const shells = new Map();

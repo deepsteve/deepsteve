@@ -9,6 +9,12 @@ describe('Server Health', () => {
     assert.match(data.current, /^\d+\.\d+\.\d+$/, 'version should be semver');
   });
 
+  it('reports testMode:true — the suite only ever runs against a disposable instance (#562)', async () => {
+    const data = await httpGet('/api/version');
+    assert.strictEqual(data.testMode, true,
+      'server under test must be started with DEEPSTEVE_TEST_MODE=1');
+  });
+
   it('GET /api/shells returns empty list initially', async () => {
     const data = await httpGet('/api/shells');
     assert.ok(Array.isArray(data.shells), 'shells should be an array');

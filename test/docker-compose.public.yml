@@ -10,6 +10,10 @@ services:
       - DEEPSTEVE_BIND=0.0.0.0
       # Auth (#536): the test container reaches us as http://server:3000, so allowlist that host.
       - DEEPSTEVE_ALLOW_HOST=server
+      # Test mode (#562): the PUBLISHED build ignores this until a release ships #562. Until then
+      # this suite is EXPECTED RED — the helpers refuse a server whose /api/version lacks
+      # testMode:true, and there is deliberately no bypass. Goes green with the next release.
+      - DEEPSTEVE_TEST_MODE=1
     volumes:
       # Token-only volume (#539): the app lives IN /root/.deepsteve here (unlike docker-compose.yml,
       # where it's in /app), so sharing that whole dir would risk running stale installed code from
