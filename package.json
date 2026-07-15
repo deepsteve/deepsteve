@@ -13,6 +13,7 @@
   "scripts": {
     "test": "sh test/run-integration.sh",
     "test:unit": "node --test test/unit/*.test.js",
+    "test:standalone": "sh test/run-standalone.sh",
     "test:docker": "docker compose -f test/docker-compose.yml up --build --abort-on-container-exit --exit-code-from test",
     "test:docker:clean": "docker compose -f test/docker-compose.yml down -v --rmi local",
     "test:install": "bash release.sh && docker compose -f test/docker-compose.install.yml up --build --abort-on-container-exit --exit-code-from test",

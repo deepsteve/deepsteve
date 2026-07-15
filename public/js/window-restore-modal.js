@@ -3,11 +3,22 @@
  */
 
 import { getDefaultTabName } from './tab-manager.js';
+import { nsChannel } from './storage-namespace.js';
+
+// Tab names are user- and agent-supplied, and since #551 can arrive from the server
+// too. Never interpolate them into innerHTML raw.
+function esc(s) {
+  return String(s ?? '').replace(/[&<>"']/g, c => (
+    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+  ));
+}
 
 export function showWindowRestoreModal(orphanedWindows) {
   return new Promise((resolve) => {
     let dismissed = false;
-    const bc = new BroadcastChannel('deepsteve-windows');
+    // Namespaced: a nested Baby Browser instance shares this origin, and a bare
+    // channel name let its modal dismiss the top-level one's (and vice versa).
+    const bc = new BroadcastChannel(nsChannel('deepsteve-windows'));
 
     function dismiss(result) {
       if (dismissed) return;
@@ -33,7 +44,7 @@ export function showWindowRestoreModal(orphanedWindows) {
 
     const windowListHtml = orphanedWindows.map((win, index) => {
       const sessionsHtml = win.sessions.map(s =>
-        `<span class="session-name">${s.name || getDefaultTabName(s.cwd)}</span>`
+        `<span class="session-name">${esc(s.name || getDefaultTabName(s.cwd))}</span>`
       ).join('');
 
       const lastActive = new Date(win.lastActive);

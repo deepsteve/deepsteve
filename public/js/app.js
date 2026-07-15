@@ -3165,6 +3165,13 @@ async function showIssuePicker() {
  * Main initialization
  */
 async function init() {
+  // Must be the FIRST thing init() does: getWindowId() mints and persists the id on
+  // first call, so any earlier caller (initLiveReload below passes windowId, and a
+  // stray fetch callback could too) makes this read true forever. When that happened
+  // the "new tab" branch became unreachable and whole-window restore silently died —
+  // the sessions were fine, the modal just never ran (#551).
+  const isExistingTab = WindowManager.hasExistingWindowId();
+
   // Cache available agents and default agent setting for new-tab menu and settings
   fetch('/api/agents').then(r => r.json()).then(data => {
     window.__deepsteveAgents = data.agents || [];
@@ -3467,8 +3474,8 @@ async function init() {
   });
   document.getElementById('empty-state-btn')?.addEventListener('click', () => quickNewSession());
 
-  // Check if this is an existing tab BEFORE starting heartbeat (which creates window ID)
-  const isExistingTab = WindowManager.hasExistingWindowId();
+  // isExistingTab was captured at the very top of init() — by now the window ID
+  // exists no matter what, so it cannot be re-derived here.
   console.log('[init] isExistingTab:', isExistingTab);
   console.log('[init] sessionStorage windowId:', sessionStorage.getItem(nsKey('deepsteve-window-id')));
   console.log('[init] localStorage:', localStorage.getItem(nsKey('deepsteve')));
@@ -3540,7 +3547,7 @@ async function init() {
 
         if (result.action === 'restore') {
           // Claim the selected window's sessions
-          const claimed = WindowManager.claimWindow(result.window.windowId);
+          const claimed = WindowManager.claimWindow(result.window);
           for (const sess of claimed) {
             TabSessions.add(sess);
           }

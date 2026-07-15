@@ -3045,6 +3045,68 @@ app.get('/api/shells', (req, res) => {
   res.json({ shells: [...active, ...saved] });
 });
 
+// The window→session map, derived from the sessions themselves (#551).
+//
+// windowId is already persisted per session by serializeShellEntry, so there is no
+// separate window store to drift from state.json or to prune — a dead session is
+// simply absent here. localStorage is a cache of this, not the source of truth, so
+// a client that lost its jar (origin change, cleared site data, a new browser) can
+// still be offered whole windows back.
+//
+// `windows` and `knownSessionIds` answer different questions and must stay separate:
+// `windows` says which window owns what — it necessarily skips sessions with no
+// windowId; `knownSessionIds` says whether a session still exists at all, including
+// those. A client using the grouping as an existence oracle would discard localStorage
+// windows whose sessions are alive but ungrouped (e.g. entries written by a pre-#551
+// server, or start-issue sessions whose window never resolved).
+app.get('/api/windows', (req, res) => {
+  // Every browser window holds a live-reload socket carrying its windowId, so this
+  // is the server's view of liveness. It only sees windows that are connected right
+  // now — the client unions it with its own BroadcastChannel roll-call.
+  const liveWindowIds = new Set(
+    [...reloadClients].filter(c => c.readyState === 1 && c.windowId).map(c => c.windowId)
+  );
+
+  const byWindow = new Map();
+  const knownSessionIds = [];
+  const add = (id, entry, status) => {
+    // tmux-attach is ephemeral. saveState() skips it for live shells, but
+    // DELETE /api/shells/:id writes one into savedState, so filter here too.
+    if (entry.agentType === 'tmux-attach') return;
+    knownSessionIds.push(id);
+    if (!entry.windowId) return; // exists, but belongs to no window
+    if (!byWindow.has(entry.windowId)) byWindow.set(entry.windowId, []);
+    byWindow.get(entry.windowId).push({
+      id,
+      name: entry.name || null,
+      cwd: entry.cwd || null,
+      agentType: entry.agentType || 'claude',
+      status,
+      createdAt: entry.createdAt || null,
+      lastActivity: entry.lastActivity || null,
+    });
+  };
+
+  for (const [id, entry] of shells) add(id, entry, 'active');
+  for (const [id, entry] of Object.entries(savedState)) {
+    if (entry.closed) continue;   // closing a tab is deliberate — recent-sessions covers it
+    if (shells.has(id)) continue; // live entry already counted; would otherwise restore twice
+    add(id, entry, 'saved');
+  }
+
+  const windows = [...byWindow].map(([windowId, sessions]) => {
+    sessions.sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
+    return {
+      windowId,
+      live: liveWindowIds.has(windowId),
+      lastActive: Math.max(...sessions.map(s => s.lastActivity || s.createdAt || 0)),
+      sessions,
+    };
+  }).sort((a, b) => b.lastActive - a.lastActive);
+
+  res.json({ windows, knownSessionIds });
+});
+
 app.post('/api/shells/killall', (req, res) => {
   const killed = [];
   for (const [id, entry] of shells) {
@@ -3069,15 +3131,7 @@ app.delete('/api/shells/:id', (req, res) => {
       clearTimeout(entry.killTimer);
       entry.killTimer = null;
     }
-    savedState[id] = {
-      cwd: entry.cwd, claudeSessionId: entry.claudeSessionId,
-      agentType: entry.agentType || 'claude',
-      configDir: entry.configDir || null,
-      worktree: entry.worktree || null, name: entry.name || null,
-      planMode: !!entry.planMode,
-      lastActivity: entry.lastActivity || null, createdAt: entry.createdAt || null,
-      closed: true
-    };
+    savedState[id] = { ...serializeShellEntry(entry), closed: true };
     killShell(entry, id, 'closed');
     shells.delete(id);
     log(`Killed active shell ${id}, preserved as closed`);
@@ -3950,8 +4004,14 @@ function handleWsConnection(ws, req) {
       const argOpts = { sessionId: claudeSessionId, planMode: savedPlanMode, worktree: savedWorktree, shellId: id };
       const startArgs = spawnFresh ? getSpawnArgs(savedAgentType, argOpts) : getResumeArgs(savedAgentType, argOpts);
 
-      spawnSession(sessionEngine, id, savedAgentType, startArgs, cwd, { ...ptySize, env: sessionEnv(id, { name: restoredName, worktree: savedWorktree, windowId: restored.windowId, cwd, agentType: savedAgentType, configDir: restored.configDir }) });
-      shells.set(id, { clients: new Set(), cwd, claudeSessionId, agentType: savedAgentType, configDir: restored.configDir || null, engine: sessionEngine, engineType: restoredEngineType, worktree: savedWorktree, name: restoredName, planMode: savedPlanMode, restored: true, waitingForInput: false, lastActivity: Date.now(), createdAt: restored.createdAt || Date.now(), windowId: restored.windowId || null });
+      // The connecting client's windowId wins over the saved one: restoring a window
+      // into a new browser window (or claiming an orphan) reconnects with a different
+      // windowId, and env is fixed at spawn — so passing the stale saved value would
+      // hand the agent a DEEPSTEVE_WINDOW_ID whose window no longer exists, and any
+      // deliverToWindow() it triggered would land nowhere (#551).
+      const restoredWindowId = windowId || restored.windowId || null;
+      spawnSession(sessionEngine, id, savedAgentType, startArgs, cwd, { ...ptySize, env: sessionEnv(id, { name: restoredName, worktree: savedWorktree, windowId: restoredWindowId, cwd, agentType: savedAgentType, configDir: restored.configDir }) });
+      shells.set(id, { clients: new Set(), cwd, claudeSessionId, agentType: savedAgentType, configDir: restored.configDir || null, engine: sessionEngine, engineType: restoredEngineType, worktree: savedWorktree, name: restoredName, planMode: savedPlanMode, restored: true, waitingForInput: false, lastActivity: Date.now(), createdAt: restored.createdAt || Date.now(), windowId: restoredWindowId });
       wireShellOutput(id);
       recordRecentSession(id);  // bump recency on same-browser reconnect + cross-browser restore
       if (agentConfig.supportsSessionWatch) watchClaudeSessionDir(id);
@@ -4065,8 +4125,13 @@ function handleWsConnection(ws, req) {
     const engineType = sessionEngine === tmuxEngine ? 'tmux' : 'node-pty';
     log(`[WS] Creating NEW shell: oldId=${oldId}, newId=${id}, agent=${agentType}, engine=${engineType}, session=${sessionId}, worktree=${worktree || 'none'}, cwd=${worktreeCwd}, planMode=${spawnedPlanMode}`);
     traceSession('SPAWN', { path: spawnPath, shell: id, oldId: oldId || null, name: name || null, worktree: worktree || null, cwd: worktreeCwd, claude: sessionId, planMode: spawnedPlanMode, agent: agentType, engine: engineType, parentShell, parentClaude, parentWorktree });
-    spawnSession(sessionEngine, id, agentType, spawnArgs, worktreeCwd, { cols: initialCols, rows: initialRows, env: sessionEnv(id, { name, worktree, cwd: worktreeCwd, agentType, configDir }) });
-    shells.set(id, { clients: new Set(), cwd: worktreeCwd, claudeSessionId: sessionId, agentType, configDir: configDir || null, engine: sessionEngine, engineType, worktree: worktree || null, name: name || null, planMode: spawnedPlanMode, waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now() });
+    // windowId is applied on every connect below, but it has to be set HERE too:
+    // saveState() runs at the end of this block, so without it a new session
+    // persists windowId:null and its window grouping is missing from state.json
+    // until the next periodic save (#551). It also gives the agent a correct
+    // DEEPSTEVE_WINDOW_ID, which sessionEnv otherwise reported as ''.
+    spawnSession(sessionEngine, id, agentType, spawnArgs, worktreeCwd, { cols: initialCols, rows: initialRows, env: sessionEnv(id, { name, worktree, windowId, cwd: worktreeCwd, agentType, configDir }) });
+    shells.set(id, { clients: new Set(), cwd: worktreeCwd, claudeSessionId: sessionId, agentType, configDir: configDir || null, engine: sessionEngine, engineType, worktree: worktree || null, windowId, name: name || null, planMode: spawnedPlanMode, waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now() });
     wireShellOutput(id);
     emitSessionOpen(id);
     recordRecentSession(id);
@@ -4133,15 +4198,7 @@ function handleWsConnection(ws, req) {
         ws.close();
         if (entry.clients.size === 0) {
           log(`[WS] close-session: last client detached from ${id}, killing shell`);
-          savedState[id] = {
-            cwd: entry.cwd, claudeSessionId: entry.claudeSessionId,
-            agentType: entry.agentType || 'claude',
-            configDir: entry.configDir || null,
-            worktree: entry.worktree || null, name: entry.name || null,
-            planMode: !!entry.planMode,
-            lastActivity: entry.lastActivity || null, createdAt: entry.createdAt || null,
-            closed: true
-          };
+          savedState[id] = { ...serializeShellEntry(entry), closed: true };
           killShell(entry, id, 'user-closed');
           shells.delete(id);
           saveState();
@@ -4176,8 +4233,12 @@ function handleWsConnection(ws, req) {
       // Grace period to allow reconnect on refresh
       entry.killTimer = setTimeout(() => {
         if (entry.clients.size === 0) {
-          // Preserve session info so it can be restored on next connect
-          savedState[id] = { cwd: entry.cwd, claudeSessionId: entry.claudeSessionId, agentType: entry.agentType || 'claude', configDir: entry.configDir || null, worktree: entry.worktree || null, name: entry.name || null, planMode: !!entry.planMode, lastActivity: entry.lastActivity || null };
+          // Preserve session info so it can be restored on next connect. Must go
+          // through serializeShellEntry: hand-rolling this dropped windowId (so a
+          // closed browser window lost its tab grouping — #551) and engineType (so
+          // a disconnected tmux session came back as node-pty). No `closed` flag —
+          // a disconnect is not a user close, and stays a restore candidate.
+          savedState[id] = serializeShellEntry(entry);
           killShell(entry, id, 'disconnected');
           shells.delete(id);
           saveState();

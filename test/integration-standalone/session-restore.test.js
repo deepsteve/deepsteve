@@ -118,6 +118,17 @@ async function startDaemon() {
   delete env.CLAUDECODE;
   for (const k of Object.keys(env)) if (k.startsWith('DEEPSTEVE_')) delete env[k];
 
+  // server.js schedules a 5s "no browser connected → open the default browser" timer
+  // on every cold start, and `open` is NOT sandboxed by our scratch HOME — it hits
+  // the developer's real browser. This suite restarts the daemon five times, so
+  // without the .restarting marker (which the server unlinks during startup, hence
+  // re-planting it before every spawn) a full run pops five browser tabs. The inert
+  // `open` stub on PATH below is the backstop if that check ever regresses.
+  fs.mkdirSync(path.join(HOME, '.deepsteve'), { recursive: true });
+  fs.writeFileSync(path.join(HOME, '.deepsteve', '.restarting'), '');
+  // exec() runs via /bin/sh, which resolves `open` from this PATH (not .zprofile).
+  env.PATH = `${path.join(HOME, 'bin')}:${process.env.PATH}`;
+
   daemon = spawn('node', ['server.js'], { cwd: REPO_ROOT, env });
   daemon.stdout.on('data', d => { daemonLog += d.toString(); });
   daemon.stderr.on('data', d => { daemonLog += d.toString(); });
@@ -235,6 +246,12 @@ before(async () => {
   fs.mkdirSync(path.join(HOME, 'stub-control'), { recursive: true });
   fs.mkdirSync(projDir, { recursive: true });
   fs.writeFileSync(path.join(HOME, 'bin', 'claude'), CLAUDE_STUB, { mode: 0o755 });
+  // Inert `open`: the daemon's browser auto-open must never reach the real browser.
+  fs.writeFileSync(
+    path.join(HOME, 'bin', 'open'),
+    '#!/bin/bash\necho "$*" >> "$HOME/open-invocations.log"\nexit 0\n',
+    { mode: 0o755 }
+  );
   // Sessions spawn through `zsh -l -c 'claude …'`, so a login shell sources this
   // and finds the stub ahead of any real claude on the system.
   fs.writeFileSync(path.join(HOME, '.zprofile'), 'export PATH="$HOME/bin:$PATH"\n');
