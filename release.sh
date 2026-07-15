@@ -14,7 +14,20 @@ if [ "v$PKG_VERSION" = "$LATEST_TAG" ]; then
   echo "Bump the version in package.json before running release.sh." >&2
   exit 1
 fi
-echo "Version: $PKG_VERSION (latest tag: ${LATEST_TAG:-none})"
+# Fail if package-lock.json has drifted from package.json. Bumping package.json by hand
+# leaves the lock behind; `npm version` writes both. npm ci tolerates the mismatch, so
+# nothing else catches it — but the stale lock then lands as noise in an unrelated PR the
+# next time anyone runs npm install. check-installer.yml runs this script on every push
+# to main, so this guard is the CI check too.
+LOCK_VERSION=$(node -p "require('./package-lock.json').version")
+LOCK_ROOT_VERSION=$(node -p "require('./package-lock.json').packages[''].version")
+if [ "$LOCK_VERSION" != "$PKG_VERSION" ] || [ "$LOCK_ROOT_VERSION" != "$PKG_VERSION" ]; then
+  echo "ERROR: package-lock.json ($LOCK_VERSION / $LOCK_ROOT_VERSION) does not match package.json ($PKG_VERSION)." >&2
+  echo "Run: npm version $PKG_VERSION --no-git-tag-version --allow-same-version" >&2
+  exit 1
+fi
+
+echo "Version: $PKG_VERSION (latest tag: ${LATEST_TAG:-none}, lock in sync)"
 
 NODE_VERSION="22.14.0"
 NODE_SHA256_ARM64="e9404633bc02a5162c5c573b1e2490f5fb44648345d64a958b17e325729a5e42"
