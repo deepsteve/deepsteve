@@ -19,7 +19,7 @@ import { init as initProgressBar, start as progressStart, done as progressDone }
 import { init as initHashCommands, beforeSend as hashCommandsBeforeSend, setWaitingForInput as setHashCommandsWaiting, setEnabled as setHashCommandsEnabled } from './hash-commands.js';
 import { init as initOverviewMode, setEnabled as setOverviewModeEnabled, setShortcut as setOverviewModeShortcut, setDefaultLayout as setOverviewDefaultLayout, toggle as toggleOverviewMode, isOverviewActive, updateFocus as updateOverviewFocus, onTabsReordered as onOverviewTabsReordered } from './overview-mode.js';
 import { init as initTerminalSearch, attachSearchAddon, closeIfOpen as closeTerminalSearch } from './terminal-search.js';
-import { init as initContextViews, setEnabled as setContextViewsEnabled, applyFilter as refreshContextFilter, requestNewTabInContext, setContexts as applyServerContexts, setActiveContext as setActiveContextFromPanel, getActiveContextId, activeContextIsEmpty, noteActiveTab } from './context-views.js';
+import { init as initContextViews, setEnabled as setContextViewsEnabled, applyFilter as refreshContextFilter, requestNewTabInContext, setContexts as applyServerContexts, setActiveContext as setActiveContextFromPanel, getActiveContextId, activeContextIsEmpty, noteActiveTab, revealTabContext } from './context-views.js';
 import { nsKey } from './storage-namespace.js';
 
 // Configuration
@@ -1803,6 +1803,7 @@ function initTerminal(id, ws, cwd, initialName, { hasScrollback = false, pending
   // always switch to the new tab immediately.
   if (!restoreActive) {
     switchTo(id);
+    revealTabContext(id); // out-of-context new tab → jump to its context / All (#547)
   }
 
   // Save to both storages — TabSessions is per-tab truth, SessionStore is for cross-tab
@@ -1971,7 +1972,10 @@ function createDisplayTab(id, name, opts = {}) {
 
   TabManager.addTab(id, tabName, tabCallbacks);
   updateEmptyState();
-  if (!opts.restoreActive) switchTo(id);
+  if (!opts.restoreActive) {
+    switchTo(id);
+    revealTabContext(id); // (#547)
+  }
 
   // Forward resize events to iframe
   const ro = new ResizeObserver(([entry]) => {
@@ -3437,7 +3441,9 @@ async function init() {
   // Handle sessions sent from other windows
   WindowManager.onSessionReceived((session) => {
     if (session.type === 'display-tab') {
-      createDisplayTab(session.id, session.name);
+      // Pass the cwd sendToWindow transmits, or the adopted tab loses its
+      // context scoping (#530) and dodges revealTabContext (#547).
+      createDisplayTab(session.id, session.name, { cwd: session.cwd });
     } else {
       createSession(session.cwd, session.id, false, { name: session.name, allowDuplicate: true });
     }

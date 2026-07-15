@@ -16,6 +16,10 @@
  * Chord: Cmd+P then A (Cmd held the whole time) jumps to the "All" view — the A
  * is gated behind Cmd+P so a bare Cmd+A stays native (terminal/input select-all).
  *
+ * Creating a tab outside the active context auto-switches the view to the new
+ * tab's own context — first matching context in rail order, else "All" — via
+ * revealTabContext(), so a fresh tab is never hidden the moment it opens (#547).
+ *
  * Self-contained module following the cmd-tab-switch.js / command-palette.js
  * pattern: init(callbacks), setEnabled(val), plus applyFilter()/
  * requestNewTabInContext() for app.js to call.
@@ -466,6 +470,27 @@ export function noteActiveTab(tabId) {
   if (lastTabByContext[ctx.id] === tabId) return;
   lastTabByContext[ctx.id] = tabId;
   saveLastTabs();
+}
+
+// Auto-switch the view to a newly created tab's context (#547). Called by
+// app.js right after a non-restore tab creation activates the new tab
+// (switchTo already ran, so the tab is active and its cwd is in the sessions
+// map). Only acts when a real (non-All) context is filtering and the new tab
+// is NOT in it: jump to the first context (rail order) whose dirs contain the
+// tab's cwd, else to "All" — so a tab is never hidden the instant it's
+// created. No-ops for global tabs (no cwd → tabInContext true), the All view,
+// restores/background tabs (not called), and before context definitions load
+// (getActiveContext() → null).
+export function revealTabContext(tabId) {
+  if (!enabled) return;
+  const ctx = getActiveContext();
+  if (!ctx) return;
+  const cwd = cb.getTabCwd?.(tabId);
+  if (tabInContext(cwd, ctx)) return;
+  const match = contexts.find(c => tabInContext(cwd, c));
+  selectContext(match ? match.id : null);
+  noteActiveTab(tabId);                        // record as destination's last tab (#541); self-no-ops for All
+  showToast(match ? match.name : 'All tabs');  // explain the jump (mirrors cycleContext)
 }
 
 // Tell app.js (→ the scheduled-tasks panel) which context is active. Half of the
