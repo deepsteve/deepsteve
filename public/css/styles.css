@@ -94,20 +94,31 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
    left sidebar. The context rail stays left of #app-main in both modes. */
 #app-container.vertical-layout #app-main { flex-direction: row; }
 
+/* No height here on purpose: #tabs is a child of #app-main, not of the viewport, so 100vh
+   overflowed every theme that insets the app (body padding + bezel) and the overflow was
+   clipped away — taking the ⚙ with it (#550). #app-main is a flex row in this mode, so its
+   default align-items:stretch already gives #tabs exactly the right height. */
 #app-container.vertical-layout #tabs {
   flex-direction: column;
   align-items: stretch;
   padding: 12px 10px;
   gap: 2px;
-  height: 100vh;
   flex-shrink: 0;
   min-width: 140px;
   border-right: none;
   box-shadow: 1px 0 0 0 var(--ds-border);
 }
 
+/* align-items:stretch is load-bearing — the base rule's `center` is for the horizontal strip, where
+   the cross axis is vertical. Flipped to a column here the cross axis becomes horizontal, so
+   `center` sized #tabs-list to its max-content (the widest tab's full label) and centred it,
+   overhanging this wrapper equally on both sides. overflow:hidden then cropped both ends, so a name
+   lost its start AND its end: `deepsteve-experimental` rendered as `epsteve-experimen` (#550).
+   Stretching constrains the list to the sidebar; .tab-label then shrinks on its own (a flex item's
+   automatic minimum size is 0 once it has overflow:hidden) and ellipsizes at the end. */
 #app-container.vertical-layout #tabs-list-wrapper {
   flex-direction: column;
+  align-items: stretch;
   flex: 1;
   min-height: 0;
   gap: 2px;
@@ -163,20 +174,18 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
   border-radius: 0 3px 3px 0;
 }
 
+/* Always visible (like horizontal mode), never hover-only: there is no hover on touch or on the
+   Quest browser, so a hover-gated close button cannot be reached there at all (#550). */
 #app-container.vertical-layout .tab .close {
   position: absolute;
   right: 8px;
   top: 50%;
   transform: translateY(-50%);
-  opacity: 0;
+  opacity: 0.5;
   background: transparent;
   padding: 2px 4px;
   border-radius: 4px;
   transition: opacity 0.15s ease, background 0.15s ease;
-}
-
-#app-container.vertical-layout .tab:hover .close {
-  opacity: 0.5;
 }
 
 #app-container.vertical-layout .tab .close:hover {
@@ -184,11 +193,15 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
   background: var(--ds-bg-tertiary);
 }
 
+/* flex-shrink:0 across the bottom cluster keeps it at its natural size; #tabs-list-wrapper is the
+   flex:1/min-height:0 item, so the tab list is what shrinks. #tabs itself must NOT get an overflow
+   value — .dropdown-menu escapes it via left:100% and would be clipped (#550). */
 #app-container.vertical-layout #new-btn-group {
   width: 100%;
   margin: 12px 0 0 0;
   padding-top: 12px;
   border-top: 1px solid var(--ds-border);
+  flex-shrink: 0;
 }
 #app-container.vertical-layout #new-btn { flex: 1; border-radius: 8px 0 0 8px; }
 #app-container.vertical-layout #new-btn-dropdown { flex-shrink: 0; border-radius: 0 8px 8px 0; }
@@ -196,6 +209,7 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
 #app-container.vertical-layout .dropdown {
   width: 100%;
   margin-top: 6px;
+  flex-shrink: 0;
 }
 
 #app-container.vertical-layout #issue-btn {
@@ -205,9 +219,13 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
   background: transparent;
   border-radius: 8px;
   transition: background 0.15s ease;
+  flex-shrink: 0;
 }
 #app-container.vertical-layout #issue-btn:hover { background: var(--ds-bg-tertiary); }
 
+/* text-align:left overrides the UA default (buttons centre their label). A centred label that
+   overflows is cropped at BOTH ends, so you lose the start of the word — the part that identifies
+   it — and the ellipsis only marks the tail. Left-aligned, it always reads from the start (#550). */
 #app-container.vertical-layout .dropdown-btn {
   width: 100%;
   border: none;
@@ -217,6 +235,8 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  text-align: left;
+  flex-shrink: 0;
 }
 #app-container.vertical-layout .dropdown-btn:hover { background: var(--ds-bg-tertiary); }
 
@@ -227,6 +247,7 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
   background: transparent;
   border-radius: 8px;
   transition: background 0.15s ease;
+  flex-shrink: 0;
 }
 #app-container.vertical-layout #settings-btn:hover { background: var(--ds-bg-tertiary); }
 
@@ -250,9 +271,10 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
 }
 
 /* Sidebar resizer for vertical layout */
+/* 6px, not 2px — a 2px transparent strip is a fiddly drag target (#550). */
 #app-container.vertical-layout #sidebar-resizer {
   display: block;
-  width: 2px;
+  width: 6px;
   background: transparent;
   cursor: col-resize;
   flex-shrink: 0;
@@ -630,12 +652,12 @@ kbd {
 .mod-back-btn:hover { background: var(--ds-btn-neutral-hover); }
 
 /* Vertical layout mod buttons */
-#app-container.vertical-layout .mod-toolbar-btn { width: 100%; margin: 6px 0 0 0; border: none; background: transparent; border-radius: 8px; transition: background 0.15s ease; }
+#app-container.vertical-layout .mod-toolbar-btn { width: 100%; margin: 6px 0 0 0; border: none; background: transparent; border-radius: 8px; transition: background 0.15s ease; text-align: left; flex-shrink: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #app-container.vertical-layout .mod-toolbar-btn:hover { background: var(--ds-bg-tertiary); }
 #app-container.vertical-layout .mod-toolbar-btn.active { background: var(--ds-accent-blue); }
 #app-container.vertical-layout .mod-back-btn { width: 100%; margin-bottom: 6px; border: none; background: transparent; border-radius: 8px; transition: background 0.15s ease; }
 #app-container.vertical-layout .mod-back-btn:hover { background: var(--ds-bg-tertiary); }
-#app-container.vertical-layout #mods-btn { width: 100%; margin-top: 6px; border: none; background: transparent; border-radius: 8px; transition: background 0.15s ease; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#app-container.vertical-layout #mods-btn { width: 100%; margin-top: 6px; border: none; background: transparent; border-radius: 8px; transition: background 0.15s ease; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; flex-shrink: 0; }
 #app-container.vertical-layout #mods-btn:hover { background: var(--ds-bg-tertiary); }
 
 /* Mod settings button (gear icon in mods dropdown) */

@@ -92,7 +92,9 @@ body {
 
 /* ── Tab bar ─────────────────────────────────────────────────────────── */
 
-#tabs {
+/* Horizontal only: in vertical mode #tabs is a sidebar, where this strip padding just eats
+   into its width (#550). The vertical block below supplies the sidebar's own edge. */
+#app-container:not(.vertical-layout) #tabs {
   padding-top: 6px !important;
   padding-left: 8px !important;
   padding-right: 8px !important;
