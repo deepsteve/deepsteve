@@ -93,6 +93,14 @@ async function startDaemon() {
   for (const k of Object.keys(env)) if (k.startsWith('DEEPSTEVE_')) delete env[k];
   env.PATH = `${path.join(HOME, 'bin')}:${process.env.PATH}`;
 
+  // Isolate tmux's socket: its default socket is per-UID, NOT per-HOME (see CLAUDE.md),
+  // so a scratch-HOME daemon otherwise shares the real user's tmux socket, sees the real
+  // daemon's ds-* sessions, and destroys them as "orphans" on startup (#570). Explicitly
+  // override any TMUX_TMPDIR inherited via {...process.env}.
+  const tmuxTmp = path.join(HOME, 'tmux-tmp');
+  fs.mkdirSync(tmuxTmp, { recursive: true, mode: 0o700 });
+  env.TMUX_TMPDIR = tmuxTmp;
+
   suppressBrowserAutoOpen();
   daemon = spawn('node', ['server.js'], { cwd: REPO_ROOT, env });
   daemon.stdout.on('data', () => {});

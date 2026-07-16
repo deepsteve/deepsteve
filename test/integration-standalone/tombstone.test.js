@@ -113,6 +113,14 @@ async function startDaemon() {
   fs.writeFileSync(path.join(HOME, '.deepsteve', '.restarting'), '');
   env.PATH = `${path.join(HOME, 'bin')}:${process.env.PATH}`;
 
+  // Isolate tmux's socket: its default socket is per-UID, NOT per-HOME (see CLAUDE.md),
+  // so a scratch-HOME daemon otherwise shares the real user's tmux socket, sees the real
+  // daemon's ds-* sessions, and destroys them as "orphans" on startup (#570). Explicitly
+  // override any TMUX_TMPDIR inherited via {...process.env}.
+  const tmuxTmp = path.join(HOME, 'tmux-tmp');
+  fs.mkdirSync(tmuxTmp, { recursive: true, mode: 0o700 });
+  env.TMUX_TMPDIR = tmuxTmp;
+
   // --test-mode: this suite POSTs /api/shells/killall, which the server refuses
   // with 403 unless started in test mode (#562). The env-var form
   // (DEEPSTEVE_TEST_MODE=1) can't be used here because startDaemon strips every
