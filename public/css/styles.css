@@ -103,13 +103,17 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
    overflowed every theme that insets the app (body padding + bezel) and the overflow was
    clipped away — taking the ⚙ with it (#550). #app-main is a flex row in this mode, so its
    default align-items:stretch already gives #tabs exactly the right height. */
-/* --ds-rail-width is the sidebar's ONLY floor, and CSS owns it: layout-manager.js reads it back
-   with getComputedStyle instead of keeping its own copy. #550 shipped a JS `MIN_SIDEBAR_WIDTH =
-   140` *and* a CSS `min-width: 140px` that had to agree by hand — and because the JS floor was
-   applied on drag AND re-applied to the restored value on init, the sidebar could not be taken
-   below 140px by dragging or by editing localStorage. Collapsing was unreachable by construction
-   (#552). Themes can override this var; nothing else may reintroduce a second floor. */
-#app-container.vertical-layout { --ds-rail-width: 48px; }
+/* --ds-rail-width is the ONE floor shared by BOTH collapsible rails — the vertical tab
+   bar (#552) and the context rail (#569) — and CSS owns it: layout-manager.js and
+   context-views.js both read it back with getComputedStyle instead of keeping a copy, so
+   the two rails collapse to identical squares. It lives on the base #app-container (not
+   the .vertical-layout variant) because the context rail exists in both layouts. #550
+   shipped a JS `MIN_SIDEBAR_WIDTH = 140` *and* a CSS `min-width: 140px` that had to agree
+   by hand — and because the JS floor was applied on drag AND re-applied to the restored
+   value on init, the sidebar could not be taken below 140px by dragging or by editing
+   localStorage. Collapsing was unreachable by construction (#552). Themes can override this
+   var; nothing else may reintroduce a second floor. */
+#app-container { --ds-rail-width: 48px; }
 
 #app-container.vertical-layout #tabs {
   flex-direction: column;
@@ -1136,6 +1140,103 @@ kbd {
 .context-add { margin-top: auto; padding: 9px 12px; cursor: pointer; color: var(--ds-accent-green-soft); font-size: 13px; border-top: 1px solid var(--ds-border); }
 .context-add:hover { background: var(--ds-bg-tertiary); }
 .context-hint { padding: 6px 12px 10px; font-size: 10px; color: var(--ds-text-secondary); opacity: 0.7; }
+
+/* Context rail drag handle (#569) — the same 6px col-resize strip as #sidebar-resizer,
+   so the two rails read as one system. It's a flex sibling between #context-rail and
+   #app-main; context-views.js (setSidebar) flips display to block whenever the rail is
+   open, in BOTH layouts (hence gated in JS, not by a .vertical-layout selector). */
+#context-resizer {
+  display: none;
+  width: 6px;
+  flex-shrink: 0;
+  background: transparent;
+  cursor: col-resize;
+  transition: background 0.15s ease;
+}
+#context-resizer:hover { background: rgba(88, 166, 255, 0.5); }
+
+/* Per-context icon square (#569). Copies .tab .tab-icon (see the vertical-tabs icon rail)
+   so a collapsed context rail and a collapsed tab rail are pixel-identical. Hidden by
+   default; shown next to the name in the EXPANDED rail only for a chosen icon (.has-icon),
+   and shown for every row in the collapsed rail (#context-rail.collapsed rules below). */
+.context-row-icon {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  border-radius: 5px;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
+  background: var(--ds-bg-tertiary);
+  color: var(--ds-text-secondary);
+}
+/* An emoji brings its own colour/silhouette; a monogram needs the chip to read as an icon. */
+.context-row-icon.is-emoji { background: transparent; font-size: 15px; }
+.context-row.has-icon .context-row-icon { display: inline-flex; }
+
+/* ── Collapsed context icon rail (#569) ───────────────────────────────────────────────────
+   Dragging the rail down to --ds-rail-width collapses it to icon squares, mirroring the
+   vertical tabs (#552). Chrome COLLAPSES rather than vanishes (#550): the header/hint drop
+   out and "+ New context" shrinks to a centred +, but every hit target survives. */
+#context-rail.collapsed .context-rail-header,
+#context-rail.collapsed .context-hint,
+#context-rail.collapsed .context-empty-note { display: none; }
+
+#context-rail.collapsed .context-list { padding: 0; }
+
+#context-rail.collapsed .context-row {
+  justify-content: center;
+  padding: 8px 0;
+  gap: 0;
+  border-left-width: 0; /* the 3px active accent border would knock the square off centre */
+}
+#context-rail.collapsed .context-row-label,
+#context-rail.collapsed .context-row-count { display: none; }
+
+/* Show a square for every row — chosen icon or derived glyph. */
+#context-rail.collapsed .context-row-icon { display: inline-flex; }
+#context-rail.collapsed .context-row.active .context-row-icon {
+  background: var(--ds-accent-blue);
+  color: var(--ds-bg-primary);
+}
+#context-rail.collapsed .context-row.active .context-row-icon.is-emoji { background: transparent; }
+
+#context-rail.collapsed .context-add {
+  text-align: center;
+  padding: 9px 0;
+  font-size: 0; /* hide the "+ New context" text node; ::before supplies the glyph */
+}
+#context-rail.collapsed .context-add::before { content: '+'; font-size: 18px; line-height: 1; }
+
+/* Icon picker popover (#569) — right-click a context → Set icon…. Reuses .context-menu
+   chrome (position/bg/border/z-index); adds a preset emoji grid + a free-text input. */
+.context-icon-picker { padding: 8px; width: 200px; }
+.context-icon-grid { display: grid; grid-template-columns: repeat(6, 1fr); gap: 2px; margin-bottom: 8px; }
+.context-icon-choice {
+  display: flex; align-items: center; justify-content: center;
+  width: 100%; aspect-ratio: 1; padding: 0;
+  background: transparent; border: 1px solid transparent; border-radius: 5px;
+  cursor: pointer; font-size: 16px; line-height: 1;
+}
+.context-icon-choice:hover { background: var(--ds-bg-tertiary); }
+.context-icon-choice.selected { border-color: var(--ds-accent-blue); }
+.context-icon-input {
+  width: 100%; box-sizing: border-box; margin-bottom: 6px;
+  padding: 5px 6px; font-size: 14px; font-family: system-ui;
+  background: var(--ds-bg-primary); border: 1px solid var(--ds-border);
+  border-radius: 4px; color: var(--ds-text-primary);
+}
+.context-icon-actions { display: flex; gap: 6px; }
+.context-icon-actions button {
+  flex: 1; padding: 5px 8px; font-size: 12px; cursor: pointer;
+  border-radius: 4px; border: 1px solid var(--ds-border);
+  background: var(--ds-bg-tertiary); color: var(--ds-text-primary);
+}
+.context-icon-apply { border-color: var(--ds-accent-blue); }
+.context-icon-actions button:hover { background: var(--ds-border); }
 
 /* Context switch toast */
 .context-toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%); background: var(--ds-bg-secondary); border: 1px solid var(--ds-border); color: var(--ds-text-bright); padding: 8px 16px; border-radius: 8px; font-size: 13px; box-shadow: 0 2px 12px var(--ds-shadow); z-index: 2000; opacity: 0; pointer-events: none; transition: opacity 0.15s; }

@@ -56,6 +56,12 @@ body {
   margin: 0 !important;
 }
 
+/* The context rail's drag handle (#569) is a flex sibling between the rail and
+   #app-main, so the #app-container gap would apply on BOTH of its sides — a ~22px dead
+   zone instead of the intended single 8px seam. Cancel both side-gaps with negative
+   margins so the 6px handle sits as a thin seam flush between the two bezeled panels. */
+#context-resizer { margin: 0 calc(var(--ds-context-gap) * -1) !important; }
+
 /* Inset + round the context rows so a full-width highlight can't sit flush in the
    panel's rounded corners (which read as the row "overflowing" near the top). */
 .context-list { padding: 2px 6px; }
