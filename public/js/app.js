@@ -23,6 +23,7 @@ import { init as initTerminalSearch, attachSearchAddon, closeIfOpen as closeTerm
 import { init as initContextViews, setEnabled as setContextViewsEnabled, applyFilter as refreshContextFilter, requestNewTabInContext, setContexts as applyServerContexts, setActiveContext as setActiveContextFromPanel, getActiveContextId, activeContextIsEmpty, noteActiveTab, revealTabContext, showToast } from './context-views.js';
 import { nsKey } from './storage-namespace.js';
 import { formatShortcut } from './shortcuts.js';
+import { init as initWakeWatch } from './wake-watch.js';
 
 // Configuration
 let maxIssueTitleLength = 25;
@@ -746,6 +747,7 @@ settingsBtn?.addEventListener('click', async () => {
   const currentAutoUpdateApply = settingsData.autoUpdateApply !== undefined ? settingsData.autoUpdateApply : true;
   const currentSessionLogEnabled = !!settingsData.sessionLogEnabled;
   const currentScheduledTasksEnabled = settingsData.scheduledTasksEnabled !== false;
+  const currentPreventSleep = settingsData.preventSleepWhileActive !== false;
   const currentDefaultAgent = settingsData.defaultAgent || 'claude';
   const currentOpencodeBinary = settingsData.opencodeBinary || 'opencode';
   const currentPiBinary = settingsData.piBinary || 'pi';
@@ -950,6 +952,16 @@ settingsBtn?.addEventListener('click', async () => {
         </label>
         <p style="font-size: 11px; color: var(--ds-text-secondary); margin-top: 4px;">
           Master switch for the locally-queued cron. When on, tasks in the Scheduled panel run on this machine at their cron time (local time), with full MCP access. Overdue tasks catch up once at startup. On by default.
+        </p>
+      </div>
+      <div class="settings-section">
+        <h3>Prevent Sleep</h3>
+        <label style="font-size: 13px; color: var(--ds-text-primary); cursor: pointer; display: flex; align-items: center; gap: 8px;">
+          <input type="checkbox" id="prevent-sleep-while-active" ${currentPreventSleep ? 'checked' : ''} style="accent-color: var(--ds-accent-green);">
+          Prevent idle sleep while sessions are open
+        </label>
+        <p style="font-size: 11px; color: var(--ds-text-secondary); margin-top: 4px;">
+          Keeps this Mac from idle-sleeping while any session is open, so agents and connections aren't interrupted (macOS only; closing the lid still sleeps). On by default.
         </p>
       </div>
       <div class="settings-section">
@@ -1383,9 +1395,10 @@ settingsBtn?.addEventListener('click', async () => {
     const autoUpdateApply = overlay.querySelector('#auto-update-apply').checked;
     const sessionLogEnabled = overlay.querySelector('#session-log-enabled').checked;
     const scheduledTasksEnabled = overlay.querySelector('#scheduled-tasks-enabled').checked;
+    const preventSleepWhileActive = overlay.querySelector('#prevent-sleep-while-active').checked;
     const inheritRemoteControl = overlay.querySelector('#inherit-rc-newtab').checked;
     const inheritRemoteControlOnFork = overlay.querySelector('#inherit-rc-fork').checked;
-    const settingsPayload = { shellProfile, maxIssueTitleLength: newMaxTitle, wandPlanMode, wandPromptTemplate, symlinkWorktreeSettings, cmdTabSwitch, cmdTabSwitchHoldMs, commandPaletteEnabled, commandPaletteShortcut, shortcutsHelpEnabled, shortcutsHelpShortcut, hashCommandsEnabled, contextViewsEnabled, metaControlsEnabled, inheritRemoteControl, inheritRemoteControlOnFork, overviewDefaultLayout, enabledAgents, opencodeBinary, piBinary, engine: selectedEngine, scrollbackKB, recentSessionsLimit, autoUpdateCheckEnabled, autoUpdateCheckIntervalHours, autoUpdateApply, sessionLogEnabled, scheduledTasksEnabled, customAgentConfigs };
+    const settingsPayload = { shellProfile, maxIssueTitleLength: newMaxTitle, wandPlanMode, wandPromptTemplate, symlinkWorktreeSettings, cmdTabSwitch, cmdTabSwitchHoldMs, commandPaletteEnabled, commandPaletteShortcut, shortcutsHelpEnabled, shortcutsHelpShortcut, hashCommandsEnabled, contextViewsEnabled, metaControlsEnabled, inheritRemoteControl, inheritRemoteControlOnFork, overviewDefaultLayout, enabledAgents, opencodeBinary, piBinary, engine: selectedEngine, scrollbackKB, recentSessionsLimit, autoUpdateCheckEnabled, autoUpdateCheckIntervalHours, autoUpdateApply, sessionLogEnabled, scheduledTasksEnabled, preventSleepWhileActive, customAgentConfigs };
     let resp = await fetch('/api/settings', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1478,6 +1491,7 @@ function createTmuxAttachSession(tmuxSessionName) {
 
     if (msg.type === 'session') {
       assignedId = msg.id;
+      ws.serverSupportsPing = !!msg.pingPong; // wake-probe capability (#563)
       ws.setSessionId(msg.id);
       initTerminal(msg.id, ws, null, msg.name || tmuxSessionName, { pendingData });
       pendingData = [];
@@ -1512,6 +1526,10 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
   let resolveReady;
   const ready = new Promise(r => { resolveReady = r; });
 
+  // A brand-new session has no tab until the server answers — surface a
+  // "server unreachable" banner if the first connect doesn't land quickly (#563).
+  const pendingCreate = isNew ? trackPendingCreate(ws, resolveReady) : null;
+
   // Buffer terminal data that arrives before the terminal is created
   let pendingData = [];
   let hasScrollback = false;
@@ -1543,6 +1561,7 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
     try {
       if (msg.type === 'session') {
         assignedId = msg.id;
+        if (pendingCreate) pendingCreate.settle();
         // Reject unexpected duplicates: another window already has this session
         if (msg.existingClients > 0 && !opts.allowDuplicate) {
           console.log(`[createSession] Rejecting duplicate session ${msg.id} (${msg.existingClients} existing client(s))`);
@@ -1552,6 +1571,7 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
         }
         // Update reconnect URL to use the assigned session ID
         ws.setSessionId(msg.id);
+        ws.serverSupportsPing = !!msg.pingPong; // wake-probe capability (#563)
         hasScrollback = msg.scrollback || false;
         // If server assigned a different ID than requested, update TabSessions
         if (existingId && msg.id !== existingId) {
@@ -1736,6 +1756,70 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
   };
 
   return ready;
+}
+
+/**
+ * Pending new-session banner (#563).
+ *
+ * A brand-new session is a WS connect: while the server is unreachable the
+ * wrapper's retry loop silently queues the create, and the tab only appears
+ * when a {type:'session'} message finally lands — possibly minutes later, with
+ * zero feedback in between. This page-level banner makes that pending state
+ * visible and cancellable. One banner is shared by all pending creates.
+ */
+const pendingCreates = new Set();
+let pendingBannerEl = null;
+
+function updatePendingBanner() {
+  if (pendingCreates.size === 0) {
+    if (pendingBannerEl) { pendingBannerEl.remove(); pendingBannerEl = null; }
+    return;
+  }
+  if (!pendingBannerEl) {
+    pendingBannerEl = document.createElement('div');
+    pendingBannerEl.className = 'pending-session-banner';
+    const spinner = document.createElement('span');
+    spinner.className = 'loading-banner-spinner';
+    const label = document.createElement('span');
+    label.className = 'pending-session-banner-label';
+    const btn = document.createElement('button');
+    btn.className = 'pending-session-banner-cancel';
+    btn.textContent = 'Cancel';
+    btn.addEventListener('click', () => {
+      for (const p of [...pendingCreates]) p.cancel();
+    });
+    pendingBannerEl.append(spinner, label, btn);
+    document.body.appendChild(pendingBannerEl);
+  }
+  pendingBannerEl.querySelector('.pending-session-banner-label').textContent =
+    pendingCreates.size > 1
+      ? `Server unreachable — ${pendingCreates.size} new sessions will open when it reconnects…`
+      : 'Server unreachable — your new session will open when it reconnects…';
+}
+
+// Arms a delayed banner for a brand-new session's first connect. Returns a
+// handle: settle() when the session arrives, cancel() aborts the attempt.
+function trackPendingCreate(ws, resolveReady) {
+  const entry = {
+    timer: null,
+    settle() {
+      clearTimeout(entry.timer);
+      pendingCreates.delete(entry);
+      updatePendingBanner();
+    },
+    cancel() {
+      entry.settle();
+      ws.close(); // wrapper close also stops the retry loop
+      resolveReady(null);
+    },
+  };
+  // Only surface the banner if the connect hasn't succeeded quickly — a healthy
+  // server answers in milliseconds and needs no UI.
+  entry.timer = setTimeout(() => {
+    pendingCreates.add(entry);
+    updatePendingBanner();
+  }, 1500);
+  return entry;
 }
 
 /**
@@ -3338,6 +3422,10 @@ async function init() {
     sessionStorage.removeItem(nsKey('deepsteve-active-tab'));
     history.replaceState(null, '', window.location.pathname);
   }
+
+  // Wake detection (#563): after a system sleep, probe/kick every WebSocket
+  // immediately instead of waiting for the browser to notice dead sockets.
+  initWakeWatch();
 
   // Auto-reload browser when server restarts (restart.sh, node --watch, etc.)
   initLiveReload({
