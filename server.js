@@ -479,7 +479,8 @@ const SETTINGS_SCHEMA = [
         configDir: String((r && r.configDir) || '').trim(),
       })).filter(r => r.name && r.configDir);
     },
-    logValue: v => v.map(r => r.name).join(',') || '(none)' },
+    logValue: v => v.map(r => r.name).join(',') || '(none)',
+    sideEffect: (val) => provisionAllProfileSkills(val) }, // #543: link skills into new profiles immediately
 ];
 
 // Settings whose default must exist in `settings` but that flow through
@@ -699,6 +700,12 @@ function getShellProfilePath() {
   return p;
 }
 
+// Expand a leading ~ to the home dir (leaves anything else untouched).
+function expandTilde(dir) {
+  if (dir && dir.startsWith('~')) return path.join(os.homedir(), dir.slice(1));
+  return dir;
+}
+
 // Resolve a custom-config-profile id (#537) to its absolute config dir, or null.
 // Tilde-expanded here (once) so the concrete path is what gets persisted/injected —
 // the durable per-session identity is the resolved dir, not the profile id, so a
@@ -708,9 +715,7 @@ function resolveConfigDir(profileId) {
   const list = Array.isArray(settings.customAgentConfigs) ? settings.customAgentConfigs : [];
   const p = list.find(x => x.id === profileId);
   if (!p || !p.configDir) return null;
-  let dir = p.configDir;
-  if (dir.startsWith('~')) dir = path.join(os.homedir(), dir.slice(1));
-  return dir;
+  return expandTilde(p.configDir);
 }
 
 // --- HTTPS certificate management ---
@@ -912,6 +917,10 @@ function broadcastSkills() {
  * @param {{ cols?: number, rows?: number, env?: object }} opts
  */
 function sessionEnv(id, { name, worktree, windowId, cwd, agentType, configDir } = {}) {
+  // Ensure this profile's config dir sees deepsteve skills (#543). Cheap + idempotent
+  // (an lstat that early-returns when already correct); self-heals a profile whose config
+  // dir didn't exist when it was added. Guarded so plain sessions do nothing.
+  if (configDir) provisionProfileSkills(configDir);
   // DEEPSTEVE_CWD is the agent's actual working directory. For agents with native
   // --worktree support (Claude), the PTY is spawned in the main repo but the agent
   // operates in .claude/worktrees/<name>, so resolve to that subdir. The worktree dir
@@ -2898,6 +2907,41 @@ function reconcileSkills() {
   }
 }
 
+// Provision a custom profile's config dir (#537/#543) so it sees the same deepsteve
+// skills as ~/.claude: <configDir>/commands/deepsteve -> SKILL_DEST_DIR.
+// A symlink, not a copy — enable/disable/reconcile keep a single write target.
+function provisionProfileSkills(configDir) {
+  try {
+    if (!configDir || !fs.existsSync(configDir)) return; // profile not initialized yet
+    const dest = path.join(configDir, 'commands', 'deepsteve');
+    let st = null;
+    try { st = fs.lstatSync(dest); } catch {}
+    if (st) {
+      if (!st.isSymbolicLink()) {
+        log(`Profile skills: ${dest} exists and is not ours — leaving it alone`);
+        return;
+      }
+      if (fs.readlinkSync(dest) === SKILL_DEST_DIR) return; // already correct
+      fs.unlinkSync(dest); // stale link → repoint
+    }
+    fs.mkdirSync(SKILL_DEST_DIR, { recursive: true });   // avoid a dangling link
+    fs.mkdirSync(path.dirname(dest), { recursive: true });
+    fs.symlinkSync(SKILL_DEST_DIR, dest);
+    log(`Profile skills: linked ${dest} -> ${SKILL_DEST_DIR}`);
+  } catch (e) {
+    log('Profile skills provisioning failed:', e.message);
+  }
+}
+
+// Provision every custom config profile (#543). Accepts an explicit list (the settings
+// sideEffect passes the incoming value, since settings.customAgentConfigs may not be
+// assigned yet); defaults to the live settings list (startup).
+function provisionAllProfileSkills(profiles) {
+  const list = Array.isArray(profiles) ? profiles
+    : (Array.isArray(settings.customAgentConfigs) ? settings.customAgentConfigs : []);
+  for (const p of list) provisionProfileSkills(expandTilde(p && p.configDir));
+}
+
 // Compare two semver strings (major.minor.patch). Returns -1, 0, or 1.
 function compareSemver(a, b) {
   const pa = a.split('.').map(Number);
@@ -4151,6 +4195,7 @@ app.post('/api/meta-controls-consent', (req, res) => {
 });
 
 reconcileSkills();
+provisionAllProfileSkills(); // #543: link deepsteve skills into every profile's config dir
 
 const server = app.listen(PORT, BIND, () => {
   log(`HTTP server listening on ${BIND}:${PORT} — UI at ${UI_URL}`);
