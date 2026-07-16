@@ -16,6 +16,7 @@
 import { nsChannel } from './storage-namespace.js';
 import { maybeHealAuth, forcePageReload, noteAuthOk } from './auth-heal.js';
 import { onWake } from './wake-watch.js';
+import { waitForServer } from './server-probe.js';
 
 const State = {
   CONNECTED: 'connected',
@@ -97,44 +98,34 @@ export function initLiveReload({ onMessage, onShowRestartConfirm, onShowReloadOv
     };
   }
 
-  // --- Reload: poll until server is back, then force-reload the page ---
+  // --- Reload: wait for the server to come back, then force-reload the page ---
 
-  function pollAndReload() {
-    let reloading = false;
-    setInterval(async () => {
-      if (reloading) return;
-      try {
-        // Public, unauthenticated readiness probe (#536): a cookieless tab (e.g. across the deploy
-        // that first turns auth on) can still detect "server back up" and reload to acquire the cookie.
-        const res = await fetch('/healthz', { cache: 'no-store' });
-        if (res.ok) {
-          reloading = true;
-          console.log('[live-reload] server is back, reloading page...');
-          forcePageReload(() => { reloading = false; });
-        }
-      } catch {}
-    }, 500);
+  // Both paths below use the shared waitForServer() probe (#553) rather than their own
+  // setInterval. It still leans on /healthz being a public, unauthenticated readiness
+  // probe (#536): a cookieless tab (e.g. across the deploy that first turns auth on) can
+  // detect "server back up" and reload to acquire the cookie.
+
+  async function pollAndReload() {
+    for (;;) {
+      await waitForServer();
+      console.log('[live-reload] server is back, reloading page...');
+      // Settles only if forcePageReload's watchdog fires (the meta-refresh didn't
+      // navigate). On success the page is gone and this never resolves — so looping is
+      // just the old code's re-arm, without an interval left running behind it.
+      await new Promise(resolve => forcePageReload(resolve));
+    }
   }
 
-  // --- Silent reconnect: poll until server is back, then reconnect WS ---
+  // --- Silent reconnect: wait for the server to come back, then reconnect WS ---
 
-  function pollAndReconnect() {
-    const interval = setInterval(async () => {
-      try {
-        // Public, unauthenticated readiness probe (#536): a cookieless tab (e.g. across the deploy
-        // that first turns auth on) can still detect "server back up" and reload to acquire the cookie.
-        const res = await fetch('/healthz', { cache: 'no-store' });
-        if (res.ok) {
-          clearInterval(interval);
-          console.log('[live-reload] server is back, reconnecting WS...');
-          // /healthz is unauthenticated, so "server up" says nothing about our cookie. In a
-          // window with zero terminal sessions this socket is the only reconnect loop, so it
-          // must run the auth probe itself or a cookieless tab loops rejected upgrades forever.
-          maybeHealAuth();
-          connect();
-        }
-      } catch {}
-    }, 500);
+  async function pollAndReconnect() {
+    await waitForServer();
+    console.log('[live-reload] server is back, reconnecting WS...');
+    // /healthz is unauthenticated, so "server up" says nothing about our cookie. In a
+    // window with zero terminal sessions this socket is the only reconnect loop, so it
+    // must run the auth probe itself or a cookieless tab loops rejected upgrades forever.
+    maybeHealAuth();
+    connect();
   }
 
   // --- Show modal in every window, first response wins ---
