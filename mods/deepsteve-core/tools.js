@@ -484,6 +484,11 @@ function init(context) {
           worktree: validatedWorktree, windowId,
           name: tabName, initialPrompt: prompt || null,
           planMode: recordedPlanMode,
+          // Explicit fork lineage (#503): a fork embeds the parent's session id in its
+          // .jsonl, so recording the parent here lets the parent's watcher authoritatively
+          // refuse to adopt this child's id (rather than re-inferring it). Persisted via
+          // serializeShellEntry after the saveState() below.
+          forkParent: (fork && caller.claudeSessionId) ? caller.claudeSessionId : null,
           waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now(),
         });
         wireShellOutput(id);

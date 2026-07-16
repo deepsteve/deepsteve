@@ -1279,16 +1279,71 @@ function parseTranscriptLabel(head) {
   return oneLine.length > 80 ? oneLine.slice(0, 79) + '…' : oneLine;
 }
 
-// True if another live shell already owns this claude session id — i.e. it was
-// deliberately spawned by deepsteve (e.g. a fork tab via `--fork-session
-// --session-id <new>`), not a self-fork of `exceptShellId`. Fork files embed the
-// parent's session id, so without this guard the parent's watcher would mistake a
-// child fork's .jsonl for its own fork and steal the child's id (#497).
-function sessionIdOwnedByOtherShell(sessionId, exceptShellId) {
+// True if this claude session id belongs to a shell OTHER than exceptShellId —
+// i.e. deepsteve deliberately spawned it (e.g. a fork tab via `--fork-session
+// --session-id <new>`), so it must never be adopted as exceptShellId's self-fork.
+// Fork files embed the PARENT's id, so without this the parent's watcher would
+// mistake a child fork's .jsonl for its own fork and steal the child's id (#497).
+//
+// (a) another LIVE shell backs this id — covers the just-forked child and, for the
+//     node-pty engine, every case (its children die with the server).
+// (b) a PERSISTED fork child (state.json / tombstone) whose id deepsteve minted.
+//     Load-bearing for the tmux engine: an orphaned tmux fork process survives a
+//     server restart and appends to its .jsonl before its tab is restored, so (a)
+//     can't see it yet — without this the #497 steal returns across restarts. The
+//     explicit `forkParent` lineage (#503) is what makes this authoritative rather
+//     than inferred; pre-#503 entries (no forkParent) simply never match here.
+function claudeSessionOwnedElsewhere(sessionId, exceptShellId) {
   for (const [sid, e] of shells) {
     if (sid !== exceptShellId && e.claudeSessionId === sessionId) return true;
   }
+  for (const [sid, e] of Object.entries(savedState)) {
+    if (sid !== exceptShellId && e && e.forkParent && e.claudeSessionId === sessionId) return true;
+  }
   return false;
+}
+
+// Single authoritative writer for a shell's Claude session id (#503). Every lineage
+// detector — the fs.watch fork detector and the PTY `--resume` matcher — funnels
+// through here, so the ownership invariant and the side effects (trace, planMode
+// reset, persistence) live in ONE place and a new detector can't reintroduce the
+// #497 steal. Returns true iff the id was adopted.
+function adoptClaudeSession(shellId, newId, source) {
+  const e = shells.get(shellId);
+  if (!e || !newId || newId === e.claudeSessionId) return false;
+  // Refuse an id deepsteve deliberately minted for another shell (a fork child):
+  // adopting it would point both tabs at the same session (#497). A genuine
+  // self-fork (/clear, plan approval) mints a brand-new id nobody owns, so it
+  // passes this guard and is adopted correctly.
+  if (claudeSessionOwnedElsewhere(newId, shellId)) {
+    log(`Session ${shellId} ignoring ${newId} — owned by another tab / fork child (${source})`);
+    return false;
+  }
+  traceSession('SESSIONID-CHANGE', { source, shell: shellId, name: e.name || null, worktree: e.worktree || null, cwd: e.cwd, claudeOld: e.claudeSessionId, claude: newId, planModeBefore: !!e.planMode, planModeAfter: false, shuttingDown: !!shuttingDown });
+  log(`Session ${shellId} claude session updated (${source}): ${e.claudeSessionId} → ${newId}`);
+  e.claudeSessionId = newId;
+  // Any fork (self or observed) means the user has left plan mode — don't re-apply
+  // --permission-mode plan on the next restart.
+  e.planMode = false;
+  saveState();
+  recordRecentSession(shellId);  // keep the ring-buffer entry's claudeSessionId current
+  // saveState() is frozen during shutdown and the process may be SIGKILLed before the
+  // final snapshot runs; patch state.json directly so the new id survives a mid-shutdown
+  // kill (the PTY `--resume` line is printed on /exit, i.e. during shutdown).
+  if (shuttingDown) {
+    try {
+      const current = loadStateFile();
+      if (current[shellId]) {
+        current[shellId].claudeSessionId = newId;
+        current[shellId].planMode = false;
+        writeStateFile(current);
+        log(`Session ${shellId} patched state.json during shutdown`);
+      }
+    } catch (err) {
+      console.error('Failed to patch state.json during shutdown:', err.message);
+    }
+  }
+  return true;
 }
 
 function watchClaudeSessionDir(shellId) {
@@ -1314,29 +1369,15 @@ function watchClaudeSessionDir(shellId) {
       const e = shells.get(shellId);
       if (!e || sessionId === e.claudeSessionId) return;
 
-      // Verify the new file references our current session (forks include the parent sessionId)
+      // Verify the new file references our current session (forks embed the parent
+      // sessionId) — this substring match is the self-fork DETECTION signal. The
+      // ownership guard (a fork tab's .jsonl also references us) and every side
+      // effect live in adoptClaudeSession() (#503), so this handler just detects.
       try {
         const newFile = path.join(projectDir, filename);
         const head = fs.readFileSync(newFile, 'utf8').slice(0, 32768);
         if (!head.includes(e.claudeSessionId)) return;
-
-        // A fork tab spawned off this session creates a .jsonl that references our
-        // id, but it belongs to another live shell. Don't claim it as our own fork
-        // (#497) — that would point both tabs at the same session.
-        if (sessionIdOwnedByOtherShell(sessionId, shellId)) {
-          log(`Session ${shellId} ignoring ${sessionId} — owned by another tab (deepsteve fork)`);
-          return;
-        }
-
-        log(`Session ${shellId} detected session fork via fs.watch: ${e.claudeSessionId} → ${sessionId}`);
-        traceSession('SESSIONID-CHANGE', { source: 'fs-watch', shell: shellId, name: e.name || null, worktree: e.worktree || null, cwd: e.cwd, claudeOld: e.claudeSessionId, claude: sessionId, planModeBefore: !!e.planMode, planModeAfter: false });
-        e.claudeSessionId = sessionId;
-        // Forks happen when the user approves a plan, runs /clear, or otherwise
-        // starts a new conversation. In all cases the user has moved past plan
-        // mode, so don't re-apply --permission-mode plan on the next restart.
-        e.planMode = false;
-        saveState();
-        recordRecentSession(shellId);  // keep the ring-buffer entry's claudeSessionId current
+        adoptClaudeSession(shellId, sessionId, 'fs-watch');
       } catch (err) {
         log(`Session ${shellId} fork check failed for ${filename}: ${err.message}, retrying in 200ms`);
         setTimeout(() => {
@@ -1345,16 +1386,7 @@ function watchClaudeSessionDir(shellId) {
             if (!e2 || sessionId === e2.claudeSessionId) return;
             const head = fs.readFileSync(path.join(projectDir, filename), 'utf8').slice(0, 32768);
             if (!head.includes(e2.claudeSessionId)) return;
-            if (sessionIdOwnedByOtherShell(sessionId, shellId)) {
-              log(`Session ${shellId} ignoring ${sessionId} — owned by another tab (deepsteve fork)`);
-              return;
-            }
-            log(`Session ${shellId} detected fork (retry): ${e2.claudeSessionId} → ${sessionId}`);
-            traceSession('SESSIONID-CHANGE', { source: 'fs-watch-retry', shell: shellId, name: e2.name || null, worktree: e2.worktree || null, cwd: e2.cwd, claudeOld: e2.claudeSessionId, claude: sessionId, planModeBefore: !!e2.planMode, planModeAfter: false });
-            e2.claudeSessionId = sessionId;
-            e2.planMode = false;
-            saveState();
-            recordRecentSession(shellId);
+            adoptClaudeSession(shellId, sessionId, 'fs-watch-retry');
           } catch (retryErr) {
             log(`Session ${shellId} fork retry failed for ${filename}: ${retryErr.message}`);
           }
@@ -1615,35 +1647,10 @@ function wireShellOutput(id) {
       const plain = stripEscapeSequences(data);
       const resumeMatch = plain.match(/claude --resume ([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/);
       if (resumeMatch) {
-        const newSessionId = resumeMatch[1];
-        // Don't adopt an id another live shell already owns (e.g. a fork tab); that
-        // would point both tabs at the same session (#497).
-        if (newSessionId !== e.claudeSessionId && !sessionIdOwnedByOtherShell(newSessionId, id)) {
-          log(`Session ${id} claude session updated: ${e.claudeSessionId} → ${newSessionId}`);
-          traceSession('SESSIONID-CHANGE', { source: 'pty-output', shell: id, name: e.name || null, worktree: e.worktree || null, cwd: e.cwd, claudeOld: e.claudeSessionId, claude: newSessionId, planModeBefore: !!e.planMode, planModeAfter: false, shuttingDown: !!shuttingDown });
-          e.claudeSessionId = newSessionId;
-          // Session ID changed (fork on /clear, plan approved, etc.) — user has
-          // left the plan-mode conversation, so don't re-apply --permission-mode
-          // plan on the next restart.
-          e.planMode = false;
-          saveState();
-          // During shutdown, saveState() is blocked by stateFrozen and the process may be
-          // killed before the final save block runs. Write the updated ID to disk immediately
-          // so it survives even if the process is killed mid-shutdown.
-          if (shuttingDown) {
-            try {
-              const current = loadStateFile();
-              if (current[id]) {
-                current[id].claudeSessionId = newSessionId;
-                current[id].planMode = false;
-                writeStateFile(current);
-                log(`Session ${id} patched state.json during shutdown`);
-              }
-            } catch (err) {
-              console.error('Failed to patch state.json during shutdown:', err.message);
-            }
-          }
-        }
+        // adoptClaudeSession() owns the ownership guard, planMode reset, persistence,
+        // and the mid-shutdown state.json patch (this line is printed on /exit, i.e.
+        // during shutdown) — #503.
+        adoptClaudeSession(id, resumeMatch[1], 'pty-output');
       }
       // #558 audit: classify this chunk's BELs (bare vs OSC-terminator) BEFORE
       // lastBelTime is bumped, so msSinceBel reflects the gap since the previous
@@ -2091,6 +2098,7 @@ function recordRecentSession(id) {
     worktree: e.worktree || null,
     name: e.name || null,
     planMode: !!e.planMode,
+    forkParent: e.forkParent || null,  // carry lineage through tombstone→prune→recents→restore (#503)
     engineType: e.engineType || 'node-pty',
     createdAt: e.createdAt || Date.now(),
     updatedAt: Date.now(),
@@ -2111,7 +2119,7 @@ let stateFrozen = false;  // Set during shutdown to prevent onExit handlers from
 // field it omits is silently wiped for every live shell on a graceful restart
 // (configDir was lost this way, breaking #537 profile resumes — #542).
 function serializeShellEntry(entry) {
-  return { cwd: entry.cwd, claudeSessionId: entry.claudeSessionId, agentType: entry.agentType || 'claude', configDir: entry.configDir || null, engineType: entry.engineType || 'node-pty', worktree: entry.worktree || null, name: entry.name || null, planMode: !!entry.planMode, lastActivity: entry.lastActivity || null, createdAt: entry.createdAt || null, windowId: entry.windowId || null };
+  return { cwd: entry.cwd, claudeSessionId: entry.claudeSessionId, agentType: entry.agentType || 'claude', configDir: entry.configDir || null, engineType: entry.engineType || 'node-pty', worktree: entry.worktree || null, name: entry.name || null, planMode: !!entry.planMode, forkParent: entry.forkParent || null, lastActivity: entry.lastActivity || null, createdAt: entry.createdAt || null, windowId: entry.windowId || null };
 }
 
 // #561: a session record is never hard-deleted by any runtime path. Every close
@@ -3865,6 +3873,7 @@ app.post('/api/recent-sessions/:key/restore', (req, res) => {
     worktree: r.worktree,
     name: r.name,
     planMode: r.planMode,
+    forkParent: r.forkParent || null,  // preserve fork lineage across a recents restore (#503)
     createdAt: r.createdAt,
     windowId: null,
   };
@@ -4644,7 +4653,7 @@ function handleWsConnection(ws, req) {
       // deliverToWindow() it triggered would land nowhere (#551).
       const restoredWindowId = windowId || restored.windowId || null;
       spawnSession(sessionEngine, id, savedAgentType, startArgs, cwd, { ...ptySize, env: sessionEnv(id, { name: restoredName, worktree: savedWorktree, windowId: restoredWindowId, cwd, agentType: savedAgentType, configDir: restored.configDir }) });
-      shells.set(id, { clients: new Set(), cwd, claudeSessionId, agentType: savedAgentType, configDir: restored.configDir || null, engine: sessionEngine, engineType: restoredEngineType, worktree: savedWorktree, name: restoredName, planMode: savedPlanMode, restored: true, waitingForInput: false, lastActivity: Date.now(), createdAt: restored.createdAt || Date.now(), windowId: restoredWindowId });
+      shells.set(id, { clients: new Set(), cwd, claudeSessionId, agentType: savedAgentType, configDir: restored.configDir || null, engine: sessionEngine, engineType: restoredEngineType, worktree: savedWorktree, name: restoredName, planMode: savedPlanMode, forkParent: restored.forkParent || null, restored: true, waitingForInput: false, lastActivity: Date.now(), createdAt: restored.createdAt || Date.now(), windowId: restoredWindowId });
       wireShellOutput(id);
       recordRecentSession(id);  // bump recency on same-browser reconnect + cross-browser restore
       if (agentConfig.supportsSessionWatch) watchClaudeSessionDir(id);
@@ -4690,7 +4699,10 @@ function handleWsConnection(ws, req) {
           traceSession('SPAWN', { path: tracePath, shell: id, name: entry.name || null, worktree: entry.worktree || null, cwd, claudeOld: entry.claudeSessionId, claude: newClaudeSessionId || entry.claudeSessionId, planMode: !!entry.planMode, elapsedMs: elapsed });
           sessionEngine.destroy(id);
           spawnSession(sessionEngine, id, savedAgentType, respawnArgs, cwd, { ...ptySize, env: sessionEnv(id, { name: entry.name, worktree: entry.worktree, windowId: entry.windowId, cwd, agentType: savedAgentType, configDir: entry.configDir }) });
-          if (newClaudeSessionId) entry.claudeSessionId = newClaudeSessionId;
+          if (newClaudeSessionId) {
+            entry.claudeSessionId = newClaudeSessionId;
+            entry.forkParent = null;  // fresh id starts an unrelated conversation — drop stale lineage (#503)
+          }
           entry.killed = false;
           entry.scrollback = [];
           entry.scrollbackSize = 0;
@@ -4772,7 +4784,7 @@ function handleWsConnection(ws, req) {
     // until the next periodic save (#551). It also gives the agent a correct
     // DEEPSTEVE_WINDOW_ID, which sessionEnv otherwise reported as ''.
     spawnSession(sessionEngine, id, agentType, spawnArgs, worktreeCwd, { cols: initialCols, rows: initialRows, env: sessionEnv(id, { name, worktree, windowId, cwd: worktreeCwd, agentType, configDir }) });
-    shells.set(id, { clients: new Set(), cwd: worktreeCwd, claudeSessionId: sessionId, agentType, configDir: configDir || null, engine: sessionEngine, engineType, worktree: worktree || null, windowId, name: name || null, planMode: spawnedPlanMode, waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now() });
+    shells.set(id, { clients: new Set(), cwd: worktreeCwd, claudeSessionId: sessionId, agentType, configDir: configDir || null, engine: sessionEngine, engineType, worktree: worktree || null, windowId, name: name || null, planMode: spawnedPlanMode, forkParent: parentClaude, waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now() });
     wireShellOutput(id);
     emitSessionOpen(id);
     recordRecentSession(id);
