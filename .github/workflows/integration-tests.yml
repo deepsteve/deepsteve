@@ -19,10 +19,20 @@ jobs:
   # Headless frontend module tests (test/unit/*). No Docker, no server — they stub
   # the few globals the modules touch and import them directly, so this finishes in
   # seconds. Kept a separate job so a unit failure is legible on its own.
+  #
+  # `ws` is the one dependency the suite actually imports: ws-client-probe.test.js
+  # (#563) runs the wake probe against a real WebSocket server, and the #562 guard
+  # tests spawn test/helpers/ws-client.js, which requires it at import.
+  # --ignore-scripts skips node-pty's node-gyp build (npm still installs the full
+  # prod graph alongside ws, but nothing here imports node-pty), keeping this a
+  # seconds job instead of a minutes one.
   unit:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+
+      - name: Install deps without native builds (ws is all the suite imports)
+        run: npm install --no-save --no-audit --no-fund --ignore-scripts
 
       - name: Run unit tests
         run: npm run test:unit
