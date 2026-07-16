@@ -168,6 +168,7 @@ function TaskCard({ task, onEdit }) {
                 <span>{absTime(r.startedAt)}</span>
                 <StatusBadge status={r.status} />
                 <span style={{ opacity: 0.6 }}>{r.sessionId}</span>
+                {r.worktree ? <span style={{ opacity: 0.5 }}>{r.worktree}{r.worktreeRemoved ? '' : ' (kept)'}</span> : null}
               </div>
               {r.summary ? <div style={{ fontSize: 11, color: C.dim, opacity: 0.85, marginLeft: 2 }}>{r.summary}</div> : null}
             </div>
@@ -198,6 +199,7 @@ function TaskForm({ task, projects, onClose }) {
   const [planMode, setPlanMode] = useState(!!initial.planMode);
   const [keepOpen, setKeepOpen] = useState(!!initial.keepOpen);
   const [keepOpenOnFailure, setKeepOpenOnFailure] = useState(!!initial.keepOpenOnFailure);
+  const [isolateWorktree, setIsolateWorktree] = useState(initial.isolateWorktree !== false); // default on (#565)
   const [once, setOnce] = useState(!!initial.once);
   const [mode, setMode] = useState(initForm.mode);
   const [fld, setFld] = useState(initForm.fld);
@@ -212,7 +214,7 @@ function TaskForm({ task, projects, onClose }) {
     if (!title.trim()) return setErr('Title is required');
     if (!prompt.trim()) return setErr('Prompt is required');
     const proj = project === '__custom__' ? customPath.trim() : project;
-    const body = { title: title.trim(), prompt: prompt.trim(), cron: cronStr, once, project: proj, agentType, planMode, keepOpen, keepOpenOnFailure };
+    const body = { title: title.trim(), prompt: prompt.trim(), cron: cronStr, once, project: proj, agentType, planMode, keepOpen, keepOpenOnFailure, isolateWorktree };
     setSaving(true);
     try {
       if (task && task.id) await api('PUT', `/api/scheduled-tasks/${task.id}`, body);
@@ -291,6 +293,12 @@ function TaskForm({ task, projects, onClose }) {
         </label>
       </div>
       <div style={{ fontSize: 11, color: C.dim, marginTop: 4 }}>By default the tab auto-closes when the agent reports finished.</div>
+      <div style={{ display: 'flex', gap: 12, marginTop: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+        <label style={{ fontSize: 12, color: C.dim, opacity: agentType !== 'claude' ? 0.5 : 1 }} title={agentType !== 'claude' ? 'Worktree isolation only applies to claude (native --worktree support).' : ''}>
+          <input type="checkbox" checked={isolateWorktree} disabled={agentType !== 'claude'} onChange={(e) => setIsolateWorktree(e.target.checked)} /> run in a disposable worktree
+        </label>
+      </div>
+      <div style={{ fontSize: 11, color: C.dim, marginTop: 4 }}>Each run gets its own git worktree/branch, removed after the run unless there is uncommitted or unmerged work. Skipped when the project is not a git repo.</div>
       {agentType !== 'claude' && <div style={{ fontSize: 11, color: C.amber, marginTop: 4 }}>Note: only claude is wired for deepsteve MCP tools (self-report + auto-close).</div>}
 
       {err && <div style={{ color: C.red, fontSize: 12, marginTop: 8 }}>{err}</div>}

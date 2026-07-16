@@ -79,6 +79,60 @@ function gitRoot(dir) {
   }
 }
 
+// True when dir is inside a non-bare git work tree. gitRoot() can't answer this:
+// it returns its input on failure, indistinguishable from "dir IS the root".
+function isGitRepo(dir) {
+  try {
+    return execSync("zsh -l -c 'git rev-parse --is-inside-work-tree'",
+      { cwd: dir, encoding: 'utf8', timeout: 5000 }).trim() === 'true';
+  } catch { return false; }
+}
+
+// launchd-started daemons have a minimal PATH; login zsh matches gitRoot/ensureWorktree.
+function zshExec(cmd, cwd) {
+  return execSync(`zsh -l -c '${cmd}'`, { cwd, encoding: 'utf8', timeout: 15000 }).trim();
+}
+
+// Remove a per-run scheduled worktree and delete its branch — conservatively (#565):
+// - `git worktree remove` WITHOUT --force: git refuses when the worktree has
+//   modified/untracked files, so uncommitted work is never deleted (worktree AND
+//   branch kept, for inspection).
+// - `git branch -d` (never -D): git refuses when the branch has unmerged commits,
+//   so committed-but-unmerged work keeps its branch.
+// Claude's native --worktree <name> names the branch worktree-<name>.
+// Never throws. Returns { removed, branchDeleted }; `exec` is injectable for tests.
+function cleanupWorktree(repoRoot, name, exec = zshExec) {
+  const res = { removed: false, branchDeleted: false };
+  if (!repoRoot || !name) return res;
+  const wtPath = path.join(repoRoot, '.claude', 'worktrees', name);
+  if (fs.existsSync(wtPath)) {
+    // Claude locks its worktree while running ("claude session <name> (pid ...)")
+    // and an abnormal exit leaves the lock behind. Both cleanup call sites only
+    // fire once that claude process is dead (onExit = the PTY exited; the sweep
+    // requires the shell gone + a closed tombstone), so the lock is always stale
+    // here — release it or `git worktree remove` refuses even a clean worktree.
+    try { exec(`git worktree unlock "${wtPath}"`, repoRoot); } catch {} // not locked is fine
+    try {
+      exec(`git worktree remove "${wtPath}"`, repoRoot);
+      res.removed = true;
+    } catch (e) {
+      log_(`worktree ${name} kept (uncommitted changes or locked): ${String(e.message || e).split('\n')[0]}`);
+      return res; // keep the branch too while the worktree stays inspectable
+    }
+  } else {
+    // Dir already gone (run died before claude created it, or removed by hand).
+    // Prune stale metadata so a registered-but-missing worktree can't pin the branch.
+    try { exec('git worktree prune', repoRoot); } catch {}
+    res.removed = true;
+  }
+  const branch = `worktree-${name}`;
+  try { exec(`git rev-parse --verify --quiet "refs/heads/${branch}"`, repoRoot); }
+  catch { res.branchDeleted = true; return res; } // branch never created — nothing to delete
+  try { exec(`git branch -d "${branch}"`, repoRoot); res.branchDeleted = true; }
+  catch { log_(`worktree ${name} removed; branch ${branch} kept (unmerged commits)`); }
+  return res;
+}
+
 // The project a scheduled run should use. An explicit path wins (canonicalized);
 // otherwise inherit the calling session's repo root.
 function resolveProject(rawProject, shellId) {
@@ -147,16 +201,35 @@ function nextRunFor(task, from) {
   return safeNextRun(task.cron, from);
 }
 
+// Isolation contract (#565): tell the agent its work area is disposable and
+// that keeping work requires merging/pushing BEFORE it self-reports finished.
+function worktreeContract(iso) {
+  return [
+    `You are working in a DISPOSABLE git worktree created just for this run:`,
+    `- working directory (worktree): ${iso.path}`,
+    `- branch: ${iso.branch} (branched from the repo's current HEAD)`,
+    `- main checkout: ${iso.repoRoot} — never edit files there directly.`,
+    ``,
+    `When this run ends the worktree is removed and the branch deleted, unless there is`,
+    `uncommitted work (worktree kept) or unmerged commits (branch kept).`,
+    `If this run produces anything worth keeping, commit it and merge it back into the`,
+    `repo's main branch (or push the branch / open a PR) BEFORE you finish.`,
+  ].join('\n');
+}
+
 // Wrap a task's prompt with the scheduled-run contract: tell the agent this is an
 // automated scheduled run and have it self-report via the MCP tools so the run
-// record reflects real work rather than the session lifecycle (#525).
-function scheduledRunPrompt(task) {
+// record reflects real work rather than the session lifecycle (#525). When the
+// run is isolated in a per-run worktree (#565), `iso` adds the merge-back contract.
+function scheduledRunPrompt(task, iso) {
   return [
     `⏰ This is an automated scheduled task run: "${task.title}" (task ${task.id}).`,
     ``,
+    ...(iso ? [worktreeContract(iso), ``] : []),
     `Before you start, call the \`scheduled_task_started\` tool to mark this run as started.`,
     `When you're done, call \`scheduled_task_finished\` with a one-line \`summary\` of what you did`,
     `(pass \`success: false\` if the task could not be completed). These record that the work actually ran.`,
+    ...(iso ? [`Merge/push anything worth keeping BEFORE calling \`scheduled_task_finished\` — the tab may auto-close and the worktree is reclaimed right after.`] : []),
     ``,
     `Your task:`,
     task.prompt,
@@ -199,28 +272,47 @@ function runTask(task, reason) {
   const cwd = task.project && fs.existsSync(task.project) ? task.project : os.homedir();
   const id = randomUUID().slice(0, 8);
   const claudeSessionId = randomUUID();
-  const spawnArgs = getSpawnArgs(agentType, { sessionId: claudeSessionId, shellId: id, planMode: !!task.planMode });
+  // Per-run worktree isolation (#565): claude-native only. The name embeds the
+  // run's shellId, so it's unique per run (a kept/leaked worktree from a previous
+  // run can never collide with or block the next fire) and links run <-> worktree
+  // for cleanup. Claude creates .claude/worktrees/<name> + branch worktree-<name>
+  // itself; the PTY still spawns in the repo root (entry.cwd stays the repo root,
+  // sessionPaths/sessionEnv resolve the subdir). `cwd === task.project` excludes
+  // the homedir fallback above.
+  let worktree = null;
+  if (task.isolateWorktree !== false && agentConfig.supportsWorktree
+      && task.project && cwd === task.project && isGitRepo(cwd)) {
+    worktree = ctx.validateWorktree(`scheduled-${id}`);
+  }
+  const spawnArgs = getSpawnArgs(agentType, { sessionId: claudeSessionId, shellId: id, planMode: !!task.planMode, worktree });
   const sessionEngine = getDefaultEngine();
   const engineType = sessionEngine.constructor.name === 'TmuxEngine' ? 'tmux' : 'node-pty';
   const name = `⏰ ${task.title}`;
 
-  log(`[scheduled] running "${task.title}" (${task.id}) id=${id} agent=${agentType} engine=${engineType} cwd=${cwd} reason=${reason}`);
+  log(`[scheduled] running "${task.title}" (${task.id}) id=${id} agent=${agentType} engine=${engineType} cwd=${cwd} worktree=${worktree || 'none'} reason=${reason}`);
   spawnSession(sessionEngine, id, agentType, spawnArgs, cwd, {
-    cols: 120, rows: 40, env: sessionEnv(id, { name, windowId: null, cwd, agentType }),
+    cols: 120, rows: 40, env: sessionEnv(id, { name, windowId: null, cwd, agentType, worktree }),
   });
   shells.set(id, {
     clients: new Set(), cwd, claudeSessionId, agentType,
-    engine: sessionEngine, engineType, worktree: null, windowId: null,
+    engine: sessionEngine, engineType, worktree, windowId: null,
     name, waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now(), prefill: true,
   });
   wireShellOutput(id);
   emitSessionOpen(id);
   // Deliver the task prompt. For MCP-capable agents (claude today), wrap it with
   // the scheduled-run contract so the agent self-reports start/finish (#525);
-  // agents without deepsteve MCP get the raw prompt as before.
+  // agents without deepsteve MCP get the raw prompt as before — except that an
+  // isolated run must always be told its work area is disposable (#565).
   if (task.prompt) {
     const mcpWired = ctx.mcpConfigArgs(agentType, id).length > 0;
-    deliverPromptWhenReady(id, mcpWired ? scheduledRunPrompt(task) : task.prompt);
+    const iso = worktree ? {
+      path: path.join(cwd, '.claude', 'worktrees', worktree),
+      branch: `worktree-${worktree}`, repoRoot: cwd,
+    } : null;
+    deliverPromptWhenReady(id, mcpWired
+      ? scheduledRunPrompt(task, iso)
+      : (iso ? `${worktreeContract(iso)}\n\n${task.prompt}` : task.prompt));
   }
   if (agentConfig.supportsSessionWatch) watchClaudeSessionDir(id);
   sessionEngine.onExit(id, () => {
@@ -236,6 +328,14 @@ function runTask(task, reason) {
         run.status = 'ended'; run.endedAt = Date.now(); saveTasks(); broadcastTasks();
       }
       ctx.handleShellGone(id);
+      // PTY is dead and the tab is gone (auto-close after scheduled_task_finished,
+      // manual close of a kept-open tab, or a crash-'ended' run): reclaim the
+      // per-run worktree. Conservative — see cleanupWorktree. The isShuttingDown
+      // guard above is what preserves it across a daemon restart for resume.
+      if (worktree) {
+        const res = cleanupWorktree(cwd, worktree);
+        if (run) { run.worktreeRemoved = !!res.removed; saveTasks(); broadcastTasks(); }
+      }
     }
   });
   saveState();
@@ -243,7 +343,7 @@ function runTask(task, reason) {
   const now = Date.now();
   task.lastRun = now;
   task.runs = task.runs || [];
-  task.runs.unshift({ startedAt: now, sessionId: id, status: 'queued', endedAt: null, agentStartedAt: null, success: null, summary: null });
+  task.runs.unshift({ startedAt: now, sessionId: id, status: 'queued', endedAt: null, agentStartedAt: null, success: null, summary: null, worktree });
   if (task.runs.length > MAX_RUNS) task.runs.length = MAX_RUNS;
   saveTasks();
   broadcastTasks();
@@ -307,17 +407,55 @@ function runCatchUp() {
 }
 function log_(msg) { if (ctx) ctx.log(`[scheduled] ${msg}`); }
 
+// Worktrees the sweep already tried and couldn't remove (dirty/unmerged) this
+// process lifetime — don't retry every tick (log spam); a daemon restart retries.
+const sweepAttempted = new Set();
+
+// Reclaim scheduled-* worktrees whose onExit cleanup never fired (#565): the
+// restore path installs its own onExit after a daemon restart, so a run that
+// finishes post-restore leaks its worktree. Conservative: only terminal-status
+// runs whose tab is gone AND whose state.json record is closed (a kept-open tab
+// the user may still resurrect for inspection stays untouched).
+function sweepLeakedWorktrees() {
+  if (!ctx) return;
+  let changed = false;
+  for (const task of tasks) {
+    if (!task.project) continue;
+    for (const run of task.runs || []) {
+      if (!run.worktree || run.worktreeRemoved) continue;
+      if (ACTIVE_STATUSES.has(run.status)) continue;      // may resume + self-report later
+      if (ctx.shells.has(run.sessionId)) continue;        // tab still open (keepOpen)
+      const saved = ctx.getSavedSession ? ctx.getSavedSession(run.sessionId) : null;
+      if (saved && !saved.closed) continue;               // restorable — don't pull the worktree out from under it
+      const key = `${task.id}:${run.sessionId}`;
+      if (sweepAttempted.has(key)) continue;
+      if (!fs.existsSync(path.join(task.project, '.claude', 'worktrees', run.worktree))) {
+        run.worktreeRemoved = true; changed = true; continue; // nothing on disk — stop re-checking
+      }
+      sweepAttempted.add(key);
+      if (cleanupWorktree(task.project, run.worktree).removed) { run.worktreeRemoved = true; changed = true; }
+    }
+  }
+  if (changed) { saveTasks(); broadcastTasks(); }
+}
+
 function startScheduler() {
   if (schedulerStarted) return;
   schedulerStarted = true;
-  setTimeout(() => { try { runCatchUp(); } catch (e) { log_(`catch-up error: ${e.message}`); } }, CATCHUP_DELAY_MS);
-  setInterval(() => { try { tick(); } catch (e) { log_(`tick error: ${e.message}`); } }, TICK_MS);
+  setTimeout(() => {
+    try { runCatchUp(); } catch (e) { log_(`catch-up error: ${e.message}`); }
+    try { sweepLeakedWorktrees(); } catch (e) { log_(`worktree sweep error: ${e.message}`); }
+  }, CATCHUP_DELAY_MS);
+  setInterval(() => {
+    try { tick(); } catch (e) { log_(`tick error: ${e.message}`); }
+    try { sweepLeakedWorktrees(); } catch (e) { log_(`worktree sweep error: ${e.message}`); }
+  }, TICK_MS);
   log_(`scheduler started (${tasks.length} task(s))`);
 }
 
 // --- CRUD used by both MCP tools and REST ---------------------------------
 
-function createTask({ title, prompt, cron: cronStr, once, project, agentType, planMode, enabled, createdBy, keepOpen, keepOpenOnFailure }) {
+function createTask({ title, prompt, cron: cronStr, once, project, agentType, planMode, enabled, createdBy, keepOpen, keepOpenOnFailure, isolateWorktree }) {
   cron.parseCron(cronStr); // throws on invalid — caller catches (a one-shot still uses a cron)
   const now = Date.now();
   const task = {
@@ -332,6 +470,9 @@ function createTask({ title, prompt, cron: cronStr, once, project, agentType, pl
     // failed run) is set. Both default off. See scheduled_task_finished (#525).
     keepOpen: !!keepOpen,
     keepOpenOnFailure: !!keepOpenOnFailure,
+    // Per-run worktree isolation (#565), default ON — legacy tasks (field absent)
+    // also isolate. Only takes effect for claude on a git-repo project; see runTask.
+    isolateWorktree: isolateWorktree !== false,
     cron: cronStr.trim(),
     // One-shot (#528): fires at the next cron match then retires (firedAt set). firedAt
     // stays null on a manual Run now — only the scheduled/catch-up fire retires it.
@@ -362,6 +503,7 @@ function updateTask(id, fields) {
   if (fields.planMode !== undefined) task.planMode = !!fields.planMode;
   if (fields.keepOpen !== undefined) task.keepOpen = !!fields.keepOpen;
   if (fields.keepOpenOnFailure !== undefined) task.keepOpenOnFailure = !!fields.keepOpenOnFailure;
+  if (fields.isolateWorktree !== undefined) task.isolateWorktree = !!fields.isolateWorktree;
   if (fields.once !== undefined) task.once = !!fields.once;
   if (fields.enabled !== undefined) task.enabled = !!fields.enabled;
   // Recompute next run from any schedule/enable change. A one-shot that has already
@@ -411,6 +553,7 @@ function taskView(task) {
     planMode: !!task.planMode,
     keepOpen: !!task.keepOpen,
     keepOpenOnFailure: !!task.keepOpenOnFailure,
+    isolateWorktree: task.isolateWorktree !== false,
     enabled: !!task.enabled,
     nextRun: task.nextRun,
     lastRun: task.lastRun,
@@ -456,9 +599,10 @@ function init(context) {
         plan_mode: z.boolean().optional().describe('Start the agent in plan mode (default false).'),
         keep_open: z.boolean().optional().describe('Keep the tab open after each run finishes instead of auto-closing (default false).'),
         keep_open_on_failure: z.boolean().optional().describe('Keep the tab open when a run fails, even if auto-close is on (default false).'),
+        isolate_worktree: z.boolean().optional().describe('Run each fire in a disposable git worktree/branch (scheduled-<runId>) so it never touches the main checkout; cleaned up after the run when clean/merged. Only applies to claude on a git-repo project. Default true.'),
         enabled: z.boolean().optional().describe('Whether the schedule is active (default true).'),
       },
-      handler: async ({ title, prompt, cron: cronStr, once, project, agent_type, plan_mode, keep_open, keep_open_on_failure, enabled }, extra) => {
+      handler: async ({ title, prompt, cron: cronStr, once, project, agent_type, plan_mode, keep_open, keep_open_on_failure, isolate_worktree, enabled }, extra) => {
         let task;
         try {
           task = createTask({
@@ -466,6 +610,7 @@ function init(context) {
             project: resolveProject(project, callerShellId(extra)),
             agentType: agent_type, planMode: plan_mode, enabled,
             keepOpen: keep_open, keepOpenOnFailure: keep_open_on_failure,
+            isolateWorktree: isolate_worktree,
             createdBy: callerShellId(extra),
           });
         } catch (e) {
@@ -512,9 +657,10 @@ function init(context) {
         plan_mode: z.boolean().optional(),
         keep_open: z.boolean().optional().describe('Keep the tab open after each run finishes instead of auto-closing.'),
         keep_open_on_failure: z.boolean().optional().describe('Keep the tab open when a run fails, even if auto-close is on.'),
+        isolate_worktree: z.boolean().optional().describe('Run each fire in a disposable git worktree/branch that is cleaned up after the run when clean/merged (claude + git-repo projects only).'),
         enabled: z.boolean().optional(),
       },
-      handler: async ({ id, title, prompt, cron: cronStr, once, project, agent_type, plan_mode, keep_open, keep_open_on_failure, enabled }, extra) => {
+      handler: async ({ id, title, prompt, cron: cronStr, once, project, agent_type, plan_mode, keep_open, keep_open_on_failure, isolate_worktree, enabled }, extra) => {
         const fields = {};
         if (title !== undefined) fields.title = title;
         if (prompt !== undefined) fields.prompt = prompt;
@@ -525,6 +671,7 @@ function init(context) {
         if (plan_mode !== undefined) fields.planMode = plan_mode;
         if (keep_open !== undefined) fields.keepOpen = keep_open;
         if (keep_open_on_failure !== undefined) fields.keepOpenOnFailure = keep_open_on_failure;
+        if (isolate_worktree !== undefined) fields.isolateWorktree = isolate_worktree;
         if (enabled !== undefined) fields.enabled = enabled;
         let task;
         try { task = updateTask(id, fields); }
@@ -629,6 +776,7 @@ function registerRoutes(app, context) {
         title: b.title, prompt: b.prompt, cron: b.cron, once: b.once, project: projectRoot,
         agentType: b.agentType, planMode: b.planMode, enabled: b.enabled,
         keepOpen: b.keepOpen, keepOpenOnFailure: b.keepOpenOnFailure,
+        isolateWorktree: b.isolateWorktree,
       });
       res.json({ task });
     } catch (e) {
@@ -671,4 +819,6 @@ function registerRoutes(app, context) {
   // GET/POST/DELETE /api/contexts live in server.js. The panel edits groups there.
 }
 
-module.exports = { init, registerRoutes };
+// The mod loader only uses init/registerRoutes; the extra named exports are for
+// unit tests (test/unit/scheduled-worktree.test.js).
+module.exports = { init, registerRoutes, cleanupWorktree, isGitRepo, scheduledRunPrompt, worktreeContract };
