@@ -113,7 +113,11 @@ async function startDaemon() {
   fs.writeFileSync(path.join(HOME, '.deepsteve', '.restarting'), '');
   env.PATH = `${path.join(HOME, 'bin')}:${process.env.PATH}`;
 
-  daemon = spawn('node', ['server.js'], { cwd: REPO_ROOT, env });
+  // --test-mode: this suite POSTs /api/shells/killall, which the server refuses
+  // with 403 unless started in test mode (#562). The env-var form
+  // (DEEPSTEVE_TEST_MODE=1) can't be used here because startDaemon strips every
+  // DEEPSTEVE_* var above, so the CLI flag is the only path in. (#571)
+  daemon = spawn('node', ['server.js', '--test-mode'], { cwd: REPO_ROOT, env });
   daemon.stdout.on('data', d => { daemonLog += d.toString(); });
   daemon.stderr.on('data', d => { daemonLog += d.toString(); });
 
