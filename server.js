@@ -164,6 +164,70 @@ function traceSession(event, fields) {
 const logRotator = createLogRotator({ targets: defaultLogPaths() });
 logRotator.start();
 
+// --- Waiting-classifier audit (#558 research instrumentation) ---
+// Records every waitingForInput decision, BEL classification, and a periodic sample
+// of all shells as JSONL, so the flag can be compared offline against what was
+// actually on screen. Gated by the default-off `waitingAuditEnabled` setting, read
+// live at every call site. Best-effort: a logging failure must never affect the
+// data path.
+const WAITING_AUDIT_FILE = path.join(os.homedir(), '.deepsteve', 'waiting-audit.jsonl');
+const WAITING_AUDIT_MAX_BYTES = 64 * 1024 * 1024; // runaway guard if left enabled
+let waitingAuditBytes = -1; // -1 = not yet initialized from the existing file
+let waitingAuditCapped = false;
+function auditWaiting(event, id, e, extra = {}) {
+  if (!settings.waitingAuditEnabled || waitingAuditCapped) return;
+  try {
+    if (waitingAuditBytes < 0) {
+      try { waitingAuditBytes = fs.statSync(WAITING_AUDIT_FILE).size; } catch { waitingAuditBytes = 0; }
+    }
+    const now = Date.now();
+    const line = JSON.stringify({
+      ts: now, event, shell: id,
+      agent: e.agentType || 'claude',
+      name: e.name || null,
+      waiting: !!e.waitingForInput,
+      msSinceBel: e.lastBelTime ? now - e.lastBelTime : null,
+      msSinceInput: e.lastInputTime ? now - e.lastInputTime : null,
+      msSinceActivity: e.lastActivity ? now - e.lastActivity : null,
+      ...extra,
+    }) + '\n';
+    fs.appendFileSync(WAITING_AUDIT_FILE, line);
+    waitingAuditBytes += line.length;
+    if (waitingAuditBytes > WAITING_AUDIT_MAX_BYTES) {
+      waitingAuditCapped = true;
+      log('[waiting-audit] byte cap reached — dropping further events');
+    }
+  } catch { /* best-effort */ }
+}
+// Human-readable tail of what's on the session's screen right now (ANSI-stripped,
+// space runs collapsed, newlines kept — JSON.stringify escapes them).
+function auditScreenTail(e, n) {
+  try {
+    return stripEscapeSequences((e.scrollback || []).join('').slice(-8192))
+      .replace(/[ \t]+/g, ' ')
+      .slice(-n);
+  } catch { return null; }
+}
+// Classify each BEL in a chunk as bare (a real terminal bell) or an OSC string
+// terminator (e.g. a title update `\x1b]0;…\x07`). The production classifier at
+// the lastBelTime site counts BOTH as bells — this taxonomy exists to measure how
+// often that conflation happens. OSC-open state carries across chunk boundaries
+// via e._auditOscOpen (ESC \ = ST also closes it). Returns counts plus the raw
+// bytes preceding the last bare BEL for forensics.
+function auditClassifyBels(e, data) {
+  let bare = 0, osc = 0, ctx = null;
+  let oscOpen = !!e._auditOscOpen;
+  const re = /\x1b\]|\x1b\\|\x07/g;
+  let m;
+  while ((m = re.exec(data)) !== null) {
+    if (m[0] === '\x1b]') oscOpen = true;
+    else if (m[0] === '\x1b\\') oscOpen = false;
+    else if (oscOpen) { osc++; oscOpen = false; }
+    else { bare++; ctx = data.slice(Math.max(0, m.index - 48), m.index); }
+  }
+  e._auditOscOpen = oscOpen;
+  return { bare, osc, ctx };
+}
 const STATE_FILE = path.join(os.homedir(), '.deepsteve', 'state.json');
 const DISPLAY_TABS_DIR = path.join(os.homedir(), '.deepsteve', 'display-tabs');
 const SCREENSHOTS_DIR = path.join(os.homedir(), '.deepsteve', 'screenshots');
@@ -389,6 +453,10 @@ const SETTINGS_SCHEMA = [
   { name: 'autoUpdateCheckIntervalHours', type: 'number', default: 6, clamp: [1, 168] },
   { name: 'autoUpdateApply',            type: 'boolean', default: true },
   { name: 'sessionLogEnabled',          type: 'boolean', default: false },
+  // Waiting-classifier audit (#558 research): logs every waitingForInput decision +
+  // periodic samples to ~/.deepsteve/waiting-audit.jsonl. Server-side research
+  // instrumentation, default off; read live at each call site (no restart to toggle).
+  { name: 'waitingAuditEnabled',        type: 'boolean', default: false, broadcast: false },
   // Hold a caffeinate -i power assertion while any session is open (#563).
   // Server-side behavior only, so broadcast:false; macOS only (no-op elsewhere).
   { name: 'preventSleepWhileActive',    type: 'boolean', default: true, broadcast: false },
@@ -1322,7 +1390,10 @@ function submitToShell(id, text, eng) {
   // resulting work as "waiting for input" until its next completion BEL. Covers
   // auto-submitted initialPrompts and meta_type as well as graceful /exit.
   const e = shells.get(id);
-  if (e) e.lastInputTime = Date.now();
+  if (e) {
+    e.lastInputTime = Date.now();
+    auditWaiting('submit', id, e, { len: text.length });
+  }
   const engine = eng || getEngine(id);
   engine.write(id, text);
   // Returns a Promise that resolves once the deferred Enter has been written, so
@@ -1435,6 +1506,7 @@ function drainPromptQueue(id) {
   const belSinceInput = e.lastBelTime && e.lastBelTime >= (e.lastInputTime || 0);
   if (e.waitingForInput) {
     e.waitingForInput = false;
+    auditWaiting('transition', id, e, { to: false, via: 'deliver-immediate' });
     log(`[deliverPrompt] id=${id} submitting immediately (was waiting)`);
     setTimeout(submitAndNotify, 500);
   } else if (config.initialPromptDelay > 0) {
@@ -1445,6 +1517,7 @@ function drainPromptQueue(id) {
     // hasn't fired yet. Submit immediately.
     log(`[deliverPrompt] id=${id} BEL fired ${Date.now() - e.lastBelTime}ms ago, submitting immediately`);
     e.waitingForInput = false;
+    auditWaiting('transition', id, e, { to: false, via: 'deliver-bel-recent' });
     setTimeout(submitAndNotify, 500);
   } else {
     log(`[deliverPrompt] id=${id} installing onIdleOnce for next idle transition`);
@@ -1572,6 +1645,14 @@ function wireShellOutput(id) {
           }
         }
       }
+      // #558 audit: classify this chunk's BELs (bare vs OSC-terminator) BEFORE
+      // lastBelTime is bumped, so msSinceBel reflects the gap since the previous
+      // bell. The scan runs on every chunk (not just BEL-carrying ones) to keep
+      // the cross-chunk OSC-open carry flag correct.
+      if (settings.waitingAuditEnabled) {
+        const bels = auditClassifyBels(e, data);
+        if (bels.bare + bels.osc > 0) auditWaiting('bels', id, e, bels);
+      }
       // Track lastBelTime for deliverPromptWhenReady fallback
       if (data.includes('\x07')) {
         e.lastBelTime = Date.now();
@@ -1593,6 +1674,13 @@ function wireShellOutput(id) {
       // Any output resets the timer and clears waiting state.
       if (e.waitingForInput) {
         e.waitingForInput = false;
+        // #558 audit: `chunk` records WHAT cleared the flag (spinner redraw vs
+        // real output) — flicker forensics.
+        auditWaiting('transition', id, e, {
+          to: false, via: 'output',
+          chunk: stripEscapeSequences(data).slice(0, 120),
+          screen: auditScreenTail(e, 300),
+        });
         const stateMsg = JSON.stringify({ type: 'state', waiting: false });
         e.clients.forEach((c) => c.send(stateMsg));
       }
@@ -1619,11 +1707,30 @@ function wireShellOutput(id) {
         const bellSinceInput = e.lastBelTime && e.lastBelTime >= (e.lastInputTime || 0);
         if (bellSinceInput || !bellEver) {
           e.waitingForInput = true;
+          auditWaiting('transition', id, e, {
+            to: true, via: 'idle-timer',
+            bellEver, bellSinceInput: !!bellSinceInput,
+            screen: auditScreenTail(e, 1500),
+          });
           const stateMsg = JSON.stringify({ type: 'state', waiting: true });
           e.clients.forEach((c) => c.send(stateMsg));
+        } else {
+          // #558 audit: the idle timer fired and decided NOT to flip (a bell exists
+          // but predates the last input). Invisible in production — but this is the
+          // stuck-false smoking gun: nothing can flip the flag back without a fresh
+          // BEL, even if the agent is sitting at its prompt.
+          auditWaiting('idle-no-flip', id, e, {
+            bellEver, bellSinceInput: false,
+            screen: auditScreenTail(e, 1500),
+          });
         }
         fireOnce();
       }, 2000);
+    } else if (settings.waitingAuditEnabled) {
+      // #558 audit: emitsBel=false sessions (terminal/pi/hermes/opencode) are never
+      // classified at all — record their bells to measure what that exclusion hides.
+      const bels = auditClassifyBels(e, data);
+      if (bels.bare + bels.osc > 0) auditWaiting('bel-nonclaude', id, e, bels);
     }
     e.clients.forEach((c) => c.send(data));
   };
@@ -3291,7 +3398,7 @@ app.delete('/api/screenshots/:id', (req, res) => {
 });
 
 app.get('/api/shells', (req, res) => {
-  const active = [...shells.entries()].map(([id, entry]) => ({ id, pid: (entry.engine || ptyEngine).getPid(id), cwd: entry.cwd, name: entry.name || null, agentType: entry.agentType || 'claude', configDir: entry.configDir || null, engineType: entry.engineType || 'node-pty', status: 'active', lastActivity: entry.lastActivity || null, connectedClients: entry.clients.size }));
+  const active = [...shells.entries()].map(([id, entry]) => ({ id, pid: (entry.engine || ptyEngine).getPid(id), cwd: entry.cwd, name: entry.name || null, agentType: entry.agentType || 'claude', configDir: entry.configDir || null, engineType: entry.engineType || 'node-pty', status: 'active', lastActivity: entry.lastActivity || null, connectedClients: entry.clients.size, waitingForInput: !!entry.waitingForInput, lastBelTime: entry.lastBelTime || null, lastInputTime: entry.lastInputTime || null }));
   const saved = Object.entries(savedState).map(([id, entry]) => ({ id, cwd: entry.cwd, name: entry.name || null, agentType: entry.agentType || 'claude', configDir: entry.configDir || null, engineType: entry.engineType || 'node-pty', status: entry.closed ? 'closed' : 'saved', lastActivity: entry.lastActivity || null, closedAt: entry.closedAt || null, closeReason: entry.closeReason || null, connectedClients: 0 }));
   res.json({ shells: [...active, ...saved] });
 });
@@ -3552,7 +3659,13 @@ app.get('/api/shells/:id/state', (req, res) => {
   const id = req.params.id;
   const entry = shells.get(id);
   if (!entry) return res.status(404).json({ error: 'Shell not found' });
-  res.json({ waitingForInput: entry.waitingForInput || false });
+  res.json({
+    waitingForInput: entry.waitingForInput || false,
+    lastBelTime: entry.lastBelTime || null,
+    lastInputTime: entry.lastInputTime || null,
+    lastActivity: entry.lastActivity || null,
+    agentType: entry.agentType || 'claude',
+  });
 });
 
 // Best-effort: the command running in a plain-terminal session right now, or
@@ -4105,6 +4218,18 @@ const powerAssertion = createPowerAssertion({
 // six spawn sites plus mod context helpers, and ≤5s of acquire/release latency is
 // irrelevant on sleep timescales.
 setInterval(() => powerAssertion.sync(), 5000).unref();
+
+// #558 audit sampler: transitions alone cannot reveal a STUCK state (the idle
+// timer is armed only by output, so a wrong `false` persists silently). A 5s
+// sample of every shell — flag, timing deltas, screen tail — makes stuck states
+// visible, and covers emitsBel=false sessions the classifier never touches.
+// Reads the setting each tick (same pattern as the power-assertion sync above).
+setInterval(() => {
+  if (!settings.waitingAuditEnabled) return;
+  for (const [id, e] of shells) {
+    auditWaiting('sample', id, e, { screen: auditScreenTail(e, 300) });
+  }
+}, 5000).unref();
 
 // Grace timer for a session whose last client socket closed. Fires only after
 // DETACH_GRACE_MS of daemon-awake, client-absent time: if the daemon recently woke
@@ -4741,10 +4866,23 @@ function handleWsConnection(ws, req) {
     entry.lastActivity = Date.now();
     entry.lastInputTime = Date.now();
     clearTimeout(entry.idleTimer);
+    const clearedWaiting = !!entry.waitingForInput;
     if (entry.waitingForInput) {
       entry.waitingForInput = false;
       const stateMsg = JSON.stringify({ type: 'state', waiting: false });
       entry.clients.forEach((c) => c.send(stateMsg));
+    }
+    // #558 audit: keystroke-resolution bell→input ordering, debounced to 1/s per
+    // shell (typing bursts collapse into a `burst` suppressed-count).
+    if (settings.waitingAuditEnabled) {
+      const now = Date.now();
+      if (!entry._auditLastInputLog || now - entry._auditLastInputLog >= 1000) {
+        auditWaiting('input', id, entry, { len: str.length, clearedWaiting, burst: entry._auditInputBurst || 0 });
+        entry._auditLastInputLog = now;
+        entry._auditInputBurst = 0;
+      } else {
+        entry._auditInputBurst = (entry._auditInputBurst || 0) + 1;
+      }
     }
     getEngine(id).write(id, str);
   });
