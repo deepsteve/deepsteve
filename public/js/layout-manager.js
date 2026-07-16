@@ -62,19 +62,23 @@ function applyLayout() {
   const tabs = document.getElementById('tabs');
   const toggleBtn = document.getElementById('layout-toggle');
 
+  // The button's icon is NOT set here. Both state icons ship in index.html and styles.css picks one
+  // off the `vertical-layout` class this function is already setting — the icon is derived from the
+  // state rather than mirrored into it. Mirroring is what gave one character three owners (`⬜`
+  // here, `▤` in the else branch, and a third copy in the markup), which is the same
+  // constants-that-must-agree shape as the 140px floor #552 opened with. The title stays: it is a
+  // real string, not a state mirror, and it is the button's accessible name.
   if (currentLayout === 'vertical') {
     // vertical-layout first: --ds-rail-width is declared on that class, so railWidth() reads ''
     // until it is on.
     container.classList.add('vertical-layout');
     tabs.style.width = sidebarWidth + 'px';
     container.classList.toggle('icon-rail', sidebarWidth <= railWidth());
-    toggleBtn.textContent = '⬜'; // Icon for vertical mode (click to go horizontal)
     toggleBtn.title = 'Switch to horizontal tabs';
   } else {
     container.classList.remove('vertical-layout');
     container.classList.remove('icon-rail');
     tabs.style.width = '';
-    toggleBtn.textContent = '▤'; // Icon for horizontal mode (click to go vertical)
     toggleBtn.title = 'Switch to vertical tabs';
   }
 }

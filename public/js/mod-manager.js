@@ -11,6 +11,7 @@
  */
 
 import { nsKey } from './storage-namespace.js';
+import { tabIcon } from './tab-manager.js';
 
 const STORAGE_KEY = nsKey('deepsteve-enabled-mods'); // Set of enabled mod IDs
 const KNOWN_MODS_KEY = nsKey('deepsteve-known-mods'); // All mod IDs known at last save
@@ -1651,10 +1652,28 @@ function _createToolbarButton(mod) {
 
   const label = mod.toolbar?.label || mod.name;
   const btn = document.createElement('button');
-  btn.className = 'mod-toolbar-btn';
-  btn.textContent = label;
+  // .nav-btn gives these the same [icon][label] shape as the rest of #tabs' chrome, which is the
+  // whole reason the collapsed rail needs no rule of its own for them: it drops .btn-label and the
+  // icon is what's left. Before #552 these had no rail treatment at all and crammed a full mod name
+  // into 36px. Hiding them instead would be #550's unreachable-⚙ in a different hat.
+  btn.className = 'mod-toolbar-btn nav-btn';
   btn.title = mod.description || label;
+  btn.setAttribute('aria-label', label);
   btn.dataset.modId = mod.id;
+
+  // A mod's icon is derived, not authored — tabIcon() is the same derivation the tab rail uses
+  // (leading emoji if there is one, else a monogram), so `⏰ Scheduled Tasks` shows its clock and
+  // `Tasks` shows a T. It returns a character rather than the inline SVG the rest of the chrome
+  // carries, hence .is-text.
+  const { glyph, isEmoji } = tabIcon(label);
+  const iconEl = document.createElement('span');
+  iconEl.className = `btn-icon is-text${isEmoji ? ' is-emoji' : ''}`;
+  iconEl.setAttribute('aria-hidden', 'true');
+  iconEl.textContent = glyph;
+  const labelEl = document.createElement('span');
+  labelEl.className = 'btn-label';
+  labelEl.textContent = label;
+  btn.append(iconEl, labelEl);
 
   btn.addEventListener('click', () => {
     if (activeViewId === mod.id) {

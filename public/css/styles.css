@@ -67,6 +67,42 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
 .layout-btn { padding: 4px 8px; background: var(--ds-bg-tertiary); border: 1px solid var(--ds-border); color: var(--ds-text-secondary); border-radius: 4px; cursor: pointer; font-size: 14px; margin-right: 8px; line-height: 1; }
 .layout-btn:hover { background: var(--ds-border); color: var(--ds-text-primary); }
 
+/* ── Nav buttons: the tab strip's chrome ───────────────────────────────────────────────────────
+   Every chrome button in #tabs — #context-toggle, #layout-toggle, #new-btn, #issue-btn, the
+   .dropdown-btns, #settings-btn, and mod-manager's .mod-toolbar-btns — is an [icon][label] pair,
+   the same shape .tab already uses. The icon is unconditional: it is the one thing the button
+   always has, in every layout. Only the LABEL varies. Making the icon conditional too is what
+   turns this into a per-button branch, which is how the cluster ended up in three alignments and
+   two insets (#552). Icons are inline SVG in index.html; here they are only sized. */
+.nav-btn { display: inline-flex; align-items: center; gap: 6px; }
+.btn-icon { display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; width: 16px; height: 16px; }
+.btn-icon > svg { width: 100%; height: 100%; display: block; }
+/* .mod-toolbar-btn's icon is a character from tabIcon(), not an SVG — a mod's identity is derived
+   from its name, not authored. Sized into the same 16px box so the rail's chrome column stays one
+   width. No chip behind the monogram, unlike .tab .tab-icon: these are chrome, and the bare mark
+   matches the SVGs beside them. */
+.btn-icon.is-text { font-size: 11px; font-weight: 600; line-height: 1; }
+.btn-icon.is-text.is-emoji { font-size: 13px; font-weight: 400; }
+
+/* The label drops in exactly two places: the horizontal strip, for buttons it has always identified
+   by their glyph alone (.is-glyph — those pixels belong to #tabs-list), and the collapsed rail, for
+   everyone. display:none rather than the `font-size: 0` this replaced — font-size is a TEXT trick,
+   so any theme setting `font-size: …!important` on these buttons defeated it. themes/ascii-art.css
+   does exactly that, and under it the 48px rail rendered the full word "Sessions" crammed into 36px
+   with the rail's glyph on top of it. display:none on a span can't be reached by a font-size
+   override, so the bug is gone by construction rather than patched for one theme (#552). */
+#app-container:not(.vertical-layout) .nav-btn.is-glyph > .btn-label,
+#app-container.vertical-layout.icon-rail .nav-btn > .btn-label { display: none; }
+
+/* The layout is already a class on #app-container, so the toggle's icon is DERIVED from it rather
+   than mirrored into it. Both icons ship in the markup and this picks one. Until #552 the glyph had
+   three owners: layout-manager.js set `▤` in one branch and `⬜` in the other, and index.html
+   carried a third copy — which is the same two-constants-that-must-agree shape as the 140px floor
+   this issue opened with. */
+#app-container .icon-layout-v,
+#app-container.vertical-layout .icon-layout-h { display: none; }
+#app-container.vertical-layout .icon-layout-v { display: inline-flex; }
+
 /* Sidebar resizer - hidden in horizontal mode */
 #sidebar-resizer { display: none; }
 
@@ -206,9 +242,60 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
   background: var(--ds-bg-tertiary);
 }
 
-/* flex-shrink:0 across the bottom cluster keeps it at its natural size; #tabs-list-wrapper is the
+/* ── Bottom cluster ───────────────────────────────────────────────────────────────────────────
+   One shape, one alignment, one inset. Before #552 this was four rows in three alignments and two
+   insets: #new-btn-group was a flex row, #issue-btn took the UA default (centred) because nothing
+   ever set text-align on it, .dropdown-btn was text-align:left at a 10px inset, and #settings-btn
+   was left at an 8px one — by luck, because it also carries .dropdown-btn while keeping its own
+   base `padding: 0 8px`. Declaring the shape ONCE on .nav-btn is what makes them agree; every
+   per-id rule below is spacing BETWEEN rows, never inside one.
+   flex-shrink:0 across the cluster keeps it at its natural size; #tabs-list-wrapper is the
    flex:1/min-height:0 item, so the tab list is what shrinks. #tabs itself must NOT get an overflow
    value — .dropdown-menu escapes it via left:100% and would be clipped (#550). */
+#app-container.vertical-layout .nav-btn {
+  width: 100%;
+  /* The 10px inset and the 16px .btn-icon are chosen together, against the rail's geometry rather
+     than by eye. #tabs' rail padding is `12px 6px`, leaving 36px of content: a centred 16px icon
+     lands at x=10 within it, centre 18 — and .tab's 22px rail chip lands at 7, centre 18 too. So
+     in the collapsed rail the nav icons and the tab chips share one centre line, which is the
+     alignment you actually see. Matching that 10px inset here keeps the icon at the same offset
+     from #tabs' content edge when expanded, so collapsing reads as the labels dropping away rather
+     than the icons jumping. (#tabs' own padding still goes 10px → 6px, so there is a 4px page-x
+     shift; that is invisible next to the 152px the sidebar itself moves.) */
+  padding: 8px 10px;
+  gap: 8px;
+  border: none;
+  background: transparent;
+  border-radius: 8px;
+  /* text-align:left overrides the UA default (buttons centre their label). A centred label that
+     overflows is cropped at BOTH ends, so you lose the start of the word — the part that identifies
+     it — and the ellipsis only marks the tail. Left-aligned, it always reads from the start (#550). */
+  text-align: left;
+  font-size: 13px;   /* neutralises #settings-btn's base font-size: 20px */
+  line-height: 1;
+  color: var(--ds-text-secondary);
+  flex-shrink: 0;
+  transition: background 0.15s ease;
+}
+#app-container.vertical-layout .nav-btn:hover {
+  background: var(--ds-bg-tertiary);
+  color: var(--ds-text-primary);
+}
+
+/* The label is the only thing that can overflow, so it is the only thing that ellipsizes. Putting
+   overflow on the BUTTON (as .dropdown-btn did) clips the icon out of its slot instead. min-width:0
+   is load-bearing: a flex item's automatic minimum size is its content, so without it the label
+   refuses to shrink and shoves the icon off the left edge. */
+#app-container.vertical-layout .nav-btn > .btn-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Spacing between rows. #engines/#automations/#sessions are wrapped in a .dropdown div while
+   #issue/#mods/#settings are bare siblings, so the margin has to go on whatever is actually #tabs'
+   own child. */
 #app-container.vertical-layout #new-btn-group {
   width: 100%;
   margin: 12px 0 0 0;
@@ -216,53 +303,25 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
   border-top: 1px solid var(--ds-border);
   flex-shrink: 0;
 }
-#app-container.vertical-layout #new-btn { flex: 1; border-radius: 8px 0 0 8px; }
+#app-container.vertical-layout .dropdown { width: 100%; margin-top: 6px; flex-shrink: 0; }
+#app-container.vertical-layout #issue-btn,
+#app-container.vertical-layout #mods-btn,
+#app-container.vertical-layout #settings-btn { margin: 6px 0 0 0; }
+
+/* The green CTA is the one row that isn't a quiet ghost button, so it opts back out of .nav-btn's
+   transparent fill and muted colour. flex:1's flex-basis:0 wins over .nav-btn's width:100% on the
+   main axis. Both hover and active have to be restated at id specificity — .nav-btn:hover is
+   (1,3,0) and would otherwise paint bg-tertiary over the green while the button is held down. */
+#app-container.vertical-layout #new-btn {
+  flex: 1;
+  min-width: 0;
+  border-radius: 8px 0 0 8px;
+  background: var(--ds-accent-green);
+  color: #fff;
+}
+#app-container.vertical-layout #new-btn:hover { background: var(--ds-accent-green-hover); color: #fff; }
+#app-container.vertical-layout #new-btn:active { background: var(--ds-accent-green-active); }
 #app-container.vertical-layout #new-btn-dropdown { flex-shrink: 0; border-radius: 0 8px 8px 0; }
-
-#app-container.vertical-layout .dropdown {
-  width: 100%;
-  margin-top: 6px;
-  flex-shrink: 0;
-}
-
-#app-container.vertical-layout #issue-btn {
-  width: 100%;
-  margin-top: 6px;
-  border: none;
-  background: transparent;
-  border-radius: 8px;
-  transition: background 0.15s ease;
-  flex-shrink: 0;
-}
-#app-container.vertical-layout #issue-btn:hover { background: var(--ds-bg-tertiary); }
-
-/* text-align:left overrides the UA default (buttons centre their label). A centred label that
-   overflows is cropped at BOTH ends, so you lose the start of the word — the part that identifies
-   it — and the ellipsis only marks the tail. Left-aligned, it always reads from the start (#550). */
-#app-container.vertical-layout .dropdown-btn {
-  width: 100%;
-  border: none;
-  background: transparent;
-  border-radius: 8px;
-  transition: background 0.15s ease;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  text-align: left;
-  flex-shrink: 0;
-}
-#app-container.vertical-layout .dropdown-btn:hover { background: var(--ds-bg-tertiary); }
-
-#app-container.vertical-layout #settings-btn {
-  width: 100%;
-  margin: 6px 0 0 0;
-  border: none;
-  background: transparent;
-  border-radius: 8px;
-  transition: background 0.15s ease;
-  flex-shrink: 0;
-}
-#app-container.vertical-layout #settings-btn:hover { background: var(--ds-bg-tertiary); }
 
 #app-container.vertical-layout .dropdown-menu {
   left: 100%;
@@ -329,32 +388,25 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
   z-index: 1;
 }
 
-/* font-size:0 hides the text node; ::before supplies the glyph. Lets the cluster collapse with no
-   markup change — the buttons carry bare text nodes today. These are stand-in text glyphs; #552
-   tracks replacing the whole set (including ⬜/▤) with inline SVG. */
-#app-container.vertical-layout.icon-rail #new-btn-group,
-#app-container.vertical-layout.icon-rail .dropdown,
-#app-container.vertical-layout.icon-rail #issue-btn,
-#app-container.vertical-layout.icon-rail .dropdown-btn {
-  width: 100%;
-}
-#app-container.vertical-layout.icon-rail .dropdown-btn {
-  font-size: 0;
-  text-align: center;
+/* The cluster keeps its rows and drops its words. One rule, because every row is now the same
+   shape — this replaces `font-size: 0` plus five per-id ::before glyph rules, i.e. a second icon
+   set living in CSS that had to be kept in step with the markup's by hand. The width:100% this
+   block also used to restate is already on .nav-btn/.dropdown/#new-btn-group above; .icon-rail
+   only ever adds a class, so those rules apply here too. */
+#app-container.vertical-layout.icon-rail .nav-btn {
+  justify-content: center;
   padding-left: 0;
   padding-right: 0;
+  gap: 0;
 }
-#app-container.vertical-layout.icon-rail .dropdown-btn::before {
-  font-size: 15px;
-  line-height: 1;
-}
-#app-container.vertical-layout.icon-rail #engines-btn::before   { content: '◈'; }
-/* NOT ⚡ — #issue-btn is already a bare ⚡, and collapsed there is no label to tell them apart. */
-#app-container.vertical-layout.icon-rail #automations-btn::before { content: '▶'; }
-#app-container.vertical-layout.icon-rail #sessions-btn::before  { content: '☰'; }
-#app-container.vertical-layout.icon-rail #mods-btn::before      { content: '⊞'; }
-#app-container.vertical-layout.icon-rail #settings-btn::before   { content: '⚙'; }
 #app-container.vertical-layout.icon-rail #new-btn { border-radius: 8px; }
+
+/* The muted active-context label (context-views.js injects it as #tabs' own child, right after
+   #context-toggle, so align-items:stretch makes it a full-width row) is a word, and 36px is not a
+   place for a word — it renders as a cropped fragment of a context name. Hiding it is not the
+   unreachable-⚙ of #550: it is a readout, not a control, and the ◧ directly above it still opens
+   the rail that shows the whole thing. */
+#app-container.vertical-layout.icon-rail #context-indicator { display: none; }
 
 #app-container.vertical-layout #content-row {
   flex: 1;
@@ -593,6 +645,14 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
   background: var(--ds-accent-blue);
   box-shadow: 0 0 0 1px var(--ds-bg-primary);
 }
+/* Anchored to the ⚙, not to the button's right edge — vertical makes #settings-btn width:100%, so
+   `right: 3px` put the dot ~180px away from the icon it is supposed to badge. The icon sits at the
+   same 10px inset in both the expanded sidebar and the rail, so one rule covers both. */
+#app-container.vertical-layout #settings-btn.update-available::after {
+  top: 6px;
+  right: auto;
+  left: 20px;
+}
 
 /* Auto-apply update toast */
 .auto-apply-toast {
@@ -748,14 +808,16 @@ kbd {
 .mod-back-btn { padding: 4px 10px; background: var(--ds-btn-neutral); border: none; color: var(--ds-accent-blue); border-radius: 4px; cursor: pointer; font-size: 13px; user-select: none; }
 .mod-back-btn:hover { background: var(--ds-btn-neutral-hover); }
 
-/* Vertical layout mod buttons */
-#app-container.vertical-layout .mod-toolbar-btn { width: 100%; margin: 6px 0 0 0; border: none; background: transparent; border-radius: 8px; transition: background 0.15s ease; text-align: left; flex-shrink: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-#app-container.vertical-layout .mod-toolbar-btn:hover { background: var(--ds-bg-tertiary); }
-#app-container.vertical-layout .mod-toolbar-btn.active { background: var(--ds-accent-blue); }
+/* Vertical layout mod buttons. These are .nav-btn too (mod-manager.js builds them with an icon
+   derived from tabIcon()), so the shape/width/fill/ellipsis all come from the .nav-btn rules and
+   only the spacing and the active state are left here. `margin: 6px 0 0 0` also resets the base
+   rule's margin-left:4px, which is horizontal-strip spacing. */
+#app-container.vertical-layout .mod-toolbar-btn { margin: 6px 0 0 0; }
+/* color has to be restated: .nav-btn's `color: var(--ds-text-secondary)` is (1,2,0) and would beat
+   the base .mod-toolbar-btn.active (0,2,0), greying out the text on the blue fill. */
+#app-container.vertical-layout .mod-toolbar-btn.active { background: var(--ds-accent-blue); color: #fff; }
 #app-container.vertical-layout .mod-back-btn { width: 100%; margin-bottom: 6px; border: none; background: transparent; border-radius: 8px; transition: background 0.15s ease; }
 #app-container.vertical-layout .mod-back-btn:hover { background: var(--ds-bg-tertiary); }
-#app-container.vertical-layout #mods-btn { width: 100%; margin-top: 6px; border: none; background: transparent; border-radius: 8px; transition: background 0.15s ease; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; flex-shrink: 0; }
-#app-container.vertical-layout #mods-btn:hover { background: var(--ds-bg-tertiary); }
 
 /* Mod settings button (gear icon in mods dropdown) */
 .mod-settings-btn { background: transparent; border: none; color: var(--ds-text-secondary); cursor: pointer; font-size: 24px; padding: 1px 8px; border-radius: 3px; line-height: 1; flex-shrink: 0; }

@@ -167,6 +167,48 @@ body {
 #tabs-arrow-start::after { content: '\25C4' !important; font-size: 9px; }
 #tabs-arrow-end::after { content: '\25BA' !important; font-size: 9px; }
 
+/* ── Nav icons: this theme draws in characters, not vectors ───────────────
+   styles.css puts an inline SVG in every .btn-icon. Here the slot renders a character instead —
+   the same substitution #tabs-arrow-start::after makes just above. The SVG is taken out of flow
+   rather than merely made invisible: an <svg> with visibility:hidden would still occupy its 16px
+   slot and push the glyph off centre.
+   No !important is needed. The svg rule ties on specificity with styles.css's and wins on source
+   order (themes are injected after it), and a *direct* font-size on the pseudo-element beats the
+   12px it would otherwise inherit from the !important'd button rule below — inherited values lose
+   to any direct declaration regardless of importance.
+   That `font-size: 12px !important` is also no longer load-bearing against the rail. It used to
+   defeat the rail's `font-size: 0`, so a collapsed 48px sidebar rendered the whole word "Sessions"
+   crammed into 36px with the rail glyph on top of it; the rail now hides .btn-label with
+   display:none, which a font-size override cannot reach (#552). */
+.btn-icon > svg { display: none; }
+.btn-icon::before {
+  font-size: 13px;
+  line-height: 1;
+  letter-spacing: 0;   /* the 0.5px below trails the glyph and knocks it off centre in the slot */
+  text-transform: none;
+}
+
+#new-btn         .btn-icon::before { content: '+'; }
+#engines-btn     .btn-icon::before { content: '\25C8'; }  /* ◈ */
+/* NOT \26A1 — #issue-btn owns the bolt, and in the collapsed rail there is no label to tell the
+   two apart. */
+#automations-btn .btn-icon::before { content: '\25B6'; }  /* ▶ */
+#sessions-btn    .btn-icon::before { content: '\2630'; }  /* ☰ */
+#mods-btn        .btn-icon::before { content: '\229E'; }  /* ⊞ */
+#issue-btn       .btn-icon::before { content: '\26A1'; }  /* ⚡ */
+#settings-btn    .btn-icon::before { content: '\2699'; }  /* ⚙ */
+#context-toggle  .btn-icon::before { content: '\25E7'; }  /* ◧ */
+/* ▤/▥ rather than the ▤/⬜ the JS used to set: the pair has to read as one axis flipped, and ⬜ is
+   not the other half of anything — it renders as a blank square, i.e. as tofu (#552). */
+#layout-toggle .icon-layout-h::before { content: '\25A4'; }  /* ▤ */
+#layout-toggle .icon-layout-v::before { content: '\25A5'; }  /* ▥ */
+
+/* .mod-toolbar-btn's icon is already a character (tabIcon()), so it keeps it — there is no SVG to
+   hide and no ::before to add. But it is a text NODE, not a pseudo-element, so the ::before reset
+   above doesn't reach it: it inherits the bracket rule's 0.5px letter-spacing (and uppercase) from
+   the button, the same off-centre nudge the reset exists to prevent. */
+.btn-icon.is-text { letter-spacing: 0; text-transform: none; }
+
 /* ── Buttons: bracket styling ────────────────────────────────────────── */
 
 #new-btn,
