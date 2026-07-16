@@ -17,6 +17,8 @@ const { execSync } = require('child_process');
 const { randomUUID } = require('crypto');
 const { z } = require('zod');
 const cron = require('./cron');
+// Resolves to ~/.deepsteve/git-root.js once deployed — mods sit at ~/.deepsteve/mods/<id>/.
+const { findGitRoot } = require('../../git-root');
 
 const TASKS_FILE = path.join(os.homedir(), '.deepsteve', 'scheduled-tasks.json');
 const MAX_RUNS = 20;          // per-task run history is bounded
@@ -71,12 +73,10 @@ function pathInside(p, dir) {
 // --- Project resolution ---------------------------------------------------
 
 // Canonicalize a path to its git repo root; fall back to the path itself.
+// Pure-fs walk (#553) — this used to shell out to `zsh -l -c 'git rev-parse'`, which
+// blocks the event loop the WS upgrade handshake shares.
 function gitRoot(dir) {
-  try {
-    return execSync("zsh -l -c 'git rev-parse --show-toplevel'", { cwd: dir, encoding: 'utf8', timeout: 5000 }).trim();
-  } catch {
-    return dir;
-  }
+  return findGitRoot(dir) || dir;
 }
 
 // True when dir is inside a non-bare git work tree. gitRoot() can't answer this:

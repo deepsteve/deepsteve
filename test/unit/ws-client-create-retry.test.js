@@ -29,7 +29,7 @@ globalThis.sessionStorage = {
 };
 globalThis.document = { addEventListener: () => {}, hidden: false };
 globalThis.addEventListener = () => {};
-globalThis.fetch = async () => ({ status: 200 }); // auth-heal probe: always "auth fine"
+globalThis.fetch = async () => ({ ok: true, status: 200 }); // /healthz gate: "server up"; auth-heal probe: "auth fine"
 // client side: Node's native WebSocket global (browser-compatible)
 
 let server;

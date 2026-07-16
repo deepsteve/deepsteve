@@ -12,6 +12,7 @@ const { createSecurity, UI_HOST } = require('./security');
 const { createSleepWatch } = require('./sleep-watch');
 const { createPowerAssertion } = require('./power-assertion');
 const { formatLogTimestamp, createLogRotator, defaultLogPaths } = require('./logging');
+const { findGitRoot } = require('./git-root');
 const NodePtyEngine = require('./engines/node-pty');
 const TmuxEngine = require('./engines/tmux');
 
@@ -2448,36 +2449,40 @@ app.delete('/api/update/pending', (req, res) => {
 
 app.get('/api/home', (req, res) => res.json({ home: os.homedir() }));
 
+// Is an agent binary on the user's PATH? `zsh -l` is required for the full PATH (a
+// LaunchAgent's /bin/sh has no Homebrew), but it's a LOGIN shell — it sources
+// ~/.zprofile/~/.zshrc every call (~50ms here), and /api/agents probes three binaries
+// synchronously on the event loop the WS upgrade handshake shares (#553). Every window's
+// init() fetches this, so a burst of windows (or nested Baby Browsers) stalled every
+// pending upgrade for ~140ms each. Cached because binaries don't come and go mid-session;
+// the TTL is short enough that installing an agent still shows up on the next page load.
+// Keyed on the binary name, so re-pointing *Binary in Settings re-probes immediately.
+const BIN_PROBE_TTL_MS = 60_000;
+const binProbeCache = new Map(); // bin -> { at, available }
+function binaryAvailable(bin) {
+  const hit = binProbeCache.get(bin);
+  if (hit && Date.now() - hit.at < BIN_PROBE_TTL_MS) return hit.available;
+  let available = false;
+  try {
+    execSync(`zsh -l -c 'which ${bin}'`, { timeout: 5000, stdio: 'pipe' });
+    available = true;
+  } catch {}
+  binProbeCache.set(bin, { at: Date.now(), available });
+  return available;
+}
+
 app.get('/api/agents', (req, res) => {
   const enabledAgents = settings.enabledAgents || ['claude'];
   const defaultAgent = settings.defaultAgent || 'claude';
   const agents = [
     { id: 'claude', name: 'Claude Code', shortName: 'CC', available: true, enabled: enabledAgents.includes('claude'), isDefault: defaultAgent === 'claude' }
   ];
-  // Check if hermes is installed
-  let hermesAvailable = false;
-  try {
-    const hBin = settings.hermesBinary || 'hermes';
-    execSync(`zsh -l -c 'which ${hBin}'`, { timeout: 5000, stdio: 'pipe' });
-    hermesAvailable = true;
-  } catch {}
+  const hermesAvailable = binaryAvailable(settings.hermesBinary || 'hermes');
   agents.push({ id: 'hermes', name: 'Hermes', shortName: 'H', available: hermesAvailable, enabled: hermesAvailable, isDefault: defaultAgent === 'hermes' });
-  // Check if opencode is installed (use login shell for full PATH)
-  let opencodeAvailable = false;
-  try {
-    const bin = settings.opencodeBinary || 'opencode';
-    execSync(`zsh -l -c 'which ${bin}'`, { timeout: 5000, stdio: 'pipe' });
-    opencodeAvailable = true;
-  } catch {}
   // Auto-enable available agents
+  const opencodeAvailable = binaryAvailable(settings.opencodeBinary || 'opencode');
   agents.push({ id: 'opencode', name: 'OpenCode (experimental)', shortName: 'OC', available: opencodeAvailable, enabled: opencodeAvailable, isDefault: defaultAgent === 'opencode' });
-  // Check if pi is installed
-  let piAvailable = false;
-  try {
-    const bin = settings.piBinary || 'pi';
-    execSync(`zsh -l -c 'which ${bin}'`, { timeout: 5000, stdio: 'pipe' });
-    piAvailable = true;
-  } catch {}
+  const piAvailable = binaryAvailable(settings.piBinary || 'pi');
   agents.push({ id: 'pi', name: 'Pi (experimental)', shortName: 'Pi', available: piAvailable, enabled: piAvailable, isDefault: defaultAgent === 'pi' });
   // Custom Claude config profiles (#537): appended at the END so they render last in
   // every picker. id is 'config:<pid>' so the client distinguishes them; the runtime
@@ -3577,14 +3582,9 @@ app.get('/api/dirs', (req, res) => {
 });
 
 app.get('/api/git-root', (req, res) => {
-  let cwd = req.query.cwd || process.env.HOME;
-  if (cwd.startsWith('~')) cwd = path.join(os.homedir(), cwd.slice(1));
-  try {
-    const root = execSync("zsh -l -c 'git rev-parse --show-toplevel'", { cwd, encoding: 'utf8' }).trim();
-    res.json({ root });
-  } catch {
-    res.status(400).json({ error: 'Not a git repository' });
-  }
+  const root = findGitRoot(req.query.cwd || process.env.HOME);
+  if (!root) return res.status(400).json({ error: 'Not a git repository' });
+  res.json({ root });
 });
 
 app.post('/api/git-roots', express.json(), (req, res) => {
@@ -3592,12 +3592,12 @@ app.post('/api/git-roots', express.json(), (req, res) => {
   if (!Array.isArray(paths)) return res.status(400).json({ error: 'paths must be an array' });
   const rootSet = new Map();
   for (const p of paths) {
-    try {
-      let cwd = p;
-      if (cwd.startsWith('~')) cwd = path.join(os.homedir(), cwd.slice(1));
-      const root = execSync("zsh -l -c 'git rev-parse --show-toplevel'", { cwd, encoding: 'utf8', timeout: 5000 }).trim();
-      if (!rootSet.has(root)) rootSet.set(root, path.basename(root));
-    } catch { /* skip non-git dirs */ }
+    // findGitRoot is a pure-fs walk (#553). This loop used to run `zsh -l -c 'git
+    // rev-parse'` per path — synchronously, on the same event loop the WS upgrade
+    // handshake runs on — so a user with N tabs stalled every pending WS upgrade for
+    // ~52ms x N. That was the "upgrades hang under scale" half of #544.
+    const root = findGitRoot(p);
+    if (root && !rootSet.has(root)) rootSet.set(root, path.basename(root));
   }
   // Disambiguate duplicate basenames
   const nameCounts = {};
