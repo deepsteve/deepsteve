@@ -2452,14 +2452,16 @@ function showRestartConfirmDialog() {
 
 function showReloadOverlay() {
   const overlay = document.createElement('div');
-  overlay.className = 'modal-overlay';
+  // Scope to #terminals (not the viewport) so this centers on the same box as the
+  // per-terminal "Reconnecting..." overlay, regardless of which side rails/panels are open (#572).
+  overlay.className = 'reload-overlay';
   overlay.style.cursor = 'default';
   overlay.innerHTML = `
     <div style="text-align:center;">
       <div class="reload-spinner"></div>
       <div style="color:var(--ds-text-bright);font-size:16px;font-weight:600;margin-top:16px;">Restarting...</div>
     </div>`;
-  document.body.appendChild(overlay);
+  (document.getElementById('terminals') || document.body).appendChild(overlay);
 }
 
 function killSession(id) {
