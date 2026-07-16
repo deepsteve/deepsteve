@@ -1562,8 +1562,12 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
       if (msg.type === 'session') {
         assignedId = msg.id;
         if (pendingCreate) pendingCreate.settle();
-        // Reject unexpected duplicates: another window already has this session
-        if (msg.existingClients > 0 && !opts.allowDuplicate) {
+        // Reject unexpected duplicates: another window already has this session.
+        // Exempt isNew sessions (#554): their id is client-minted, so no other tab
+        // can legitimately hold it — an existing client can only be this tab's own
+        // not-yet-reaped dead socket from a prior create attempt, and closing here
+        // would kill the retry loop and orphan the shell.
+        if (!isNew && msg.existingClients > 0 && !opts.allowDuplicate) {
           console.log(`[createSession] Rejecting duplicate session ${msg.id} (${msg.existingClients} existing client(s))`);
           ws.close();
           resolveReady(null);

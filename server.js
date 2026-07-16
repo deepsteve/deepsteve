@@ -4433,7 +4433,17 @@ function handleWsConnection(ws, req) {
 
   if (!id || !shells.has(id)) {
     const oldId = id;
-    id = randomUUID().slice(0, 8);
+    // #554: a create retry re-sends new=1 with the client-minted id — honor it so
+    // repeated attempts converge on one shell instead of spawning one per retry.
+    // (If the shell WAS created by a prior attempt, shells.has(id) is true and we
+    // skip this block entirely, attaching to it below.) Malformed/absent ids
+    // (old-JS tabs) fall back to server minting, exactly the old behavior.
+    id = (createNew && oldId && /^[0-9a-f]{8}$/.test(oldId)) ? oldId : randomUUID().slice(0, 8);
+    // A reaped attempt-1 create under this id is superseded by the live shell we're
+    // about to spawn (create/adopt path, same as the restore branch's delete — not a
+    // #561 close-path delete). The reaped entry was never attached/prompted, so
+    // nothing resurrectable is lost.
+    delete savedState[id];
     const sessionId = randomUUID();  // Full UUID for session ID (both agents)
     const agentConfig = getAgentConfig(agentType);
     

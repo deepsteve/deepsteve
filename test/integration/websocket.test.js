@@ -1,5 +1,6 @@
 const { describe, it, afterEach, before } = require('node:test');
 const assert = require('node:assert');
+const crypto = require('crypto');
 const { WsClient, httpGet, httpPost, cleanupSessions } = require('../helpers/ws-client');
 
 describe('WebSocket Protocol', () => {
@@ -86,6 +87,46 @@ describe('WebSocket Protocol', () => {
     const client = createClient();
     const msg = await client.connect({ id: 'nonexist' });
     assert.strictEqual(msg.type, 'gone', 'should receive gone message');
+  });
+
+  // #554: creates are idempotent — the client mints the shell id, so a retry
+  // that re-sends new=1 with the same id attaches instead of spawning a fresh
+  // shell per attempt.
+  it('create honors a client-minted id', async () => {
+    const id = crypto.randomUUID().slice(0, 8);
+    const client = createClient();
+    const session = await client.connect({ new: '1', id, agentType: 'terminal', cwd: '/tmp' });
+    assert.strictEqual(session.id, id, 'server should adopt the client-minted id');
+  });
+
+  it('retried create with the same id attaches instead of spawning a second shell (#554)', async () => {
+    const id = crypto.randomUUID().slice(0, 8);
+    const client1 = createClient();
+    const session1 = await client1.connect({ new: '1', id, agentType: 'terminal', cwd: '/tmp' });
+    assert.strictEqual(session1.id, id);
+
+    // Simulate the reconnect-loop retry: identical params, client1 still counted.
+    const client2 = createClient();
+    const session2 = await client2.connect({ new: '1', id, agentType: 'terminal', cwd: '/tmp' });
+    assert.strictEqual(session2.id, id, 'retry should converge on the same shell');
+    assert.strictEqual(session2.existingClients, 1, 'retry attached to the live shell');
+
+    const data = await httpGet('/api/shells');
+    const matches = data.shells.filter(s => s.id === id);
+    assert.strictEqual(matches.length, 1, 'exactly one shell exists for the id');
+  });
+
+  it('malformed client id on create falls back to a server-minted id', async () => {
+    const client = createClient();
+    const session = await client.connect({ new: '1', id: 'not-hex!', agentType: 'terminal', cwd: '/tmp' });
+    assert.notStrictEqual(session.id, 'not-hex!');
+    assert.match(session.id, /^[0-9a-f]{8}$/, 'server minted its own 8-hex id');
+  });
+
+  it('create with no id still works (old-client compat)', async () => {
+    const client = createClient();
+    const session = await client.connect({ new: '1', agentType: 'terminal', cwd: '/tmp' });
+    assert.match(session.id, /^[0-9a-f]{8}$/, 'server minted an id as before');
   });
 
   it('multiple clients receive output from same session', async () => {
