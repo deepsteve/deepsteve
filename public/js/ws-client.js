@@ -20,7 +20,20 @@ onWake(() => {
   }
 });
 
+// 8 hex chars, the server's own shell-id shape (randomUUID().slice(0, 8)).
+function mintShellId() {
+  try { return crypto.randomUUID().slice(0, 8); }
+  catch { // non-secure contexts (plain-HTTP LAN via --bind) lack randomUUID
+    return [...crypto.getRandomValues(new Uint8Array(4))].map(b => b.toString(16).padStart(2, '0')).join('');
+  }
+}
+
 export function createWebSocket(options = {}) {
+  // #554: mint the shell id client-side for new sessions so create retries are
+  // idempotent — every reconnect re-requests the SAME shell instead of spawning
+  // a fresh one per retry when the socket drops before the session message lands.
+  if (options.isNew && !options.id) options.id = mintShellId();
+
   const params = new URLSearchParams();
 
   if (options.action) params.set('action', options.action);
