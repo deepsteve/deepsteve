@@ -62,10 +62,9 @@ body {
    margins so the 6px handle sits as a thin seam flush between the two bezeled panels. */
 #context-resizer { margin: 0 calc(var(--ds-context-gap) * -1) !important; }
 
-/* Inset + round the context rows so a full-width highlight can't sit flush in the
-   panel's rounded corners (which read as the row "overflowing" near the top). */
-.context-list { padding: 2px 6px; }
-.context-row { border-radius: 8px; }
+/* Row inset/rounding that keeps a full-width highlight off the panel's rounded
+   corners now lives in the base stylesheet, derived from --ds-context-radius so
+   it applies to every rounded theme and in the collapsed icon rail too (#577). */
 
 /* The CRT monitor bezel lives on #app-main (the terminal side) only, so the
    context panel to its left is a distinct, standalone monitor rather than being

@@ -1192,8 +1192,14 @@ kbd {
   user-select: none;  /* rail items are buttons — a press-drag (incl. row drag-to-reorder, #532) must never become a text selection (#564) */
 }
 .context-rail-header { font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--ds-text-secondary); padding: 10px 12px 6px; }
-.context-list { display: flex; flex-direction: column; }
-.context-row { display: flex; align-items: center; gap: 6px; padding: 7px 12px; cursor: pointer; color: var(--ds-text-secondary); font-size: 13px; border-left: 3px solid transparent; }
+/* Inset + round the rows proportionally to the rail's corner radius so a row's
+   full-width highlight can never reach — and bleed past — the rounded bezel
+   (#577). A bordered scroll container doesn't reliably clip children at rounded
+   corners, so we keep the paint inside the arc instead of relying on the clip.
+   Derived from --ds-context-radius: 0 when the rail is square (default theme,
+   unchanged), scaling up for any rounded theme (e.g. retro-monitor → 3px/6px). */
+.context-list { display: flex; flex-direction: column; padding: calc(var(--ds-context-radius) / 6) calc(var(--ds-context-radius) / 3); }
+.context-row { display: flex; align-items: center; gap: 6px; padding: 7px 12px; cursor: pointer; color: var(--ds-text-secondary); font-size: 13px; border-left: 3px solid transparent; border-radius: calc(var(--ds-context-radius) / 2); }
 .context-row:hover { background: var(--ds-bg-tertiary); color: var(--ds-text-primary); }
 .context-row.active { color: var(--ds-text-bright); background: var(--ds-bg-tertiary); border-left-color: var(--ds-accent-blue); }
 .context-row:active { background: var(--ds-border); }  /* after .context-row.active: equal specificity, source order lets the press show on the selected row too */
@@ -1267,8 +1273,10 @@ kbd {
 #context-rail.collapsed .context-hint,
 #context-rail.collapsed .context-empty-note { display: none; }
 
-#context-rail.collapsed .context-list { padding: 0; }
-
+/* Keep the base (radius-derived) .context-list inset when collapsed too, so the
+   selected/hover/pressed background stays inside the rounded bezel (#577). It's 0
+   for a square rail and ~6px horizontal for retro-monitor, which still leaves the
+   22px icon square centred in the 48px rail. */
 #context-rail.collapsed .context-row {
   justify-content: center;
   padding: 8px 0;
