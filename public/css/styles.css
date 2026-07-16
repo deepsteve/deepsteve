@@ -562,10 +562,30 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
 .window-item { padding: 12px; cursor: pointer; border-bottom: 1px solid var(--ds-bg-tertiary); }
 .window-item:last-child { border-bottom: none; }
 .window-item:hover { background: var(--ds-bg-tertiary); }
-.window-item.selected { background: var(--ds-accent-green); }
 .window-item .window-title { font-size: 14px; color: var(--ds-text-bright); margin-bottom: 4px; }
 .window-item .window-sessions { font-size: 12px; color: var(--ds-text-secondary); }
 .window-item .session-name { display: inline-block; background: var(--ds-bg-tertiary); padding: 2px 6px; border-radius: 3px; margin-right: 4px; margin-top: 4px; }
+
+/* Recover-everything restore modal (#560) */
+.modal.modal-wide { width: 560px; max-width: calc(100vw - 40px); }
+.modal-wide .restore-list { max-height: 60vh; }
+.restore-subtitle { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; font-size: 13px; color: var(--ds-text-secondary); margin-bottom: 12px; }
+.restore-select-links { white-space: nowrap; }
+.restore-select-links a { color: var(--ds-accent-blue); cursor: pointer; }
+.restore-select-links a:hover { text-decoration: underline; }
+.restore-section { border-bottom: 1px solid var(--ds-border); }
+.restore-section:last-child { border-bottom: none; }
+.modal .restore-section-header { display: flex; align-items: center; gap: 8px; margin: 0; padding: 8px 12px; cursor: pointer; background: var(--ds-bg-secondary); position: sticky; top: 0; z-index: 1; }
+.restore-section-header .restore-section-title { font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--ds-text-bright); }
+.restore-section-header .restore-section-meta { font-size: 11px; color: var(--ds-text-secondary); opacity: 0.8; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.modal .window-item { display: flex; align-items: flex-start; gap: 10px; margin: 0; padding: 10px 12px; font-size: 13px; }
+.modal .window-item input[type="checkbox"] { margin-top: 2px; flex-shrink: 0; }
+.window-item.checked { background: var(--ds-bg-tertiary); }
+.restore-row-body { min-width: 0; }
+.restore-row-title { font-size: 13px; color: var(--ds-text-bright); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.restore-row-title.restore-row-derived { font-style: italic; color: var(--ds-text-primary); }
+.window-item.session-closed { opacity: 0.55; }
+.window-item.session-closed.checked { opacity: 0.85; }
 
 /* Theme selector in settings */
 .settings-section { margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--ds-border); }
@@ -887,12 +907,16 @@ kbd {
 #empty-state .empty-state-recent:empty { display: none; }
 #empty-state .empty-state-recent .recent-session-btn { padding: 6px 16px; font-size: 13px; font-family: inherit; color: var(--ds-text-primary); background: transparent; border: 1px solid var(--ds-border); border-radius: 6px; cursor: pointer; opacity: 0.7; transition: opacity 0.15s, background 0.15s; }
 #empty-state .empty-state-recent .recent-session-btn:hover { opacity: 1; background: var(--ds-bg-tertiary); }
+#empty-state .empty-state-restore { margin-top: 12px; padding: 6px 16px; font-size: 13px; font-family: inherit; color: var(--ds-text-secondary); background: transparent; border: 1px solid var(--ds-border); border-radius: 6px; cursor: pointer; opacity: 0.6; transition: opacity 0.15s, background 0.15s; }
+#empty-state .empty-state-restore:hover { opacity: 1; background: var(--ds-bg-tertiary); }
+#empty-state .empty-state-restore:disabled { opacity: 0.4; cursor: default; }
 /* Empty-context reuse (#534): when #empty-state covers a stale terminal for an active
    context with no matching tabs, lift it above the absolutely-positioned
    .terminal-container siblings and drop the recent-sessions shortcuts (cross-repo /
    global, not context-scoped) so the view focuses on "+ New" in this context. */
 #empty-state.context-empty { z-index: 12; }
 #empty-state.context-empty .empty-state-recent { display: none; }
+#empty-state.context-empty .empty-state-restore { display: none; }
 
 /* Recent-sessions section in directory picker modal */
 .modal .recent-section { display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; }

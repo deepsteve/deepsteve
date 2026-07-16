@@ -1122,6 +1122,62 @@ function claudeProjectDir(cwd, worktree, configDir) {
   return path.join(base, dirName);
 }
 
+// --- Transcript-derived session labels (#560) ---
+// A restore list of "claude, claude, claude…" is useless (8 of 12 sessions in the
+// 2026-07-15 wipe had name: null), so unnamed sessions get a label pulled from
+// their conversation transcript: the ai-title line Claude Code writes once it
+// names the conversation, else the first real user message. Both land near the
+// head of the file, so only the first 256KB is read — a 100MB transcript costs
+// the same as a small one.
+const LABEL_READ_BYTES = 256 * 1024;
+const labelCache = new Map(); // claudeSessionId → { mtimeMs, label }
+
+// `entry` is anything carrying { claudeSessionId, cwd, worktree, configDir } —
+// a live shell, a savedState record, or a recent-sessions ring-buffer row.
+function deriveSessionLabel(entry) {
+  if (!entry || !entry.claudeSessionId || !entry.cwd) return null;
+  try {
+    const file = path.join(claudeProjectDir(entry.cwd, entry.worktree, entry.configDir), `${entry.claudeSessionId}.jsonl`);
+    const stat = fs.statSync(file);
+    const cached = labelCache.get(entry.claudeSessionId);
+    if (cached && cached.mtimeMs === stat.mtimeMs) return cached.label;
+    const buf = Buffer.alloc(Math.min(stat.size, LABEL_READ_BYTES));
+    const fd = fs.openSync(file, 'r');
+    try {
+      fs.readSync(fd, buf, 0, buf.length, 0);
+    } finally {
+      fs.closeSync(fd);
+    }
+    const label = parseTranscriptLabel(buf.toString('utf8'));
+    labelCache.set(entry.claudeSessionId, { mtimeMs: stat.mtimeMs, label });
+    return label;
+  } catch {
+    return null; // no transcript (never prompted), unreadable, whatever — no label
+  }
+}
+
+function parseTranscriptLabel(head) {
+  let title = null;
+  let firstUser = null;
+  for (const line of head.split('\n')) {
+    if (!line.trim()) continue;
+    let obj;
+    try { obj = JSON.parse(line); } catch { continue; } // window may cut the last line mid-JSON
+    if (obj.type === 'ai-title' && obj.aiTitle) {
+      title = obj.aiTitle; // rewritten as the conversation evolves — last one wins
+    } else if (!firstUser && obj.type === 'user' && !obj.isSidechain) {
+      const c = obj.message && obj.message.content;
+      const text = typeof c === 'string' ? c
+        : Array.isArray(c) ? ((c.find(b => b && b.type === 'text') || {}).text || '') : '';
+      if (text.trim()) firstUser = text.trim();
+    }
+  }
+  const raw = title || firstUser;
+  if (!raw) return null;
+  const oneLine = raw.replace(/\s+/g, ' ').trim();
+  return oneLine.length > 80 ? oneLine.slice(0, 79) + '…' : oneLine;
+}
+
 // True if another live shell already owns this claude session id — i.e. it was
 // deliberately spawned by deepsteve (e.g. a fork tab via `--fork-session
 // --session-id <new>`), not a self-fork of `exceptShellId`. Fork files embed the
@@ -2483,6 +2539,7 @@ const BUILTIN_COMMANDS = [
   { id: 'prev-tab', type: 'builtin', name: 'Previous Tab', description: 'Switch to previous tab' },
   { id: 'overview-mode', type: 'builtin', name: 'Overview Mode', description: 'Show all terminals at once' },
   { id: 'shortcuts-help', type: 'builtin', name: 'Keyboard Shortcuts', description: 'Show all keyboard shortcuts' },
+  { id: 'restore-sessions', type: 'builtin', name: 'Restore Sessions', description: 'Recover sessions from closed windows and tombstones' },
 ];
 
 function getCustomCommands() {
@@ -3154,7 +3211,7 @@ app.get('/api/shells', (req, res) => {
 // those. A client using the grouping as an existence oracle would discard localStorage
 // windows whose sessions are alive but ungrouped (e.g. entries written by a pre-#551
 // server, or start-issue sessions whose window never resolved).
-app.get('/api/windows', (req, res) => {
+function buildWindowsView({ collectUngrouped = false } = {}) {
   // Every browser window holds a live-reload socket carrying its windowId, so this
   // is the server's view of liveness. It only sees windows that are connected right
   // now — the client unions it with its own BroadcastChannel roll-call.
@@ -3164,14 +3221,13 @@ app.get('/api/windows', (req, res) => {
 
   const byWindow = new Map();
   const knownSessionIds = [];
+  const ungrouped = [];
   const add = (id, entry, status) => {
     // tmux-attach is ephemeral. saveState() skips it for live shells, but
     // DELETE /api/shells/:id writes one into savedState, so filter here too.
     if (entry.agentType === 'tmux-attach') return;
     knownSessionIds.push(id);
-    if (!entry.windowId) return; // exists, but belongs to no window
-    if (!byWindow.has(entry.windowId)) byWindow.set(entry.windowId, []);
-    byWindow.get(entry.windowId).push({
+    const session = {
       id,
       name: entry.name || null,
       cwd: entry.cwd || null,
@@ -3179,12 +3235,23 @@ app.get('/api/windows', (req, res) => {
       status,
       createdAt: entry.createdAt || null,
       lastActivity: entry.lastActivity || null,
-    });
+    };
+    if (!entry.windowId) {
+      // Exists, but belongs to no window. For the recover view (#560) these are
+      // offerable — except a live session a browser is showing right now
+      // (clients > 0): that one isn't lost, it's open.
+      if (collectUngrouped && !(status === 'active' && entry.clients && entry.clients.size > 0)) {
+        ungrouped.push(session);
+      }
+      return;
+    }
+    if (!byWindow.has(entry.windowId)) byWindow.set(entry.windowId, []);
+    byWindow.get(entry.windowId).push(session);
   };
 
   for (const [id, entry] of shells) add(id, entry, 'active');
   for (const [id, entry] of Object.entries(savedState)) {
-    if (entry.closed) continue;   // closing a tab is deliberate — recent-sessions covers it
+    if (entry.closed) continue;   // closing a tab is deliberate — the closed bucket covers it
     if (shells.has(id)) continue; // live entry already counted; would otherwise restore twice
     add(id, entry, 'saved');
   }
@@ -3199,7 +3266,78 @@ app.get('/api/windows', (req, res) => {
     };
   }).sort((a, b) => b.lastActive - a.lastActive);
 
+  return { windows, knownSessionIds, ungrouped };
+}
+
+app.get('/api/windows', (req, res) => {
+  const { windows, knownSessionIds } = buildWindowsView();
   res.json({ windows, knownSessionIds });
+});
+
+// #560: the recover-everything view — a superset of /api/windows. Window groups
+// (same shape, sessions gain `worktree` + a transcript-derived `label`), plus the
+// buckets /api/windows deliberately omits: ungrouped sessions (no windowId),
+// closed tombstones (#561), and recent-session lineages state.json no longer
+// knows (hard-deleted pre-#561, or forgotten). Label derivation reads transcript
+// files, so it lives here and NOT in /api/windows, which is on the hot startup
+// path of every browser window.
+app.get('/api/recoverable-sessions', (req, res) => {
+  const { windows, knownSessionIds, ungrouped } = buildWindowsView({ collectUngrouped: true });
+
+  // Enrich a session row with worktree + derived label from its state entry.
+  const enrich = (session) => {
+    const entry = shells.get(session.id) || savedState[session.id];
+    return {
+      ...session,
+      worktree: (entry && entry.worktree) || null,
+      label: session.name ? null : deriveSessionLabel(entry),
+    };
+  };
+
+  const closed = Object.entries(savedState)
+    .filter(([, e]) => e && e.closed && e.agentType !== 'tmux-attach')
+    .map(([id, e]) => ({
+      id,
+      name: e.name || null,
+      label: e.name ? null : deriveSessionLabel(e),
+      cwd: e.cwd || null,
+      worktree: e.worktree || null,
+      agentType: e.agentType || 'claude',
+      status: 'closed',
+      createdAt: e.createdAt || null,
+      lastActivity: e.lastActivity || null,
+      closedAt: e.closedAt || null,
+      closeReason: e.closeReason || null,
+    }))
+    .sort((a, b) => (b.closedAt || 0) - (a.closedAt || 0));
+
+  // Ring-buffer lineages with no state.json record under any id — restorable
+  // only by minting a fresh id (POST /api/recent-sessions/:key/restore).
+  // savedState wins the dedupe: if the lineage is still in state.json (open,
+  // saved, or tombstoned), the row above already covers it.
+  const knownClaudeIds = new Set();
+  for (const [, e] of shells) if (e.claudeSessionId) knownClaudeIds.add(e.claudeSessionId);
+  for (const e of Object.values(savedState)) if (e && e.claudeSessionId) knownClaudeIds.add(e.claudeSessionId);
+  const recents = recentSessions
+    .filter(r => !(r.claudeSessionId && knownClaudeIds.has(r.claudeSessionId))
+              && !shells.has(r.shellId) && !savedState[r.shellId])
+    .map(r => ({
+      key: r.key,
+      name: r.name || null,
+      label: r.name ? null : deriveSessionLabel(r),
+      cwd: r.cwd || null,
+      worktree: r.worktree || null,
+      agentType: r.agentType || 'claude',
+      updatedAt: r.updatedAt || null,
+    }));
+
+  res.json({
+    windows: windows.map(w => ({ ...w, sessions: w.sessions.map(enrich) })),
+    knownSessionIds,
+    ungrouped: ungrouped.map(enrich),
+    closed,
+    recents,
+  });
 });
 
 app.post('/api/shells/killall', (req, res) => {

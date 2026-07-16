@@ -8,7 +8,7 @@ import { TabManager, getDefaultTabName, initTabArrows } from './tab-manager.js';
 import { createTerminal, setupTerminalIO, fitTerminal, observeTerminalResize, measureTerminalSize, updateTerminalTheme } from './terminal.js';
 import { createWebSocket } from './ws-client.js';
 import { showDirectoryPicker } from './dir-picker.js';
-import { showWindowRestoreModal } from './window-restore-modal.js';
+import { showSessionRestoreModal } from './session-restore-modal.js';
 import { LayoutManager } from './layout-manager.js';
 import { initLiveReload } from './live-reload.js';
 import { ModManager } from './mod-manager.js';
@@ -20,7 +20,7 @@ import { init as initProgressBar, start as progressStart, done as progressDone }
 import { init as initHashCommands, beforeSend as hashCommandsBeforeSend, setWaitingForInput as setHashCommandsWaiting, setEnabled as setHashCommandsEnabled } from './hash-commands.js';
 import { init as initOverviewMode, setEnabled as setOverviewModeEnabled, setShortcut as setOverviewModeShortcut, setDefaultLayout as setOverviewDefaultLayout, toggle as toggleOverviewMode, isOverviewActive, updateFocus as updateOverviewFocus, onTabsReordered as onOverviewTabsReordered } from './overview-mode.js';
 import { init as initTerminalSearch, attachSearchAddon, closeIfOpen as closeTerminalSearch } from './terminal-search.js';
-import { init as initContextViews, setEnabled as setContextViewsEnabled, applyFilter as refreshContextFilter, requestNewTabInContext, setContexts as applyServerContexts, setActiveContext as setActiveContextFromPanel, getActiveContextId, activeContextIsEmpty, noteActiveTab, revealTabContext } from './context-views.js';
+import { init as initContextViews, setEnabled as setContextViewsEnabled, applyFilter as refreshContextFilter, requestNewTabInContext, setContexts as applyServerContexts, setActiveContext as setActiveContextFromPanel, getActiveContextId, activeContextIsEmpty, noteActiveTab, revealTabContext, showToast } from './context-views.js';
 import { nsKey } from './storage-namespace.js';
 import { formatShortcut } from './shortcuts.js';
 
@@ -2180,6 +2180,83 @@ async function restoreSessions(sessionList, opts = {}) {
 }
 
 /**
+ * The recover-everything restore flow (#560), shared by the startup offer, the
+ * command palette, the ▾ new-tab menu, and the empty-state button.
+ * Returns 'restored' | 'fresh' (declined / nothing usable) | 'none' (nothing
+ * to offer at all).
+ */
+let restoreOfferOpen = false;
+async function offerSessionRestore({ secondaryLabel, onlyIfOrphans = false } = {}) {
+  if (restoreOfferOpen) return 'fresh';
+  restoreOfferOpen = true;
+  try {
+    const data = await WindowManager.listRecoverable();
+    if (data.windows.length + data.ungrouped.length + data.closed.length + data.recents.length === 0) {
+      return 'none';
+    }
+    // Startup auto-show gate: closed tombstones / recents alone don't warrant
+    // interrupting a brand-new window (see the init call site).
+    if (onlyIfOrphans && data.windows.length + data.ungrouped.length === 0) {
+      return 'none';
+    }
+    const result = await showSessionRestoreModal(data, { secondaryLabel });
+    if (result.action !== 'restore') return 'fresh';
+
+    const myWindowId = getWindowId();
+    // A selected session can already be open in this window (stale localStorage
+    // while the server fetch failed, say). Restoring it again would create a
+    // second tab-<id> DOM node, and the duplicate-attach cleanup would then
+    // tear down the LIVE tab — so filter against the live map, and dedupe
+    // across buckets.
+    const seen = new Set(sessions.keys());
+    const toRestore = [];
+    const take = (sess) => {
+      if (!sess || seen.has(sess.id)) return;
+      seen.add(sess.id);
+      toRestore.push(sess);
+    };
+
+    for (const win of result.selection.windows) {
+      for (const sess of WindowManager.claimSessions(win, win.sessions)) take(sess);
+    }
+    for (const sess of result.selection.sessions) {
+      SessionStore.addSession(myWindowId, { id: sess.id, cwd: sess.cwd, name: sess.name });
+      take(sess);
+    }
+    // Recents lineages have no state.json record — the server mints a fresh id
+    // and pre-seeds savedState; the normal reconnect path then resumes it.
+    for (const r of result.selection.recents) {
+      try {
+        const resp = await fetch(`/api/recent-sessions/${encodeURIComponent(r.key)}/restore`, { method: 'POST' });
+        if (!resp.ok) continue;
+        const restored = await resp.json();
+        SessionStore.addSession(myWindowId, { id: restored.id, cwd: restored.cwd, name: restored.name });
+        take(restored);
+      } catch {
+        // ring buffer changed under us — skip this one, the rest still restore
+      }
+    }
+
+    if (toRestore.length === 0) return 'fresh';
+    for (const sess of toRestore) TabSessions.add(sess);
+    await restoreSessions(toRestore, { allowDuplicate: false });
+    return 'restored';
+  } finally {
+    restoreOfferOpen = false;
+  }
+}
+
+/**
+ * Re-entry surfaces (palette, ▾ menu, empty state): the user explicitly asked
+ * for the view, so declining must NOT dump them into the directory picker the
+ * way the startup path does, and an empty result deserves feedback.
+ */
+async function reopenSessionRestore() {
+  const outcome = await offerSessionRestore({ secondaryLabel: 'Cancel' });
+  if (outcome === 'none') showToast('No sessions to restore');
+}
+
+/**
  * Show confirmation dialog if agent is busy. Returns true if close should proceed.
  * For locally-connected sessions, checks in-memory state. For server-only sessions
  * (dropdown), fetches state from the server.
@@ -2604,9 +2681,10 @@ function showNewTabMenu(e) {
     }
   }
 
-  // New window option
+  // New window + session recovery options
   html += '<div class="context-menu-separator"></div>';
   html += '<div class="context-menu-item" data-action="new-window">New window</div>';
+  html += '<div class="context-menu-item" data-action="restore-sessions">Restore sessions…</div>';
 
   menu.innerHTML = html;
 
@@ -2823,6 +2901,8 @@ function showNewTabMenu(e) {
       createSession(cwdPath, null, true, { agentType: 'opencode' });
     } else if (action === 'new-window') {
       window.open(window.location.origin, '_blank');
+    } else if (action === 'restore-sessions') {
+      reopenSessionRestore();
     }
   };
 
@@ -3363,6 +3443,7 @@ async function init() {
     openMods: () => { document.getElementById('mods-btn')?.click(); },
     toggleOverviewMode: () => toggleOverviewMode(),
     showShortcutsHelp: () => openShortcutsHelp(),
+    restoreSessions: () => reopenSessionRestore(),
     focusTerminal: () => {
       if (activeId) {
         const s = sessions.get(activeId);
@@ -3478,6 +3559,20 @@ async function init() {
     fetch('/api/issues?cwd=' + encodeURIComponent(cwd)).finally(() => { issuePrefetching = false; });
   });
   document.getElementById('empty-state-btn')?.addEventListener('click', () => quickNewSession());
+  document.getElementById('empty-state-restore')?.addEventListener('click', async (e) => {
+    // listRecoverable's roll-call takes ~1.5s — show progress on the button
+    // instead of appearing dead.
+    const btn = e.currentTarget;
+    const original = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = 'Checking…';
+    try {
+      await reopenSessionRestore();
+    } finally {
+      btn.disabled = false;
+      btn.textContent = original;
+    }
+  });
 
   // isExistingTab was captured at the very top of init() — by now the window ID
   // exists no matter what, so it cannot be re-derived here.
@@ -3544,25 +3639,15 @@ async function init() {
       }
       restoreSessions(legacySessions);
     } else {
-      // Check for orphaned windows
-      const orphanedWindows = await WindowManager.listOrphanedWindows();
-
-      if (orphanedWindows.length > 0) {
-        const result = await showWindowRestoreModal(orphanedWindows);
-
-        if (result.action === 'restore') {
-          // Claim the selected window's sessions
-          const claimed = WindowManager.claimWindow(result.window);
-          for (const sess of claimed) {
-            TabSessions.add(sess);
-          }
-          restoreSessions(claimed, { allowDuplicate: false });
-        } else {
-          // Start fresh
-          await promptRepoSession();
-        }
-      } else {
-        // No orphaned windows - start fresh
+      // Startup restore offer (#560). Auto-shows only when there are orphaned
+      // window groups or ungrouped sessions to reclaim — closed tombstones
+      // exist almost always (#561 tombstones every deliberate close), so they
+      // alone must not pop a modal on every new window. They stay one click
+      // away behind the empty state, the ▾ menu, and the command palette.
+      const outcome = await offerSessionRestore({ onlyIfOrphans: true });
+      if (outcome !== 'restored') {
+        // Declined, nothing to offer, or another window claimed everything —
+        // start fresh either way.
         await promptRepoSession();
       }
     }

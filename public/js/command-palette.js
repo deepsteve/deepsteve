@@ -163,6 +163,9 @@ async function executeCommand(cmd) {
       case 'shortcuts-help':
         callbacks.showShortcutsHelp?.();
         break;
+      case 'restore-sessions':
+        callbacks.restoreSessions?.();
+        break;
     }
   } else if (cmd.type === 'switch-tab') {
     callbacks.switchToTab?.(cmd.tabId);

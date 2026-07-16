@@ -545,7 +545,9 @@ function toggleSidebar() {
 
 let toastEl = null;
 let toastTimer = null;
-function showToast(text) {
+// Exported: app.js reuses it for one-line feedback (e.g. "No sessions to
+// restore", #560) — it's the only generic toast in the frontend.
+export function showToast(text) {
   if (!toastEl) {
     toastEl = document.createElement('div');
     toastEl.className = 'context-toast';

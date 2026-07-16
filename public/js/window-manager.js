@@ -61,24 +61,32 @@ function rollCall() {
 }
 
 /**
- * The server-side window→session map (#551). Sessions outlive the origin their
+ * The server-side recover-everything view (#560, superset of #551's
+ * /api/windows): the window→session map plus ungrouped sessions, closed
+ * tombstones, and recent-history lineages. Sessions outlive the origin their
  * window map was stored on, so localStorage alone can't answer "what did this
  * window own" after an origin change, a cleared jar, or a new browser profile.
  *
  * Returns null — meaning "no server opinion, trust localStorage" — rather than
- * throwing, so an older server, a failed request, or a nested Baby Browser all
- * fall back to the pre-#551 behavior instead of losing the restore modal.
+ * throwing, so a failed request or a nested Baby Browser falls back to the
+ * localStorage-only behavior instead of losing the restore modal.
  */
-async function fetchServerWindows() {
+async function fetchRecoverable() {
   // Nested instances are ephemeral and share the parent's origin; their windows
   // stay client-only so they can't offer to restore the top-level window's tabs.
   if (recursionDepth > 0) return null;
   try {
-    const res = await fetch('/api/windows');
+    const res = await fetch('/api/recoverable-sessions');
     if (!res.ok) return null;
     const data = await res.json();
     if (!data || !Array.isArray(data.windows)) return null;
-    return { windows: data.windows, knownSessionIds: new Set(data.knownSessionIds || []) };
+    return {
+      windows: data.windows,
+      knownSessionIds: new Set(data.knownSessionIds || []),
+      ungrouped: data.ungrouped || [],
+      closed: data.closed || [],
+      recents: data.recents || [],
+    };
   } catch {
     return null;
   }
@@ -185,22 +193,38 @@ export const WindowManager = {
   },
 
   /**
-   * List windows that appear to be orphaned (no active browser tab).
+   * The recover-everything picture (#560): orphaned window groups (merged with
+   * localStorage, exactly like the old listOrphanedWindows), plus the buckets
+   * only the server knows — ungrouped sessions, closed tombstones (#561), and
+   * recent-history lineages. Returns { windows, ungrouped, closed, recents }.
    *
    * Deliberately does NOT bail when localStorage has no windows: that is exactly
    * the state after an origin change, and bailing early is what left 72 live
    * sessions unrestorable in #551. The server is asked regardless.
    */
-  async listOrphanedWindows() {
+  async listRecoverable() {
     const myWindowId = this.getWindowId();
     const local = SessionStore.getAllWindows();
-    const server = await fetchServerWindows();
+    const server = await fetchRecoverable();
+    const empty = { windows: [], ungrouped: [], closed: [], recents: [] };
+
+    // No server opinion (request failed, nested Baby Browser) — trust
+    // localStorage alone, like the pre-#551 modal did.
+    if (!server) {
+      if (Object.keys(local).length === 0) return empty;
+      const liveIds = new Set(await rollCall());
+      return { ...empty, windows: mergeWindows({ local, server: null, myWindowId, liveIds }) };
+    }
 
     // Nothing to restore from either side (a genuinely fresh install) — skip the
     // roll-call rather than stalling startup for ORPHAN_DETECTION_TIMEOUT. This is
     // the fast path the old localStorage-only check gave us; it just has to consult
     // the server before concluding there are no candidates.
-    if (Object.keys(local).length === 0 && (server?.windows || []).length === 0) return [];
+    if (Object.keys(local).length === 0 && server.windows.length === 0
+        && server.ungrouped.length === 0 && server.closed.length === 0
+        && server.recents.length === 0) {
+      return empty;
+    }
 
     // Liveness needs both signals. The roll-call reaches windows in THIS browser,
     // which the server can't tell apart (it only ever sees a windowId string). The
@@ -208,34 +232,54 @@ export const WindowManager = {
     // can't. After an origin change this is load-bearing: old-origin tabs still open
     // hold live reload sockets, so their windows must not be offered for stealing.
     const liveIds = new Set(await rollCall());
-    for (const w of server?.windows || []) {
+    for (const w of server.windows) {
       if (w.live) liveIds.add(w.windowId);
     }
 
-    return mergeWindows({ local, server, myWindowId, liveIds });
+    const merged = mergeWindows({ local, server, myWindowId, liveIds });
+
+    // mergeWindows keeps localStorage's minimal {id, cwd, name} rows (tab order
+    // and client-only tabs live there) — fold the server's display enrichment
+    // (label, worktree, agentType, lastActivity) back in for the modal.
+    const enrichedById = new Map();
+    for (const w of server.windows) {
+      for (const s of w.sessions) enrichedById.set(s.id, s);
+    }
+    const windows = merged.map(w => ({
+      ...w,
+      sessions: w.sessions.map(s => {
+        const enr = enrichedById.get(s.id);
+        return enr ? { ...s, ...enr, name: enr.name || s.name || null } : s;
+      }),
+    }));
+
+    return { windows, ungrouped: server.ungrouped, closed: server.closed, recents: server.recents };
   },
 
   /**
-   * Claim an orphaned window's sessions.
+   * Claim specific sessions from an orphaned window into this one (#560 —
+   * selection is per-session, so a whole-window claim no longer fits). Copies
+   * each into our window record and removes it from the donor's; removeSession
+   * auto-deletes the donor window when it empties, and is a no-op for
+   * server-derived windows that never had a localStorage entry.
    *
-   * Takes the merged window (not just its id) because a server-derived window has
-   * no localStorage entry to move sessions out of — reading them back from
-   * SessionStore would restore nothing.
+   * Takes the merged window (not just its id) because a server-derived window
+   * has no localStorage entry to read sessions back from.
    */
-  claimWindow(win) {
+  claimSessions(win, sessions) {
     const myWindowId = this.getWindowId();
 
-    for (const session of win.sessions) {
+    for (const session of sessions) {
       SessionStore.addSession(myWindowId, session);
-    }
-    // Guard against self-claim: removeWindow would delete what we just wrote.
-    if (win.windowId !== myWindowId) {
-      SessionStore.removeWindow(win.windowId);
+      // Guard against self-claim: removing what we just wrote.
+      if (win.windowId !== myWindowId) {
+        SessionStore.removeSession(win.windowId, session.id);
+      }
     }
 
     // No server call needed — restoreSessions reconnects each session WS with our
     // windowId, and the server reassigns entry.windowId on connect.
-    return win.sessions;
+    return sessions;
   },
 
   /**
