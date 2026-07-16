@@ -27,6 +27,7 @@
 
 import { nsKey } from './storage-namespace.js';
 import { register, registerInfo } from './shortcuts.js';
+import { tabIcon } from './tab-manager.js';
 
 // Context definitions are server-owned (#526): they are the same entity as the
 // Scheduled Tasks "project groups", loaded from /api/contexts and kept fresh by
@@ -35,6 +36,7 @@ import { register, registerInfo } from './shortcuts.js';
 const ACTIVE_KEY = nsKey('deepsteve-context-active');   // sessionStorage: active id (per window)
 const SIDEBAR_KEY = nsKey('deepsteve-context-sidebar'); // sessionStorage: open state (per window)
 const LAST_TAB_KEY = nsKey('deepsteve-context-last-tab'); // sessionStorage: { [contextId]: tabId } (per window, #541)
+const WIDTH_KEY = nsKey('deepsteve-context-width');     // sessionStorage: rail width in px (per window, #569)
 
 let enabled = true;
 let contexts = [];          // [{ id, name, dirs: [] }]
@@ -45,6 +47,7 @@ let cmdChordArmed = false;  // true between a Cmd+P press and the Cmd release �
 
 let cb = {};       // callbacks injected by app.js
 let rail = null;   // #context-rail element
+let resizer = null; // #context-resizer — drag handle at the rail's right edge (#569)
 let toggleBtn = null;
 let indicatorEl = null; // #context-indicator — muted active-context name shown next to the toggle when the rail is closed (#531)
 let ruleTitleEl = null; // #context-rule-title — dashed ruled variant of the same label shown at the top of the terminal in the retro-monitor theme (#535)
@@ -100,6 +103,16 @@ function loadSidebar() {
 }
 function saveSidebar() {
   sessionStorage.setItem(SIDEBAR_KEY, sidebarOpen ? '1' : '0');
+}
+// Rail width (#569). Like the vertical-tabs sidebar (#552) the restored value is
+// guarded for SHAPE not size — no Math.max floor — so a width dragged down to the
+// rail floor (icon rail) survives a reload instead of silently re-inflating.
+function loadWidth() {
+  const n = parseFloat(sessionStorage.getItem(WIDTH_KEY));
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+function saveWidth(px) {
+  sessionStorage.setItem(WIDTH_KEY, String(Math.round(px)));
 }
 function loadLastTabs() {
   try { return JSON.parse(sessionStorage.getItem(LAST_TAB_KEY)) || {}; } catch { return {}; }
@@ -259,7 +272,22 @@ function renderRail() {
 
 function makeRow(id, name, active, ctx) {
   const row = document.createElement('div');
-  row.className = 'context-row' + (active ? ' active' : '');
+  // has-icon governs whether the icon chip shows in the EXPANDED rail (only for a
+  // chosen icon — see issue #569); the collapsed icon rail always shows a chip.
+  row.className = 'context-row' + (active ? ' active' : '') + (ctx?.icon ? ' has-icon' : '');
+
+  // Icon square (#569). A chosen ctx.icon wins; otherwise derive a glyph the same
+  // way tabs do (tabIcon), so every square is legible in the collapsed rail. The
+  // synthetic "All" row (ctx null) can't store an icon, so it always gets ≡.
+  const iconEl = document.createElement('span');
+  iconEl.className = 'context-row-icon';
+  iconEl.setAttribute('aria-hidden', 'true');
+  const resolved = ctx?.icon
+    ? { glyph: ctx.icon, isEmoji: isEmojiGlyph(ctx.icon) }
+    : (ctx ? tabIcon(name) : { glyph: '≡', isEmoji: false });
+  iconEl.textContent = resolved.glyph;
+  iconEl.classList.toggle('is-emoji', resolved.isEmoji);
+  row.appendChild(iconEl);
 
   const label = document.createElement('span');
   label.className = 'context-row-label';
@@ -346,6 +374,10 @@ function showRowMenu(x, y, ctx) {
 
   if (ctx) {
     addRowMenuItem(menu, 'Edit', () => openContextEditor(ctx));
+    // Set icon/emoji (#569). Right-click (not double-click-the-square) so it works
+    // at any rail width and reuses this menu's dismissal machinery.
+    addRowMenuItem(menu, ctx.icon ? 'Change icon…' : 'Set icon…', () => showIconPicker(x, y, ctx));
+    if (ctx.icon) addRowMenuItem(menu, 'Clear icon', () => setContextIcon(ctx, ''));
     addRowMenuItem(menu, 'Delete', () => {
       if (confirm(`Delete context "${ctx.name}"?`)) deleteContext(ctx);
     }, 'var(--ds-accent-red)');
@@ -370,6 +402,104 @@ function showRowMenu(x, y, ctx) {
     if (rowMenu === menu) document.addEventListener('mousedown', onRowMenuDocMouseDown, true);
   }, 0);
   document.addEventListener('keydown', onRowMenuKey, true);
+}
+
+// -------------------------------------------------------------- context icons (#569)
+
+// Icon = server-side per-context state (rides contexts.json like name/dirs). Set via
+// the row right-click menu → showIconPicker. A chosen icon shows in the rail square
+// AND next to the name in the expanded panel; cleared, the square falls back to a
+// derived glyph (tabIcon). Match tabIcon's own emoji test so isEmoji styling agrees.
+function isEmojiGlyph(g) {
+  try { return /\p{Extended_Pictographic}|\p{Regional_Indicator}/u.test(g || ''); }
+  catch { return false; }
+}
+// First grapheme, not first code point — keep ZWJ sequences / flags intact (as tabIcon does).
+function firstGrapheme(s) {
+  try {
+    const [first] = [...new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(s)];
+    return first?.segment ?? '';
+  } catch { return [...(s || '')][0] || ''; }
+}
+
+// Optimistic local set + server persist. contexts holds the live object makeRow was
+// given, so mutating ctx.icon updates the rail immediately; the server broadcast
+// (setContexts) reconciles this and every other window. Send the FULL object — the
+// POST handler requires name.
+function setContextIcon(ctx, raw) {
+  if (!ctx) return;
+  const value = raw ? firstGrapheme(String(raw).trim()) : '';
+  ctx.icon = value;
+  saveContext({ id: ctx.id, name: ctx.name, dirs: ctx.dirs, icon: value });
+  renderRail();
+}
+
+const ICON_PRESETS = ['🚀','🐛','⚙️','📦','🧪','🌐','🎨','🔧','📊','💡','🔥','⭐','🧠','📝','🗂️','🤖'];
+
+// Small popover anchored where the right-click menu was, reusing the row-menu
+// dismissal (mousedown-outside via onRowMenuDocMouseDown, Escape via onRowMenuKey,
+// and the rowMenu handle so hideRowMenu tears it down). #546's mousedown-not-click
+// dismissal already accounts for renderRail() wiping the DOM mid-gesture.
+function showIconPicker(x, y, ctx) {
+  hideRowMenu();
+  const menu = document.createElement('div');
+  menu.className = 'context-menu context-icon-picker';
+
+  const grid = document.createElement('div');
+  grid.className = 'context-icon-grid';
+  for (const emoji of ICON_PRESETS) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'context-icon-choice' + (ctx.icon === emoji ? ' selected' : '');
+    b.textContent = emoji;
+    b.onclick = () => { hideRowMenu(); setContextIcon(ctx, emoji); };
+    grid.appendChild(b);
+  }
+  menu.appendChild(grid);
+
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.className = 'context-icon-input';
+  input.placeholder = 'Type or paste an emoji';
+  input.value = ctx.icon || '';
+  input.maxLength = 8; // room for a multi-codepoint grapheme (ZWJ / flags)
+  input.onkeydown = (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); hideRowMenu(); setContextIcon(ctx, input.value); }
+  };
+  menu.appendChild(input);
+
+  const actions = document.createElement('div');
+  actions.className = 'context-icon-actions';
+  const apply = document.createElement('button');
+  apply.type = 'button';
+  apply.className = 'context-icon-apply';
+  apply.textContent = 'Set';
+  apply.onclick = () => { hideRowMenu(); setContextIcon(ctx, input.value); };
+  actions.appendChild(apply);
+  const clear = document.createElement('button');
+  clear.type = 'button';
+  clear.className = 'context-icon-clear';
+  clear.textContent = 'Clear';
+  clear.onclick = () => { hideRowMenu(); setContextIcon(ctx, ''); };
+  actions.appendChild(clear);
+  menu.appendChild(actions);
+
+  menu.style.left = x + 'px';
+  menu.style.top = y + 'px';
+  document.body.appendChild(menu);
+
+  // Nudge back on-screen (mirror showRowMenu).
+  const rect = menu.getBoundingClientRect();
+  if (rect.right > window.innerWidth) menu.style.left = (window.innerWidth - rect.width - 8) + 'px';
+  if (rect.bottom > window.innerHeight) menu.style.top = (window.innerHeight - rect.height - 8) + 'px';
+
+  rowMenu = menu;
+  setTimeout(() => {
+    if (rowMenu === menu) document.addEventListener('mousedown', onRowMenuDocMouseDown, true);
+  }, 0);
+  document.addEventListener('keydown', onRowMenuKey, true);
+  input.focus();
+  input.select();
 }
 
 // ------------------------------------------------------- row drag-to-reorder
@@ -527,11 +657,15 @@ function setSidebar(open) {
   sidebarOpen = open;
   saveSidebar();
   if (rail) rail.style.display = open ? 'flex' : 'none';
+  if (resizer) resizer.style.display = open ? 'block' : 'none';
   if (toggleBtn) {
     toggleBtn.classList.toggle('active', open);
     toggleBtn.title = open ? 'Hide contexts (⌘P)' : 'Show contexts (⌘P)';
   }
-  if (open) renderRail();
+  if (open) {
+    renderRail();
+    applyRailWidth(loadWidth()); // restore the dragged width (null → CSS/theme default)
+  }
   updateIndicator();
   window.dispatchEvent(new Event('resize'));
 }
@@ -539,6 +673,113 @@ function setSidebar(open) {
 function toggleSidebar() {
   setSidebar(!sidebarOpen);
   document.activeElement?.blur();
+}
+
+// ------------------------------------------------------- resize / collapse (#569)
+//
+// The rail is freely resizable by dragging #context-resizer, and collapses to a
+// compact icon rail at its floor — the same behaviour the vertical tab bar got in
+// #552, so the two rails read as one system. Modelled on setupResizer() in
+// layout-manager.js. Both rails share ONE floor number: --ds-rail-width on
+// #app-container (CSS owns it; we read it back rather than keep a copy).
+
+let railWidthPx = 0;      // last width we applied, saved on mouseup / auto-fit
+let measureCanvas = null; // reused offscreen canvas for auto-fit text measurement
+
+function contextRailFloor() {
+  const el = document.getElementById('app-container');
+  const v = el ? parseFloat(getComputedStyle(el).getPropertyValue('--ds-rail-width')) : NaN;
+  return Number.isFinite(v) && v > 0 ? v : 48;
+}
+
+// Apply an explicit width (px) or, when null, clear the inline width so the CSS
+// default (--ds-context-width, theme-overridable) governs again. Either way the
+// collapsed class is derived from the resulting width so the icon rail turns on at
+// the floor. Only meaningful while the rail is visible (getBoundingClientRect is 0
+// when display:none), so callers apply it after opening the rail.
+function applyRailWidth(px) {
+  if (!rail) return;
+  const floor = contextRailFloor();
+  if (px == null) {
+    rail.style.width = '';
+    railWidthPx = rail.getBoundingClientRect().width;
+  } else {
+    railWidthPx = px;
+    rail.style.width = px + 'px';
+  }
+  rail.classList.toggle('collapsed', railWidthPx <= floor);
+}
+
+function setupContextResizer() {
+  if (!resizer || !rail) return;
+  let dragging = false;
+
+  resizer.addEventListener('mousedown', (e) => {
+    if (e.button && e.button !== 0) return;
+    dragging = true;
+    railWidthPx = rail.getBoundingClientRect().width; // so a click without a drag saves the current width
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+    e.preventDefault();
+  });
+
+  document.addEventListener('mousemove', (e) => {
+    if (!dragging) return;
+    const floor = contextRailFloor();
+    // Measure from the rail's OWN left edge, not the viewport — body padding and
+    // the retro-monitor gap sit to its left and would otherwise offset the drag.
+    let w = e.clientX - rail.getBoundingClientRect().left;
+    if (w < floor * 2) w = floor;               // snap shut to the icon rail (like #552)
+    w = Math.min(w, window.innerWidth * 0.5);   // max 50% of the viewport
+    railWidthPx = w;
+    rail.style.width = w + 'px';
+    rail.classList.toggle('collapsed', w <= floor);
+  });
+
+  document.addEventListener('mouseup', () => {
+    if (!dragging) return;
+    dragging = false;
+    document.body.style.cursor = '';
+    document.body.style.userSelect = '';
+    saveWidth(railWidthPx);
+    window.dispatchEvent(new Event('resize')); // refit terminals once, on release (not per-move)
+  });
+
+  // Double-click the handle → auto-fit to content, à la a spreadsheet column (#569).
+  resizer.addEventListener('dblclick', autoSizeRail);
+}
+
+// Size the rail to its widest content: the longest context name plus the fixed
+// chrome ("+ New context", header) and a per-row allowance, clamped to the floor
+// and half the viewport. Excludes the multi-line .context-hint, which wraps by
+// design. There is no existing text-measurement helper, so measure with a canvas.
+function autoSizeRail() {
+  if (!rail) return;
+  const floor = contextRailFloor();
+  if (!measureCanvas) measureCanvas = document.createElement('canvas');
+  const g = measureCanvas.getContext('2d');
+  // Build the font from individual props — getComputedStyle(...).font returns '' in
+  // Firefox for the shorthand. Read it off a real label so it tracks the theme.
+  const labelEl = rail.querySelector('.context-row-label');
+  if (labelEl) {
+    const cs = getComputedStyle(labelEl);
+    g.font = `${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`;
+  } else {
+    g.font = '13px system-ui';
+  }
+  let textW = 0;
+  for (const s of ['Contexts', '+ New context', 'All', ...contexts.map(c => c.name)]) {
+    textW = Math.max(textW, g.measureText(s || '').width);
+  }
+  // Allowance: row padding (12+12) + active border (3) + icon chip + gap + a
+  // worst-case count badge + slack. Tuned by eye; auto-fit needn't be exact.
+  let w = textW + 95;
+  w = Math.max(floor, Math.min(w, window.innerWidth * 0.5));
+  railWidthPx = w;
+  rail.style.width = w + 'px';
+  rail.classList.remove('collapsed'); // auto-fit always lands above the floor
+  saveWidth(w);
+  window.dispatchEvent(new Event('resize'));
 }
 
 // ---------------------------------------------------------------------- toast
@@ -904,6 +1145,20 @@ export function init(callbacks) {
   const appMain = document.getElementById('app-main');
   if (appContainer && appMain) appContainer.insertBefore(rail, appMain);
   else if (appContainer) appContainer.insertBefore(rail, appContainer.firstChild);
+
+  // Drag handle at the rail's right edge (#569). A SIBLING of the rail, never a
+  // child — renderRail() does rail.innerHTML='' on every render and would wipe an
+  // in-rail handle. Sits [#context-rail | #context-resizer | #app-main], mirroring
+  // the vertical-tabs [#tabs | #sidebar-resizer | #terminals] arrangement. Its
+  // visibility follows the rail's open state (toggled in setSidebar), so it shows
+  // in both layouts whenever the rail is open.
+  resizer = document.createElement('div');
+  resizer.id = 'context-resizer';
+  resizer.title = 'Drag to resize · double-click to auto-fit';
+  if (appContainer && appMain) appContainer.insertBefore(resizer, appMain);
+  else if (appContainer && rail.nextSibling) appContainer.insertBefore(resizer, rail.nextSibling);
+  else if (appContainer) appContainer.appendChild(resizer);
+  setupContextResizer();
 
   // Closed-context label variant for the retro-monitor CRT theme (#535). It is
   // display:none in every theme by default; the retro-monitor theme reveals it and

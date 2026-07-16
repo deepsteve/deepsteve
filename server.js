@@ -1978,7 +1978,7 @@ function loadContexts() {
       const v = JSON.parse(fs.readFileSync(CONTEXTS_FILE, 'utf8'));
       contexts = (Array.isArray(v) ? v : [])
         .filter(c => c && typeof c.name === 'string')
-        .map(c => ({ id: c.id || genContextId(), name: c.name, dirs: Array.isArray(c.dirs) ? c.dirs.filter(Boolean) : [] }));
+        .map(c => ({ id: c.id || genContextId(), name: c.name, dirs: Array.isArray(c.dirs) ? c.dirs.filter(Boolean) : [], icon: typeof c.icon === 'string' ? c.icon : '' }));
       return;
     }
   } catch (e) {
@@ -3815,8 +3815,11 @@ app.post('/api/contexts', (req, res) => {
   const dirs = Array.isArray(b.dirs) ? b.dirs.filter(Boolean) : [];
   const id = (b.id && String(b.id)) || genContextId();
   const existing = contexts.find(c => c.id === id);
-  if (existing) { existing.name = name; existing.dirs = dirs; }
-  else contexts.push({ id, name, dirs });
+  // Preserve the icon when the client omits it (e.g. a name/dirs edit from the
+  // editor modal sends no icon) — otherwise editing a context would clear its icon.
+  const icon = typeof b.icon === 'string' ? b.icon : (existing ? existing.icon : '');
+  if (existing) { existing.name = name; existing.dirs = dirs; existing.icon = icon; }
+  else contexts.push({ id, name, dirs, icon });
   saveContexts();
   broadcastContexts();
   res.json({ contexts });
