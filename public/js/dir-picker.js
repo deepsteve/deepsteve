@@ -37,11 +37,25 @@ function relTime(ts) {
   return `${Math.floor(h / 24)}d ago`;
 }
 
-export function showDirectoryPicker({ recentSessions = [] } = {}) {
+export function showDirectoryPicker({ recentSessions = [], contextDirs = [], contextLabel = '' } = {}) {
   return new Promise(async (resolve) => {
     const home = await fetchHome();
     const defaultPath = SessionStore.getLastCwd() || home;
     const alwaysUse = SessionStore.getAlwaysUse();
+
+    // Context repos first (#573): a quick-pick section above Recent sessions,
+    // listing the active context's repos so the context follows you here too.
+    const ctxHtml = contextDirs.length > 0 ? `
+        <div class="recent-section">
+          <div class="recent-label">${esc(contextLabel || 'Context')}</div>
+          ${contextDirs.map(p => `
+            <button class="recent-session-btn context-dir-btn" data-path="${esc(p)}" title="${esc(p)}">
+              <span class="recent-name">${esc(p.split('/').pop())}</span>
+              <span class="recent-meta">${esc(p)}</span>
+            </button>`).join('')}
+        </div>
+        <div class="recent-separator"></div>
+    ` : '';
 
     const recentHtml = recentSessions.length > 0 ? `
         <div class="recent-section">
@@ -63,6 +77,7 @@ export function showDirectoryPicker({ recentSessions = [] } = {}) {
     overlay.innerHTML = `
       <div class="modal">
         <h2>Select working directory</h2>
+        ${ctxHtml}
         ${recentHtml}
         <div class="path-wrap">
           <input type="text" id="cwd-input" value="${defaultPath}">
@@ -91,6 +106,12 @@ export function showDirectoryPicker({ recentSessions = [] } = {}) {
     });
 
     const input = overlay.querySelector('#cwd-input');
+
+    // Context-repo quick-pick (#573): behave like typing that path + Start.
+    overlay.querySelectorAll('.context-dir-btn[data-path]').forEach(btn => {
+      btn.onclick = () => { input.value = btn.dataset.path; submit(); };
+    });
+
     const checkbox = overlay.querySelector('#always-use');
     const tree = overlay.querySelector('#dir-tree');
     const upBtn = overlay.querySelector('#up-btn');

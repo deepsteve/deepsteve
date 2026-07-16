@@ -255,3 +255,78 @@ test('jump to an existing tab already in the active context → no switch (#559)
   assert.deepStrictEqual(state.switchCalls, []);
   assert.strictEqual(state.activeTabId, 'tab1b');
 });
+
+// #573: orderRecentDirsByContext — the pure ordering helper the new-tab menu and
+// dir picker use to list the active context's repos first, then the rest of the
+// recents. No DOM / module state involved; just import the module for the export.
+
+test('orderRecentDirsByContext: no context → passthrough, same order (#573)', async () => {
+  const { mod } = await setup();
+  const recents = [{ path: '/repo/b', lastUsed: 2 }, { path: '/repo/c', lastUsed: 1 }];
+  const { contextGroup, rest } = mod.orderRecentDirsByContext([], recents);
+  assert.deepStrictEqual(contextGroup, []);
+  assert.deepStrictEqual(rest, recents); // rest preserves input order verbatim
+});
+
+test('orderRecentDirsByContext: context repos first in stored order, incl. ones absent from recents (#573)', async () => {
+  const { mod } = await setup();
+  const recents = [{ path: '/repo/b', lastUsed: 2 }];
+  const { contextGroup, rest } = mod.orderRecentDirsByContext(['/repo/a', '/repo/c'], recents);
+  assert.deepStrictEqual(contextGroup, [{ path: '/repo/a' }, { path: '/repo/c' }]);
+  assert.deepStrictEqual(rest, [{ path: '/repo/b', lastUsed: 2 }]);
+});
+
+test('orderRecentDirsByContext: exact-path match is deduped out of rest (#573)', async () => {
+  const { mod } = await setup();
+  const recents = [{ path: '/repo/a', lastUsed: 3 }, { path: '/repo/b', lastUsed: 2 }];
+  const { contextGroup, rest } = mod.orderRecentDirsByContext(['/repo/a'], recents);
+  assert.deepStrictEqual(contextGroup, [{ path: '/repo/a' }]);
+  assert.deepStrictEqual(rest, [{ path: '/repo/b', lastUsed: 2 }]); // /repo/a shown once, up top
+});
+
+test('orderRecentDirsByContext: trailing-slash-insensitive dedup (#573)', async () => {
+  const { mod } = await setup();
+  const recents = [{ path: '/repo/a', lastUsed: 1 }];
+  const { contextGroup, rest } = mod.orderRecentDirsByContext(['/repo/a/'], recents);
+  assert.deepStrictEqual(contextGroup, [{ path: '/repo/a/' }]);
+  assert.deepStrictEqual(rest, []); // '/repo/a' matches '/repo/a/'
+});
+
+test('orderRecentDirsByContext: a recent SUBDIR of a context repo stays in rest (#573)', async () => {
+  const { mod } = await setup();
+  const recents = [{ path: '/repo/a/sub', lastUsed: 1 }];
+  const { contextGroup, rest } = mod.orderRecentDirsByContext(['/repo/a'], recents);
+  assert.deepStrictEqual(contextGroup, [{ path: '/repo/a' }]);
+  assert.deepStrictEqual(rest, [{ path: '/repo/a/sub', lastUsed: 1 }]); // not filtered — distinct quick-pick
+});
+
+// #573: getActiveContextInfo — the getter the new-tab menu + dir picker read to
+// decide whether to show a context group. Must return null in exactly the cases
+// where both surfaces should render "as today": All view and feature-disabled.
+
+test('getActiveContextInfo: active context → {name, dirs} snapshot (#573)', async () => {
+  const { mod } = await setup(); // CTX_A = { name:'Alpha', dirs:['/repo/a'] }
+  mod.setActiveContext('ctxa');
+  assert.deepStrictEqual(mod.getActiveContextInfo(), { name: 'Alpha', dirs: ['/repo/a'] });
+});
+
+test('getActiveContextInfo: All view → null (#573)', async () => {
+  const { mod } = await setup();
+  assert.strictEqual(mod.getActiveContextInfo(), null);
+});
+
+test('getActiveContextInfo: feature disabled → null even with an active context (#573)', async () => {
+  const { mod } = await setup();
+  mod.setActiveContext('ctxa');
+  mod.setEnabled(false);
+  assert.strictEqual(mod.getActiveContextInfo(), null);
+});
+
+test('getActiveContextInfo: returned dirs is a copy, not the live array (#573)', async () => {
+  const multi = { id: 'ctxm', name: 'Multi', dirs: ['/repo/a', '/repo/b'] };
+  const { mod } = await setup({ contexts: [multi] });
+  mod.setActiveContext('ctxm');
+  const info = mod.getActiveContextInfo();
+  info.dirs.push('/repo/c');                       // mutate the snapshot
+  assert.deepStrictEqual(mod.getActiveContextInfo().dirs, ['/repo/a', '/repo/b']); // source intact
+});

@@ -28,7 +28,7 @@ import { init as initProgressBar, start as progressStart, done as progressDone }
 import { init as initHashCommands, beforeSend as hashCommandsBeforeSend, setWaitingForInput as setHashCommandsWaiting, setEnabled as setHashCommandsEnabled } from './hash-commands.js';
 import { init as initOverviewMode, setEnabled as setOverviewModeEnabled, setShortcut as setOverviewModeShortcut, setDefaultLayout as setOverviewDefaultLayout, toggle as toggleOverviewMode, isOverviewActive, updateFocus as updateOverviewFocus, onTabsReordered as onOverviewTabsReordered } from './overview-mode.js';
 import { init as initTerminalSearch, attachSearchAddon, closeIfOpen as closeTerminalSearch } from './terminal-search.js';
-import { init as initContextViews, setEnabled as setContextViewsEnabled, applyFilter as refreshContextFilter, requestNewTabInContext, setContexts as applyServerContexts, setActiveContext as setActiveContextFromPanel, getActiveContextId, activeContextIsEmpty, noteActiveTab, revealTabContext, showToast } from './context-views.js';
+import { init as initContextViews, setEnabled as setContextViewsEnabled, applyFilter as refreshContextFilter, requestNewTabInContext, setContexts as applyServerContexts, setActiveContext as setActiveContextFromPanel, getActiveContextId, getActiveContextInfo, orderRecentDirsByContext, activeContextIsEmpty, noteActiveTab, revealTabContext, showToast } from './context-views.js';
 import { nsKey } from './storage-namespace.js';
 import { formatShortcut } from './shortcuts.js';
 import { init as initWakeWatch } from './wake-watch.js';
@@ -2931,30 +2931,49 @@ function showNewTabMenu(e) {
     html += `<div class="context-menu-item context-menu-has-submenu" id="agent-submenu-trigger">Agent: ${currentAgentName} <span class="context-menu-arrow"></span></div>`;
   }
 
-  // Build recent dirs section
+  // Build recent dirs section. With a context active (#573), the context's repos
+  // are listed first (in stored order), then a separator, then the remaining
+  // recents — ordering, not filtering. "All" / disabled → identical to before.
   const recentDirs = SessionStore.getRecentDirs();
   const INITIAL_SHOW = 10;
   const MORE_INCREMENT = 20;
+  const ctxInfo = getActiveContextInfo();               // { name, dirs } | null
+  const { contextGroup, rest } =
+    orderRecentDirsByContext(ctxInfo ? ctxInfo.dirs : [], recentDirs);
+  // Single easy-to-change spot for the top-group header text (empty → no header).
+  const ctxHeaderLabel = ctxInfo ? ctxInfo.name : '';
   let recentShown = 0;
-  // Disambiguate duplicate leaf names by appending parent dir
+
+  // Disambiguate duplicate leaf names across BOTH groups by appending parent dir.
   const leafCounts = {};
-  for (const d of recentDirs) {
+  for (const d of [...contextGroup, ...rest]) {
     const leaf = d.path.split('/').pop();
     leafCounts[leaf] = (leafCounts[leaf] || 0) + 1;
   }
-  if (recentDirs.length > 0) {
+  const dirItemHtml = (d) => {
+    const parts = d.path.split('/');
+    const leaf = parts.pop();
+    const label = leafCounts[leaf] > 1 && parts.length > 0
+      ? `${leaf} (${parts.pop()})`
+      : leaf;
+    const p = d.path.replace(/"/g, '&quot;');
+    return `<div class="context-menu-item" data-action="recent" data-path="${p}" title="${p}">${label}</div>`;
+  };
+
+  // Top group: the active context's repos (all of them, stored order).
+  if (contextGroup.length > 0) {
+    if (ctxHeaderLabel) html += `<div class="context-menu-header">${escapeHtml(ctxHeaderLabel)}</div>`;
+    for (const d of contextGroup) html += dirItemHtml(d);
+    html += '<div class="context-menu-separator"></div>';
+  }
+
+  // Bottom group: the rest of the recents (paginated, as before).
+  if (rest.length > 0) {
     html += '<div class="context-menu-header">Recent</div>';
-    const initialSlice = recentDirs.slice(0, INITIAL_SHOW);
+    const initialSlice = rest.slice(0, INITIAL_SHOW);
     recentShown = initialSlice.length;
-    for (const d of initialSlice) {
-      const parts = d.path.split('/');
-      const leaf = parts.pop();
-      const label = leafCounts[leaf] > 1 && parts.length > 0
-        ? `${leaf} (${parts.pop()})`
-        : leaf;
-      html += `<div class="context-menu-item" data-action="recent" data-path="${d.path.replace(/"/g, '&quot;')}" title="${d.path.replace(/"/g, '&quot;')}">${label}</div>`;
-    }
-    if (recentDirs.length > INITIAL_SHOW) {
+    for (const d of initialSlice) html += dirItemHtml(d);
+    if (rest.length > INITIAL_SHOW) {
       html += `<div class="context-menu-item context-menu-more" data-action="more">More...</div>`;
     }
     html += '<div class="context-menu-separator" id="recent-dirs-separator"></div>';
@@ -3146,11 +3165,12 @@ function showNewTabMenu(e) {
     if (!item) return;
     const action = item.dataset.action;
     if (!action) return; // ignore clicks on items without actions (e.g. agent submenu trigger)
-    // "More" button: append next batch of recent dirs without closing menu
+    // "More" button: append next batch of the remaining recents (the `rest`
+    // group — context repos above the separator are shown in full) (#573).
     if (action === 'more') {
       ev.stopPropagation();
       const moreBtn = item;
-      const nextSlice = recentDirs.slice(recentShown, recentShown + MORE_INCREMENT);
+      const nextSlice = rest.slice(recentShown, recentShown + MORE_INCREMENT);
       recentShown += nextSlice.length;
       const separator = menu.querySelector('#recent-dirs-separator');
       for (const d of nextSlice) {
@@ -3167,7 +3187,7 @@ function showNewTabMenu(e) {
         el.textContent = label;
         menu.insertBefore(el, moreBtn);
       }
-      if (recentShown >= recentDirs.length) {
+      if (recentShown >= rest.length) {
         moreBtn.remove();
       }
       // Re-check if menu extends off-screen after adding items
@@ -3355,7 +3375,13 @@ async function promptRepoSession() {
   // Refresh the recent-sessions list so the picker shows the latest (also kept
   // current via the 'recent-sessions' WS broadcast while a tab is open).
   await loadRecentSessions();
-  const result = await showDirectoryPicker({ recentSessions });
+  // With a context active, surface its repos first in the picker too (#573).
+  const ctxInfo = getActiveContextInfo();
+  const result = await showDirectoryPicker({
+    recentSessions,
+    contextDirs: ctxInfo ? ctxInfo.dirs : [],
+    contextLabel: ctxInfo ? ctxInfo.name : '',
+  });
   if (result === null) return;
   if (result && typeof result === 'object' && result.type === 'recent') {
     await restoreRecentSession(result.key);
