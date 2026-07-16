@@ -1385,6 +1385,14 @@ settingsBtn?.addEventListener('click', async () => {
     if (overlay.querySelector('#agent-claude').checked) enabledAgents.push('claude');
     if (overlay.querySelector('#agent-opencode').checked) enabledAgents.push('opencode');
     if (overlay.querySelector('#agent-pi').checked) enabledAgents.push('pi');
+    // Preserve enabled agents that have no checkbox here (e.g. hermes) — rebuilding
+    // the list from only the rendered trio silently disabled them on every save (#519).
+    // Appended after the rendered ones because the server derives defaultAgent from
+    // the first entry.
+    const renderedAgentIds = ['claude', 'opencode', 'pi'];
+    for (const a of settingsData.enabledAgents || []) {
+      if (!renderedAgentIds.includes(a)) enabledAgents.push(a);
+    }
     const opencodeBinary = overlay.querySelector('#opencode-binary').value || 'opencode';
     const piBinary = overlay.querySelector('#pi-binary').value || 'pi';
     // Custom Claude config profiles (#537): collect rows; drop incomplete ones. Keep the
@@ -2539,6 +2547,84 @@ function showRestartConfirmDialog() {
   return { promise, dismiss: cleanup };
 }
 
+// Meta Controls consent (#519): an agent called meta_type while the setting is
+// off. The server holds the pending tool call while every window shows this
+// dialog; the first decision wins (POST /api/meta-controls-consent) and the
+// server broadcasts confirm-meta-controls-resolved so other windows' copies
+// dismiss. Approving flips the persistent metaControlsEnabled setting — exactly
+// what the Settings toggle does.
+let metaConsentDialog = null;
+
+function dismissMetaControlsConsentDialog() {
+  if (metaConsentDialog) metaConsentDialog.dismiss();
+}
+
+function showMetaControlsConsentDialog(msg) {
+  dismissMetaControlsConsentDialog(); // never stack two
+
+  const requesterName = msg.requester?.name || msg.requester?.id || 'An agent';
+  const targetName = msg.target?.name || msg.target?.id || 'a session';
+  const isSelf = !!msg.requester?.id && msg.requester.id === msg.target?.id;
+
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.innerHTML = `
+    <div class="modal">
+      <h2>Enable Meta Controls?</h2>
+      <p style="font-size:13px;color:var(--ds-text-secondary);margin-bottom:8px;">
+        Agent session <strong id="meta-consent-requester"></strong> wants to type into
+        <span id="meta-consent-target-wrap">session <strong id="meta-consent-target"></strong></span>,
+        which requires the <strong>Meta Controls</strong> setting (currently off).
+      </p>
+      <p style="font-size:13px;color:var(--ds-text-secondary);margin-bottom:16px;">
+        Meta Controls lets agents send keystrokes to any session — including their own,
+        which enables self-driving loops. Enabling it keeps the setting on until you turn
+        it off in Settings.
+      </p>
+      <div class="modal-buttons">
+        <button class="btn-secondary" id="meta-consent-cancel">Cancel</button>
+        <button class="btn-primary" id="meta-consent-ok">Enable</button>
+      </div>
+    </div>`;
+  // Session names are user data — set via textContent, never interpolated HTML.
+  overlay.querySelector('#meta-consent-requester').textContent = requesterName;
+  if (isSelf) {
+    overlay.querySelector('#meta-consent-target-wrap').textContent = 'its own terminal';
+  } else {
+    overlay.querySelector('#meta-consent-target').textContent = targetName;
+  }
+  document.body.appendChild(overlay);
+
+  let cleaned = false;
+  const cleanup = () => {
+    if (cleaned) return;
+    cleaned = true;
+    document.removeEventListener('keydown', onKey, true);
+    overlay.remove();
+    metaConsentDialog = null;
+  };
+  const decide = (decision) => {
+    cleanup();
+    fetch('/api/meta-controls-consent', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ decision }),
+    }).catch(() => {});
+  };
+  overlay.querySelector('#meta-consent-cancel').onclick = () => decide('declined');
+  overlay.querySelector('#meta-consent-ok').onclick = () => decide('confirmed');
+  const onKey = (e) => {
+    // Stop all key events from reaching the terminal while the modal is open.
+    e.stopPropagation();
+    e.preventDefault();
+    // Deliberately no Enter→approve: enabling a security gate takes a click.
+    if (e.key === 'Escape') decide('declined');
+  };
+  document.addEventListener('keydown', onKey, true);
+
+  metaConsentDialog = { dismiss: cleanup };
+}
+
 function showReloadOverlay() {
   const overlay = document.createElement('div');
   overlay.className = 'modal-overlay';
@@ -3612,6 +3698,13 @@ async function init() {
       if (msg.type === 'version-applying') {
         hideAutoApplyToast();
         showReloadOverlay();
+      }
+      if (msg.type === 'confirm-meta-controls') {
+        showMetaControlsConsentDialog(msg);
+      }
+      if (msg.type === 'confirm-meta-controls-resolved') {
+        // Decided elsewhere (another window, or the server-side timeout) — dismiss ours.
+        dismissMetaControlsConsentDialog();
       }
     },
     onShowRestartConfirm: () => showRestartConfirmDialog(),

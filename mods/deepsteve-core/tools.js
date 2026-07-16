@@ -10,6 +10,29 @@ function deriveTabName(cmd) {
   return oneLine.length > MAX ? oneLine.slice(0, MAX - 1) + '…' : oneLine;
 }
 
+// Control keys meta_type can send (#519). Values are the raw bytes written to the
+// PTY — both engines pass them through unchanged. `C-a`…`C-z` map to control chars.
+const KEY_MAP = {
+  Escape: '\x1b', Enter: '\r', Tab: '\t', Backspace: '\x7f',
+  Up: '\x1b[A', Down: '\x1b[B', Right: '\x1b[C', Left: '\x1b[D',
+  Home: '\x1b[H', End: '\x1b[F',
+  PageUp: '\x1b[5~', PageDown: '\x1b[6~', Delete: '\x1b[3~',
+};
+const VALID_KEYS = `${Object.keys(KEY_MAP).join(', ')}, C-a…C-z`;
+function keyToBytes(key) {
+  if (KEY_MAP[key]) return KEY_MAP[key];
+  const ctrl = /^C-([a-z])$/i.exec(key);
+  if (ctrl) return String.fromCharCode(ctrl[1].toLowerCase().charCodeAt(0) & 0x1f);
+  return null;
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// meta_type timing knobs, exported so unit tests can shrink them. keyGapMs: Ink
+// only recognizes control bytes that arrive as separate stdin reads. settleMs:
+// how long to let the echo/redraw reach the scrollback before reading it back.
+const TIMINGS = { keyGapMs: 250, settleMs: 500, waitForIdleMs: 30000, idlePollMs: 250 };
+
 function init(context) {
   const {
     shells, closeSession, handleShellGone, spawnSession, sessionEnv, getSpawnArgs, mcpConfigArgs, getAgentConfig, wireShellOutput, getDefaultEngine, getForegroundCommand,
@@ -18,7 +41,18 @@ function init(context) {
     fetchIssueFromGitHub, deliverPromptWhenReady,
     reloadClients, deliverToWindow, settings, log, isShuttingDown,
     emitSessionOpen,
+    stripEscapeSequences, sessionInputState, maybeInheritRemoteControl, requestMetaControlsConsent,
   } = context;
+
+  // Last N visual lines of a session's screen: ANSI-stripped scrollback tail.
+  // TUI agents redraw whole frames, so this approximates (not reproduces) the
+  // current screen — same approach as the server's sessionHasRemoteControl.
+  function screenLines(entry, n) {
+    const raw = (entry.scrollback || []).join('').slice(-16384);
+    const lines = stripEscapeSequences(raw).split(/\r\n|\n|\r/).map((l) => l.replace(/\s+$/g, ''));
+    while (lines.length && lines[lines.length - 1] === '') lines.pop();
+    return lines.slice(-n);
+  }
 
   return {
     get_my_session_id: {
@@ -33,7 +67,7 @@ function init(context) {
       },
     },
     get_session_info: {
-      description: 'Get live session metadata for a deepsteve session: tab name, cwd (your actual working directory — the worktree path for worktree sessions), repoRoot (the main repo checkout), worktree (the worktree name, or null), and runningCommand (for a plain terminal session, the command running in it right now, or null if it is idle at its prompt; always null for agent sessions). Use `get_my_session_id` to get your session ID.',
+      description: 'Get live session metadata for a deepsteve session: tab name, cwd (your actual working directory — the worktree path for worktree sessions), repoRoot (the main repo checkout), worktree (the worktree name, or null), runningCommand (for a plain terminal session, the command running in it right now, or null if it is idle at its prompt; always null for agent sessions), state ("idle" = the agent is at its input prompt, "busy" = mid-task, "unknown" = not classifiable for this agent type), and metaControls (whether the Meta Controls setting is on, i.e. whether meta_type will type without asking the user first). Use `get_my_session_id` to get your session ID.',
       schema: {
         session_id: z.string().describe('The deepsteve session ID. Use `get_my_session_id` to get this value.'),
       },
@@ -56,6 +90,9 @@ function init(context) {
             runningCommand: entry.agentType === 'terminal' ? getForegroundCommand(session_id) : null,
             createdAt: entry.createdAt || null,
             elapsedMs: entry.createdAt ? Date.now() - entry.createdAt : null,
+            // Kept in lockstep with GET /api/shells/:id/info (#519).
+            state: sessionInputState(entry),
+            metaControls: !!settings.metaControlsEnabled,
           }, null, 2) }]
         };
       },
@@ -77,29 +114,134 @@ function init(context) {
       },
     },
     meta_type: {
-      description: 'Type text into a deepsteve session\'s terminal, optionally pressing Enter to submit. With no session_id, types into the calling session. Requires the Meta Controls setting to be enabled (off by default).',
+      description: 'Type text and/or control keys into a deepsteve session\'s terminal — a server-side PTY write, so it works regardless of which browser tab is focused (or whether a browser is open at all). With no session_id, types into the calling session. The result is truthful: it reports the session\'s input state before typing ("idle" = at its prompt, "busy" = mid-task, "unknown" = unclassifiable agent type), whether the typed text actually appeared on the session\'s screen (`landed`, a readback heuristic), and the screen tail after typing — check these instead of assuming success. Use wait_for_idle to hold off until the agent reaches its prompt, and clear_first to press Escape once first (clears staged composer text). Requires the Meta Controls setting: if it is off, this call shows the user an in-browser consent dialog and waits up to 60s for their decision.',
       schema: {
-        text: z.string().describe('The text to type into the terminal.'),
+        text: z.string().optional().describe('Text to type. At least one of `text` / `keys` is required.'),
+        keys: z.array(z.string()).optional().describe(`Control keys to press BEFORE typing \`text\`, in order (e.g. ["Escape"] to cancel a menu, ["C-c"] to interrupt). Valid: ${VALID_KEYS}.`),
         session_id: z.string().optional().describe('Target session ID. If omitted, types into the calling session.'),
-        submit: z.boolean().optional().describe('Press Enter to submit after typing (default true). Set false to stage input without submitting.'),
+        submit: z.boolean().optional().describe('Press Enter after typing `text` (default true). Set false to stage input without submitting. Ignored when no `text` is given.'),
+        clear_first: z.boolean().optional().describe('Press Escape once before `keys`/`text` to clear any staged input in the composer (default false).'),
+        wait_for_idle: z.boolean().optional().describe('If the session is busy, wait (up to 30s) for it to reach its input prompt before typing; on timeout nothing is typed and the result says so. Recommended when targeting an agent session that may be mid-task.'),
       },
-      handler: async ({ text, session_id, submit }, extra) => {
-        if (!settings.metaControlsEnabled) {
-          return { content: [{ type: 'text', text: 'Meta Controls is disabled. Enable it in deepsteve Settings to use meta_type.' }] };
+      handler: async ({ text, keys, session_id, submit, clear_first, wait_for_idle }, extra) => {
+        const callerId = extra?.requestInfo?.url?.searchParams?.get('shellId');
+        const targetId = session_id || callerId;
+        if (!text && (!keys || keys.length === 0)) {
+          return { content: [{ type: 'text', text: 'Nothing to send: provide `text` and/or `keys`.' }] };
         }
+        // Validate keys before anything else — don't prompt the user for consent
+        // on a call that was malformed anyway.
+        const keyBytes = [];
+        for (const k of keys || []) {
+          const b = keyToBytes(k);
+          if (b === null) {
+            return { content: [{ type: 'text', text: `Unknown key "${k}". Valid keys: ${VALID_KEYS}.` }] };
+          }
+          keyBytes.push(b);
+        }
+        const entry = targetId ? shells.get(targetId) : null;
+        if (!entry) {
+          return { content: [{ type: 'text', text: `Session "${targetId || 'unknown'}" not found.` }] };
+        }
+
+        if (!settings.metaControlsEnabled) {
+          // Ask the human in the browser instead of failing opaquely (#519).
+          const outcome = await requestMetaControlsConsent({ requesterId: callerId, targetId });
+          if (outcome !== 'confirmed') {
+            const why = {
+              declined: 'The user declined to enable it just now (declines cool down for 60s — do not retry immediately; if this is needed, ask the user to enable Meta Controls in deepsteve Settings).',
+              timeout: 'The user did not respond to the consent dialog within 60s. Ask them directly, then retry.',
+              'no-clients': 'No browser window is connected to approve enabling it. Ask the user to open the deepsteve UI, or to enable Meta Controls in deepsteve Settings.',
+            }[outcome] || `Consent not granted (${outcome}).`;
+            return { content: [{ type: 'text', text: `Meta Controls is disabled. ${why}` }] };
+          }
+        }
+
+        const stateBefore = sessionInputState(entry);
+        if (wait_for_idle && stateBefore === 'busy') {
+          const deadline = Date.now() + TIMINGS.waitForIdleMs;
+          while (Date.now() < deadline && shells.has(targetId) && !entry.waitingForInput) {
+            await sleep(TIMINGS.idlePollMs);
+          }
+          if (!shells.has(targetId)) {
+            return { content: [{ type: 'text', text: `Session "${targetId}" closed while waiting for idle. Nothing was typed.` }] };
+          }
+          if (!entry.waitingForInput) {
+            return { content: [{ type: 'text', text: JSON.stringify({
+              session_id: targetId, state_before: 'busy', timed_out_waiting: true,
+              submitted: false, landed: false,
+              note: 'Session stayed busy for 30s; nothing was typed. Retry later, or retry without wait_for_idle to type anyway.',
+            }) }] };
+          }
+        }
+
+        // Each control byte is its own engine write with a gap — Ink only
+        // recognizes control keys that arrive as separate stdin reads (same
+        // reason submitToShell defers Enter).
+        const allKeyBytes = [...(clear_first ? [KEY_MAP.Escape] : []), ...keyBytes];
+        for (const b of allKeyBytes) {
+          if (!shells.has(targetId)) {
+            return { content: [{ type: 'text', text: `Session "${targetId}" closed mid-send.` }] };
+          }
+          entry.engine.write(targetId, b);
+          await sleep(TIMINGS.keyGapMs);
+        }
+
+        const doSubmit = text ? submit !== false : false;
+        if (text) {
+          if (doSubmit) {
+            await submitToShell(targetId, text); // writes text, then \r after 1s (Ink-safe)
+          } else {
+            entry.engine.write(targetId, text);  // stage text without Enter
+          }
+        }
+        // Let the echo/redraw reach the scrollback before reading it back.
+        await sleep(TIMINGS.settleMs);
+
+        // Readback heuristic: did the typed text show up on the screen? The
+        // composer echoes what it received, so a miss usually means the input
+        // was swallowed (dead PTY, modal menu, etc.).
+        let landed = null;
+        if (text) {
+          const norm = (s) => s.replace(/\s+/g, ' ').trim();
+          const needle = norm(text).slice(0, 200);
+          if (needle.length > 0) {
+            const tail = stripEscapeSequences((entry.scrollback || []).join('').slice(-8192));
+            landed = norm(tail).includes(needle);
+          }
+        }
+
+        log(`[MCP] meta_type: target=${targetId}, len=${text ? text.length : 0}, keys=${allKeyBytes.length}, submit=${doSubmit}, state_before=${stateBefore}, landed=${landed}`);
+        return { content: [{ type: 'text', text: JSON.stringify({
+          session_id: targetId,
+          state_before: stateBefore,
+          typed: text ? text.length : 0,
+          keys_sent: [...(clear_first ? ['Escape'] : []), ...(keys || [])],
+          submitted: doSubmit,
+          landed,
+          screen_tail: screenLines(entry, 10),
+        }, null, 2) }] };
+      },
+    },
+    read_session_screen: {
+      description: 'Read the recent terminal screen of a deepsteve session: the last N lines of its ANSI-stripped output, plus its input state ("idle" = the agent is at its input prompt, "busy" = mid-task, "unknown" = unclassifiable — plain terminals and non-BEL agents) and seconds since it last produced output. With no session_id, reads the calling session. Use it to check what a session is doing, or to verify input landed after meta_type. Note: TUI agents redraw their screen constantly, so the stripped stream contains repeated frame fragments — the tail approximates the current screen rather than reproducing it exactly.',
+      schema: {
+        session_id: z.string().optional().describe('Target session ID. If omitted, reads the calling session.'),
+        lines: z.number().optional().describe('How many lines from the end to return (default 40, max 200).'),
+      },
+      handler: async ({ session_id, lines }, extra) => {
         const targetId = session_id || extra?.requestInfo?.url?.searchParams?.get('shellId');
         const entry = targetId ? shells.get(targetId) : null;
         if (!entry) {
           return { content: [{ type: 'text', text: `Session "${targetId || 'unknown'}" not found.` }] };
         }
-        const doSubmit = submit !== false; // default true
-        if (doSubmit) {
-          submitToShell(targetId, text);      // writes text, then \r after 1s (Ink-safe)
-        } else {
-          entry.engine.write(targetId, text); // stage text without Enter
-        }
-        log(`[MCP] meta_type: target=${targetId}, len=${text.length}, submit=${doSubmit}`);
-        return { content: [{ type: 'text', text: JSON.stringify({ session_id: targetId, typed: text.length, submitted: doSubmit }) }] };
+        const n = Math.max(1, Math.min(200, Math.round(Number(lines) || 40)));
+        return { content: [{ type: 'text', text: JSON.stringify({
+          session_id: targetId,
+          state: sessionInputState(entry),
+          seconds_since_output: entry.lastActivity ? Math.round((Date.now() - entry.lastActivity) / 1000) : null,
+          lines: screenLines(entry, n),
+        }, null, 2) }] };
       },
     },
     start_issue: {
@@ -188,6 +330,10 @@ function init(context) {
           handleShellGone(id);
         });
         saveState();
+
+        // Inherit Remote Control from the caller (#519) — queued BEFORE the issue
+        // prompt so `/rc` submits first; deliverPromptWhenReady sequences the two.
+        maybeInheritRemoteControl({ newId: id, agentType: effectiveAgentType, isFork: false, parentId: callerId });
 
         // Deliver prompt: sync if body provided, async fetch from GitHub otherwise
         if (prompt) {
@@ -343,6 +489,12 @@ function init(context) {
         wireShellOutput(id);
         emitSessionOpen(id);
 
+        // Inherit Remote Control from the caller (#519) — queued before any `prompt`
+        // below so `/rc` submits first. isFork reflects what actually happened (a
+        // requested fork without a resumable caller session spawns fresh). No-op for
+        // non-claude agents.
+        maybeInheritRemoteControl({ newId: id, agentType: effectiveAgentType, isFork: !!(fork && caller.claudeSessionId), parentId: callerId });
+
         // Deliver the prompt through the shared readiness pipeline (same as start_issue
         // above and the server's other spawn paths). deliverPromptWhenReady handles BOTH
         // delay-based agents (initialPromptDelay > 0) AND BEL agents like claude whose
@@ -370,4 +522,4 @@ function init(context) {
   };
 }
 
-module.exports = { init, deriveTabName };
+module.exports = { init, deriveTabName, TIMINGS };

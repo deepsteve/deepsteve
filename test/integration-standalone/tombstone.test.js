@@ -104,6 +104,9 @@ async function startDaemon() {
   // Don't leak the invoking environment into the daemon (see session-restore.test.js).
   delete env.CLAUDECODE;
   for (const k of Object.keys(env)) if (k.startsWith('DEEPSTEVE_')) delete env[k];
+  // The killall test below needs the #562 gate open: POST /api/shells/killall is
+  // 403 unless the daemon runs in test mode. Set AFTER the DEEPSTEVE_* scrub.
+  env.DEEPSTEVE_TEST_MODE = '1';
 
   // Suppress the cold-start browser auto-open across restarts (see session-restore.test.js).
   fs.mkdirSync(path.join(HOME, '.deepsteve'), { recursive: true });

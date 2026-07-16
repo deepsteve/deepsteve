@@ -101,6 +101,8 @@ const RELOAD_FLAG = path.join(os.homedir(), '.deepsteve', '.reload');
 const reloadClients = new Set(); // WebSocket connections for live-reload
 const pendingOpens = []; // open-session messages waiting for a browser to connect
 let restartState = null; // { resolve: fn, timeout: timer } — first browser response wins
+let metaConsentState = null; // { promise, resolve: fn, timeout: timer } — pending Meta Controls consent (#519)
+let metaConsentDeclinedAt = 0; // cooldown start so a retrying agent can't nag the user with modals
 
 // Deliver a message to a specific browser window, falling back to first available client.
 // If no clients are connected, queues the message for flush on next connection.
@@ -458,9 +460,17 @@ function coerceSetting(entry, raw) {
     case 'array': {
       if (!Array.isArray(raw)) return { ok: false };
       let arr = raw;
-      if (entry.itemEnum) arr = arr.filter(x => entry.itemEnum.includes(x));
+      let warning;
+      if (entry.itemEnum) {
+        const dropped = raw.filter(x => !entry.itemEnum.includes(x));
+        arr = raw.filter(x => entry.itemEnum.includes(x));
+        // A stale settings.json (or an external read-modify-write POST) can carry
+        // items no longer in the enum; they're pruned, but silently losing them
+        // hid real config from the caller (#519) — report what was dropped.
+        if (dropped.length) warning = `${entry.name}: dropped unknown item(s): ${dropped.join(', ')}`;
+      }
       if (entry.nonEmpty && arr.length === 0) return { ok: false };
-      return { ok: true, value: arr };
+      return { ok: true, value: arr, warning };
     }
     case 'custom': {
       const v = entry.sanitize(raw);
@@ -471,16 +481,25 @@ function coerceSetting(entry, raw) {
   return { ok: false };
 }
 
+// Returns an array of human-readable warnings for fields that were rejected or
+// had items pruned, so a POST caller can see what didn't apply as sent (#519).
 function applySettingsFromBody(body, s) {
+  const warnings = [];
   for (const entry of SETTINGS_SCHEMA) {
     if (!(entry.name in body)) continue;
     const result = coerceSetting(entry, body[entry.name]);
-    if (!result.ok) continue;
+    if (!result.ok) {
+      warnings.push(`${entry.name}: rejected invalid value`);
+      continue;
+    }
+    if (result.warning) warnings.push(result.warning);
     s[entry.name] = result.value;
     if (entry.sideEffect) entry.sideEffect(result.value, s);
     const display = entry.logValue ? entry.logValue(result.value) : result.value;
     log(`Settings updated: ${entry.name}=${display}`);
   }
+  for (const w of warnings) log(`Settings warning: ${w}`);
+  return warnings;
 }
 
 // Load settings
@@ -1335,25 +1354,45 @@ function fetchIssueFromGitHub(number, cwd) {
 
 /**
  * Deliver a prompt to a shell, handling the race between async fetch and idle readiness.
- * If the shell is already waiting for input, submit immediately.
- * If the agent uses initialPromptDelay (non-BEL), use that delay.
- * Otherwise, install a single-shot onIdleOnce callback that the idle timer
- * will invoke on the next idle transition.
+ * Prompts are queued per shell and submitted one at a time, each waiting for its
+ * own readiness signal — so two pending prompts (e.g. an inherited `/rc` followed
+ * by a start_issue prompt, #519) can't clobber each other's onIdleOnce slot.
+ * For each queue head: if the shell is already waiting for input, submit
+ * immediately; if the agent uses initialPromptDelay (non-BEL), use that delay;
+ * otherwise install a single-shot onIdleOnce callback that the idle timer will
+ * invoke on the next idle transition.
  */
 function deliverPromptWhenReady(id, prompt) {
   const e = shells.get(id);
   if (!e) return;
+  if (!e.promptQueue) e.promptQueue = [];
+  e.promptQueue.push(prompt);
+  if (e.promptDelivering) {
+    log(`[deliverPrompt] id=${id} queued prompt behind in-flight delivery (len=${prompt.length}, queue=${e.promptQueue.length})`);
+    return; // the in-flight drain picks it up after the current submit lands
+  }
+  drainPromptQueue(id);
+}
+
+function drainPromptQueue(id) {
+  const e = shells.get(id);
+  if (!e || !e.promptQueue || e.promptQueue.length === 0) {
+    if (e) e.promptDelivering = false;
+    return;
+  }
+  e.promptDelivering = true;
+  const prompt = e.promptQueue.shift();
   const config = getAgentConfig(e.agentType);
-  log(`[deliverPrompt] id=${id} waitingForInput=${e.waitingForInput} initialPromptDelay=${config.initialPromptDelay} promptLen=${prompt.length}`);
+  log(`[deliverPrompt] id=${id} waitingForInput=${e.waitingForInput} initialPromptDelay=${config.initialPromptDelay} promptLen=${prompt.length} queued=${e.promptQueue.length}`);
 
   // Block user keystrokes while we auto-populate this tab, so the user can't
   // interleave input with the injected prompt and corrupt the submission (#512).
   // Scoped to loading/prefill flows only, so input is never silently dropped
   // without a visible cue (the loading banner / prefill progress bar, which carry
-  // an "Enable input" override button). Cleared when the deferred Enter lands
-  // (submitAndNotify below), the user clicks override, or a 60s safety timer
-  // (matches the client banner auto-dismiss) fires in case the agent never goes
-  // idle and submitAndNotify never runs.
+  // an "Enable input" override button). Cleared when the deferred Enter of the
+  // LAST queued prompt lands (submitAndNotify below), the user clicks override,
+  // or a 60s safety timer (matches the client banner auto-dismiss, re-armed per
+  // prompt) fires in case the agent never goes idle and submitAndNotify never runs.
   if (e.loading || e.prefill) {
     e.inputBlocked = true;
     clearTimeout(e.inputBlockTimer);
@@ -1371,6 +1410,13 @@ function deliverPromptWhenReady(id, prompt) {
     submitToShell(id, prompt).then(() => {
       const entry = shells.get(id);
       if (!entry) return;
+      if (entry.promptQueue && entry.promptQueue.length > 0) {
+        // More prompts pending — keep input blocked and the banner up; the next
+        // drain waits for the agent's next idle/BEL before submitting.
+        drainPromptQueue(id);
+        return;
+      }
+      entry.promptDelivering = false;
       entry.inputBlocked = false;
       clearTimeout(entry.inputBlockTimer);
       entry.inputBlockTimer = null;
@@ -1383,6 +1429,10 @@ function deliverPromptWhenReady(id, prompt) {
     });
   }
 
+  // "BEL since last input" mirrors the idle classifier: a BEL that predates the
+  // last submission (e.g. the one that preceded a just-submitted queue head)
+  // doesn't mean the agent is at its prompt now.
+  const belSinceInput = e.lastBelTime && e.lastBelTime >= (e.lastInputTime || 0);
   if (e.waitingForInput) {
     e.waitingForInput = false;
     log(`[deliverPrompt] id=${id} submitting immediately (was waiting)`);
@@ -1390,7 +1440,7 @@ function deliverPromptWhenReady(id, prompt) {
   } else if (config.initialPromptDelay > 0) {
     log(`[deliverPrompt] id=${id} using delay ${config.initialPromptDelay}ms`);
     setTimeout(submitAndNotify, config.initialPromptDelay);
-  } else if (e.lastBelTime && (Date.now() - e.lastBelTime) < 2000) {
+  } else if (belSinceInput && (Date.now() - e.lastBelTime) < 2000) {
     // BEL fired recently — agent is likely at prompt even though idle timer
     // hasn't fired yet. Submit immediately.
     log(`[deliverPrompt] id=${id} BEL fired ${Date.now() - e.lastBelTime}ms ago, submitting immediately`);
@@ -1433,6 +1483,20 @@ function maybeInheritRemoteControl({ newId, agentType, isFork, parentId }) {
   if (!sessionHasRemoteControl(parentId)) return;
   log(`[rc-inherit] parent ${parentId} has /rc active -> enabling /rc in new ${isFork ? 'fork' : 'tab'} ${newId}`);
   deliverPromptWhenReady(newId, '/rc');
+}
+
+/**
+ * Coarse input-state of a session for external callers (meta_type,
+ * read_session_screen, get_session_info): 'idle' means the BEL-gated classifier
+ * says the agent is at its input prompt, 'busy' means it isn't (or hasn't proven
+ * it yet), 'unknown' means the agent type never emits BEL so the classifier
+ * doesn't run (plain terminals, pi).
+ */
+function sessionInputState(entry) {
+  if (!entry) return 'unknown';
+  const config = getAgentConfig(entry.agentType);
+  if (!config.emitsBel) return 'unknown';
+  return entry.waitingForInput ? 'idle' : 'busy';
 }
 
 /**
@@ -2542,7 +2606,7 @@ app.get('/api/tmux-sessions', (req, res) => {
 });
 
 app.post('/api/settings', (req, res) => {
-  applySettingsFromBody(req.body, settings);
+  const warnings = applySettingsFromBody(req.body, settings);
   saveSettings();
   broadcastSettings();
   // Side effect: restart the update-check interval if its fields changed.
@@ -2551,7 +2615,9 @@ app.post('/api/settings', (req, res) => {
   // Side effect: apply a power-assertion toggle immediately instead of waiting
   // for the next 5s reconcile tick (#563).
   if ('preventSleepWhileActive' in req.body) powerAssertion.sync();
-  res.json(settings);
+  // `warnings` rides along only when something was pruned/rejected; a later
+  // read-modify-write POST echoing it back is harmless (not in the schema).
+  res.json(warnings.length ? { ...settings, warnings } : settings);
 });
 
 // --- Command Palette: Custom Commands ---
@@ -3525,6 +3591,9 @@ app.get('/api/shells/:id/info', (req, res) => {
     runningCommand: entry.agentType === 'terminal' ? getForegroundCommand(id) : null,
     createdAt: entry.createdAt || null,
     elapsedMs: entry.createdAt ? Date.now() - entry.createdAt : null,
+    // Kept in lockstep with the get_session_info MCP tool (#519).
+    state: sessionInputState(entry),
+    metaControls: !!settings.metaControlsEnabled,
   });
 });
 
@@ -3890,6 +3959,80 @@ app.get('/api/restart-prompt', (req, res) => {
   res.type('text/plain').send(
     `Restarting - ${n} active session${n === 1 ? '' : 's'} will be interrupted`
   );
+});
+
+// --- Meta Controls consent (#519) ---
+// When an agent calls meta_type while metaControlsEnabled is off, the server asks
+// the human in the browser (same shape as the restart confirm above) instead of
+// failing with an opaque error or silently flipping a security gate. Differences
+// from the restart flow are deliberate: zero connected browsers means NO consent
+// (a security gate is never auto-confirmed), concurrent requests share the one
+// pending prompt, and a decline starts a cooldown so a retrying agent can't nag
+// the user with modals. Approval flips the persistent metaControlsEnabled setting
+// (exactly what the Settings toggle does), so later calls skip the prompt.
+const META_CONSENT_TIMEOUT_MS = 60000;
+const META_CONSENT_DECLINE_COOLDOWN_MS = 60000;
+
+function sessionLabel(id) {
+  const e = shells.get(id);
+  if (!e) return id || 'unknown';
+  return e.name || (e.cwd ? path.basename(e.cwd) : id);
+}
+
+function requestMetaControlsConsent({ requesterId, targetId } = {}) {
+  if (settings.metaControlsEnabled) return Promise.resolve('confirmed');
+  if (Date.now() - metaConsentDeclinedAt < META_CONSENT_DECLINE_COOLDOWN_MS) return Promise.resolve('declined');
+  if (metaConsentState) return metaConsentState.promise; // join the pending prompt
+  const clients = [...reloadClients].filter(c => c.readyState === 1);
+  if (clients.length === 0) return Promise.resolve('no-clients');
+
+  let resolveFn;
+  const promise = new Promise((resolve) => { resolveFn = resolve; });
+  const finish = (result) => {
+    if (!metaConsentState) return; // already resolved (endpoint vs timeout race)
+    clearTimeout(metaConsentState.timeout);
+    metaConsentState = null;
+    if (result === 'declined') metaConsentDeclinedAt = Date.now();
+    if (result === 'confirmed') {
+      settings.metaControlsEnabled = true;
+      saveSettings();
+      broadcastSettings();
+      log('[meta-consent] user approved — metaControlsEnabled turned on');
+    }
+    // Dismiss the modal in every window, not just the one that decided.
+    for (const ws of [...reloadClients].filter(c => c.readyState === 1)) {
+      try { ws.send(JSON.stringify({ type: 'confirm-meta-controls-resolved', result })); } catch {}
+    }
+    resolveFn(result);
+  };
+  const timeout = setTimeout(() => {
+    log('[meta-consent] timed out with no browser response');
+    finish('timeout');
+  }, META_CONSENT_TIMEOUT_MS);
+  metaConsentState = { promise, finish, timeout };
+
+  const msg = JSON.stringify({
+    type: 'confirm-meta-controls',
+    requester: { id: requesterId || null, name: requesterId ? sessionLabel(requesterId) : null },
+    target: { id: targetId || null, name: targetId ? sessionLabel(targetId) : null },
+  });
+  for (const ws of clients) {
+    try { ws.send(msg); } catch (e) { log(`[meta-consent] send failed: ${e.message}`); }
+  }
+  log(`[meta-consent] asking user: requester=${requesterId || '?'} target=${targetId || '?'} (${clients.length} window(s))`);
+  return promise;
+}
+
+// Browser reply for the consent modal. First response wins; later replies (other
+// windows, or after the timeout) get { stale: true }.
+app.post('/api/meta-controls-consent', (req, res) => {
+  const decision = req.body && req.body.decision;
+  if (decision !== 'confirmed' && decision !== 'declined') {
+    return res.status(400).json({ error: 'decision must be "confirmed" or "declined"' });
+  }
+  if (!metaConsentState) return res.json({ stale: true });
+  metaConsentState.finish(decision);
+  res.json({ ok: true });
 });
 
 reconcileSkills();
@@ -4656,7 +4799,7 @@ function broadcastToWindow(windowId, msg) {
 }
 
 // Initialize MCP server (async, ~100ms for dynamic import)
-initMCP({ app, security, shells, wss, broadcast, broadcastToWindow, log, MODS_DIR, closeSession, tombstoneSession, handleShellGone, spawnSession, sessionEnv, getSpawnArgs, mcpConfigArgs, getAgentConfig, wireShellOutput, watchClaudeSessionDir, unwatchClaudeSessionDir, saveState, validateWorktree, ensureWorktree, sessionPaths, submitToShell, fetchIssueFromGitHub, deliverPromptWhenReady, reloadClients, deliverToWindow, settings, isShuttingDown: () => shuttingDown, displayTabs, setDisplayTab, deleteDisplayTab, screenshots, setScreenshot, deleteScreenshot, getScreenshotPath, getDefaultEngine, getForegroundCommand, sessionLog, emitSessionOpen, getContexts: () => contexts, pathInside, getSavedSession: (id) => savedState[id] || null }).catch(e => log('MCP init failed:', e.message));
+initMCP({ app, security, shells, wss, broadcast, broadcastToWindow, log, MODS_DIR, closeSession, tombstoneSession, handleShellGone, spawnSession, sessionEnv, getSpawnArgs, mcpConfigArgs, getAgentConfig, wireShellOutput, watchClaudeSessionDir, unwatchClaudeSessionDir, saveState, validateWorktree, ensureWorktree, sessionPaths, submitToShell, fetchIssueFromGitHub, deliverPromptWhenReady, reloadClients, deliverToWindow, settings, isShuttingDown: () => shuttingDown, displayTabs, setDisplayTab, deleteDisplayTab, screenshots, setScreenshot, deleteScreenshot, getScreenshotPath, getDefaultEngine, getForegroundCommand, sessionLog, emitSessionOpen, getContexts: () => contexts, pathInside, getSavedSession: (id) => savedState[id] || null, stripEscapeSequences, sessionInputState, maybeInheritRemoteControl, requestMetaControlsConsent }).catch(e => log('MCP init failed:', e.message));
 
 // Watch themes directory for changes and broadcast to clients
 let themeWatchDebounce = null;
