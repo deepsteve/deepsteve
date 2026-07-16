@@ -11,6 +11,7 @@ const { initMCP } = require('./mcp-server');
 const { createSecurity, UI_HOST } = require('./security');
 const { createSleepWatch } = require('./sleep-watch');
 const { createPowerAssertion } = require('./power-assertion');
+const { formatLogTimestamp, createLogRotator, defaultLogPaths } = require('./logging');
 const NodePtyEngine = require('./engines/node-pty');
 const TmuxEngine = require('./engines/tmux');
 
@@ -142,8 +143,7 @@ function deliverToWindow(msg, targetWindowId, { openBrowser } = {}) {
 }
 
 function log(...args) {
-  const ts = new Date().toISOString().slice(11, 23);
-  console.log(`[${ts}]`, ...args);
+  console.log(`[${formatLogTimestamp()}]`, ...args);
 }
 
 // Session-lifecycle tracing for debugging session-ID / planMode divergence (issue #491).
@@ -153,6 +153,14 @@ function log(...args) {
 function traceSession(event, fields) {
   log('[session-trace]', JSON.stringify({ event, ts: Date.now(), ...fields }));
 }
+
+// Log rotation (#557): launchd/systemd hold our stdout/stderr open on the log
+// files with O_APPEND, so the daemon rotates them itself (copy → ftruncate on
+// its own fd). The inode guard inside makes this a no-op for foreground/dev
+// runs whose stdout isn't actually one of these files.
+const logRotator = createLogRotator({ targets: defaultLogPaths() });
+logRotator.start();
+
 const STATE_FILE = path.join(os.homedir(), '.deepsteve', 'state.json');
 const DISPLAY_TABS_DIR = path.join(os.homedir(), '.deepsteve', 'display-tabs');
 const SCREENSHOTS_DIR = path.join(os.homedir(), '.deepsteve', 'screenshots');
@@ -1965,6 +1973,11 @@ function handleShellGone(id) {
   saveState();
 }
 
+// The periodic save used to log the full session roster every 30s — at 30+
+// sessions that one line was essentially the entire 201MB log (#557). Log a
+// count summary instead, and only when it changed since the last save; the
+// roster itself is always readable in state.json.
+let lastSaveStateSummary = '';
 function saveState() {
   if (stateFrozen) {
     log(`[saveState] BLOCKED — state frozen during shutdown`);
@@ -1979,7 +1992,13 @@ function saveState() {
   const merged = { ...savedState, ...state };
   try {
     writeStateFile(merged);
-    log(`Saved ${Object.keys(merged).length} sessions to state file: ${Object.entries(merged).map(([id, e]) => `${id}→${(e.claudeSessionId || '?').slice(0, 8)}`).join(', ')}`);
+    const ids = Object.keys(merged);
+    const closed = ids.reduce((n, id) => n + (merged[id].closed ? 1 : 0), 0);
+    const summary = `Saved ${ids.length} sessions (${ids.length - closed} active, ${closed} closed)`;
+    if (summary !== lastSaveStateSummary) {
+      lastSaveStateSummary = summary;
+      log(summary);
+    }
   } catch (e) {
     console.error('Failed to save state:', e.message);
   }
@@ -4298,7 +4317,7 @@ function handleWsConnection(ws, req) {
 
   log(`[WS] Connection: id=${id}, cwd=${cwd}, createNew=${createNew}, worktree=${worktree}`);
   log(`[WS] Active shells: ${[...shells.keys()].join(', ') || 'none'}`);
-  log(`[WS] Saved state: ${Object.keys(savedState).join(', ') || 'none'}`);
+  log(`[WS] Saved state: ${Object.keys(savedState).length} entries (${Object.values(savedState).filter(e => e && e.closed).length} closed)`);
 
   // If client requested a specific ID that doesn't exist, check if we can restore it
   if (id && !shells.has(id) && !createNew) {
