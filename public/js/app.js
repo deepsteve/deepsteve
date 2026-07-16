@@ -3460,7 +3460,8 @@ async function showIssuePicker() {
   overlay.onclick = (e) => { if (e.target === overlay) closeIssuePicker(); };
   const onEscIssuePicker = (e) => { if (e.key === 'Escape') { e.preventDefault(); closeIssuePicker(); } };
   document.addEventListener('keydown', onEscIssuePicker);
-  new MutationObserver((_, obs) => { if (!overlay.parentNode) { document.removeEventListener('keydown', onEscIssuePicker); obs.disconnect(); } }).observe(document.body, { childList: true });
+  let issueObserver = null;  // infinite-scroll IntersectionObserver; hoisted so teardown is centralized here
+  new MutationObserver((_, obs) => { if (!overlay.parentNode) { document.removeEventListener('keydown', onEscIssuePicker); issueObserver?.disconnect(); obs.disconnect(); } }).observe(document.body, { childList: true });
 
   let issues, wandPlanMode, wandPromptTemplate, hasMore;
   let selectedIssue = null;
@@ -3510,22 +3511,34 @@ async function showIssuePicker() {
 
   async function loadMore() {
     if (loadingMore || !hasMore) return;
+    const list = overlay.querySelector('.issue-list');
+    const sentinel = list?.querySelector('.issue-sentinel');
+    if (!sentinel) return;
     loadingMore = true;
+    sentinel.classList.add('is-loading');   // reveal the "Loading more…" row while fetching
     currentPage++;
     try {
       const res = await fetch(`/api/issues?cwd=${encodeURIComponent(gitRoot)}&page=${currentPage}`);
-      if (!res.ok) return;
+      if (!res.ok) return;                   // finally clears the spinner; a later scroll can retry
       const data = await res.json();
+      if (!overlay.parentNode) return;       // picker dismissed mid-fetch — do no DOM work
       issues = issues.concat(data.issues);
       hasMore = data.hasMore;
-      renderIssues(data.issues);
-      if (!hasMore) {
-        const list = overlay.querySelector('.issue-list');
-        const sentinel = list?.querySelector('.issue-sentinel');
-        sentinel?.remove();
+      renderIssues(data.issues);             // items insert BEFORE the sentinel, so no scroll jump
+      if (hasMore) {
+        // IntersectionObserver only fires on intersection *transitions*, so a sentinel that
+        // stays inside root+margin after appending never re-triggers. Re-observing forces a
+        // fresh initial callback for the sentinel's CURRENT position, continuing auto-fill
+        // until it finally sits out of view — then this same observer catches genuine scroll
+        // edges. (observe() on an already-observed target is a no-op, so unobserve first.)
+        issueObserver?.unobserve(sentinel);
+        issueObserver?.observe(sentinel);
+      } else {
+        sentinel.remove();
       }
     } finally {
       loadingMore = false;
+      if (sentinel.isConnected) sentinel.classList.remove('is-loading');
     }
   }
 
@@ -3558,6 +3571,10 @@ async function showIssuePicker() {
 
   // Fetch issues and settings in background, update modal when done
   async function fetchAndRender() {
+    // Drop any observer from a prior render (e.g. a repo switch) before re-fetching.
+    // Runs synchronously before the awaits below, so a stale observer can't fire in between.
+    issueObserver?.disconnect();
+    issueObserver = null;
     try {
       const [issuesRes, settingsData] = await Promise.all([
         fetch('/api/issues?cwd=' + encodeURIComponent(gitRoot)),
@@ -3590,13 +3607,11 @@ async function showIssuePicker() {
         if (!hasMore) {
           sentinel.remove();
         } else {
-          const io = new IntersectionObserver((entries) => {
+          issueObserver = new IntersectionObserver((entries) => {
             if (entries.some(e => e.isIntersecting)) loadMore();
           }, { root: list, rootMargin: '200px' });
-          io.observe(sentinel);
-          new MutationObserver((_, obs) => {
-            if (!overlay.parentNode) { io.disconnect(); obs.disconnect(); }
-          }).observe(document.body, { childList: true });
+          issueObserver.observe(sentinel);
+          // Teardown is centralized in the overlay-removal MutationObserver above.
         }
         const buttons = overlay.querySelector('.modal-buttons');
         const startBtn = document.createElement('button');
