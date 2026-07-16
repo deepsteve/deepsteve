@@ -10,6 +10,7 @@ import { initClientLog } from './client-log.js';
 initClientLog();
 
 import { SessionStore } from './session-store.js';
+import { SessionStores, getTabSessions } from './session-stores.js';
 import { WindowManager } from './window-manager.js';
 import { TabManager, getDefaultTabName, initTabArrows } from './tab-manager.js';
 import { createTerminal, setupTerminalIO, fitTerminal, observeTerminalResize, measureTerminalSize, updateTerminalTheme } from './terminal.js';
@@ -119,37 +120,6 @@ function refreshAutomationsDropdown() {
 
 // Dedup set for browser-eval/console requests (each tab processes once)
 const processedBrowserRequests = new Set();
-
-/**
- * Per-tab session persistence via sessionStorage.
- * This is the authoritative source for "what sessions does THIS tab have."
- * Survives page refresh, doesn't depend on localStorage window-ID mapping.
- */
-const TabSessions = {
-  KEY: nsKey('deepsteve-tab-sessions'),
-  get() {
-    try { return JSON.parse(sessionStorage.getItem(this.KEY)) || []; } catch { return []; }
-  },
-  save(sessionList) {
-    sessionStorage.setItem(this.KEY, JSON.stringify(sessionList));
-  },
-  add(session) {
-    const list = this.get();
-    if (!list.find(s => s.id === session.id)) list.push(session);
-    this.save(list);
-  },
-  remove(sessionId) {
-    this.save(this.get().filter(s => s.id !== sessionId));
-  },
-  updateId(oldId, newId) {
-    const list = this.get();
-    const s = list.find(s => s.id === oldId);
-    if (s) { s.id = newId; this.save(list); }
-  },
-  clear() {
-    sessionStorage.removeItem(this.KEY);
-  }
-};
 
 /**
  * Persist the active tab ID in sessionStorage so it survives page refresh.
@@ -405,7 +375,7 @@ async function loadRecentSessions() {
 // Restore a recent session: the server pre-seeds savedState under a fresh id, then
 // we connect to it — the normal reconnect path resumes the conversation (with the
 // server's 5s resume-fail → fork fallback). The restored tab then behaves like any
-// live tab (claudeSessionId tracked into TabSessions, persisted to both stores).
+// live tab (claudeSessionId tracked into the per-tab session list, persisted to both stores).
 async function restoreRecentSession(key) {
   let r;
   try {
@@ -1622,9 +1592,9 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
         connHandle.setSessionId(msg.id);
         ws.serverSupportsPing = !!msg.pingPong; // wake-probe capability (#563)
         hasScrollback = msg.scrollback || false;
-        // If server assigned a different ID than requested, update TabSessions
+        // If server assigned a different ID than requested, update the per-tab session id
         if (existingId && msg.id !== existingId) {
-          TabSessions.updateId(existingId, msg.id);
+          SessionStores.updateId(existingId, msg.id);
         }
         // Check if this WebSocket already has a session (reconnect case)
         const existingSession = [...sessions.entries()].find(([, s]) => s.ws === ws);
@@ -1663,29 +1633,20 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
         const connSess = sessions.get(msg.id);
         if (connSess) connSess.connHandle = connHandle;
         // Track engineType and claudeSessionId for session verification (after initTerminal
-        // so TabSessions.add has already created the entry)
+        // so SessionStores.add has already created the entry)
         if (msg.engineType) {
           const sess = sessions.get(msg.id);
           if (sess) sess.engineType = msg.engineType;
           // engineType tracked on session object (tooltip shows tab name, set by TabManager)
         }
         if (msg.claudeSessionId) {
-          const tabList = TabSessions.get();
-          const tabEntry = tabList.find(s => s.id === msg.id);
-          if (tabEntry) {
-            if (tabEntry.claudeSessionId && tabEntry.claudeSessionId !== msg.claudeSessionId) {
-              console.warn(`[session] Session ${msg.id} claudeSessionId changed: ${tabEntry.claudeSessionId} → ${msg.claudeSessionId}`);
-            }
-            tabEntry.claudeSessionId = msg.claudeSessionId;
-            TabSessions.save(tabList);
-          }
+          SessionStores.setClaudeSessionId(msg.id, msg.claudeSessionId);
         }
       } else if (msg.type === 'close-tab') {
         if (assignedId) killSession(assignedId);
       } else if (msg.type === 'gone') {
         connHandle.untrack();
-        SessionStore.removeSession(getWindowId(), msg.id);
-        TabSessions.remove(msg.id);
+        SessionStores.remove(getWindowId(), msg.id);
         TabManager.removeTab(msg.id);
         resolveReady(null);
       } else if (msg.type === 'theme') {
@@ -2012,10 +1973,7 @@ function initTerminal(id, ws, cwd, initialName, { hasScrollback = false, pending
     },
     onRename: (sessionId) => renameSession(sessionId),
     onReorder: (orderedIds) => {
-      const tabList = TabSessions.get();
-      const reordered = orderedIds.map(id => tabList.find(s => s.id === id)).filter(Boolean);
-      TabSessions.save(reordered);
-      SessionStore.reorderSessions(getWindowId(), orderedIds);
+      SessionStores.reorder(getWindowId(), orderedIds);
       notifyTabsChanged();
       onOverviewTabsReordered(orderedIds);
     },
@@ -2047,9 +2005,9 @@ function initTerminal(id, ws, cwd, initialName, { hasScrollback = false, pending
     focusTab(id); // switch to the new tab + jump to its context / All (#547/#559)
   }
 
-  // Save to both storages — TabSessions is per-tab truth, SessionStore is for cross-tab
-  TabSessions.add({ id, cwd, name });
-  SessionStore.addSession(windowId, { id, cwd, name });
+  // Per-tab store (sessionStorage) is truth for this tab, SessionStore (localStorage)
+  // is for cross-tab; the facade writes both in one call (#385).
+  SessionStores.add(windowId, { id, cwd, name });
   SessionStore.addRecentDir(cwd);
 
   // ResizeObserver handles window resize, layout toggle, mod panel.
@@ -2092,8 +2050,7 @@ function createModTab(modId, opts = {}) {
   if (!mod) {
     // Mod disabled or removed — clean up stale storage if restoring
     if (opts.id) {
-      SessionStore.removeSession(getWindowId(), opts.id);
-      TabSessions.remove(opts.id);
+      SessionStores.remove(getWindowId(), opts.id);
     }
     return;
   }
@@ -2132,10 +2089,7 @@ function createModTab(modId, opts = {}) {
     },
     onRename: (sessionId) => renameSession(sessionId),
     onReorder: (orderedIds) => {
-      const tabList = TabSessions.get();
-      const reordered = orderedIds.map(id => tabList.find(s => s.id === id)).filter(Boolean);
-      TabSessions.save(reordered);
-      SessionStore.reorderSessions(getWindowId(), orderedIds);
+      SessionStores.reorder(getWindowId(), orderedIds);
       notifyTabsChanged();
       onOverviewTabsReordered(orderedIds);
     },
@@ -2155,8 +2109,7 @@ function createModTab(modId, opts = {}) {
 
   // Persist
   const windowId = getWindowId();
-  TabSessions.add({ id, name, type: 'mod-tab', modId });
-  SessionStore.addSession(windowId, { id, name, type: 'mod-tab', modId });
+  SessionStores.add(windowId, { id, name, type: 'mod-tab', modId });
 
   // Forward resize events to iframe
   const ro = new ResizeObserver(([entry]) => {
@@ -2195,8 +2148,7 @@ function createDisplayTab(id, name, opts = {}) {
     type: 'display-tab', emittingAudio: false,
   });
 
-  TabSessions.add({ id, name: tabName, type: 'display-tab', cwd });
-  SessionStore.addSession(getWindowId(), { id, name: tabName, type: 'display-tab', cwd });
+  SessionStores.add(getWindowId(), { id, name: tabName, type: 'display-tab', cwd });
 
   const tabCallbacks = {
     onSwitch: (sessionId) => switchTo(sessionId),
@@ -2205,10 +2157,7 @@ function createDisplayTab(id, name, opts = {}) {
     },
     onRename: (sessionId) => renameSession(sessionId),
     onReorder: (orderedIds) => {
-      const tabList = TabSessions.get();
-      const reordered = orderedIds.map(id => tabList.find(s => s.id === id)).filter(Boolean);
-      TabSessions.save(reordered);
-      SessionStore.reorderSessions(getWindowId(), orderedIds);
+      SessionStores.reorder(getWindowId(), orderedIds);
       notifyTabsChanged();
       onOverviewTabsReordered(orderedIds);
     },
@@ -2363,8 +2312,7 @@ async function restoreSessions(sessionList, opts = {}) {
     if (resolvedId === null) {
       const entry = sessionList[i];
       console.log('[restore] Session', entry.id, 'rejected (duplicate), cleaning up storage');
-      SessionStore.removeSession(getWindowId(), entry.id);
-      TabSessions.remove(entry.id);
+      SessionStores.remove(getWindowId(), entry.id);
       TabManager.removeTab(entry.id);
     }
   });
@@ -2446,7 +2394,7 @@ async function offerSessionRestore({ secondaryLabel, onlyIfOrphans = false } = {
     }
 
     if (toRestore.length === 0) return 'fresh';
-    for (const sess of toRestore) TabSessions.add(sess);
+    for (const sess of toRestore) SessionStores.addTabOnly(sess);
     await restoreSessions(toRestore, { allowDuplicate: false });
     return 'restored';
   } finally {
@@ -2699,8 +2647,7 @@ function killSession(id) {
   TabManager.removeTab(id);
   sessions.delete(id);
 
-  SessionStore.removeSession(getWindowId(), id);
-  TabSessions.remove(id);
+  SessionStores.remove(getWindowId(), id);
 
   // Switch to adjacent tab (left preferred, then right)
   if (activeId === id) {
@@ -2756,8 +2703,7 @@ async function sendToWindow(id, targetWindowId) {
   TabManager.removeTab(id);
   sessions.delete(id);
 
-  SessionStore.removeSession(getWindowId(), id);
-  TabSessions.remove(id);
+  SessionStores.remove(getWindowId(), id);
 
   // Switch to adjacent tab (left preferred, then right)
   if (activeId === id) {
@@ -2785,11 +2731,7 @@ function renameSession(id) {
     const name = newName || getDefaultTabName(session.cwd);
     session.name = name;
     TabManager.updateLabel(id, name);
-    SessionStore.updateSession(getWindowId(), id, { name });
-    // Update per-tab storage
-    const tabList = TabSessions.get();
-    const tabEntry = tabList.find(s => s.id === id);
-    if (tabEntry) { tabEntry.name = name; TabSessions.save(tabList); }
+    SessionStores.rename(getWindowId(), id, name);
     // Tell server so it persists across tab close/restore (skip for mod tabs — no WS)
     if (session.ws) session.ws.sendJSON({ type: 'rename', name });
     notifyTabsChanged();
@@ -3769,7 +3711,7 @@ async function init() {
   const freshParam = new URLSearchParams(window.location.search).get('fresh');
   if (freshParam) {
     WindowManager.resetWindowId();
-    sessionStorage.removeItem(nsKey('deepsteve-tab-sessions'));
+    SessionStores.clearTabSessions();
     sessionStorage.removeItem(nsKey('deepsteve-active-tab'));
     history.replaceState(null, '', window.location.pathname);
   }
@@ -3968,11 +3910,7 @@ async function init() {
       session.name = finalName;
       TabManager.updateLabel(activeId, finalName);
       if (session.ws) session.ws.sendJSON({ type: 'rename', name: finalName });
-      // Update session stores
-      const tabList = TabSessions.get();
-      const tabEntry = tabList.find(s => s.id === activeId);
-      if (tabEntry) { tabEntry.name = finalName; TabSessions.save(tabList); }
-      SessionStore.updateSession(getWindowId(), activeId, { name: finalName });
+      SessionStores.rename(getWindowId(), activeId, finalName);
       notifyTabsChanged();
     },
     restart: () => { fetch('/api/request-restart', { method: 'POST' }); },
@@ -4063,17 +4001,17 @@ async function init() {
 
   WindowManager.startHeartbeat();
 
-  // TabSessions (sessionStorage) is the authoritative per-tab source.
+  // The per-tab session list (sessionStorage) is the authoritative per-tab source.
   // It survives page refresh and doesn't depend on localStorage window-ID mapping.
-  const tabSessions = TabSessions.get();
-  console.log('[init] TabSessions:', tabSessions);
+  const tabSessions = getTabSessions();
+  console.log('[init] tab sessions:', tabSessions);
 
   if (isExistingTab && tabSessions.length > 0) {
     // Existing tab with sessions saved in sessionStorage — restore them
-    console.log('[init] Restoring from TabSessions');
+    console.log('[init] Restoring from tab sessions');
     restoreSessions(tabSessions);
   } else if (isExistingTab) {
-    // Existing tab but TabSessions is empty — try localStorage as fallback
+    // Existing tab but the tab-session list is empty — try localStorage as fallback
     const savedSessions = SessionStore.getWindowSessions(windowId);
     console.log('[init] windowId:', windowId, 'savedSessions (fallback):', savedSessions);
     if (savedSessions.length > 0) {
@@ -4088,8 +4026,7 @@ async function init() {
     if (legacySessions && legacySessions.length > 0) {
       // Migrate legacy sessions to this window
       for (const session of legacySessions) {
-        SessionStore.addSession(windowId, session);
-        TabSessions.add(session);
+        SessionStores.add(windowId, session);
       }
       restoreSessions(legacySessions);
     } else {
