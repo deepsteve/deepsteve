@@ -14,8 +14,28 @@
     <!-- #context-rail is mounted here (as #app-container's first child) by context-views.js -->
     <div id="app-main">
     <div id="tabs">
-      <button id="context-toggle" class="layout-btn" title="Show contexts (⌘P)" tabindex="-1">◧</button>
-      <button id="layout-toggle" class="layout-btn" title="Switch to vertical tabs" tabindex="-1">▤</button>
+      <!-- Every chrome button in this strip is a .nav-btn: an unconditional [.btn-icon][.btn-label].
+           The icon never varies; only the label does, and CSS suppresses it in exactly two places —
+           the horizontal strip (for .is-glyph buttons, which the strip has always identified by their
+           glyph alone) and the collapsed rail (for everyone). Before #552 this cluster was four rows
+           in three alignments and two insets, with the rail's glyphs living in a parallel set of CSS
+           `::before` rules that had to be kept in step with these by hand.
+
+           Icons are inline SVG here, in markup, because markup is what renders these buttons — the
+           same rule that puts SPEAKER_SVG in tab-manager.js, which renders that span. They use
+           currentColor and are sized entirely by CSS (.btn-icon), so themes restyle them by setting
+           `color` and ascii-art.css swaps them for characters wholesale. -->
+      <button id="context-toggle" class="layout-btn nav-btn" title="Show contexts (⌘P)" tabindex="-1">
+        <span class="btn-icon" aria-hidden="true"><svg viewBox="0 0 16 16"><rect x="1.5" y="2.5" width="13" height="11" rx="2" stroke="currentColor" fill="none" stroke-width="1.4"/><path d="M6 2.5v11" stroke="currentColor" stroke-width="1.4"/></svg></span>
+      </button>
+      <!-- Both layout icons ship together and CSS picks by #app-container.vertical-layout — the state
+           is already a class, so the icon is derived from it rather than mirrored into it. Until #552
+           this one character had three owners: layout-manager.js set `▤` in one branch and `⬜` in the
+           other, and this element carried a third copy. -->
+      <button id="layout-toggle" class="layout-btn nav-btn" title="Switch to vertical tabs" tabindex="-1">
+        <span class="btn-icon icon-layout-h" aria-hidden="true"><svg viewBox="0 0 16 16"><rect x="1.5" y="2.5" width="13" height="11" rx="2" stroke="currentColor" fill="none" stroke-width="1.4"/><rect x="2.2" y="3.2" width="11.6" height="3" rx="1" fill="currentColor"/></svg></span>
+        <span class="btn-icon icon-layout-v" aria-hidden="true"><svg viewBox="0 0 16 16"><rect x="1.5" y="2.5" width="13" height="11" rx="2" stroke="currentColor" fill="none" stroke-width="1.4"/><rect x="2.2" y="3.2" width="3.4" height="9.6" rx="1" fill="currentColor"/></svg></span>
+      </button>
       <div id="tabs-list-wrapper">
         <div id="tabs-list"></div>
         <div id="tabs-arrows">
@@ -24,27 +44,53 @@
         </div>
       </div>
       <div id="new-btn-group">
-        <button id="new-btn">+</button>
+        <button id="new-btn" class="nav-btn is-glyph" aria-label="New tab" title="New tab">
+          <span class="btn-icon" aria-hidden="true"><svg viewBox="0 0 16 16"><path d="M8 3.5v9M3.5 8h9" stroke="currentColor" fill="none" stroke-width="1.6" stroke-linecap="round"/></svg></span>
+          <span class="btn-label">New tab</span>
+        </button>
+        <!-- Not a .nav-btn: a caret, not a row. It is display:none in the rail. -->
         <button id="new-btn-dropdown" title="New tab options">&#9662;</button>
       </div>
-      <button id="issue-btn" title="Pick a GitHub issue">&#9889;</button>
+      <!-- The bolt is filled and #automations-btn's play is outlined. They differ on two channels
+           (silhouette AND weight), not one, because in the rail there is no label to tell them apart. -->
+      <button id="issue-btn" class="nav-btn is-glyph" aria-label="New issue" title="Pick a GitHub issue">
+        <span class="btn-icon" aria-hidden="true"><svg viewBox="0 0 16 16"><path d="M9 1.5 3.5 9h4l-.5 5.5L12.5 7h-4z" fill="currentColor"/></svg></span>
+        <span class="btn-label">New issue</span>
+      </button>
       <button id="overview-layout-btn" title="Switch overview layout" tabindex="-1" style="display:none;">&#8862;</button>
       <button id="overview-exit-btn" title="Exit overview mode" tabindex="-1" style="display:none;">&#10005;</button>
       <div id="tabs-spacer"></div>
       <div id="engines-dropdown" class="dropdown" style="display: none;">
-        <button id="engines-btn" class="dropdown-btn" title="Select AI agent/engine">Engine</button>
+        <!-- The only nav button with a dynamic label; app.js writes .btn-label (never the button's
+             textContent, which would take the icon with it) and keeps aria-label in step. -->
+        <button id="engines-btn" class="dropdown-btn nav-btn" aria-label="Engine" title="Select AI agent/engine">
+          <span class="btn-icon" aria-hidden="true"><svg viewBox="0 0 16 16"><rect x="4.5" y="4.5" width="7" height="7" rx="1.5" stroke="currentColor" fill="none" stroke-width="1.4"/><path d="M6.5 2v2.5M9.5 2v2.5M6.5 11.5V14M9.5 11.5V14M2 6.5h2.5M2 9.5h2.5M11.5 6.5H14M11.5 9.5H14" stroke="currentColor" fill="none" stroke-width="1.4" stroke-linecap="round"/></svg></span>
+          <span class="btn-label">Engine</span>
+        </button>
         <div id="engines-menu" class="dropdown-menu"></div>
       </div>
       <div id="automations-dropdown" class="dropdown" style="display: none;">
-        <button id="automations-btn" class="dropdown-btn" title="Run an automation">⚡ Auto</button>
+        <button id="automations-btn" class="dropdown-btn nav-btn" aria-label="Automations" title="Run an automation">
+          <span class="btn-icon" aria-hidden="true"><svg viewBox="0 0 16 16"><path d="M5.5 3.3 12.2 8l-6.7 4.7z" stroke="currentColor" fill="none" stroke-width="1.4" stroke-linejoin="round"/></svg></span>
+          <span class="btn-label">Auto</span>
+        </button>
         <div id="automations-menu" class="dropdown-menu"></div>
       </div>
       <div id="sessions-dropdown" class="dropdown">
-        <button id="sessions-btn" class="dropdown-btn" title="Manage sessions">Sessions</button>
+        <button id="sessions-btn" class="dropdown-btn nav-btn" aria-label="Sessions" title="Manage sessions">
+          <span class="btn-icon" aria-hidden="true"><svg viewBox="0 0 16 16"><path d="M6 4h8M6 8h8M6 12h8" stroke="currentColor" fill="none" stroke-width="1.4" stroke-linecap="round"/><circle cx="2.8" cy="4" r="1" fill="currentColor"/><circle cx="2.8" cy="8" r="1" fill="currentColor"/><circle cx="2.8" cy="12" r="1" fill="currentColor"/></svg></span>
+          <span class="btn-label">Sessions</span>
+        </button>
         <div id="sessions-menu" class="dropdown-menu"></div>
       </div>
-      <button id="mods-btn" class="dropdown-btn" title="Toggle mods" style="display:none;">Mods</button>
-      <button id="settings-btn" class="dropdown-btn" title="Settings">⚙</button>
+      <button id="mods-btn" class="dropdown-btn nav-btn" aria-label="Mods" title="Toggle mods" style="display:none;">
+        <span class="btn-icon" aria-hidden="true"><svg viewBox="0 0 16 16"><rect x="2.25" y="2.25" width="5" height="5" rx="1.2" stroke="currentColor" fill="none" stroke-width="1.4"/><rect x="8.75" y="2.25" width="5" height="5" rx="1.2" stroke="currentColor" fill="none" stroke-width="1.4"/><rect x="2.25" y="8.75" width="5" height="5" rx="1.2" stroke="currentColor" fill="none" stroke-width="1.4"/><rect x="8.75" y="8.75" width="5" height="5" rx="1.2" stroke="currentColor" fill="none" stroke-width="1.4"/></svg></span>
+        <span class="btn-label">Mods</span>
+      </button>
+      <button id="settings-btn" class="dropdown-btn nav-btn is-glyph" aria-label="Settings" title="Settings">
+        <span class="btn-icon" aria-hidden="true"><svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="4.4" stroke="currentColor" fill="none" stroke-width="1.4"/><circle cx="8" cy="8" r="1.3" fill="currentColor"/><path d="M8 .9v2.4M8 12.7v2.4M15.1 8h-2.4M3.3 8H.9M13 3l-1.7 1.7M4.7 11.3 3 13M13 13l-1.7-1.7M4.7 4.7 3 3" stroke="currentColor" fill="none" stroke-width="1.5" stroke-linecap="round"/></svg></span>
+        <span class="btn-label">Settings</span>
+      </button>
     </div>
     <div id="sidebar-resizer"></div>
     <div id="terminals">

@@ -2656,18 +2656,29 @@ function refreshEnginesDropdown() {
     return `<div class="dropdown-item ${isDefault ? 'active' : 'clickable'}" data-agent="${a.id}">${a.name}${isDefault ? ' ✓' : ''}</div>`;
   }).join('');
 
+  // Write the LABEL, never the button. #engines-btn is the only nav button with a dynamic label, and
+  // `btn.textContent = …` would take .btn-icon down with it — the icon is markup-owned inline SVG
+  // (the cloneNode above deliberately preserves it), so the button would lose its icon here on load
+  // and again on every hover (#552). aria-label tracks the label so the accessible name matches
+  // what's on screen even in the collapsed rail, where .btn-label is display:none and the name would
+  // otherwise silently fall back to the title.
+  const setEngineLabel = (text) => {
+    btn.querySelector('.btn-label').textContent = text;
+    btn.setAttribute('aria-label', text);
+  };
+
   // Update button text (short name by default, full name on hover)
   const currentAgent = agents.find(a => a.id === window.__deepsteveDefaultAgent);
-  btn.textContent = currentAgent?.shortName || currentAgent?.name || 'Engine';
+  setEngineLabel(currentAgent?.shortName || currentAgent?.name || 'Engine');
   btn.title = currentAgent?.name || 'Engine';
 
   btn.addEventListener('mouseenter', () => {
     const a = agents.find(a => a.id === window.__deepsteveDefaultAgent);
-    btn.textContent = a?.name || 'Engine';
+    setEngineLabel(a?.name || 'Engine');
   });
   btn.addEventListener('mouseleave', () => {
     const a = agents.find(a => a.id === window.__deepsteveDefaultAgent);
-    btn.textContent = a?.shortName || a?.name || 'Engine';
+    setEngineLabel(a?.shortName || a?.name || 'Engine');
   });
 
   // Handle clicks on menu items
@@ -2681,7 +2692,7 @@ function refreshEnginesDropdown() {
         i.textContent = (a?.name || '') + (isSelected ? ' ✓' : '');
       });
       const newDefault = agents.find(a => a.id === agentId);
-      btn.textContent = newDefault?.name || 'Engine';
+      setEngineLabel(newDefault?.name || 'Engine');
       btn.title = newDefault?.name || 'Engine';
       menu.classList.remove('open');
     });
