@@ -442,14 +442,17 @@ function sweepLeakedWorktrees() {
 function startScheduler() {
   if (schedulerStarted) return;
   schedulerStarted = true;
+  // .unref() so the scheduler timers never keep the process alive on their own
+  // (the daemon stays up via its HTTP server); this also lets init() run in a
+  // unit test without the interval hanging the test process.
   setTimeout(() => {
     try { runCatchUp(); } catch (e) { log_(`catch-up error: ${e.message}`); }
     try { sweepLeakedWorktrees(); } catch (e) { log_(`worktree sweep error: ${e.message}`); }
-  }, CATCHUP_DELAY_MS);
+  }, CATCHUP_DELAY_MS).unref();
   setInterval(() => {
     try { tick(); } catch (e) { log_(`tick error: ${e.message}`); }
     try { sweepLeakedWorktrees(); } catch (e) { log_(`worktree sweep error: ${e.message}`); }
-  }, TICK_MS);
+  }, TICK_MS).unref();
   log_(`scheduler started (${tasks.length} task(s))`);
 }
 
@@ -578,6 +581,21 @@ function formatTaskLines(list) {
   }).join('\n\n');
 }
 
+// --- Feature gate ---------------------------------------------------------
+// The client mod toggle only shows/hides the panel (per-browser localStorage),
+// so it can't be the server's gate. The server-authoritative on/off is the
+// `scheduledTasksEnabled` setting — the same one the tick already honors. These
+// helpers extend that one gate to every write/action surface (MCP tools + REST)
+// so that when the feature is off an agent gets a clear "it's turned off" error
+// instead of a cheerful ack for a task the scheduler will never fire.
+function featureEnabled() { return !!(ctx && ctx.settings && ctx.settings.scheduledTasksEnabled); }
+const FEATURE_OFF_MSG =
+  'Scheduled tasks are turned off. Ask the user to enable "Run scheduled tasks" ' +
+  'in Settings (the scheduledTasksEnabled setting) before scheduling or running tasks.';
+function featureOffResult() {
+  return { content: [{ type: 'text', text: FEATURE_OFF_MSG }], isError: true };
+}
+
 // --- MCP tools ------------------------------------------------------------
 
 function init(context) {
@@ -586,7 +604,7 @@ function init(context) {
 
   const callerShellId = (extra) => extra?.requestInfo?.url?.searchParams?.get('shellId') || null;
 
-  return {
+  const tools = {
     schedule_task: {
       description: 'Schedule a local agent task that runs on this machine (with full access to the project\'s MCP servers). Tasks are organized by project. Recurring by default; pass once:true for a run-once task that fires at the next cron match and then retires itself (no need to unschedule it afterward). Use for reports/maintenance/digests that need local MCP — e.g. a weekly analytics report.',
       schema: {
@@ -751,6 +769,19 @@ function init(context) {
       },
     },
   };
+
+  // Fail-closed when the feature is off: the write/action tools refuse with a
+  // clear reason (isError) so an agent scheduling into a disabled feature learns
+  // why instead of getting a cheerful ack for a task that will never fire.
+  // Deliberately NOT gated: list_scheduled_tasks (read-only), unschedule_task
+  // (cleanup should always work), and scheduled_task_started/finished (a run
+  // already in flight when the feature is toggled off must still self-report and
+  // clean up). The gate reads the setting live on every call.
+  for (const name of ['schedule_task', 'update_scheduled_task', 'run_scheduled_task_now']) {
+    const inner = tools[name].handler;
+    tools[name].handler = (args, extra) => (featureEnabled() ? inner(args, extra) : featureOffResult());
+  }
+  return tools;
 }
 
 // --- REST for the panel ---------------------------------------------------
@@ -768,6 +799,7 @@ function registerRoutes(app, context) {
   });
 
   app.post('/api/scheduled-tasks', (req, res) => {
+    if (!featureEnabled()) return res.status(403).json({ error: FEATURE_OFF_MSG });
     const b = req.body || {};
     let projectRoot = b.project || '';
     if (projectRoot) projectRoot = resolveProject(projectRoot, null);
@@ -785,6 +817,7 @@ function registerRoutes(app, context) {
   });
 
   app.put('/api/scheduled-tasks/:id', (req, res) => {
+    if (!featureEnabled()) return res.status(403).json({ error: FEATURE_OFF_MSG });
     const b = req.body || {};
     const fields = { ...b };
     if (b.project !== undefined) fields.project = b.project ? resolveProject(b.project, null) : '';
@@ -803,6 +836,7 @@ function registerRoutes(app, context) {
   });
 
   app.post('/api/scheduled-tasks/:id/run', (req, res) => {
+    if (!featureEnabled()) return res.status(403).json({ error: FEATURE_OFF_MSG });
     const task = tasks.find(t => t.id === req.params.id);
     if (!task) return res.status(404).json({ error: 'Task not found' });
     const shellId = runTask(task, 'manual');
