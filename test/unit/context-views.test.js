@@ -109,9 +109,20 @@ async function setup({ contexts = [CTX_A, CTX_B], tabs = {} } = {}) {
     mod.noteActiveTab(id);
     mod.revealTabContext(id);
   };
+  // What app.js's focusTab(id) does when jumping to an EXISTING tab (#559):
+  // activate it (noteActiveTab records it) then reveal its context. Same sequence
+  // as openNewTab minus the addTab — the tab already exists (and may be
+  // context-hidden). switchCalls is reset so assertions see only snap-backs
+  // caused by the jump itself.
+  const jumpToTab = (id) => {
+    state.switchCalls.length = 0;
+    state.activeTabId = id;
+    mod.noteActiveTab(id);
+    mod.revealTabContext(id);
+  };
 
   for (const [id, cwd] of Object.entries(tabs)) addTab(id, cwd);
-  return { mod, state, addTab, openNewTab };
+  return { mod, state, addTab, openNewTab, jumpToTab };
 }
 
 const isHidden = (id) => tabEls.get(id).classList.contains('context-hidden');
@@ -209,4 +220,38 @@ test('contexts not yet loaded (empty list) → fails open, no switch', async () 
 
   assert.strictEqual(mod.getActiveContextId(), null); // was already All; unchanged
   assert.strictEqual(isHidden('tab2'), false);
+});
+
+// #559: focusTab() routes every "jump to an existing tab" affordance (Action
+// Required, cross-window focus, restore, …) through revealTabContext, so the
+// context rail follows the jump — not just new-tab creation (#547).
+
+test('jump to an existing tab in another context → reveals that context (#559)', async () => {
+  const { mod, state, jumpToTab } = await setup({ tabs: { tab1: '/repo/a', tab2: '/repo/b' } });
+  mod.setActiveContext('ctxa');
+  assert.strictEqual(isHidden('tab2'), true); // precondition: out-of-context tab hidden
+
+  jumpToTab('tab2');
+
+  assert.strictEqual(mod.getActiveContextId(), 'ctxb');
+  assert.strictEqual(isHidden('tab2'), false);
+  assert.strictEqual(isHidden('tab1'), true);  // old context's tab filtered out
+  assert.deepStrictEqual(state.switchCalls, []); // no snap-back thrash after the reveal
+  assert.strictEqual(state.activeTabId, 'tab2');
+  // Recorded as the destination context's last-viewed tab (#541).
+  const lastTabs = JSON.parse(storeMap.get('deepsteve-context-last-tab'));
+  assert.strictEqual(lastTabs.ctxb, 'tab2');
+});
+
+test('jump to an existing tab already in the active context → no switch (#559)', async () => {
+  const { mod, state, jumpToTab } = await setup({ tabs: { tab1: '/repo/a', tab1b: '/repo/a/sub' } });
+  mod.setActiveContext('ctxa');
+
+  jumpToTab('tab1b');
+
+  assert.strictEqual(mod.getActiveContextId(), 'ctxa'); // unchanged
+  assert.strictEqual(isHidden('tab1b'), false);
+  assert.strictEqual(isHidden('tab1'), false);
+  assert.deepStrictEqual(state.switchCalls, []);
+  assert.strictEqual(state.activeTabId, 'tab1b');
 });

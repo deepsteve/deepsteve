@@ -2044,8 +2044,7 @@ function initTerminal(id, ws, cwd, initialName, { hasScrollback = false, pending
   // correct tab after all sessions are initialized. For new sessions,
   // always switch to the new tab immediately.
   if (!restoreActive) {
-    switchTo(id);
-    revealTabContext(id); // out-of-context new tab → jump to its context / All (#547)
+    focusTab(id); // switch to the new tab + jump to its context / All (#547/#559)
   }
 
   // Save to both storages — TabSessions is per-tab truth, SessionStore is for cross-tab
@@ -2223,8 +2222,7 @@ function createDisplayTab(id, name, opts = {}) {
   TabManager.addTab(id, tabName, tabCallbacks);
   updateEmptyState();
   if (!opts.restoreActive) {
-    switchTo(id);
-    revealTabContext(id); // (#547)
+    focusTab(id); // (#547/#559)
   }
 
   // Forward resize events to iframe
@@ -2306,6 +2304,19 @@ function switchTo(id) {
   }
 }
 
+// User-initiated jump to an EXISTING tab: activate it AND bring its context into
+// view (#559). Distinct from switchTo(), which stays context-neutral so the
+// close-tab fallback and applyFilter's snap-back can land on a hidden neighbor
+// without changing your context. Every "go to this tab" affordance (Action
+// Required + other mods, cross-window focus, restore, new tabs) routes here;
+// switchTo() is only for mechanical/internal activations. Do NOT merge the two —
+// revealing inside switchTo() would let closing a tab teleport you into the
+// DOM-adjacent neighbor's context.
+function focusTab(id) {
+  switchTo(id);
+  revealTabContext(id);
+}
+
 /**
  * Restore multiple sessions and select the previously active tab.
  * Reads ActiveTab before any sessions initialize, waits for all to finish,
@@ -2367,7 +2378,7 @@ async function restoreSessions(sessionList, opts = {}) {
     } else {
       console.log('[restore] Saved active tab', savedActiveId, 'not found, falling back to', target);
     }
-    switchTo(target);
+    focusTab(target); // reveal the restored tab's context if it diverges from the saved one (#559)
   }
 
   // Re-apply the context filter once all tabs exist and the active tab is
@@ -3655,7 +3666,9 @@ async function init() {
   ModManager.init({
     getSessions: getSessionList,
     getActiveSessionId: () => activeId,
-    focusSession: switchTo,
+    // Action Required + other mods jump to a session through this bridge; focusTab
+    // (not switchTo) so the context rail follows the jump (#559).
+    focusSession: focusTab,
     createSession: (cwd, opts) => createSession(cwd, null, true, opts),
     killSession: async (id, opts) => {
       if (opts?.force || await confirmCloseSession(id)) killSession(id);
@@ -3809,7 +3822,10 @@ async function init() {
   initCmdHoldMode({
     getOrderedTabIds: getVisibleTabIds,
     getActiveTabId: () => activeId,
-    switchToTab: switchTo,
+    // focusTab, not switchTo: reveal is a no-op under visible-scoping today, but
+    // keeps "every deliberate jump reveals its context" true if this ever moves
+    // to getAllTabIds (#559).
+    switchToTab: focusTab,
   });
 
   // Initialize the top-of-page progress bar (automation prefill feedback)
@@ -3823,7 +3839,9 @@ async function init() {
       const s = sessions.get(id);
       return s?.name || getDefaultTabName(s?.cwd || '');
     },
-    switchToTab: switchTo,
+    // focusTab, not switchTo: no-op reveal under visible-scoping today, but keeps
+    // the "every deliberate jump reveals its context" invariant (#559).
+    switchToTab: focusTab,
     quickNewSession,
     quickNewTerminal,
     createSession: (cwd, opts) => createSession(cwd, null, true, opts),
@@ -3861,7 +3879,9 @@ async function init() {
       const s = sessions.get(id);
       return s?.name || getDefaultTabName(s?.cwd || '');
     },
-    switchToTab: switchTo,
+    // focusTab, not switchTo: no-op reveal under visible-scoping today, but keeps
+    // the "every deliberate jump reveals its context" invariant (#559).
+    switchToTab: focusTab,
     fitAllTerminals: () => {
       for (const [, s] of sessions) {
         if (s.term && s.fit && s.ws) fitTerminal(s.term, s.fit, s.ws);
@@ -3995,7 +4015,7 @@ async function init() {
 
   // Handle focus-session requests from other windows
   WindowManager.onFocusSession((sessionId) => {
-    switchTo(sessionId);
+    focusTab(sessionId); // reveal the focused session's context too (#559)
   });
 
   WindowManager.startHeartbeat();
