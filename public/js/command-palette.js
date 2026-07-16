@@ -198,22 +198,37 @@ async function open() {
   isOpen = true;
   hasMouseMoved = false;
 
-  // Fetch commands and automations from server in parallel
+  // Fetch commands and automations from server in parallel. A failed fetch used
+  // to collapse into an empty palette with no trace anywhere (2026-07-15) — keep
+  // the palette usable (tab switching is local) but say what broke.
   let serverCommands = [];
   let automations = [];
+  let loadError = null;
+  const jsonOrThrow = (r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); };
   try {
     const [cmdResp, autoResp] = await Promise.all([
-      fetch('/api/commands').then(r => r.json()).catch(() => ({ commands: [] })),
-      fetch('/api/automations').then(r => r.json()).catch(() => ({ automations: [] })),
+      fetch('/api/commands').then(jsonOrThrow).catch(err => { loadError = err.message || String(err); return { commands: [] }; }),
+      fetch('/api/automations').then(jsonOrThrow).catch(err => { loadError = loadError || err.message || String(err); return { automations: [] }; }),
     ]);
     serverCommands = cmdResp.commands || [];
     automations = autoResp.automations || [];
   } catch (err) {
+    loadError = loadError || err.message || String(err);
     console.error('[command-palette] Failed to fetch commands:', err);
   }
 
   // Build items list: built-in + tabs + custom
   items = [];
+
+  // Inert (no executeCommand branch dispatches type 'error') but visible: the
+  // palette must never look merely empty when the server couldn't be reached.
+  if (loadError) {
+    items.push({
+      id: 'load-error', type: 'error',
+      name: '⚠ Server commands unavailable',
+      description: `Loading commands failed: ${loadError} — try reloading the page`,
+    });
+  }
 
   // Built-in commands from server
   for (const cmd of serverCommands) {

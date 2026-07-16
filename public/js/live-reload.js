@@ -17,6 +17,7 @@ import { nsChannel } from './storage-namespace.js';
 import { maybeHealAuth, forcePageReload, noteAuthOk } from './auth-heal.js';
 import { onWake } from './wake-watch.js';
 import { waitForServer } from './server-probe.js';
+import { attachClientLogSender } from './client-log.js';
 
 const State = {
   CONNECTED: 'connected',
@@ -31,6 +32,10 @@ export function initLiveReload({ onMessage, onShowRestartConfirm, onShowReloadOv
   let state = State.DISCONNECTED;
   let pingTimer = null;
   let lastPingTime = 0;
+
+  // The error beacon rides this socket (it must work when fetch doesn't).
+  // `ws` is reassigned on every reconnect, so hand over a getter, not the socket.
+  attachClientLogSender(() => ws);
 
   const restartChannel = new BroadcastChannel(nsChannel('deepsteve-restart'));
 

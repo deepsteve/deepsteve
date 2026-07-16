@@ -2,6 +2,13 @@
  * Main application entry point
  */
 
+import { initClientLog } from './client-log.js';
+// Before anything initializes: wrap fetch + install global error handlers so
+// failures are beaconed to the server log. (Imports are hoisted, so this runs
+// after module-scope code but before every init call and fetch below —
+// 2026-07-15: hours of silent fetch failures were invisible in every log.)
+initClientLog();
+
 import { SessionStore } from './session-store.js';
 import { WindowManager } from './window-manager.js';
 import { TabManager, getDefaultTabName, initTabArrows } from './tab-manager.js';
@@ -3181,14 +3188,24 @@ async function showIssuePicker() {
   const cwd = active?.cwd;
   if (!cwd) return promptRepoSession();
 
-  // Check git root
+  // Check git root. Only the endpoint's own 400 means "not a repo" — blaming
+  // git for a 401/500/network failure sent a whole debugging session the wrong
+  // way (2026-07-15), so every other failure reports what actually happened.
   let gitRoot;
   try {
     const res = await fetch('/api/git-root?cwd=' + encodeURIComponent(cwd));
-    if (!res.ok) throw new Error('Not a git repository');
+    if (res.status === 400) {
+      alert('Current directory is not a git repository.');
+      return;
+    }
+    if (!res.ok) {
+      const authHint = (res.status === 401 || res.status === 429) ? ' (auth) — try reloading the page' : '';
+      alert(`Couldn't check the git repository: server responded ${res.status}${authHint}.`);
+      return;
+    }
     gitRoot = (await res.json()).root;
-  } catch {
-    alert('Current directory is not a git repository.');
+  } catch (e) {
+    alert(`Couldn't check the git repository: ${e && e.message ? e.message : 'network error'} — is the server reachable?`);
     return;
   }
 

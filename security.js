@@ -197,6 +197,22 @@ function createSecurity(cfg) {
     }
   }
 
+  // HTTP auth rejections used to be completely silent (the 2026-07-15 incident:
+  // a page whose fetches all 401'd for hours left zero log lines — the empty
+  // command palette and the misleading "not a git repository" alert were
+  // undiagnosable). Log them, throttled: max 5 lines per 10s window, then a
+  // suppressed-count line, so a broken page retrying can't bury the log.
+  let rejectWindowStart = 0, rejectLogged = 0, rejectSuppressed = 0;
+  function logAuthReject(msg) {
+    const now = Date.now();
+    if (now - rejectWindowStart > 10_000) {
+      if (rejectSuppressed > 0) log(`Auth: (${rejectSuppressed} more rejections suppressed)`);
+      rejectWindowStart = now; rejectLogged = 0; rejectSuppressed = 0;
+    }
+    if (rejectLogged < 5) { rejectLogged++; log(msg); }
+    else rejectSuppressed++;
+  }
+
   // === Express middleware ===
 
   // 1. Host allowlist — first in the chain, applies to every request (static, /api, /mcp).
@@ -267,7 +283,13 @@ function createSecurity(cfg) {
     }
 
     recordFailure();
-    if (lockedOut()) return res.status(429).type('text/plain').send('Too Many Requests');
+    const status = lockedOut() ? 429 : 401;
+    // Distinguish "no credentials at all" (evicted/expired cookie, bare curl)
+    // from "credentials present but wrong" (rotated token, forged cookie) —
+    // they point at completely different failures.
+    const why = bearer ? 'invalid bearer token' : cookieTok ? 'invalid auth cookie' : 'no credentials';
+    logAuthReject(`Auth: rejected ${req.method} ${req.url} — ${why} (${status})`);
+    if (status === 429) return res.status(429).type('text/plain').send('Too Many Requests');
     return res.status(401).type('text/plain').send('Unauthorized');
   }
 
@@ -294,7 +316,7 @@ function createSecurity(cfg) {
     const cookieTok = cookieTokenOf(req);
     if (!cookieTok || !validToken(cookieTok)) {
       recordFailure();
-      log('Rejected WS upgrade: missing/invalid auth cookie');
+      log(`Rejected WS upgrade: ${cookieTok ? 'invalid' : 'missing'} auth cookie`);
       return cb(false, lockedOut() ? 429 : 401, 'Unauthorized');
     }
     cb(true);

@@ -4110,6 +4110,7 @@ function handleWsConnection(ws, req) {
   if (action === 'reload') {
     ws.windowId = url.searchParams.get('windowId') || null;
     reloadClients.add(ws);
+    log(`[WS] Reload client connected (windowId=${ws.windowId || 'none'}), ${reloadClients.size} total`);
     ws.isAlive = true;
     let lastBeat = Date.now();
     const pingInterval = setInterval(() => {
@@ -4131,9 +4132,10 @@ function handleWsConnection(ws, req) {
       ws.isAlive = false;
       if (ws.readyState === 1) ws.send(JSON.stringify({ type: 'ping' }));
     }, 30000);
-    ws.on('close', () => {
+    ws.on('close', (code) => {
       clearInterval(pingInterval);
       reloadClients.delete(ws);
+      log(`[WS] Reload client closed (windowId=${ws.windowId || 'none'}, code=${code || 0}), ${reloadClients.size} remaining`);
       // If restart is pending and no browsers remain, auto-confirm
       if (restartState) {
         const liveClients = [...reloadClients].filter(c => c.readyState === 1);
@@ -4151,6 +4153,16 @@ function handleWsConnection(ws, req) {
           restartState.resolve('confirmed');
         } else if (parsed.type === 'restart-declined' && restartState) {
           restartState.resolve('declined');
+        } else if (parsed.type === 'client-log' && Array.isArray(parsed.entries)) {
+          // Error beacon from public/js/client-log.js — page JS errors and
+          // failed fetches, delivered over this socket precisely because it
+          // works when the page's fetch() doesn't. Caps keep a hostile or
+          // broken page from flooding the log.
+          for (const e of parsed.entries.slice(0, 25)) {
+            const kind = String((e && e.kind) || 'event').slice(0, 40);
+            const msg = String((e && e.msg) || '').slice(0, 400);
+            log(`[client ${ws.windowId || '?'}] ${kind}: ${msg}`);
+          }
         }
       } catch {}
     });
