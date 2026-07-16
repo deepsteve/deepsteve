@@ -2910,11 +2910,18 @@ function refreshEnginesDropdown() {
   });
 }
 
+// Close fn for the currently-open new-tab menu, or null — single source of truth so a
+// repeat press of the trigger toggles the menu closed instead of reopening it (#574).
+let newTabMenuCloser = null;
+
 /**
  * Show dropdown menu for new tab options (recent repos + actions)
  */
 function showNewTabMenu(e) {
-  // Remove any existing menu
+  // Toggle: a repeat press of the trigger (the ▾, or the rail long-press/right-click
+  // on +) while the menu is open closes it instead of reopening (#574).
+  if (newTabMenuCloser) { newTabMenuCloser(); return; }
+  // Defensive: drop any stray menu that lost its tracker (shouldn't happen).
   document.querySelector('.new-tab-menu')?.remove();
 
   const menu = document.createElement('div');
@@ -3086,8 +3093,7 @@ function showNewTabMenu(e) {
             if (!item || !item.dataset.tmuxSession) return;
             ev.stopPropagation();
             const sessionName = item.dataset.tmuxSession;
-            hideTmuxSubmenu();
-            menu.remove();
+            close();
             createTmuxAttachSession(sessionName);
           });
         }
@@ -3177,10 +3183,7 @@ function showNewTabMenu(e) {
       }
       return;
     }
-    menu.remove();
-    if (submenu) submenu.remove();
-    if (tmuxSubmenu) tmuxSubmenu.remove();
-    cleanup();
+    close();
     if (action === 'recent') {
       createSession(item.dataset.path, null, true, { agentType: getDefaultAgentType() });
     } else if (action === 'terminal') {
@@ -3212,18 +3215,22 @@ function showNewTabMenu(e) {
 
   menu.addEventListener('click', selectItem);
 
-  // Close on click outside
-  const cleanup = () => {
+  // Close on outside click. The trigger button subtree (btn) counts as "inside" so its
+  // mousedown never pre-closes the menu — that lets the click/contextmenu-time toggle at
+  // the top of showNewTabMenu decide, which is what makes a repeat press close it (#574).
+  const close = () => {
+    menu.remove();
+    if (submenu) submenu.remove();
+    if (tmuxSubmenu) tmuxSubmenu.remove();
     document.removeEventListener('mousedown', closeHandler);
+    newTabMenuCloser = null;
   };
   const closeHandler = (ev) => {
-    if (!menu.contains(ev.target) && !(submenu && submenu.contains(ev.target)) && !(tmuxSubmenu && tmuxSubmenu.contains(ev.target)) && ev.target !== btn) {
-      menu.remove();
-      if (submenu) submenu.remove();
-      if (tmuxSubmenu) tmuxSubmenu.remove();
-      cleanup();
+    if (!menu.contains(ev.target) && !(submenu && submenu.contains(ev.target)) && !(tmuxSubmenu && tmuxSubmenu.contains(ev.target)) && !btn.contains(ev.target)) {
+      close();
     }
   };
+  newTabMenuCloser = close;
   setTimeout(() => document.addEventListener('mousedown', closeHandler), 0);
 }
 
