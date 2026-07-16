@@ -132,11 +132,13 @@ embed_text() {
   echo "" >> "$OUT"
 }
 
-# Core files
+# Core files — every root module, not a hand-maintained list: a new require()
+# in server.js (e.g. sleep-watch.js in #563) missing here would crash-loop
+# every fresh install with MODULE_NOT_FOUND.
 embed_text "package.json" "package.json"
-embed_text "server.js" "server.js"
-embed_text "mcp-server.js" "mcp-server.js"
-embed_text "security.js" "security.js"
+for rootjs in *.js; do
+  embed_text "$rootjs" "$rootjs"
+done
 
 # Engine files
 embed_text "engines/engine.js" "engines/engine.js"

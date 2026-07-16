@@ -112,9 +112,10 @@ SCRIPT_DIR="$BG_DIR"
 cd "$SCRIPT_DIR"
 
 cp package.json ~/.deepsteve/
-cp server.js ~/.deepsteve/
-cp mcp-server.js ~/.deepsteve/
-cp security.js ~/.deepsteve/
+# ALL root modules, not a hand-maintained list: a new require() in server.js
+# (e.g. sleep-watch.js in #563) must never be missable here — a missed copy
+# crash-loops the daemon on the next restart with MODULE_NOT_FOUND.
+cp *.js ~/.deepsteve/
 mkdir -p ~/.deepsteve/engines
 cp engines/*.js ~/.deepsteve/engines/
 cp -r public/* ~/.deepsteve/public/
