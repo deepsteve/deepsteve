@@ -1514,7 +1514,7 @@ function createTmuxAttachSession(tmuxSessionName) {
       ws.serverSupportsPing = !!msg.pingPong; // wake-probe capability (#563)
       ws.setSessionId(msg.id);
       connHandle.setSessionId(msg.id);
-      initTerminal(msg.id, ws, null, msg.name || tmuxSessionName, { pendingData });
+      initTerminal(msg.id, ws, null, msg.name || tmuxSessionName, { pendingData, cols, rows });
       pendingData = [];
       const sess = sessions.get(msg.id);
       if (sess) {
@@ -1631,7 +1631,7 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
         if (!existingSession) {
           // Use client-provided name, or fall back to server-persisted name
           const sessionName = opts.name || msg.name;
-          initTerminal(msg.id, ws, cwd, sessionName, { hasScrollback, pendingData, restoreActive: opts.restoreActive || opts.background });
+          initTerminal(msg.id, ws, cwd, sessionName, { hasScrollback, pendingData, restoreActive: opts.restoreActive || opts.background, cols, rows });
           resolveReady(msg.id);
           if (opts.loading) {
             const sess = sessions.get(msg.id);
@@ -1803,6 +1803,12 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
       session.scrollControl.suppressScroll();
       // ResizeObserver handles fit; just request redraw from server
       ws.send(JSON.stringify({ type: 'redraw' }));
+      // After a daemon restart the PTY is respawned at the cols/rows frozen into
+      // the WS URL at creation time — stale if the window was resized since. A
+      // bare resize to the live xterm dims forces a SIGWINCH redraw when they
+      // differ, and is a no-op when they match (#566). redraw is a server no-op
+      // for the node-pty path, so this is what actually repairs stale sizing.
+      ws.send(JSON.stringify({ type: 'resize', cols: session.term.cols, rows: session.term.rows }));
       session.scrollControl.scrollToBottom();
     }
     ModManager.notifyWSReconnected();
@@ -1956,13 +1962,15 @@ function dismissLoadingBanner(sessionId) {
 /**
  * Initialize a terminal after WebSocket connection is established
  */
-function initTerminal(id, ws, cwd, initialName, { hasScrollback = false, pendingData = [], restoreActive = false } = {}) {
+function initTerminal(id, ws, cwd, initialName, { hasScrollback = false, pendingData = [], restoreActive = false, cols, rows } = {}) {
   const container = document.createElement('div');
   container.className = 'terminal-container';
   container.id = 'term-' + id;
   document.getElementById('terminals').appendChild(container);
 
-  const { term, fit } = createTerminal(container);
+  // Pass the measured grid size so the xterm opens at the right dims and
+  // scrollback replays into the correct grid on refresh (#566).
+  const { term, fit } = createTerminal(container, { cols, rows });
   const scrollControl = setupTerminalIO(term, ws, {
     onUserInput: () => {
       clearNotification(id);
@@ -2057,6 +2065,14 @@ function initTerminal(id, ws, cwd, initialName, { hasScrollback = false, pending
       // via Ink. The original DECTCEM hide sequence from session start may
       // have been trimmed from the scrollback circular buffer.
       term.write('\x1b[?25l');
+      // Heal the mismatched-size case (#566): if the PTY's size differs from
+      // this freshly-created xterm (window resized/zoomed while away, PTY sized
+      // by another window, or respawned at stale dims after a daemon restart),
+      // a real resize triggers SIGWINCH → Ink redraws a clean current frame.
+      // If sizes match, TIOCSWINSZ with no change emits no SIGWINCH — harmless.
+      // A bare resize (not fitTerminal) also heals hidden/background tabs, whose
+      // 0×0 containers FitAddon and the ResizeObserver can't measure.
+      ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
     } else {
       scrollControl.scrollToBottom();
       ws.send(JSON.stringify({ type: 'redraw' }));

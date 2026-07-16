@@ -12,15 +12,25 @@ function getTerminalForeground() {
   return getComputedStyle(document.documentElement).getPropertyValue('--ds-terminal-foreground').trim() || null;
 }
 
-export function createTerminal(container) {
+export function createTerminal(container, { cols, rows } = {}) {
   const themeObj = { background: getTerminalBackground() };
   const fg = getTerminalForeground();
   if (fg) themeObj.foreground = fg;
-  const term = new Terminal({
+  const opts = {
     fontSize: 14,
     cursorBlink: false,  // Disable - Claude has its own cursor
     theme: themeObj
-  });
+  };
+  // Open the terminal at the measured grid size (#566). On page refresh the
+  // container is still display:none, so FitAddon can't size the terminal before
+  // the server replays scrollback into it — leaving it at xterm's 80×24 default
+  // garbles Ink's cursor-addressed frames until a later real resize. Passing the
+  // already-measured dims makes the replay land in the correct grid immediately.
+  if (Number.isFinite(cols) && cols > 0 && Number.isFinite(rows) && rows > 0) {
+    opts.cols = cols;
+    opts.rows = rows;
+  }
+  const term = new Terminal(opts);
 
   const fit = new FitAddon.FitAddon();
   term.loadAddon(fit);
