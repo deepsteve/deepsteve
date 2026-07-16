@@ -22,6 +22,7 @@
   --ds-shadow: rgba(0, 0, 0, 0.4);
   --ds-reconnect-overlay: rgba(13, 17, 23, 0.75);
   --ds-reconnect-glow: rgba(240, 136, 62, 0.3);
+  --ds-reconnect-dot: var(--ds-accent-orange);
 
   /* Context panel (left rail) — fully theme-overridable. Base theme keeps it a
      flush, square-edged column; themes (e.g. retro-monitor) round it and add a
@@ -88,6 +89,11 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
 .tab .tab-icon { display: none; }
 .tab.placeholder { animation: tab-connecting 1.2s ease-in-out infinite; }
 @keyframes tab-connecting { 0%, 100% { opacity: 0.4; } 50% { opacity: 0.8; } }
+/* Connection down (#556): the badge slot becomes a pulsing dot. Must follow
+   .tab .badge.visible (equal specificity) so it overrides the blue
+   unseen-activity dot while the socket is down; blue returns on reconnect
+   since the .visible class is untouched underneath. */
+.tab.reconnecting .badge { visibility: visible; background: var(--ds-reconnect-dot); animation: pulse 1.5s ease-in-out infinite; }
 .tab.dragging { opacity: 0.3; }
 .tab-drag-ghost { opacity: 0.9; box-shadow: 0 4px 12px rgba(0,0,0,0.5); }
 #tabs-list.tab-drag-active { user-select: none; }
@@ -521,6 +527,12 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
 .pending-session-banner { position: fixed; top: 12px; left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 8px; padding: 8px 16px; background: var(--ds-bg-secondary); border: 1px solid var(--ds-border); border-radius: 6px; box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35); color: var(--ds-text-secondary); font-size: 13px; font-family: monospace; z-index: 2600; }
 .pending-session-banner-cancel { padding: 2px 10px; font-size: 12px; font-family: inherit; color: var(--ds-text-secondary); background: var(--ds-bg-primary); border: 1px solid var(--ds-border); border-radius: 4px; cursor: pointer; flex-shrink: 0; }
 .pending-session-banner-cancel:hover { color: var(--ds-text-primary); border-color: var(--ds-accent-blue); }
+
+/* Global reconnect banner (#556): shown when any session's socket has been
+   down past the grace period. Same recipe/position as .pending-session-banner —
+   safe because only one ever shows (ConnectionStatus is suppressed while
+   pending creates are on screen). */
+.reconnect-banner { position: fixed; top: 12px; left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 8px; padding: 8px 16px; background: var(--ds-bg-secondary); border: 1px solid var(--ds-accent-orange); border-radius: 6px; box-shadow: 0 0 20px var(--ds-reconnect-glow); color: var(--ds-text-primary); font-size: 13px; font-family: monospace; z-index: 2600; }
 
 /* Top-of-page progress bar (automation prefill) */
 #ds-progress-bar { position: fixed; top: 0; left: 0; width: 100%; height: 3px; z-index: 10000; pointer-events: none; opacity: 0; transition: opacity 0.4s ease; }

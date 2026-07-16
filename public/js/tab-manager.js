@@ -548,6 +548,17 @@ export const TabManager = {
   },
 
   /**
+   * Mark a tab's connection as down/recovering (#556): its badge slot becomes
+   * a pulsing dot. Lives on the tab element so it shows for background tabs
+   * (the terminal container is display:none) and placeholder tabs (no session
+   * exists yet) — the two cases the container overlay structurally can't cover.
+   */
+  updateReconnecting(sessionId, on) {
+    const tab = document.getElementById('tab-' + sessionId);
+    if (tab) tab.classList.toggle('reconnecting', !!on);
+  },
+
+  /**
    * Get the adjacent tab's session ID (left neighbor preferred, then right).
    * Returns null if no adjacent tab exists.
    */
