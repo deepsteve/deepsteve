@@ -989,7 +989,7 @@ kbd {
 #empty-state .empty-state-title { color: var(--ds-accent-blue); opacity: 0.4; font-size: 12px; margin-top: 8px; }
 #empty-state .empty-state-btn { margin-top: 24px; padding: 8px 20px; font-size: 14px; font-family: inherit; color: var(--ds-text-primary); background: var(--ds-bg-tertiary); border: 1px solid var(--ds-border); border-radius: 6px; cursor: pointer; opacity: 0.7; transition: opacity 0.15s, background 0.15s; }
 #empty-state .empty-state-btn:hover { opacity: 1; background: var(--ds-bg-secondary); }
-/* Recent-sessions restore list (issue #533): empty state + directory picker modal */
+/* Recent-sessions restore list (issue #533): empty state */
 #empty-state .empty-state-recent { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; justify-content: center; max-width: 600px; }
 #empty-state .empty-state-recent:empty { display: none; }
 #empty-state .empty-state-recent .recent-session-btn { padding: 6px 16px; font-size: 13px; font-family: inherit; color: var(--ds-text-primary); background: transparent; border: 1px solid var(--ds-border); border-radius: 6px; cursor: pointer; opacity: 0.7; transition: opacity 0.15s, background 0.15s; }
@@ -1005,7 +1005,8 @@ kbd {
 #empty-state.context-empty .empty-state-recent { display: none; }
 #empty-state.context-empty .empty-state-restore { display: none; }
 
-/* Recent-sessions section in directory picker modal */
+/* Directory-picker quick-pick section: the active context's repos (#573). The
+   per-session "Recent sessions" list that also used these classes was removed in #575. */
 .modal .recent-section { display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; }
 .modal .recent-section .recent-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--ds-text-secondary); opacity: 0.7; margin-bottom: 2px; }
 .modal .recent-section .recent-session-btn { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; text-align: left; padding: 6px 10px; font-family: inherit; color: var(--ds-text-primary); background: transparent; border: 1px solid var(--ds-border); border-radius: 6px; cursor: pointer; transition: background 0.15s; }

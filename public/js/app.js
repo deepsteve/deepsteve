@@ -3379,21 +3379,16 @@ async function promptWorktreeSession() {
  * Prompt for directory and create session
  */
 async function promptRepoSession() {
-  // Refresh the recent-sessions list so the picker shows the latest (also kept
-  // current via the 'recent-sessions' WS broadcast while a tab is open).
-  await loadRecentSessions();
-  // With a context active, surface its repos first in the picker too (#573).
+  // Pure directory picker (#575): the per-session "Recent sessions" list was removed —
+  // session resume lives on dedicated surfaces (empty-state recents, the ▾ menu's
+  // "Restore sessions…" #560 modal, the command palette). With a context active, still
+  // surface its repos first as directory quick-picks (#573).
   const ctxInfo = getActiveContextInfo();
   const result = await showDirectoryPicker({
-    recentSessions,
     contextDirs: ctxInfo ? ctxInfo.dirs : [],
     contextLabel: ctxInfo ? ctxInfo.name : '',
   });
   if (result === null) return;
-  if (result && typeof result === 'object' && result.type === 'recent') {
-    await restoreRecentSession(result.key);
-    return;
-  }
   createSession(result, null, true, { agentType: getDefaultAgentType() });
 }
 

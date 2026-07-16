@@ -26,25 +26,16 @@ function esc(s) {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
-function relTime(ts) {
-  if (!ts) return '';
-  const s = Math.max(0, Math.floor((Date.now() - ts) / 1000));
-  if (s < 60) return 'just now';
-  const m = Math.floor(s / 60);
-  if (m < 60) return `${m}m ago`;
-  const h = Math.floor(m / 60);
-  if (h < 24) return `${h}h ago`;
-  return `${Math.floor(h / 24)}d ago`;
-}
-
-export function showDirectoryPicker({ recentSessions = [], contextDirs = [], contextLabel = '' } = {}) {
+export function showDirectoryPicker({ contextDirs = [], contextLabel = '' } = {}) {
   return new Promise(async (resolve) => {
     const home = await fetchHome();
     const defaultPath = SessionStore.getLastCwd() || home;
     const alwaysUse = SessionStore.getAlwaysUse();
 
-    // Context repos first (#573): a quick-pick section above Recent sessions,
-    // listing the active context's repos so the context follows you here too.
+    // Context repos first (#573): a quick-pick section listing the active context's
+    // repos as directory shortcuts so the context follows you into the picker too.
+    // (The per-session "Recent sessions" list was removed in #575 — this modal picks
+    // a directory; session resume lives on its own surfaces.)
     const ctxHtml = contextDirs.length > 0 ? `
         <div class="recent-section">
           <div class="recent-label">${esc(contextLabel || 'Context')}</div>
@@ -57,28 +48,12 @@ export function showDirectoryPicker({ recentSessions = [], contextDirs = [], con
         <div class="recent-separator"></div>
     ` : '';
 
-    const recentHtml = recentSessions.length > 0 ? `
-        <div class="recent-section">
-          <div class="recent-label">Recent sessions</div>
-          ${recentSessions.map(r => {
-            const label = r.name || (r.cwd ? r.cwd.split('/').pop() : '') || 'session';
-            const meta = [r.cwd, r.agentType, relTime(r.updatedAt)].filter(Boolean).join(' · ');
-            return `<button class="recent-session-btn" data-recent-key="${esc(r.key)}" title="${esc(meta)}">
-              <span class="recent-name">${esc(label)}</span>
-              <span class="recent-meta">${esc(meta)}</span>
-            </button>`;
-          }).join('')}
-        </div>
-        <div class="recent-separator"></div>
-    ` : '';
-
     const overlay = document.createElement('div');
     overlay.className = 'modal-overlay';
     overlay.innerHTML = `
       <div class="modal">
         <h2>Select working directory</h2>
         ${ctxHtml}
-        ${recentHtml}
         <div class="path-wrap">
           <input type="text" id="cwd-input" value="${defaultPath}">
           <button class="path-up" id="up-btn">&#8593;</button>
@@ -96,14 +71,6 @@ export function showDirectoryPicker({ recentSessions = [], contextDirs = [], con
       </div>
     `;
     document.body.appendChild(overlay);
-
-    // Recent-session button click handlers
-    overlay.querySelectorAll('.recent-session-btn[data-recent-key]').forEach(btn => {
-      btn.onclick = () => {
-        overlay.remove();
-        resolve({ type: 'recent', key: btn.dataset.recentKey });
-      };
-    });
 
     const input = overlay.querySelector('#cwd-input');
 
