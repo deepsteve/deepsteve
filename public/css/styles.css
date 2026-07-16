@@ -1107,12 +1107,14 @@ kbd {
   box-shadow: var(--ds-context-shadow);
   overflow-y: auto;
   overflow-x: hidden;
+  user-select: none;  /* rail items are buttons — a press-drag (incl. row drag-to-reorder, #532) must never become a text selection (#564) */
 }
 .context-rail-header { font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--ds-text-secondary); padding: 10px 12px 6px; }
 .context-list { display: flex; flex-direction: column; }
 .context-row { display: flex; align-items: center; gap: 6px; padding: 7px 12px; cursor: pointer; color: var(--ds-text-secondary); font-size: 13px; border-left: 3px solid transparent; }
 .context-row:hover { background: var(--ds-bg-tertiary); color: var(--ds-text-primary); }
 .context-row.active { color: var(--ds-text-bright); background: var(--ds-bg-tertiary); border-left-color: var(--ds-accent-blue); }
+.context-row:active { background: var(--ds-border); }  /* after .context-row.active: equal specificity, source order lets the press show on the selected row too */
 .context-row-label { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* Drag-to-reorder (#532): dim the row being dragged; the real DOM row moves
    live between slots as the pointer crosses each sibling's midpoint. */
@@ -1133,8 +1135,10 @@ kbd {
 }
 .context-empty-note { padding: 8px 12px; font-size: 11px; color: var(--ds-text-secondary); cursor: pointer; line-height: 1.4; }
 .context-empty-note:hover { color: var(--ds-text-primary); }
+.context-empty-note:active { background: var(--ds-border); }
 .context-add { margin-top: auto; padding: 9px 12px; cursor: pointer; color: var(--ds-accent-green-soft); font-size: 13px; border-top: 1px solid var(--ds-border); }
 .context-add:hover { background: var(--ds-bg-tertiary); }
+.context-add:active { background: var(--ds-border); }
 .context-hint { padding: 6px 12px 10px; font-size: 10px; color: var(--ds-text-secondary); opacity: 0.7; }
 
 /* Context switch toast */
