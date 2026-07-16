@@ -13,6 +13,7 @@ const { createSleepWatch } = require('./sleep-watch');
 const { createPowerAssertion } = require('./power-assertion');
 const { formatLogTimestamp, createLogRotator, defaultLogPaths } = require('./logging');
 const { findGitRoot } = require('./git-root');
+const { classifyScreenTail, CLAUDE_SCREEN_MARKERS } = require('./screen-classifier');
 const NodePtyEngine = require('./engines/node-pty');
 const TmuxEngine = require('./engines/tmux');
 
@@ -189,6 +190,7 @@ function auditWaiting(event, id, e, extra = {}) {
       msSinceBel: e.lastBelTime ? now - e.lastBelTime : null,
       msSinceInput: e.lastInputTime ? now - e.lastInputTime : null,
       msSinceActivity: e.lastActivity ? now - e.lastActivity : null,
+      msSinceSpinner: e.lastSpinnerTime ? now - e.lastSpinnerTime : null,
       ...extra,
     }) + '\n';
     fs.appendFileSync(WAITING_AUDIT_FILE, line);
@@ -971,7 +973,8 @@ const AGENT_CONFIGS = {
     supportsWorktree: true,
     supportsSessionId: true,
     supportsSessionWatch: true,
-    emitsBel: true,
+    emitsBel: true,              // still used by killShell's BEL exit-watch + the #558 audit
+    screenMarkers: CLAUDE_SCREEN_MARKERS, // #568: drives the screen-state waiting detector
     exitMethod: 'exit-cmd', // uses /exit
     initialPromptDelay: 0,
     sessionIdFlag: '--session-id',
@@ -1460,10 +1463,10 @@ function fetchIssueFromGitHub(number, cwd) {
  * Prompts are queued per shell and submitted one at a time, each waiting for its
  * own readiness signal — so two pending prompts (e.g. an inherited `/rc` followed
  * by a start_issue prompt, #519) can't clobber each other's onIdleOnce slot.
- * For each queue head: if the shell is already waiting for input, submit
- * immediately; if the agent uses initialPromptDelay (non-BEL), use that delay;
- * otherwise install a single-shot onIdleOnce callback that the idle timer will
- * invoke on the next idle transition.
+ * For each queue head: if the screen shows the agent idle right now, submit
+ * immediately; if the agent uses a fixed initialPromptDelay (non-claude, which the
+ * screen detector can't classify), use that delay; otherwise install a single-shot
+ * onIdleOnce callback that setWaiting invokes on the next idle transition (#568).
  */
 function deliverPromptWhenReady(id, prompt) {
   const e = shells.get(id);
@@ -1532,25 +1535,18 @@ function drainPromptQueue(id) {
     });
   }
 
-  // "BEL since last input" mirrors the idle classifier: a BEL that predates the
-  // last submission (e.g. the one that preceded a just-submitted queue head)
-  // doesn't mean the agent is at its prompt now.
-  const belSinceInput = e.lastBelTime && e.lastBelTime >= (e.lastInputTime || 0);
-  if (e.waitingForInput) {
-    e.waitingForInput = false;
-    auditWaiting('transition', id, e, { to: false, via: 'deliver-immediate' });
-    log(`[deliverPrompt] id=${id} submitting immediately (was waiting)`);
+  // If the screen shows the agent is idle at its prompt right now, submit
+  // immediately. Otherwise, agents with a fixed initialPromptDelay (non-claude,
+  // which the screen detector returns 'unknown' for) use that delay; everything
+  // else installs a single-shot onIdleOnce that setWaiting fires on the next idle
+  // transition (#568 — replaces the old BEL-recency heuristic).
+  if (computeWaiting(e)) {
+    setWaiting(e, id, false, 'deliver-immediate');
+    log(`[deliverPrompt] id=${id} submitting immediately (screen idle)`);
     setTimeout(submitAndNotify, 500);
   } else if (config.initialPromptDelay > 0) {
     log(`[deliverPrompt] id=${id} using delay ${config.initialPromptDelay}ms`);
     setTimeout(submitAndNotify, config.initialPromptDelay);
-  } else if (belSinceInput && (Date.now() - e.lastBelTime) < 2000) {
-    // BEL fired recently — agent is likely at prompt even though idle timer
-    // hasn't fired yet. Submit immediately.
-    log(`[deliverPrompt] id=${id} BEL fired ${Date.now() - e.lastBelTime}ms ago, submitting immediately`);
-    e.waitingForInput = false;
-    auditWaiting('transition', id, e, { to: false, via: 'deliver-bel-recent' });
-    setTimeout(submitAndNotify, 500);
   } else {
     log(`[deliverPrompt] id=${id} installing onIdleOnce for next idle transition`);
     e.onIdleOnce = () => {
@@ -1592,16 +1588,14 @@ function maybeInheritRemoteControl({ newId, agentType, isFork, parentId }) {
 
 /**
  * Coarse input-state of a session for external callers (meta_type,
- * read_session_screen, get_session_info): 'idle' means the BEL-gated classifier
- * says the agent is at its input prompt, 'busy' means it isn't (or hasn't proven
- * it yet), 'unknown' means the agent type never emits BEL so the classifier
- * doesn't run (plain terminals, pi).
+ * read_session_screen, get_session_info). Shares the #568 screen-state detector:
+ * 'idle' = the screen shows the agent at its input prompt (or a permission
+ * dialog), 'busy' = a turn is running, 'unknown' = the screen isn't decisive or
+ * the agent type has no defined screen signals (plain terminals, pi, …).
  */
 function sessionInputState(entry) {
-  if (!entry) return 'unknown';
-  const config = getAgentConfig(entry.agentType);
-  if (!config.emitsBel) return 'unknown';
-  return entry.waitingForInput ? 'idle' : 'busy';
+  const s = classifyScreenState(entry);
+  return s === 'working' ? 'busy' : s === 'waiting' ? 'idle' : 'unknown';
 }
 
 /**
@@ -1616,9 +1610,66 @@ function stripEscapeSequences(data) {
     .replace(/\x1b[78DMHNOcn=><]/g, '');              // Single-char escapes
 }
 
+// --- Screen-state waiting detector (#568) ---
+// Replaces the BEL-gated silence classifier. The last few KB of the scrollback,
+// ANSI-stripped and whitespace-collapsed, is the "screen tail" the classifier
+// reads (same shape as sessionHasRemoteControl / auditScreenTail). 8KB covers the
+// live UI region even across a few overlapping repaint frames.
+const SCREEN_TAIL_BYTES = 8192;
+function screenTail(entry) {
+  return stripEscapeSequences((entry.scrollback || []).join('').slice(-SCREEN_TAIL_BYTES))
+    .replace(/[ \t]+/g, ' ');
+}
+
+// Tri-state: 'working' | 'waiting' | 'unknown'. 'unknown' means the screen isn't
+// decisive — callers that update the flag must leave it AS-IS on 'unknown', never
+// force it false (that is what keeps a half-typed prompt from disarming, #558).
+function classifyScreenState(entry) {
+  if (!entry) return 'unknown';
+  const markers = getAgentConfig(entry.agentType).screenMarkers;
+  return classifyScreenTail({
+    tail: markers ? screenTail(entry) : '',
+    now: Date.now(),
+    lastSpinnerTime: entry.lastSpinnerTime,
+    markers,
+  });
+}
+
+// Definite-waiting only (used by prompt delivery, which must wait for a real idle
+// signal rather than fire on an ambiguous screen).
+function computeWaiting(entry) {
+  return classifyScreenState(entry) === 'waiting';
+}
+
+// The single place that flips entry.waitingForInput. Broadcasts {type:'state'} to
+// the session's clients only on a real change, and fires the one-shot onIdleOnce
+// (queued-prompt delivery) on the transition into waiting.
+function setWaiting(e, id, waiting, via, extra = {}) {
+  if (waiting === !!e.waitingForInput) return;
+  e.waitingForInput = waiting;
+  auditWaiting('transition', id, e, { to: waiting, via, screen: auditScreenTail(e, waiting ? 1500 : 300), ...extra });
+  const stateMsg = JSON.stringify({ type: 'state', waiting });
+  e.clients.forEach((c) => c.send(stateMsg));
+  if (waiting && e.onIdleOnce) {
+    const cb = e.onIdleOnce;
+    e.onIdleOnce = null;
+    try { cb(); } catch (err) { log(`[idle] onIdleOnce threw: ${err.message}`); }
+  }
+}
+
+// Re-derive the waiting flag from the screen and apply it. 'unknown' is a no-op
+// (leave the flag as-is) — only a decisive 'working'/'waiting' moves it. Called on
+// every output chunk and on the periodic sweep, so a stuck state self-corrects.
+function reclassifyWaiting(e, id, via) {
+  if (!getAgentConfig(e.agentType).screenMarkers) return; // agent isn't classified
+  const state = classifyScreenState(e);
+  if (state === 'unknown') return;
+  setWaiting(e, id, state === 'waiting', via);
+}
+
 /**
  * Wire up a shell's onData handler: broadcast output to WebSocket clients,
- * detect idle state (2s silence), and auto-submit queued prompts.
+ * re-derive the screen-state waiting flag (#568), and auto-submit queued prompts.
  */
 function wireShellOutput(id) {
   const entry = shells.get(id);
@@ -1637,14 +1688,15 @@ function wireShellOutput(id) {
     while (e.scrollbackSize > (settings.scrollbackKB * 1024) && e.scrollback.length > 1) {
       e.scrollbackSize -= e.scrollback.shift().length;
     }
-    // Generic: detect session ID updates and BEL for input state tracking.
     const config = getAgentConfig(e.agentType);
+    // Strip ANSI once and share it: resume-UUID matching and the spinner heartbeat
+    // both want the plain text. Skip entirely for agents that need neither
+    // (plain terminals) so their hot path stays a pure passthrough.
+    const plain = (config.emitsBel || config.screenMarkers) ? stripEscapeSequences(data) : null;
 
     if (config.emitsBel) {
       // Detect claude --resume <UUID> in PTY output to track the actual session ID.
       // Claude prints this line when a session exits (including /exit, /clear, shutdown).
-      // Strip all ANSI escapes before matching so dim/bold/OSC wrappers don't interfere.
-      const plain = stripEscapeSequences(data);
       const resumeMatch = plain.match(/claude --resume ([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/);
       if (resumeMatch) {
         // adoptClaudeSession() owns the ownership guard, planMode reset, persistence,
@@ -1652,92 +1704,31 @@ function wireShellOutput(id) {
         // during shutdown) — #503.
         adoptClaudeSession(id, resumeMatch[1], 'pty-output');
       }
-      // #558 audit: classify this chunk's BELs (bare vs OSC-terminator) BEFORE
-      // lastBelTime is bumped, so msSinceBel reflects the gap since the previous
-      // bell. The scan runs on every chunk (not just BEL-carrying ones) to keep
-      // the cross-chunk OSC-open carry flag correct.
+      // #558 audit: classify this chunk's BELs (bare vs OSC-terminator). Kept for
+      // the audit taxonomy and to keep the cross-chunk OSC-open carry flag correct.
       if (settings.waitingAuditEnabled) {
         const bels = auditClassifyBels(e, data);
         if (bels.bare + bels.osc > 0) auditWaiting('bels', id, e, bels);
       }
-      // Track lastBelTime for deliverPromptWhenReady fallback
-      if (data.includes('\x07')) {
-        e.lastBelTime = Date.now();
-        // A BEL is the agent's readiness signal — it has reached its input prompt.
-        // If a prompt was queued before the first BEL (the WS create path queues it
-        // ~11ms in, well before Claude's first bell at ~400ms), fire the queued
-        // callback now instead of waiting for the 2s idle timer below. Claude's
-        // streaming startup output keeps resetting that timer, delaying submission
-        // by ~12s (#492). Single-shot: onIdleOnce is nulled here so the idle timer
-        // won't double-fire it.
-        if (e.onIdleOnce) {
-          const cb = e.onIdleOnce;
-          e.onIdleOnce = null;
-          try { cb(); } catch (err) { log(`[bel] onIdleOnce threw: ${err.message}`); }
-        }
-      }
-
-      // Silence-based idle detection: if no PTY output for 2s, mark as waiting.
-      // Any output resets the timer and clears waiting state.
-      if (e.waitingForInput) {
-        e.waitingForInput = false;
-        // #558 audit: `chunk` records WHAT cleared the flag (spinner redraw vs
-        // real output) — flicker forensics.
-        auditWaiting('transition', id, e, {
-          to: false, via: 'output',
-          chunk: stripEscapeSequences(data).slice(0, 120),
-          screen: auditScreenTail(e, 300),
-        });
-        const stateMsg = JSON.stringify({ type: 'state', waiting: false });
-        e.clients.forEach((c) => c.send(stateMsg));
-      }
-      clearTimeout(e.idleTimer);
-      e.idleTimer = setTimeout(() => {
-        // Fire any queued prompt regardless of the waiting decision below
-        // (single-shot — nulled so the BEL path above can't double-fire it).
-        const fireOnce = () => {
-          if (e.onIdleOnce) {
-            const cb = e.onIdleOnce;
-            e.onIdleOnce = null;
-            try { cb(); } catch (err) { log(`[idle] onIdleOnce threw: ${err.message}`); }
-          }
-        };
-        if (e.waitingForInput) { fireOnce(); return; }
-
-        // BEL-gated classifier (#500). Silence alone is ambiguous: a long, quiet
-        // tool call (bash, slow network) looks identical to sitting at the prompt.
-        // The agent emits a BEL when it actually reaches its input prompt, so only
-        // flip to "waiting" when a BEL has fired since the user last submitted.
-        // Fallback: a session that has never emitted a BEL (terminal bell disabled)
-        // keeps the legacy silence-only heuristic so detection still works there.
-        const bellEver = !!e.lastBelTime;
-        const bellSinceInput = e.lastBelTime && e.lastBelTime >= (e.lastInputTime || 0);
-        if (bellSinceInput || !bellEver) {
-          e.waitingForInput = true;
-          auditWaiting('transition', id, e, {
-            to: true, via: 'idle-timer',
-            bellEver, bellSinceInput: !!bellSinceInput,
-            screen: auditScreenTail(e, 1500),
-          });
-          const stateMsg = JSON.stringify({ type: 'state', waiting: true });
-          e.clients.forEach((c) => c.send(stateMsg));
-        } else {
-          // #558 audit: the idle timer fired and decided NOT to flip (a bell exists
-          // but predates the last input). Invisible in production — but this is the
-          // stuck-false smoking gun: nothing can flip the flag back without a fresh
-          // BEL, even if the agent is sitting at its prompt.
-          auditWaiting('idle-no-flip', id, e, {
-            bellEver, bellSinceInput: false,
-            screen: auditScreenTail(e, 1500),
-          });
-        }
-        fireOnce();
-      }, 2000);
+      // lastBelTime no longer gates the waiting classifier (#568) — it now only
+      // feeds killShell's "wait for the prompt bell before /exit" path and the
+      // audit's msSinceBel. The BEL is not a reliable readiness signal (#558).
+      if (data.includes('\x07')) e.lastBelTime = Date.now();
     } else if (settings.waitingAuditEnabled) {
       // #558 audit: emitsBel=false sessions (terminal/pi/hermes/opencode) are never
-      // classified at all — record their bells to measure what that exclusion hides.
+      // classified — record their bells to measure what that exclusion hides.
       const bels = auditClassifyBels(e, data);
       if (bels.bare + bels.osc > 0) auditWaiting('bel-nonclaude', id, e, bels);
+    }
+
+    // #568 screen-state waiting detector. Any chunk carrying the spinner marker is
+    // a live-turn heartbeat → refresh lastSpinnerTime. Then re-derive the waiting
+    // flag from the screen (reclassifyWaiting fires onIdleOnce / broadcasts state
+    // on a real transition; 'unknown' leaves the flag untouched). Runs on every
+    // chunk; the periodic sweep handles the transition-to-idle when output stops.
+    if (config.screenMarkers) {
+      if (config.screenMarkers.spinner.test(plain)) e.lastSpinnerTime = Date.now();
+      reclassifyWaiting(e, id, 'output');
     }
     e.clients.forEach((c) => c.send(data));
   };
@@ -1769,8 +1760,7 @@ function killShell(entry, id, reason = 'closed') {
   log(`Killing shell ${id} (pid=${pid}, agent=${entry.agentType || 'claude'}, waitingForInput=${entry.waitingForInput})`);
   traceSession('CLOSE', { shell: id, name: entry.name || null, worktree: entry.worktree || null, cwd: entry.cwd, claude: entry.claudeSessionId, planMode: !!entry.planMode, pid, agent: entry.agentType || 'claude', waitingForInput: !!entry.waitingForInput, shuttingDown: !!shuttingDown });
 
-  // Clean up idle timer and engine data listener
-  clearTimeout(entry.idleTimer);
+  // Clean up timers and engine data listener
   clearTimeout(entry.inputBlockTimer);
   if (entry._engineDataHandler) {
     eng.removeListener('data', entry._engineDataHandler);
@@ -4243,6 +4233,16 @@ setInterval(() => {
   }
 }, 5000).unref();
 
+// #568 waiting sweep: re-derive every classified session's waiting flag on a 1s
+// tick. This is what catches the transition to idle when output STOPS (no chunk
+// arrives to trigger reclassify on the data path) and lets any stuck state
+// self-correct without fresh bytes — the core defect #558 documented. Cheap: a
+// screen-tail slice + a few regex tests per claude session. reclassifyWaiting is
+// a no-op for unclassified agents and only broadcasts on a real transition.
+setInterval(() => {
+  for (const [id, e] of shells) reclassifyWaiting(e, id, 'sweep');
+}, 1000).unref();
+
 // Grace timer for a session whose last client socket closed. Fires only after
 // DETACH_GRACE_MS of daemon-awake, client-absent time: if the daemon recently woke
 // from sleep (sleepWatch), or this very timer fired far later than it was armed
@@ -4877,22 +4877,21 @@ function handleWsConnection(ws, req) {
     // (resize/rename/unblock-input/close-session) already returned above, so they
     // still work as escape hatches.
     if (entry.inputBlocked) return;
-    // User sent input - update activity and clear waiting/idle state
+    // User sent input — bump activity/input timers only. The #568 screen-state
+    // detector decides "waiting" purely from the rendered screen, so a single
+    // un-submitted keystroke must NOT clear the flag here (that was the #558
+    // "one keystroke disarms it permanently" bug). The echo flows through the data
+    // handler, and because it carries no spinner heartbeat, a composed-but-unsent
+    // message stays "waiting".
     entry.lastActivity = Date.now();
     entry.lastInputTime = Date.now();
-    clearTimeout(entry.idleTimer);
-    const clearedWaiting = !!entry.waitingForInput;
-    if (entry.waitingForInput) {
-      entry.waitingForInput = false;
-      const stateMsg = JSON.stringify({ type: 'state', waiting: false });
-      entry.clients.forEach((c) => c.send(stateMsg));
-    }
-    // #558 audit: keystroke-resolution bell→input ordering, debounced to 1/s per
-    // shell (typing bursts collapse into a `burst` suppressed-count).
+    // #558 audit: keystroke-resolution ordering, debounced to 1/s per shell
+    // (typing bursts collapse into a `burst` suppressed-count). clearedWaiting is
+    // now always false — keystrokes no longer touch the flag.
     if (settings.waitingAuditEnabled) {
       const now = Date.now();
       if (!entry._auditLastInputLog || now - entry._auditLastInputLog >= 1000) {
-        auditWaiting('input', id, entry, { len: str.length, clearedWaiting, burst: entry._auditInputBurst || 0 });
+        auditWaiting('input', id, entry, { len: str.length, clearedWaiting: false, burst: entry._auditInputBurst || 0 });
         entry._auditLastInputLog = now;
         entry._auditInputBurst = 0;
       } else {

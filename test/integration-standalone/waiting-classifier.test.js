@@ -1,25 +1,32 @@
 /**
- * Deterministic repros for the BEL-gated waitingForInput classifier (#558 research).
+ * Deterministic tests for the screen-state waitingForInput detector (#568).
  *
- * Spawns its own throwaway daemon (scratch $HOME, random port, stub `claude`)
- * and drives the classifier through the real WS input path — the same path a
- * typing user takes. The stub agent is command-driven over its stdin:
+ * These are the #558 repros, flipped from "reproduces the bug" to "the bug is
+ * gone." Spawns its own throwaway daemon (scratch $HOME, random port, stub
+ * `claude`) and drives the detector through the real WS input path — the same
+ * path a typing user takes. The stub agent is command-driven over its stdin and,
+ * unlike the old BEL stub, emits real *screen text* (spinner / idle footer /
+ * permission dialog) because the detector reads the rendered screen, not bells:
  *
- *   bell      -> prints output then a bare BEL (a real "turn done" readiness bell)
- *   osc       -> prints an OSC title update (BEL-terminated), then "works" silently
- *   tickbell  -> prints a bare BEL, then a burst of output every 3s (flicker)
+ *   idle      -> prints the idle composer footer ("⏵⏵ auto mode on", "? for
+ *                shortcuts"), then sits quiet at its read loop
+ *   work      -> a spinner ("… esc to interrupt …") every ~0.5s for a good while
+ *                (the shape of a long, output-quiet tool call — #500), then
+ *                "work finished" + the idle footer
+ *   perm      -> a permission dialog ("Do you want to proceed?", "Esc to cancel …")
+ *   tick      -> the idle footer, then a non-spinner line every 2s (would have
+ *                flickered the old 2s-silence classifier)
  *   /exit     -> exits
  *
- * What each test demonstrates (findings, not fixes — this branch is research-only):
- *   0. Baseline: bell -> 2s silence -> waiting:true. The happy path works.
- *   A. Lead 1 (stuck-false): a single keystroke after the bell clears the flag
- *      and nothing can ever set it again — the half-typed tab never shows waiting.
- *   B. Lead 2 (corrected): emitsBel=false sessions (terminal) are never classified
- *      at all — a bare BEL + long silence never flips the flag.
- *   C. Lead 3 (premature-true): an OSC title terminator counts as a readiness
- *      bell, so a quiet "working" stretch right after it flags waiting.
- *   D. Lead 4 (flicker): periodic output while genuinely waiting toggles the flag
- *      repeatedly, in episodes shorter than the client's 10s notification cooldown.
+ * What each test now asserts (the fix):
+ *   0. Baseline: idle footer -> waiting:true; REST and /api/shells agree.
+ *   A. #558 Lead 1 fixed: one un-submitted keystroke does NOT clear waiting; it
+ *      stays true (the "one keystroke disarms it forever" trap is gone).
+ *   B. Non-claude (terminal) sessions are still never classified (unchanged).
+ *   C. #500 fixed: a running spinner is never mislabeled waiting, and the flag
+ *      flips to true only after the turn ends and the footer appears.
+ *   D. Anti-flicker: periodic non-spinner output at an idle footer produces one
+ *      waiting:true edge and no spurious false edges.
  *
  * Run: node --test --test-timeout=180000 test/integration-standalone/waiting-classifier.test.js
  */
@@ -34,14 +41,30 @@ const WebSocket = require('ws');
 
 const REPO_ROOT = path.resolve(__dirname, '..', '..');
 
+// Emits real Claude-like screen text. print_footer draws the idle composer footer
+// (the "⏵⏵ auto mode on" mode line + the "? for shortcuts" placeholder); spin
+// prints a spinner frame carrying the "esc to interrupt" heartbeat every ~0.5s.
 const CLAUDE_STUB = `#!/bin/bash
 printf 'stub claude ready\\n'
+print_footer() {
+  printf '%s\\n' '⏵⏵ auto mode on (shift+tab to cycle) · for agents'
+  printf '%s\\n' '? for shortcuts'
+}
+spin() {
+  local n=$1 i=1
+  while [ $i -le $n ]; do
+    printf '%s Working... (esc to interrupt · %ss)\\n' '*' "$i"
+    sleep 0.5
+    i=$((i+1))
+  done
+}
 while IFS= read -r line; do
   case "$line" in
     *"/exit"*) exit 0 ;;
-    *tickbell*) ( printf '\\a'; for i in 1 2 3 4 5; do sleep 3; printf 'tick %s\\n' "$i"; done ) & ;;
-    *bell*) printf 'turn done\\n\\a' ;;
-    *osc*) printf '\\033]0;stub-title\\007'; sleep 8; printf 'work finished\\n' ;;
+    *work*) ( spin 20; printf 'work finished\\n'; print_footer ) & ;;
+    *idle*) print_footer ;;
+    *perm*) printf '%s\\n' 'Do you want to proceed?' '1. Yes' '2. No' 'Esc to cancel · Tab to amend' ;;
+    *tick*) print_footer; ( for i in 1 2 3 4 5; do sleep 2; printf 'tick %s\\n' "$i"; done ) & ;;
   esac
 done
 exit 0
@@ -102,6 +125,13 @@ async function startDaemon() {
   fs.writeFileSync(path.join(HOME, '.deepsteve', '.restarting'), '');
   env.PATH = `${path.join(HOME, 'bin')}:${process.env.PATH}`;
 
+  // Isolate tmux's socket: it is per-UID, NOT per-HOME (see CLAUDE.md), so a
+  // scratch-HOME daemon otherwise shares the real user's tmux socket, sees the
+  // real daemon's ds-* sessions, and destroys them as "orphans" on startup (#570).
+  const tmuxTmp = path.join(HOME, 'tmux-tmp');
+  fs.mkdirSync(tmuxTmp, { recursive: true, mode: 0o700 });
+  env.TMUX_TMPDIR = tmuxTmp;
+
   daemon = spawn('node', ['server.js'], { cwd: REPO_ROOT, env });
   daemon.stdout.on('data', d => { daemonLog += d.toString(); });
   daemon.stderr.on('data', d => { daemonLog += d.toString(); });
@@ -129,8 +159,7 @@ async function restState(id) {
   return r.json();
 }
 
-// Audit JSONL written by the daemon (scratch HOME) — the same file the
-// production tagalong will produce.
+// Audit JSONL written by the daemon (scratch HOME).
 function auditEvents() {
   try {
     return fs.readFileSync(path.join(HOME, '.deepsteve', 'waiting-audit.jsonl'), 'utf8')
@@ -183,8 +212,6 @@ class Client {
 let clients = [];
 function track(c) { clients.push(c); return c; }
 
-// The stub replies to a command only when the newline lands — write text and \r
-// separately like a real submit (Ink-style), but a plain \n works for bash read.
 function submitLine(c, text) {
   c.sendRaw(text + '\n');
 }
@@ -222,157 +249,131 @@ after(async () => {
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 
-test('baseline: bare bell + 2s silence flips waiting:true; REST and /api/shells agree', async () => {
+test('baseline: the idle footer flips waiting:true; REST and /api/shells agree', async () => {
   const c = track(new Client());
   const s = await c.connect({ cwd: projDir, new: '1', agentType: 'claude' });
 
-  // Startup: "stub claude ready" then silence with NO bell ever -> the !bellEver
-  // fallback flips waiting:true ~2s in. Wait it out so later marks are clean.
-  await waitFor(() => c.statesSince(0).some(m => m.waiting === true),
-    'startup silence-fallback waiting:true', 8000);
-
+  // Startup prints only "stub claude ready" (no footer, no spinner) -> the
+  // detector stays 'unknown' and the flag stays false. Drive `idle` to paint the
+  // footer, which is a decisive at-prompt signal.
   const mark = c.mark();
-  submitLine(c, 'bell');
-  // Input clears the flag, then: echo + "turn done" + BEL -> 2s silence -> true.
+  submitLine(c, 'idle');
   await waitFor(() => c.statesSince(mark).some(m => m.waiting === true),
-    'waiting:true after bare bell', 8000);
+    'waiting:true after the idle footer', 8000);
 
   const rest = await restState(s.id);
   assert.strictEqual(rest.waitingForInput, true, 'REST /state agrees');
-  assert.ok(rest.lastBelTime > 0, '/state exposes lastBelTime');
   assert.ok(rest.lastInputTime > 0, '/state exposes lastInputTime');
 
   const shellsList = (await (await fetch(`${BASE}/api/shells`, { headers: authHeaders() })).json()).shells;
   const row = shellsList.find(sh => sh.id === s.id);
   assert.strictEqual(row.waitingForInput, true, '/api/shells carries waitingForInput');
-  assert.ok(row.lastBelTime > 0, '/api/shells carries lastBelTime');
 
-  // Audit recorded the bare bell as bare, not OSC.
-  const bels = auditEvents().filter(e => e.event === 'bels' && e.shell === s.id);
-  assert.ok(bels.some(e => e.bare >= 1), 'audit classified a bare BEL');
+  // Audit recorded a transition to waiting driven by the screen, not a bell.
+  const flips = auditEvents().filter(e =>
+    e.event === 'transition' && e.shell === s.id && e.to === true);
+  assert.ok(flips.length >= 1, 'audit recorded a transition to:true');
 
   submitLine(c, '/exit');
 });
 
-test('Lead 1 (stuck-false): one keystroke after the bell hides "waiting" forever', async () => {
+test('#558 Lead 1 fixed: one un-submitted keystroke does NOT clear waiting', async () => {
   const c = track(new Client());
   const s = await c.connect({ cwd: projDir, new: '1', agentType: 'claude' });
-  await waitFor(() => c.statesSince(0).some(m => m.waiting === true),
-    'startup waiting:true', 8000);
 
-  // Reach a genuine waiting state via a real bell.
+  // Reach a genuine waiting state.
   let mark = c.mark();
-  submitLine(c, 'bell');
+  submitLine(c, 'idle');
   await waitFor(() => c.statesSince(mark).some(m => m.waiting === true),
-    'waiting:true after bell', 8000);
+    'waiting:true at the idle footer', 8000);
 
-  // The user starts typing a reply and stops — one character, no submit.
-  // The stub sits at its read loop the entire time: factually waiting for input.
+  // The user starts typing a reply and stops — one character, no submit. The old
+  // classifier cleared waitingForInput on ANY keystroke and could never set it
+  // again; the screen-state detector must ignore the keystroke and stay waiting.
   mark = c.mark();
   c.sendRaw('g');
-  await waitFor(() => c.statesSince(mark).some(m => m.waiting === false),
-    'keystroke clears waiting', 5000);
 
-  // 10s window: the flag must never come back (echo re-armed the idle timer,
-  // which fired with bellSinceInput=false and gave up; no new BEL will ever fire).
+  // 10s window: the flag must never go false (no keystroke-disarm), and the sweep
+  // must keep it true (no stuck-false).
   await sleep(10000);
-  const trues = c.statesSince(mark).filter(m => m.waiting === true);
-  assert.strictEqual(trues.length, 0, `no waiting:true for 10s (got ${trues.length})`);
+  const falses = c.statesSince(mark).filter(m => m.waiting === false);
+  assert.strictEqual(falses.length, 0, `no waiting:false after the keystroke (got ${falses.length})`);
   const rest = await restState(s.id);
-  assert.strictEqual(rest.waitingForInput, false, 'REST /state still false');
+  assert.strictEqual(rest.waitingForInput, true, 'REST /state still true');
 
-  // The audit caught the classifier declining to flip: the stuck-false smoking gun.
-  const noFlips = auditEvents().filter(e =>
-    e.event === 'idle-no-flip' && e.shell === s.id && e.bellSinceInput === false);
-  assert.ok(noFlips.length >= 1, 'audit recorded idle-no-flip with bellSinceInput:false');
+  // The old smoking-gun event no longer fires — the trap is gone.
+  const noFlips = auditEvents().filter(e => e.event === 'idle-no-flip' && e.shell === s.id);
+  assert.strictEqual(noFlips.length, 0, 'no idle-no-flip events (BEL trap removed)');
 
   submitLine(c, '/exit');
 });
 
-test('Lead 2 (corrected): emitsBel=false sessions are never classified at all', async () => {
+test('non-claude (terminal) sessions are never classified', async () => {
   const c = track(new Client());
   const s = await c.connect({ cwd: projDir, new: '1', agentType: 'terminal' });
   assert.strictEqual(s.agentType, 'terminal');
 
-  // Let the shell settle at its prompt, then ring a genuine bare bell.
+  // Let the shell settle, then produce output at its prompt. A claude session
+  // would classify; a terminal (no screenMarkers) never does.
   await sleep(2000);
   const mark = c.mark();
   submitLine(c, "printf 'ding\\a'");
-
-  // Bare BEL + >6s of silence at the prompt: for a claude session this is the
-  // strongest possible "waiting" signal. For a terminal session: nothing.
   await sleep(6500);
+
   const states = c.statesSince(mark);
   assert.strictEqual(states.length, 0,
     `terminal session never gets a state message (got ${JSON.stringify(states)})`);
   const rest = await restState(s.id);
   assert.strictEqual(rest.waitingForInput, false, 'REST /state permanently false');
 
-  // The bell DID happen — the audit's non-claude channel saw it.
+  // The bell still shows on the audit's non-claude channel (unchanged).
   const bels = auditEvents().filter(e => e.event === 'bel-nonclaude' && e.shell === s.id);
   assert.ok(bels.some(e => e.bare >= 1), 'audit recorded the unclassified bare bell');
 });
 
-test('Lead 3 (premature-true): an OSC title terminator counts as a readiness bell', async () => {
+test('#500 fixed: a running spinner is never "waiting"; flips only after the turn ends', async () => {
   const c = track(new Client());
   const s = await c.connect({ cwd: projDir, new: '1', agentType: 'claude' });
-  await waitFor(() => c.statesSince(0).some(m => m.waiting === true),
-    'startup waiting:true', 8000);
 
-  // Make bellEver=true via a real bell first, so the flip below can ONLY come
-  // from the bellSinceInput branch (never the !bellEver fallback) — isolating
-  // the OSC terminator as the cause.
-  let mark = c.mark();
-  submitLine(c, 'bell');
+  // work: a spinner ("esc to interrupt") every ~0.5s for a good while (no footer
+  // yet) — the shape of a long, output-quiet tool call that #500 mislabeled as
+  // waiting. The spinner heartbeat keeps the detector on "working".
+  const mark = c.mark();
+  submitLine(c, 'work');
+
+  // Observe several seconds of spinner and assert the flag never went true — well
+  // past the spinner-staleness window, so this genuinely exercises #500.
+  await sleep(8000);
+  const duringWork = c.statesSince(mark).filter(m => m.waiting === true);
+  assert.strictEqual(duringWork.length, 0, `no waiting:true while the spinner runs (got ${duringWork.length})`);
+  const midRest = await restState(s.id);
+  assert.strictEqual(midRest.waitingForInput, false, 'busy mid-spinner per REST');
+
+  // Once the spinner stops and the footer prints, the flag flips true (poll
+  // directly rather than racing the stub's exact spin duration).
   await waitFor(() => c.statesSince(mark).some(m => m.waiting === true),
-    'waiting:true after real bell', 8000);
+    'waiting:true once the turn ends and the footer appears', 30000);
+  assert.ok(c.raw.includes('work finished'), 'the turn had finished before the flag flipped');
 
-  // Submit "osc": the stub emits a BEL-terminated title update, then works
-  // silently for 8s. The submit sets lastInputTime AFTER the last real bell, so
-  // without the OSC bell the classifier would (correctly) refuse to flip.
-  mark = c.mark();
-  const beforeRaw = c.raw.length;
-  submitLine(c, 'osc');
-  const flip = await waitFor(() => c.statesSince(mark).find(m => m.waiting === true),
-    'premature waiting:true during silent work', 8000);
-
-  // The flip happened while the agent was still mid-work: "work finished" had
-  // not yet been printed when the state message arrived.
-  const rawAtFlip = c.raw.slice(beforeRaw, flip._rawLen);
-  assert.ok(!rawAtFlip.includes('work finished'),
-    'flag flipped before the work output arrived');
-
-  // Audit attribution: the triggering chunk contained an OSC terminator and no
-  // bare bell, and the flip came via bellSinceInput (not the !bellEver fallback).
-  const events = auditEvents().filter(e => e.shell === s.id);
-  const oscBels = events.filter(e => e.event === 'bels' && e.osc >= 1 && e.bare === 0);
-  assert.ok(oscBels.length >= 1, 'audit classified the OSC terminator (osc>=1, bare=0)');
-  const flips = events.filter(e =>
-    e.event === 'transition' && e.to === true && e.via === 'idle-timer');
-  assert.strictEqual(flips[flips.length - 1].bellSinceInput, true,
-    'flip came from bellSinceInput — the OSC bell satisfied the gate');
-
-  await waitFor(() => c.raw.includes('work finished'), 'stub finishes its work', 12000);
   submitLine(c, '/exit');
 });
 
-test('Lead 4 (flicker): periodic output while waiting toggles the flag repeatedly', async () => {
+test('anti-flicker: periodic non-spinner output at an idle footer does not toggle', async () => {
   const c = track(new Client());
   const s = await c.connect({ cwd: projDir, new: '1', agentType: 'claude' });
-  await waitFor(() => c.statesSince(0).some(m => m.waiting === true),
-    'startup waiting:true', 8000);
 
-  // Bell once (bellSinceInput stays true throughout), then output every 3s:
-  // each burst clears the flag, each 2s gap re-flips it.
+  // tick: draw the idle footer, then print a plain line every 2s. The old 2s
+  // idle-timer toggled the flag on every burst; the screen-state detector sees
+  // the footer stay put and holds waiting steady.
   const mark = c.mark();
-  submitLine(c, 'tickbell');
-  await sleep(17000);
+  submitLine(c, 'tick');
+  await sleep(11000);
 
   const states = c.statesSince(mark);
   const trues = states.filter(m => m.waiting === true).length;
   const falses = states.filter(m => m.waiting === false).length;
-  assert.ok(trues >= 3, `>=3 waiting:true edges in 17s (got ${trues})`);
-  assert.ok(falses >= 3, `>=3 waiting:false edges in 17s (got ${falses})`);
+  assert.strictEqual(trues, 1, `exactly one waiting:true edge (got ${trues})`);
+  assert.strictEqual(falses, 0, `no spurious waiting:false edges (got ${falses})`);
 
   submitLine(c, '/exit');
 });

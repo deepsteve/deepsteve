@@ -25,13 +25,19 @@ const WebSocket = require('ws');
 const REPO_ROOT = path.resolve(__dirname, '..', '..');
 
 // Fake claude: shows the /rc-active footer (what sessionHasRemoteControl greps
-// for) and echoes every submitted line back as GOT:<line>.
+// for) and echoes every submitted line back as GOT:<line>. It also prints the
+// idle composer footer at startup and after each echo so the #568 screen-state
+// detector sees "at prompt" and deliverPromptWhenReady fires (real claude always
+// shows this footer when idle; the old BEL/silence path no longer exists).
 const CLAUDE_STUB = `#!/bin/bash
+footer() { echo "⏵⏵ auto mode on (shift+tab to cycle)"; }
 echo "stub claude started args: $*"
 echo "/rc active"
+footer
 while IFS= read -r line; do
   case "$line" in *"/exit"*) exit 0 ;; esac
   echo "GOT:$line"
+  footer
 done
 exit 0
 `;
