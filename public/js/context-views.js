@@ -137,6 +137,23 @@ function tabInContext(cwd, ctx) {
   });
 }
 
+// Pure (no module state / globals): split `recentDirs` into the active context's
+// repos followed by the remaining recents, for the new-tab flow (#573). The
+// context group is ALL of `contextDirs` in stored order (even repos with no
+// recent-dir entry), mapped to the same `{path}` shape recent-dir entries use.
+// `rest` is `recentDirs` with any entry whose path EXACTLY matches a context dir
+// removed (trailing-slash-insensitive) — a recent SUBDIR of a context repo is
+// kept, since it's a distinct quick-pick; this is ordering, not filtering. With
+// no context (`contextDirs` empty) `contextGroup` is [] and `rest` === the input
+// order, so callers collapse to the pre-#573 behavior.
+export function orderRecentDirsByContext(contextDirs, recentDirs) {
+  const norm = (p) => (p || '').replace(/\/+$/, '');
+  const ctxPaths = new Set((contextDirs || []).map(norm));
+  const contextGroup = (contextDirs || []).map((path) => ({ path }));
+  const rest = (recentDirs || []).filter((d) => !ctxPaths.has(norm(d.path)));
+  return { contextGroup, rest };
+}
+
 function getActiveContext() {
   return contexts.find(c => c.id === activeContextId) || null;
 }
@@ -1219,6 +1236,16 @@ export function setActiveContext(id) {
 
 export function getActiveContextId() {
   return activeContextId;
+}
+
+// Read-only snapshot of the active context for the new-tab flow (#573): its name
+// (for the menu header) and a copy of its dirs (stored order, for ordering), or
+// null when the view is "All" OR the feature is disabled — so callers behave
+// exactly as before the change in both cases.
+export function getActiveContextInfo() {
+  if (!enabled) return null;
+  const c = getActiveContext();
+  return c ? { name: c.name, dirs: [...c.dirs] } : null;
 }
 
 export function setEnabled(val) {
