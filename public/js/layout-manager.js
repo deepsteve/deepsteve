@@ -55,6 +55,22 @@ function saveLayout() {
 }
 
 /**
+ * Toggle the collapsed icon-rail class, and keep the "+" button's hint in step with it. In the rail
+ * the ▾ caret is hidden (styles.css), so long-press/right-click on + is the only path to the new-tab
+ * menu (#567); the tooltip advertises that — but only here, where it is true. One owner for the state
+ * and its hint, so they cannot drift (the reason icon-rail is a class and not three mirrored copies).
+ */
+function setIconRail(container, on) {
+  container.classList.toggle('icon-rail', on);
+  const newBtn = document.getElementById('new-btn');
+  if (newBtn) {
+    const label = on ? 'New tab — long-press or right-click for options' : 'New tab';
+    newBtn.title = label;
+    newBtn.setAttribute('aria-label', label);
+  }
+}
+
+/**
  * Apply the current layout to the DOM
  */
 function applyLayout() {
@@ -73,11 +89,11 @@ function applyLayout() {
     // until it is on.
     container.classList.add('vertical-layout');
     tabs.style.width = sidebarWidth + 'px';
-    container.classList.toggle('icon-rail', sidebarWidth <= railWidth());
+    setIconRail(container, sidebarWidth <= railWidth());
     toggleBtn.title = 'Switch to horizontal tabs';
   } else {
     container.classList.remove('vertical-layout');
-    container.classList.remove('icon-rail');
+    setIconRail(container, false);
     tabs.style.width = '';
     toggleBtn.title = 'Switch to vertical tabs';
   }
@@ -137,7 +153,7 @@ function setupResizer() {
 
     sidebarWidth = newWidth;
     tabs.style.width = sidebarWidth + 'px';
-    document.getElementById('app-container').classList.toggle('icon-rail', sidebarWidth <= rail);
+    setIconRail(document.getElementById('app-container'), sidebarWidth <= rail);
   });
 
   document.addEventListener('mouseup', () => {
