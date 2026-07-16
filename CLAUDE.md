@@ -27,6 +27,7 @@ The server owns the wording (`GET /api/restart-prompt`, derived from the live se
 tail -f ~/Library/Logs/deepsteve.log
 tail -f ~/Library/Logs/deepsteve.error.log
 ```
+Log lines are timestamped in local time (ISO-8601 with offset), and the daemon rotates both files itself at 10MB — the previous generation is kept next to them as `deepsteve.log.1` / `deepsteve.error.log.1` (`logging.js`, #557; works through the launchd-held O_APPEND fd, so no plist change is involved).
 
 ### Check if running:
 ```bash
