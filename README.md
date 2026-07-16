@@ -106,6 +106,41 @@ Customize the UI with CSS theme files. See the [Themes Guide](docs/themes.md) fo
 
 Extend deepsteve with visual mods — alternative views, panels, and MCP tools for your sessions. See the [Mods Guide](docs/mods.md) for details.
 
+## Custom Model Providers (OpenRouter)
+
+Claude Code sessions can run against any Anthropic-compatible API endpoint — OpenRouter, a corporate gateway, a local proxy — using a **custom Claude config profile**. No mod or proxy needed; each profile is just a separate `CLAUDE_CONFIG_DIR` with its own provider env, and tabs opt into it per session.
+
+Example: running [GLM 5.2](https://openrouter.ai/z-ai/glm-5.2) through OpenRouter.
+
+**1. Create a config directory** with a `settings.json` that points Claude Code at the provider:
+
+```bash
+mkdir ~/.claude-open-router
+cat > ~/.claude-open-router/settings.json <<'EOF'
+{
+  "env": {
+    "ANTHROPIC_BASE_URL": "https://openrouter.ai/api",
+    "ANTHROPIC_AUTH_TOKEN": "sk-or-v1-YOUR-OPENROUTER-KEY",
+    "ANTHROPIC_API_KEY": "sk-or-v1-YOUR-OPENROUTER-KEY",
+    "ANTHROPIC_MODEL": "z-ai/glm-5.2",
+    "ANTHROPIC_SMALL_FAST_MODEL": "anthropic/claude-haiku-4.5",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "anthropic/claude-opus-4.8",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "anthropic/claude-sonnet-5",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "anthropic/claude-haiku-4.5"
+  },
+  "model": "z-ai/glm-5.2"
+}
+EOF
+```
+
+`ANTHROPIC_MODEL`/`model` pick the main model by the provider's id; the `ANTHROPIC_DEFAULT_*`/`SMALL_FAST` entries map Claude Code's internal model tiers to provider ids so background/fast paths keep working.
+
+**2. Register it in deepsteve**: Settings → **Custom Claude configs** → add a row with a display name (e.g. `OpenRouter`) and the config dir (`~/.claude-open-router`).
+
+**3. Open a tab with it**: the profile appears alongside the agents in the new-tab menu. Sessions started with it spawn Claude Code with `CLAUDE_CONFIG_DIR` pointing at that directory — provider, model, auth, and conversation history all stay isolated per profile, and regular Claude tabs are unaffected.
+
+Note: plain base-URL routing covers normal use. OpenRouter-specific request-body fields (e.g. pinning a backend `provider`) aren't expressible this way — that was proposed as a transform-proxy mod in #499 and closed as not needed in practice.
+
 ## Managing the Daemon
 
 ```bash
