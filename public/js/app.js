@@ -7,6 +7,7 @@ import { WindowManager } from './window-manager.js';
 import { TabManager, getDefaultTabName, initTabArrows } from './tab-manager.js';
 import { createTerminal, setupTerminalIO, fitTerminal, observeTerminalResize, measureTerminalSize, updateTerminalTheme } from './terminal.js';
 import { createWebSocket } from './ws-client.js';
+import { createConnectionTracker } from './connection-status.js';
 import { showDirectoryPicker } from './dir-picker.js';
 import { showSessionRestoreModal } from './session-restore-modal.js';
 import { LayoutManager } from './layout-manager.js';
@@ -1471,6 +1472,10 @@ function createTmuxAttachSession(tmuxSessionName) {
     windowId: getWindowId(),
   });
 
+  // Same reconnect-state tracking as createSession (#556); no tab exists
+  // until the session message lands, so the handle starts without a tabId.
+  const connHandle = ConnectionStatus.track({ tabId: null });
+
   let pendingData = [];
   let assignedId = null;
 
@@ -1493,16 +1498,31 @@ function createTmuxAttachSession(tmuxSessionName) {
       assignedId = msg.id;
       ws.serverSupportsPing = !!msg.pingPong; // wake-probe capability (#563)
       ws.setSessionId(msg.id);
+      connHandle.setSessionId(msg.id);
       initTerminal(msg.id, ws, null, msg.name || tmuxSessionName, { pendingData });
       pendingData = [];
-      if (msg.engineType) {
-        const sess = sessions.get(msg.id);
-        if (sess) sess.engineType = msg.engineType;
+      const sess = sessions.get(msg.id);
+      if (sess) {
+        sess.connHandle = connHandle; // so killSession/sendToWindow can untrack
+        if (msg.engineType) sess.engineType = msg.engineType;
       }
     } else if (msg.type === 'error') {
       alert(msg.message || 'Failed to attach to tmux session');
+      connHandle.untrack();
       ws.close();
     }
+  };
+
+  ws.onreconnecting = () => {
+    connHandle.noteReconnecting();
+    const session = assignedId ? sessions.get(assignedId) : null;
+    if (session) session.container.classList.add('reconnecting');
+  };
+
+  ws.onreconnected = () => {
+    connHandle.noteReconnected();
+    const session = assignedId ? sessions.get(assignedId) : null;
+    if (session) session.container.classList.remove('reconnecting');
   };
 }
 
@@ -1522,13 +1542,21 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
   }
   const ws = createWebSocket({ id: existingId, cwd, isNew, worktree: opts.worktree, name: opts.name, planMode: opts.planMode, agentType, configProfile, cols, rows, windowId: getWindowId(), fork: opts.fork, rcParent: opts.rcParent });
 
+  // Reconnect state lives on this handle, not the sessions map (#556): the map
+  // entry only exists after the first {type:'session'} message, so a connect
+  // that never succeeds would otherwise be invisible. Restores carry the
+  // requested id so the dot lands on their placeholder tab; brand-new creates
+  // stay off the reconnect banner pre-session — that outage belongs to the
+  // pending-create banner below.
+  const connHandle = ConnectionStatus.track({ tabId: existingId, bannerEligible: !isNew });
+
   // Promise that resolves when the session is fully initialized (terminal created)
   let resolveReady;
   const ready = new Promise(r => { resolveReady = r; });
 
   // A brand-new session has no tab until the server answers — surface a
   // "server unreachable" banner if the first connect doesn't land quickly (#563).
-  const pendingCreate = isNew ? trackPendingCreate(ws, resolveReady) : null;
+  const pendingCreate = isNew ? trackPendingCreate(ws, resolveReady, connHandle) : null;
 
   // Buffer terminal data that arrives before the terminal is created
   let pendingData = [];
@@ -1569,12 +1597,14 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
         // would kill the retry loop and orphan the shell.
         if (!isNew && msg.existingClients > 0 && !opts.allowDuplicate) {
           console.log(`[createSession] Rejecting duplicate session ${msg.id} (${msg.existingClients} existing client(s))`);
+          connHandle.untrack();
           ws.close();
           resolveReady(null);
           return;
         }
         // Update reconnect URL to use the assigned session ID
         ws.setSessionId(msg.id);
+        connHandle.setSessionId(msg.id);
         ws.serverSupportsPing = !!msg.pingPong; // wake-probe capability (#563)
         hasScrollback = msg.scrollback || false;
         // If server assigned a different ID than requested, update TabSessions
@@ -1612,6 +1642,11 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
             }
           }
         }
+        // Expose the reconnect handle to close paths outside this closure
+        // (killSession, sendToWindow) — a teardown mid-outage must untrack it
+        // or the connection-lost banner would be pinned forever.
+        const connSess = sessions.get(msg.id);
+        if (connSess) connSess.connHandle = connHandle;
         // Track engineType and claudeSessionId for session verification (after initTerminal
         // so TabSessions.add has already created the entry)
         if (msg.engineType) {
@@ -1633,6 +1668,7 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
       } else if (msg.type === 'close-tab') {
         if (assignedId) killSession(assignedId);
       } else if (msg.type === 'gone') {
+        connHandle.untrack();
         SessionStore.removeSession(getWindowId(), msg.id);
         TabSessions.remove(msg.id);
         TabManager.removeTab(msg.id);
@@ -1737,19 +1773,17 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
   };
 
   ws.onreconnecting = () => {
-    // Find session by websocket and add reconnecting state
-    const entry = [...sessions.entries()].find(([, s]) => s.ws === ws);
-    if (entry) {
-      const [, session] = entry;
-      session.container.classList.add('reconnecting');
-    }
+    connHandle.noteReconnecting();
+    // Full-container overlay for an established session (active tab only —
+    // the tab dot and banner via connHandle cover everything else).
+    const session = assignedId ? sessions.get(assignedId) : null;
+    if (session) session.container.classList.add('reconnecting');
   };
 
   ws.onreconnected = () => {
-    // Remove reconnecting state and refresh terminal
-    const entry = [...sessions.entries()].find(([, s]) => s.ws === ws);
-    if (entry) {
-      const [, session] = entry;
+    connHandle.noteReconnected();
+    const session = assignedId ? sessions.get(assignedId) : null;
+    if (session) {
       session.container.classList.remove('reconnecting');
       session.scrollControl.suppressScroll();
       // ResizeObserver handles fit; just request redraw from server
@@ -1775,6 +1809,10 @@ const pendingCreates = new Set();
 let pendingBannerEl = null;
 
 function updatePendingBanner() {
+  // The reconnect banner (#556) sits in the same spot and says less — while a
+  // pending create is on screen, it yields. Every add/settle/cancel funnels
+  // through here, so this is the single suppression choke point.
+  ConnectionStatus.setSuppressed(pendingCreates.size > 0);
   if (pendingCreates.size === 0) {
     if (pendingBannerEl) { pendingBannerEl.remove(); pendingBannerEl = null; }
     return;
@@ -1803,7 +1841,7 @@ function updatePendingBanner() {
 
 // Arms a delayed banner for a brand-new session's first connect. Returns a
 // handle: settle() when the session arrives, cancel() aborts the attempt.
-function trackPendingCreate(ws, resolveReady) {
+function trackPendingCreate(ws, resolveReady, connHandle) {
   const entry = {
     timer: null,
     settle() {
@@ -1813,6 +1851,7 @@ function trackPendingCreate(ws, resolveReady) {
     },
     cancel() {
       entry.settle();
+      connHandle.untrack(); // ws.close() stops retries without ever firing onreconnected
       ws.close(); // wrapper close also stops the retry loop
       resolveReady(null);
     },
@@ -1825,6 +1864,45 @@ function trackPendingCreate(ws, resolveReady) {
   }, 1500);
   return entry;
 }
+
+/**
+ * Global connection-lost banner (#556). Rendered by ConnectionStatus once any
+ * session's socket has been down past the grace period — including a socket
+ * whose first connect never succeeded, which has no sessions entry, no
+ * container, and (for restores) only a placeholder tab. Same recipe as the
+ * pending-create banner above; no Cancel because retry is automatic.
+ */
+let reconnectBannerEl = null;
+
+function renderReconnectBanner(count) {
+  if (count === 0) {
+    if (reconnectBannerEl) { reconnectBannerEl.remove(); reconnectBannerEl = null; }
+    return;
+  }
+  if (!reconnectBannerEl) {
+    reconnectBannerEl = document.createElement('div');
+    reconnectBannerEl.className = 'reconnect-banner';
+    const spinner = document.createElement('span');
+    spinner.className = 'loading-banner-spinner';
+    const label = document.createElement('span');
+    label.className = 'reconnect-banner-label';
+    reconnectBannerEl.append(spinner, label);
+    document.body.appendChild(reconnectBannerEl);
+  }
+  reconnectBannerEl.querySelector('.reconnect-banner-label').textContent =
+    count > 1
+      ? `Connection lost — reconnecting ${count} sessions…`
+      : 'Connection lost — reconnecting…';
+}
+
+// Per-connection reconnect state (#556): drives the tab-strip dot and the
+// banner above. Handles are created in createSession/createTmuxAttachSession
+// at ws-creation time — before any sessions-map entry exists, which is exactly
+// when the old container-class overlay could not fire.
+const ConnectionStatus = createConnectionTracker({
+  setTabIndicator: (tabId, on) => TabManager.updateReconnecting(tabId, on),
+  renderBanner: renderReconnectBanner,
+});
 
 /**
  * Show a loading banner at the top of a terminal container.
@@ -2484,6 +2562,10 @@ function killSession(id) {
     try { session.ws.sendJSON({ type: 'close-session' }); } catch {}
 
     if (session.resizeObserver) session.resizeObserver.disconnect();
+    // Untrack reconnect state before closing (#556): wrapper.close() stops the
+    // retry loop without firing onreconnected, so a tab closed mid-outage
+    // would otherwise pin the connection-lost banner forever.
+    session.connHandle?.untrack();
     session.ws.close();
     session.term.dispose();
     session.container.remove();
@@ -2541,6 +2623,7 @@ async function sendToWindow(id, targetWindowId) {
   // Ack received — clean up locally (no server DELETE — shell stays alive for 30s grace period;
   // display-tab HTML stays on disk so the target window can fetch it)
   if (session.resizeObserver) session.resizeObserver.disconnect();
+  session.connHandle?.untrack(); // see killSession (#556)
   if (session.ws) session.ws.close();
   if (session.term) session.term.dispose();
   session.container.remove();
