@@ -149,7 +149,11 @@ globalThis.sessionStorage = {
 };
 globalThis.document = { addEventListener: () => {}, hidden: false };
 globalThis.addEventListener = () => {};
-globalThis.fetch = async () => ({ status: 200 }); // auth-heal probe: always "auth fine"
+// Both probes must be satisfied: server-probe's serverUp() reads res.ok (the
+// /healthz gate), auth-heal reads res.status (401/429 → reload). A stub missing
+// `ok` pins waitForServer's gate closed, so the reconnect never fires and this
+// file hangs on the open server handle after the assertion throws.
+globalThis.fetch = async () => ({ ok: true, status: 200 });
 
 test('first connect that never lands a session still raises dot + banner (#556)', async () => {
   const { createWebSocket } = await import('../../public/js/ws-client.js');
