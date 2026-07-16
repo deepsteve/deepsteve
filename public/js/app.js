@@ -3215,6 +3215,82 @@ function showNewTabMenu(e) {
 }
 
 /**
+ * Wire the "+" (#new-btn): plain click opens the default tab, and — in the collapsed icon rail,
+ * where CSS hides the ▾ caret (#new-btn-dropdown) — long-press and right-click open the same
+ * new-tab menu the ▾ opens elsewhere (#567). Gated to the rail: in horizontal / expanded-vertical
+ * the visible ▾ is the affordance, so + keeps its plain click and the native context menu there.
+ *
+ * Click, contextmenu, and long-press share one owner so they can share the `longPressFired` flag —
+ * cleaner than suppressing the post-long-press click across separate listeners by phase ordering.
+ */
+function wireNewTabGestures() {
+  const newBtn = document.getElementById('new-btn');
+  if (!newBtn) return;
+  const inIconRail = () => document.getElementById('app-container')?.classList.contains('icon-rail');
+
+  let longPressFired = false;
+
+  // Plain click — open the default tab, unless a long-press just opened the menu.
+  newBtn.addEventListener('click', () => {
+    if (longPressFired) { longPressFired = false; return; }
+    quickNewSession();
+  });
+
+  // Right-click — rail only; elsewhere let the native menu show and the ▾ do the job.
+  newBtn.addEventListener('contextmenu', (e) => {
+    if (!inIconRail()) return;
+    e.preventDefault();
+    showNewTabMenu(e); // anchors via #new-btn-group, flyout-right (showNewTabMenu's vertical branch)
+  });
+
+  // Long-press (mouse + touch) — rail only. Mirrors tab-manager's pointer skeleton with a hold timer.
+  const LONG_PRESS_MS = 500;
+  const MOVE_SLOP = 8;
+  let pressTimer = null;
+  const onDown = (e) => {
+    if (!inIconRail()) return;
+    if (e.type === 'mousedown' && e.button !== 0) return; // left only; right-click handled above
+    const sx = e.touches ? e.touches[0].clientX : e.clientX;
+    const sy = e.touches ? e.touches[0].clientY : e.clientY;
+    longPressFired = false; // reset every press so a click-less touch long-press can't swallow a later click
+    const onMove = (me) => {
+      const cx = me.touches ? me.touches[0].clientX : me.clientX;
+      const cy = me.touches ? me.touches[0].clientY : me.clientY;
+      if (Math.abs(cx - sx) > MOVE_SLOP || Math.abs(cy - sy) > MOVE_SLOP) cancel();
+    };
+    const cancel = () => {
+      clearTimeout(pressTimer);
+      pressTimer = null;
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('touchmove', onMove);
+      document.removeEventListener('mouseup', cancel);
+      document.removeEventListener('touchend', cancel);
+    };
+    pressTimer = setTimeout(() => {
+      longPressFired = true; // suppresses the click that follows the release
+      showNewTabMenu(e);
+      cancel();
+      // Lifting a finger after a touch long-press synthesizes mousedown→mouseup→click on the
+      // button AFTER the menu is already open. showNewTabMenu closes on an outside mousedown, so
+      // swallow that one synthetic mousedown if it lands on the button — otherwise touch long-press
+      // opens then instantly dismisses. Mouse press-hold ends with mouseup only (no mousedown), so
+      // this one-shot capture listener simply falls through and removes itself there.
+      const swallowSynthetic = (me) => {
+        if (newBtn.contains(me.target)) me.stopPropagation();
+        document.removeEventListener('mousedown', swallowSynthetic, true);
+      };
+      document.addEventListener('mousedown', swallowSynthetic, true);
+    }, LONG_PRESS_MS);
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('touchmove', onMove, { passive: true });
+    document.addEventListener('mouseup', cancel);
+    document.addEventListener('touchend', cancel);
+  };
+  newBtn.addEventListener('mousedown', onDown);
+  newBtn.addEventListener('touchstart', onDown, { passive: true });
+}
+
+/**
  * Prompt for worktree name and create session
  */
 async function promptWorktreeSession() {
@@ -3856,8 +3932,9 @@ async function init() {
   // Fire-and-forget — don't block session restore on mod loading
   ModManager.loadAvailableMods();
 
-  // Split button: + creates tab, ▾ opens dropdown menu
-  document.getElementById('new-btn').addEventListener('click', () => quickNewSession());
+  // Split button: + creates tab (plus rail-only long-press/right-click for the menu, #567),
+  // ▾ opens the dropdown menu.
+  wireNewTabGestures();
   document.getElementById('new-btn-dropdown').addEventListener('click', (e) => showNewTabMenu(e));
   document.getElementById('issue-btn').addEventListener('click', () => showIssuePicker());
   // Prefetch issues on hover so results are cached when the dialog opens
