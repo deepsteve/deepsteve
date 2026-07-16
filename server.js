@@ -9,6 +9,8 @@ const os = require('os');
 const net = require('net');
 const { initMCP } = require('./mcp-server');
 const { createSecurity, UI_HOST } = require('./security');
+const { createSleepWatch } = require('./sleep-watch');
+const { createPowerAssertion } = require('./power-assertion');
 const NodePtyEngine = require('./engines/node-pty');
 const TmuxEngine = require('./engines/tmux');
 
@@ -369,6 +371,9 @@ const SETTINGS_SCHEMA = [
   { name: 'autoUpdateCheckIntervalHours', type: 'number', default: 6, clamp: [1, 168] },
   { name: 'autoUpdateApply',            type: 'boolean', default: true },
   { name: 'sessionLogEnabled',          type: 'boolean', default: false },
+  // Hold a caffeinate -i power assertion while any session is open (#563).
+  // Server-side behavior only, so broadcast:false; macOS only (no-op elsewhere).
+  { name: 'preventSleepWhileActive',    type: 'boolean', default: true, broadcast: false },
   { name: 'displayTabAudioIndicator',   type: 'boolean', default: true, broadcast: false },
   { name: 'scheduledTasksEnabled',      type: 'boolean', default: true },
   // Custom Claude Code config profiles (#537): each row = { id, name, configDir }.
@@ -1862,6 +1867,7 @@ setInterval(() => saveState(), 30000);
 async function shutdown(signal) {
   log(`Received ${signal}, saving state...`);
   saveState();
+  powerAssertion.dispose(); // release the sleep assertion (caffeinate) up front
 
   // If .reload flag exists, tell all browsers to refresh after restart
   const shouldReload = fs.existsSync(RELOAD_FLAG);
@@ -2367,6 +2373,9 @@ app.post('/api/settings', (req, res) => {
   // Side effect: restart the update-check interval if its fields changed.
   const needsTimerRestart = Object.keys(req.body).some(k => AUTO_UPDATE_TIMER_FIELDS.has(k));
   if (needsTimerRestart) restartUpdateTimer();
+  // Side effect: apply a power-assertion toggle immediately instead of waiting
+  // for the next 5s reconcile tick (#563).
+  if ('preventSleepWhileActive' in req.body) powerAssertion.sync();
   res.json(settings);
 });
 
@@ -3644,6 +3653,51 @@ const server = app.listen(PORT, BIND, () => {
 });
 const shells = new Map();
 
+// --- Sleep/wake awareness (#563) ---
+// System sleep freezes the daemon and suspends the browser at different times
+// (DarkWake runs the daemon for ~45s while pages stay frozen), so client silence
+// right after a wake is the sleep's fault, not evidence the client is gone. The
+// detach reaper and the live-reload heartbeat consult sleepWatch before treating
+// silence as absence. Env overrides exist so integration tests can run fast.
+const DETACH_GRACE_MS = parseInt(process.env.DEEPSTEVE_DETACH_GRACE_MS, 10) || 30000;
+const DETACH_HOLDOFF_MS = parseInt(process.env.DEEPSTEVE_DETACH_HOLDOFF_MS, 10) || 120000;
+const sleepWatch = createSleepWatch({ log });
+sleepWatch.start();
+
+// While any session is open, hold a macOS power assertion so the machine doesn't
+// idle-sleep out from under it (#563). caffeinate -i does not block clamshell
+// sleep — that's deliberate. -w makes caffeinate exit on its own if we die.
+const powerAssertion = createPowerAssertion({
+  isWanted: () => !!settings.preventSleepWhileActive && shells.size > 0,
+  log,
+});
+// A 5s reconcile tick instead of hooks at every shells.set/delete site: there are
+// six spawn sites plus mod context helpers, and ≤5s of acquire/release latency is
+// irrelevant on sleep timescales.
+setInterval(() => powerAssertion.sync(), 5000).unref();
+
+// Grace timer for a session whose last client socket closed. Fires only after
+// DETACH_GRACE_MS of daemon-awake, client-absent time: if the daemon recently woke
+// from sleep (sleepWatch), or this very timer fired far later than it was armed
+// for (the daemon was frozen before sleepWatch's own overdue tick could run —
+// overdue timers run in due-time order, so the reaper can beat the detector),
+// re-arm instead of reaping so a post-wake reconnect always wins the race.
+function armDetachReap(entry, reap, delayMs = DETACH_GRACE_MS) {
+  const armedAt = Date.now();
+  entry.killTimer = setTimeout(() => {
+    if (entry.clients.size > 0) return;
+    const lateMs = Date.now() - armedAt - delayMs;
+    let deferMs = sleepWatch.holdoffRemaining(DETACH_HOLDOFF_MS);
+    if (lateMs > 10000) deferMs = Math.max(deferMs, DETACH_HOLDOFF_MS);
+    if (deferMs > 0) {
+      log(`[sleep-watch] detach reap deferred ${Math.ceil(deferMs / 1000)}s (recent wake)`);
+      armDetachReap(entry, reap, Math.max(deferMs, 1000));
+      return;
+    }
+    reap();
+  }, delayMs);
+}
+
 // --- tmux session reattach on startup ---
 // If tmux is available, check for surviving tmux sessions and reattach them
 // regardless of the default engine setting.
@@ -3770,8 +3824,19 @@ function handleWsConnection(ws, req) {
     ws.windowId = url.searchParams.get('windowId') || null;
     reloadClients.add(ws);
     ws.isAlive = true;
+    let lastBeat = Date.now();
     const pingInterval = setInterval(() => {
+      const beatGap = Date.now() - lastBeat;
+      lastBeat = Date.now();
       if (!ws.isAlive) {
+        // A missing pong right after a sleep is the sleep's fault, not the
+        // client's: the browser was frozen when the ping went out (#563). Give
+        // it one fresh round-trip instead of terminating. beatGap catches the
+        // case where this overdue interval runs before sleepWatch's own tick.
+        if (beatGap > 40000 || sleepWatch.holdoffRemaining(45000) > 0) {
+          if (ws.readyState === 1) ws.send(JSON.stringify({ type: 'ping' }));
+          return;
+        }
         log(`[WS] Reload client dead (no pong), terminating (windowId=${ws.windowId})`);
         ws.terminate();
         return;
@@ -3894,7 +3959,7 @@ function handleWsConnection(ws, req) {
     log(`[WS] tmux-attach: id=${id}, session=${tmuxSession}`);
 
     entry.clients.add(ws);
-    ws.send(JSON.stringify({ type: 'session', id, restored: false, cwd: null, name: tabName, agentType: 'tmux-attach', engineType: 'node-pty', scrollback: false, existingClients: 0 }));
+    ws.send(JSON.stringify({ type: 'session', id, restored: false, cwd: null, name: tabName, agentType: 'tmux-attach', engineType: 'node-pty', scrollback: false, existingClients: 0, pingPong: true }));
 
     ws.on('message', (msg) => {
       const str = msg.toString();
@@ -3906,6 +3971,9 @@ function handleWsConnection(ws, req) {
           return;
         }
         if (parsed.type === 'redraw') { attachPty.write('\x0c'); return; }
+        // Liveness probe (#563) — must return before the attachPty.write below,
+        // or the raw JSON would be typed into the tmux session.
+        if (parsed.type === 'ping') { try { ws.send(JSON.stringify({ type: 'pong' })); } catch {} return; }
         if (parsed.type === 'rename') { entry.name = parsed.name || null; return; }
         if (parsed.type === 'close-session') {
           // Detach only — don't kill the tmux session
@@ -3928,14 +3996,12 @@ function handleWsConnection(ws, req) {
       if (!shells.has(id)) return;
       entry.clients.delete(ws);
       if (entry.clients.size === 0) {
-        // Detach after grace period
-        entry.killTimer = setTimeout(() => {
-          if (entry.clients.size === 0) {
-            log(`[WS] tmux-attach: detaching from ${tmuxSession} (grace period expired)`);
-            try { attachPty.kill(); } catch {}
-            shells.delete(id);
-          }
-        }, 30000);
+        // Detach after grace period (sleep-aware — #563)
+        armDetachReap(entry, () => {
+          log(`[WS] tmux-attach: detaching from ${tmuxSession} (grace period expired)`);
+          try { attachPty.kill(); } catch {}
+          shells.delete(id);
+        });
       }
     });
     return;
@@ -4158,7 +4224,10 @@ function handleWsConnection(ws, req) {
   if (windowId) entry.windowId = windowId;
   const hasScrollback = entry.scrollback && entry.scrollback.length > 0;
   log(`[WS] Sending session response: id=${id}, restored=${entry.restored || false}, scrollback=${hasScrollback ? entry.scrollbackSize + 'B' : 'none'}, existingClients=${existingClients}`);
-  ws.send(JSON.stringify({ type: 'session', id, restored: entry.restored || false, cwd: entry.cwd, name: entry.name || null, agentType: entry.agentType || 'claude', configDir: entry.configDir || null, engineType: entry.engineType || 'node-pty', claudeSessionId: entry.claudeSessionId || null, scrollback: hasScrollback, existingClients, waitingForInput: entry.waitingForInput || false }));
+  // pingPong: capability flag (#563) — clients only send {type:'ping'} probes when
+  // the server advertises it, because an older server would type the raw JSON into
+  // the PTY (unknown control messages fall through to the input write).
+  ws.send(JSON.stringify({ type: 'session', id, restored: entry.restored || false, cwd: entry.cwd, name: entry.name || null, agentType: entry.agentType || 'claude', configDir: entry.configDir || null, engineType: entry.engineType || 'node-pty', claudeSessionId: entry.claudeSessionId || null, scrollback: hasScrollback, existingClients, waitingForInput: entry.waitingForInput || false, pingPong: true }));
 
   // Send buffered scrollback so the client can render the terminal immediately
   if (hasScrollback) {
@@ -4177,6 +4246,10 @@ function handleWsConnection(ws, req) {
       if (parsed && typeof parsed === 'object') {
       if (parsed.type === 'resize') { getEngine(id).resize(id, parsed.cols, parsed.rows); return; }
       if (parsed.type === 'redraw') { return; } // no-op: Ink echoes \x0c as ^L garbage; scrollback replay handles reconnect
+      // Liveness probe from a just-woken client (#563). Must return before the
+      // PTY write below, and must not touch lastActivity/waitingForInput — a
+      // probe is not user input.
+      if (parsed.type === 'ping') { try { ws.send(JSON.stringify({ type: 'pong' })); } catch {} return; }
       if (parsed.type === 'initialPrompt') {
         // Client-initiated issue-start (magic wand) marks the prompt as `loading` so
         // we block input and emit prompt-submitted to dismiss the banner, matching the
@@ -4230,20 +4303,18 @@ function handleWsConnection(ws, req) {
     if (!shells.has(id)) return; // already killed by close-session
     entry.clients.delete(ws);
     if (entry.clients.size === 0) {
-      // Grace period to allow reconnect on refresh
-      entry.killTimer = setTimeout(() => {
-        if (entry.clients.size === 0) {
-          // Preserve session info so it can be restored on next connect. Must go
-          // through serializeShellEntry: hand-rolling this dropped windowId (so a
-          // closed browser window lost its tab grouping — #551) and engineType (so
-          // a disconnected tmux session came back as node-pty). No `closed` flag —
-          // a disconnect is not a user close, and stays a restore candidate.
-          savedState[id] = serializeShellEntry(entry);
-          killShell(entry, id, 'disconnected');
-          shells.delete(id);
-          saveState();
-        }
-      }, 30000);
+      // Grace period to allow reconnect on refresh (sleep-aware — #563)
+      armDetachReap(entry, () => {
+        // Preserve session info so it can be restored on next connect. Must go
+        // through serializeShellEntry: hand-rolling this dropped windowId (so a
+        // closed browser window lost its tab grouping — #551) and engineType (so
+        // a disconnected tmux session came back as node-pty). No `closed` flag —
+        // a disconnect is not a user close, and stays a restore candidate.
+        savedState[id] = serializeShellEntry(entry);
+        killShell(entry, id, 'disconnected');
+        shells.delete(id);
+        saveState();
+      });
     }
   });
 }

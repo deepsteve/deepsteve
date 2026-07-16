@@ -15,6 +15,7 @@
 
 import { nsChannel } from './storage-namespace.js';
 import { maybeHealAuth, forcePageReload, noteAuthOk } from './auth-heal.js';
+import { onWake } from './wake-watch.js';
 
 const State = {
   CONNECTED: 'connected',
@@ -31,6 +32,11 @@ export function initLiveReload({ onMessage, onShowRestartConfirm, onShowReloadOv
   let lastPingTime = 0;
 
   const restartChannel = new BroadcastChannel(nsChannel('deepsteve-restart'));
+
+  // After a system sleep the last server ping may be minutes stale through no
+  // fault of the server's (#563). Reset the watchdog so the just-woken server
+  // gets one fresh ping period before we force-close the socket.
+  onWake(() => { lastPingTime = Date.now(); });
 
   function setState(newState) {
     console.log(`[live-reload] ${state} → ${newState}`);

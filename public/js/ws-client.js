@@ -3,6 +3,22 @@
  */
 
 import { maybeHealAuth, noteAuthOk } from './auth-heal.js';
+import { onWake } from './wake-watch.js';
+
+// After a system sleep a socket can be dead-but-OPEN: the browser hasn't fired
+// onclose yet, so the reconnect loop never starts (#563). On a wake signal we
+// probe every open socket with {type:'ping'} and force-close it if nothing
+// comes back, and kick sockets that are already reconnecting immediately
+// instead of waiting out the retry interval.
+const PROBE_TIMEOUT_MS = 5000;
+const liveWrappers = new Set();
+
+onWake(() => {
+  if (window.__deepsteveReloadPending) return; // same contract as the retry loop
+  for (const w of liveWrappers) {
+    try { w._onWake(); } catch {}
+  }
+});
 
 export function createWebSocket(options = {}) {
   const params = new URLSearchParams();
@@ -28,9 +44,38 @@ export function createWebSocket(options = {}) {
   let ws;
   let reconnectTimer = null;
   let isReconnecting = false;
+  let probeTimer = null;
+  let probeStartedAt = 0;
+  let probeFailed = false;
+
+  function clearProbe() {
+    if (probeTimer) { clearTimeout(probeTimer); probeTimer = null; }
+    probeStartedAt = 0;
+  }
+
+  // Wall-clock-checked probe timeout: browsers batch throttled-tab timers, so
+  // the 5s timeout callback can run in the same batch as the ping send — only
+  // give up when PROBE_TIMEOUT_MS of real time has actually passed.
+  function armProbeCheck() {
+    probeTimer = setTimeout(() => {
+      probeTimer = null;
+      if (!probeStartedAt) return; // already answered
+      const elapsed = Date.now() - probeStartedAt;
+      if (elapsed < PROBE_TIMEOUT_MS) { armProbeCheck(); return; }
+      // No traffic since the probe: the socket died during sleep. Force-close.
+      // The close may complete "clean", so remember why we closed it.
+      probeStartedAt = 0;
+      probeFailed = true;
+      try { ws.close(); } catch {}
+    }, Math.max(500, PROBE_TIMEOUT_MS - (Date.now() - probeStartedAt)));
+  }
 
   const wrapper = {
     get readyState() { return ws.readyState; },
+
+    // Set by the caller when the server's session message advertises pingPong
+    // support — never send probes to a server that would type them into the PTY.
+    serverSupportsPing: false,
 
     send(data) {
       if (ws.readyState === WebSocket.OPEN) {
@@ -45,7 +90,9 @@ export function createWebSocket(options = {}) {
     },
 
     close() {
+      liveWrappers.delete(wrapper);
       clearInterval(reconnectTimer);
+      clearProbe();
       ws.close();
     },
 
@@ -65,6 +112,20 @@ export function createWebSocket(options = {}) {
       url = wsProto + location.host + '?' + p;
     },
 
+    // Wake handling (#563): kick a pending reconnect immediately, or verify an
+    // OPEN socket really survived the sleep.
+    _onWake() {
+      if (isReconnecting) {
+        retryNow();
+        return;
+      }
+      if (ws.readyState === WebSocket.OPEN && wrapper.serverSupportsPing && !probeStartedAt) {
+        probeStartedAt = Date.now();
+        try { ws.send(JSON.stringify({ type: 'ping' })); } catch {}
+        armProbeCheck();
+      }
+    },
+
     // Event handlers - set by caller
     onmessage: null,
     onerror: null,
@@ -73,6 +134,16 @@ export function createWebSocket(options = {}) {
     onreconnecting: null,  // Called when reconnect starts
     onreconnected: null,   // Called when reconnect succeeds
   };
+
+  function retryNow() {
+    if (window.__deepsteveReloadPending) return; // stop churn while a heal-reload navigates
+    // The browser can't see WHY an upgrade failed (always close code 1006), so probe over
+    // HTTP: no-op unless the server is up but rejecting our auth, then one guarded reload.
+    maybeHealAuth();
+    if (ws.readyState === WebSocket.CLOSED) {
+      connect();
+    }
+  }
 
   function connect() {
     ws = new WebSocket(url);
@@ -89,6 +160,8 @@ export function createWebSocket(options = {}) {
     };
 
     ws.onmessage = (e) => {
+      // Any traffic proves the socket is alive — no need to parse for pong.
+      if (probeStartedAt) clearProbe();
       if (wrapper.onmessage) wrapper.onmessage(e);
     };
 
@@ -97,27 +170,23 @@ export function createWebSocket(options = {}) {
     };
 
     ws.onclose = (e) => {
-      // Start reconnecting if not already
-      if (!isReconnecting && !e.wasClean && !window.__deepsteveReloadPending) {
+      clearProbe();
+      // Start reconnecting if not already. A dead socket we force-closed after
+      // a failed probe can report wasClean=true, so probeFailed also counts.
+      if (!isReconnecting && (probeFailed || !e.wasClean) && !window.__deepsteveReloadPending) {
         isReconnecting = true;
         if (wrapper.onreconnecting) wrapper.onreconnecting();
 
-        reconnectTimer = setInterval(() => {
-          if (window.__deepsteveReloadPending) return; // stop churn while a heal-reload navigates
-          // The browser can't see WHY an upgrade failed (always close code 1006), so probe over
-          // HTTP: no-op unless the server is up but rejecting our auth, then one guarded reload.
-          maybeHealAuth();
-          if (ws.readyState === WebSocket.CLOSED) {
-            connect();
-          }
-        }, 1000);
+        reconnectTimer = setInterval(retryNow, 1000);
       }
+      probeFailed = false;
 
       if (wrapper.onclose) wrapper.onclose(e);
     };
   }
 
   connect();
+  liveWrappers.add(wrapper);
 
   return wrapper;
 }
