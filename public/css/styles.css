@@ -532,6 +532,12 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
 .issue-loading::before { content: ''; width: 24px; height: 24px; border: 2.5px solid var(--ds-border); border-top-color: var(--ds-accent-green); border-radius: 50%; animation: spin 0.7s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 .issue-loading-text { color: var(--ds-text-secondary); font-size: 13px; }
+/* Infinite-scroll sentinel: a 0-height IntersectionObserver target when idle; the
+   ".is-loading" class reveals a spinner + label row while the next page is fetching. */
+.issue-sentinel { height: 0; }
+.issue-sentinel.is-loading { height: auto; display: flex; align-items: center; justify-content: center; gap: 8px; padding: 12px 16px; color: var(--ds-text-secondary); font-size: 13px; border-top: 1px solid var(--ds-bg-tertiary); }
+.issue-sentinel.is-loading::before { content: ''; width: 16px; height: 16px; border: 2px solid var(--ds-border); border-top-color: var(--ds-accent-green); border-radius: 50%; animation: spin 0.7s linear infinite; flex-shrink: 0; }
+.issue-sentinel.is-loading::after { content: 'Loading more…'; }
 .issue-error { padding: 24px 16px; text-align: center; color: var(--ds-text-secondary); font-size: 13px; }
 .issue-error-message { color: #e06c75; margin-bottom: 12px; }
 .issue-retry { padding: 6px 16px; background: var(--ds-bg-tertiary); border: 1px solid var(--ds-border); color: var(--ds-text-primary); border-radius: 4px; cursor: pointer; font-size: 12px; }
