@@ -290,20 +290,38 @@ function renderRail() {
 function makeRow(id, name, active, ctx) {
   const row = document.createElement('div');
   // has-icon governs whether the icon chip shows in the EXPANDED rail (only for a
-  // chosen icon — see issue #569); the collapsed icon rail always shows a chip.
-  row.className = 'context-row' + (active ? ' active' : '') + (ctx?.icon ? ' has-icon' : '');
+  // chosen icon — see #569; an uploaded image, #579, counts too); the collapsed icon
+  // rail always shows a chip.
+  row.className = 'context-row' + (active ? ' active' : '') + ((ctx?.icon || ctx?.iconImage) ? ' has-icon' : '');
 
-  // Icon square (#569). A chosen ctx.icon wins; otherwise derive a glyph the same
-  // way tabs do (tabIcon), so every square is legible in the collapsed rail. The
-  // synthetic "All" row (ctx null) can't store an icon, so it always gets ≡.
+  // Icon square (#569/#579). An uploaded image (ctx.iconImage) wins, then a chosen emoji
+  // (ctx.icon), else a glyph derived the same way tabs do (tabIcon) so every square is
+  // legible in the collapsed rail. The synthetic "All" row (ctx null) always gets ≡.
   const iconEl = document.createElement('span');
   iconEl.className = 'context-row-icon';
   iconEl.setAttribute('aria-hidden', 'true');
-  const resolved = ctx?.icon
-    ? { glyph: ctx.icon, isEmoji: isEmojiGlyph(ctx.icon) }
-    : (ctx ? tabIcon(name) : { glyph: '≡', isEmoji: false });
-  iconEl.textContent = resolved.glyph;
-  iconEl.classList.toggle('is-emoji', resolved.isEmoji);
+  if (ctx?.iconImage) {
+    // Render the image via <img> only (never inline the SVG markup), so a crafted SVG
+    // can't script in our origin. On load failure, fall back to the derived glyph.
+    iconEl.classList.add('is-image');
+    const img = document.createElement('img');
+    img.src = '/api/contexts/' + encodeURIComponent(ctx.id) + '/icon';
+    img.alt = '';
+    img.decoding = 'async';
+    img.onerror = () => {
+      iconEl.classList.remove('is-image');
+      const fb = tabIcon(name);
+      iconEl.textContent = fb.glyph;
+      iconEl.classList.toggle('is-emoji', fb.isEmoji);
+    };
+    iconEl.appendChild(img);
+  } else {
+    const resolved = ctx?.icon
+      ? { glyph: ctx.icon, isEmoji: isEmojiGlyph(ctx.icon) }
+      : (ctx ? tabIcon(name) : { glyph: '≡', isEmoji: false });
+    iconEl.textContent = resolved.glyph;
+    iconEl.classList.toggle('is-emoji', resolved.isEmoji);
+  }
   row.appendChild(iconEl);
 
   const label = document.createElement('span');
@@ -391,10 +409,13 @@ function showRowMenu(x, y, ctx) {
 
   if (ctx) {
     addRowMenuItem(menu, 'Edit', () => openContextEditor(ctx));
-    // Set icon/emoji (#569). Right-click (not double-click-the-square) so it works
-    // at any rail width and reuses this menu's dismissal machinery.
-    addRowMenuItem(menu, ctx.icon ? 'Change icon…' : 'Set icon…', () => showIconPicker(x, y, ctx));
-    if (ctx.icon) addRowMenuItem(menu, 'Clear icon', () => setContextIcon(ctx, ''));
+    // Set icon: emoji or an uploaded PNG/SVG image (#569/#579). Right-click (not
+    // double-click-the-square) so it works at any rail width and reuses this menu's
+    // dismissal machinery. The picker offers both an emoji grid and a "Choose image…"
+    // button; they're mutually exclusive, so one "Clear icon" removes whichever is set.
+    const hasIcon = ctx.icon || ctx.iconImage;
+    addRowMenuItem(menu, hasIcon ? 'Change icon…' : 'Set icon…', () => showIconPicker(x, y, ctx));
+    if (hasIcon) addRowMenuItem(menu, 'Clear icon', () => clearContextIcon(ctx));
     addRowMenuItem(menu, 'Delete', () => {
       if (confirm(`Delete context "${ctx.name}"?`)) deleteContext(ctx);
     }, 'var(--ds-accent-red)');
@@ -442,13 +463,51 @@ function firstGrapheme(s) {
 // Optimistic local set + server persist. contexts holds the live object makeRow was
 // given, so mutating ctx.icon updates the rail immediately; the server broadcast
 // (setContexts) reconciles this and every other window. Send the FULL object — the
-// POST handler requires name.
+// POST handler requires name. Setting an emoji drops any uploaded image (they're
+// mutually exclusive, #579); the server does the same, deleting the file.
 function setContextIcon(ctx, raw) {
   if (!ctx) return;
-  const value = raw ? firstGrapheme(String(raw).trim()) : '';
+  const value = firstGrapheme(String(raw || '').trim());
   ctx.icon = value;
+  if (value) ctx.iconImage = '';
   saveContext({ id: ctx.id, name: ctx.name, dirs: ctx.dirs, icon: value });
   renderRail();
+}
+
+// Clear a context's icon entirely (emoji AND uploaded image) → the rail falls back to
+// the derived glyph. Optimistic; the DELETE also removes any stored file server-side.
+function clearContextIcon(ctx) {
+  if (!ctx) return;
+  ctx.icon = '';
+  ctx.iconImage = '';
+  fetch('/api/contexts/' + encodeURIComponent(ctx.id) + '/icon', { method: 'DELETE' }).catch(() => {});
+  renderRail();
+}
+
+const MAX_ICON_BYTES = 2 * 1024 * 1024; // matches the server's express.raw limit
+
+// Upload a chosen PNG/SVG as the context's icon (#579). Validates format/size locally
+// (the server re-checks the bytes), PUTs the raw file, and on success updates optimistically
+// — image wins over emoji. The server broadcast reconciles every other window.
+function chooseContextImage(ctx, file) {
+  if (!ctx || !file) return;
+  const name = (file.name || '').toLowerCase();
+  const ext = file.type === 'image/png' || name.endsWith('.png') ? 'png'
+    : (file.type === 'image/svg+xml' || name.endsWith('.svg') ? 'svg' : '');
+  if (!ext) { alert('Please choose a PNG or SVG image.'); return; }
+  if (file.size > MAX_ICON_BYTES) { alert('Image is too large (max 2 MB).'); return; }
+  fetch('/api/contexts/' + encodeURIComponent(ctx.id) + '/icon?ext=' + ext, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/octet-stream' },
+    body: file,
+  })
+    .then(r => {
+      if (!r.ok) { alert('Could not set the image icon.'); return; }
+      ctx.iconImage = ext;
+      ctx.icon = '';
+      renderRail();
+    })
+    .catch(() => { alert('Could not set the image icon.'); });
 }
 
 const ICON_PRESETS = ['🚀','🐛','⚙️','📦','🧪','🌐','🎨','🔧','📊','💡','🔥','⭐','🧠','📝','🗂️','🤖'];
@@ -485,6 +544,26 @@ function showIconPicker(x, y, ctx) {
   };
   menu.appendChild(input);
 
+  // Choose image… (#579): a native file picker for a PNG/SVG, uploaded to the server and
+  // rendered as the real icon (mutually exclusive with the emoji above). The hidden input
+  // is scoped to the picker so it's torn down with it.
+  const fileInput = document.createElement('input');
+  fileInput.type = 'file';
+  fileInput.accept = '.png,.svg,image/png,image/svg+xml';
+  fileInput.style.display = 'none';
+  fileInput.onchange = () => {
+    const file = fileInput.files && fileInput.files[0];
+    hideRowMenu();
+    if (file) chooseContextImage(ctx, file);
+  };
+  const chooseImg = document.createElement('button');
+  chooseImg.type = 'button';
+  chooseImg.className = 'context-icon-image-btn';
+  chooseImg.textContent = 'Choose image (PNG/SVG)…';
+  chooseImg.onclick = () => fileInput.click();
+  menu.appendChild(chooseImg);
+  menu.appendChild(fileInput);
+
   const actions = document.createElement('div');
   actions.className = 'context-icon-actions';
   const apply = document.createElement('button');
@@ -497,7 +576,7 @@ function showIconPicker(x, y, ctx) {
   clear.type = 'button';
   clear.className = 'context-icon-clear';
   clear.textContent = 'Clear';
-  clear.onclick = () => { hideRowMenu(); setContextIcon(ctx, ''); };
+  clear.onclick = () => { hideRowMenu(); clearContextIcon(ctx); };
   actions.appendChild(clear);
   menu.appendChild(actions);
 

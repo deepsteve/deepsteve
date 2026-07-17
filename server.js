@@ -235,6 +235,9 @@ const DISPLAY_TABS_DIR = path.join(os.homedir(), '.deepsteve', 'display-tabs');
 const SCREENSHOTS_DIR = path.join(os.homedir(), '.deepsteve', 'screenshots');
 const SETTINGS_FILE = path.join(os.homedir(), '.deepsteve', 'settings.json');
 const CONTEXTS_FILE = path.join(os.homedir(), '.deepsteve', 'contexts.json');
+// Per-context uploaded icon images (#579): <contextId>.png / .svg. Emoji icons still
+// ride contexts.json (the `icon` string); an uploaded image sets `iconImage` (the ext).
+const ICONS_DIR = path.join(os.homedir(), '.deepsteve', 'icons');
 // Ring buffer of the last N session configs, for cross-browser restore (#533).
 const RECENT_SESSIONS_FILE = path.join(os.homedir(), '.deepsteve', 'recent-sessions.json');
 // Legacy scheduled-tasks "project groups" file (#521). Superseded by contexts.json
@@ -1969,6 +1972,15 @@ function saveContexts() {
   }
 }
 
+// Delete a context's uploaded icon file(s) (#579). Both extensions are removed so a
+// png→svg replace (or a delete) never leaves a stale file behind. Missing files and
+// errors are ignored — this is best-effort cleanup, not a correctness gate.
+function removeIconFiles(id) {
+  for (const ext of ['png', 'svg']) {
+    try { fs.unlinkSync(path.join(ICONS_DIR, `${id}.${ext}`)); } catch {}
+  }
+}
+
 // Load contexts from disk; on first run, migrate legacy project-groups.json
 // ({name, projects} → {id, name, dirs}) so existing scheduled-tasks groups carry over.
 function loadContexts() {
@@ -1977,7 +1989,7 @@ function loadContexts() {
       const v = JSON.parse(fs.readFileSync(CONTEXTS_FILE, 'utf8'));
       contexts = (Array.isArray(v) ? v : [])
         .filter(c => c && typeof c.name === 'string')
-        .map(c => ({ id: c.id || genContextId(), name: c.name, dirs: Array.isArray(c.dirs) ? c.dirs.filter(Boolean) : [], icon: typeof c.icon === 'string' ? c.icon : '' }));
+        .map(c => ({ id: c.id || genContextId(), name: c.name, dirs: Array.isArray(c.dirs) ? c.dirs.filter(Boolean) : [], icon: typeof c.icon === 'string' ? c.icon : '', iconImage: (c.iconImage === 'png' || c.iconImage === 'svg') ? c.iconImage : '' }));
       return;
     }
   } catch (e) {
@@ -3852,8 +3864,14 @@ app.post('/api/contexts', (req, res) => {
   // Preserve the icon when the client omits it (e.g. a name/dirs edit from the
   // editor modal sends no icon) — otherwise editing a context would clear its icon.
   const icon = typeof b.icon === 'string' ? b.icon : (existing ? existing.icon : '');
-  if (existing) { existing.name = name; existing.dirs = dirs; existing.icon = icon; }
-  else contexts.push({ id, name, dirs, icon });
+  // Emoji and uploaded image are mutually exclusive (#579): setting a non-empty emoji
+  // drops any stored image (and deletes its file). An omitted or empty `icon` leaves the
+  // existing iconImage untouched, so a name/dirs edit can't wipe an image, and clearing
+  // is done via DELETE /api/contexts/:id/icon.
+  let iconImage = existing ? existing.iconImage || '' : '';
+  if (icon) { if (iconImage) removeIconFiles(id); iconImage = ''; }
+  if (existing) { existing.name = name; existing.dirs = dirs; existing.icon = icon; existing.iconImage = iconImage; }
+  else contexts.push({ id, name, dirs, icon, iconImage });
   saveContexts();
   broadcastContexts();
   res.json({ contexts });
@@ -3863,9 +3881,83 @@ app.delete('/api/contexts/:id', (req, res) => {
   const idx = contexts.findIndex(c => c.id === req.params.id);
   if (idx === -1) return res.status(404).json({ error: 'Context not found' });
   contexts.splice(idx, 1);
+  removeIconFiles(req.params.id); // clean up any uploaded icon file (#579)
   saveContexts();
   broadcastContexts();
   res.json({ deleted: req.params.id });
+});
+
+// --- Per-context uploaded icon images (#579) ---
+// PNG/SVG chosen via the rail right-click → Set icon… → Choose image… flow. Stored under
+// ~/.deepsteve/icons/<id>.<ext> and served back (authed) to the UI, which renders them via
+// <img> only (never inlined) so a crafted SVG can't script in our origin.
+
+const PNG_MAGIC = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+// Best-effort "is this really the format it claims?" check on the raw bytes, so an
+// arbitrary file renamed .png/.svg isn't stored and later served with an image type.
+function iconBytesLookValid(ext, buf) {
+  if (!buf || !buf.length) return false;
+  if (ext === 'png') return buf.length >= 8 && buf.subarray(0, 8).equals(PNG_MAGIC);
+  if (ext === 'svg') return /<svg[\s>]/i.test(buf.subarray(0, 1024).toString('utf8'));
+  return false;
+}
+
+// Upload/replace a context's icon image. Raw binary body (mirrors the drops PUT); the
+// global express.json() parser is a no-op for non-JSON content types, so no skip-list
+// entry is needed. Sets iconImage (the ext) and drops any emoji (mutual exclusivity).
+app.put('/api/contexts/:id/icon', express.raw({ type: '*/*', limit: '2mb' }), (req, res) => {
+  const ext = String(req.query.ext || '').toLowerCase();
+  if (ext !== 'png' && ext !== 'svg') return res.status(400).json({ error: 'ext must be png or svg' });
+  const ctx = contexts.find(c => c.id === req.params.id);
+  if (!ctx) return res.status(404).json({ error: 'Context not found' });
+  const buf = req.body;
+  if (!Buffer.isBuffer(buf) || buf.length === 0) return res.status(400).json({ error: 'Empty image data' });
+  if (!iconBytesLookValid(ext, buf)) return res.status(400).json({ error: `Not a valid ${ext.toUpperCase()} image` });
+  try {
+    fs.mkdirSync(ICONS_DIR, { recursive: true });
+    fs.writeFileSync(path.join(ICONS_DIR, `${ctx.id}.${ext}`), buf);
+    // Drop the other extension so png→svg (or svg→png) never leaves a stale file that a
+    // later loader could pick up.
+    const stale = ext === 'png' ? 'svg' : 'png';
+    try { fs.unlinkSync(path.join(ICONS_DIR, `${ctx.id}.${stale}`)); } catch {}
+  } catch (e) {
+    return res.status(500).json({ error: 'Write failed: ' + e.message });
+  }
+  ctx.iconImage = ext;
+  ctx.icon = ''; // image wins over emoji
+  saveContexts();
+  broadcastContexts();
+  res.json({ contexts });
+});
+
+// Serve a context's icon image (authed via the positional gate). Rendered on the client
+// only through <img>; the nosniff + sandbox CSP headers are defense-in-depth for anyone
+// who navigates straight to this URL.
+app.get('/api/contexts/:id/icon', (req, res) => {
+  const ctx = contexts.find(c => c.id === req.params.id);
+  const ext = ctx && ctx.iconImage;
+  if (ext !== 'png' && ext !== 'svg') return res.status(404).end();
+  const file = path.join(ICONS_DIR, `${ctx.id}.${ext}`);
+  if (!fs.existsSync(file)) return res.status(404).end();
+  res.type(ext === 'svg' ? 'image/svg+xml' : 'image/png');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Content-Disposition', 'inline');
+  res.setHeader('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; sandbox");
+  res.sendFile(file);
+});
+
+// Clear a context's icon entirely (emoji AND image) → falls back to the derived glyph.
+// Backs the UI's "Clear icon" action.
+app.delete('/api/contexts/:id/icon', (req, res) => {
+  const ctx = contexts.find(c => c.id === req.params.id);
+  if (!ctx) return res.status(404).json({ error: 'Context not found' });
+  if (ctx.iconImage) removeIconFiles(ctx.id);
+  ctx.icon = '';
+  ctx.iconImage = '';
+  saveContexts();
+  broadcastContexts();
+  res.json({ contexts });
 });
 
 // Reorder contexts (#532): the client sends the full id order after a rail
