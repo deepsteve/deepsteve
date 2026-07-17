@@ -77,9 +77,11 @@ async function setup({ contexts = [CTX_A, CTX_B], tabs = {} } = {}) {
   tabEls.clear();
 
   const state = {
-    tabCwds: {},     // id → cwd (null = global tab)
+    tabCwds: {},        // id → cwd (null = global tab)
     activeTabId: null,
-    switchCalls: [], // switchToTab invocations from context-views (snap-back)
+    switchCalls: [],    // switchToTab invocations from context-views (snap-back)
+    createInDirCalls: [], // createSessionInDir(cwd) invocations (#581)
+    promptDirCalls: 0,  // promptNewTabDir() invocations (#581)
   };
 
   const url = new URL('../../public/js/context-views.js', `file://${__filename}`);
@@ -93,6 +95,8 @@ async function setup({ contexts = [CTX_A, CTX_B], tabs = {} } = {}) {
     switchToTab: (id) => { state.switchCalls.push(id); state.activeTabId = id; },
     updateEmptyState: () => {},
     onActiveContextChanged: () => {},
+    createSessionInDir: (cwd) => { state.createInDirCalls.push(cwd); },
+    promptNewTabDir: () => { state.promptDirCalls++; },
   });
   mod.setContexts(contexts);
 
@@ -329,4 +333,94 @@ test('getActiveContextInfo: returned dirs is a copy, not the live array (#573)',
   const info = mod.getActiveContextInfo();
   info.dirs.push('/repo/c');                       // mutate the snapshot
   assert.deepStrictEqual(mod.getActiveContextInfo().dirs, ['/repo/a', '/repo/b']); // source intact
+});
+
+// #581: requestNewTabInContext — the guard quickNewSession() calls before it
+// would inherit the active tab's cwd. It must OWN every case where inheriting
+// would leak into a foreign context, and only return false when inheriting is
+// safe (All view, or an active tab already inside the active context). The
+// crux: an empty context with NO dirs must prompt a directory picker, not fall
+// through to inherit a hidden foreign tab's cwd.
+
+const EMPTY_CTX = { id: 'empty', name: 'Empty', dirs: [] };
+
+test('empty (no-dirs) context, nothing open → prompts dir picker, no inherit (#581)', async () => {
+  const { mod, state } = await setup({ contexts: [CTX_A, EMPTY_CTX], tabs: {} });
+  mod.setActiveContext('empty');
+
+  const handled = mod.requestNewTabInContext();
+
+  assert.strictEqual(handled, true);              // owned — quickNewSession must not fall through
+  assert.strictEqual(state.promptDirCalls, 1);    // prompted for a directory
+  assert.deepStrictEqual(state.createInDirCalls, []);
+});
+
+test('empty (no-dirs) context with a hidden foreign active tab → prompts, never inherits its cwd (#581)', async () => {
+  const { mod, state } = await setup({ contexts: [CTX_A, EMPTY_CTX], tabs: { tab1: '/repo/a' } });
+  state.activeTabId = 'tab1';                      // the leak source: active tab lives in ctxa
+  mod.setActiveContext('empty');                  // switching here can't move off tab1 (no visible tab)
+
+  const handled = mod.requestNewTabInContext();
+
+  assert.strictEqual(handled, true);
+  assert.strictEqual(state.promptDirCalls, 1);
+  assert.deepStrictEqual(state.createInDirCalls, []); // did NOT open in /repo/a
+  assert.strictEqual(mod.getActiveContextId(), 'empty'); // stayed in the chosen context
+});
+
+test('context with one repo, empty of tabs → opens in that repo (#581)', async () => {
+  const { mod, state } = await setup({ contexts: [CTX_A], tabs: {} });
+  mod.setActiveContext('ctxa');
+
+  const handled = mod.requestNewTabInContext();
+
+  assert.strictEqual(handled, true);
+  assert.deepStrictEqual(state.createInDirCalls, ['/repo/a']); // context's single repo
+  assert.strictEqual(state.promptDirCalls, 0);
+});
+
+test('context with one repo + hidden foreign active tab → opens in the repo, not the foreign cwd (#581)', async () => {
+  const { mod, state } = await setup({ contexts: [CTX_A, CTX_B], tabs: { tab1: '/repo/b' } });
+  state.activeTabId = 'tab1';                      // active tab is in ctxb
+  mod.setActiveContext('ctxa');
+
+  const handled = mod.requestNewTabInContext();
+
+  assert.strictEqual(handled, true);
+  assert.deepStrictEqual(state.createInDirCalls, ['/repo/a']);
+  assert.strictEqual(state.promptDirCalls, 0);
+});
+
+test('active tab already inside the active context → default inherit path (returns false) (#581)', async () => {
+  const { mod, state } = await setup({ contexts: [CTX_A], tabs: { tab1: '/repo/a/sub' } });
+  state.activeTabId = 'tab1';
+  mod.setActiveContext('ctxa');
+
+  const handled = mod.requestNewTabInContext();
+
+  assert.strictEqual(handled, false);             // quickNewSession inherits /repo/a/sub — stays in-context
+  assert.strictEqual(state.promptDirCalls, 0);
+  assert.deepStrictEqual(state.createInDirCalls, []);
+});
+
+test('All view → default inherit path (returns false) (#581)', async () => {
+  const { mod, state } = await setup({ contexts: [CTX_A], tabs: { tab1: '/repo/a' } });
+  state.activeTabId = 'tab1';                      // no setActiveContext → All
+
+  const handled = mod.requestNewTabInContext();
+
+  assert.strictEqual(handled, false);
+  assert.strictEqual(state.promptDirCalls, 0);
+  assert.deepStrictEqual(state.createInDirCalls, []);
+});
+
+test('feature disabled → default inherit path (returns false) (#581)', async () => {
+  const { mod, state } = await setup({ contexts: [CTX_A, EMPTY_CTX], tabs: {} });
+  mod.setActiveContext('empty');
+  mod.setEnabled(false);
+
+  const handled = mod.requestNewTabInContext();
+
+  assert.strictEqual(handled, false);
+  assert.strictEqual(state.promptDirCalls, 0);
 });
