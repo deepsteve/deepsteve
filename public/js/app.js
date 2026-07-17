@@ -29,6 +29,7 @@ import { init as initProgressBar, start as progressStart, done as progressDone }
 import { init as initHashCommands, beforeSend as hashCommandsBeforeSend, setWaitingForInput as setHashCommandsWaiting, setEnabled as setHashCommandsEnabled } from './hash-commands.js';
 import { init as initOverviewMode, setEnabled as setOverviewModeEnabled, setShortcut as setOverviewModeShortcut, setDefaultLayout as setOverviewDefaultLayout, toggle as toggleOverviewMode, isOverviewActive, updateFocus as updateOverviewFocus, onTabsReordered as onOverviewTabsReordered } from './overview-mode.js';
 import { init as initTerminalSearch, attachSearchAddon, closeIfOpen as closeTerminalSearch } from './terminal-search.js';
+import { createChatView } from './chat-view.js';
 import { init as initContextViews, setEnabled as setContextViewsEnabled, applyFilter as refreshContextFilter, requestNewTabInContext, setContexts as applyServerContexts, setActiveContext as setActiveContextFromPanel, getActiveContextId, getActiveContextInfo, orderRecentDirsByContext, activeContextIsEmpty, noteActiveTab, revealTabContext, showToast } from './context-views.js';
 import { nsKey } from './storage-namespace.js';
 import { formatShortcut } from './shortcuts.js';
@@ -45,6 +46,10 @@ function truncateTitle(title) {
 // Active sessions in memory
 const sessions = new Map();
 let activeId = null;
+// Chat view (#481): a per-session alternative rendering of the terminal buffer.
+// Gated by the chatViewEnabled setting (default off); enabling it reveals the
+// toolbar toggle button. Applied from the settings broadcast.
+let chatViewEnabled = false;
 
 // Cached automations for the new-tab dropdown (refreshed on load + modal close)
 let cachedAutomations = [];
@@ -250,6 +255,16 @@ function applySettings(settings) {
   }
   if (settings.overviewModeShortcut !== undefined) {
     setOverviewModeShortcut(settings.overviewModeShortcut);
+  }
+  if (settings.chatViewEnabled !== undefined) {
+    chatViewEnabled = settings.chatViewEnabled;
+    // If disabled while a chat view is open on the active tab, drop back to the
+    // terminal so the user isn't stranded in a view they can no longer toggle.
+    if (!chatViewEnabled && activeId) {
+      const s = sessions.get(activeId);
+      if (s && s.chatViewActive) toggleChatView(false);
+    }
+    updateChatToggleVisibility();
   }
   if (settings.overviewDefaultLayout !== undefined) {
     setOverviewDefaultLayout(settings.overviewDefaultLayout);
@@ -717,6 +732,7 @@ settingsBtn?.addEventListener('click', async () => {
   const currentHashCommandsEnabled = settingsData.hashCommandsEnabled !== undefined ? settingsData.hashCommandsEnabled : true;
   const currentContextViewsEnabled = settingsData.contextViewsEnabled !== undefined ? settingsData.contextViewsEnabled : true;
   const currentOverviewDefaultLayout = settingsData.overviewDefaultLayout || 'tall';
+  const currentChatViewEnabled = !!settingsData.chatViewEnabled; // #481, default off
   const currentMetaControlsEnabled = !!settingsData.metaControlsEnabled;
   const currentInheritRc = settingsData.inheritRemoteControl !== false;
   const currentInheritRcFork = settingsData.inheritRemoteControlOnFork !== false;
@@ -869,6 +885,17 @@ settingsBtn?.addEventListener('click', async () => {
         </label>
         <p style="font-size: 11px; color: var(--ds-text-secondary); margin-top: 4px;">
           Layout used when entering overview mode (\u2318O). Tall stacks vertically; Tiled uses a 2-row grid.
+        </p>
+      </div>
+      <div class="settings-section">
+        <h3>Chat View</h3>
+        <label style="font-size: 13px; color: var(--ds-text-primary); cursor: pointer; display: flex; align-items: center; gap: 8px;">
+          <input type="checkbox" id="chat-view-enabled" ${currentChatViewEnabled ? 'checked' : ''} style="accent-color: var(--ds-accent-green);">
+          Enabled
+        </label>
+        <p style="font-size: 11px; color: var(--ds-text-secondary); margin-top: 4px;">
+          Adds a toolbar button (\ud83d\udcac) that re-renders a Claude session as a chat-style tree of turns,
+          with thinking, status, tool calls and recaps collapsed by default. Experimental.
         </p>
       </div>
       <div class="settings-section">
@@ -1336,6 +1363,7 @@ settingsBtn?.addEventListener('click', async () => {
     const cmdTabSwitch = overlay.querySelector('#cmd-tab-switch').checked;
     const cmdTabSwitchHoldMs = Math.max(0, Number(overlay.querySelector('#cmd-tab-switch-hold-ms').value) || 0);
     const commandPaletteEnabled = overlay.querySelector('#command-palette-enabled').checked;
+    const chatViewEnabledSetting = overlay.querySelector('#chat-view-enabled').checked;
     const commandPaletteShortcut = overlay.querySelector('#command-palette-shortcut').value;
     const shortcutsHelpEnabled = overlay.querySelector('#shortcuts-help-enabled').checked;
     // Stored as JSON (a list of alternates). Fall back to the raw value rather than
@@ -1384,7 +1412,7 @@ settingsBtn?.addEventListener('click', async () => {
     const preventSleepWhileActive = overlay.querySelector('#prevent-sleep-while-active').checked;
     const inheritRemoteControl = overlay.querySelector('#inherit-rc-newtab').checked;
     const inheritRemoteControlOnFork = overlay.querySelector('#inherit-rc-fork').checked;
-    const settingsPayload = { shellProfile, maxIssueTitleLength: newMaxTitle, wandPlanMode, wandPromptTemplate, symlinkWorktreeSettings, cmdTabSwitch, cmdTabSwitchHoldMs, commandPaletteEnabled, commandPaletteShortcut, shortcutsHelpEnabled, shortcutsHelpShortcut, hashCommandsEnabled, contextViewsEnabled, metaControlsEnabled, inheritRemoteControl, inheritRemoteControlOnFork, overviewDefaultLayout, enabledAgents, opencodeBinary, piBinary, engine: selectedEngine, scrollbackKB, recentSessionsLimit, autoUpdateCheckEnabled, autoUpdateCheckIntervalHours, autoUpdateApply, sessionLogEnabled, scheduledTasksEnabled, preventSleepWhileActive, customAgentConfigs };
+    const settingsPayload = { shellProfile, maxIssueTitleLength: newMaxTitle, wandPlanMode, wandPromptTemplate, symlinkWorktreeSettings, cmdTabSwitch, cmdTabSwitchHoldMs, commandPaletteEnabled, commandPaletteShortcut, shortcutsHelpEnabled, shortcutsHelpShortcut, hashCommandsEnabled, contextViewsEnabled, metaControlsEnabled, inheritRemoteControl, inheritRemoteControlOnFork, overviewDefaultLayout, enabledAgents, opencodeBinary, piBinary, engine: selectedEngine, scrollbackKB, recentSessionsLimit, autoUpdateCheckEnabled, autoUpdateCheckIntervalHours, autoUpdateApply, sessionLogEnabled, scheduledTasksEnabled, preventSleepWhileActive, customAgentConfigs, chatViewEnabled: chatViewEnabledSetting };
     let resp = await fetch('/api/settings', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1950,7 +1978,15 @@ function initTerminal(id, ws, cwd, initialName, { hasScrollback = false, pending
 
   // Store session in memory
   const searchAddon = attachSearchAddon(term);
-  sessions.set(id, { term, fit, ws, container, cwd, name, waitingForInput: false, hasUnseenActivity: false, scrollControl, searchAddon });
+  const sessionEntry = { term, fit, ws, container, cwd, name, waitingForInput: false, hasUnseenActivity: false, scrollControl, searchAddon, chatViewActive: false };
+  sessions.set(id, sessionEntry);
+
+  // Build the alternative chat view (parser + DOM) as a sibling of .xterm. It
+  // stays inactive until toggled; while inactive the parser is detached and
+  // incurs zero cost (#481).
+  const chatView = createChatView(sessionEntry);
+  container.appendChild(chatView.element);
+  sessionEntry.chatView = chatView;
 
   // Suppress scroll during init to prevent onWriteParsed races with
   // buffered data flush and scrollback replay
@@ -2235,9 +2271,12 @@ function switchTo(id) {
     clearNotification(id);
     updateTitle();
     updateAppBadge();
+    updateChatToggleVisibility();
 
     if (session.type === 'mod-tab' || session.type === 'display-tab') return;
 
+    // Note: even when the chat view is active the terminal stays live (split
+    // overlay, #481 v2), so it must still be fit/focused/scrolled normally.
     setHashCommandsWaiting(!!session.waitingForInput);
     session.scrollControl.suppressScroll();
     requestAnimationFrame(() => {
@@ -2249,6 +2288,49 @@ function switchTo(id) {
           session.scrollControl.scrollToBottom();
         });
       }
+    });
+  }
+}
+
+/** Show or hide the chat-toggle button based on the setting and active session. */
+function updateChatToggleVisibility() {
+  const btn = document.getElementById('chat-toggle-btn');
+  if (!btn) return;
+  const active = activeId ? sessions.get(activeId) : null;
+  const visible = !!(chatViewEnabled && active && active.term && active.chatView);
+  btn.style.display = visible ? '' : 'none';
+  if (visible) btn.classList.toggle('active', !!active.chatViewActive);
+}
+
+/** Toggle the chat view for the active session (or force a specific state). */
+function toggleChatView(force) {
+  if (!activeId) return;
+  const session = sessions.get(activeId);
+  if (!session || !session.term || !session.chatView) return;
+  const next = typeof force === 'boolean' ? force : !session.chatViewActive;
+  if (next === session.chatViewActive) return;
+  session.chatViewActive = next;
+  session.container.classList.toggle('chat-view-active', next);
+  session.chatView.setActive(next);
+  updateChatToggleVisibility();
+  if (!next) {
+    // Returning to full terminal view — re-fit and restore focus/scroll.
+    setHashCommandsWaiting(!!session.waitingForInput);
+    session.scrollControl.suppressScroll();
+    requestAnimationFrame(() => {
+      try { fitTerminal(session.term, session.fit, session.ws); }
+      finally {
+        session.term.focus();
+        requestAnimationFrame(() => session.scrollControl.scrollToBottom());
+      }
+    });
+  } else {
+    // Entering chat view: the terminal stays live as the bottom composer strip
+    // (split overlay, #481 v2), so focus it — typing lands in Claude — and keep
+    // it pinned to the bottom so the composer is what shows through the strip.
+    requestAnimationFrame(() => {
+      session.term.focus();
+      session.scrollControl.scrollToBottom();
     });
   }
 }
@@ -2632,6 +2714,7 @@ function killSession(id) {
     try { session.ws.sendJSON({ type: 'close-session' }); } catch {}
 
     if (session.resizeObserver) session.resizeObserver.disconnect();
+    if (session.chatView) session.chatView.dispose();
     // Untrack reconnect state before closing (#556): wrapper.close() stops the
     // retry loop without firing onreconnected, so a tab closed mid-outage
     // would otherwise pin the connection-lost banner forever.
@@ -2692,6 +2775,7 @@ async function sendToWindow(id, targetWindowId) {
   // Ack received — clean up locally (no server DELETE — shell stays alive for 30s grace period;
   // display-tab HTML stays on disk so the target window can fetch it)
   if (session.resizeObserver) session.resizeObserver.disconnect();
+  if (session.chatView) session.chatView.dispose();
   session.connHandle?.untrack(); // see killSession (#556)
   if (session.ws) session.ws.close();
   if (session.term) session.term.dispose();
@@ -3940,6 +4024,7 @@ async function init() {
   wireNewTabGestures();
   document.getElementById('new-btn-dropdown').addEventListener('click', (e) => showNewTabMenu(e));
   document.getElementById('issue-btn').addEventListener('click', () => showIssuePicker());
+  document.getElementById('chat-toggle-btn')?.addEventListener('click', () => toggleChatView());
   // Prefetch issues on hover so results are cached when the dialog opens
   let issuePrefetching = false;
   document.getElementById('issue-btn').addEventListener('mouseenter', () => {

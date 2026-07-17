@@ -423,6 +423,7 @@ const SETTINGS_SCHEMA = [
   { name: 'commandPaletteShortcut',     type: 'string',  default: 'Meta+k' },
   { name: 'overviewModeEnabled',        type: 'boolean', default: true },
   { name: 'overviewModeShortcut',       type: 'string',  default: 'Meta+o' },
+  { name: 'chatViewEnabled',            type: 'boolean', default: false },
   { name: 'shortcutsHelpEnabled',       type: 'boolean', default: true },
   // Two defaults (#549): macOS gives ⌘⇧/ to the browser's Help menu, which eats the
   // keydown before the page sees it. ⌘/ is the fallback so the overlay is always
