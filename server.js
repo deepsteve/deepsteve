@@ -11,6 +11,7 @@ const { initMCP } = require('./mcp-server');
 const { createSecurity, UI_HOST } = require('./security');
 const { createSleepWatch } = require('./sleep-watch');
 const { createPowerAssertion } = require('./power-assertion');
+const { resolveForkTip } = require('./fork-resolve');
 const { formatLogTimestamp, createLogRotator, defaultLogPaths } = require('./logging');
 const { findGitRoot } = require('./git-root');
 const { classifyScreenTail, CLAUDE_SCREEN_MARKERS } = require('./screen-classifier');
@@ -1217,6 +1218,12 @@ function symlinkWorktreeClaudeSettings(parentCwd, worktreePath) {
 
 const CLAUDE_PROJECTS_DIR = path.join(os.homedir(), '.claude', 'projects');
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+// How much of a transcript head to scan for a parent-session reference. Both the
+// fs.watch fork detector and the fork-time tip resolver (#455) use this. Larger
+// than the original 32KB because on a long conversation the parent id can sit past
+// byte 32768 (a forked file embeds the parent id in an early file-history-snapshot
+// blob, but its exact offset grows with the copied history).
+const FORK_HEAD_READ_BYTES = 128 * 1024;
 
 function claudeProjectDir(cwd, worktree, configDir) {
   // Claude Code stores sessions in a directory named after the resolved cwd.
@@ -1387,7 +1394,7 @@ function watchClaudeSessionDir(shellId) {
       // effect live in adoptClaudeSession() (#503), so this handler just detects.
       try {
         const newFile = path.join(projectDir, filename);
-        const head = fs.readFileSync(newFile, 'utf8').slice(0, 32768);
+        const head = fs.readFileSync(newFile, 'utf8').slice(0, FORK_HEAD_READ_BYTES);
         if (!head.includes(e.claudeSessionId)) return;
         adoptClaudeSession(shellId, sessionId, 'fs-watch');
       } catch (err) {
@@ -1396,7 +1403,7 @@ function watchClaudeSessionDir(shellId) {
           try {
             const e2 = shells.get(shellId);
             if (!e2 || sessionId === e2.claudeSessionId) return;
-            const head = fs.readFileSync(path.join(projectDir, filename), 'utf8').slice(0, 32768);
+            const head = fs.readFileSync(path.join(projectDir, filename), 'utf8').slice(0, FORK_HEAD_READ_BYTES);
             if (!head.includes(e2.claudeSessionId)) return;
             adoptClaudeSession(shellId, sessionId, 'fs-watch-retry');
           } catch (retryErr) {
@@ -1418,6 +1425,60 @@ function unwatchClaudeSessionDir(shellId) {
   if (entry && entry.sessionDirWatcher) {
     entry.sessionDirWatcher.close();
     entry.sessionDirWatcher = null;
+  }
+}
+
+// Resolve a fork parent's LIVE transcript tip before forking (#455). The in-memory
+// `claudeSessionId` is only advanced mid-conversation by the fs.watch detector, which
+// silently misses rotations (dropped/coalesced macOS events, an A→B→C chain break, a
+// parent ref past the head window, or an event not yet processed at the fork instant).
+// `claude --resume <stale> --fork-session` then forks an earlier checkpoint. This does the
+// filesystem I/O (readdir/stat/head-read) and delegates the chaining decision to the pure,
+// unit-tested resolveForkTip() in ./fork-resolve, then funnels any advance through
+// adoptClaudeSession (so the in-memory value + state.json are corrected and the #497
+// ownership invariant is preserved). NEVER throws — on any error, a missing transcript, no
+// claudeSessionId, or a non-claude agent it returns the input id, i.e. exactly today's
+// behavior. Only meaningful for claude (transcript-backed) sessions.
+function resolveForkParentSession(parentShellId) {
+  const e = shells.get(parentShellId);
+  if (!e || !e.claudeSessionId) return e ? e.claudeSessionId : null;
+  if (!getAgentConfig(e.agentType).supportsSessionWatch) return e.claudeSessionId;
+  const original = e.claudeSessionId;
+  try {
+    const dir = claudeProjectDir(e.cwd, e.worktree, e.configDir); // same call the watcher uses
+    const files = new Map(); // id -> absolute path
+    const mtimeOf = new Map(); // id -> mtimeMs
+    for (const f of fs.readdirSync(dir)) {
+      if (!f.endsWith('.jsonl')) continue;
+      const id = f.slice(0, -6);
+      if (!UUID_RE.test(id)) continue;
+      const file = path.join(dir, f);
+      try { mtimeOf.set(id, fs.statSync(file).mtimeMs); files.set(id, file); } catch {}
+    }
+    const headCache = new Map(); // id -> head string (each file read at most once)
+    const readHead = (id) => {
+      if (headCache.has(id)) return headCache.get(id);
+      let head = '';
+      try {
+        const buf = Buffer.alloc(FORK_HEAD_READ_BYTES);
+        const fd = fs.openSync(files.get(id), 'r');
+        try { head = buf.slice(0, fs.readSync(fd, buf, 0, buf.length, 0)).toString('utf8'); }
+        finally { fs.closeSync(fd); }
+      } catch {}
+      headCache.set(id, head);
+      return head;
+    };
+    const tip = resolveForkTip({
+      startId: original,
+      ids: [...files.keys()], // array (not a one-shot iterator — resolveForkTip re-scans per hop)
+      mtimeOf,
+      readHead,
+      ownedElsewhere: (id) => claudeSessionOwnedElsewhere(id, parentShellId),
+    });
+    if (tip !== original) adoptClaudeSession(parentShellId, tip, 'fork-resolve');
+    return tip;
+  } catch {
+    return original; // any failure → unchanged, current behavior preserved
   }
 }
 
@@ -4801,7 +4862,10 @@ function handleWsConnection(ws, req) {
     let parentShell = null, parentClaude = null, parentWorktree = null;
     if (forkFrom && shells.has(forkFrom)) {
       const parent = shells.get(forkFrom);
-      spawnArgs = ['--resume', parent.claudeSessionId, '--fork-session', '--session-id', sessionId];
+      // Resolve the parent's LIVE transcript tip (#455) — the in-memory claudeSessionId
+      // can lag behind a mid-conversation rotation, which would fork an earlier checkpoint.
+      const forkParentSession = resolveForkParentSession(forkFrom);
+      spawnArgs = ['--resume', forkParentSession, '--fork-session', '--session-id', sessionId];
       if (worktree) spawnArgs.push('--worktree', worktree);
       else if (parent.worktree) spawnArgs.push('--worktree', parent.worktree);
       spawnArgs.push(...mcpConfigArgs(agentType, id));
@@ -4809,9 +4873,9 @@ function handleWsConnection(ws, req) {
       spawnedPlanMode = false;
       spawnPath = 'fork';
       parentShell = forkFrom;
-      parentClaude = parent.claudeSessionId;
+      parentClaude = forkParentSession;  // record the RESOLVED tip in lineage/trace
       parentWorktree = parent.worktree || null;
-      log(`[WS] Forking from shell ${forkFrom} (parent claude session: ${parent.claudeSessionId})`);
+      log(`[WS] Forking from shell ${forkFrom} (parent claude session: ${forkParentSession})`);
     } else {
       spawnArgs = getSpawnArgs(agentType, {
         sessionId,
@@ -4996,7 +5060,7 @@ function broadcastToWindow(windowId, msg) {
 }
 
 // Initialize MCP server (async, ~100ms for dynamic import)
-initMCP({ app, security, shells, wss, broadcast, broadcastToWindow, log, MODS_DIR, closeSession, tombstoneSession, handleShellGone, spawnSession, sessionEnv, getSpawnArgs, mcpConfigArgs, getAgentConfig, wireShellOutput, watchClaudeSessionDir, unwatchClaudeSessionDir, saveState, validateWorktree, ensureWorktree, sessionPaths, submitToShell, fetchIssueFromGitHub, deliverPromptWhenReady, reloadClients, deliverToWindow, settings, isShuttingDown: () => shuttingDown, displayTabs, setDisplayTab, deleteDisplayTab, screenshots, setScreenshot, deleteScreenshot, getScreenshotPath, getDefaultEngine, getForegroundCommand, sessionLog, emitSessionOpen, getContexts: () => contexts, pathInside, getSavedSession: (id) => savedState[id] || null, stripEscapeSequences, sessionInputState, maybeInheritRemoteControl, requestMetaControlsConsent }).catch(e => log('MCP init failed:', e.message));
+initMCP({ app, security, shells, wss, broadcast, broadcastToWindow, log, MODS_DIR, closeSession, tombstoneSession, handleShellGone, spawnSession, sessionEnv, getSpawnArgs, mcpConfigArgs, getAgentConfig, wireShellOutput, watchClaudeSessionDir, unwatchClaudeSessionDir, resolveForkParentSession, saveState, validateWorktree, ensureWorktree, sessionPaths, submitToShell, fetchIssueFromGitHub, deliverPromptWhenReady, reloadClients, deliverToWindow, settings, isShuttingDown: () => shuttingDown, displayTabs, setDisplayTab, deleteDisplayTab, screenshots, setScreenshot, deleteScreenshot, getScreenshotPath, getDefaultEngine, getForegroundCommand, sessionLog, emitSessionOpen, getContexts: () => contexts, pathInside, getSavedSession: (id) => savedState[id] || null, stripEscapeSequences, sessionInputState, maybeInheritRemoteControl, requestMetaControlsConsent }).catch(e => log('MCP init failed:', e.message));
 
 // Watch themes directory for changes and broadcast to clients
 let themeWatchDebounce = null;
