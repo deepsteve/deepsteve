@@ -1,4 +1,5 @@
-// Headless unit test for public/js/context-views.js — revealTabContext (#547).
+// Headless unit test for public/js/context-views.js — revealTabContext (#547),
+// new-tab context guards (#581), and the closed-rail indicator + icon chip (#585).
 //
 // No browser, no Docker: stub the handful of globals the module touches
 // (window/document/sessionStorage/fetch) BEFORE importing it, then drive the
@@ -23,9 +24,15 @@ globalThis.sessionStorage = {
 
 function fakeElement() {
   const classes = new Set();
-  return {
-    id: '', className: '', textContent: '', title: '', innerHTML: '',
+  const children = [];
+  let text = '';
+  const el = {
+    id: '', className: '', title: '', innerHTML: '',
     style: {},
+    dataset: {},
+    children,
+    inserted: [],  // insertAdjacentElement targets (init() lands #context-indicator here)
+    listeners: {}, // last handler per event type (toggleSidebar lives at listeners.click)
     classList: {
       add: (c) => classes.add(c),
       remove: (c) => classes.delete(c),
@@ -36,21 +43,35 @@ function fakeElement() {
         return on;
       },
     },
-    addEventListener: () => {},
-    insertAdjacentElement: () => {},
-    appendChild: () => {},
+    addEventListener: (ev, fn) => { el.listeners[ev] = fn; },
+    insertAdjacentElement: (pos, child) => { el.inserted.push(child); },
+    appendChild: (child) => { children.push(child); },
+    setAttribute: () => {},
+    getBoundingClientRect: () => ({ width: 0, left: 0, top: 0 }),
     remove: () => {},
   };
+  // DOM fidelity the indicator chip depends on: setting textContent drops the
+  // element's children (applyContextIcon clears a previous <img> exactly this way).
+  Object.defineProperty(el, 'textContent', {
+    get: () => text,
+    set: (v) => { text = String(v); children.length = 0; },
+  });
+  return el;
 }
 
 // Registry of fake tab elements, keyed by tab id (getElementById('tab-<id>')).
 const tabEls = new Map();
+// Non-tab elements resolvable by id, seeded per setup(). 'context-toggle' lives
+// here so init() builds the indicator; 'app-container'/'app-main' deliberately
+// stay unresolved (their init paths are guarded and irrelevant to these tests).
+const byId = new Map();
 
 globalThis.document = {
-  getElementById: (id) => (id.startsWith('tab-') ? tabEls.get(id.slice(4)) || null : null),
+  getElementById: (id) => (id.startsWith('tab-') ? tabEls.get(id.slice(4)) || null : byId.get(id) || null),
   createElement: () => fakeElement(),
   querySelectorAll: () => [],
   addEventListener: () => {},
+  removeEventListener: () => {},
   body: { appendChild: () => {} },
   activeElement: null,
 };
@@ -75,6 +96,9 @@ let importCount = 0;
 async function setup({ contexts = [CTX_A, CTX_B], tabs = {} } = {}) {
   storeMap.clear();
   tabEls.clear();
+  byId.clear();
+  const toggle = fakeElement();  // #context-toggle — init() hangs the indicator off it
+  byId.set('context-toggle', toggle);
 
   const state = {
     tabCwds: {},        // id → cwd (null = global tab)
@@ -126,7 +150,15 @@ async function setup({ contexts = [CTX_A, CTX_B], tabs = {} } = {}) {
   };
 
   for (const [id, cwd] of Object.entries(tabs)) addTab(id, cwd);
-  return { mod, state, addTab, openNewTab, jumpToTab };
+
+  // #585 indicator handles: init() inserted the indicator after the toggle, with
+  // [icon chip, label] children.
+  const indicator = toggle.inserted[0] || null;
+  return {
+    mod, state, addTab, openNewTab, jumpToTab, toggle, indicator,
+    indicatorIcon: indicator?.children[0] || null,
+    indicatorLabel: indicator?.children[1] || null,
+  };
 }
 
 const isHidden = (id) => tabEls.get(id).classList.contains('context-hidden');
@@ -423,4 +455,73 @@ test('feature disabled → default inherit path (returns false) (#581)', async (
 
   assert.strictEqual(handled, false);
   assert.strictEqual(state.promptDirCalls, 0);
+});
+
+// #585: the closed-rail readout (#context-indicator) now carries two children —
+// a text label (every layout) and an icon chip (revealed by CSS only in the
+// collapsed vertical icon rail). updateIndicator() must fill both, follow the
+// image→emoji→monogram chain (applyContextIcon, shared with the rail rows), and
+// keep the whole readout hidden in the All view / while the rail is open.
+
+test('active context → indicator shows monogram chip + name (#585)', async () => {
+  const { mod, indicator, indicatorIcon, indicatorLabel } = await setup();
+  mod.setActiveContext('ctxa');
+
+  assert.strictEqual(indicator.classList.contains('hidden'), false);
+  assert.strictEqual(indicatorLabel.textContent, 'Alpha');
+  assert.strictEqual(indicatorIcon.textContent, 'A'); // tabIcon-derived monogram
+  assert.strictEqual(indicatorIcon.classList.contains('is-emoji'), false);
+  assert.strictEqual(indicatorIcon.classList.contains('is-image'), false);
+  assert.ok(indicator.title.includes('Alpha'));
+});
+
+test('chosen emoji icon → chip is the emoji with is-emoji (#585)', async () => {
+  const { mod, indicatorIcon } = await setup({ contexts: [{ ...CTX_A, icon: '🦊' }] });
+  mod.setActiveContext('ctxa');
+
+  assert.strictEqual(indicatorIcon.textContent, '🦊');
+  assert.strictEqual(indicatorIcon.classList.contains('is-emoji'), true);
+});
+
+test('iconImage → <img> chip; onerror falls back to the derived monogram (#585)', async () => {
+  const { mod, indicatorIcon } = await setup({ contexts: [{ ...CTX_A, iconImage: 'icon.svg' }] });
+  mod.setActiveContext('ctxa');
+
+  assert.strictEqual(indicatorIcon.classList.contains('is-image'), true);
+  const img = indicatorIcon.children[0];
+  assert.strictEqual(img.src, '/api/contexts/ctxa/icon');
+
+  img.onerror(); // broken upload → derived glyph, chip styling restored
+  assert.strictEqual(indicatorIcon.classList.contains('is-image'), false);
+  assert.strictEqual(indicatorIcon.textContent, 'A');
+  assert.strictEqual(indicatorIcon.children.length, 0); // textContent set dropped the <img>
+});
+
+test('All view → indicator hidden and chip cleared (#585)', async () => {
+  const { mod, indicator, indicatorIcon } = await setup();
+  assert.strictEqual(indicator.classList.contains('hidden'), true); // hidden from init
+
+  mod.setActiveContext('ctxa');
+  assert.strictEqual(indicator.classList.contains('hidden'), false);
+
+  mod.setActiveContext(null);
+  assert.strictEqual(indicator.classList.contains('hidden'), true);
+  assert.strictEqual(indicatorIcon.textContent, '');
+});
+
+test('rail open → hidden; closing rebuilds a fresh chip after an icon edit (#585)', async () => {
+  const { mod, toggle, indicator, indicatorIcon } = await setup();
+  mod.setActiveContext('ctxa');
+  assert.strictEqual(indicatorIcon.textContent, 'A');
+
+  toggle.listeners.click(); // toggleSidebar → open (also exercises renderRail/makeRow)
+  assert.strictEqual(indicator.classList.contains('hidden'), true);
+
+  // Icon edited while the rail is open (server broadcast path).
+  mod.setContexts([{ ...CTX_A, icon: '🦊' }, CTX_B]);
+
+  toggle.listeners.click(); // close → updateIndicator rebuilds the chip
+  assert.strictEqual(indicator.classList.contains('hidden'), false);
+  assert.strictEqual(indicatorIcon.textContent, '🦊'); // fresh, not the stale monogram
+  assert.strictEqual(indicatorIcon.classList.contains('is-emoji'), true);
 });

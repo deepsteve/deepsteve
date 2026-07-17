@@ -419,12 +419,59 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
 }
 #app-container.vertical-layout.icon-rail #new-btn { border-radius: 8px; }
 
-/* The muted active-context label (context-views.js injects it as #tabs' own child, right after
+/* The muted active-context readout (context-views.js injects it as #tabs' own child, right after
    #context-toggle, so align-items:stretch makes it a full-width row) is a word, and 36px is not a
-   place for a word — it renders as a cropped fragment of a context name. Hiding it is not the
-   unreachable-⚙ of #550: it is a readout, not a control, and the ◧ directly above it still opens
-   the rail that shows the whole thing. */
-#app-container.vertical-layout.icon-rail #context-indicator { display: none; }
+   place for a word — but it IS a place for a 22px chip, the same word→chip trade every tab
+   (.tab-icon above) and context row (.context-row-icon) already makes when its rail collapses
+   (#585; before that the rail just hid the readout, which is how "which context am I in?" went
+   unanswerable in exactly the layout that needs the cue most). The label child drops out, the
+   chip child appears, the full name survives in the title tooltip, and clicking still opens the
+   rail. NEVER set `display` on #context-indicator itself in this block: the 2-id selector
+   outranks #context-indicator.hidden, so it would un-hide the readout in the All view and while
+   the rail is open. Visibility stays the .hidden class's alone; this block only restyles. */
+#app-container.vertical-layout.icon-rail #context-indicator {
+  max-width: none;   /* the 160px text clamp is meaningless for a centred chip */
+  margin-left: 0;    /* the 2px text nudge would knock the chip off centre */
+}
+#app-container.vertical-layout.icon-rail #context-indicator .context-indicator-label { display: none; }
+/* Copies .tab .tab-icon (above) the way .context-row-icon does, so all three collapsed chips stay
+   pixel-identical. Not comma-shared into that rule: this chip is a block-level box centring itself
+   in the column via margin:auto while the tab's is inline-flex inside a row, and tabs never carry
+   is-image. */
+#app-container.vertical-layout.icon-rail #context-indicator .context-indicator-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 0 auto;
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  border-radius: 5px;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
+  background: var(--ds-bg-tertiary);
+  color: var(--ds-text-secondary);
+}
+#app-container.vertical-layout.icon-rail #context-indicator .context-indicator-icon.is-emoji {
+  background: transparent;
+  font-size: 15px;
+}
+#app-container.vertical-layout.icon-rail #context-indicator .context-indicator-icon.is-image {
+  background: transparent;
+  overflow: hidden;
+}
+#app-container.vertical-layout.icon-rail #context-indicator .context-indicator-icon.is-image img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+}
+/* Hover affordance parity with the text readout — the chip sets its own color, so the outer's
+   :hover color bump (see the #context-indicator rules below) doesn't reach it on its own. */
+#app-container.vertical-layout.icon-rail #context-indicator:hover .context-indicator-icon {
+  color: var(--ds-text-primary);
+}
 
 #app-container.vertical-layout #content-row {
   flex: 1;
@@ -1178,6 +1225,11 @@ kbd {
 }
 #context-indicator:hover { color: var(--ds-text-primary); }
 #context-indicator.hidden { display: none; }
+/* The chip child (#585) exists ONLY in the collapsed vertical icon rail — anywhere the label is
+   visible the chip is redundant at best and duplicated at worst, the same argument as
+   .tab .tab-icon. The label child needs no rule of its own: it's an inline span, so the outer's
+   max-width/overflow/text-overflow above keep ellipsizing its text exactly as before. */
+#context-indicator .context-indicator-icon { display: none; }
 
 /* Ruled terminal-title variant of the closed-context label — hidden by default;
    only the retro-monitor theme reveals it as a dashed rule at the top of the

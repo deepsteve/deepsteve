@@ -50,6 +50,8 @@ let rail = null;   // #context-rail element
 let resizer = null; // #context-resizer — drag handle at the rail's right edge (#569)
 let toggleBtn = null;
 let indicatorEl = null; // #context-indicator — muted active-context name shown next to the toggle when the rail is closed (#531)
+let indicatorIconEl = null;  // chip child of the indicator — the collapsed icon rail's presentation of it (#585)
+let indicatorLabelEl = null; // text child of the indicator — every other layout's presentation
 let ruleTitleEl = null; // #context-rule-title — dashed ruled variant of the same label shown at the top of the terminal in the retro-monitor theme (#535)
 
 // ---------------------------------------------------------------- persistence
@@ -236,14 +238,28 @@ function updateIndicator() {
   const show = enabled && !sidebarOpen && !!ctx; // rail closed + real context
   const name = show ? ctx.name : '';
   const tip  = show ? `Context: ${ctx.name} — click to open (⌘P)` : '';
-  // Drive both presentations: the tab-strip label (#context-indicator) and the
-  // ruled terminal title (#context-rule-title). CSS picks which one is visible —
-  // the retro-monitor theme hides the former and reveals the latter (#535).
-  for (const el of [indicatorEl, ruleTitleEl]) {
-    if (!el) continue;
-    el.textContent = name;
-    el.classList.toggle('hidden', !show);
-    el.title = tip;
+  // Drive both presentations: the tab-strip indicator (#context-indicator) and the
+  // ruled terminal title (#context-rule-title). CSS picks what's visible — the
+  // retro-monitor theme hides the former and reveals the latter (#535), and the
+  // collapsed icon rail shows the indicator's chip child instead of its label
+  // (#585). The indicator carries children, so it can't share a plain-textContent
+  // loop with the ruled title.
+  if (indicatorEl) {
+    indicatorLabelEl.textContent = name;
+    // Rebuild the chip on every pass, straight off the live context object, so an
+    // icon edit / server broadcast can never leave a stale chip behind.
+    if (show) applyContextIcon(indicatorIconEl, ctx, name);
+    else {
+      indicatorIconEl.textContent = '';
+      indicatorIconEl.classList.remove('is-image', 'is-emoji');
+    }
+    indicatorEl.classList.toggle('hidden', !show);
+    indicatorEl.title = tip;
+  }
+  if (ruleTitleEl) {
+    ruleTitleEl.textContent = name;
+    ruleTitleEl.classList.toggle('hidden', !show);
+    ruleTitleEl.title = tip;
   }
 }
 
@@ -294,34 +310,11 @@ function makeRow(id, name, active, ctx) {
   // rail always shows a chip.
   row.className = 'context-row' + (active ? ' active' : '') + ((ctx?.icon || ctx?.iconImage) ? ' has-icon' : '');
 
-  // Icon square (#569/#579). An uploaded image (ctx.iconImage) wins, then a chosen emoji
-  // (ctx.icon), else a glyph derived the same way tabs do (tabIcon) so every square is
-  // legible in the collapsed rail. The synthetic "All" row (ctx null) always gets ≡.
+  // Icon square (#569/#579) — see applyContextIcon for the image/emoji/glyph chain.
   const iconEl = document.createElement('span');
   iconEl.className = 'context-row-icon';
   iconEl.setAttribute('aria-hidden', 'true');
-  if (ctx?.iconImage) {
-    // Render the image via <img> only (never inline the SVG markup), so a crafted SVG
-    // can't script in our origin. On load failure, fall back to the derived glyph.
-    iconEl.classList.add('is-image');
-    const img = document.createElement('img');
-    img.src = '/api/contexts/' + encodeURIComponent(ctx.id) + '/icon';
-    img.alt = '';
-    img.decoding = 'async';
-    img.onerror = () => {
-      iconEl.classList.remove('is-image');
-      const fb = tabIcon(name);
-      iconEl.textContent = fb.glyph;
-      iconEl.classList.toggle('is-emoji', fb.isEmoji);
-    };
-    iconEl.appendChild(img);
-  } else {
-    const resolved = ctx?.icon
-      ? { glyph: ctx.icon, isEmoji: isEmojiGlyph(ctx.icon) }
-      : (ctx ? tabIcon(name) : { glyph: '≡', isEmoji: false });
-    iconEl.textContent = resolved.glyph;
-    iconEl.classList.toggle('is-emoji', resolved.isEmoji);
-  }
+  applyContextIcon(iconEl, ctx, name);
   row.appendChild(iconEl);
 
   const label = document.createElement('span');
@@ -451,6 +444,38 @@ function showRowMenu(x, y, ctx) {
 function isEmojiGlyph(g) {
   try { return /\p{Extended_Pictographic}|\p{Regional_Indicator}/u.test(g || ''); }
   catch { return false; }
+}
+
+// Paint a context's icon into iconEl — shared by the rail rows (makeRow) and the
+// closed-rail indicator chip (updateIndicator, #585) so the fallback chain can't
+// fork. An uploaded image (ctx.iconImage) wins, then a chosen emoji (ctx.icon),
+// else a glyph derived the same way tabs do (tabIcon) so every square is legible
+// in the collapsed rail; the synthetic "All" row (ctx null) always gets ≡. The
+// image renders via <img> only (never inline the SVG markup), so a crafted SVG
+// can't script in our origin; on load failure, fall back to the derived glyph.
+function applyContextIcon(iconEl, ctx, name) {
+  iconEl.textContent = ''; // also drops any previous <img>
+  iconEl.classList.remove('is-image', 'is-emoji');
+  if (ctx?.iconImage) {
+    iconEl.classList.add('is-image');
+    const img = document.createElement('img');
+    img.src = '/api/contexts/' + encodeURIComponent(ctx.id) + '/icon';
+    img.alt = '';
+    img.decoding = 'async';
+    img.onerror = () => {
+      iconEl.classList.remove('is-image');
+      const fb = tabIcon(name);
+      iconEl.textContent = fb.glyph;
+      iconEl.classList.toggle('is-emoji', fb.isEmoji);
+    };
+    iconEl.appendChild(img);
+  } else {
+    const resolved = ctx?.icon
+      ? { glyph: ctx.icon, isEmoji: isEmojiGlyph(ctx.icon) }
+      : (ctx ? tabIcon(name) : { glyph: '≡', isEmoji: false });
+    iconEl.textContent = resolved.glyph;
+    iconEl.classList.toggle('is-emoji', resolved.isEmoji);
+  }
 }
 // First grapheme, not first code point — keep ZWJ sequences / flags intact (as tabIcon does).
 function firstGrapheme(s) {
@@ -1239,6 +1264,16 @@ export function init(callbacks) {
       setSidebar(true);
       document.activeElement?.blur();
     });
+    // Two presentations of the same readout, icon-then-label like the tab markup:
+    // the label everywhere a word fits, the chip only in the collapsed icon rail
+    // (#585). CSS picks one; the click handler and title live on the outer span.
+    indicatorIconEl = document.createElement('span');
+    indicatorIconEl.className = 'context-indicator-icon';
+    indicatorIconEl.setAttribute('aria-hidden', 'true');
+    indicatorEl.appendChild(indicatorIconEl);
+    indicatorLabelEl = document.createElement('span');
+    indicatorLabelEl.className = 'context-indicator-label';
+    indicatorEl.appendChild(indicatorLabelEl);
     toggleBtn.insertAdjacentElement('afterend', indicatorEl);
   }
 
