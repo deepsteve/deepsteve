@@ -917,19 +917,29 @@ function onKeyUp(e) {
 // ------------------------------------------------------ new tab in a context
 
 /**
- * Called by app.js's new-tab flow. Returns true if it opened (or will open) a
- * tab in the active context — i.e. a context is selected and the current tab
- * isn't already inside it. Returns false to let the default new-tab flow run
- * (which inherits the active tab's cwd, keeping you in-context already).
+ * Called by app.js's new-tab flow. Returns true when it has taken ownership of
+ * the new tab — either opening it in the active context or prompting for a dir —
+ * so quickNewSession must NOT fall through. Returns false only when the default
+ * inherit-the-active-tab's-cwd flow is safe: the "All" view, or an active tab
+ * that's already inside the active context.
+ *
+ * The subtle case is a context with NO dirs configured (#581): when it's empty
+ * of tabs, activeId still points at a context-hidden tab from ANOTHER context,
+ * so inheriting active.cwd would open there and #547 would yank the view away.
+ * We must own that case too — prompt a directory picker instead of leaking.
  */
 export function requestNewTabInContext() {
   if (!enabled) return false;
   const ctx = getActiveContext();
-  if (!ctx || ctx.dirs.length === 0) return false;
+  if (!ctx) return false;                                      // "All" view → inherit is fine
   const activeCwd = cb.getTabCwd?.(cb.getActiveTabId?.());
-  if (activeCwd && tabInContext(activeCwd, ctx)) return false;
-  newTabInActiveContext(ctx);
-  return true;
+  if (activeCwd && tabInContext(activeCwd, ctx)) return false; // active tab already in-context → inherit stays in-context
+  if (ctx.dirs.length > 0) {
+    newTabInActiveContext(ctx);          // single → open in the repo; multiple → chooser (#522)
+  } else {
+    cb.promptNewTabDir?.();              // empty context, no inferable repo → directory picker (#581)
+  }
+  return true;                           // handled — never let quickNewSession inherit a foreign cwd
 }
 
 async function newTabInActiveContext(ctx) {

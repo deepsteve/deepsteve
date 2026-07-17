@@ -3742,6 +3742,10 @@ async function init() {
     switchToTab: switchTo,
     updateEmptyState,
     createSessionInDir: (cwd) => createSession(cwd, null, true, { agentType: getDefaultAgentType() }),
+    // Empty context (no dirs) new-tab: prompt the directory picker instead of
+    // inheriting the last-active tab's (foreign) cwd (#581). promptRepoSession
+    // already surfaces the active context's repos first via #573 ordering.
+    promptNewTabDir: () => promptRepoSession(),
     showDirPicker: () => showDirectoryPicker(),
     getRecentDirs: () => SessionStore.getRecentDirs(),
     // Bidirectional group/context sync (#526): tell the scheduled-tasks panel
