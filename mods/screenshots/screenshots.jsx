@@ -21,9 +21,25 @@ function screenshotUrl(id) {
  * same-origin iframe — display tabs (`/api/display-tab/...`) and mod panels — we capture
  * the iframe's own document instead. The iframe is same-origin and sandboxed with
  * `allow-same-origin`, so its contentDocument is reachable.
+ *
+ * A child iframe only counts as "the content" when it is visible and covers at
+ * least half of the element's area. Without that guard, capturing a container
+ * that merely contains iframes (e.g. `#app-container`, which holds every hidden
+ * panel-mod iframe) diverted to the first display:none iframe, whose 0×0 canvas
+ * serializes to an invalid `data:,` URL and the capture failed.
  */
+function contentIframeOf(el) {
+  if (el.tagName === 'IFRAME') return el;
+  const elArea = Math.max(1, el.clientWidth * el.clientHeight);
+  for (const fr of el.querySelectorAll('iframe')) {
+    const area = fr.clientWidth * fr.clientHeight;
+    if (area > 0 && area / elArea >= 0.5) return fr;
+  }
+  return null;
+}
+
 async function captureElementToPng(el) {
-  const iframe = el.tagName === 'IFRAME' ? el : el.querySelector('iframe');
+  const iframe = contentIframeOf(el);
   if (iframe) {
     let doc = null;
     try { doc = iframe.contentDocument; } catch { /* cross-origin */ }
