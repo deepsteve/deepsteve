@@ -244,11 +244,16 @@ test('fork records forkParent lineage and its distinct child id (#503)', async (
   // Confirm the child stub actually spawned as a fork (didn't fast-exit). The stub
   // echoes its argv only once `zsh -l -c 'claude …'` execs it — after shells.set /
   // saveState above — so poll rather than read once.
+  // The fork must --resume the parent's CURRENT session id (claudeP). With no rotation on
+  // disk the resolver returns it unchanged, so this pins the fork-time resolution wiring
+  // (server.js resolveForkParentSession) in the common case — a regression to a stale id
+  // would surface here as a wrong --resume argument.
   await waitFor(() => {
     let stubLog = '';
     try { stubLog = fs.readFileSync(stubLogPath, 'utf8'); } catch { return false; }
-    return stubLog.split('\n').some(l => l.includes('--fork-session') && l.includes(claudeC));
-  }, 'child stub to spawn with --fork-session --session-id <child>');
+    return stubLog.split('\n').some(l =>
+      l.includes(`--resume ${claudeP}`) && l.includes('--fork-session') && l.includes(claudeC));
+  }, 'child stub to spawn with --resume <parent> --fork-session --session-id <child>');
 });
 
 test('#497: parent watcher refuses the live child fork file (oracle branch a)', async () => {
@@ -320,3 +325,12 @@ test('self-fork (/clear, plan approval) is still adopted, and plan mode resets',
   assert.strictEqual(state[idP2].claudeSessionId, claudeNew, 'parent adopted the new self-fork id');
   assert.strictEqual(state[idP2].planMode, false, 'plan mode reset after the self-fork');
 });
+
+// NOTE on #455 coverage: the resolver's UNIQUE value over the existing fs.watch detector
+// is (a) synchronous evaluation at the fork instant and (b) multi-hop A→B→C chaining. A
+// live daemon can't isolate either deterministically — Node's fs.watch on macOS even
+// REPLAYS pre-existing files as `rename` events when a watcher arms, so the watcher heals
+// any resolvable rotation and races the resolver. The chaining + reference + mtime +
+// ownership decision logic is therefore unit-tested in isolation in
+// test/unit/fork-resolve.test.js (resolveForkTip). Test 1 above additionally asserts the
+// integration wiring passes the resolved id straight through in the common no-rotation case.

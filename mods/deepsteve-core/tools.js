@@ -36,7 +36,7 @@ const TIMINGS = { keyGapMs: 250, settleMs: 500, waitForIdleMs: 30000, idlePollMs
 function init(context) {
   const {
     shells, closeSession, handleShellGone, spawnSession, sessionEnv, getSpawnArgs, mcpConfigArgs, getAgentConfig, wireShellOutput, getDefaultEngine, getForegroundCommand,
-    watchClaudeSessionDir, unwatchClaudeSessionDir, saveState,
+    watchClaudeSessionDir, unwatchClaudeSessionDir, resolveForkParentSession, saveState,
     validateWorktree, ensureWorktree, sessionPaths, submitToShell,
     fetchIssueFromGitHub, deliverPromptWhenReady,
     reloadClients, deliverToWindow, settings, log, isShuttingDown,
@@ -454,8 +454,12 @@ function init(context) {
         const claudeSessionId = randomUUID();
 
         let spawnArgs;
+        let resolvedForkParent = null;
         if (fork && caller.claudeSessionId) {
-          spawnArgs = ['--resume', caller.claudeSessionId, '--fork-session', '--session-id', claudeSessionId];
+          // Resolve the caller's LIVE transcript tip (#455) — the in-memory claudeSessionId
+          // can lag behind a mid-conversation rotation, which would fork an earlier checkpoint.
+          resolvedForkParent = resolveForkParentSession(callerId);
+          spawnArgs = ['--resume', resolvedForkParent, '--fork-session', '--session-id', claudeSessionId];
           if (validatedWorktree) spawnArgs.push('--worktree', validatedWorktree);
           spawnArgs.push(...mcpConfigArgs(effectiveAgentType, id));
         } else {
@@ -488,7 +492,7 @@ function init(context) {
           // .jsonl, so recording the parent here lets the parent's watcher authoritatively
           // refuse to adopt this child's id (rather than re-inferring it). Persisted via
           // serializeShellEntry after the saveState() below.
-          forkParent: (fork && caller.claudeSessionId) ? caller.claudeSessionId : null,
+          forkParent: (fork && caller.claudeSessionId) ? resolvedForkParent : null,
           waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now(),
         });
         wireShellOutput(id);
