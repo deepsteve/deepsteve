@@ -283,7 +283,7 @@ function renderRail() {
 
   const hint = document.createElement('div');
   hint.className = 'context-hint';
-  hint.textContent = '⌘↑/↓ switch · ⌘P hide · right-click to edit · drag to reorder';
+  hint.textContent = '⌘↑/↓ switch · ⌘P hide';
   rail.appendChild(hint);
 }
 
