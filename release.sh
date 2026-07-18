@@ -29,6 +29,16 @@ fi
 
 echo "Version: $PKG_VERSION (latest tag: ${LATEST_TAG:-none}, lock in sync)"
 
+# Warn if the deepsteve.com demo lags the released tag (#584). The site serves the
+# tag it vendored at /demo/VERSION; a healthy demo equals LATEST_TAG at this point
+# (this script runs pre-tag). Warn-only and network-tolerant: check-installer.yml
+# runs this script in CI on every push, so it must never fail or hang here.
+DEMO_TAG=$(curl -fsSL --max-time 5 https://deepsteve.com/demo/VERSION 2>/dev/null || true)
+if [ -n "$DEMO_TAG" ] && [ -n "$LATEST_TAG" ] && [ "$DEMO_TAG" != "$LATEST_TAG" ]; then
+  echo "WARNING: deepsteve.com demo is vendored at $DEMO_TAG but the latest release is $LATEST_TAG." >&2
+  echo "         After this release: run tools/revendor-demo.sh in the site repo (RELEASING.md step 7)." >&2
+fi
+
 NODE_VERSION="22.14.0"
 NODE_SHA256_ARM64="e9404633bc02a5162c5c573b1e2490f5fb44648345d64a958b17e325729a5e42"
 NODE_SHA256_X64="6698587713ab565a94a360e091df9f6d91c8fadda6d00f0cf6526e9b40bed250"
