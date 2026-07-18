@@ -111,137 +111,28 @@ export function setupTerminalIO(term, ws, { onUserInput, container, beforeSend }
     return true;
   });
 
-  // Auto-scroll state machine.
-  //
-  // Three states:
-  //   AUTO           — new output auto-scrolls to bottom
-  //   USER_SCROLLED  — user scrolled up; output does NOT yank back
-  //   SUPPRESSED     — transitions (tab switch, reconnect, init) ignore scroll events
-  //
-  // Transitions:
-  //   AUTO → USER_SCROLLED  (scroll event detects gap > tolerance)
-  //   USER_SCROLLED → AUTO  (scroll event detects gap ≤ tolerance, or scrollToBottom())
-  //   * → SUPPRESSED        (suppressScroll())
-  //   SUPPRESSED → AUTO     (scrollToBottom() or 500ms safety timeout)
-  //
-  // We listen on the .xterm-viewport `scroll` event instead of `wheel` + rAF.
-  // The scroll event fires *after* the browser has updated scrollTop, so there
-  // are no stale-position races with output or Ink re-renders.
-  let state = 'AUTO';
-  let suppressTimer = null;
-  let prevScrollTop = 0;
-
-  const BOTTOM_TOLERANCE = 10;
-  const SNAP_TOLERANCE = 100; // ~5-6 lines — snap to bottom when user scrolls down near it
-
-  // Floating scroll-to-bottom button
-  const scrollBtn = document.createElement('button');
-  scrollBtn.className = 'scroll-to-bottom';
-  scrollBtn.textContent = '\u2193';
-  scrollBtn.setAttribute('aria-label', 'Scroll to bottom');
-  if (container) container.appendChild(scrollBtn);
+  // xterm 6 follows live output and provides its own scrollbar
+  // (.xterm-scrollable-element) natively. deepsteve's old AUTO/USER_SCROLLED
+  // state machine + down button listened on .xterm-viewport, which xterm 6
+  // turned into an inert overlay, so it never fired (#586). We keep only the
+  // imperative helpers callers still need.
 
   function scrollToBottom() {
-    state = 'AUTO';
-    clearTimeout(suppressTimer);
     term.scrollToBottom();
     term.refresh(0, term.rows - 1);
-    scrollBtn.classList.remove('visible');
-    if (viewport) prevScrollTop = viewport.scrollTop;
-    // After container visibility changes (tab switch), the viewport scroll
-    // dimensions may not be recalculated yet. Force a deferred sync so the
-    // scrollbar reflects the actual buffer height and the user can scroll.
-    requestAnimationFrame(() => {
-      term.scrollLines(0);
-      if (viewport) prevScrollTop = viewport.scrollTop;
-    });
+    // Container visibility just changed (tab switch); scroll dims may not be
+    // recalculated yet - force a deferred sync.
+    requestAnimationFrame(() => { term.scrollLines(0); });
   }
 
-  function suppressScroll() {
-    state = 'SUPPRESSED';
-    clearTimeout(suppressTimer);
-    suppressTimer = setTimeout(() => {
-      if (state === 'SUPPRESSED') state = 'AUTO';
-    }, 500);
-    if (viewport) prevScrollTop = viewport.scrollTop;
-  }
-
-  scrollBtn.addEventListener('click', () => {
-    scrollToBottom();
-    term.focus();
-  });
-
-  // Use the DOM viewport element for scroll position checks.
-  // xterm renders .xterm-viewport as the scrollable container.
-  const viewport = container?.querySelector('.xterm-viewport');
-
-  if (viewport) {
-    // Detect user scroll-up intent via wheel event. Wheel fires synchronously,
-    // before the browser updates scrollTop and before the async scroll event.
-    // This prevents the race where onWriteParsed (which fires between the
-    // scrollTop change and the scroll event) yanks the viewport back to bottom.
-    viewport.addEventListener('wheel', (e) => {
-      if (state === 'SUPPRESSED') return;
-      if (e.deltaY < 0 && state === 'AUTO') {
-        state = 'USER_SCROLLED';
-        scrollBtn.classList.add('visible');
-      }
-    }, { passive: true });
-
-    viewport.addEventListener('scroll', () => {
-      if (state === 'SUPPRESSED') return;
-
-      const scrollTop = viewport.scrollTop;
-      const scrolledUp = scrollTop < prevScrollTop;
-      prevScrollTop = scrollTop;
-
-      const gap = viewport.scrollHeight - scrollTop - viewport.clientHeight;
-
-      if (gap <= BOTTOM_TOLERANCE) {
-        state = 'AUTO';
-        scrollBtn.classList.remove('visible');
-      } else if (scrolledUp) {
-        state = 'USER_SCROLLED';
-        scrollBtn.classList.add('visible');
-      } else if (state === 'USER_SCROLLED' && gap <= SNAP_TOLERANCE) {
-        scrollToBottom();
-      } else if (state === 'AUTO' && gap > SNAP_TOLERANCE) {
-        // User is far from bottom in AUTO state (e.g. after suppression ended
-        // while scrolled up). Transition to USER_SCROLLED so button appears.
-        // Uses SNAP_TOLERANCE (not BOTTOM_TOLERANCE) to avoid flicker during
-        // rapid output where auto-scroll momentarily lags.
-        state = 'USER_SCROLLED';
-        scrollBtn.classList.add('visible');
-      }
-      // USER_SCROLLED + !scrolledUp + gap>SNAP → stay USER_SCROLLED (button already visible)
-    }, { passive: true });
-  }
-
-  term.onWriteParsed(() => {
-    if (state === 'AUTO') {
-      term.scrollLines(0); // Force viewport sync — Ink repaints can desync viewport (#188)
-      if (!viewport) { term.scrollToBottom(); return; }
-      const gap = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight;
-      if (gap > BOTTOM_TOLERANCE) {
-        term.scrollToBottom();
-      }
-    }
-  });
+  // Force a viewport sync after each parsed frame - Ink repaints can desync the
+  // viewport (#188). scrollLines(0) is a 0-delta scroll: it never yanks a
+  // scrolled-up user, and xterm handles following live output to the bottom.
+  term.onWriteParsed(() => { term.scrollLines(0); });
 
   return {
     scrollToBottom,
-    suppressScroll,
-    /** Re-sync viewport to bottom if user hasn't intentionally scrolled up. */
-    nudgeToBottom() {
-      if (state === 'AUTO') {
-        if (!viewport) { term.scrollToBottom(); return; }
-        const gap = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight;
-        if (gap > BOTTOM_TOLERANCE) {
-          term.scrollToBottom();
-        }
-      }
-    },
-    /** Force xterm viewport layout sync — call after Ink repaints or state transitions. */
+    /** Force xterm viewport layout sync - call after Ink repaints. */
     syncViewport() {
       term.scrollLines(0);
     }
@@ -270,18 +161,12 @@ export function observeTerminalResize(container, term, fit, ws) {
     if (container.clientWidth === 0 || container.clientHeight === 0) return;
     clearTimeout(debounceTimer);
     debounceTimer = setTimeout(() => {
-      // Preserve scroll position across refit (layout toggle, panel resize)
-      const vp = container.querySelector('.xterm-viewport');
-      const wasAtBottom = vp ? (vp.scrollHeight - vp.scrollTop - vp.clientHeight) < 20 : true;
-      const savedScroll = vp?.scrollTop;
+      // Preserve scroll position across refit (layout toggle, panel resize).
+      // xterm 6's .xterm-viewport is inert; re-pin to bottom only if we were
+      // already following, else let xterm keep its position (#586).
+      const atBottom = term.buffer.active.viewportY >= term.buffer.active.baseY;
       fit.fit();
-      if (vp) {
-        if (wasAtBottom) {
-          term.scrollToBottom();
-        } else {
-          vp.scrollTop = savedScroll;
-        }
-      }
+      if (atBottom) term.scrollToBottom();
       term.scrollLines(0); // Force viewport sync after resize
       ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
     }, 100);
