@@ -276,17 +276,10 @@ function applySettings(settings) {
   }).catch(() => {});
 }
 
-// When the browser tab regains visibility, re-sync scroll position.
-// scrollToBottom() calls from onWriteParsed may have been no-ops while
-// the tab was hidden (browsers skip layout for background tabs), so the
-// viewport can fall behind even though the scroll state is AUTO.
+// When the browser tab regains visibility, clear its notification state.
 document.addEventListener('visibilitychange', () => {
   if (!document.hidden && activeId) {
     clearNotification(activeId);
-    const session = sessions.get(activeId);
-    if (session?.scrollControl) {
-      session.scrollControl.nudgeToBottom();
-    }
   }
 });
 window.addEventListener('focus', () => {
@@ -1761,7 +1754,6 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
     const session = assignedId ? sessions.get(assignedId) : null;
     if (session) {
       session.container.classList.remove('reconnecting');
-      session.scrollControl.suppressScroll();
       // ResizeObserver handles fit; just request redraw from server
       ws.send(JSON.stringify({ type: 'redraw' }));
       // After a daemon restart the PTY is respawned at the cols/rows frozen into
@@ -1951,10 +1943,6 @@ function initTerminal(id, ws, cwd, initialName, { hasScrollback = false, pending
   // Store session in memory
   const searchAddon = attachSearchAddon(term);
   sessions.set(id, { term, fit, ws, container, cwd, name, waitingForInput: false, hasUnseenActivity: false, scrollControl, searchAddon });
-
-  // Suppress scroll during init to prevent onWriteParsed races with
-  // buffered data flush and scrollback replay
-  scrollControl.suppressScroll();
 
   // Flush any buffered data that arrived before the terminal was created
   for (const data of pendingData) {
@@ -2239,7 +2227,6 @@ function switchTo(id) {
     if (session.type === 'mod-tab' || session.type === 'display-tab') return;
 
     setHashCommandsWaiting(!!session.waitingForInput);
-    session.scrollControl.suppressScroll();
     requestAnimationFrame(() => {
       try {
         fitTerminal(session.term, session.fit, session.ws);
