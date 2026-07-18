@@ -13,7 +13,7 @@ import { SessionStore } from './session-store.js';
 import { SessionStores, getTabSessions } from './session-stores.js';
 import { WindowManager } from './window-manager.js';
 import { TabManager, getDefaultTabName, initTabArrows } from './tab-manager.js';
-import { createTerminal, setupTerminalIO, fitTerminal, observeTerminalResize, measureTerminalSize, updateTerminalTheme } from './terminal.js';
+import { createTerminal, setupTerminalIO, fitTerminal, observeTerminalResize, measureTerminalSize, updateTerminalTheme, installTerminalWheelGuard } from './terminal.js';
 import { createWebSocket } from './ws-client.js';
 import { createConnectionTracker } from './connection-status.js';
 import { showDirectoryPicker } from './dir-picker.js';
@@ -3646,6 +3646,11 @@ async function init() {
 
   // Initialize tab scroll arrows
   initTabArrows();
+
+  // Keep macOS pinch-zoom (ctrl-wheel) away from xterm so the browser can zoom
+  // over the terminal (#583). Delegated on #terminals; ModManager's #content-row
+  // wrap moves the same node, so the listener survives regardless of ordering.
+  installTerminalWheelGuard(document.getElementById('terminals'));
 
   // Initialize mod system
   ModManager.init({

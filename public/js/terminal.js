@@ -12,6 +12,20 @@ function getTerminalForeground() {
   return getComputedStyle(document.documentElement).getPropertyValue('--ds-terminal-foreground').trim() || null;
 }
 
+// #583: macOS pinch-zoom arrives as wheel events with ctrlKey=true. xterm 6
+// cancels every wheel it sees (its mouse-reporting path calls preventDefault
+// unconditionally), which blocks browser zoom over the terminal and, while
+// pinch-zoomed, blocks panning — scroll input dead-ends. A capture-phase
+// stopPropagation on the ancestor keeps ctrl-wheels away from xterm's bubble
+// listeners; no preventDefault, so the browser's zoom default proceeds.
+export function handleTerminalWheelCapture(e) {
+  if (e.ctrlKey) e.stopPropagation();
+}
+
+export function installTerminalWheelGuard(el) {
+  el.addEventListener('wheel', handleTerminalWheelCapture, { capture: true, passive: true });
+}
+
 export function createTerminal(container, { cols, rows } = {}) {
   const themeObj = { background: getTerminalBackground() };
   const fg = getTerminalForeground();
