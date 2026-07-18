@@ -503,3 +503,8 @@ textarea:focus {
   background: #000080 !important;
   box-shadow: 0 0 0 1px #c0c0c0 !important;
 }
+
+/* The GitHub-issue bolt follows the button's flat black (#552 SVG uses currentColor,
+   and the base theme colors it gold via --ds-issue-bolt). Win95 chrome is strictly
+   black-on-grey, so reclaim the glyph. */
+#issue-btn { --ds-issue-bolt: currentColor; }

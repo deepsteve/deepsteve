@@ -496,3 +496,7 @@ input:focus, select:focus, textarea:focus {
 .overview-tile.active {
   border-color: var(--ds-accent-green) !important;
 }
+
+/* The ⚡ is drawn as a ::before glyph here and should read in the theme's own ink,
+   not the base theme's gold (--ds-issue-bolt). */
+#issue-btn { --ds-issue-bolt: currentColor; }

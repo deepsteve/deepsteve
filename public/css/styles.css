@@ -17,6 +17,7 @@
   --ds-btn-neutral-active: #272c33;
   --ds-accent-orange: #f0883e;
   --ds-accent-green-soft: #3fb950;
+  --ds-issue-bolt: #f5c518;        /* GitHub-issue ⚡ glyph — was a colored emoji until #552 flattened it to a currentColor SVG; theme-overridable */
   --ds-selected-bg: #1f3a2e;
   --ds-overlay: rgba(0, 0, 0, 0.7);
   --ds-shadow: rgba(0, 0, 0, 0.4);
@@ -502,6 +503,10 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
 /* Issue Button */
 #issue-btn { padding: 4px 8px; background: var(--ds-bg-tertiary); border: 1px solid var(--ds-border); color: var(--ds-text-secondary); border-radius: 4px; cursor: pointer; font-size: 15px; line-height: 1; flex-shrink: 0; }
 #issue-btn:hover { background: var(--ds-border); color: var(--ds-text-primary); }
+/* The bolt glyph keeps its own color (like the ⚡ emoji did before #552) instead of
+   inheriting the button's muted currentColor — set on the icon so button hover chrome
+   is unaffected and the label (shown in the rail) stays normal text color. */
+#issue-btn .btn-icon { color: var(--ds-issue-bolt); }
 
 /* Sessions Dropdown */
 .dropdown { position: relative; flex-shrink: 0; }
