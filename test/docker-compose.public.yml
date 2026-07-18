@@ -10,9 +10,9 @@ services:
       - DEEPSTEVE_BIND=0.0.0.0
       # Auth (#536): the test container reaches us as http://server:3000, so allowlist that host.
       - DEEPSTEVE_ALLOW_HOST=server
-      # Test mode (#562): the PUBLISHED build ignores this until a release ships #562. Until then
-      # this suite is EXPECTED RED — the helpers refuse a server whose /api/version lacks
-      # testMode:true, and there is deliberately no bypass. Goes green with the next release.
+      # Test mode (#562): required so the test helpers accept this server — they refuse any target
+      # whose /api/version lacks testMode:true, with no bypass. The published build ships #562, so
+      # this enables test mode exactly as in the source-built suites.
       - DEEPSTEVE_TEST_MODE=1
     volumes:
       # Token-only volume (#539): the app lives IN /root/.deepsteve here (unlike docker-compose.yml,
@@ -31,11 +31,9 @@ services:
         install -m 600 /auth/token /root/.deepsteve/auth-token
         exec node server.js
     healthcheck:
-      # This suite installs the PUBLISHED deepsteve.com build, which lags source: it may predate
-      # #536 (no /healthz endpoint yet) or, post-release, be #536+ (/api/version auth-gated). GET /
-      # (static index.html) is served unauthenticated in EVERY version, so it's the only
-      # version-robust readiness probe here. Do NOT use /healthz or /api/version in THIS file —
-      # the source-built suites (docker-compose.yml / .install.yml) can, since they run current code.
+      # GET / (static index.html) is served unauthenticated in every build, so it needs no token
+      # and no version-specific endpoint. Do NOT switch to /api/version here: it's auth-gated and
+      # the token isn't seeded into the healthcheck's environment.
       test: ["CMD", "curl", "-sf", "-o", "/dev/null", "http://localhost:3000/"]
       interval: 2s
       timeout: 5s
@@ -54,19 +52,16 @@ services:
     volumes:
       - ds_token:/auth   # read the server-seeded auth token (#539)
     # Copy the token where the test helper reads it (~/.deepsteve/auth-token), then run files
-    # serially (one process each). Skips (SKIP_PATTERN is an ERE alternation):
-    #   tmux-engine   — install.sh has no tmux.
-    #   security-auth — this suite installs the PUBLISHED build, which lags source and may predate
-    #                   #536, so its no-auth server fails the auth-contract assertions. Auth is
-    #                   already covered by the source-built suites (docker-compose.yml / .install.yml).
-    # See test/run-integration.sh for why --test-concurrency=1 isn't enough.
+    # serially (one process each). Skip only tmux-engine: the public install image has no tmux
+    # (Dockerfile.public installs just zsh + curl). See test/run-integration.sh for why
+    # --test-concurrency=1 isn't enough.
     command:
       - sh
       - -c
       - |
         set -e
         cp /auth/token /root/.deepsteve/auth-token
-        exec sh test/run-integration.sh 'security-auth|tmux-engine'
+        exec sh test/run-integration.sh 'tmux-engine'
 
 volumes:
   ds_token:
