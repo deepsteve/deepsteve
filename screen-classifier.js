@@ -9,11 +9,26 @@
  *
  * The one robust signal, chosen after inspecting real captures:
  *
- *   Claude's working spinner re-emits its `esc to interrupt` hint on EVERY
- *   animation frame (sub-second) for the whole turn, including during long tool
- *   calls. So "working" is decided by the *recency* of that marker — tracked by
- *   the caller as `lastSpinnerTime` (only chunks that contain the spinner regex
- *   refresh it) — NOT by its mere presence in the tail.
+ *   Claude's working spinner repaints on EVERY animation frame (sub-second) for
+ *   the whole turn, including during long tool calls. So "working" is decided by
+ *   the *recency* of a spinner-bearing chunk — tracked by the caller as
+ *   `lastSpinnerTime` (only chunks that match the spinner regex refresh it) —
+ *   NOT by its mere presence in the tail.
+ *
+ *   What identifies a spinner frame has to survive TUI drift. The original
+ *   marker was the `esc to interrupt` hint, which older Claude Code re-emitted
+ *   on the spinner line every frame — but mid-2026 builds moved that hint off
+ *   the spinner line (into the ⏵⏵ mode footer) and the status line became
+ *   "✳ Hatching… (6m 53s · ↓ 18.3k tokens · …)". With no chunk ever matching,
+ *   lastSpinnerTime stayed stale, every classify fell through to 'unknown'
+ *   (= leave flag as-is), and each session's waitingForInput froze at whatever
+ *   it last was — in practice True, since sessions pass through the idle prompt
+ *   between turns. The durable per-frame signal is the spinner GLYPH itself:
+ *   every animation frame rewrites one of ✢✳✶✻✽ (cursor-addressed diffs like
+ *   "✻ge" still carry it). The regex now matches glyph OR hint, covering both
+ *   generations. A glyph in a completed-turn line ("✻ Sautéed for 42s") or in
+ *   pasted text refreshes at most once — a one-off ≤2.5s phantom 'working',
+ *   self-healing, and the safe direction of error.
  *
  * Why recency and not position: the server has no terminal emulator, so the
  * ANSI-stripped scrollback tail is a concatenation of many overlapping partial
@@ -48,11 +63,14 @@ const SPINNER_MAX_QUIET_MS = 2500;
 // another agent later) is a one-place edit. Matched against the ANSI-stripped,
 // whitespace-collapsed screen tail.
 const CLAUDE_SCREEN_MARKERS = {
-  // The live-turn hint on the spinner line ("… · esc to interrupt · Ns"). Only
-  // present while a turn runs — the completed-turn line ("✻ Sautéed for 42s") has
-  // no interrupt hint, so this cleanly distinguishes an active spinner from a
-  // finished one. Used by the caller to refresh lastSpinnerTime per chunk.
-  spinner: /esc to interrupt/i,
+  // A spinner animation frame. Two alternates spanning TUI generations: the
+  // glyph set ✢✳✶✻✽ is rewritten on every frame by current Claude Code (even
+  // cursor-addressed frame diffs carry it), and `esc to interrupt` is the
+  // per-frame spinner-line hint of older builds. Deliberately NOT `·` (footer
+  // separator, far too common). Used by the caller to refresh lastSpinnerTime
+  // per chunk; a one-off match (completed-turn line, pasted glyph) costs at
+  // most one SPINNER_MAX_QUIET_MS window of phantom 'working'.
+  spinner: /esc to interrupt|[✢✳✶✻✽]/i,
 
   // Permission / selection dialogs — the agent is blocked on the user's choice.
   // Kept broad on purpose; these are only consulted once the spinner is stale, so

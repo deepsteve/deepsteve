@@ -58,9 +58,20 @@ spin() {
     i=$((i+1))
   done
 }
+# Mid-2026 Claude Code spinner: NO "esc to interrupt" anywhere — the per-frame
+# signal is the animated glyph alone (the shape that froze every flag at true).
+spinmodern() {
+  local n=$1 i=1
+  while [ $i -le $n ]; do
+    printf '%s Hatching... (%ss · 1.2k tokens · thinking)\\n' '✻' "$i"
+    sleep 0.5
+    i=$((i+1))
+  done
+}
 while IFS= read -r line; do
   case "$line" in
     *"/exit"*) exit 0 ;;
+    *workmodern*) ( spinmodern 20; printf 'work finished\\n'; print_footer ) & ;;
     *work*) ( spin 20; printf 'work finished\\n'; print_footer ) & ;;
     *idle*) print_footer ;;
     *perm*) printf '%s\\n' 'Do you want to proceed?' '1. Yes' '2. No' 'Esc to cancel · Tab to amend' ;;
@@ -353,6 +364,37 @@ test('#500 fixed: a running spinner is never "waiting"; flips only after the tur
   // directly rather than racing the stub's exact spin duration).
   await waitFor(() => c.statesSince(mark).some(m => m.waiting === true),
     'waiting:true once the turn ends and the footer appears', 30000);
+  assert.ok(c.raw.includes('work finished'), 'the turn had finished before the flag flipped');
+
+  submitLine(c, '/exit');
+});
+
+test('glyph-only spinner (mid-2026 TUI): a waiting flag flips back to working', async () => {
+  const c = track(new Client());
+  const s = await c.connect({ cwd: projDir, new: '1', agentType: 'claude' });
+
+  // Reach a decisive waiting:true first — this is the state every real session
+  // passes through between turns, and where the hint-only marker froze it.
+  let mark = c.mark();
+  submitLine(c, 'idle');
+  await waitFor(() => c.statesSince(mark).some(m => m.waiting === true),
+    'waiting:true at the idle footer', 8000);
+
+  // workmodern: glyph frames with NO "esc to interrupt". With the hint-only
+  // spinner marker nothing ever refreshed lastSpinnerTime, classify returned
+  // 'unknown' forever, and the flag stayed frozen at true for the whole turn —
+  // the 2026-07-17 "every tab shows Action Required" bug. The glyph heartbeat
+  // must flip it to working.
+  mark = c.mark();
+  submitLine(c, 'workmodern');
+  await waitFor(() => c.statesSince(mark).some(m => m.waiting === false),
+    'waiting:false once glyph frames arrive', 8000);
+  const midRest = await restState(s.id);
+  assert.strictEqual(midRest.waitingForInput, false, 'busy mid-glyph-spinner per REST');
+
+  // And back to waiting when the turn ends and the footer repaints.
+  await waitFor(() => c.statesSince(mark).filter(m => m.waiting === true).length >= 1,
+    'waiting:true once the modern turn ends', 30000);
   assert.ok(c.raw.includes('work finished'), 'the turn had finished before the flag flipped');
 
   submitLine(c, '/exit');

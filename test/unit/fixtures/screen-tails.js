@@ -135,6 +135,25 @@ const SELECTION_MENU_TAIL = [
   'Enter to select · Tab/Arrow keys to navigate · Esc to cancel',
 ].join('\n');
 
+// Real capture (2026-07-17) — a working session on a mid-2026 Claude Code build
+// (e11d1f4a, mid-file-write). The status line carries NO "esc to interrupt" (the
+// hint moved into the ⏵⏵ footer on these builds); only the animated glyph frames
+// (including cursor-addressed diffs like "✻ ge") identify the running turn. This
+// is the shape that froze every session's waiting flag while the spinner marker
+// was hint-only: no chunk ever refreshed lastSpinnerTime, classify returned
+// 'unknown' forever, and the flag stuck at its last decisive value (True).
+const MODERN_WORKING_TAIL = [
+  '⏺ BUILTIN_MODS is a parseable one-liner in server.js — the generator can extract it',
+  '✽ Writing revendor-demo.sh… thinking with xhigh effort)',
+  '4362',
+  'thought for 31s)',
+  '✢ endr-d 10s · ↓ 24.9k tokens · thought for 31s)',
+  '· vd',
+  '✳ v1',
+  '✻ ge',
+  '✽ nr',
+].join('\n');
+
 // SYNTHETIC — startup banner, nothing recognizable yet.
 const STARTUP_TAIL = 'stub claude ready\nStarting…';
 
@@ -151,6 +170,8 @@ const fixtures = [
   { name: 'normal-mode "? for shortcuts" → waiting', tail: IDLE_SHORTCUTS_TAIL, lastSpinnerTime: null, expect: 'waiting' },
   { name: 'STALE esc-to-interrupt in tail but footer last → waiting (robustness)', tail: STALE_SPINNER_THEN_IDLE_TAIL, lastSpinnerTime: STALE, expect: 'waiting' },
   { name: 'half-typed normal mode, no markers → unknown (keep-state)', tail: HALF_TYPED_TAIL, lastSpinnerTime: STALE, expect: 'unknown' },
+  { name: 'modern working, no esc-hint (real 2026-07), glyph frames fresh → working', tail: MODERN_WORKING_TAIL, lastSpinnerTime: FRESH, expect: 'working' },
+  { name: 'modern working, spinner stale → unknown (keep-state; heartbeat carries it live)', tail: MODERN_WORKING_TAIL, lastSpinnerTime: STALE, expect: 'unknown' },
   { name: 'startup banner → unknown', tail: STARTUP_TAIL, lastSpinnerTime: null, expect: 'unknown' },
   // Boundary: a spinner exactly at the freshness edge is stale (>= threshold);
   // referenced off the constant so the boundary tracks any retune.
