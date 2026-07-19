@@ -11,7 +11,7 @@
  */
 
 let enabled = true;
-let lineHasContent = false; // true once user types any non-# character on current line
+let lineText = ''; // mirrors the current input line; '' means empty, which is what gates # activation
 let callbacks = {};
 let active = false;
 let buffer = '';         // characters typed after #
@@ -346,17 +346,25 @@ export function beforeSend(data, container) {
     return true;
   }
 
-  // Track line content: reset on Enter, set on printable chars
-  if (data === '\r') {
-    lineHasContent = false;
+  // Mirror the current input line so the gate below can tell whether it is truly
+  // empty. Keys that clear the line (Enter, Ctrl+C, Ctrl+U, Escape) reset it;
+  // backspace drops the last char; word-kill strips the trailing word; printable
+  // chars append — except '#', the trigger itself, which must never count or it
+  // could never fire on an empty line.
+  if (data === '\r' || data === '\n' || data === '\x03' || data === '\x15' || data === '\x1b') {
+    lineText = '';
   } else if (data === '\x7f' || data === '\b') {
-    // Can't perfectly track backspace-to-empty, but that's fine
+    lineText = lineText.slice(0, -1);
+  } else if (data === '\x17' || data === '\x1b\x7f') {   // Ctrl+W, Option+Delete
+    const trimmed = lineText.replace(/\s+$/, '');
+    const lastSpace = trimmed.lastIndexOf(' ');
+    lineText = lastSpace >= 0 ? lineText.slice(0, lastSpace + 1) : '';
   } else if (data.length === 1 && data.charCodeAt(0) >= 32 && data !== '#') {
-    lineHasContent = true;
+    lineText += data;
   }
 
   // Not active — only intercept # at the start of a line (no prior content)
-  if (enabled && !lineHasContent && data.startsWith('#')) {
+  if (enabled && lineText === '' && data.startsWith('#')) {
     if (data === '#') {
       activate(container);
       return true;
@@ -379,7 +387,7 @@ export function beforeSend(data, container) {
 export function setWaitingForInput(w) {
   if (w) {
     // Fresh prompt — input line is empty, allow # to activate again.
-    lineHasContent = false;
+    lineText = '';
   } else if (active) {
     deactivate();
   }
