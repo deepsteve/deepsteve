@@ -1146,15 +1146,6 @@ kbd {
 .shortcuts-help-sep { font-size: 10px; color: var(--ds-text-secondary); }
 .shortcuts-help-desc { flex: 1; font-size: 13px; color: var(--ds-text-primary); }
 
-/* Overview Mode */
-#terminals.overview-mode { display: grid; grid-template-columns: repeat(auto-fill, minmax(400px, 1fr)); grid-auto-rows: minmax(250px, 1fr); gap: 8px; padding: 8px; overflow-y: auto; }
-#terminals.overview-mode .terminal-container.overview-visible { position: relative; inset: auto; display: flex; flex-direction: column; border: 2px solid var(--ds-border); border-radius: 6px; overflow: hidden; cursor: pointer; transition: border-color 0.15s; }
-#terminals.overview-mode .terminal-container.overview-visible.overview-focused { border-color: var(--ds-accent-blue); }
-#terminals.overview-mode #empty-state { display: none; }
-.overview-label { position: absolute; top: 0; left: 0; right: 0; padding: 4px 10px; background: var(--ds-bg-secondary); border-bottom: 1px solid var(--ds-border); font-size: 12px; color: var(--ds-text-primary); z-index: 5; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; pointer-events: none; }
-.overview-waiting { position: absolute; top: 6px; right: 10px; width: 8px; height: 8px; border-radius: 50%; background: var(--ds-accent-green); z-index: 6; animation: overview-pulse 2s ease-in-out infinite; pointer-events: none; }
-@keyframes overview-pulse { 0%, 100% { opacity: 0.4; } 50% { opacity: 1; } }
-
 /* Hash Commands (#) autocomplete */
 .hash-command-popup { position: absolute; bottom: 8px; left: 16px; right: 16px; max-width: 420px; background: var(--ds-bg-secondary); border: 1px solid var(--ds-border); border-radius: 6px; box-shadow: 0 4px 20px var(--ds-shadow); z-index: 200; display: flex; flex-direction: column; font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', Menlo, monospace; overflow: hidden; }
 .hash-command-input { padding: 10px 14px; border-bottom: 1px solid var(--ds-border); font-size: 14px; color: var(--ds-text-bright); white-space: pre; line-height: 1.4; }
@@ -1173,7 +1164,11 @@ kbd {
 .hash-command-item-arg { font-size: 12px; color: var(--ds-text-secondary); font-style: italic; white-space: nowrap; }
 .hash-command-item-desc { font-size: 12px; color: var(--ds-text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-left: auto; }
 
-/* Overview Mode */
+/* Overview Mode — the grid geometry lives ONLY on the .overview-tall /
+   .overview-tiled classes below. An earlier copy of this block also set
+   grid-template-columns/grid-auto-rows on the bare .overview-mode selector, so
+   tall's 250px row floor leaked into tiled and fought its grid-template-rows:
+   1fr 1fr under overflow-y: hidden (#590). */
 #terminals.overview-mode { display: grid; gap: 8px; padding: 8px; overflow-y: auto; }
 #terminals.overview-mode .terminal-container.overview-visible { position: relative; inset: auto; display: flex; flex-direction: column; border: 2px solid var(--ds-border); border-radius: 6px; overflow: hidden; cursor: pointer; transition: border-color 0.15s; }
 #terminals.overview-mode .terminal-container.overview-visible.overview-focused { border-color: var(--ds-accent-blue); }

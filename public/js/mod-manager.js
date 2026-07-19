@@ -1562,7 +1562,12 @@ function _showPanel() {
     panelContainer.style.display = 'block';
     panelContainer.style.width = panelWidth + 'px';
     panelResizer.style.display = 'block';
-    document.getElementById('terminals').style.display = 'block';
+    // #terminals deliberately gets NO inline display here. It is a plain div —
+    // already `block` — so this only ever re-stated the default, but an inline
+    // declaration outranks any stylesheet rule, and it silently beat
+    // `#terminals.overview-mode { display: grid }`. With a panel open, overview
+    // mode then laid its tiles out as full-width stacked blocks instead of a
+    // grid (#590).
   }
 
   localStorage.setItem(PANEL_VISIBLE_KEY, 'true');
@@ -1585,6 +1590,8 @@ function _hidePanel() {
   // Hide panel container + resizer
   panelContainer.style.display = 'none';
   panelResizer.style.display = 'none';
+  // Clear the inline display _showPanel used to set, so a tab that opened a panel
+  // before this build isn't stuck with it (see the note there).
   document.getElementById('terminals').style.display = '';
 
   localStorage.setItem(PANEL_VISIBLE_KEY, 'false');

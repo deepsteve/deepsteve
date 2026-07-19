@@ -226,6 +226,15 @@ export function applyFilter() {
 
   renderRail();
   updateIndicator();
+
+  // The one "the view is now settled on this context" edge (#590). Deliberately
+  // here and not in notifyActive(): notifyActive() runs BEFORE this function, so
+  // the .context-hidden classes a consumer would read are still the old
+  // context's, and the snap-back above may not have picked the final active tab
+  // yet. Overview mode uses it to hide the outgoing context's grid and re-show
+  // the incoming one's. Fires on tab-set changes too (notifyTabsChanged), which
+  // is why consumers must be idempotent.
+  cb.onContextViewApplied?.(activeContextId);
 }
 
 // Muted active-context name shown right of the ◧ toggle, but only while the rail
