@@ -13,7 +13,7 @@ import { SessionStore } from './session-store.js';
 import { SessionStores, getTabSessions } from './session-stores.js';
 import { WindowManager } from './window-manager.js';
 import { TabManager, getDefaultTabName, initTabArrows } from './tab-manager.js';
-import { createTerminal, setupTerminalIO, fitTerminal, observeTerminalResize, measureTerminalSize, updateTerminalTheme, installTerminalWheelGuard } from './terminal.js';
+import { createTerminal, setupTerminalIO, fitTerminal, resizeTerminal, observeTerminalResize, measureTerminalSize, updateTerminalTheme, installTerminalWheelGuard } from './terminal.js';
 import { createWebSocket } from './ws-client.js';
 import { createConnectionTracker } from './connection-status.js';
 import { showDirectoryPicker } from './dir-picker.js';
@@ -27,7 +27,7 @@ import { init as initCommandPalette, setEnabled as setCommandPaletteEnabled, set
 import { init as initShortcutsHelp, setEnabled as setShortcutsHelpEnabled, setShortcut as setShortcutsHelpShortcut, open as openShortcutsHelp } from './shortcuts-help.js';
 import { init as initProgressBar, start as progressStart, done as progressDone } from './progress-bar.js';
 import { init as initHashCommands, beforeSend as hashCommandsBeforeSend, setWaitingForInput as setHashCommandsWaiting, setEnabled as setHashCommandsEnabled } from './hash-commands.js';
-import { init as initOverviewMode, setEnabled as setOverviewModeEnabled, setShortcut as setOverviewModeShortcut, setDefaultLayout as setOverviewDefaultLayout, toggle as toggleOverviewMode, isOverviewActive, updateFocus as updateOverviewFocus, onTabsReordered as onOverviewTabsReordered } from './overview-mode.js';
+import { init as initOverviewMode, setEnabled as setOverviewModeEnabled, setShortcut as setOverviewModeShortcut, setDefaultLayout as setOverviewDefaultLayout, toggle as toggleOverviewMode, isOverviewActive, updateFocus as updateOverviewFocus, onTabsReordered as onOverviewTabsReordered, syncToContext as syncOverviewToContext } from './overview-mode.js';
 import { init as initTerminalSearch, attachSearchAddon, closeIfOpen as closeTerminalSearch } from './terminal-search.js';
 import { init as initContextViews, setEnabled as setContextViewsEnabled, applyFilter as refreshContextFilter, requestNewTabInContext, setContexts as applyServerContexts, setActiveContext as setActiveContextFromPanel, getActiveContextId, getActiveContextInfo, orderRecentDirsByContext, activeContextIsEmpty, noteActiveTab, revealTabContext, showToast } from './context-views.js';
 import { nsKey } from './storage-namespace.js';
@@ -406,6 +406,12 @@ function getSessionList() {
 function notifyTabsChanged() {
   ModManager.notifySessionsChanged(getSessionList());
   refreshContextFilter();
+  // refreshContextFilter() normally drives this via onContextViewApplied, but it
+  // early-returns when context views are disabled — and a persisted grid still
+  // has to come back once the restored tabs exist (#590). syncToContext() no-ops
+  // when the grid already matches the active context, so the double call while
+  // context views are on costs nothing.
+  syncOverviewToContext();
 }
 
 // Expose session internals for mods that need direct terminal access (e.g. reparenting)
@@ -3685,6 +3691,10 @@ async function init() {
     // Bidirectional group/context sync (#526): tell the scheduled-tasks panel
     // which context is active whenever the rail changes it.
     onActiveContextChanged: (id) => ModManager.notifyActiveContextChanged(id),
+    // Overview mode is per-context view state (#590): reconcile the grid once the
+    // filter has settled, so switching away hides the old context's tiles (and
+    // restores their size) and switching back re-shows that context's grid.
+    onContextViewApplied: () => syncOverviewToContext(),
   });
 
   // File drag-and-drop upload
@@ -3863,9 +3873,31 @@ async function init() {
     // focusTab, not switchTo: no-op reveal under visible-scoping today, but keeps
     // the "every deliberate jump reveals its context" invariant (#559).
     switchToTab: focusTab,
-    fitAllTerminals: () => {
-      for (const [, s] of sessions) {
-        if (s.term && s.fit && s.ws) fitTerminal(s.term, s.fit, s.ws);
+    // Non-revealing counterpart to switchToTab: used when the grid comes down as
+    // part of a context switch, where focusTab's revealTabContext would bounce
+    // the view back to the context being left (#590).
+    activateTab: switchTo,
+    getActiveContextId,
+    fitTerminals: (ids) => {
+      for (const id of ids) {
+        const s = sessions.get(id);
+        if (s?.term && s.fit && s.ws) fitTerminal(s.term, s.fit, s.ws);
+      }
+    },
+    // Give each terminal in the grid its pre-overview size back. Only the one
+    // still-visible container can be measured; every other one is display:none by
+    // now, and FitAddon silently no-ops on those — which is exactly how #421's
+    // fix left them stranded at tile dimensions. Hand those the numbers instead
+    // (#590).
+    restoreTerminals: (dims) => {
+      for (const [id, d] of dims) {
+        const s = sessions.get(id);
+        if (!s?.term || !s.ws) continue;
+        if (s.container.clientWidth > 0 && s.container.clientHeight > 0) {
+          if (s.fit) fitTerminal(s.term, s.fit, s.ws);
+        } else {
+          resizeTerminal(s.term, s.ws, d.cols, d.rows);
+        }
       }
     },
     focusTerminal: () => {

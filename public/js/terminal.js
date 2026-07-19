@@ -150,6 +150,23 @@ export function fitTerminal(term, fit, ws) {
 }
 
 /**
+ * Resize a terminal to an explicit grid, for the case fitTerminal() cannot serve:
+ * a container with no layout box. FitAddon measures
+ * getComputedStyle(term.element.parentElement).height, which resolves to `auto`
+ * on a display:none element, so proposeDimensions() yields NaN and fit() returns
+ * having done nothing — silently (the same fact createTerminal's #566 comment
+ * relies on). Anything that shrinks a hidden terminal therefore cannot grow it
+ * back by fitting; it has to hand the dimensions back. Overview mode is the one
+ * caller: it shrinks every tab in the grid, and all but the active one are hidden
+ * by the time it exits (#590).
+ */
+export function resizeTerminal(term, ws, cols, rows) {
+  if (!(cols > 0) || !(rows > 0)) return;
+  if (term.cols !== cols || term.rows !== rows) term.resize(cols, rows);
+  ws.send(JSON.stringify({ type: 'resize', cols, rows }));
+}
+
+/**
  * Create a ResizeObserver that auto-fits the terminal when its container changes size.
  * Handles window resize, layout toggle, mod panel open/close.
  * Tab switching is handled by switchTo() calling fitTerminal() directly.
