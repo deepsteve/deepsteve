@@ -410,7 +410,7 @@ Issue description:
 
 Please read the issue carefully, understand the codebase context, and implement the changes needed.`;
 
-const AGENT_TYPES = ['claude', 'hermes', 'opencode', 'pi'];
+const AGENT_TYPES = ['claude', 'codex', 'hermes', 'opencode', 'pi'];
 
 const SETTINGS_SCHEMA = [
   { name: 'shellProfile',               type: 'string',  default: '~/.zshrc' },
@@ -441,7 +441,7 @@ const SETTINGS_SCHEMA = [
   { name: 'metaControlsEnabled',        type: 'boolean', default: false },
   { name: 'inheritRemoteControl',       type: 'boolean', default: true },
   { name: 'inheritRemoteControlOnFork', type: 'boolean', default: true },
-  { name: 'enabledAgents',              type: 'array',   default: ['claude', 'hermes', 'opencode', 'pi'],
+  { name: 'enabledAgents',              type: 'array',   default: ['claude', 'codex', 'hermes', 'opencode', 'pi'],
     itemEnum: AGENT_TYPES, nonEmpty: true, broadcast: false,
     sideEffect: (val, s) => { s.defaultAgent = val[0]; },
     logValue: v => v.join(',') },
@@ -915,12 +915,80 @@ function broadcastSkills() {
  * Spawn a session using the specified engine.
  * @param {Engine} eng - Engine instance to use
  * @param {string} id - Session ID
- * @param {string} agentType - 'claude', 'hermes', 'opencode', or 'pi'
+ * @param {string} agentType - 'claude', 'codex', 'hermes', 'opencode', or 'pi'
  * @param {string[]} args - Agent CLI arguments
  * @param {string} cwd - Working directory
  * @param {{ cols?: number, rows?: number, env?: object }} opts
  */
-function sessionEnv(id, { name, worktree, windowId, cwd, agentType, configDir } = {}) {
+const CODEX_SHARED_HOME = path.join(os.homedir(), '.codex');
+const CODEX_SESSION_ROOT = path.join(os.homedir(), '.deepsteve', 'codex-sessions');
+const CODEX_SHARED_ENTRIES = [
+  'auth.json',
+  'config.toml',
+  'requirements.toml',
+  'AGENTS.md',
+  'agents',
+  'prompts',
+  'rules',
+  'skills',
+  'plugins',
+  'marketplaces',
+  'packages',
+  'hooks',
+  'memories',
+  'themes',
+  'pets',
+];
+
+// Codex generates its own session UUID and only supports deterministic recovery
+// after startup via `codex resume <id>` or `codex resume --last`. Give every
+// DeepSteve tab an isolated CODEX_HOME so --last can never adopt a sibling tab's
+// conversation, even when several Codex tabs share the same cwd. Configuration,
+// authentication, skills, and plugins remain linked to the user's normal Codex
+// home; runtime state (sessions/history/sqlite/logs) stays private to the tab.
+function ensureCodexSessionHome(homeId) {
+  const key = String(homeId || '');
+  if (!/^[0-9a-f]{8}$/.test(key)) return null;
+  const sessionHome = path.join(CODEX_SESSION_ROOT, key);
+  try {
+    fs.mkdirSync(sessionHome, { recursive: true, mode: 0o700 });
+    for (const name of CODEX_SHARED_ENTRIES) {
+      const source = path.join(CODEX_SHARED_HOME, name);
+      const target = path.join(sessionHome, name);
+      if (!fs.existsSync(source)) continue;
+      try {
+        fs.lstatSync(target);
+        continue;
+      } catch (err) {
+        if (err.code !== 'ENOENT') continue;
+      }
+      fs.symlinkSync(source, target, fs.statSync(source).isDirectory() ? 'dir' : 'file');
+    }
+  } catch (err) {
+    log(`Failed to provision Codex session home ${sessionHome}: ${err.message}`);
+    return null;
+  }
+  return sessionHome;
+}
+
+function codexSessionHomeHasTranscript(homeId) {
+  const key = String(homeId || '');
+  if (!/^[0-9a-f]{8}$/.test(key)) return false;
+  const pending = [path.join(CODEX_SESSION_ROOT, key, 'sessions')];
+  while (pending.length > 0) {
+    const dir = pending.pop();
+    let entries;
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); }
+    catch { continue; }
+    for (const entry of entries) {
+      if (entry.isFile() && entry.name.endsWith('.jsonl')) return true;
+      if (entry.isDirectory()) pending.push(path.join(dir, entry.name));
+    }
+  }
+  return false;
+}
+
+function sessionEnv(id, { name, worktree, windowId, cwd, agentType, configDir, codexHomeId } = {}) {
   // Ensure this profile's config dir sees deepsteve skills (#543). Cheap + idempotent
   // (an lstat that early-returns when already correct); self-heals a profile whose config
   // dir didn't exist when it was added. Guarded so plain sessions do nothing.
@@ -934,6 +1002,7 @@ function sessionEnv(id, { name, worktree, windowId, cwd, agentType, configDir } 
   if (worktree && agentCwd && getAgentConfig(agentType).supportsWorktree) {
     agentCwd = getWorktreePath(agentCwd, worktree);
   }
+  const codexHome = agentType === 'codex' ? ensureCodexSessionHome(codexHomeId || id) : null;
   return {
     DEEPSTEVE_SESSION_ID: id,
     DEEPSTEVE_TAB_NAME: name || '',
@@ -947,6 +1016,7 @@ function sessionEnv(id, { name, worktree, windowId, cwd, agentType, configDir } 
     // Custom Claude config profile (#537): point Claude at an alternate config dir.
     // Emitted only for profile sessions, so plain sessions stay byte-for-byte identical.
     ...(configDir ? { CLAUDE_CONFIG_DIR: configDir } : {}),
+    ...(codexHome ? { CODEX_HOME: codexHome } : {}),
   };
 }
 
@@ -972,6 +1042,7 @@ function spawnSession(eng, id, agentType, args, cwd, { cols = 120, rows = 40, en
     return;
   }
   const bin = agentType === 'claude' ? 'claude'
+    : agentType === 'codex' ? 'codex'
     : agentType === 'hermes' ? (settings.hermesBinary || 'hermes')
     : agentType === 'opencode' ? (settings.opencodeBinary || 'opencode')
     : agentType === 'pi' ? (settings.piBinary || 'pi')
@@ -995,6 +1066,17 @@ const AGENT_CONFIGS = {
     planModeValue: 'plan',
     resumeFlag: '--resume',
     resumeDefault: '-c'
+  },
+  codex: {
+    supportsWorktree: false,
+    supportsSessionId: false,    // Codex generates its UUID; per-tab CODEX_HOME isolates --last
+    supportsSessionWatch: false,
+    emitsBel: false,
+    exitMethod: 'sigterm',       // Codex persists turns continuously; SIGTERM is safe during shutdown
+    initialPromptDelay: 0,       // readiness comes from Codex's rendered MCP lifecycle, never a timer
+    codexReadiness: true,
+    resumeFlag: 'resume',
+    resumeDefault: '--last'
   },
   hermes: {
     supportsWorktree: false, // Hermes --worktree is a boolean flag (no name arg), so we create worktrees manually
@@ -1049,7 +1131,15 @@ function spawnAgent(id, agentType, args, cwd, opts = {}) {
 }
 
 function mcpConfigArgs(agentType, shellId) {
-  if (agentType !== 'claude' || !shellId) return [];
+  if (!shellId) return [];
+  if (agentType === 'codex') {
+    const url = `http://localhost:${PORT}/mcp?shellId=${shellId}`;
+    return [
+      '-c', `mcp_servers.deepsteve.url=${JSON.stringify(url)}`,
+      '-c', 'mcp_servers.deepsteve.bearer_token_env_var="DEEPSTEVE_API_TOKEN"',
+    ];
+  }
+  if (agentType !== 'claude') return [];
   // The MCP config carries the auth bearer token (#536). Write it to a per-shell 0600 file and pass
   // the PATH (claude's --mcp-config accepts file paths) — never inline JSON in argv, which `ps`
   // exposes to every other local user.
@@ -1109,6 +1199,14 @@ function getSpawnArgs(agentType, { sessionId, planMode, worktree, shellId }) {
 function getResumeArgs(agentType, { sessionId, planMode, worktree, shellId }) {
   const config = getAgentConfig(agentType);
   const args = [];
+
+  if (agentType === 'codex') {
+    args.push('resume');
+    if (sessionId) args.push(sessionId);
+    else args.push('--last');
+    args.push(...mcpConfigArgs(agentType, shellId));
+    return args;
+  }
 
   if (sessionId) {
     args.push(config.resumeFlag, sessionId);
@@ -1531,14 +1629,98 @@ function fetchIssueFromGitHub(number, cwd) {
   });
 }
 
+// Codex renders its composer before MCP initialization has settled, and Enter
+// pressed during that startup task can be ignored while leaving the draft in the
+// composer. Track the TUI's own lifecycle instead of guessing how long startup
+// will take. Ratatui renders an MCP status row, then clears that row with
+// cursor-position + erase-to-end when every server is ready/failed/cancelled.
+// If startup is fast enough that no status row is rendered, a fully loaded
+// welcome frame that remains stable for one render beat is the ready signal.
+const CODEX_MCP_STATUS_RE = /(?:Starting MCP servers(?: \([^)]*\))?|Booting MCP server:)/;
+const CODEX_READY_SETTLE_MS = 250;
+
+function codexCursorRowBefore(data, offset) {
+  const prefix = data.slice(0, offset);
+  const cursorRe = /\x1b\[(\d+);(\d+)H/g;
+  let row = null;
+  let match;
+  while ((match = cursorRe.exec(prefix))) row = Number(match[1]);
+  return row;
+}
+
+function codexLoadedPromptRendered(data) {
+  const plain = stripEscapeSequences(data);
+  const card = plain.slice(plain.lastIndexOf('OpenAI Codex'));
+  return card.includes('OpenAI Codex') &&
+    /model:\s+(?!loading\b)\S+/.test(card) &&
+    card.includes('›');
+}
+
+function markCodexReady(entry, id, via) {
+  if (entry.codexReady) return;
+  entry.codexReady = true;
+  clearTimeout(entry.codexReadyTimer);
+  entry.codexReadyTimer = null;
+  log(`[codex-ready] id=${id} via=${via}`);
+  if (entry.onCodexReadyOnce) {
+    const callback = entry.onCodexReadyOnce;
+    entry.onCodexReadyOnce = null;
+    try { callback(); } catch (err) { log(`[codex-ready] callback threw: ${err.message}`); }
+  }
+}
+
+function observeCodexReadiness(entry, id, data) {
+  if (!entry.codexReadinessState) {
+    entry.codexReadinessState = { tail: '', sawMcpStartup: false, mcpStatusRow: null, clearTail: '' };
+  }
+  const state = entry.codexReadinessState;
+  const combined = (state.tail + data).slice(-16384);
+  const plain = stripEscapeSequences(combined);
+
+  if (!state.sawMcpStartup) {
+    const marker = plain.match(CODEX_MCP_STATUS_RE);
+    if (marker) {
+      const rawMarkerOffset = combined.indexOf(marker[0]);
+      state.sawMcpStartup = true;
+      state.mcpStatusRow = codexCursorRowBefore(combined, rawMarkerOffset);
+      state.clearTail = '';
+      entry.codexReady = false;
+      clearTimeout(entry.codexReadyTimer);
+      entry.codexReadyTimer = null;
+      log(`[codex-ready] id=${id} MCP startup row=${state.mcpStatusRow || 'unknown'}`);
+    }
+  } else if (!CODEX_MCP_STATUS_RE.test(stripEscapeSequences(data))) {
+    const clearData = (state.clearTail || '') + data;
+    const clearRe = /\x1b\[(\d+);1H\x1b\[J/g;
+    let clear;
+    while ((clear = clearRe.exec(clearData))) {
+      if (!state.mcpStatusRow || Number(clear[1]) <= state.mcpStatusRow) {
+        markCodexReady(entry, id, 'mcp-status-cleared');
+        break;
+      }
+    }
+    state.clearTail = clearData.slice(-32);
+  }
+
+  if (!state.sawMcpStartup && !entry.codexReady && codexLoadedPromptRendered(combined)) {
+    clearTimeout(entry.codexReadyTimer);
+    entry.codexReadyTimer = setTimeout(() => {
+      const current = shells.get(id);
+      if (current === entry && !state.sawMcpStartup) markCodexReady(entry, id, 'loaded-prompt');
+    }, CODEX_READY_SETTLE_MS);
+  }
+  state.tail = combined;
+}
+
 /**
  * Deliver a prompt to a shell, handling the race between async fetch and idle readiness.
  * Prompts are queued per shell and submitted one at a time, each waiting for its
  * own readiness signal — so two pending prompts (e.g. an inherited `/rc` followed
  * by a start_issue prompt, #519) can't clobber each other's onIdleOnce slot.
- * For each queue head: if the screen shows the agent idle right now, submit
- * immediately; if the agent uses a fixed initialPromptDelay (non-claude, which the
- * screen detector can't classify), use that delay; otherwise install a single-shot
+ * For each queue head: Codex waits for its rendered MCP lifecycle to settle; if
+ * another agent's screen shows it idle right now, submit immediately; if it uses
+ * a fixed initialPromptDelay because its screen can't be classified, use that
+ * delay; otherwise install a single-shot
  * onIdleOnce callback that setWaiting invokes on the next idle transition (#568).
  */
 function deliverPromptWhenReady(id, prompt) {
@@ -1608,11 +1790,24 @@ function drainPromptQueue(id) {
     });
   }
 
+  // Codex's composer is visible while MCP servers are still starting, so its
+  // screen-looking-ready state is not actionable. Wait for observeCodexReadiness
+  // to see the MCP status row clear (or a stable fully-loaded no-status frame).
+  // This is per-shell state, so same-cwd tabs cannot wake each other's prompts.
+  if (config.codexReadiness) {
+    if (e.codexReady) {
+      log(`[deliverPrompt] id=${id} Codex already ready, submitting queued prompt`);
+      setTimeout(submitAndNotify, 50);
+    } else {
+      log(`[deliverPrompt] id=${id} waiting for Codex MCP readiness`);
+      e.onCodexReadyOnce = () => setTimeout(submitAndNotify, 50);
+    }
+    return;
+  }
   // If the screen shows the agent is idle at its prompt right now, submit
-  // immediately. Otherwise, agents with a fixed initialPromptDelay (non-claude,
-  // which the screen detector returns 'unknown' for) use that delay; everything
-  // else installs a single-shot onIdleOnce that setWaiting fires on the next idle
-  // transition (#568 — replaces the old BEL-recency heuristic).
+  // immediately. Otherwise, unclassified agents with a fixed initialPromptDelay
+  // use that delay; everything else installs a single-shot onIdleOnce that fires
+  // on the next idle transition (#568 — replaces the old BEL-recency heuristic).
   if (computeWaiting(e)) {
     setWaiting(e, id, false, 'deliver-immediate');
     log(`[deliverPrompt] id=${id} submitting immediately (screen idle)`);
@@ -1747,6 +1942,13 @@ function reclassifyWaiting(e, id, via) {
 function wireShellOutput(id) {
   const entry = shells.get(id);
   if (!entry) return;
+  if (getAgentConfig(entry.agentType).codexReadiness) {
+    clearTimeout(entry.codexReadyTimer);
+    entry.codexReadyTimer = null;
+    entry.codexReady = false;
+    entry.codexReadinessState = { tail: '', sawMcpStartup: false, mcpStatusRow: null, clearTail: '' };
+    entry.onCodexReadyOnce = null;
+  }
   if (!entry.scrollback) entry.scrollback = [];
   if (!entry.scrollbackSize) entry.scrollbackSize = 0;
 
@@ -1765,7 +1967,7 @@ function wireShellOutput(id) {
     // Strip ANSI once and share it: resume-UUID matching and the spinner heartbeat
     // both want the plain text. Skip entirely for agents that need neither
     // (plain terminals) so their hot path stays a pure passthrough.
-    const plain = (config.emitsBel || config.screenMarkers) ? stripEscapeSequences(data) : null;
+    const plain = (config.emitsBel || config.screenMarkers || config.codexReadiness) ? stripEscapeSequences(data) : null;
 
     if (config.emitsBel) {
       // Detect claude --resume <UUID> in PTY output to track the actual session ID.
@@ -1802,6 +2004,9 @@ function wireShellOutput(id) {
     if (config.screenMarkers) {
       if (config.screenMarkers.spinner.test(plain)) e.lastSpinnerTime = Date.now();
       reclassifyWaiting(e, id, 'output');
+    }
+    if (config.codexReadiness) {
+      observeCodexReadiness(e, id, data);
     }
     e.clients.forEach((c) => c.send(data));
   };
@@ -2166,6 +2371,7 @@ function recordRecentSession(id) {
     claudeSessionId: e.claudeSessionId || null,
     cwd: e.cwd || null,
     agentType: e.agentType || 'claude',
+    codexHomeId: e.codexHomeId || null,
     configDir: e.configDir || null,
     worktree: e.worktree || null,
     name: e.name || null,
@@ -2191,7 +2397,7 @@ let stateFrozen = false;  // Set during shutdown to prevent onExit handlers from
 // field it omits is silently wiped for every live shell on a graceful restart
 // (configDir was lost this way, breaking #537 profile resumes — #542).
 function serializeShellEntry(entry) {
-  return { cwd: entry.cwd, claudeSessionId: entry.claudeSessionId, agentType: entry.agentType || 'claude', configDir: entry.configDir || null, engineType: entry.engineType || 'node-pty', worktree: entry.worktree || null, name: entry.name || null, planMode: !!entry.planMode, forkParent: entry.forkParent || null, lastActivity: entry.lastActivity || null, createdAt: entry.createdAt || null, windowId: entry.windowId || null };
+  return { cwd: entry.cwd, claudeSessionId: entry.claudeSessionId, agentType: entry.agentType || 'claude', codexHomeId: entry.codexHomeId || null, configDir: entry.configDir || null, engineType: entry.engineType || 'node-pty', worktree: entry.worktree || null, name: entry.name || null, planMode: !!entry.planMode, forkParent: entry.forkParent || null, lastActivity: entry.lastActivity || null, createdAt: entry.createdAt || null, windowId: entry.windowId || null };
 }
 
 // #561: a session record is never hard-deleted by any runtime path. Every close
@@ -2728,6 +2934,8 @@ app.get('/api/agents', (req, res) => {
   const agents = [
     { id: 'claude', name: 'Claude Code', shortName: 'CC', available: true, enabled: enabledAgents.includes('claude'), isDefault: defaultAgent === 'claude' }
   ];
+  const codexAvailable = binaryAvailable('codex');
+  agents.push({ id: 'codex', name: 'Codex (beta)', shortName: 'CX', available: codexAvailable, enabled: codexAvailable && enabledAgents.includes('codex'), isDefault: defaultAgent === 'codex' });
   const hermesAvailable = binaryAvailable(settings.hermesBinary || 'hermes');
   agents.push({ id: 'hermes', name: 'Hermes', shortName: 'H', available: hermesAvailable, enabled: hermesAvailable, isDefault: defaultAgent === 'hermes' });
   // Auto-enable available agents
@@ -2878,7 +3086,7 @@ app.post('/api/commands/execute', (req, res) => {
   const filePath = path.join(COMMANDS_DIR, match);
   const shell = sessionId ? shells.get(sessionId) : null;
   const env = {
-    ...sessionEnv(sessionId || '', { name: shell?.name, worktree: shell?.worktree, windowId: shell?.windowId, cwd: shell?.cwd, agentType: shell?.agentType, configDir: shell?.configDir }),
+    ...sessionEnv(sessionId || '', { name: shell?.name, worktree: shell?.worktree, windowId: shell?.windowId, cwd: shell?.cwd, agentType: shell?.agentType, configDir: shell?.configDir, codexHomeId: shell?.codexHomeId }),
     // Run the command in the agent's real working dir (the worktree for worktree
     // sessions); sessionPaths returns an existing dir suitable for execSync's cwd.
     DEEPSTEVE_CWD: (shell ? sessionPaths(shell).cwd : '') || process.cwd(),
@@ -3257,7 +3465,7 @@ app.post('/api/start-automation', (req, res) => {
   }
 
   const id = randomUUID().slice(0, 8);
-  const claudeSessionId = randomUUID();
+  const claudeSessionId = agentType === 'codex' ? null : randomUUID();
   const agentConfig = getAgentConfig(agentType);
   const icon = meta.icon || '⚡';
   const autoName = meta.name || automationId;
@@ -3269,7 +3477,7 @@ app.post('/api/start-automation', (req, res) => {
 
   log(`[API] start-automation "${automationId}": id=${id}, agent=${agentType}, engine=${engineType}, cwd=${cwd}`);
   spawnSession(sessionEngine, id, agentType, spawnArgs, cwd, { cols: 120, rows: 40, env: sessionEnv(id, { name, windowId: windowId || null, cwd, agentType, configDir }) });
-  shells.set(id, { clients: new Set(), cwd, claudeSessionId, agentType, configDir: configDir || null, engine: sessionEngine, engineType, worktree: null, windowId: windowId || null, name, waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now(), prefill: true });
+  shells.set(id, { clients: new Set(), cwd, claudeSessionId, agentType, codexHomeId: agentType === 'codex' ? id : null, configDir: configDir || null, engine: sessionEngine, engineType, worktree: null, windowId: windowId || null, name, waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now(), prefill: true });
   wireShellOutput(id);
   emitSessionOpen(id);
   recordRecentSession(id);
@@ -4045,19 +4253,29 @@ app.get('/api/recent-sessions', (req, res) => {
   res.json({ sessions: recentSessions.slice(0, N) });
 });
 
-// Restore a recent session: mint a fresh shell id, pre-seed savedState[newId] with
-// the stored config, and return the id. The client then connects to it, hitting the
-// normal reconnect branch which resumes via `claude --resume` (and its 5s fork
-// fallback if the conversation is gone). This reuses the resume path with zero
-// duplication and works from any browser.
+function restoreShellIdForRecentSession(recent, mintId = () => randomUUID().slice(0, 8)) {
+  if (recent.agentType === 'codex' && /^[0-9a-f]{8}$/.test(recent.codexHomeId || '')) {
+    return recent.codexHomeId;
+  }
+  return mintId();
+}
+
+// Restore a recent session and pre-seed savedState with the stored config. Claude
+// keeps its existing fresh-shell behavior. A Codex home is also the tab's runtime
+// isolation boundary, so reuse that identity: repeated restores converge on one
+// live shell instead of launching concurrent Codex processes against the same
+// history/sqlite files. The client then connects through the normal resume path,
+// so this works from any browser without duplicating spawn logic.
 app.post('/api/recent-sessions/:key/restore', (req, res) => {
   const r = recentSessions.find(s => s.key === req.params.key);
   if (!r) return res.status(404).json({ error: 'Recent session not found' });
-  const newId = randomUUID().slice(0, 8);
-  savedState[newId] = {
+  const newId = restoreShellIdForRecentSession(r);
+  const codexRestoreId = r.agentType === 'codex' ? newId : null;
+  if (!shells.has(newId)) savedState[newId] = {
     cwd: r.cwd,
     claudeSessionId: r.claudeSessionId,
     agentType: r.agentType,
+    codexHomeId: codexRestoreId || r.codexHomeId || null,
     configDir: r.configDir || null,
     engineType: r.engineType,
     worktree: r.worktree,
@@ -4151,7 +4369,7 @@ app.post('/api/start-issue', (req, res) => {
 
   const worktree = validateWorktree('github-issue-' + number);
   const id = randomUUID().slice(0, 8);
-  const claudeSessionId = randomUUID();
+  const claudeSessionId = agentType === 'codex' ? null : randomUUID();
   const agentConfig = getAgentConfig(agentType);
 
   // For agents that don't support --worktree natively: manually create worktree
@@ -4185,7 +4403,7 @@ app.post('/api/start-issue', (req, res) => {
   const engineType = sessionEngine === tmuxEngine ? 'tmux' : 'node-pty';
   log(`[API] start-issue #${number}: id=${id}, agent=${agentType}, engine=${engineType}, worktree=${worktree || 'none'}, cwd=${worktreeCwd}`);
   spawnSession(sessionEngine, id, agentType, spawnArgs, worktreeCwd, { cols: 120, rows: 40, env: sessionEnv(id, { name, worktree, windowId: windowId || null, cwd: worktreeCwd, agentType, configDir }) });
-  shells.set(id, { clients: new Set(), cwd: worktreeCwd, claudeSessionId: claudeSessionId, agentType, configDir: configDir || null, engine: sessionEngine, engineType, worktree: worktree || null, windowId: windowId || null, name, planMode: !!settings.wandPlanMode, waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now(), loading: true });
+  shells.set(id, { clients: new Set(), cwd: worktreeCwd, claudeSessionId: claudeSessionId, agentType, codexHomeId: agentType === 'codex' ? id : null, configDir: configDir || null, engine: sessionEngine, engineType, worktree: worktree || null, windowId: windowId || null, name, planMode: !!settings.wandPlanMode, waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now(), loading: true });
   wireShellOutput(id);
   emitSessionOpen(id);
   recordRecentSession(id);
@@ -4484,6 +4702,7 @@ if (tmuxEngine) {
           cwd: meta.cwd,
           claudeSessionId: meta.claudeSessionId,
           agentType: meta.agentType || 'claude',
+          codexHomeId: meta.codexHomeId || null,
           configDir: meta.configDir || null,
           engine: tmuxEngine,
           engineType: 'tmux',
@@ -4818,6 +5037,7 @@ function handleWsConnection(ws, req) {
       const claudeSessionId = restored.claudeSessionId;
       const savedWorktree = validateWorktree(restored.worktree);
       const savedAgentType = restored.agentType || 'claude';
+      const codexHomeId = restored.codexHomeId || (savedAgentType === 'codex' ? id : null);
       const savedPlanMode = !!restored.planMode;
       const agentConfig = getAgentConfig(savedAgentType);
 
@@ -4837,6 +5057,9 @@ function handleWsConnection(ws, req) {
         const transcript = path.join(claudeProjectDir(cwd, savedWorktree, restored.configDir), `${claudeSessionId}.jsonl`);
         spawnFresh = !fs.existsSync(transcript);
         if (spawnFresh) log(`Session ${id} has no transcript at ${transcript} — spawning fresh instead of --resume`);
+      } else if (savedAgentType === 'codex') {
+        spawnFresh = !codexSessionHomeHasTranscript(codexHomeId);
+        if (spawnFresh) log(`Codex session ${id} has no rollout in home ${codexHomeId} — spawning fresh instead of resume --last`);
       }
 
       log(`Restoring session ${id} in ${cwd} (agent: ${savedAgentType}, engine: ${restoredEngineType}, session: ${claudeSessionId}, worktree: ${savedWorktree || 'none'}, planMode: ${savedPlanMode})`);
@@ -4853,8 +5076,8 @@ function handleWsConnection(ws, req) {
       // hand the agent a DEEPSTEVE_WINDOW_ID whose window no longer exists, and any
       // deliverToWindow() it triggered would land nowhere (#551).
       const restoredWindowId = windowId || restored.windowId || null;
-      spawnSession(sessionEngine, id, savedAgentType, startArgs, cwd, { ...ptySize, env: sessionEnv(id, { name: restoredName, worktree: savedWorktree, windowId: restoredWindowId, cwd, agentType: savedAgentType, configDir: restored.configDir }) });
-      shells.set(id, { clients: new Set(), cwd, claudeSessionId, agentType: savedAgentType, configDir: restored.configDir || null, engine: sessionEngine, engineType: restoredEngineType, worktree: savedWorktree, name: restoredName, planMode: savedPlanMode, forkParent: restored.forkParent || null, restored: true, waitingForInput: false, lastActivity: Date.now(), createdAt: restored.createdAt || Date.now(), windowId: restoredWindowId });
+      spawnSession(sessionEngine, id, savedAgentType, startArgs, cwd, { ...ptySize, env: sessionEnv(id, { name: restoredName, worktree: savedWorktree, windowId: restoredWindowId, cwd, agentType: savedAgentType, configDir: restored.configDir, codexHomeId }) });
+      shells.set(id, { clients: new Set(), cwd, claudeSessionId, agentType: savedAgentType, codexHomeId, configDir: restored.configDir || null, engine: sessionEngine, engineType: restoredEngineType, worktree: savedWorktree, name: restoredName, planMode: savedPlanMode, forkParent: restored.forkParent || null, restored: true, waitingForInput: false, lastActivity: Date.now(), createdAt: restored.createdAt || Date.now(), windowId: restoredWindowId });
       wireShellOutput(id);
       recordRecentSession(id);  // bump recency on same-browser reconnect + cross-browser restore
       if (agentConfig.supportsSessionWatch) watchClaudeSessionDir(id);
@@ -4899,7 +5122,7 @@ function handleWsConnection(ws, req) {
           log(`Session ${id} exited after ${elapsed}ms — respawning (${tracePath})`);
           traceSession('SPAWN', { path: tracePath, shell: id, name: entry.name || null, worktree: entry.worktree || null, cwd, claudeOld: entry.claudeSessionId, claude: newClaudeSessionId || entry.claudeSessionId, planMode: !!entry.planMode, elapsedMs: elapsed });
           sessionEngine.destroy(id);
-          spawnSession(sessionEngine, id, savedAgentType, respawnArgs, cwd, { ...ptySize, env: sessionEnv(id, { name: entry.name, worktree: entry.worktree, windowId: entry.windowId, cwd, agentType: savedAgentType, configDir: entry.configDir }) });
+          spawnSession(sessionEngine, id, savedAgentType, respawnArgs, cwd, { ...ptySize, env: sessionEnv(id, { name: entry.name, worktree: entry.worktree, windowId: entry.windowId, cwd, agentType: savedAgentType, configDir: entry.configDir, codexHomeId: entry.codexHomeId }) });
           if (newClaudeSessionId) {
             entry.claudeSessionId = newClaudeSessionId;
             entry.forkParent = null;  // fresh id starts an unrelated conversation — drop stale lineage (#503)
@@ -4937,7 +5160,7 @@ function handleWsConnection(ws, req) {
     // #561 close-path delete). The reaped entry was never attached/prompted, so
     // nothing resurrectable is lost.
     delete savedState[id];
-    const sessionId = randomUUID();  // Full UUID for session ID (both agents)
+    const sessionId = agentType === 'codex' ? null : randomUUID();
     const agentConfig = getAgentConfig(agentType);
     
     // For agents that don't support --worktree natively: manually create worktree
@@ -4952,7 +5175,7 @@ function handleWsConnection(ws, req) {
     let spawnedPlanMode;
     let spawnPath = 'new';
     let parentShell = null, parentClaude = null, parentWorktree = null;
-    if (forkFrom && shells.has(forkFrom)) {
+    if (forkFrom && shells.has(forkFrom) && agentType === 'claude') {
       const parent = shells.get(forkFrom);
       // Resolve the parent's LIVE transcript tip (#455) — the in-memory claudeSessionId
       // can lag behind a mid-conversation rotation, which would fork an earlier checkpoint.
@@ -4988,7 +5211,7 @@ function handleWsConnection(ws, req) {
     // until the next periodic save (#551). It also gives the agent a correct
     // DEEPSTEVE_WINDOW_ID, which sessionEnv otherwise reported as ''.
     spawnSession(sessionEngine, id, agentType, spawnArgs, worktreeCwd, { cols: initialCols, rows: initialRows, env: sessionEnv(id, { name, worktree, windowId, cwd: worktreeCwd, agentType, configDir }) });
-    shells.set(id, { clients: new Set(), cwd: worktreeCwd, claudeSessionId: sessionId, agentType, configDir: configDir || null, engine: sessionEngine, engineType, worktree: worktree || null, windowId, name: name || null, planMode: spawnedPlanMode, forkParent: parentClaude, waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now() });
+    shells.set(id, { clients: new Set(), cwd: worktreeCwd, claudeSessionId: sessionId, agentType, codexHomeId: agentType === 'codex' ? id : null, configDir: configDir || null, engine: sessionEngine, engineType, worktree: worktree || null, windowId, name: name || null, planMode: spawnedPlanMode, forkParent: parentClaude, waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now() });
     wireShellOutput(id);
     emitSessionOpen(id);
     recordRecentSession(id);
