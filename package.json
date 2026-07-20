@@ -2,7 +2,7 @@
   "name": "deepsteve",
   "version": "0.20.4",
   "private": true,
-  "description": "Web UI for running multiple Claude Code instances in browser tabs",
+  "description": "Web UI for running multiple Claude Code and Codex beta instances in browser tabs",
   "license": "MIT",
   "author": "Fncore, Inc",
   "repository": {

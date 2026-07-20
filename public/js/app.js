@@ -944,11 +944,15 @@ settingsBtn?.addEventListener('click', async () => {
       <div class="settings-section">
         <h3>Enabled Agents</h3>
         <p style="font-size: 13px; color: var(--ds-text-secondary); margin-bottom: 8px;">
-          Select which agents are available. If multiple are enabled, you can switch between them using the Engine dropdown.
+          Choose which installed agents are enabled. If multiple are enabled, you can switch between them using the Engine dropdown.
         </p>
         <label style="font-size: 13px; color: var(--ds-text-primary); cursor: pointer; display: flex; align-items: center; gap: 8px; margin-bottom: 8px;">
           <input type="checkbox" id="agent-claude" ${agents.find(a => a.id === 'claude')?.enabled !== false ? 'checked' : ''} style="accent-color: var(--ds-accent-green);">
           Claude Code
+        </label>
+        <label style="font-size: 13px; color: var(--ds-text-primary); cursor: pointer; display: flex; align-items: center; gap: 8px; margin-bottom: 8px;">
+          <input type="checkbox" id="agent-codex" ${agents.find(a => a.id === 'codex')?.enabled ? 'checked' : ''} ${agents.find(a => a.id === 'codex')?.available ? '' : 'disabled'} style="accent-color: var(--ds-accent-green);">
+          Codex (beta)${agents.find(a => a.id === 'codex')?.available ? '' : ' (not installed)'}
         </label>
         <label style="font-size: 13px; color: var(--ds-text-primary); cursor: pointer; display: flex; align-items: center; gap: 8px; margin-bottom: 8px;">
           <input type="checkbox" id="agent-opencode" ${agents.find(a => a.id === 'opencode')?.enabled ? 'checked' : ''} ${agents.find(a => a.id === 'opencode')?.available ? '' : 'disabled'} style="accent-color: var(--ds-accent-green);">
@@ -1352,13 +1356,14 @@ settingsBtn?.addEventListener('click', async () => {
     const overviewDefaultLayout = overlay.querySelector('#overview-default-layout').value;
     const enabledAgents = [];
     if (overlay.querySelector('#agent-claude').checked) enabledAgents.push('claude');
+    if (overlay.querySelector('#agent-codex').checked) enabledAgents.push('codex');
     if (overlay.querySelector('#agent-opencode').checked) enabledAgents.push('opencode');
     if (overlay.querySelector('#agent-pi').checked) enabledAgents.push('pi');
     // Preserve enabled agents that have no checkbox here (e.g. hermes) — rebuilding
     // the list from only the rendered trio silently disabled them on every save (#519).
     // Appended after the rendered ones because the server derives defaultAgent from
     // the first entry.
-    const renderedAgentIds = ['claude', 'opencode', 'pi'];
+    const renderedAgentIds = ['claude', 'codex', 'opencode', 'pi'];
     for (const a of settingsData.enabledAgents || []) {
       if (!renderedAgentIds.includes(a)) enabledAgents.push(a);
     }

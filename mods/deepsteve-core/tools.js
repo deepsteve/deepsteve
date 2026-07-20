@@ -254,7 +254,7 @@ function init(context) {
         labels: z.string().optional().describe('Comma-separated labels'),
         url: z.string().optional().describe('Issue URL'),
         cwd: z.string().optional().describe('Working directory (defaults to caller\'s cwd)'),
-        agent_type: z.string().optional().describe('Agent type (defaults to caller\'s)'),
+        agent_type: z.string().optional().describe('Agent type (defaults to caller\'s): "claude", "codex" (beta), or an experimental agent such as "opencode", "pi", or "hermes".'),
       },
       handler: async ({ session_id, number, title, body, labels, url, cwd, agent_type }, extra) => {
         const callerId = session_id || extra?.requestInfo?.url?.searchParams?.get('shellId');
@@ -266,7 +266,9 @@ function init(context) {
         // Inherit from caller, allow overrides
         const effectiveCwd = cwd || caller.cwd;
         const effectiveAgentType = agent_type || caller.agentType || 'claude';
-        const effectiveConfigDir = caller.configDir || null;  // inherit custom config profile (#537)
+        // Custom config profiles are a Claude-only surface (#537). An explicit
+        // override to Codex/another agent must not leak CLAUDE_CONFIG_DIR.
+        const effectiveConfigDir = effectiveAgentType === 'claude' ? (caller.configDir || null) : null;
         const windowId = caller.windowId || null;
 
         // Build prompt helper
@@ -286,7 +288,8 @@ function init(context) {
 
         const worktree = validateWorktree('github-issue-' + number);
         const id = randomUUID().slice(0, 8);
-        const claudeSessionId = randomUUID();
+        const claudeSessionId = effectiveAgentType === 'codex' ? null : randomUUID();
+        const codexHomeId = effectiveAgentType === 'codex' ? id : null;
         const agentConfig = getAgentConfig(effectiveAgentType);
 
         // For agents that don't support --worktree natively: manually create worktree
@@ -309,10 +312,11 @@ function init(context) {
         const sessionEngine = getDefaultEngine();
         const engineType = sessionEngine.constructor.name === 'TmuxEngine' ? 'tmux' : 'node-pty';
         log(`[MCP] start_issue #${number}: id=${id}, agent=${effectiveAgentType}, engine=${engineType}, worktree=${worktree || 'none'}, cwd=${spawnCwd}`);
-        spawnSession(sessionEngine, id, effectiveAgentType, spawnArgs, spawnCwd, { cols: 120, rows: 40, env: sessionEnv(id, { name, worktree, windowId, cwd: spawnCwd, agentType: effectiveAgentType, configDir: effectiveConfigDir }) });
+        spawnSession(sessionEngine, id, effectiveAgentType, spawnArgs, spawnCwd, { cols: 120, rows: 40, env: sessionEnv(id, { name, worktree, windowId, cwd: spawnCwd, agentType: effectiveAgentType, configDir: effectiveConfigDir, codexHomeId }) });
         shells.set(id, {
           clients: new Set(), cwd: spawnCwd,
           claudeSessionId, agentType: effectiveAgentType,
+          codexHomeId,
           configDir: effectiveConfigDir,
           engine: sessionEngine, engineType,
           worktree: worktree || null, windowId,
@@ -372,7 +376,7 @@ function init(context) {
       },
     },
     open_terminal: {
-      description: 'Open a new tab in the caller\'s browser window. IMPORTANT: by default (no `agent_type`) this opens a PLAIN TERMINAL (zsh) — NOT a Claude/agent session — and `prompt` is IGNORED. To open a Claude Code (or other agent) session — one that runs slash commands like /rc and actually receives `prompt` — you MUST pass `agent_type` (e.g. "claude"); or pass `fork: true` to inherit the caller\'s agent type. It does NOT auto-inherit the caller\'s agent type otherwise. Inherits cwd/worktree from the caller.',
+      description: 'Open a new tab in the caller\'s browser window. IMPORTANT: by default (no `agent_type`) this opens a PLAIN TERMINAL (zsh) — NOT an agent session — and `prompt` is IGNORED. To open Claude Code, Codex beta, or another agent — and actually deliver `prompt` — you MUST pass `agent_type` (for example, "claude" or "codex"); or pass `fork: true` to inherit the caller\'s agent type. It does NOT auto-inherit the caller\'s agent type otherwise. Inherits cwd/worktree from the caller.',
       schema: {
         prompt: z.string().optional().describe('Initial prompt to send to the new session. Delivered ONLY to agent sessions (requires `agent_type` or `fork`); IGNORED for a plain terminal — use `command` for those.'),
         command: z.string().optional().describe('Shell command to auto-run on startup (plain terminal tabs only). Runs as if typed at the prompt; the tab stays open afterward. Ignored for agent sessions.'),
@@ -380,9 +384,9 @@ function init(context) {
         session_id: z.string().optional().describe('Caller session ID (auto-detected if omitted)'),
         cwd: z.string().optional().describe('Working directory (defaults to caller\'s cwd)'),
         worktree: z.string().optional().describe('Worktree name'),
-        agent_type: z.string().optional().describe('Agent type for an AGENT session, e.g. "claude" or "pi". OMIT this → a plain terminal (zsh), NOT the caller\'s agent. To inherit the caller\'s agent type instead, pass `fork: true`.'),
+        agent_type: z.string().optional().describe('Agent type for an AGENT session, e.g. "claude", "codex" (beta), or "pi" (experimental). OMIT this → a plain terminal (zsh), NOT the caller\'s agent. To inherit the caller\'s agent type instead, pass `fork: true`.'),
         plan_mode: z.boolean().optional().describe('Start in plan mode'),
-        fork: z.boolean().optional().describe('Fork the calling session\'s Claude conversation into the new tab'),
+        fork: z.boolean().optional().describe('Inherit the caller\'s agent type. For Claude Code callers with a resumable session, also fork the conversation; other agents start a fresh session.'),
       },
       handler: async ({ session_id, prompt, command, name, cwd, worktree, agent_type, plan_mode, fork }, extra) => {
         const callerId = session_id || extra?.requestInfo?.url?.searchParams?.get('shellId');
@@ -394,10 +398,11 @@ function init(context) {
         const effectiveCwd = cwd || caller.cwd;
         // agent_type provided → agent session; fork → inherit caller's agent; otherwise → plain shell
         const effectiveAgentType = agent_type || (fork ? (caller.agentType || 'claude') : null);
-        // Inherit the caller's custom config profile (#537) — for an agent session so it
-        // runs against the same CLAUDE_CONFIG_DIR, and for a plain terminal so a manually
-        // typed `claude` there uses the same profile too.
-        const effectiveConfigDir = caller.configDir || null;
+        // Inherit custom configs only for Claude agent sessions (#537). Plain terminals
+        // keep it too, so manually typing `claude` uses the caller's profile.
+        const effectiveConfigDir = !effectiveAgentType || effectiveAgentType === 'claude'
+          ? (caller.configDir || null)
+          : null;
         const windowId = caller.windowId || null;
         const id = randomUUID().slice(0, 8);
 
@@ -451,11 +456,12 @@ function init(context) {
           spawnCwd = ensureWorktree(effectiveCwd, validatedWorktree);
         }
 
-        const claudeSessionId = randomUUID();
+        const claudeSessionId = effectiveAgentType === 'codex' ? null : randomUUID();
+        const codexHomeId = effectiveAgentType === 'codex' ? id : null;
 
         let spawnArgs;
         let resolvedForkParent = null;
-        if (fork && caller.claudeSessionId) {
+        if (fork && caller.claudeSessionId && effectiveAgentType === 'claude') {
           // Resolve the caller's LIVE transcript tip (#455) — the in-memory claudeSessionId
           // can lag behind a mid-conversation rotation, which would fork an earlier checkpoint.
           resolvedForkParent = resolveForkParentSession(callerId);
@@ -478,11 +484,12 @@ function init(context) {
         log(`[MCP] open_terminal: id=${id}, agent=${effectiveAgentType}, engine=${engineType2}, worktree=${validatedWorktree || 'none'}, cwd=${spawnCwd}, caller=${session_id}`);
         // Forked sessions don't pass --permission-mode plan in spawnArgs, so record
         // planMode=false for them regardless of the caller-supplied plan_mode arg.
-        const recordedPlanMode = (fork && caller.claudeSessionId) ? false : !!plan_mode;
-        spawnSession(sessionEngine2, id, effectiveAgentType, spawnArgs, spawnCwd, { cols: 120, rows: 40, env: sessionEnv(id, { name: tabName, worktree: validatedWorktree, windowId, cwd: spawnCwd, agentType: effectiveAgentType, configDir: effectiveConfigDir }) });
+        const recordedPlanMode = (fork && caller.claudeSessionId && effectiveAgentType === 'claude') ? false : !!plan_mode;
+        spawnSession(sessionEngine2, id, effectiveAgentType, spawnArgs, spawnCwd, { cols: 120, rows: 40, env: sessionEnv(id, { name: tabName, worktree: validatedWorktree, windowId, cwd: spawnCwd, agentType: effectiveAgentType, configDir: effectiveConfigDir, codexHomeId }) });
         shells.set(id, {
           clients: new Set(), cwd: spawnCwd,
           claudeSessionId, agentType: effectiveAgentType,
+          codexHomeId,
           configDir: effectiveConfigDir,
           engine: sessionEngine2, engineType: engineType2,
           worktree: validatedWorktree, windowId,
@@ -492,7 +499,7 @@ function init(context) {
           // .jsonl, so recording the parent here lets the parent's watcher authoritatively
           // refuse to adopt this child's id (rather than re-inferring it). Persisted via
           // serializeShellEntry after the saveState() below.
-          forkParent: (fork && caller.claudeSessionId) ? resolvedForkParent : null,
+          forkParent: (fork && caller.claudeSessionId && effectiveAgentType === 'claude') ? resolvedForkParent : null,
           waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now(),
         });
         wireShellOutput(id);

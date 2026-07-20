@@ -6,7 +6,7 @@
 
 https://deepsteve.com
 
-Run multiple AI agent sessions side-by-side in your browser, each with full terminal capabilities and persistent conversation history. Supports **Claude Code** with experimental support for **Hermes** and **OpenCode**.
+Run multiple AI agent sessions side-by-side in your browser, each with full terminal capabilities and persistent conversation history. Supports **Claude Code** and **Codex (beta)**, with experimental support for **OpenCode**, **Pi**, and **Hermes**.
 
 <p align="center">
   <img src="screenshots/deepsteve-preview.png" alt="deepsteve — full app with tabs and tasks panel" width="800">
@@ -23,11 +23,11 @@ Run multiple AI agent sessions side-by-side in your browser, each with full term
 
 ## Terminal Engines
 
-deepsteve currently uses **node-pty** to run agent sessions (Claude Code, OpenCode) as child processes on a Node server, connected to the browser via WebSocket. **tmux** support is currently being implemented as an alternative backend — running sessions inside tmux panes instead of node-pty, enabling native session persistence and detach/reattach without the Node process staying alive.
+deepsteve currently uses **node-pty** to run agent sessions (Claude Code, Codex beta, and the experimental OpenCode, Pi, and Hermes integrations) as child processes on a Node server, connected to the browser via WebSocket. **tmux** support is currently being implemented as an alternative backend — running sessions inside tmux panes instead of node-pty, enabling native session persistence and detach/reattach without the Node process staying alive.
 
 ## Features
 
-- **Multiple sessions** - Open as many Claude Code or OpenCode instances as you need in separate tabs
+- **Multiple sessions** - Open as many Claude Code or Codex beta instances as you need in separate tabs
 - **Real terminal emulation** - PTY support via xterm.js.
 - **Session persistence** - Conversations survive server restarts and page refreshes
 - **GitHub issue picker** - Pick an issue from any repo and launch a session with a worktree and prompt
@@ -46,7 +46,7 @@ curl -fsSL deepsteve.com/install.sh | bash
 
 - macOS
 - Node.js
-- [Claude Code](https://docs.anthropic.com/en/docs/claude-code) or [OpenCode](https://github.com/google/opencode) installed
+- [Claude Code](https://docs.anthropic.com/en/docs/claude-code) or [Codex CLI](https://developers.openai.com/codex/cli/) installed (Codex support is beta; OpenCode, Pi, and Hermes are experimental alternatives)
 
 ## Installation (from source)
 
@@ -63,7 +63,7 @@ If you've cloned the repo:
 
 Open [http://deepsteve.localhost:3000](http://deepsteve.localhost:3000) in your browser (`*.localhost` resolves to loopback; `http://localhost:3000` also works and redirects there).
 
-- Click **+** to create a new Claude Code session in any directory
+- Click **+** to create a new Claude Code or Codex beta session in any directory
 - Click the **GitHub icon** to pick an issue — deepsteve creates a worktree and starts a session with the issue as a prompt
 - Right-click a tab to rename it
 - Use **Shift+Enter** for multi-line input
@@ -156,7 +156,7 @@ launchctl list | grep deepsteve        # check status
 - Binds to `localhost:3000` only by default — not accessible from the network
 - **Token-authenticated** on every surface (WebSocket, MCP, REST): a Host allowlist + Origin allowlist + a per-install secret at `~/.deepsteve/auth-token` (`0600`) close the cross-origin / DNS-rebinding hole. The browser gets the token as an HttpOnly cookie; other clients send it as `Authorization: Bearer <token>`. Widen access with `--allow-origin` / `--allow-host`.
 - The UI lives on **`http://deepsteve.localhost:3000`** — still loopback-only (RFC 6761), but with its own browser cookie jar so the auth cookie can't be evicted when other local dev apps fill the shared `localhost` jar. Browser navigations to `localhost:3000` get a 302 there; disable with `--no-canonical-redirect` (or `DEEPSTEVE_NO_CANONICAL_REDIRECT=1`) if `*.localhost` doesn't resolve on your system.
-- Each session runs Claude Code with the permissions of the user who installed deepsteve
+- Each agent session runs with the permissions of the user who installed deepsteve
 
 ## Running on Meta Quest (WebXR)
 

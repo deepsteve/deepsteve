@@ -271,7 +271,8 @@ function runTask(task, reason) {
   const agentConfig = getAgentConfig(agentType);
   const cwd = task.project && fs.existsSync(task.project) ? task.project : os.homedir();
   const id = randomUUID().slice(0, 8);
-  const claudeSessionId = randomUUID();
+  const claudeSessionId = agentType === 'codex' ? null : randomUUID();
+  const codexHomeId = agentType === 'codex' ? id : null;
   // Per-run worktree isolation (#565): claude-native only. The name embeds the
   // run's shellId, so it's unique per run (a kept/leaked worktree from a previous
   // run can never collide with or block the next fire) and links run <-> worktree
@@ -291,16 +292,17 @@ function runTask(task, reason) {
 
   log(`[scheduled] running "${task.title}" (${task.id}) id=${id} agent=${agentType} engine=${engineType} cwd=${cwd} worktree=${worktree || 'none'} reason=${reason}`);
   spawnSession(sessionEngine, id, agentType, spawnArgs, cwd, {
-    cols: 120, rows: 40, env: sessionEnv(id, { name, windowId: null, cwd, agentType, worktree }),
+    cols: 120, rows: 40, env: sessionEnv(id, { name, windowId: null, cwd, agentType, worktree, codexHomeId }),
   });
   shells.set(id, {
     clients: new Set(), cwd, claudeSessionId, agentType,
+    codexHomeId,
     engine: sessionEngine, engineType, worktree, windowId: null,
     name, waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now(), prefill: true,
   });
   wireShellOutput(id);
   emitSessionOpen(id);
-  // Deliver the task prompt. For MCP-capable agents (claude today), wrap it with
+  // Deliver the task prompt. For MCP-capable agents (Claude Code and Codex), wrap it with
   // the scheduled-run contract so the agent self-reports start/finish (#525);
   // agents without deepsteve MCP get the raw prompt as before — except that an
   // isolated run must always be told its work area is disposable (#565).
@@ -613,7 +615,7 @@ function init(context) {
         cron: z.string().describe('5-field cron in local time: "min hour day-of-month month day-of-week". E.g. "0 9 * * 1" = every Monday 9am. For a one-shot (once:true), this is just the next matching time to fire at.'),
         once: z.boolean().optional().describe('Run exactly once at the next cron match, then retire (kept as a done row). Default false (recurring).'),
         project: z.string().optional().describe('Repo path to run in (canonicalized to its git root). Defaults to the calling session\'s project.'),
-        agent_type: z.string().optional().describe('Agent to run (default "claude" — the MCP-capable agent).'),
+        agent_type: z.string().optional().describe('Agent to run: "claude" (default), "codex" (beta), or an experimental agent such as "opencode", "pi", or "hermes".'),
         plan_mode: z.boolean().optional().describe('Start the agent in plan mode (default false).'),
         keep_open: z.boolean().optional().describe('Keep the tab open after each run finishes instead of auto-closing (default false).'),
         keep_open_on_failure: z.boolean().optional().describe('Keep the tab open when a run fails, even if auto-close is on (default false).'),
@@ -671,7 +673,7 @@ function init(context) {
         cron: z.string().optional().describe('New 5-field cron (local time)'),
         once: z.boolean().optional().describe('Make this a run-once task (fires at the next cron match, then retires) or back to recurring.'),
         project: z.string().optional(),
-        agent_type: z.string().optional(),
+        agent_type: z.string().optional().describe('Agent to run: "claude", "codex" (beta), or an experimental agent such as "opencode", "pi", or "hermes".'),
         plan_mode: z.boolean().optional(),
         keep_open: z.boolean().optional().describe('Keep the tab open after each run finishes instead of auto-closing.'),
         keep_open_on_failure: z.boolean().optional().describe('Keep the tab open when a run fails, even if auto-close is on.'),
