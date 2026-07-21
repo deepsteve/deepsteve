@@ -952,7 +952,7 @@ settingsBtn?.addEventListener('click', async () => {
         </label>
         <label style="font-size: 13px; color: var(--ds-text-primary); cursor: pointer; display: flex; align-items: center; gap: 8px; margin-bottom: 8px;">
           <input type="checkbox" id="agent-codex" ${agents.find(a => a.id === 'codex')?.enabled ? 'checked' : ''} ${agents.find(a => a.id === 'codex')?.available ? '' : 'disabled'} style="accent-color: var(--ds-accent-green);">
-          Codex (beta)${agents.find(a => a.id === 'codex')?.available ? '' : ' (not installed)'}
+          Codex${agents.find(a => a.id === 'codex')?.available ? '' : ' (not installed)'}
         </label>
         <label style="font-size: 13px; color: var(--ds-text-primary); cursor: pointer; display: flex; align-items: center; gap: 8px; margin-bottom: 8px;">
           <input type="checkbox" id="agent-opencode" ${agents.find(a => a.id === 'opencode')?.enabled ? 'checked' : ''} ${agents.find(a => a.id === 'opencode')?.available ? '' : 'disabled'} style="accent-color: var(--ds-accent-green);">

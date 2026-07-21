@@ -3007,7 +3007,7 @@ app.get('/api/agents', (req, res) => {
     { id: 'claude', name: 'Claude Code', shortName: 'CC', available: true, enabled: enabledAgents.includes('claude'), isDefault: defaultAgent === 'claude' }
   ];
   const codexAvailable = binaryAvailable('codex');
-  agents.push({ id: 'codex', name: 'Codex (beta)', shortName: 'CX', available: codexAvailable, enabled: codexAvailable && enabledAgents.includes('codex'), isDefault: defaultAgent === 'codex' });
+  agents.push({ id: 'codex', name: 'Codex', shortName: 'CX', available: codexAvailable, enabled: codexAvailable && enabledAgents.includes('codex'), isDefault: defaultAgent === 'codex' });
   const hermesAvailable = binaryAvailable(settings.hermesBinary || 'hermes');
   agents.push({ id: 'hermes', name: 'Hermes', shortName: 'H', available: hermesAvailable, enabled: hermesAvailable, isDefault: defaultAgent === 'hermes' });
   // Auto-enable available agents
