@@ -9,6 +9,7 @@ const { test } = require('node:test');
 const assert = require('node:assert');
 
 const { init, TIMINGS } = require('../../mods/deepsteve-core/tools.js');
+const { TerminalScreen } = require('../../terminal-screen');
 
 // Shrink the real delays so the suite runs in milliseconds.
 TIMINGS.keyGapMs = 5;
@@ -21,7 +22,7 @@ TIMINGS.idlePollMs = 10;
 function stripEscapeSequences(data) {
   return data
     .replace(/\x1b\][\s\S]*?(\x07|\x1b\\)/g, '')
-    .replace(/\x1b\[[0-9;?]*[a-zA-Z@`]/g, '')
+    .replace(/\x1b\[[0-?]*[ -\/]*[@-~]/g, '')
     .replace(/\x1b[()][A-Z0-9]/g, '')
     .replace(/\x1b[78DMHNOcn=><]/g, '');
 }
@@ -51,6 +52,13 @@ function makeContext({ metaControlsEnabled = true, consentOutcome = 'confirmed',
     log: () => {},
     stripEscapeSequences,
     // Matches the server's semantics: non-BEL agent types are 'unknown'.
+    readTerminalScreen: async (entry, lines) => {
+      if (!entry.terminalScreen) {
+        entry.terminalScreen = new TerminalScreen();
+        for (const chunk of entry.scrollback || []) entry.terminalScreen.write(chunk);
+      }
+      return entry.terminalScreen.lines(lines);
+    },
     sessionInputState: (entry) =>
       entry.agentType === 'claude' ? (entry.waitingForInput ? 'idle' : 'busy') : 'unknown',
     submitToShell: async (id, text) => {
@@ -252,7 +260,7 @@ test('read_session_screen returns stripped tail lines with state', async () => {
 
 test('read_session_screen honors and clamps the lines param', async () => {
   const { tools, shells } = makeContext();
-  const many = Array.from({ length: 300 }, (_, i) => `l${i}`).join('\n');
+  const many = Array.from({ length: 300 }, (_, i) => `l${i}`).join('\r\n');
   shells.set('abc', makeEntry({ scrollback: [many] }));
   const two = parse(await tools.read_session_screen.handler({ lines: 2 }, callerExtra('abc')));
   assert.deepStrictEqual(two.lines, ['l298', 'l299']);
