@@ -314,7 +314,8 @@ function runTask(task, reason) {
     } : null;
     deliverPromptWhenReady(id, mcpWired
       ? scheduledRunPrompt(task, iso)
-      : (iso ? `${worktreeContract(iso)}\n\n${task.prompt}` : task.prompt));
+      : (iso ? `${worktreeContract(iso)}\n\n${task.prompt}` : task.prompt),
+    { retryCodexEnter: agentType === 'codex' })
   }
   if (agentConfig.supportsSessionWatch) watchClaudeSessionDir(id);
   sessionEngine.onExit(id, () => {

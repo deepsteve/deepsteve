@@ -1591,7 +1591,54 @@ function resolveForkParentSession(parentShellId) {
  * text first, then send \r in a separate write after a short delay to ensure
  * they land in different readable events.
  */
-function submitToShell(id, text, eng) {
+const CODEX_SUBMIT_RETRY_MS = 1500
+const CODEX_SUBMIT_MAX_RETRIES = 2
+
+// Codex's paste-burst detector can occasionally consume a programmatic Enter as
+// part of the paste, leaving the complete prompt staged in the composer. This is
+// only enabled for unattended scheduled runs. Retry Enter while the PTY is
+// completely silent; any output after an attempt proves Codex handled the key and
+// cancels the retry before it can disturb a turn that has already started.
+function writeCodexEnterWithRetry(id, engine) {
+  const entry = shells.get(id)
+  if (!entry || entry.codexSubmitRetry) return
+  const pending = { retries: CODEX_SUBMIT_MAX_RETRIES, timer: null }
+  entry.codexSubmitRetry = pending
+
+  const writeEnter = () => {
+    const current = shells.get(id)
+    if (current !== entry || entry.codexSubmitRetry !== pending) return
+    try { engine.write(id, '\r') } catch {
+      entry.codexSubmitRetry = null
+      return
+    }
+    // PTY output may arrive synchronously in test/fake engines. Do not arm a
+    // retry after that output has already acknowledged this Enter.
+    if (entry.codexSubmitRetry !== pending) return
+    if (pending.retries === 0) {
+      entry.codexSubmitRetry = null
+      return
+    }
+    pending.timer = setTimeout(() => {
+      if (shells.get(id) !== entry || entry.codexSubmitRetry !== pending) return
+      pending.retries--
+      log(`[codex-submit] id=${id} no output after Enter; retrying (${CODEX_SUBMIT_MAX_RETRIES - pending.retries}/${CODEX_SUBMIT_MAX_RETRIES})`)
+      writeEnter()
+    }, CODEX_SUBMIT_RETRY_MS)
+  }
+
+  writeEnter()
+}
+
+function acknowledgeCodexSubmitOutput(entry, id) {
+  const pending = entry.codexSubmitRetry
+  if (!pending) return
+  clearTimeout(pending.timer)
+  entry.codexSubmitRetry = null
+  log(`[codex-submit] id=${id} Enter acknowledged by PTY output`)
+}
+
+function submitToShell(id, text, eng, options = {}) {
   // Mark this as a submission so the idle classifier doesn't treat the agent's
   // resulting work as "waiting for input" until its next completion BEL. Covers
   // auto-submitted initialPrompts and meta_type as well as graceful /exit.
@@ -1608,7 +1655,8 @@ function submitToShell(id, text, eng) {
   // The \r write is wrapped because the PTY may have died during the 1s window.
   return new Promise((resolve) => {
     setTimeout(() => {
-      try { engine.write(id, '\r'); } catch {}
+      if (options.retryCodexEnter) writeCodexEnterWithRetry(id, engine)
+      else try { engine.write(id, '\r') } catch {}
       resolve();
     }, 1000);
   });
@@ -1723,11 +1771,11 @@ function observeCodexReadiness(entry, id, data) {
  * delay; otherwise install a single-shot
  * onIdleOnce callback that setWaiting invokes on the next idle transition (#568).
  */
-function deliverPromptWhenReady(id, prompt) {
+function deliverPromptWhenReady(id, prompt, options = {}) {
   const e = shells.get(id);
   if (!e) return;
   if (!e.promptQueue) e.promptQueue = [];
-  e.promptQueue.push(prompt);
+  e.promptQueue.push({ prompt, options })
   if (e.promptDelivering) {
     log(`[deliverPrompt] id=${id} queued prompt behind in-flight delivery (len=${prompt.length}, queue=${e.promptQueue.length})`);
     return; // the in-flight drain picks it up after the current submit lands
@@ -1742,7 +1790,9 @@ function drainPromptQueue(id) {
     return;
   }
   e.promptDelivering = true;
-  const prompt = e.promptQueue.shift();
+  const queued = e.promptQueue.shift()
+  const prompt = typeof queued === 'string' ? queued : queued.prompt
+  const options = typeof queued === 'string' ? {} : queued.options
   const config = getAgentConfig(e.agentType);
   log(`[deliverPrompt] id=${id} waitingForInput=${e.waitingForInput} initialPromptDelay=${config.initialPromptDelay} promptLen=${prompt.length} queued=${e.promptQueue.length}`);
 
@@ -1768,7 +1818,7 @@ function drainPromptQueue(id) {
     // Re-enable input only after the deferred Enter has actually been written, so
     // the banner dismiss, the unblock, and a truthful "prompt-submitted" event all
     // coincide with the submission landing (#512).
-    submitToShell(id, prompt).then(() => {
+    submitToShell(id, prompt, null, options).then(() => {
       const entry = shells.get(id);
       if (!entry) return;
       if (entry.promptQueue && entry.promptQueue.length > 0) {
@@ -1956,6 +2006,7 @@ function wireShellOutput(id) {
     const e = shells.get(id);
     if (!e) return;
     e.lastActivity = Date.now();
+    acknowledgeCodexSubmitOutput(e, id)
     // Append to scrollback buffer
     e.scrollback.push(data);
     e.scrollbackSize += data.length;
@@ -3136,10 +3187,12 @@ const BUILTIN_MODS = new Set(['browser-console', 'tasks', 'screenshots', 'go-kar
 // --- Skills system ---
 const SKILLS_DIR = path.join(__dirname, 'skills');
 const CLAUDE_COMMANDS_DIR = path.join(os.homedir(), '.claude', 'commands');
+const CODEX_SKILLS_DIR = path.join(os.homedir(), '.agents', 'skills');
+const CODEX_SKILL_STORE_DIR = path.join(os.homedir(), '.deepsteve', 'codex-skills');
 const SKILL_ID_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/;
 
 // Install a skill file: copy source .md to ~/.claude/commands/deepsteve/{id}.md
-// Frontmatter `name: {id}` makes the slash command /{id}.
+// The deepsteve subdirectory namespaces the Claude command as /deepsteve:{id}.
 function installSkillFile(id) {
   const src = path.join(SKILLS_DIR, `${id}.md`);
   fs.mkdirSync(SKILL_DEST_DIR, { recursive: true });
@@ -3159,27 +3212,139 @@ function parseSkillFrontmatter(content) {
 }
 
 // Skill files are installed to ~/.claude/commands/deepsteve/{id}.md
-// Frontmatter `name: {id}` makes them available as /{id} slash commands.
+// Claude invokes them as /deepsteve:{id}; custom profiles link this directory.
 const SKILL_DEST_DIR = path.join(CLAUDE_COMMANDS_DIR, 'deepsteve');
 function skillDestPath(id) {
   return path.join(SKILL_DEST_DIR, `${id}.md`);
 }
 
-// Reconcile enabled skills on startup: ensure .md files exist in ~/.claude/commands/deepsteve/
-function reconcileSkills() {
-  if (!settings.enabledSkills || settings.enabledSkills.length === 0) return;
+function codexSkillName(id) {
+  return `deepsteve-${id}`;
+}
+
+function codexSkillStorePath(id) {
+  return path.join(CODEX_SKILL_STORE_DIR, codexSkillName(id));
+}
+
+function codexSkillLinkPath(id) {
+  return path.join(CODEX_SKILLS_DIR, codexSkillName(id));
+}
+
+function pathStat(filePath) {
+  try { return fs.lstatSync(filePath); } catch { return null; }
+}
+
+// Codex does not expand Claude's literal $ARGUMENTS placeholder. Keep skills/*.md
+// canonical and generate a Codex-facing SKILL.md that describes where arguments live.
+function renderCodexSkill(id) {
+  const skillName = codexSkillName(id);
+  const src = fs.readFileSync(path.join(SKILLS_DIR, `${id}.md`), 'utf8');
+  const argumentText = `the user's invocation arguments (the text following the $${skillName} mention in their message)`;
+  let content = src.replace(/^---\n([\s\S]*?)\n---/, (match, frontmatter) => {
+    const updated = frontmatter
+      .replace(/^name:\s*.*$/m, `name: ${skillName}`)
+      .replace(/^argument-hint:.*\n?/m, '');
+    return `---\n${updated}\n---`;
+  });
+  content = content.replace(/\$ARGUMENTS/g, argumentText);
+  content = content.replace(/\/deepsteve:([a-zA-Z0-9][a-zA-Z0-9._-]*)/g, '$deepsteve-$1');
+  return content;
+}
+
+function writeFileIfChanged(filePath, content) {
   try {
-    fs.mkdirSync(SKILL_DEST_DIR, { recursive: true });
+    if (fs.readFileSync(filePath, 'utf8') === content) return;
+  } catch {}
+  fs.writeFileSync(filePath, content);
+}
+
+// Codex discovers $HOME/.agents/skills/<name>/SKILL.md and follows symlinked
+// skill folders. The generated content lives under ~/.deepsteve; only the
+// DeepSteve-prefixed discovery link is managed in the user's skills directory.
+function installCodexSkill(id) {
+  const store = codexSkillStorePath(id);
+  const dest = codexSkillLinkPath(id);
+  fs.mkdirSync(store, { recursive: true });
+  writeFileIfChanged(path.join(store, 'SKILL.md'), renderCodexSkill(id));
+  fs.mkdirSync(CODEX_SKILLS_DIR, { recursive: true });
+
+  const st = pathStat(dest);
+  if (st) {
+    if (!st.isSymbolicLink()) {
+      log(`Codex skill: ${dest} exists and is not ours — leaving it alone`);
+      return;
+    }
+    if (fs.readlinkSync(dest) === store) return;
+    fs.unlinkSync(dest);
+  }
+  fs.symlinkSync(store, dest);
+  log(`Codex skill: linked ${dest} -> ${store}`);
+}
+
+function removeCodexSkill(id) {
+  const dest = codexSkillLinkPath(id);
+  const st = pathStat(dest);
+  if (st) {
+    if (!st.isSymbolicLink()) {
+      log(`Codex skill: ${dest} exists and is not ours — leaving it alone`);
+    } else {
+      fs.unlinkSync(dest);
+    }
+  }
+
+  // Remove only the files DeepSteve creates. If anything else is present in the
+  // backing directory, rmdirSync leaves it intact rather than clobbering it.
+  const store = codexSkillStorePath(id);
+  const skillFile = path.join(store, 'SKILL.md');
+  if (pathStat(skillFile)?.isFile()) fs.unlinkSync(skillFile);
+  try { fs.rmdirSync(store); } catch {}
+}
+
+function removeClaudeSkill(id) {
+  const dest = skillDestPath(id);
+  if (pathStat(dest)) fs.unlinkSync(dest);
+}
+
+function installSkill(id) {
+  installSkillFile(id);
+  installCodexSkill(id);
+}
+
+function removeSkill(id) {
+  removeClaudeSkill(id);
+  removeCodexSkill(id);
+}
+
+// Reconcile enabled skills on startup across both agent formats. Enabled skills
+// are installed, disabled known skills are absent, and invalid/missing entries
+// are removed from settings.
+function reconcileSkills() {
+  try {
+    const requestedSkills = Array.isArray(settings.enabledSkills) ? settings.enabledSkills : [];
     const validSkills = [];
-    for (const id of settings.enabledSkills) {
+    const enabledSet = new Set();
+    for (const id of requestedSkills) {
       if (!SKILL_ID_RE.test(id)) continue;
       const src = path.join(SKILLS_DIR, `${id}.md`);
-      if (fs.existsSync(src)) {
-        installSkillFile(id);
-        validSkills.push(id);
-      }
+      if (!fs.existsSync(src) || enabledSet.has(id)) continue;
+      validSkills.push(id);
+      enabledSet.add(id);
     }
-    if (validSkills.length !== settings.enabledSkills.length) {
+
+    const knownSkills = fs.existsSync(SKILLS_DIR)
+      ? fs.readdirSync(SKILLS_DIR)
+        .filter(file => file.endsWith('.md') && SKILL_ID_RE.test(file.slice(0, -3)))
+        .map(file => file.slice(0, -3))
+      : [];
+    for (const id of knownSkills) {
+      if (enabledSet.has(id)) installSkill(id);
+      else removeSkill(id);
+    }
+    // Also clean valid settings entries whose canonical source disappeared.
+    for (const id of requestedSkills) {
+      if (SKILL_ID_RE.test(id) && !enabledSet.has(id)) removeSkill(id);
+    }
+    if (validSkills.length !== requestedSkills.length) {
       settings.enabledSkills = validSkills;
       saveSettings();
     }
@@ -3293,8 +3458,7 @@ app.post('/api/skills/enable', (req, res) => {
   }
   if (!fs.existsSync(src)) return res.status(404).json({ error: 'Skill not found' });
   try {
-    fs.mkdirSync(SKILL_DEST_DIR, { recursive: true });
-    installSkillFile(id);
+    installSkill(id);
     if (!settings.enabledSkills) settings.enabledSkills = [];
     if (!settings.enabledSkills.includes(id)) settings.enabledSkills.push(id);
     saveSettings();
@@ -3309,13 +3473,15 @@ app.post('/api/skills/enable', (req, res) => {
 app.post('/api/skills/disable', (req, res) => {
   const { id } = req.body;
   if (!id || !SKILL_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid skill ID' });
-  const dest = skillDestPath(id);
-  // Validate dest is inside SKILL_DEST_DIR (deepsteve/ subdirectory)
-  if (!path.resolve(dest).startsWith(path.resolve(SKILL_DEST_DIR) + path.sep)) {
+  const claudeDest = skillDestPath(id);
+  const codexDest = codexSkillLinkPath(id);
+  // Validate managed destinations remain inside their DeepSteve-owned parents.
+  if (!path.resolve(claudeDest).startsWith(path.resolve(SKILL_DEST_DIR) + path.sep)
+      || !path.resolve(codexDest).startsWith(path.resolve(CODEX_SKILLS_DIR) + path.sep)) {
     return res.status(400).json({ error: 'Invalid skill ID' });
   }
   try {
-    if (fs.existsSync(dest)) fs.unlinkSync(dest);
+    removeSkill(id);
     settings.enabledSkills = (settings.enabledSkills || []).filter(s => s !== id);
     saveSettings();
     log(`Skill disabled: ${id}`);

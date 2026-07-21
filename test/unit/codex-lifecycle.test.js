@@ -73,6 +73,29 @@ result = { observeCodexReadiness, codexLoadedPromptRendered }`, context);
   return { ...context.result, shells, timers };
 }
 
+function loadSubmitHelpers() {
+  const code = sourceBetween('const CODEX_SUBMIT_RETRY_MS', '/**\n * Async wrapper around `gh issue view`')
+  const timers = []
+  const shells = new Map()
+  const context = {
+    shells,
+    log: () => {},
+    auditWaiting: () => {},
+    getEngine: () => null,
+    clearTimeout: (timer) => {
+      if (timer) timer.cleared = true
+    },
+    setTimeout: (fn, ms) => {
+      const timer = { fn, ms, cleared: false }
+      timers.push(timer)
+      return timer
+    },
+  }
+  vm.runInNewContext(`${code}
+result = { submitToShell, acknowledgeCodexSubmitOutput }`, context)
+  return { ...context.result, shells, timers }
+}
+
 test('Codex homes isolate runtime state while sharing user configuration', () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-codex-home-'));
   const shared = path.join(home, '.codex');
@@ -247,6 +270,52 @@ test('Codex recognizes an MCP status clear split across PTY chunks', () => {
   assert.strictEqual(entry.codexReady, true);
   assert.strictEqual(entry.delivered, true);
 });
+
+test('headless scheduled Codex submission retries a silent Enter and stops after its cap', async () => {
+  const { submitToShell, shells, timers } = loadSubmitHelpers()
+  const writes = []
+  const engine = { write: (id, data) => writes.push(data) }
+  shells.set('scheduled', { agentType: 'codex' })
+
+  const submitted = submitToShell('scheduled', 'do the scheduled work', engine, { retryCodexEnter: true })
+  assert.deepStrictEqual(writes, ['do the scheduled work'])
+
+  const deferredEnter = timers.shift()
+  assert.strictEqual(deferredEnter.ms, 1000)
+  deferredEnter.fn()
+  await submitted
+  assert.deepStrictEqual(writes, ['do the scheduled work', '\r'])
+
+  const firstRetry = timers.shift()
+  assert.strictEqual(firstRetry.ms, 1500)
+  firstRetry.fn()
+  assert.deepStrictEqual(writes, ['do the scheduled work', '\r', '\r'])
+
+  const secondRetry = timers.shift()
+  secondRetry.fn()
+  secondRetry.fn()
+  assert.deepStrictEqual(writes, ['do the scheduled work', '\r', '\r', '\r'])
+  assert.strictEqual(shells.get('scheduled').codexSubmitRetry, null)
+})
+
+test('scheduled Codex retry is cancelled by output from a turn that already started', async () => {
+  const { submitToShell, acknowledgeCodexSubmitOutput, shells, timers } = loadSubmitHelpers()
+  const writes = []
+  const engine = { write: (id, data) => writes.push(data) }
+  const entry = { agentType: 'codex' }
+  shells.set('started', entry)
+
+  const submitted = submitToShell('started', 'begin once', engine, { retryCodexEnter: true })
+  timers.shift().fn()
+  await submitted
+  const retry = timers.shift()
+
+  acknowledgeCodexSubmitOutput(entry, 'started')
+  retry.fn()
+  acknowledgeCodexSubmitOutput(entry, 'started')
+  assert.deepStrictEqual(writes, ['begin once', '\r'])
+  assert.strictEqual(entry.codexSubmitRetry, null)
+})
 
 test('Codex recent restores converge on the isolated home identity', () => {
   const code = sourceBetween(

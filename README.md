@@ -106,6 +106,15 @@ Customize the UI with CSS theme files. See the [Themes Guide](docs/themes.md) fo
 
 Extend deepsteve with visual mods — alternative views, panels, and MCP tools for your sessions. See the [Mods Guide](docs/mods.md) for details.
 
+### Skills
+
+Skills enabled in the Mods panel are installed for both Claude Code and Codex from the canonical prompts in `skills/*.md`.
+
+- Claude Code: invoke `chat.md` as `/deepsteve:chat`, with any arguments after the slash command.
+- Codex: mention the generated skill as `$deepsteve-chat`, with any arguments after the mention.
+
+DeepSteve keeps Claude command copies under `~/.claude/commands/deepsteve` and exposes Codex-compatible `SKILL.md` folders through managed symlinks under `~/.agents/skills`. Existing non-symlink paths there are left untouched.
+
 ## Custom Model Providers (OpenRouter)
 
 Claude Code sessions can run against any Anthropic-compatible API endpoint — OpenRouter, a corporate gateway, a local proxy — using a **custom Claude config profile**. No mod or proxy needed; each profile is just a separate `CLAUDE_CONFIG_DIR` with its own provider env, and tabs opt into it per session.
