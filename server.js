@@ -15,6 +15,7 @@ const { resolveForkTip } = require('./fork-resolve');
 const { formatLogTimestamp, createLogRotator, defaultLogPaths } = require('./logging');
 const { findGitRoot } = require('./git-root');
 const { classifyScreenTail, CLAUDE_SCREEN_MARKERS } = require('./screen-classifier');
+const { TerminalScreen } = require('./terminal-screen');
 const NodePtyEngine = require('./engines/node-pty');
 const TmuxEngine = require('./engines/tmux');
 
@@ -1923,7 +1924,7 @@ function sessionInputState(entry) {
 function stripEscapeSequences(data) {
   return data
     .replace(/\x1b\][\s\S]*?(\x07|\x1b\\)/g, '')  // OSC
-    .replace(/\x1b\[[0-9;?]*[a-zA-Z@`]/g, '')       // CSI (including private params like ?25h)
+    .replace(/\x1b\[[0-?]*[ -\/]*[@-~]/g, '')       // CSI (parameter, intermediate, and final bytes)
     .replace(/\x1b[()][A-Z0-9]/g, '')                // SCS (character set selection)
     .replace(/\x1b[78DMHNOcn=><]/g, '');              // Single-char escapes
 }
@@ -1989,9 +1990,11 @@ function reclassifyWaiting(e, id, via) {
  * Wire up a shell's onData handler: broadcast output to WebSocket clients,
  * re-derive the screen-state waiting flag (#568), and auto-submit queued prompts.
  */
-function wireShellOutput(id) {
+function wireShellOutput(id, cols = 120, rows = 40) {
   const entry = shells.get(id);
   if (!entry) return;
+  disposeTerminalScreen(entry);
+  entry.terminalScreen = new TerminalScreen({ cols, rows });
   if (getAgentConfig(entry.agentType).codexReadiness) {
     clearTimeout(entry.codexReadyTimer);
     entry.codexReadyTimer = null;
@@ -2001,6 +2004,7 @@ function wireShellOutput(id) {
   }
   if (!entry.scrollback) entry.scrollback = [];
   if (!entry.scrollbackSize) entry.scrollbackSize = 0;
+  for (const chunk of entry.scrollback) entry.terminalScreen.write(chunk);
 
   const dataHandler = (data) => {
     const e = shells.get(id);
@@ -2010,6 +2014,7 @@ function wireShellOutput(id) {
     // Append to scrollback buffer
     e.scrollback.push(data);
     e.scrollbackSize += data.length;
+    e.terminalScreen.write(data);
     // Trim scrollback if it exceeds the limit
     while (e.scrollbackSize > (settings.scrollbackKB * 1024) && e.scrollback.length > 1) {
       e.scrollbackSize -= e.scrollback.shift().length;
@@ -2067,10 +2072,25 @@ function wireShellOutput(id) {
   entry._engineDataHandler = dataHandler;
 }
 
+async function readTerminalScreen(entry, lines) {
+  if (!entry.terminalScreen) {
+    entry.terminalScreen = new TerminalScreen();
+    for (const chunk of entry.scrollback || []) entry.terminalScreen.write(chunk);
+  }
+  return entry.terminalScreen.lines(lines);
+}
+
+function disposeTerminalScreen(entry) {
+  if (!entry.terminalScreen) return;
+  entry.terminalScreen.dispose();
+  entry.terminalScreen = null;
+}
+
 // Gracefully kill a shell
 function killShell(entry, id, reason = 'closed') {
   if (entry.killed) return;
   entry.killed = true;
+  disposeTerminalScreen(entry);
   // Record why this session is closing; the engine 'exit' funnel reads it when the
   // pty actually exits (closeReasons survives the shells.delete that happens first).
   closeReasons.set(id, reason);
@@ -2478,6 +2498,7 @@ function handleShellGone(id) {
   if (!entry) return;
   tombstoneSession(id, entry);
   notifyClientsShellExited(id);
+  disposeTerminalScreen(entry);
   shells.delete(id);
   saveState();
 }
@@ -5099,6 +5120,7 @@ function handleWsConnection(ws, req) {
       scrollback: [],
       scrollbackSize: 0,
       _attachPty: attachPty,
+      terminalScreen: new TerminalScreen({ cols: initialCols, rows: initialRows }),
     };
     shells.set(id, entry);
 
@@ -5108,6 +5130,7 @@ function handleWsConnection(ws, req) {
       e.lastActivity = Date.now();
       e.scrollback.push(data);
       e.scrollbackSize += data.length;
+      e.terminalScreen.write(data);
       while (e.scrollbackSize > (settings.scrollbackKB * 1024) && e.scrollback.length > 1) {
         e.scrollbackSize -= e.scrollback.shift().length;
       }
@@ -5115,6 +5138,7 @@ function handleWsConnection(ws, req) {
     });
 
     attachPty.onExit(() => {
+      disposeTerminalScreen(entry);
       if (!shuttingDown) { shells.delete(id); }
     });
 
@@ -5130,6 +5154,7 @@ function handleWsConnection(ws, req) {
         if (parsed && typeof parsed === 'object') {
         if (parsed.type === 'resize') {
           attachPty.resize(parsed.cols, parsed.rows);
+          entry.terminalScreen.resize(parsed.cols, parsed.rows);
           return;
         }
         if (parsed.type === 'redraw') { attachPty.write('\x0c'); return; }
@@ -5144,6 +5169,7 @@ function handleWsConnection(ws, req) {
           if (entry.clients.size === 0) {
             log(`[WS] tmux-attach: detaching from ${tmuxSession} (last client)`);
             try { attachPty.kill(); } catch {}
+            disposeTerminalScreen(entry);
             shells.delete(id);
           }
           return;
@@ -5162,6 +5188,7 @@ function handleWsConnection(ws, req) {
         armDetachReap(entry, () => {
           log(`[WS] tmux-attach: detaching from ${tmuxSession} (grace period expired)`);
           try { attachPty.kill(); } catch {}
+          disposeTerminalScreen(entry);
           shells.delete(id);
         });
       }
@@ -5244,7 +5271,7 @@ function handleWsConnection(ws, req) {
       const restoredWindowId = windowId || restored.windowId || null;
       spawnSession(sessionEngine, id, savedAgentType, startArgs, cwd, { ...ptySize, env: sessionEnv(id, { name: restoredName, worktree: savedWorktree, windowId: restoredWindowId, cwd, agentType: savedAgentType, configDir: restored.configDir, codexHomeId }) });
       shells.set(id, { clients: new Set(), cwd, claudeSessionId, agentType: savedAgentType, codexHomeId, configDir: restored.configDir || null, engine: sessionEngine, engineType: restoredEngineType, worktree: savedWorktree, name: restoredName, planMode: savedPlanMode, forkParent: restored.forkParent || null, restored: true, waitingForInput: false, lastActivity: Date.now(), createdAt: restored.createdAt || Date.now(), windowId: restoredWindowId });
-      wireShellOutput(id);
+      wireShellOutput(id, initialCols, initialRows);
       recordRecentSession(id);  // bump recency on same-browser reconnect + cross-browser restore
       if (agentConfig.supportsSessionWatch) watchClaudeSessionDir(id);
 
@@ -5296,7 +5323,7 @@ function handleWsConnection(ws, req) {
           entry.killed = false;
           entry.scrollback = [];
           entry.scrollbackSize = 0;
-          wireShellOutput(id);
+          wireShellOutput(id, initialCols, initialRows);
           recordRecentSession(id);
           watchClaudeSessionDir(id);
           armRestoreExit();
@@ -5378,7 +5405,7 @@ function handleWsConnection(ws, req) {
     // DEEPSTEVE_WINDOW_ID, which sessionEnv otherwise reported as ''.
     spawnSession(sessionEngine, id, agentType, spawnArgs, worktreeCwd, { cols: initialCols, rows: initialRows, env: sessionEnv(id, { name, worktree, windowId, cwd: worktreeCwd, agentType, configDir }) });
     shells.set(id, { clients: new Set(), cwd: worktreeCwd, claudeSessionId: sessionId, agentType, codexHomeId: agentType === 'codex' ? id : null, configDir: configDir || null, engine: sessionEngine, engineType, worktree: worktree || null, windowId, name: name || null, planMode: spawnedPlanMode, forkParent: parentClaude, waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now() });
-    wireShellOutput(id);
+    wireShellOutput(id, initialCols, initialRows);
     emitSessionOpen(id);
     recordRecentSession(id);
     // Inherit Claude's Remote Control (/rc) from the parent tab/fork if it had it on.
@@ -5424,7 +5451,7 @@ function handleWsConnection(ws, req) {
       // that happens to parse as a JSON primitive (e.g. typing "1" in a plain terminal
       // parses as the number 1) must fall through to the PTY write below. See #373.
       if (parsed && typeof parsed === 'object') {
-      if (parsed.type === 'resize') { getEngine(id).resize(id, parsed.cols, parsed.rows); return; }
+      if (parsed.type === 'resize') { getEngine(id).resize(id, parsed.cols, parsed.rows); entry.terminalScreen.resize(parsed.cols, parsed.rows); return; }
       if (parsed.type === 'redraw') { return; } // no-op: Ink echoes \x0c as ^L garbage; scrollback replay handles reconnect
       // Liveness probe from a just-woken client (#563). Must return before the
       // PTY write below, and must not touch lastActivity/waitingForInput — a
@@ -5541,7 +5568,7 @@ function broadcastToWindow(windowId, msg) {
 }
 
 // Initialize MCP server (async, ~100ms for dynamic import)
-initMCP({ app, security, shells, wss, broadcast, broadcastToWindow, log, MODS_DIR, closeSession, tombstoneSession, handleShellGone, spawnSession, sessionEnv, getSpawnArgs, mcpConfigArgs, getAgentConfig, wireShellOutput, watchClaudeSessionDir, unwatchClaudeSessionDir, resolveForkParentSession, saveState, validateWorktree, ensureWorktree, sessionPaths, submitToShell, fetchIssueFromGitHub, deliverPromptWhenReady, reloadClients, deliverToWindow, settings, isShuttingDown: () => shuttingDown, displayTabs, setDisplayTab, deleteDisplayTab, screenshots, setScreenshot, deleteScreenshot, getScreenshotPath, getDefaultEngine, getForegroundCommand, sessionLog, emitSessionOpen, getContexts: () => contexts, pathInside, getSavedSession: (id) => savedState[id] || null, stripEscapeSequences, sessionInputState, maybeInheritRemoteControl, requestMetaControlsConsent }).catch(e => log('MCP init failed:', e.message));
+initMCP({ app, security, shells, wss, broadcast, broadcastToWindow, log, MODS_DIR, closeSession, tombstoneSession, handleShellGone, spawnSession, sessionEnv, getSpawnArgs, mcpConfigArgs, getAgentConfig, wireShellOutput, watchClaudeSessionDir, unwatchClaudeSessionDir, resolveForkParentSession, saveState, validateWorktree, ensureWorktree, sessionPaths, submitToShell, fetchIssueFromGitHub, deliverPromptWhenReady, reloadClients, deliverToWindow, settings, isShuttingDown: () => shuttingDown, displayTabs, setDisplayTab, deleteDisplayTab, screenshots, setScreenshot, deleteScreenshot, getScreenshotPath, getDefaultEngine, getForegroundCommand, sessionLog, emitSessionOpen, getContexts: () => contexts, pathInside, getSavedSession: (id) => savedState[id] || null, stripEscapeSequences, readTerminalScreen, sessionInputState, maybeInheritRemoteControl, requestMetaControlsConsent }).catch(e => log('MCP init failed:', e.message));
 
 // Watch themes directory for changes and broadcast to clients
 let themeWatchDebounce = null;

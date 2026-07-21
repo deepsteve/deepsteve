@@ -41,13 +41,14 @@ function init(context) {
     fetchIssueFromGitHub, deliverPromptWhenReady,
     reloadClients, deliverToWindow, settings, log, isShuttingDown,
     emitSessionOpen,
-    stripEscapeSequences, sessionInputState, maybeInheritRemoteControl, requestMetaControlsConsent,
+    stripEscapeSequences, readTerminalScreen, sessionInputState, maybeInheritRemoteControl, requestMetaControlsConsent,
   } = context;
 
-  // Last N visual lines of a session's screen: ANSI-stripped scrollback tail.
-  // TUI agents redraw whole frames, so this approximates (not reproduces) the
-  // current screen — same approach as the server's sessionHasRemoteControl.
-  function screenLines(entry, n) {
+  // Read the interpreted terminal buffer maintained at the PTY boundary. Tests
+  // and third-party embedders without that context helper retain a transcript
+  // fallback for compatibility.
+  async function screenLines(entry, n) {
+    if (readTerminalScreen) return readTerminalScreen(entry, n);
     const raw = (entry.scrollback || []).join('').slice(-16384);
     const lines = stripEscapeSequences(raw).split(/\r\n|\n|\r/).map((l) => l.replace(/\s+$/g, ''));
     while (lines.length && lines[lines.length - 1] === '') lines.pop();
@@ -206,7 +207,7 @@ function init(context) {
           const norm = (s) => s.replace(/\s+/g, ' ').trim();
           const needle = norm(text).slice(0, 200);
           if (needle.length > 0) {
-            const tail = stripEscapeSequences((entry.scrollback || []).join('').slice(-8192));
+            const tail = (await screenLines(entry, 200)).join('\n');
             landed = norm(tail).includes(needle);
           }
         }
@@ -219,12 +220,12 @@ function init(context) {
           keys_sent: [...(clear_first ? ['Escape'] : []), ...(keys || [])],
           submitted: doSubmit,
           landed,
-          screen_tail: screenLines(entry, 10),
+          screen_tail: await screenLines(entry, 10),
         }, null, 2) }] };
       },
     },
     read_session_screen: {
-      description: 'Read the recent terminal screen of a deepsteve session: the last N lines of its ANSI-stripped output, plus its input state ("idle" = the agent is at its input prompt, "busy" = mid-task, "unknown" = unclassifiable — plain terminals and non-BEL agents) and seconds since it last produced output. With no session_id, reads the calling session. Use it to check what a session is doing, or to verify input landed after meta_type. Note: TUI agents redraw their screen constantly, so the stripped stream contains repeated frame fragments — the tail approximates the current screen rather than reproducing it exactly.',
+      description: 'Read the recent terminal screen of a deepsteve session: the last N lines of interpreted terminal state, plus its input state ("idle" = the agent is at its input prompt, "busy" = mid-task, "unknown" = unclassifiable — plain terminals and non-BEL agents) and seconds since it last produced output. With no session_id, reads the calling session. Use it to check what a session is doing, or to verify input landed after meta_type. Cursor movement, redraws, reflow, and ANSI control sequences are resolved before the lines are returned.',
       schema: {
         session_id: z.string().optional().describe('Target session ID. If omitted, reads the calling session.'),
         lines: z.number().optional().describe('How many lines from the end to return (default 40, max 200).'),
@@ -240,7 +241,7 @@ function init(context) {
           session_id: targetId,
           state: sessionInputState(entry),
           seconds_since_output: entry.lastActivity ? Math.round((Date.now() - entry.lastActivity) / 1000) : null,
-          lines: screenLines(entry, n),
+          lines: await screenLines(entry, n),
         }, null, 2) }] };
       },
     },
