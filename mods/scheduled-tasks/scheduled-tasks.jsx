@@ -4,7 +4,25 @@ const { useState, useEffect, useMemo } = React;
 
 const DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const DAY_FULL = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
-const AGENTS = ['claude', 'hermes', 'opencode', 'pi'];
+// Fallback agent list, used only if GET /api/agents fails — the real list (which
+// includes codex and any custom config profiles, #537) is fetched at mount.
+const FALLBACK_AGENTS = [{ id: 'claude', name: 'claude' }, { id: 'codex', name: 'codex' }, { id: 'hermes', name: 'hermes' }, { id: 'opencode', name: 'opencode' }, { id: 'pi', name: 'pi' }];
+
+// `claude --model` accepts an alias or a full id; these are the aliases worth
+// offering, with an escape hatch for pinning an exact id (e.g. claude-fable-5).
+const MODEL_ALIASES = ['opus', 'sonnet', 'haiku', 'fable'];
+const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'];
+
+// A config profile is claude + an alternate config dir, encoded 'config:<id>' in
+// the Agent dropdown exactly like the main new-tab menu does.
+function agentSelValue(task) {
+  if (task && task.configProfile) return `config:${task.configProfile}`;
+  return (task && task.agentType) || 'claude';
+}
+function splitAgentSel(sel) {
+  if (typeof sel === 'string' && sel.startsWith('config:')) return { agentType: 'claude', configProfile: sel.slice(7) };
+  return { agentType: sel || 'claude', configProfile: null };
+}
 
 const C = {
   border: 'var(--ds-border, #30363d)',
@@ -169,6 +187,9 @@ function TaskCard({ task, onEdit }) {
                 <StatusBadge status={r.status} />
                 <span style={{ opacity: 0.6 }}>{r.sessionId}</span>
                 {r.worktree ? <span style={{ opacity: 0.5 }}>{r.worktree}{r.worktreeRemoved ? '' : ' (kept)'}</span> : null}
+                {/* Effective model/effort for this run (#592) — recorded per run so
+                    an audit never has to reconstruct them from transcripts. */}
+                {r.model || r.effort ? <span style={{ opacity: 0.5 }}>{[r.model, r.effort].filter(Boolean).join(' · ')}</span> : null}
               </div>
               {r.summary ? <div style={{ fontSize: 11, color: C.dim, opacity: 0.85, marginLeft: 2 }}>{r.summary}</div> : null}
             </div>
@@ -188,14 +209,20 @@ function input() {
 function label() { return { fontSize: 12, color: C.dim, marginTop: 10, display: 'block' }; }
 
 // ------------------------------------------------------------------ Task form
-function TaskForm({ task, projects, onClose }) {
+function TaskForm({ task, projects, agents, onClose }) {
   const initial = task || {};
   const initForm = cronToForm(initial.cron || '0 9 * * 1');
   const [title, setTitle] = useState(initial.title || '');
   const [prompt, setPrompt] = useState(initial.prompt || '');
   const [project, setProject] = useState(initial.project || (projects[0] && projects[0].root) || '');
   const [customPath, setCustomPath] = useState('');
-  const [agentType, setAgentType] = useState(initial.agentType || 'claude');
+  const [agentSel, setAgentSel] = useState(agentSelValue(initial));
+  // A stored model may be an alias we offer, or a pinned full id — the latter
+  // comes back as the "Custom…" option with the id prefilled.
+  const initModel = initial.model || '';
+  const [model, setModel] = useState(!initModel || MODEL_ALIASES.includes(initModel) ? initModel : '__custom__');
+  const [customModel, setCustomModel] = useState(MODEL_ALIASES.includes(initModel) ? '' : initModel);
+  const [effort, setEffort] = useState(initial.effort || '');
   const [planMode, setPlanMode] = useState(!!initial.planMode);
   const [keepOpen, setKeepOpen] = useState(!!initial.keepOpen);
   const [keepOpenOnFailure, setKeepOpenOnFailure] = useState(!!initial.keepOpenOnFailure);
@@ -209,13 +236,23 @@ function TaskForm({ task, projects, onClose }) {
 
   const cronStr = useMemo(() => buildCron(mode, fld), [mode, fld]);
   const setF = (patch) => setFld((p) => ({ ...p, ...patch }));
+  // A 'config:<id>' selection IS claude, so every claude-only control below stays
+  // enabled for it.
+  const { agentType, configProfile } = splitAgentSel(agentSel);
+  const profiles = agents.filter((a) => a.custom);
+  // Keep the saved selection selectable even if it's gone from /api/agents (an
+  // uninstalled agent binary, or a deleted config profile) — otherwise opening
+  // Edit would silently re-point the task at whatever option renders first.
+  const builtins = agents.filter((a) => !a.custom);
+  const known = agents.some((a) => a.id === agentSel);
+  if (!known && agentSel) (agentSel.startsWith('config:') ? profiles : builtins).push({ id: agentSel, name: `${agentSel} (unavailable)` });
 
   const save = async () => {
     setErr('');
     if (!title.trim()) return setErr('Title is required');
     if (!prompt.trim()) return setErr('Prompt is required');
     const proj = project === '__custom__' ? customPath.trim() : project;
-    const body = { title: title.trim(), prompt: prompt.trim(), cron: cronStr, once, project: proj, agentType, planMode, keepOpen, keepOpenOnFailure, isolateWorktree, maxRuntimeMinutes: Number(maxRuntime) || 0 };
+    const body = { title: title.trim(), prompt: prompt.trim(), cron: cronStr, once, project: proj, agentType, configProfile, model: model === '__custom__' ? customModel.trim() : model, effort, planMode, keepOpen, keepOpenOnFailure, isolateWorktree, maxRuntimeMinutes: Number(maxRuntime) || 0 };
     setSaving(true);
     try {
       if (task && task.id) await api('PUT', `/api/scheduled-tasks/${task.id}`, body);
@@ -281,12 +318,38 @@ function TaskForm({ task, projects, onClose }) {
 
       <div style={{ display: 'flex', gap: 12, marginTop: 10, alignItems: 'center', flexWrap: 'wrap' }}>
         <label style={{ fontSize: 12, color: C.dim }}>Agent{' '}
-          <select style={{ ...input(), width: 120, display: 'inline-block', marginTop: 0 }} value={agentType} onChange={(e) => setAgentType(e.target.value)}>
-            {AGENTS.map((a) => <option key={a} value={a}>{a}</option>)}
+          <select style={{ ...input(), width: 150, display: 'inline-block', marginTop: 0 }} value={agentSel} onChange={(e) => setAgentSel(e.target.value)}>
+            {builtins.map((a) => <option key={a.id} value={a.id}>{a.name || a.id}</option>)}
+            {profiles.length ? (
+              <optgroup label="config profiles">
+                {profiles.map((a) => <option key={a.id} value={a.id}>{a.name || a.id}</option>)}
+              </optgroup>
+            ) : null}
           </select>
         </label>
         <label style={{ fontSize: 12, color: C.dim }}><input type="checkbox" checked={planMode} onChange={(e) => setPlanMode(e.target.checked)} /> plan mode</label>
       </div>
+      {/* #592: model + effort. claude-only (the flags exist on no other agent), so
+          they follow the same disabled/dimmed pattern as worktree isolation. */}
+      <div style={{ display: 'flex', gap: 12, marginTop: 8, alignItems: 'center', flexWrap: 'wrap', opacity: agentType !== 'claude' ? 0.5 : 1 }}>
+        <label style={{ fontSize: 12, color: C.dim }} title={agentType !== 'claude' ? 'Model selection only applies to claude.' : ''}>Model{' '}
+          <select style={{ ...input(), width: 150, display: 'inline-block', marginTop: 0 }} value={model} disabled={agentType !== 'claude'} onChange={(e) => setModel(e.target.value)}>
+            <option value="">Default (inherit)</option>
+            {MODEL_ALIASES.map((m) => <option key={m} value={m}>{m}</option>)}
+            <option value="__custom__">Custom…</option>
+          </select>
+        </label>
+        <label style={{ fontSize: 12, color: C.dim }} title={agentType !== 'claude' ? 'Effort selection only applies to claude.' : ''}>Effort{' '}
+          <select style={{ ...input(), width: 110, display: 'inline-block', marginTop: 0 }} value={effort} disabled={agentType !== 'claude'} onChange={(e) => setEffort(e.target.value)}>
+            <option value="">Default</option>
+            {EFFORT_LEVELS.map((l) => <option key={l} value={l}>{l}</option>)}
+          </select>
+        </label>
+      </div>
+      {model === '__custom__' && agentType === 'claude' && (
+        <input style={{ ...input(), marginTop: 6 }} value={customModel} onChange={(e) => setCustomModel(e.target.value)} placeholder="claude-fable-5" />
+      )}
+      <div style={{ fontSize: 11, color: C.dim, marginTop: 4 }}>Default inherits Claude Code's own model and effort — which can silently fall back to a cheaper model when you hit usage limits. Pin them here for a run that must be cheap, or must not be.</div>
       <div style={{ display: 'flex', gap: 12, marginTop: 8, alignItems: 'center', flexWrap: 'wrap' }}>
         <label style={{ fontSize: 12, color: C.dim }}><input type="checkbox" checked={keepOpen} onChange={(e) => setKeepOpen(e.target.checked)} /> keep tab open when finished</label>
         <label style={{ fontSize: 12, color: C.dim, opacity: keepOpen ? 0.5 : 1 }} title={keepOpen ? 'Redundant while “keep tab open when finished” is on.' : 'Keep the tab open only when the run fails.'}>
@@ -374,6 +437,18 @@ function App() {
   const [filter, setFilter] = useState({ type: 'all', value: '' });
   const [editing, setEditing] = useState(null); // null | 'new' | task
   const [showGroups, setShowGroups] = useState(false);
+  // The agent list is server-owned and includes custom config profiles (#537) as
+  // custom:true rows with id 'config:<profileId>' — same source the main new-tab
+  // menu uses, so the panel can't drift from it.
+  const [agents, setAgents] = useState(FALLBACK_AGENTS);
+
+  useEffect(() => {
+    let alive = true;
+    api('GET', '/api/agents')
+      .then((d) => { if (alive && d && Array.isArray(d.agents) && d.agents.length) setAgents(d.agents.filter((a) => a.available !== false)); })
+      .catch(() => {}); // keep FALLBACK_AGENTS — the form must never render an empty select
+    return () => { alive = false; };
+  }, []);
 
   useEffect(() => {
     const unsubs = [];
@@ -452,7 +527,7 @@ function App() {
       </div>
 
       {showGroups && <GroupsManager contexts={contexts} projects={data.projects} onClose={() => setShowGroups(false)} />}
-      {editing && <TaskForm task={editing === 'new' ? null : editing} projects={data.projects} onClose={() => setEditing(null)} />}
+      {editing && <TaskForm task={editing === 'new' ? null : editing} projects={data.projects} agents={agents} onClose={() => setEditing(null)} />}
 
       {sections.length === 0 && !editing && (
         <div style={{ color: C.dim, fontSize: 13, marginTop: 20, textAlign: 'center' }}>No scheduled tasks yet.<br />Click <b>+ New</b> to create one.</div>

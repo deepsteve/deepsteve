@@ -202,6 +202,40 @@ test('Claude spawn argument construction is unchanged', () => {
   ]);
 });
 
+// #592: scheduled runs can pin a model and an effort level. Both flags exist only
+// on claude, and both must survive a resume — Claude's --resume does not persist
+// session flags, so a restart-resumed run would otherwise silently revert to the
+// default model (exactly the drift the issue's 54-run audit turned up).
+test('Claude model/effort flags are emitted on spawn AND re-applied on resume', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-claude-model-args-'));
+  const { getSpawnArgs, getResumeArgs } = loadArgumentHelpers(home);
+  const opts = { sessionId: 'claude-session', planMode: false, worktree: null, shellId: 'abcddcba', model: 'haiku', effort: 'low' };
+
+  const spawn = Array.from(getSpawnArgs('claude', opts));
+  assert.deepStrictEqual(spawn.slice(0, 6), ['--session-id', 'claude-session', '--model', 'haiku', '--effort', 'low']);
+
+  const resume = Array.from(getResumeArgs('claude', opts));
+  assert.deepStrictEqual(resume.slice(0, 6), ['--resume', 'claude-session', '--model', 'haiku', '--effort', 'low']);
+
+  // A full model id is fine; an unusable value degrades to "inherit the default"
+  // rather than reaching argv.
+  assert.ok(Array.from(getSpawnArgs('claude', { ...opts, model: 'claude-fable-5' })).includes('claude-fable-5'));
+  const junk = Array.from(getSpawnArgs('claude', { ...opts, model: 'foo; rm -rf /', effort: 'ludicrous' }));
+  assert.ok(!junk.includes('--model'), 'a malformed model must not reach argv');
+  assert.ok(!junk.includes('--effort'), 'an unknown effort level must not reach argv');
+});
+
+test('non-claude agents never get model/effort flags', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-other-model-args-'));
+  const { getSpawnArgs } = loadArgumentHelpers(home);
+  for (const agent of ['codex', 'hermes', 'opencode', 'pi']) {
+    const args = Array.from(getSpawnArgs(agent, { sessionId: null, planMode: false, worktree: null, shellId: 'abcddcba', model: 'haiku', effort: 'low' }));
+    assert.ok(!args.includes('--model'), `${agent} should not receive --model`);
+    assert.ok(!args.includes('--effort'), `${agent} should not receive --effort`);
+    assert.ok(!args.includes('haiku'), `${agent} argv should not mention the model at all`);
+  }
+});
+
 test('Codex waits for the rendered MCP status row to clear before becoming ready', () => {
   const { observeCodexReadiness, shells } = loadReadinessHelpers();
   const entry = { onCodexReadyOnce: () => { entry.deliveries = (entry.deliveries || 0) + 1; } };

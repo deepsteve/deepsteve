@@ -43,6 +43,11 @@ const ACTIVE_STATUSES = new Set(['queued', 'running', 'started']);
 // log line per tick. 0 on a task means "no limit".
 const DEFAULT_MAX_RUNTIME_MINUTES = 60;
 
+// Effort levels accepted by `claude --effort` (#592). Mirrors server.js's
+// EFFORT_LEVELS, which stays the authority — this copy only shapes the MCP enum;
+// every value still goes through ctx.validateEffort before it reaches argv.
+const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'];
+
 // --- Persistent state (load on start, write-through on mutate) ---
 // Tasks live here; the named groups that drive scope:'group' are now the shared
 // server-owned "contexts" (#526), read live via ctx.getContexts() — this mod no
@@ -277,8 +282,16 @@ function runTask(task, reason, { foreground = false } = {}) {
     return null;
   }
 
-  const agentType = task.agentType || 'claude';
+  const { agentType } = splitAgentSelection(task.agentType, task.configProfile);
   const agentConfig = getAgentConfig(agentType);
+  // Custom Claude config profile (#537/#592). Resolved here, at spawn time, so a
+  // profile whose directory changed in Settings takes effect on the next run; the
+  // resolved dir (not the id) is what gets persisted on the shell entry, matching
+  // every other spawn path. A deleted profile resolves to null = default config.
+  const configDir = agentType === 'claude' && ctx.resolveConfigDir
+    ? (ctx.resolveConfigDir(task.configProfile) || null) : null;
+  const model = cleanModel(task.model);
+  const effort = cleanEffort(task.effort);
   const cwd = task.project && fs.existsSync(task.project) ? task.project : os.homedir();
   const id = randomUUID().slice(0, 8);
   const claudeSessionId = agentType === 'codex' ? null : randomUUID();
@@ -295,18 +308,18 @@ function runTask(task, reason, { foreground = false } = {}) {
       && task.project && cwd === task.project && isGitRepo(cwd)) {
     worktree = ctx.validateWorktree(`scheduled-${id}`);
   }
-  const spawnArgs = getSpawnArgs(agentType, { sessionId: claudeSessionId, shellId: id, planMode: !!task.planMode, worktree });
+  const spawnArgs = getSpawnArgs(agentType, { sessionId: claudeSessionId, shellId: id, planMode: !!task.planMode, worktree, model, effort });
   const sessionEngine = getDefaultEngine();
   const engineType = sessionEngine.constructor.name === 'TmuxEngine' ? 'tmux' : 'node-pty';
   const name = `⏰ ${task.title}`;
 
-  log(`[scheduled] running "${task.title}" (${task.id}) id=${id} agent=${agentType} engine=${engineType} cwd=${cwd} worktree=${worktree || 'none'} reason=${reason}`);
+  log(`[scheduled] running "${task.title}" (${task.id}) id=${id} agent=${agentType} model=${model || 'default'} effort=${effort || 'default'} profile=${task.configProfile || 'none'} engine=${engineType} cwd=${cwd} worktree=${worktree || 'none'} reason=${reason}`);
   spawnSession(sessionEngine, id, agentType, spawnArgs, cwd, {
-    cols: 120, rows: 40, env: sessionEnv(id, { name, windowId: null, cwd, agentType, worktree, codexHomeId }),
+    cols: 120, rows: 40, env: sessionEnv(id, { name, windowId: null, cwd, agentType, worktree, codexHomeId, configDir }),
   });
   shells.set(id, {
     clients: new Set(), cwd, claudeSessionId, agentType,
-    codexHomeId,
+    codexHomeId, configDir, model, effort,
     engine: sessionEngine, engineType, worktree, windowId: null,
     // Unattended by construction (#597): no browser ever owned this tab, so a
     // windowId-less scheduled run must not be offered up as a lost session by
@@ -360,7 +373,10 @@ function runTask(task, reason, { foreground = false } = {}) {
   const now = Date.now();
   task.lastRun = now;
   task.runs = task.runs || [];
-  task.runs.unshift({ startedAt: now, sessionId: id, status: 'queued', endedAt: null, agentStartedAt: null, success: null, summary: null, worktree });
+  // Record the *effective* model/effort/config dir on the run row (#592). Nothing
+  // else stores them: reconstructing what a past run actually used previously meant
+  // digging through Claude transcripts, and effort isn't in there at all.
+  task.runs.unshift({ startedAt: now, sessionId: id, status: 'queued', endedAt: null, agentStartedAt: null, success: null, summary: null, worktree, model, effort, configDir });
   if (task.runs.length > MAX_RUNS) task.runs.length = MAX_RUNS;
   saveTasks();
   broadcastTasks();
@@ -527,15 +543,46 @@ function sanitizeMaxRuntime(v) {
   return n;
 }
 
-function createTask({ title, prompt, cron: cronStr, once, project, agentType, planMode, enabled, createdBy, keepOpen, keepOpenOnFailure, isolateWorktree, maxRuntimeMinutes }) {
+// #592/#537: a custom config profile is agentType 'claude' + a profile id, not a
+// new agent type — but the panel's Agent dropdown (like the main new-tab menu)
+// encodes profiles as 'config:<profileId>'. Accept either form, the same way the
+// WS new-session path does, and always store the two pieces separately.
+function splitAgentSelection(agentType, configProfile) {
+  let type = agentType || 'claude';
+  let profile = configProfile || null;
+  if (typeof type === 'string' && type.startsWith('config:')) {
+    profile = profile || type.slice('config:'.length);
+    type = 'claude';
+  }
+  // A profile only means anything for claude; keep the record honest so the form
+  // and runTask don't have to re-check.
+  if (type !== 'claude') profile = null;
+  return { agentType: type, configProfile: profile };
+}
+
+// Sanitize model/effort through the server's validators when the mod ctx has
+// them (it always does at runtime; unit-test stubs may not). null = inherit.
+function cleanModel(v) { return (ctx && ctx.validateModel ? ctx.validateModel(v) : (v || null)) || null; }
+function cleanEffort(v) { return (ctx && ctx.validateEffort ? ctx.validateEffort(v) : (v || null)) || null; }
+
+function createTask({ title, prompt, cron: cronStr, once, project, agentType, configProfile, model, effort, planMode, enabled, createdBy, keepOpen, keepOpenOnFailure, isolateWorktree, maxRuntimeMinutes }) {
   cron.parseCron(cronStr); // throws on invalid — caller catches (a one-shot still uses a cron)
   const now = Date.now();
+  const agent = splitAgentSelection(agentType, configProfile);
   const task = {
     id: randomUUID().slice(0, 8),
     title: String(title || 'Untitled task'),
     prompt: String(prompt || ''),
     project: project || '',
-    agentType: agentType || 'claude',
+    agentType: agent.agentType,
+    // Custom Claude config profile (#537) to run under, by profile id. Stored as the
+    // id (not the resolved dir) because a task is a template: editing the profile's
+    // directory in Settings should move future runs with it. Resolved at spawn time.
+    configProfile: agent.configProfile,
+    // #592: null = inherit Claude Code's own default (the pre-#592 behavior, which
+    // is also what silently fell back off Opus on usage limits). claude-only.
+    model: cleanModel(model),
+    effort: cleanEffort(effort),
     planMode: !!planMode,
     // Auto-close is the default: the tab closes when the agent self-reports
     // finished, unless keepOpen (always keep) or keepOpenOnFailure (keep on a
@@ -574,7 +621,17 @@ function updateTask(id, fields) {
   if (fields.title !== undefined) task.title = String(fields.title);
   if (fields.prompt !== undefined) task.prompt = String(fields.prompt);
   if (fields.project !== undefined) task.project = fields.project || '';
-  if (fields.agentType !== undefined) task.agentType = fields.agentType || 'claude';
+  // Agent + config profile move together: switching to a non-claude agent must drop
+  // the profile, and a 'config:<id>' agentType carries the profile inside it.
+  if (fields.agentType !== undefined || fields.configProfile !== undefined) {
+    const agent = splitAgentSelection(
+      fields.agentType !== undefined ? fields.agentType : task.agentType,
+      fields.configProfile !== undefined ? fields.configProfile : task.configProfile);
+    task.agentType = agent.agentType;
+    task.configProfile = agent.configProfile;
+  }
+  if (fields.model !== undefined) task.model = cleanModel(fields.model);
+  if (fields.effort !== undefined) task.effort = cleanEffort(fields.effort);
   if (fields.planMode !== undefined) task.planMode = !!fields.planMode;
   if (fields.keepOpen !== undefined) task.keepOpen = !!fields.keepOpen;
   if (fields.keepOpenOnFailure !== undefined) task.keepOpenOnFailure = !!fields.keepOpenOnFailure;
@@ -626,6 +683,9 @@ function taskView(task) {
     firedAt: task.firedAt || null,
     done: !!(task.once && task.firedAt),
     agentType: task.agentType,
+    configProfile: task.configProfile || null,
+    model: task.model || null,
+    effort: task.effort || null,
     planMode: !!task.planMode,
     keepOpen: !!task.keepOpen,
     keepOpenOnFailure: !!task.keepOpenOnFailure,
@@ -689,6 +749,14 @@ function unattendedRunInFlight() {
   return null;
 }
 
+// Shared schema fragment for the claude-only run knobs (#592/#537), so
+// schedule_task and update_scheduled_task can never drift apart.
+const AGENT_TUNING_SCHEMA = () => ({
+  model: z.string().optional().describe('Model for each run: an alias such as "opus", "sonnet", "haiku" or "fable", or a full id such as "claude-fable-5". Omit (or "") to inherit Claude Code\'s own default — note that the default can silently fall back to a cheaper model on usage limits. claude only.'),
+  effort: z.enum(EFFORT_LEVELS).optional().describe('Thinking/effort level for each run: low, medium, high, xhigh or max. Omit to inherit Claude Code\'s default. claude only.'),
+  config_profile: z.string().optional().describe('Id of a custom Claude config profile (Settings → config profiles, #537) to run under, i.e. an alternate CLAUDE_CONFIG_DIR. Omit for the default config. claude only.'),
+});
+
 function init(context) {
   ctx = context;
   startScheduler();
@@ -706,6 +774,7 @@ function init(context) {
         once: z.boolean().optional().describe('Run exactly once at the next cron match, then retire (kept as a done row). Default false (recurring).'),
         project: z.string().optional().describe('Repo path to run in (canonicalized to its git root). Defaults to the calling session\'s project.'),
         agent_type: z.string().optional().describe('Agent to run: "claude" (default), "codex", or an experimental agent such as "opencode", "pi", or "hermes".'),
+        ...AGENT_TUNING_SCHEMA(),
         plan_mode: z.boolean().optional().describe('Start the agent in plan mode (default false).'),
         keep_open: z.boolean().optional().describe('Keep the tab open after each run finishes instead of auto-closing (default false).'),
         keep_open_on_failure: z.boolean().optional().describe('Keep the tab open when a run fails, even if auto-close is on (default false).'),
@@ -713,13 +782,14 @@ function init(context) {
         max_runtime_minutes: z.number().optional().describe('Close a run that has not reported finished after this many minutes, so a stuck run cannot block future fires. Default 60; 0 disables the limit.'),
         enabled: z.boolean().optional().describe('Whether the schedule is active (default true).'),
       },
-      handler: async ({ title, prompt, cron: cronStr, once, project, agent_type, plan_mode, keep_open, keep_open_on_failure, isolate_worktree, max_runtime_minutes, enabled }, extra) => {
+      handler: async ({ title, prompt, cron: cronStr, once, project, agent_type, model, effort, config_profile, plan_mode, keep_open, keep_open_on_failure, isolate_worktree, max_runtime_minutes, enabled }, extra) => {
         let task;
         try {
           task = createTask({
             title, prompt, cron: cronStr, once,
             project: resolveProject(project, callerShellId(extra)),
-            agentType: agent_type, planMode: plan_mode, enabled,
+            agentType: agent_type, configProfile: config_profile, model, effort,
+            planMode: plan_mode, enabled,
             keepOpen: keep_open, keepOpenOnFailure: keep_open_on_failure,
             isolateWorktree: isolate_worktree,
             maxRuntimeMinutes: max_runtime_minutes,
@@ -766,6 +836,7 @@ function init(context) {
         once: z.boolean().optional().describe('Make this a run-once task (fires at the next cron match, then retires) or back to recurring.'),
         project: z.string().optional(),
         agent_type: z.string().optional().describe('Agent to run: "claude", "codex", or an experimental agent such as "opencode", "pi", or "hermes".'),
+        ...AGENT_TUNING_SCHEMA(),
         plan_mode: z.boolean().optional(),
         keep_open: z.boolean().optional().describe('Keep the tab open after each run finishes instead of auto-closing.'),
         keep_open_on_failure: z.boolean().optional().describe('Keep the tab open when a run fails, even if auto-close is on.'),
@@ -773,7 +844,7 @@ function init(context) {
         max_runtime_minutes: z.number().optional().describe('Close a run that has not reported finished after this many minutes (0 disables the limit).'),
         enabled: z.boolean().optional(),
       },
-      handler: async ({ id, title, prompt, cron: cronStr, once, project, agent_type, plan_mode, keep_open, keep_open_on_failure, isolate_worktree, max_runtime_minutes, enabled }, extra) => {
+      handler: async ({ id, title, prompt, cron: cronStr, once, project, agent_type, model, effort, config_profile, plan_mode, keep_open, keep_open_on_failure, isolate_worktree, max_runtime_minutes, enabled }, extra) => {
         const fields = {};
         if (title !== undefined) fields.title = title;
         if (prompt !== undefined) fields.prompt = prompt;
@@ -781,6 +852,9 @@ function init(context) {
         if (once !== undefined) fields.once = once;
         if (project !== undefined) fields.project = resolveProject(project, callerShellId(extra));
         if (agent_type !== undefined) fields.agentType = agent_type;
+        if (config_profile !== undefined) fields.configProfile = config_profile;
+        if (model !== undefined) fields.model = model;
+        if (effort !== undefined) fields.effort = effort;
         if (plan_mode !== undefined) fields.planMode = plan_mode;
         if (keep_open !== undefined) fields.keepOpen = keep_open;
         if (keep_open_on_failure !== undefined) fields.keepOpenOnFailure = keep_open_on_failure;
@@ -902,7 +976,9 @@ function registerRoutes(app, context) {
     try {
       const task = createTask({
         title: b.title, prompt: b.prompt, cron: b.cron, once: b.once, project: projectRoot,
-        agentType: b.agentType, planMode: b.planMode, enabled: b.enabled,
+        agentType: b.agentType, configProfile: b.configProfile,
+        model: b.model, effort: b.effort,
+        planMode: b.planMode, enabled: b.enabled,
         keepOpen: b.keepOpen, keepOpenOnFailure: b.keepOpenOnFailure,
         isolateWorktree: b.isolateWorktree,
         maxRuntimeMinutes: b.maxRuntimeMinutes,
