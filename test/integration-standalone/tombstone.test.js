@@ -341,6 +341,56 @@ test('clear-disconnected marks closed, never hard-deletes', async () => {
   }
 });
 
+// #603: "Clear disconnected" used to undo itself — a browser socket still looping on
+// reconnect re-dialed ?id=<shell> and the restore path resurrected the tombstone,
+// respawning the agent. ws-client's post-assignment (passive-reconnect) URL now carries
+// noRestore=1. The flag must ONLY block *closed* entries: a plain disconnect writes a
+// non-closed saved entry (#563 sleep resilience) that has to keep restoring, and an
+// explicit restore (dropdown click, #560 restore modal) omits the flag entirely.
+test('noRestore=1 refuses to resurrect a closed tombstone, but nothing else (#603)', async () => {
+  await stopDaemon();
+  const seeded = readState();
+  const base = {
+    cwd: projDir, agentType: 'claude', configDir: null, engineType: 'node-pty', worktree: null,
+    planMode: false, lastActivity: Date.now(), createdAt: Date.now(), windowId: null,
+  };
+  seeded['discclos'] = {
+    ...base, name: 'disc-closed', claudeSessionId: 'aaaaaaaa-1111-2222-3333-444444444444',
+    closed: true, closedAt: Date.now(), closeReason: 'disconnected',
+  };
+  seeded['discopen'] = {
+    ...base, name: 'disc-open', claudeSessionId: 'bbbbbbbb-1111-2222-3333-444444444444',
+  };
+  writeState(seeded);
+  await startDaemon();
+
+  // (a) passive reconnect to a tombstone → gone, and the tombstone is NOT consumed.
+  const stubBefore = stubLog().length;
+  const closedClient = track(new Client());
+  const goneMsg = await closedClient.connect({ cwd: projDir, id: 'discclos', noRestore: '1' });
+  assert.strictEqual(goneMsg.type, 'gone', 'closed tombstone answers "gone" under noRestore');
+  assert.strictEqual(goneMsg.id, 'discclos');
+  assert.strictEqual(stubLog().length, stubBefore, 'no agent respawned');
+  const stillThere = readState()['discclos'];
+  assert.ok(stillThere, 'tombstone survives — the record is never consumed by a refused restore');
+  assert.strictEqual(stillThere.closed, true, 'still closed');
+  assert.ok(!(await apiGet('/api/shells')).shells.some(s => s.id === 'discclos' && s.status === 'active'),
+    'refused restore left no live shell');
+
+  // (b) the same flag must not touch a plain disconnect (#563) — it is not closed.
+  const openClient = track(new Client());
+  const openMsg = await openClient.connect({ cwd: projDir, id: 'discopen', noRestore: '1' });
+  assert.strictEqual(openMsg.type, 'session', 'non-closed saved entry still restores under noRestore');
+  assert.strictEqual(openMsg.id, 'discopen');
+
+  // (c) an explicit restore omits the flag and still resurrects a tombstone (#560).
+  const explicitClient = track(new Client());
+  const explicitMsg = await explicitClient.connect({ cwd: projDir, id: 'discclos' });
+  assert.strictEqual(explicitMsg.type, 'session', 'explicit restore of a tombstone still works');
+  assert.strictEqual(explicitMsg.id, 'discclos');
+  closeClients();
+});
+
 test('retention sweep prunes only closed tombstones past the window', async () => {
   await stopDaemon();
   const DAY = 24 * 60 * 60 * 1000;

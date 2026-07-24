@@ -158,6 +158,13 @@ export function createWebSocket(options = {}) {
       if (options.agentType && options.agentType !== 'claude') p.set('agentType', options.agentType);
       if (options.configProfile) p.set('configProfile', options.configProfile); // custom Claude config profile (#537)
       if (options.windowId) p.set('windowId', options.windowId);
+      // #603: this is the URL every *passive* reconnect re-dials. A session that was
+      // cleared while we were disconnected is a closed tombstone server-side, and
+      // reconnecting with its id would resurrect it and respawn the agent. Ask the
+      // server to answer `gone` instead. Deliberately NOT set on createWebSocket()'s
+      // initial URL — dropdown clicks, the session-restore modal (#560) and page-reload
+      // restores are explicit user intent and must still be able to resume a tombstone.
+      p.set('noRestore', '1');
       url = wsProto + location.host + '?' + p;
     },
 
