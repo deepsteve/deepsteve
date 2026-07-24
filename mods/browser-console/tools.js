@@ -10,7 +10,19 @@ const TIMEOUT_MS = 10000;
  * Initialize browser console MCP tools.
  */
 function init(context) {
-  const { broadcast, broadcastToWindow, shells } = context;
+  const { broadcast, broadcastToWindow, shells, reloadClients } = context;
+
+  // These tools drive the deepsteve UI, so with no browser attached there is
+  // nothing to answer them. Say so immediately instead of broadcasting into the
+  // void and burning the full timeout on a misleading "enable the mod" message —
+  // an unattended scheduled run hits this every time (#596).
+  function noBrowserResult() {
+    if (reloadClients && [...reloadClients].some((c) => c.readyState === 1)) return null;
+    return {
+      isError: true,
+      content: [{ type: 'text', text: 'No deepsteve browser window is connected. This tool drives the deepsteve web UI and cannot run unattended.' }],
+    };
+  }
 
   // Resolve session_id to a windowId, returning the send function and optional targetWindowId
   function resolveTarget(session_id) {
@@ -32,6 +44,8 @@ function init(context) {
         session_id: z.string().optional().describe('DeepSteve session ID. Run `echo $DEEPSTEVE_SESSION_ID` in your terminal to get this value. When provided, the command is sent only to the browser window that owns this session.'),
       },
       handler: async ({ code, session_id }) => {
+        const noBrowser = noBrowserResult();
+        if (noBrowser) return noBrowser;
         const requestId = randomUUID();
         const { send } = resolveTarget(session_id);
 
@@ -63,6 +77,8 @@ function init(context) {
         session_id: z.string().optional().describe('DeepSteve session ID. Run `echo $DEEPSTEVE_SESSION_ID` in your terminal to get this value. When provided, the command is sent only to the browser window that owns this session.'),
       },
       handler: async ({ level, limit, search, session_id }) => {
+        const noBrowser = noBrowserResult();
+        if (noBrowser) return noBrowser;
         const requestId = randomUUID();
         const { send } = resolveTarget(session_id);
 

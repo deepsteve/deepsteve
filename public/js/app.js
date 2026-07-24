@@ -1538,7 +1538,7 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
     configProfile = agentType.slice('config:'.length);
     agentType = 'claude';
   }
-  const ws = createWebSocket({ id: existingId, cwd, isNew, worktree: opts.worktree, name: opts.name, planMode: opts.planMode, agentType, configProfile, cols, rows, windowId: getWindowId(), fork: opts.fork, rcParent: opts.rcParent });
+  const ws = createWebSocket({ id: existingId, cwd, isNew, worktree: opts.worktree, name: opts.name, planMode: opts.planMode, agentType, configProfile, cols, rows, windowId: getWindowId(), fork: opts.fork, rcParent: opts.rcParent, noRestore: opts.noRestore });
 
   // Reconnect state lives on this handle, not the sessions map (#556): the map
   // entry only exists after the first {type:'session'} message, so a connect
@@ -3836,9 +3836,13 @@ async function init() {
         renderEmptyStateRecent();
       }
       if (msg.type === 'open-session') {
-        // Server created a session (e.g. via /api/start-issue) — open a tab for it
+        // Server created a session (e.g. via /api/start-issue) — open a tab for it.
+        // noRestore (#596): the server just told us this session exists, so this is
+        // never a restore request. If it died in the meantime (a queued unattended
+        // run that finished before this window connected), we want a clean "gone",
+        // not a resurrected tombstone.
         if (msg.windowId && msg.windowId !== getWindowId()) return;
-        createSession(msg.cwd, msg.id, false, { name: msg.name, allowDuplicate: true, initialPrompt: msg.initialPrompt, loading: msg.loading, background: msg.background });
+        createSession(msg.cwd, msg.id, false, { name: msg.name, allowDuplicate: true, initialPrompt: msg.initialPrompt, loading: msg.loading, background: msg.background, noRestore: true });
         // A background open (unattended scheduled run, #600) stays silent — the
         // top-of-page progress bar is ambient interruption for work the user
         // didn't just start.

@@ -76,6 +76,10 @@ export function createWebSocket(options = {}) {
   if (options.windowId) params.set('windowId', options.windowId);
   if (options.fork) params.set('fork', options.fork);
   if (options.rcParent) params.set('rcParent', options.rcParent);
+  // #596: this connect is acting on a server-pushed open-session, not a restore
+  // request. Tells the server not to resurrect a #561 closed tombstone if the
+  // session died between the pendingOpens flush and this connect.
+  if (options.noRestore) params.set('noRestore', '1');
 
   const wsProto = location.protocol === 'https:' ? 'wss://' : 'ws://';
   let url = wsProto + location.host + '?' + params;

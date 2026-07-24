@@ -14,6 +14,7 @@ const { createPowerAssertion } = require('./power-assertion');
 const { resolveForkTip } = require('./fork-resolve');
 const { formatLogTimestamp, createLogRotator, defaultLogPaths } = require('./logging');
 const { findGitRoot } = require('./git-root');
+const { createPendingOpens } = require('./pending-opens');
 const { classifyScreenTail, CLAUDE_SCREEN_MARKERS } = require('./screen-classifier');
 const { TerminalScreen } = require('./terminal-screen');
 const NodePtyEngine = require('./engines/node-pty');
@@ -102,7 +103,10 @@ if (BIND !== '127.0.0.1' && BIND !== '::1') {
 const SCROLLBACK_DEFAULT_KB = 100; // default scrollback buffer size in KB
 const RELOAD_FLAG = path.join(os.homedir(), '.deepsteve', '.reload');
 const reloadClients = new Set(); // WebSocket connections for live-reload
-const pendingOpens = []; // open-session messages waiting for a browser to connect
+// open-session messages waiting for a browser to connect. Self-cleaning (#596):
+// entries are dropped when their session/display tab closes, filtered for liveness
+// at flush time, and bounded by a TTL + cap — see pending-opens.js.
+const pendingOpens = createPendingOpens({ log: (...a) => log(...a) });
 let restartState = null; // { resolve: fn, timeout: timer } — first browser response wins
 let metaConsentState = null; // { promise, resolve: fn, timeout: timer } — pending Meta Controls consent (#519)
 let metaConsentDeclinedAt = 0; // cooldown start so a retrying agent can't nag the user with modals
@@ -145,6 +149,25 @@ function deliverToWindow(msg, targetWindowId, { openBrowser } = {}) {
     if (openBrowser) {
       exec(`open "${UI_URL}"`);
     }
+  }
+}
+
+// A queued message is only worth delivering if the thing it points at still exists
+// (#596). An unattended scheduled run that fired, finished and auto-closed before
+// any browser connected must NOT hand its tombstoned id to the next window — the
+// WS restore path would resurrect it as a zombie `--resume` tab in a worktree its
+// own cleanup already removed. Unknown (mod-defined) types are never dropped for
+// liveness; the queue's TTL/cap is their only bound.
+function isPendingOpenLive(parsed) {
+  switch (parsed.type) {
+    case 'open-session':
+    case 'prompt-submitted':
+    case 'deliver-prompt':
+      return shells.has(parsed.id);
+    case 'open-display-tab':
+      return displayTabs.has(parsed.id);
+    default:
+      return true;
   }
 }
 
@@ -2480,6 +2503,12 @@ function serializeShellEntry(entry) {
 // resurrect it via --resume. Permanent removal happens only via an explicit
 // DELETE ?forget=1 (deliberate user action) or pruneClosedSessions() (retention).
 function tombstoneSession(id, entry, reason) {
+  // Every close path funnels through here, which makes it the one place that can
+  // guarantee a queued open-session for a session nobody ever saw is retracted
+  // instead of being handed to the next browser as a zombie tab (#596). Runs
+  // before the tmux-attach return so ephemeral sessions are retracted too.
+  const dropped = pendingOpens.drop(id);
+  if (dropped) log(`[pendingOpens] dropped ${dropped} queued message(s) for closed session ${id}`);
   if (entry.agentType === 'tmux-attach') return; // ephemeral — never persisted
   savedState[id] = {
     ...serializeShellEntry(entry),
@@ -2808,15 +2837,48 @@ function broadcastVersionStatus() {
   }
 }
 
-function scheduleAutoApply() {
-  const GRACE_MS = 60 * 1000;
-  const deadline = Date.now() + GRACE_MS;
-  log(`[auto-update] scheduling auto-apply in ${GRACE_MS / 1000}s for ${versionStatus.releaseTag}`);
+// Things that make an unattended restart a bad idea right now (#596). A mod
+// registers a predicate returning null (fine) or { reason } (hold off). This
+// exists because /api/request-restart auto-confirms when no browser is connected —
+// which is exactly the situation an unattended scheduled run is fired in, so the
+// auto-updater used to restart straight through a run mid-work, leaving its status
+// stuck 'running' forever and its worktree leaked (the sweep skips ACTIVE runs).
+// Only the auto-update path consults these: an explicit ./restart.sh is a direct
+// user instruction and is still honored immediately.
+const restartBlockers = [];
+function registerRestartBlocker(fn) {
+  if (typeof fn === 'function') restartBlockers.push(fn);
+}
+function restartBlockedBy() {
+  for (const fn of restartBlockers) {
+    try {
+      const res = fn();
+      if (res && res.reason) return res.reason;
+    } catch (e) { log(`[auto-update] restart blocker threw: ${e.message}`); }
+  }
+  return null;
+}
+
+const AUTO_APPLY_GRACE_MS = 60 * 1000;
+const AUTO_APPLY_DEFER_MS = 10 * 60 * 1000;
+const AUTO_APPLY_MAX_DEFERS = 6; // ~1h of waiting, then update anyway rather than starve
+
+function scheduleAutoApply(deferrals = 0) {
+  const delayMs = deferrals === 0 ? AUTO_APPLY_GRACE_MS : AUTO_APPLY_DEFER_MS;
+  const deadline = Date.now() + delayMs;
+  log(`[auto-update] scheduling auto-apply in ${delayMs / 1000}s for ${versionStatus.releaseTag}${deferrals ? ` (deferral ${deferrals}/${AUTO_APPLY_MAX_DEFERS})` : ''}`);
   const timer = setTimeout(() => {
-    log(`[auto-update] grace expired, triggering reinstall`);
     pendingAutoApply = null;
+    const blocked = restartBlockedBy();
+    if (blocked && deferrals < AUTO_APPLY_MAX_DEFERS) {
+      log(`[auto-update] deferring reinstall — ${blocked}`);
+      scheduleAutoApply(deferrals + 1);
+      return;
+    }
+    if (blocked) log(`[auto-update] applying despite "${blocked}" — deferral limit reached`);
+    log(`[auto-update] grace expired, triggering reinstall`);
     applyCurlReinstall().catch(e => log(`[auto-update] auto-apply failed: ${e.message}`));
-  }, GRACE_MS);
+  }, delayMs);
   pendingAutoApply = { tag: versionStatus.releaseTag, deadline, timer };
   const msg = JSON.stringify({
     type: 'version-auto-applying',
@@ -4948,6 +5010,7 @@ function setDisplayTab(id, html) {
 
 function deleteDisplayTab(id) {
   displayTabs.delete(id);
+  pendingOpens.drop(id); // don't offer a deleted tab to the next browser (#596)
   try { fs.unlinkSync(path.join(DISPLAY_TABS_DIR, `${id}.html`)); } catch {}
 }
 
@@ -5071,22 +5134,18 @@ function handleWsConnection(ws, req) {
         }
       } catch {}
     });
-    // Flush pending open-session messages that match this window (or have no windowId)
+    // Flush pending open-session messages that match this window (or have no
+    // windowId). Anything whose session/display tab is gone, or that has aged out,
+    // is discarded rather than delivered (#596).
     if (pendingOpens.length > 0) {
-      const keep = [];
-      let flushed = 0;
-      for (const msg of pendingOpens) {
-        const parsed = JSON.parse(msg);
-        if (!parsed.windowId || parsed.windowId === ws.windowId) {
-          if (ws.readyState === 1) ws.send(msg);
-          flushed++;
-        } else {
-          keep.push(msg);
-        }
+      const { send, droppedStale, droppedExpired } = pendingOpens.takeFor(ws.windowId, isPendingOpenLive);
+      for (const msg of send) {
+        if (ws.readyState === 1) ws.send(msg);
       }
-      pendingOpens.length = 0;
-      pendingOpens.push(...keep);
-      if (flushed > 0) log(`[WS] Flushed ${flushed} pending open-session(s) to reload client (windowId=${ws.windowId}), ${keep.length} kept for other windows`);
+      if (send.length || droppedStale || droppedExpired) {
+        log(`[WS] Flushed ${send.length} pending open-session(s) to reload client (windowId=${ws.windowId}), `
+          + `dropped ${droppedStale} stale + ${droppedExpired} expired, ${pendingOpens.length} kept for other windows`);
+      }
     }
     return;
   }
@@ -5229,6 +5288,7 @@ function handleWsConnection(ws, req) {
   const initialRows = parseInt(url.searchParams.get('rows')) || 40;
   let agentType = url.searchParams.get('agentType') || 'claude';
   const forkFrom = url.searchParams.get('fork');
+  const noRestore = url.searchParams.get('noRestore') === '1'; // acting on a server-pushed open-session (#596)
   const requestedEngine = url.searchParams.get('engine'); // optional per-session engine override
   // Custom Claude config profile (#537): the client sends configProfile=<pid> with
   // agentType=claude. Resolve to a concrete dir now — the resolved dir is the durable
@@ -5244,6 +5304,19 @@ function handleWsConnection(ws, req) {
 
   // If client requested a specific ID that doesn't exist, check if we can restore it
   if (id && !shells.has(id) && !createNew) {
+    // #596: a client acting on a server-pushed open-session is not asking to
+    // restore anything. If the session closed between the pendingOpens flush and
+    // this connect, do NOT resurrect its #561 tombstone — a finished scheduled run
+    // would come back as a zombie --resume tab pointing at a deleted worktree.
+    // Explicit restores (restore modal, TabSessions reconnect, orphan claim) never
+    // send noRestore, so /api/recoverable-sessions is untouched, and the tombstone
+    // is deliberately left intact for them.
+    if (noRestore && savedState[id] && savedState[id].closed) {
+      log(`[WS] Refusing to resurrect closed session ${id} (noRestore, closeReason=${savedState[id].closeReason})`);
+      ws.send(JSON.stringify({ type: 'gone', id }));
+      ws.close();
+      return;
+    }
     if (savedState[id]) {
       // Restore this session with --resume flag using saved agent session ID
       const restored = savedState[id];
@@ -5589,7 +5662,7 @@ function broadcastToWindow(windowId, msg) {
 }
 
 // Initialize MCP server (async, ~100ms for dynamic import)
-initMCP({ app, security, shells, wss, broadcast, broadcastToWindow, log, MODS_DIR, closeSession, tombstoneSession, handleShellGone, spawnSession, sessionEnv, getSpawnArgs, mcpConfigArgs, getAgentConfig, wireShellOutput, watchClaudeSessionDir, unwatchClaudeSessionDir, resolveForkParentSession, saveState, validateWorktree, ensureWorktree, sessionPaths, submitToShell, fetchIssueFromGitHub, deliverPromptWhenReady, reloadClients, deliverToWindow, settings, isShuttingDown: () => shuttingDown, displayTabs, setDisplayTab, deleteDisplayTab, screenshots, setScreenshot, deleteScreenshot, getScreenshotPath, getDefaultEngine, getForegroundCommand, sessionLog, emitSessionOpen, getContexts: () => contexts, pathInside, getSavedSession: (id) => savedState[id] || null, stripEscapeSequences, readTerminalScreen, sessionInputState, maybeInheritRemoteControl, requestMetaControlsConsent }).catch(e => log('MCP init failed:', e.message));
+initMCP({ app, security, shells, wss, broadcast, broadcastToWindow, log, MODS_DIR, closeSession, tombstoneSession, handleShellGone, spawnSession, sessionEnv, getSpawnArgs, mcpConfigArgs, getAgentConfig, wireShellOutput, watchClaudeSessionDir, unwatchClaudeSessionDir, resolveForkParentSession, saveState, validateWorktree, ensureWorktree, sessionPaths, submitToShell, fetchIssueFromGitHub, deliverPromptWhenReady, reloadClients, deliverToWindow, settings, isShuttingDown: () => shuttingDown, displayTabs, setDisplayTab, deleteDisplayTab, screenshots, setScreenshot, deleteScreenshot, getScreenshotPath, getDefaultEngine, getForegroundCommand, sessionLog, emitSessionOpen, getContexts: () => contexts, pathInside, getSavedSession: (id) => savedState[id] || null, stripEscapeSequences, readTerminalScreen, sessionInputState, maybeInheritRemoteControl, requestMetaControlsConsent, registerRestartBlocker }).catch(e => log('MCP init failed:', e.message));
 
 // Watch themes directory for changes and broadcast to clients
 let themeWatchDebounce = null;

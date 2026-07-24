@@ -15,7 +15,18 @@ let modContext = null; // stashed for registerRoutes to use
  */
 function init(context) {
   modContext = context;
-  const { broadcast, broadcastToWindow, shells, screenshots, deleteScreenshot, getScreenshotPath } = context;
+  const { broadcast, broadcastToWindow, shells, screenshots, deleteScreenshot, getScreenshotPath, reloadClients } = context;
+
+  // Capturing requires a browser to render in. With none attached (e.g. an
+  // unattended scheduled run) say so at once rather than waiting out the 30s
+  // timeout on a misleading "enable the mod" message (#596).
+  function noBrowserResult() {
+    if (reloadClients && [...reloadClients].some((c) => c.readyState === 1)) return null;
+    return {
+      isError: true,
+      content: [{ type: 'text', text: 'No deepsteve browser window is connected. Screenshots capture the deepsteve web UI and cannot be taken unattended.' }],
+    };
+  }
 
   // Resolve session_id to a windowId, returning the send function
   function resolveTarget(session_id) {
@@ -39,6 +50,8 @@ function init(context) {
         session_id: z.string().optional().describe('DeepSteve session ID. Run `echo $DEEPSTEVE_SESSION_ID` in your terminal to get this value. When provided, the command is sent only to the browser window that owns this session.'),
       },
       handler: async ({ selector, filename, output_dir, session_id }) => {
+        const noBrowser = noBrowserResult();
+        if (noBrowser) return noBrowser;
         const requestId = randomUUID();
         const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
         const fname = (filename || `deepsteve-${ts}`) + '.png';
