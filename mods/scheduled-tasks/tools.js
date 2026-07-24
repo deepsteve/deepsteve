@@ -290,8 +290,13 @@ function runTask(task, reason, { foreground = false } = {}) {
   // every other spawn path. A deleted profile resolves to null = default config.
   const configDir = agentType === 'claude' && ctx.resolveConfigDir
     ? (ctx.resolveConfigDir(task.configProfile) || null) : null;
-  const model = cleanModel(task.model);
-  const effort = cleanEffort(task.effort);
+  // #604: a task that pins nothing falls back to the system-level default rather
+  // than to Claude Code's own (which can silently drop to a cheaper model on usage
+  // limits). Read live off ctx.settings — like the scheduledTasksEnabled gate — so
+  // a Settings change applies to already-created tasks on their next fire, with no
+  // restart. cleanModel/cleanEffort never return '', so `||` is the whole chain.
+  const model = cleanModel(task.model) || defaultModel();
+  const effort = cleanEffort(task.effort) || defaultEffort();
   const cwd = task.project && fs.existsSync(task.project) ? task.project : os.homedir();
   const id = randomUUID().slice(0, 8);
   const claudeSessionId = agentType === 'codex' ? null : randomUUID();
@@ -564,6 +569,12 @@ function splitAgentSelection(agentType, configProfile) {
 // them (it always does at runtime; unit-test stubs may not). null = inherit.
 function cleanModel(v) { return (ctx && ctx.validateModel ? ctx.validateModel(v) : (v || null)) || null; }
 function cleanEffort(v) { return (ctx && ctx.validateEffort ? ctx.validateEffort(v) : (v || null)) || null; }
+
+// #604: the system-level fallbacks, resolved live. Same sanitizing as a task value —
+// a settings value is no more trusted at the argv boundary than a task one.
+function settingsObj() { return (ctx && ctx.settings) || {}; }
+function defaultModel() { return cleanModel(settingsObj().scheduledDefaultModel); }
+function defaultEffort() { return cleanEffort(settingsObj().scheduledDefaultEffort); }
 
 function createTask({ title, prompt, cron: cronStr, once, project, agentType, configProfile, model, effort, planMode, enabled, createdBy, keepOpen, keepOpenOnFailure, isolateWorktree, maxRuntimeMinutes }) {
   cron.parseCron(cronStr); // throws on invalid — caller catches (a one-shot still uses a cron)
@@ -965,7 +976,12 @@ function registerRoutes(app, context) {
     const enriched = tasks.map(t => ({ ...t, schedule: scheduleLabel(t), projectName: displayName(t.project) }));
     // Groups (now the shared "contexts") arrive over /api/contexts + the 'contexts'
     // broadcast, not in this payload.
-    res.json({ tasks: enriched, projects: knownProjects(), enabled: !!ctx.settings.scheduledTasksEnabled });
+    // `defaults` (#604) is what an unpinned task actually resolves to, so the form's
+    // "Default" options can name it instead of vaguely saying "inherit".
+    res.json({
+      tasks: enriched, projects: knownProjects(), enabled: !!ctx.settings.scheduledTasksEnabled,
+      defaults: { model: defaultModel(), effort: defaultEffort() },
+    });
   });
 
   app.post('/api/scheduled-tasks', (req, res) => {

@@ -209,7 +209,7 @@ function input() {
 function label() { return { fontSize: 12, color: C.dim, marginTop: 10, display: 'block' }; }
 
 // ------------------------------------------------------------------ Task form
-function TaskForm({ task, projects, agents, onClose }) {
+function TaskForm({ task, projects, agents, defaults = {}, onClose }) {
   const initial = task || {};
   const initForm = cronToForm(initial.cron || '0 9 * * 1');
   const [title, setTitle] = useState(initial.title || '');
@@ -334,14 +334,14 @@ function TaskForm({ task, projects, agents, onClose }) {
       <div style={{ display: 'flex', gap: 12, marginTop: 8, alignItems: 'center', flexWrap: 'wrap', opacity: agentType !== 'claude' ? 0.5 : 1 }}>
         <label style={{ fontSize: 12, color: C.dim }} title={agentType !== 'claude' ? 'Model selection only applies to claude.' : ''}>Model{' '}
           <select style={{ ...input(), width: 150, display: 'inline-block', marginTop: 0 }} value={model} disabled={agentType !== 'claude'} onChange={(e) => setModel(e.target.value)}>
-            <option value="">Default (inherit)</option>
+            <option value="">{defaults.model ? `Default (system: ${defaults.model})` : 'Default (inherit)'}</option>
             {MODEL_ALIASES.map((m) => <option key={m} value={m}>{m}</option>)}
             <option value="__custom__">Custom…</option>
           </select>
         </label>
         <label style={{ fontSize: 12, color: C.dim }} title={agentType !== 'claude' ? 'Effort selection only applies to claude.' : ''}>Effort{' '}
           <select style={{ ...input(), width: 110, display: 'inline-block', marginTop: 0 }} value={effort} disabled={agentType !== 'claude'} onChange={(e) => setEffort(e.target.value)}>
-            <option value="">Default</option>
+            <option value="">{defaults.effort ? `Default (system: ${defaults.effort})` : 'Default'}</option>
             {EFFORT_LEVELS.map((l) => <option key={l} value={l}>{l}</option>)}
           </select>
         </label>
@@ -349,7 +349,11 @@ function TaskForm({ task, projects, agents, onClose }) {
       {model === '__custom__' && agentType === 'claude' && (
         <input style={{ ...input(), marginTop: 6 }} value={customModel} onChange={(e) => setCustomModel(e.target.value)} placeholder="claude-fable-5" />
       )}
-      <div style={{ fontSize: 11, color: C.dim, marginTop: 4 }}>Default inherits Claude Code's own model and effort — which can silently fall back to a cheaper model when you hit usage limits. Pin them here for a run that must be cheap, or must not be.</div>
+      <div style={{ fontSize: 11, color: C.dim, marginTop: 4 }}>
+        {defaults.model || defaults.effort
+          ? `Default uses the system-wide setting for scheduled runs (${[defaults.model, defaults.effort].filter(Boolean).join(' · ')}), set in Settings → Scheduled Tasks. Pin them here to override it for this task.`
+          : 'Default inherits Claude Code’s own model and effort — which can silently fall back to a cheaper model when you hit usage limits. Pin them here for a run that must be cheap, or must not be, or set a system-wide default in Settings → Scheduled Tasks.'}
+      </div>
       <div style={{ display: 'flex', gap: 12, marginTop: 8, alignItems: 'center', flexWrap: 'wrap' }}>
         <label style={{ fontSize: 12, color: C.dim }}><input type="checkbox" checked={keepOpen} onChange={(e) => setKeepOpen(e.target.checked)} /> keep tab open when finished</label>
         <label style={{ fontSize: 12, color: C.dim, opacity: keepOpen ? 0.5 : 1 }} title={keepOpen ? 'Redundant while “keep tab open when finished” is on.' : 'Keep the tab open only when the run fails.'}>
@@ -432,7 +436,7 @@ function GroupsManager({ contexts, projects, onClose }) {
 
 // ------------------------------------------------------------------ Root
 function App() {
-  const [data, setData] = useState({ tasks: [], projects: [], enabled: true });
+  const [data, setData] = useState({ tasks: [], projects: [], enabled: true, defaults: {} });
   const [contexts, setContexts] = useState([]); // the shared groups (#526)
   const [filter, setFilter] = useState({ type: 'all', value: '' });
   const [editing, setEditing] = useState(null); // null | 'new' | task
@@ -454,7 +458,7 @@ function App() {
     const unsubs = [];
     function setup() {
       const ds = window.deepsteve;
-      unsubs.push(ds.onScheduledTasksChanged((d) => setData(d || { tasks: [], projects: [], enabled: true })));
+      unsubs.push(ds.onScheduledTasksChanged((d) => setData(d || { tasks: [], projects: [], enabled: true, defaults: {} })));
       // Groups the panel scopes by ARE the Context View's contexts (#526).
       if (ds.onContextsChanged) unsubs.push(ds.onContextsChanged((list) => setContexts(list || [])));
       // Follow the context selected in the rail (context → panel filter).
@@ -527,7 +531,7 @@ function App() {
       </div>
 
       {showGroups && <GroupsManager contexts={contexts} projects={data.projects} onClose={() => setShowGroups(false)} />}
-      {editing && <TaskForm task={editing === 'new' ? null : editing} projects={data.projects} agents={agents} onClose={() => setEditing(null)} />}
+      {editing && <TaskForm task={editing === 'new' ? null : editing} projects={data.projects} agents={agents} defaults={data.defaults || {}} onClose={() => setEditing(null)} />}
 
       {sections.length === 0 && !editing && (
         <div style={{ color: C.dim, fontSize: 13, marginTop: 20, textAlign: 'center' }}>No scheduled tasks yet.<br />Click <b>+ New</b> to create one.</div>

@@ -756,6 +756,14 @@ settingsBtn?.addEventListener('click', async () => {
   const currentSessionLogEnabled = !!settingsData.sessionLogEnabled;
   const currentScheduledTasksEnabled = settingsData.scheduledTasksEnabled !== false;
   const currentScheduledTasksOpenInBackground = settingsData.scheduledTasksOpenInBackground !== false;
+  // #604: system-wide fallback model/effort for scheduled runs. '' = inherit Claude
+  // Code's own. Anything that isn't one of the offered aliases (e.g. a full model id
+  // like claude-fable-5) preselects "Custom…" and fills the free-text field.
+  const SCHEDULED_MODEL_ALIASES = ['opus', 'sonnet', 'haiku', 'fable'];
+  const SCHEDULED_EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'];
+  const currentScheduledDefaultModel = settingsData.scheduledDefaultModel || '';
+  const currentScheduledDefaultEffort = settingsData.scheduledDefaultEffort || '';
+  const scheduledModelIsCustom = !!currentScheduledDefaultModel && !SCHEDULED_MODEL_ALIASES.includes(currentScheduledDefaultModel);
   const currentPreventSleep = settingsData.preventSleepWhileActive !== false;
   const currentDefaultAgent = settingsData.defaultAgent || 'claude';
   const currentOpencodeBinary = settingsData.opencodeBinary || 'opencode';
@@ -969,6 +977,26 @@ settingsBtn?.addEventListener('click', async () => {
         <p style="font-size: 11px; color: var(--ds-text-secondary); margin-top: 4px;">
           A scheduled run opens its tab without switching to it, so an unattended run never interrupts what you're doing. The tab shows an unread dot until you visit it. The Scheduled panel's own "Run now" button always switches. On by default.
         </p>
+        <label style="font-size: 13px; color: var(--ds-text-primary); display: flex; align-items: center; gap: 8px; margin-top: 10px;">
+          Default model:
+          <select id="scheduled-default-model" style="padding: 4px 6px; background: var(--ds-bg-primary); border: 1px solid var(--ds-border); border-radius: 4px; color: var(--ds-text-primary); font-size: 13px;">
+            <option value="" ${!currentScheduledDefaultModel ? 'selected' : ''}>Default (inherit)</option>
+            ${SCHEDULED_MODEL_ALIASES.map(m => `<option value="${m}" ${currentScheduledDefaultModel === m ? 'selected' : ''}>${m}</option>`).join('')}
+            <option value="__custom__" ${scheduledModelIsCustom ? 'selected' : ''}>Custom&hellip;</option>
+          </select>
+          <input type="text" id="scheduled-default-model-custom" value="${scheduledModelIsCustom ? currentScheduledDefaultModel : ''}" placeholder="claude-fable-5"
+                 style="flex: 1; min-width: 0; padding: 4px 6px; background: var(--ds-bg-primary); border: 1px solid var(--ds-border); border-radius: 4px; color: var(--ds-text-primary); font-size: 13px; ${scheduledModelIsCustom ? '' : 'display: none;'}">
+        </label>
+        <label style="font-size: 13px; color: var(--ds-text-primary); display: flex; align-items: center; gap: 8px; margin-top: 8px;">
+          Default thinking level:
+          <select id="scheduled-default-effort" style="padding: 4px 6px; background: var(--ds-bg-primary); border: 1px solid var(--ds-border); border-radius: 4px; color: var(--ds-text-primary); font-size: 13px;">
+            <option value="" ${!currentScheduledDefaultEffort ? 'selected' : ''}>Default (inherit)</option>
+            ${SCHEDULED_EFFORT_LEVELS.map(l => `<option value="${l}" ${currentScheduledDefaultEffort === l ? 'selected' : ''}>${l}</option>`).join('')}
+          </select>
+        </label>
+        <p style="font-size: 11px; color: var(--ds-text-secondary); margin-top: 4px;">
+          Used by any scheduled task that doesn't pin its own model / thinking level in the Scheduled panel — including tasks an agent creates later. Applies from the next run, no restart. "Default (inherit)" leaves it to Claude Code, which can silently fall back to a cheaper model when you hit usage limits. Claude only; other agents have no such flags.
+        </p>
       </div>
       <div class="settings-section">
         <h3>Prevent Sleep</h3>
@@ -1168,6 +1196,15 @@ settingsBtn?.addEventListener('click', async () => {
   const piBinaryRow = overlay.querySelector('#pi-binary-row');
   agentPiCheckbox?.addEventListener('change', () => {
     piBinaryRow.style.display = agentPiCheckbox.checked ? 'block' : 'none';
+  });
+
+  // #604: the scheduled default-model free-text field only exists for "Custom…".
+  const scheduledModelSelect = overlay.querySelector('#scheduled-default-model');
+  const scheduledModelCustom = overlay.querySelector('#scheduled-default-model-custom');
+  scheduledModelSelect?.addEventListener('change', () => {
+    const custom = scheduledModelSelect.value === '__custom__';
+    scheduledModelCustom.style.display = custom ? '' : 'none';
+    if (custom) scheduledModelCustom.focus();
   });
 
   // Custom Claude config profiles (#537): add / remove rows + Browse via dir-picker.
@@ -1425,10 +1462,15 @@ settingsBtn?.addEventListener('click', async () => {
     const sessionLogEnabled = overlay.querySelector('#session-log-enabled').checked;
     const scheduledTasksEnabled = overlay.querySelector('#scheduled-tasks-enabled').checked;
     const scheduledTasksOpenInBackground = overlay.querySelector('#scheduled-tasks-open-in-background').checked;
+    const scheduledModelChoice = overlay.querySelector('#scheduled-default-model').value;
+    const scheduledDefaultModel = scheduledModelChoice === '__custom__'
+      ? overlay.querySelector('#scheduled-default-model-custom').value.trim()
+      : scheduledModelChoice;
+    const scheduledDefaultEffort = overlay.querySelector('#scheduled-default-effort').value;
     const preventSleepWhileActive = overlay.querySelector('#prevent-sleep-while-active').checked;
     const inheritRemoteControl = overlay.querySelector('#inherit-rc-newtab').checked;
     const inheritRemoteControlOnFork = overlay.querySelector('#inherit-rc-fork').checked;
-    const settingsPayload = { shellProfile, maxIssueTitleLength: newMaxTitle, wandPlanMode, wandPromptTemplate, symlinkWorktreeSettings, cmdTabSwitch, cmdTabSwitchHoldMs, commandPaletteEnabled, commandPaletteShortcut, shortcutsHelpEnabled, shortcutsHelpShortcut, hashCommandsEnabled, contextViewsEnabled, metaControlsEnabled, inheritRemoteControl, inheritRemoteControlOnFork, overviewDefaultLayout, enabledAgents, opencodeBinary, piBinary, engine: selectedEngine, scrollbackKB, recentSessionsLimit, autoUpdateCheckEnabled, autoUpdateCheckIntervalHours, autoUpdateApply, sessionLogEnabled, scheduledTasksEnabled, scheduledTasksOpenInBackground, preventSleepWhileActive, customAgentConfigs };
+    const settingsPayload = { shellProfile, maxIssueTitleLength: newMaxTitle, wandPlanMode, wandPromptTemplate, symlinkWorktreeSettings, cmdTabSwitch, cmdTabSwitchHoldMs, commandPaletteEnabled, commandPaletteShortcut, shortcutsHelpEnabled, shortcutsHelpShortcut, hashCommandsEnabled, contextViewsEnabled, metaControlsEnabled, inheritRemoteControl, inheritRemoteControlOnFork, overviewDefaultLayout, enabledAgents, opencodeBinary, piBinary, engine: selectedEngine, scrollbackKB, recentSessionsLimit, autoUpdateCheckEnabled, autoUpdateCheckIntervalHours, autoUpdateApply, sessionLogEnabled, scheduledTasksEnabled, scheduledTasksOpenInBackground, scheduledDefaultModel, scheduledDefaultEffort, preventSleepWhileActive, customAgentConfigs };
     let resp = await fetch('/api/settings', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
