@@ -24,6 +24,9 @@
   "engines": {
     "node": ">=18"
   },
+  "overrides": {
+    "@hono/node-server": "^2.0.5"
+  },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.0",
     "@xterm/headless": "6.0.0",
