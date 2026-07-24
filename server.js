@@ -469,6 +469,9 @@ const SETTINGS_SCHEMA = [
   { name: 'preventSleepWhileActive',    type: 'boolean', default: true, broadcast: false },
   { name: 'displayTabAudioIndicator',   type: 'boolean', default: true, broadcast: false },
   { name: 'scheduledTasksEnabled',      type: 'boolean', default: true },
+  // Scheduled runs are unattended, so their tab opens without stealing focus (#600).
+  // Turn off to get the old behavior (the new tab becomes active as it opens).
+  { name: 'scheduledTasksOpenInBackground', type: 'boolean', default: true },
   // How long closed-session tombstones survive in state.json before the retention
   // sweep prunes them (#561). Server-internal — no client UI reads it.
   { name: 'closedSessionRetentionDays', type: 'number',  default: 30, clamp: [1, 365], round: true, broadcast: false },

@@ -724,6 +724,7 @@ settingsBtn?.addEventListener('click', async () => {
   const currentAutoUpdateApply = settingsData.autoUpdateApply !== undefined ? settingsData.autoUpdateApply : true;
   const currentSessionLogEnabled = !!settingsData.sessionLogEnabled;
   const currentScheduledTasksEnabled = settingsData.scheduledTasksEnabled !== false;
+  const currentScheduledTasksOpenInBackground = settingsData.scheduledTasksOpenInBackground !== false;
   const currentPreventSleep = settingsData.preventSleepWhileActive !== false;
   const currentDefaultAgent = settingsData.defaultAgent || 'claude';
   const currentOpencodeBinary = settingsData.opencodeBinary || 'opencode';
@@ -929,6 +930,13 @@ settingsBtn?.addEventListener('click', async () => {
         </label>
         <p style="font-size: 11px; color: var(--ds-text-secondary); margin-top: 4px;">
           Master switch for the locally-queued cron. When on, tasks in the Scheduled panel run on this machine at their cron time (local time), with full MCP access. Overdue tasks catch up once at startup. On by default.
+        </p>
+        <label style="font-size: 13px; color: var(--ds-text-primary); cursor: pointer; display: flex; align-items: center; gap: 8px; margin-top: 10px;">
+          <input type="checkbox" id="scheduled-tasks-open-in-background" ${currentScheduledTasksOpenInBackground ? 'checked' : ''} style="accent-color: var(--ds-accent-green);">
+          Open runs in the background
+        </label>
+        <p style="font-size: 11px; color: var(--ds-text-secondary); margin-top: 4px;">
+          A scheduled run opens its tab without switching to it, so an unattended run never interrupts what you're doing. The tab shows an unread dot until you visit it. The Scheduled panel's own "Run now" button always switches. On by default.
         </p>
       </div>
       <div class="settings-section">
@@ -1385,10 +1393,11 @@ settingsBtn?.addEventListener('click', async () => {
     const autoUpdateApply = overlay.querySelector('#auto-update-apply').checked;
     const sessionLogEnabled = overlay.querySelector('#session-log-enabled').checked;
     const scheduledTasksEnabled = overlay.querySelector('#scheduled-tasks-enabled').checked;
+    const scheduledTasksOpenInBackground = overlay.querySelector('#scheduled-tasks-open-in-background').checked;
     const preventSleepWhileActive = overlay.querySelector('#prevent-sleep-while-active').checked;
     const inheritRemoteControl = overlay.querySelector('#inherit-rc-newtab').checked;
     const inheritRemoteControlOnFork = overlay.querySelector('#inherit-rc-fork').checked;
-    const settingsPayload = { shellProfile, maxIssueTitleLength: newMaxTitle, wandPlanMode, wandPromptTemplate, symlinkWorktreeSettings, cmdTabSwitch, cmdTabSwitchHoldMs, commandPaletteEnabled, commandPaletteShortcut, shortcutsHelpEnabled, shortcutsHelpShortcut, hashCommandsEnabled, contextViewsEnabled, metaControlsEnabled, inheritRemoteControl, inheritRemoteControlOnFork, overviewDefaultLayout, enabledAgents, opencodeBinary, piBinary, engine: selectedEngine, scrollbackKB, recentSessionsLimit, autoUpdateCheckEnabled, autoUpdateCheckIntervalHours, autoUpdateApply, sessionLogEnabled, scheduledTasksEnabled, preventSleepWhileActive, customAgentConfigs };
+    const settingsPayload = { shellProfile, maxIssueTitleLength: newMaxTitle, wandPlanMode, wandPromptTemplate, symlinkWorktreeSettings, cmdTabSwitch, cmdTabSwitchHoldMs, commandPaletteEnabled, commandPaletteShortcut, shortcutsHelpEnabled, shortcutsHelpShortcut, hashCommandsEnabled, contextViewsEnabled, metaControlsEnabled, inheritRemoteControl, inheritRemoteControlOnFork, overviewDefaultLayout, enabledAgents, opencodeBinary, piBinary, engine: selectedEngine, scrollbackKB, recentSessionsLimit, autoUpdateCheckEnabled, autoUpdateCheckIntervalHours, autoUpdateApply, sessionLogEnabled, scheduledTasksEnabled, scheduledTasksOpenInBackground, preventSleepWhileActive, customAgentConfigs };
     let resp = await fetch('/api/settings', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1605,7 +1614,7 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
         if (!existingSession) {
           // Use client-provided name, or fall back to server-persisted name
           const sessionName = opts.name || msg.name;
-          initTerminal(msg.id, ws, cwd, sessionName, { hasScrollback, pendingData, restoreActive: opts.restoreActive || opts.background, cols, rows });
+          initTerminal(msg.id, ws, cwd, sessionName, { hasScrollback, pendingData, restoreActive: opts.restoreActive, background: opts.background, cols, rows });
           resolveReady(msg.id);
           if (opts.loading) {
             const sess = sessions.get(msg.id);
@@ -1926,7 +1935,7 @@ function dismissLoadingBanner(sessionId) {
 /**
  * Initialize a terminal after WebSocket connection is established
  */
-function initTerminal(id, ws, cwd, initialName, { hasScrollback = false, pendingData = [], restoreActive = false, cols, rows } = {}) {
+function initTerminal(id, ws, cwd, initialName, { hasScrollback = false, pendingData = [], restoreActive = false, background = false, cols, rows } = {}) {
   const container = document.createElement('div');
   container.className = 'terminal-container';
   container.id = 'term-' + id;
@@ -2000,8 +2009,19 @@ function initTerminal(id, ws, cwd, initialName, { hasScrollback = false, pending
   // During restore, skip switchTo() — restoreSessions() will select the
   // correct tab after all sessions are initialized. For new sessions,
   // always switch to the new tab immediately.
-  if (!restoreActive) {
+  //
+  // A background open (an unattended scheduled run, #600) is the exception: the
+  // tab lands inactive so the user isn't yanked out of what they were doing —
+  // focusTab() would also drag the context rail to the new tab's context. It
+  // still takes focus when nothing is active yet, since an inactive lone tab
+  // would leave a blank pane behind a hidden empty state. The unseen badge is
+  // what makes it discoverable; switchTo() clears it when the user visits.
+  if (!restoreActive && (!background || !activeId)) {
     focusTab(id); // switch to the new tab + jump to its context / All (#547/#559)
+  } else if (background) {
+    const sess = sessions.get(id);
+    if (sess) sess.hasUnseenActivity = true;
+    TabManager.updateBadge(id, true);
   }
 
   // Per-tab store (sessionStorage) is truth for this tab, SessionStore (localStorage)
@@ -3749,8 +3769,11 @@ async function init() {
       if (msg.type === 'open-session') {
         // Server created a session (e.g. via /api/start-issue) — open a tab for it
         if (msg.windowId && msg.windowId !== getWindowId()) return;
-        createSession(msg.cwd, msg.id, false, { name: msg.name, allowDuplicate: true, initialPrompt: msg.initialPrompt, loading: msg.loading });
-        if (msg.prefill) progressStart(msg.id);
+        createSession(msg.cwd, msg.id, false, { name: msg.name, allowDuplicate: true, initialPrompt: msg.initialPrompt, loading: msg.loading, background: msg.background });
+        // A background open (unattended scheduled run, #600) stays silent — the
+        // top-of-page progress bar is ambient interruption for work the user
+        // didn't just start.
+        if (msg.prefill && !msg.background) progressStart(msg.id);
       }
       if (msg.type === 'deliver-prompt') {
         // Async prompt delivery (e.g. GitHub issue fetch completed after tab opened)
