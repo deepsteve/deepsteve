@@ -495,6 +495,23 @@ const SETTINGS_SCHEMA = [
   // Scheduled runs are unattended, so their tab opens without stealing focus (#600).
   // Turn off to get the old behavior (the new tab becomes active as it opens).
   { name: 'scheduledTasksOpenInBackground', type: 'boolean', default: true },
+  // #604: system-level fallback model / thinking level for scheduled runs that don't
+  // pin their own (#592). '' = inherit Claude Code's own default, i.e. pre-#604
+  // behavior. Sanitized here through the same validators the argv boundary uses, so
+  // an invalid value is rejected at POST time instead of silently no-op'ing at fire
+  // time. `values` must be the thunk form — EFFORT_LEVELS is declared below this
+  // array, so an eager `values: [...]` would hit the TDZ at module load.
+  // The sideEffect re-pushes the scheduled-tasks payload so an open automations panel
+  // relabels its "Default" options (which name the resolved default) right away.
+  { name: 'scheduledDefaultModel',      type: 'custom',  default: '',
+    sanitize: (raw) => {
+      if (typeof raw !== 'string') return null;
+      const v = raw.trim();
+      return v ? validateModel(v) : '';
+    },
+    sideEffect: () => broadcast({ type: 'scheduled-tasks' }) },
+  { name: 'scheduledDefaultEffort',     type: 'enum',    default: '', values: () => ['', ...EFFORT_LEVELS],
+    sideEffect: () => broadcast({ type: 'scheduled-tasks' }) },
   // How long closed-session tombstones survive in state.json before the retention
   // sweep prunes them (#561). Server-internal — no client UI reads it.
   { name: 'closedSessionRetentionDays', type: 'number',  default: 30, clamp: [1, 365], round: true, broadcast: false },
