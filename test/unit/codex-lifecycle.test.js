@@ -97,7 +97,9 @@ result = { submitToShell, acknowledgeCodexSubmitOutput }`, context)
 }
 
 test('Codex homes isolate runtime state while sharing user configuration', () => {
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-codex-home-'));
+  // macOS: os.tmpdir() is /var/folders/... but /var symlinks to /private/var, so the realpathSync()
+  // calls below would otherwise disagree with paths built from `shared` (#605).
+  const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'ds-codex-home-')));
   const shared = path.join(home, '.codex');
   fs.mkdirSync(path.join(shared, 'agents'), { recursive: true });
   fs.mkdirSync(path.join(shared, 'themes'), { recursive: true });
