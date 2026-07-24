@@ -1129,28 +1129,55 @@ function onKeyUp(e) {
 // ------------------------------------------------------ new tab in a context
 
 /**
+ * Which repo does the ACTIVE CONTEXT determine? The one answer shared by every
+ * "open a new thing" flow — the new-tab button (#581) and the GitHub issue
+ * picker (#598) — so the two can never drift apart again.
+ *
+ * Pure: no DOM, no await, no side effects. Callers own the interaction, which is
+ * what lets each one prompt in its own idiom (and lets this be unit-tested).
+ *
+ *   { kind: 'inherit', cwd }            → the caller's own inherit-the-active-tab
+ *                                         default is safe: contexts off, the "All"
+ *                                         view, or an active tab already inside the
+ *                                         context. `cwd` may be null (a mod/display
+ *                                         tab is active, or nothing is open).
+ *   { kind: 'dirs', dirs, contextName } → the context's repos; 1 → just use it,
+ *                                         N → let the user choose (#522).
+ *   { kind: 'ask', contextName }        → context with NO dirs configured: nothing
+ *                                         is inferable, the caller must prompt (#581).
+ *
+ * The subtle case is that last one. When a no-dirs context is empty of tabs,
+ * activeId still points at a context-hidden tab from ANOTHER context, so
+ * inheriting its cwd would open there and #547 would yank the view away. Note
+ * also the `activeCwd &&` guard: a no-cwd active tab (mod/display) is global, so
+ * it must NOT count as "already in-context" and short-circuit to inherit.
+ */
+export function resolveContextRepo() {
+  const activeCwd = cb.getTabCwd?.(cb.getActiveTabId?.()) || null;
+  if (!enabled) return { kind: 'inherit', cwd: activeCwd };
+  const ctx = getActiveContext();
+  if (!ctx) return { kind: 'inherit', cwd: activeCwd };        // "All" view → inherit is fine
+  if (activeCwd && tabInContext(activeCwd, ctx))               // already in-context → inherit stays in-context
+    return { kind: 'inherit', cwd: activeCwd, contextName: ctx.name };
+  if (ctx.dirs.length === 0) return { kind: 'ask', contextName: ctx.name };
+  return { kind: 'dirs', dirs: [...ctx.dirs], contextName: ctx.name };
+}
+
+/**
  * Called by app.js's new-tab flow. Returns true when it has taken ownership of
  * the new tab — either opening it in the active context or prompting for a dir —
  * so quickNewSession must NOT fall through. Returns false only when the default
- * inherit-the-active-tab's-cwd flow is safe: the "All" view, or an active tab
- * that's already inside the active context.
- *
- * The subtle case is a context with NO dirs configured (#581): when it's empty
- * of tabs, activeId still points at a context-hidden tab from ANOTHER context,
- * so inheriting active.cwd would open there and #547 would yank the view away.
- * We must own that case too — prompt a directory picker instead of leaking.
+ * inherit-the-active-tab's-cwd flow is safe (see resolveContextRepo above).
  */
 export function requestNewTabInContext() {
-  if (!enabled) return false;
-  const ctx = getActiveContext();
-  if (!ctx) return false;                                      // "All" view → inherit is fine
-  const activeCwd = cb.getTabCwd?.(cb.getActiveTabId?.());
-  if (activeCwd && tabInContext(activeCwd, ctx)) return false; // active tab already in-context → inherit stays in-context
-  if (ctx.dirs.length > 0) {
-    newTabInActiveContext(ctx);          // single → open in the repo; multiple → chooser (#522)
-  } else {
+  const d = resolveContextRepo();
+  if (d.kind === 'inherit') return false;
+  if (d.kind === 'ask') {
     cb.promptNewTabDir?.();              // empty context, no inferable repo → directory picker (#581)
+    return true;
   }
+  if (d.dirs.length === 1) cb.createSessionInDir?.(d.dirs[0]);
+  else chooseDir(d.dirs).then(dir => { if (dir) cb.createSessionInDir?.(dir); });  // multiple → chooser (#522)
   return true;                           // handled — never let quickNewSession inherit a foreign cwd
 }
 
@@ -1165,33 +1192,44 @@ async function newTabInActiveContext(ctx) {
   cb.createSessionInDir?.(dir);
 }
 
-function chooseDir(dirs) {
+function chooseDir(dirs, { title = 'Open new tab in…' } = {}) {
   return new Promise((resolve) => {
     const overlay = document.createElement('div');
     overlay.className = 'modal-overlay';
     const modal = document.createElement('div');
     modal.className = 'modal context-dir-chooser';
     const h = document.createElement('h2');
-    h.textContent = 'Open new tab in…';
+    h.textContent = title;
     modal.appendChild(h);
+    const close = (dir) => {
+      document.removeEventListener('keydown', onEsc);
+      overlay.remove();
+      resolve(dir);
+    };
+    const onEsc = (e) => { if (e.key === 'Escape') { e.preventDefault(); close(null); } };
+    document.addEventListener('keydown', onEsc);
     for (const d of dirs) {
       const b = document.createElement('button');
       b.className = 'btn-secondary context-choose-dir';
       b.textContent = d;
       b.title = d;
-      b.onclick = () => { overlay.remove(); resolve(d); };
+      b.onclick = () => close(d);
       modal.appendChild(b);
     }
     const cancel = document.createElement('button');
     cancel.className = 'btn-secondary';
     cancel.textContent = 'Cancel';
-    cancel.onclick = () => { overlay.remove(); resolve(null); };
+    cancel.onclick = () => close(null);
     modal.appendChild(cancel);
     overlay.appendChild(modal);
-    overlay.onclick = (e) => { if (e.target === overlay) { overlay.remove(); resolve(null); } };
+    overlay.onclick = (e) => { if (e.target === overlay) close(null); };
     document.body.appendChild(overlay);
   });
 }
+
+// The issue picker's "which of this context's repos?" prompt (#598) — the same
+// chooser the new-tab flow uses, with its own title.
+export const chooseContextDir = (dirs, title) => chooseDir(dirs, { title });
 
 // ------------------------------------------------------------- context editor
 

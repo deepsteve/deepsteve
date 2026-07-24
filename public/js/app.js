@@ -29,7 +29,7 @@ import { init as initProgressBar, start as progressStart, done as progressDone }
 import { init as initHashCommands, beforeSend as hashCommandsBeforeSend, setWaitingForInput as setHashCommandsWaiting, setEnabled as setHashCommandsEnabled } from './hash-commands.js';
 import { init as initOverviewMode, setEnabled as setOverviewModeEnabled, setShortcut as setOverviewModeShortcut, setDefaultLayout as setOverviewDefaultLayout, toggle as toggleOverviewMode, isOverviewActive, updateFocus as updateOverviewFocus, onTabsReordered as onOverviewTabsReordered, syncToContext as syncOverviewToContext } from './overview-mode.js';
 import { init as initTerminalSearch, attachSearchAddon, closeIfOpen as closeTerminalSearch } from './terminal-search.js';
-import { init as initContextViews, setEnabled as setContextViewsEnabled, applyFilter as refreshContextFilter, requestNewTabInContext, setContexts as applyServerContexts, setActiveContext as setActiveContextFromPanel, getActiveContextId, getActiveContextInfo, orderRecentDirsByContext, activeContextIsEmpty, noteActiveTab, revealTabContext, showToast } from './context-views.js';
+import { init as initContextViews, setEnabled as setContextViewsEnabled, applyFilter as refreshContextFilter, requestNewTabInContext, resolveContextRepo, chooseContextDir, setContexts as applyServerContexts, setActiveContext as setActiveContextFromPanel, getActiveContextId, getActiveContextInfo, orderRecentDirsByContext, activeContextIsEmpty, noteActiveTab, revealTabContext, showToast } from './context-views.js';
 import { nsKey } from './storage-namespace.js';
 import { formatShortcut } from './shortcuts.js';
 import { init as initWakeWatch } from './wake-watch.js';
@@ -3359,39 +3359,108 @@ function escapeHtml(str) {
   return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
-/**
- * Show GitHub issue picker and create worktree session
- */
-async function showIssuePicker() {
-  const active = activeId && sessions.get(activeId);
-  const cwd = active?.cwd;
-  if (!cwd) return promptRepoSession();
+// cwd → git root. Successes only, page lifetime: a `null` must stay retryable
+// (a dir can become a repo), and roots don't move in practice. Shared by the
+// picker and its hover prefetch so a hover saves the open a round-trip.
+const gitRootCache = new Map();
 
-  // Check git root. Only the endpoint's own 400 means "not a repo" — blaming
-  // git for a 401/500/network failure sent a whole debugging session the wrong
-  // way (2026-07-15), so every other failure reports what actually happened.
-  let gitRoot;
+// Prefetch path: resolves or gives up silently. Never alerts.
+async function resolveGitRootQuiet(cwd) {
+  if (!cwd) return null;
+  if (gitRootCache.has(cwd)) return gitRootCache.get(cwd);
+  try {
+    const res = await fetch('/api/git-root?cwd=' + encodeURIComponent(cwd));
+    if (!res.ok) return null;
+    const root = (await res.json()).root;
+    if (root) gitRootCache.set(cwd, root);
+    return root || null;
+  } catch { return null; }
+}
+
+// Interactive path: returns null after telling the user WHY. Only the endpoint's
+// own 400 means "not a repo" — blaming git for a 401/500/network failure sent a
+// whole debugging session the wrong way (2026-07-15), so every other failure
+// reports what actually happened.
+async function resolveGitRootLoud(cwd) {
+  if (gitRootCache.has(cwd)) return gitRootCache.get(cwd);
   try {
     const res = await fetch('/api/git-root?cwd=' + encodeURIComponent(cwd));
     if (res.status === 400) {
-      alert('Current directory is not a git repository.');
-      return;
+      // Name the directory: with the repo now coming from the active context
+      // (#598), it may not be the one the user is sitting in.
+      alert(`${cwd} is not a git repository.`);
+      return null;
     }
     if (!res.ok) {
       const authHint = (res.status === 401 || res.status === 429) ? ' (auth) — try reloading the page' : '';
       alert(`Couldn't check the git repository: server responded ${res.status}${authHint}.`);
-      return;
+      return null;
     }
-    gitRoot = (await res.json()).root;
+    const root = (await res.json()).root;
+    if (root) gitRootCache.set(cwd, root);
+    return root || null;
   } catch (e) {
     alert(`Couldn't check the git repository: ${e && e.message ? e.message : 'network error'} — is the server reachable?`);
-    return;
+    return null;
+  }
+}
+
+// Guards the user-length prompts below: without it, repeated clicks stack N
+// directory pickers and then N issue modals.
+let issuePickerOpening = false;
+
+/**
+ * Show GitHub issue picker and create worktree session
+ */
+async function showIssuePicker() {
+  if (issuePickerOpening) return;
+  // #598 — decide SYNCHRONOUSLY, at event time. The repo comes from the ACTIVE
+  // CONTEXT, never from the foreign last-selected tab that an empty context
+  // leaves behind as activeId; and activeId / the active context can both change
+  // while a prompt is up.
+  const decision = resolveContextRepo();
+  const contextDirs = decision.kind === 'dirs' ? decision.dirs : [];
+  let seedDir = decision.kind === 'dirs'
+    ? (decision.dirs.length === 1 ? decision.dirs[0] : null)
+    : (decision.kind === 'inherit' ? decision.cwd : null);
+
+  if (!seedDir) {
+    issuePickerOpening = true;
+    try {
+      if (decision.kind === 'dirs') {
+        seedDir = await chooseContextDir(decision.dirs, 'Pick issues from…');
+      } else {
+        // 'ask' (a context with no dirs), or the All view with a mod/display tab
+        // (or nothing) open. Pick a dir and CONTINUE into the picker — this used
+        // to `return promptRepoSession()`, which silently created a plain session
+        // and never showed a single issue (#598).
+        const info = getActiveContextInfo();
+        seedDir = await showDirectoryPicker({
+          contextDirs: info ? info.dirs : [],
+          contextLabel: info ? info.name : '',
+        });
+      }
+    } finally { issuePickerOpening = false; }
+    if (!seedDir) return;                        // cancelled → create nothing
   }
 
-  // Collect candidate paths for repo selector
-  const sessionCwds = [...sessions.values()].map(s => s.cwd).filter(Boolean);
-  const recentCwds = SessionStore.getRecentDirs().map(d => d.path);
-  const allCwds = [...new Set([cwd, ...sessionCwds, ...recentCwds])];
+  let gitRoot = await resolveGitRootLoud(seedDir);
+  if (!gitRoot) return;
+
+  // Candidate paths for the repo selector. With a context active it offers that
+  // context's repos ONLY — the whole point of #598 is that an unrelated repo must
+  // never be one click away from an in-context issue pick. gitRoot itself is
+  // always seeded: on the inherit path it may be a `.claude/worktrees/<name>`
+  // root (findGitRoot honors a `.git` FILE), which is not one of ctx.dirs, and
+  // without an <option> for it the browser would silently select the first one —
+  // showing a repo that disagrees with the issues being fetched.
+  const allCwds = contextDirs.length
+    ? [...new Set([gitRoot, ...contextDirs])]
+    : [...new Set([
+        gitRoot,
+        ...[...sessions.values()].map(s => s.cwd).filter(Boolean),
+        ...SessionStore.getRecentDirs().map(d => d.path),
+      ])];
 
   // Show modal immediately with loading state
   const overlay = document.createElement('div');
@@ -3998,13 +4067,22 @@ async function init() {
   document.getElementById('issue-btn').addEventListener('click', () => showIssuePicker());
   // Prefetch issues on hover so results are cached when the dialog opens
   let issuePrefetching = false;
-  document.getElementById('issue-btn').addEventListener('mouseenter', () => {
+  document.getElementById('issue-btn').addEventListener('mouseenter', async () => {
     if (issuePrefetching) return;
-    const active = activeId && sessions.get(activeId);
-    const cwd = active?.cwd;
-    if (!cwd) return;
+    // Same resolver the picker uses (#598), so we never warm a repo it won't open.
+    // Only prefetch when the repo is unambiguous: a multi-repo or no-dirs context
+    // needs a prompt, and hover must never open a modal.
+    const d = resolveContextRepo();
+    const seed = d.kind === 'inherit' ? d.cwd : (d.dirs && d.dirs.length === 1 ? d.dirs[0] : null);
+    if (!seed) return;
     issuePrefetching = true;
-    fetch('/api/issues?cwd=' + encodeURIComponent(cwd)).finally(() => { issuePrefetching = false; });
+    try {
+      // Key on the ROOT, not the cwd: /api/issues caches on the cwd it's given,
+      // and the modal always fetches with the git root — so prefetching the raw
+      // cwd of a subdir warmed a key the modal never read.
+      const root = await resolveGitRootQuiet(seed);
+      if (root) await fetch('/api/issues?cwd=' + encodeURIComponent(root));
+    } finally { issuePrefetching = false; }
   });
   document.getElementById('empty-state-btn')?.addEventListener('click', () => quickNewSession());
   document.getElementById('empty-state-restore')?.addEventListener('click', async (e) => {
