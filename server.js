@@ -2329,7 +2329,7 @@ function loadContexts() {
       const v = JSON.parse(fs.readFileSync(CONTEXTS_FILE, 'utf8'));
       contexts = (Array.isArray(v) ? v : [])
         .filter(c => c && typeof c.name === 'string')
-        .map(c => ({ id: c.id || genContextId(), name: c.name, dirs: Array.isArray(c.dirs) ? c.dirs.filter(Boolean) : [], icon: typeof c.icon === 'string' ? c.icon : '', iconImage: (c.iconImage === 'png' || c.iconImage === 'svg') ? c.iconImage : '' }));
+        .map(c => ({ id: c.id || genContextId(), name: c.name, dirs: Array.isArray(c.dirs) ? c.dirs.filter(Boolean) : [], icon: typeof c.icon === 'string' ? c.icon : '', iconImage: (c.iconImage === 'png' || c.iconImage === 'svg') ? c.iconImage : '', archived: c.archived === true }));
       return;
     }
   } catch (e) {
@@ -4329,8 +4329,11 @@ app.post('/api/contexts', (req, res) => {
   // is done via DELETE /api/contexts/:id/icon.
   let iconImage = existing ? existing.iconImage || '' : '';
   if (icon) { if (iconImage) removeIconFiles(id); iconImage = ''; }
+  // `archived` (#601) is owned solely by POST /api/contexts/:id/archive — a name/dirs
+  // edit from the editor modal must never resurrect an archived context (same reason
+  // the icon is preserved above).
   if (existing) { existing.name = name; existing.dirs = dirs; existing.icon = icon; existing.iconImage = iconImage; }
-  else contexts.push({ id, name, dirs, icon, iconImage });
+  else contexts.push({ id, name, dirs, icon, iconImage, archived: false });
   saveContexts();
   broadcastContexts();
   res.json({ contexts });
@@ -4414,6 +4417,21 @@ app.delete('/api/contexts/:id/icon', (req, res) => {
   if (ctx.iconImage) removeIconFiles(ctx.id);
   ctx.icon = '';
   ctx.iconImage = '';
+  saveContexts();
+  broadcastContexts();
+  res.json({ contexts });
+});
+
+// Archive / unarchive a context (#601). Archived contexts keep all of their stored
+// state (dirs, icon, order) but drop out of the context rail's main list, the ⌘↑/↓
+// cycle, and the new-tab auto-reveal — they're browsable from the rail's "Archived"
+// section. Deliberately its own route rather than a field on the upsert, so a plain
+// name/dirs edit can't flip it. Scheduled Tasks still sees archived contexts (a
+// dormant project's tasks must keep firing), so nothing gates ctx.getContexts().
+app.post('/api/contexts/:id/archive', (req, res) => {
+  const ctx = contexts.find(c => c.id === req.params.id);
+  if (!ctx) return res.status(404).json({ error: 'Context not found' });
+  ctx.archived = req.body?.archived === true;
   saveContexts();
   broadcastContexts();
   res.json({ contexts });

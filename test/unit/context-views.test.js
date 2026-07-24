@@ -1,5 +1,6 @@
 // Headless unit test for public/js/context-views.js — revealTabContext (#547),
-// new-tab context guards (#581), and the closed-rail indicator + icon chip (#585).
+// new-tab context guards (#581), the closed-rail indicator + icon chip (#585), and
+// archive/unarchive (#601).
 //
 // No browser, no Docker: stub the handful of globals the module touches
 // (window/document/sessionStorage/fetch) BEFORE importing it, then drive the
@@ -27,7 +28,7 @@ function fakeElement() {
   const children = [];
   let text = '';
   const el = {
-    id: '', className: '', title: '', innerHTML: '',
+    id: '', className: '', title: '',
     style: {},
     dataset: {},
     children,
@@ -50,6 +51,14 @@ function fakeElement() {
     getBoundingClientRect: () => ({ width: 0, left: 0, top: 0 }),
     remove: () => {},
   };
+  // DOM fidelity renderRail() depends on: `innerHTML = ''` empties the element, so a
+  // re-render replaces its rows instead of appending a second copy (#601 tests read
+  // the rail's children back).
+  let html = '';
+  Object.defineProperty(el, 'innerHTML', {
+    get: () => html,
+    set: (v) => { html = String(v); if (!html) children.length = 0; },
+  });
   // DOM fidelity the indicator chip depends on: setting textContent drops the
   // element's children (applyContextIcon clears a previous <img> exactly this way).
   Object.defineProperty(el, 'textContent', {
@@ -66,11 +75,18 @@ const tabEls = new Map();
 // stay unresolved (their init paths are guarded and irrelevant to these tests).
 const byId = new Map();
 
+// Document-level listeners the module installs in init() (keydown/keyup), keyed by
+// type — so tests can dispatch a fake key event (⌘↑/↓ cycling, #601).
+const docListeners = new Map();
+// Every element the module creates, in order — the rail (#context-rail) is mounted
+// into an #app-container this harness doesn't stub, so this is how tests reach it.
+const createdEls = [];
+
 globalThis.document = {
   getElementById: (id) => (id.startsWith('tab-') ? tabEls.get(id.slice(4)) || null : byId.get(id) || null),
-  createElement: () => fakeElement(),
+  createElement: () => { const el = fakeElement(); createdEls.push(el); return el; },
   querySelectorAll: () => [],
-  addEventListener: () => {},
+  addEventListener: (ev, fn) => { docListeners.set(ev, [...(docListeners.get(ev) || []), fn]); },
   removeEventListener: () => {},
   body: { appendChild: () => {} },
   activeElement: null,
@@ -97,6 +113,8 @@ async function setup({ contexts = [CTX_A, CTX_B], tabs = {} } = {}) {
   storeMap.clear();
   tabEls.clear();
   byId.clear();
+  docListeners.clear();
+  createdEls.length = 0;
   const toggle = fakeElement();  // #context-toggle — init() hangs the indicator off it
   byId.set('context-toggle', toggle);
 
@@ -154,8 +172,15 @@ async function setup({ contexts = [CTX_A, CTX_B], tabs = {} } = {}) {
   // #585 indicator handles: init() inserted the indicator after the toggle, with
   // [icon chip, label] children.
   const indicator = toggle.inserted[0] || null;
+  const rail = createdEls.find(el => el.id === 'context-rail') || null;
+  // Dispatch a keydown at the document listeners the module installed (⌘↑/↓, #601).
+  const pressKey = (init) => {
+    const e = { metaKey: false, ctrlKey: false, altKey: false, shiftKey: false, target: null,
+      preventDefault: () => {}, stopPropagation: () => {}, ...init };
+    for (const fn of docListeners.get('keydown') || []) fn(e);
+  };
   return {
-    mod, state, addTab, openNewTab, jumpToTab, toggle, indicator,
+    mod, state, addTab, openNewTab, jumpToTab, toggle, indicator, rail, pressKey,
     indicatorIcon: indicator?.children[0] || null,
     indicatorLabel: indicator?.children[1] || null,
   };
@@ -524,4 +549,92 @@ test('rail open → hidden; closing rebuilds a fresh chip after an icon edit (#5
   assert.strictEqual(indicator.classList.contains('hidden'), false);
   assert.strictEqual(indicatorIcon.textContent, '🦊'); // fresh, not the stale monogram
   assert.strictEqual(indicatorIcon.classList.contains('is-emoji'), true);
+});
+
+// ---------------------------------------------------- archived contexts (#601)
+
+const ARCHIVED_B = { ...CTX_B, archived: true };
+
+// Rail children by class, most recent render (innerHTML='' empties the fake element).
+const railChildren = (rail, cls) => rail.children.filter(c => c.className.split(' ').includes(cls));
+
+test('archived context is dropped from the rail list into the Archived section (#601)', async () => {
+  const { mod, toggle, rail } = await setup({ contexts: [CTX_A, ARCHIVED_B] });
+  toggle.listeners.click(); // open the rail → renderRail
+
+  const lists = railChildren(rail, 'context-list');
+  const mainRows = lists[0].children.map(r => r.children[1]?.textContent);
+  assert.deepStrictEqual(mainRows, ['All', 'Alpha']); // Beta archived → not listed
+
+  const [toggleRow] = railChildren(rail, 'context-archived-toggle');
+  assert.strictEqual(toggleRow.textContent, '▸ Archived (1)');
+  assert.strictEqual(lists.length, 1); // collapsed → no archived list rendered
+
+  toggleRow.onclick();
+  const after = railChildren(rail, 'context-archived-toggle')[0];
+  assert.strictEqual(after.textContent, '▾ Archived (1)');
+  const archivedList = railChildren(rail, 'context-archived-list')[0];
+  assert.deepStrictEqual(archivedList.children.map(r => r.children[1]?.textContent), ['Beta']);
+});
+
+test('no archived contexts → no Archived section (#601)', async () => {
+  const { toggle, rail } = await setup();
+  toggle.listeners.click();
+  assert.deepStrictEqual(railChildren(rail, 'context-archived-toggle'), []);
+});
+
+test('⌘↑/↓ cycling skips archived contexts (#601)', async () => {
+  const { mod, pressKey } = await setup({ contexts: [CTX_A, ARCHIVED_B] });
+  assert.strictEqual(mod.getActiveContextId(), null);        // All
+
+  pressKey({ metaKey: true, code: 'ArrowDown' });
+  assert.strictEqual(mod.getActiveContextId(), 'ctxa');
+
+  pressKey({ metaKey: true, code: 'ArrowDown' });            // ctxb archived → wraps to All
+  assert.strictEqual(mod.getActiveContextId(), null);
+});
+
+test('every context archived → ⌘↑/↓ leaves the key native (#601)', async () => {
+  const { mod, pressKey } = await setup({ contexts: [{ ...CTX_A, archived: true }] });
+  pressKey({ metaKey: true, code: 'ArrowDown' });
+  assert.strictEqual(mod.getActiveContextId(), null);
+});
+
+test('new tab whose only matching context is archived → reveals All (#601)', async () => {
+  const { mod, openNewTab } = await setup({ contexts: [CTX_A, ARCHIVED_B], tabs: { tab1: '/repo/a' } });
+  mod.setActiveContext('ctxa');
+
+  openNewTab('tab2', '/repo/b/sub'); // ctxb matches but is archived
+
+  assert.strictEqual(mod.getActiveContextId(), null);
+  assert.strictEqual(isHidden('tab2'), false);
+});
+
+test('archiving the active context → POSTs and falls back to All (#601)', async () => {
+  const { mod, toggle, rail } = await setup();
+  mod.setActiveContext('ctxb');
+  toggle.listeners.click(); // open the rail so the rows exist
+
+  const calls = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (url, opts) => { calls.push({ url, opts }); return realFetch(); };
+  try {
+    // Right-click menu on the Beta row → Archive (menu items are appended to a fake
+    // document.body, so drive the module's exported path via the row listener).
+    const betaRow = railChildren(rail, 'context-list')[0].children[2];
+    betaRow.listeners.contextmenu({ preventDefault: () => {}, clientX: 0, clientY: 0 });
+    const menu = createdEls.filter(el => el.className.includes('context-row-menu')).pop();
+    const archive = menu.children.find(i => i.textContent === 'Archive');
+    assert.ok(archive, 'Archive item present in the row menu');
+    archive.onclick();
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+
+  const post = calls.find(c => String(c.url).includes('/archive'));
+  assert.ok(post, 'archive endpoint called');
+  assert.strictEqual(post.url, '/api/contexts/ctxb/archive');
+  assert.strictEqual(post.opts.method, 'POST');
+  assert.deepStrictEqual(JSON.parse(post.opts.body), { archived: true });
+  assert.strictEqual(mod.getActiveContextId(), null); // active context archived → All
 });
