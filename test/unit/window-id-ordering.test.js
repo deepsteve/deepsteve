@@ -21,6 +21,16 @@ const path = require('node:path');
 
 const APP_JS = path.resolve(__dirname, '..', '..', 'public', 'js', 'app.js');
 
+// Blank out comments so prose mentioning getWindowId() (this file's own rationale, and
+// the comments in init()) can't be mistaken for a call site.
+function appSource() {
+  return fs.readFileSync(APP_JS, 'utf8')
+    .replace(/\/\*[\s\S]*?\*\//g, m => ' '.repeat(m.length))
+    .split('\n')
+    .map(line => (/^\s*\/\//.test(line) ? ' '.repeat(line.length) : line))
+    .join('\n');
+}
+
 test('getWindowId() mints on first call — so read order is load-bearing', async () => {
   const store = new Map();
   globalThis.sessionStorage = {
@@ -41,13 +51,7 @@ test('getWindowId() mints on first call — so read order is load-bearing', asyn
 });
 
 test('init() captures isExistingTab before anything can mint the window id', () => {
-  // Blank out comments so prose mentioning getWindowId() (including this file's own
-  // rationale, and the comment in init()) can't be mistaken for a call site.
-  const src = fs.readFileSync(APP_JS, 'utf8')
-    .replace(/\/\*[\s\S]*?\*\//g, m => ' '.repeat(m.length))
-    .split('\n')
-    .map(line => (/^\s*\/\//.test(line) ? ' '.repeat(line.length) : line))
-    .join('\n');
+  const src = appSource();
 
   const initAt = src.indexOf('async function init()');
   assert.ok(initAt !== -1, 'found init()');
@@ -63,5 +67,29 @@ test('init() captures isExistingTab before anything can mint the window id', () 
     captureAt < firstMintAt,
     'isExistingTab must be captured before the first getWindowId() call in init(), or the ' +
     'new-tab branch becomes unreachable and whole-window restore silently dies (#551)'
+  );
+});
+
+test('init() clears an inherited window id before it reads isExistingTab', () => {
+  // The #551 invariant has a second half (#597). window.open() copies the opener's
+  // sessionStorage, so a ?fresh=1 window boots holding the PARENT's window id. If the
+  // fresh reset runs after the isExistingTab capture — it used to, ~90 lines after —
+  // the capture reads the parent's id, reports "existing tab", and the new window lands
+  // on the directory picker instead of the new-window branch. The restore modal was
+  // therefore unreachable from a new window, and the ▾ menu's New Window (which sent no
+  // flag at all) had the new window restore its parent's tabs on top of that.
+  const src = appSource();
+  const initAt = src.indexOf('async function init()');
+  assert.ok(initAt !== -1, 'found init()');
+
+  const resetAt = src.indexOf('WindowManager.resetWindowId()', initAt);
+  const captureAt = src.indexOf('const isExistingTab = WindowManager.hasExistingWindowId();', initAt);
+  assert.ok(resetAt !== -1, 'init() still performs the fresh-window reset');
+  assert.ok(captureAt !== -1, 'init() captures isExistingTab');
+
+  assert.ok(
+    resetAt < captureAt,
+    'the fresh-window reset must precede the isExistingTab capture, or a new window ' +
+    'inherits its parent identity and never reaches the new-window branch (#597)'
   );
 });

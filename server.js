@@ -2471,7 +2471,7 @@ let stateFrozen = false;  // Set during shutdown to prevent onExit handlers from
 // field it omits is silently wiped for every live shell on a graceful restart
 // (configDir was lost this way, breaking #537 profile resumes — #542).
 function serializeShellEntry(entry) {
-  return { cwd: entry.cwd, claudeSessionId: entry.claudeSessionId, agentType: entry.agentType || 'claude', codexHomeId: entry.codexHomeId || null, configDir: entry.configDir || null, engineType: entry.engineType || 'node-pty', worktree: entry.worktree || null, name: entry.name || null, planMode: !!entry.planMode, forkParent: entry.forkParent || null, lastActivity: entry.lastActivity || null, createdAt: entry.createdAt || null, windowId: entry.windowId || null };
+  return { cwd: entry.cwd, claudeSessionId: entry.claudeSessionId, agentType: entry.agentType || 'claude', codexHomeId: entry.codexHomeId || null, configDir: entry.configDir || null, engineType: entry.engineType || 'node-pty', worktree: entry.worktree || null, name: entry.name || null, planMode: !!entry.planMode, forkParent: entry.forkParent || null, lastActivity: entry.lastActivity || null, createdAt: entry.createdAt || null, windowId: entry.windowId || null, scheduled: !!entry.scheduled };
 }
 
 // #561: a session record is never hard-deleted by any runtime path. Every close
@@ -3959,7 +3959,15 @@ function buildWindowsView({ collectUngrouped = false } = {}) {
       // Exists, but belongs to no window. For the recover view (#560) these are
       // offerable — except a live session a browser is showing right now
       // (clients > 0): that one isn't lost, it's open.
-      if (collectUngrouped && !(status === 'active' && entry.clients && entry.clients.size > 0)) {
+      //
+      // Scheduled runs (#597) are never offerable while unattached. They are
+      // spawned with windowId: null and queue their tab via pendingOpens, so
+      // between fire and browser attach they look exactly like an orphan — but
+      // no browser ever owned the tab, so it can't have been lost. Offering it
+      // popped the restore modal on every startup that had a scheduled run in
+      // flight. Once a window attaches, entry.windowId is set and the session
+      // groups normally, so a crash of THAT window still offers it back.
+      if (collectUngrouped && !entry.scheduled && !(status === 'active' && entry.clients && entry.clients.size > 0)) {
         ungrouped.push(session);
       }
       return;
@@ -5291,7 +5299,7 @@ function handleWsConnection(ws, req) {
       // deliverToWindow() it triggered would land nowhere (#551).
       const restoredWindowId = windowId || restored.windowId || null;
       spawnSession(sessionEngine, id, savedAgentType, startArgs, cwd, { ...ptySize, env: sessionEnv(id, { name: restoredName, worktree: savedWorktree, windowId: restoredWindowId, cwd, agentType: savedAgentType, configDir: restored.configDir, codexHomeId }) });
-      shells.set(id, { clients: new Set(), cwd, claudeSessionId, agentType: savedAgentType, codexHomeId, configDir: restored.configDir || null, engine: sessionEngine, engineType: restoredEngineType, worktree: savedWorktree, name: restoredName, planMode: savedPlanMode, forkParent: restored.forkParent || null, restored: true, waitingForInput: false, lastActivity: Date.now(), createdAt: restored.createdAt || Date.now(), windowId: restoredWindowId });
+      shells.set(id, { clients: new Set(), cwd, claudeSessionId, agentType: savedAgentType, codexHomeId, configDir: restored.configDir || null, engine: sessionEngine, engineType: restoredEngineType, worktree: savedWorktree, name: restoredName, planMode: savedPlanMode, forkParent: restored.forkParent || null, restored: true, scheduled: !!restored.scheduled, waitingForInput: false, lastActivity: Date.now(), createdAt: restored.createdAt || Date.now(), windowId: restoredWindowId });
       wireShellOutput(id, initialCols, initialRows);
       recordRecentSession(id);  // bump recency on same-browser reconnect + cross-browser restore
       if (agentConfig.supportsSessionWatch) watchClaudeSessionDir(id);

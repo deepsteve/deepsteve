@@ -296,7 +296,9 @@ test('graceful shutdown persists the full state entry shape', async () => {
     assert.strictEqual(entry.claudeSessionId, claude);
     // The shutdown-final snapshot must write the same shape as saveState() —
     // it used to drop configDir (breaking #537 profile resumes) et al. (#542)
-    for (const key of ['configDir', 'createdAt', 'windowId', 'engineType']) {
+    // `scheduled` (#597) rides along for the same reason: buildWindowsView reads it
+    // straight off disk to decide whether a windowId-less session is a lost one.
+    for (const key of ['configDir', 'createdAt', 'windowId', 'engineType', 'scheduled']) {
       assert.ok(key in entry, `state entry has ${key}`);
     }
   }
