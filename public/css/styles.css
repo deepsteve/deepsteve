@@ -1283,7 +1283,13 @@ kbd {
 .context-archived-list { padding-top: 0; opacity: 0.72; }
 .context-archived-list:hover { opacity: 1; }
 
-.context-add { margin-top: auto; padding: 9px 12px; cursor: pointer; color: var(--ds-accent-green-soft); font-size: 13px; border-top: 1px solid var(--ds-border); }
+/* Same radius-derived inset + rounding as .context-list/.context-row above (#577), so the
+   full-width hover/active fill can't spill past the rail's rounded bezel (#602). It matters
+   most in the collapsed rail, where .context-hint is hidden and this is the LAST child —
+   flush against both bottom corners. margin-inline (not the `margin` shorthand): margin-top
+   is load-bearing (auto here, 0 via the .context-archived-toggle sibling rule). All three
+   values are 0 in the square default theme, so nothing moves there. */
+.context-add { margin-top: auto; margin-inline: calc(var(--ds-context-radius) / 3); margin-bottom: calc(var(--ds-context-radius) / 6); border-radius: calc(var(--ds-context-radius) / 2); padding: 9px 12px; cursor: pointer; color: var(--ds-accent-green-soft); font-size: 13px; border-top: 1px solid var(--ds-border); }
 .context-add:hover { background: var(--ds-bg-tertiary); }
 .context-add:active { background: var(--ds-border); }
 .context-hint { padding: 6px 12px 10px; font-size: 10px; color: var(--ds-text-secondary); opacity: 0.7; }

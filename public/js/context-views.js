@@ -390,6 +390,7 @@ function renderRail() {
   const add = document.createElement('div');
   add.className = 'context-add';
   add.textContent = '+ New context';
+  add.title = 'New context';  // the collapsed rail hides the label, leaving a bare "+" (#602)
   add.onclick = () => openContextEditor(null);
   rail.appendChild(add);
 
