@@ -212,6 +212,14 @@ function handleEnter() {
 }
 
 function handleCharacter(ch) {
+  // `# terminal` is the muscle-memory form (Claude Code's own memory feature
+  // uses `# `), so a space typed before any command name is swallowed rather
+  // than stored — a leading space would break every matching path below.
+  // The caller consumes the keystroke either way, so it can't leak to the PTY.
+  // Only fires while the buffer is empty, so the space *between* a command and
+  // its argument is untouched.
+  if (ch === ' ' && buffer.length === 0) return;
+
   buffer += ch;
 
   // Check if we should lock to a command (typed command name + space)
@@ -370,7 +378,8 @@ export function beforeSend(data, container) {
       return true;
     }
     // Pasted or batched input like "#terminal" or "#terminal\r"
-    const text = data.endsWith('\r') ? data.slice(1, -1) : data.slice(1);
+    // Left-trim so a pasted/batched `# terminal` matches like `#terminal` does.
+    const text = (data.endsWith('\r') ? data.slice(1, -1) : data.slice(1)).replace(/^\s+/, '');
     const spaceIdx = text.indexOf(' ');
     const cmdName = (spaceIdx >= 0 ? text.slice(0, spaceIdx) : text).toLowerCase();
     const arg = spaceIdx >= 0 ? text.slice(spaceIdx + 1) : '';

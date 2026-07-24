@@ -82,6 +82,45 @@ test('#tab myname + Enter passes the argument through', async () => {
   assert.deepStrictEqual(calls, [['tab', 'myname']]);
 });
 
+// ------------------------------------------- #591: the leading-space form works
+//
+// `# terminal` is the muscle-memory form (Claude Code's memory feature uses
+// `# `). The space used to land in the buffer as a leading char, which broke
+// the substring filter, the space-lock, and the batched branch alike — the
+// overlay went empty and the text was silently discarded.
+
+test('# terminal (leading space) + Enter executes the command', async () => {
+  const { calls, key, type } = await setup();
+  type('# terminal');
+  key('\r');
+  assert.deepStrictEqual(calls, [['terminal']]);
+});
+
+test('# terminal (leading space) executes on the trailing space', async () => {
+  const { calls, type } = await setup();
+  type('# terminal ');
+  assert.deepStrictEqual(calls, [['terminal']]);
+});
+
+test('#   tab (multiple leading spaces) still locks the command', async () => {
+  const { calls, key, type } = await setup();
+  type('#   tab myname');
+  key('\r');
+  assert.deepStrictEqual(calls, [['tab', 'myname']]);
+});
+
+test('pasted "# terminal\\r" executes the command', async () => {
+  const { calls, key } = await setup();
+  assert.strictEqual(key('# terminal\r'), true);
+  assert.deepStrictEqual(calls, [['terminal']]);
+});
+
+test('pasted "# tab myname\\r" passes the argument through', async () => {
+  const { calls, key } = await setup();
+  assert.strictEqual(key('# tab myname\r'), true);
+  assert.deepStrictEqual(calls, [['tab', 'myname']]);
+});
+
 // --------------------------------------- the gate still guards mid-line hashes
 
 test('# typed mid-word is NOT intercepted — forwarded to the PTY', async () => {
