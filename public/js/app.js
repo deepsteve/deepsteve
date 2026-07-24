@@ -473,6 +473,13 @@ function formatRelativeTime(timestamp) {
   return `${days}d ago`;
 }
 
+// Closed tombstones (#561) are hidden by default: "Clear disconnected" turns rows into
+// tombstones rather than deleting them, so rendering them kept the list exactly as long
+// and made the button look like a no-op (#603). They stay one click away via the footer
+// toggle — still clickable to resume, still ✕-able to forget for good. Deliberately not
+// persisted: the default should be "hidden" every time the page loads.
+let showClosedSessions = false;
+
 async function refreshSessionsDropdown() {
   try {
     const res = await fetch('/api/shells');
@@ -501,7 +508,10 @@ async function refreshSessionsDropdown() {
 
     const showAgentBadge = window.__deepsteveAgents?.length > 1;
 
-    sessionsMenu.innerHTML = allShells.map(shell => {
+    const closedShells = allShells.filter(s => s.status === 'closed');
+    const visibleShells = showClosedSessions ? allShells : allShells.filter(s => s.status !== 'closed');
+
+    sessionsMenu.innerHTML = visibleShells.map(shell => {
       const isThisTab = thisTab(shell);
       const isOtherWindow = otherWindow(shell);
       const isClosed = shell.status === 'closed';
@@ -530,7 +540,7 @@ async function refreshSessionsDropdown() {
           ${canClose ? `<span class="session-close" data-id="${shell.id}"${isClosed ? ' data-closed="1"' : ''}>✕</span>` : ''}
         </div>
       `;
-    }).join('');
+    }).join('') || '<div class="dropdown-empty">No sessions</div>';
 
     // Add "Clear disconnected" button at the top — only count truly disconnected
     // sessions. Closed tombstones are excluded: the endpoint never hard-deletes
@@ -542,10 +552,28 @@ async function refreshSessionsDropdown() {
     if (disconnectedCount > 0) {
       clearBtn.addEventListener('click', async () => {
         await fetch('/api/shells/clear-disconnected', { method: 'POST' });
+        // The server also broadcasts `sessions-cleared` to every window (including
+        // this one), which is what removes any live tab rows; this re-render just
+        // updates the menu we're standing in.
         await refreshSessionsDropdown();
       });
     }
     sessionsMenu.prepend(clearBtn);
+
+    // Footer toggle for the hidden tombstones.
+    if (closedShells.length > 0) {
+      const closedToggle = document.createElement('div');
+      closedToggle.className = 'dropdown-show-closed';
+      closedToggle.textContent = showClosedSessions
+        ? `Hide closed (${closedShells.length}) ▴`
+        : `Show closed (${closedShells.length}) ▾`;
+      closedToggle.addEventListener('click', async (e) => {
+        e.stopPropagation();  // the document-level handler would close the menu
+        showClosedSessions = !showClosedSessions;
+        await refreshSessionsDropdown();
+      });
+      sessionsMenu.appendChild(closedToggle);
+    }
 
     // Add click handlers to attach to non-connected sessions
     sessionsMenu.querySelectorAll('.dropdown-item.clickable').forEach(item => {
@@ -1661,9 +1689,19 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
       } else if (msg.type === 'close-tab') {
         if (assignedId) killSession(assignedId);
       } else if (msg.type === 'gone') {
-        connHandle.untrack();
-        SessionStores.remove(getWindowId(), msg.id);
-        TabManager.removeTab(msg.id);
+        // `gone` now also answers a *reconnect* whose session was closed meanwhile
+        // (#603), so the tab may already be fully built. Tear it down properly in
+        // that case; on the original initial-connect path there is no session yet.
+        if (sessions.has(msg.id)) {
+          killSession(msg.id);
+        } else {
+          connHandle.untrack();
+          SessionStores.remove(getWindowId(), msg.id);
+          TabManager.removeTab(msg.id);
+        }
+        // Close the wrapper, not just the socket: without this the retry loop never
+        // sees `closed` and re-dials the same dead id forever.
+        ws.close();
         resolveReady(null);
       } else if (msg.type === 'theme') {
         applyTheme(msg.css || '');
@@ -3866,6 +3904,15 @@ async function init() {
       if (msg.type === 'recent-sessions') {
         recentSessions = msg.sessions || [];
         renderEmptyStateRecent();
+      }
+      if (msg.type === 'sessions-cleared') {
+        // "Clear disconnected" ran in some window (#603). These sessions are dead
+        // server-side, so drop their tab rows and store entries here too — otherwise
+        // this window keeps a row whose reconnect loop would resurrect the tombstone.
+        for (const id of msg.ids || []) {
+          if (sessions.has(id)) killSession(id);
+          else SessionStores.remove(getWindowId(), id);
+        }
       }
       if (msg.type === 'open-session') {
         // Server created a session (e.g. via /api/start-issue) — open a tab for it.

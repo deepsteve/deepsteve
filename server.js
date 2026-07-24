@@ -4358,7 +4358,17 @@ app.post('/api/shells/clear-disconnected', (req, res) => {
     }
   }
 
-  if (cleared.length > 0) saveState();
+  if (cleared.length > 0) {
+    saveState();
+    // Tell every browser window to drop these rows (#603). Must go over the
+    // live-reload channel, not broadcast()/entry.clients: a cleared session has
+    // zero session clients by construction, and the window that still holds the
+    // tab (e.g. its socket is mid-reconnect after a sleep) is only reachable here.
+    const msg = JSON.stringify({ type: 'sessions-cleared', ids: cleared });
+    for (const client of reloadClients) {
+      if (client.readyState === 1) client.send(msg);
+    }
+  }
   log(`Cleared ${cleared.length} disconnected sessions: ${cleared.join(', ')}`);
   res.json({ cleared });
 });
@@ -5367,6 +5377,16 @@ function handleWsConnection(ws, req) {
       return;
     }
     if (savedState[id]) {
+      // A passive reconnect (ws-client's post-assignment URL) must never resurrect a
+      // session that was closed out from under it — that's how "Clear disconnected"
+      // used to undo itself, respawning the agent and eating the tombstone (#603).
+      // Explicit restores omit the flag and still resume closed sessions (#560).
+      if (savedState[id].closed && url.searchParams.get('noRestore') === '1') {
+        log(`[WS] Refusing to resurrect closed session ${id} (noRestore)`);
+        ws.send(JSON.stringify({ type: 'gone', id }));
+        ws.close();
+        return;
+      }
       // Restore this session with --resume flag using saved agent session ID
       const restored = savedState[id];
       cwd = restored.cwd;
