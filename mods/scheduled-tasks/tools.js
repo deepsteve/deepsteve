@@ -250,7 +250,9 @@ function findRunByShell(shellId) {
 
 // Spawn a session for a task and record the run. Returns the new shell id, or
 // null if the run was skipped (overlap guard) or the scheduler isn't ready.
-function runTask(task, reason) {
+// `foreground` opts out of the background open (#600) — only the panel's own
+// "Run now" button sets it, since the user just asked to see the run.
+function runTask(task, reason, { foreground = false } = {}) {
   if (!ctx) return null;
   const {
     shells, getDefaultEngine, getSpawnArgs, spawnSession, sessionEnv, getAgentConfig,
@@ -351,8 +353,12 @@ function runTask(task, reason) {
   saveTasks();
   broadcastTasks();
   // No windowId and no openBrowser: unattended. The tab queues (pendingOpens)
-  // and appears when a browser next connects.
-  deliverToWindow({ type: 'open-session', id, cwd, name, windowId: null, prefill: true }, null);
+  // and appears when a browser next connects. `background` additionally tells the
+  // client to leave the new tab *unfocused* (#600) — a scheduled fire must not
+  // yank the user off whatever they were doing. Read live off ctx.settings (which
+  // is mutated in place), so the setting takes effect with no restart.
+  const background = !foreground && ctx.settings.scheduledTasksOpenInBackground !== false;
+  deliverToWindow({ type: 'open-session', id, cwd, name, windowId: null, prefill: true, background }, null);
   return id;
 }
 
@@ -842,7 +848,9 @@ function registerRoutes(app, context) {
     if (!featureEnabled()) return res.status(403).json({ error: FEATURE_OFF_MSG });
     const task = tasks.find(t => t.id === req.params.id);
     if (!task) return res.status(404).json({ error: 'Task not found' });
-    const shellId = runTask(task, 'manual');
+    // The panel's Run-now button: the user explicitly asked for this run, so open
+    // its tab in the foreground even when scheduled fires are silent (#600).
+    const shellId = runTask(task, 'manual', { foreground: true });
     res.json({ started: !!shellId, sessionId: shellId || null });
   });
 

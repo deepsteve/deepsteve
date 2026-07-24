@@ -102,6 +102,9 @@ export function start(sessionId) {
 }
 
 export function done(sessionId) {
+  // Never started (a background open deliberately skips start(), #600) or already
+  // finished — don't let it complete a bar it never contributed to.
+  if (!activeIds.has(sessionId)) return;
   const timer = safetyTimers.get(sessionId);
   if (timer) { clearTimeout(timer); safetyTimers.delete(sessionId); }
   activeIds.delete(sessionId);
