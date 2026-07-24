@@ -1,6 +1,6 @@
 {
   "name": "deepsteve",
-  "version": "0.20.4",
+  "version": "0.21.0",
   "private": true,
   "description": "Web UI for running multiple Claude Code and Codex instances in browser tabs",
   "license": "MIT",
