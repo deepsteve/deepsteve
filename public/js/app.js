@@ -33,6 +33,7 @@ import { init as initContextViews, setEnabled as setContextViewsEnabled, applyFi
 import { nsKey } from './storage-namespace.js';
 import { formatShortcut } from './shortcuts.js';
 import { init as initWakeWatch } from './wake-watch.js';
+import { openNewWindow, isFreshRequest } from './new-window.js';
 
 // Configuration
 let maxIssueTitleLength = 25;
@@ -382,8 +383,10 @@ async function restoreRecentSession(key) {
   createSession(r.cwd, r.id, false, { name: r.name, agentType: r.agentType, allowDuplicate: true });
 }
 
-// Load recent sessions on startup
-loadRecentSessions();
+// Load recent sessions on startup. init()'s landing decision (landWithNoTabs) awaits
+// this rather than racing it — whether the empty state has anything on it is the whole
+// question there.
+const recentSessionsReady = loadRecentSessions();
 
 /**
  * Build a session list for the mod bridge API
@@ -3187,7 +3190,7 @@ function showNewTabMenu(e) {
       const cwdPath = active?.cwd || '~';
       createSession(cwdPath, null, true, { agentType: 'opencode' });
     } else if (action === 'new-window') {
-      window.open(window.location.origin, '_blank');
+      openNewWindow();
     } else if (action === 'restore-sessions') {
       reopenSessionRestore();
     }
@@ -3350,6 +3353,27 @@ async function promptRepoSession() {
   });
   if (result === null) return;
   createSession(result, null, true, { agentType: getDefaultAgentType() });
+}
+
+/**
+ * Where a window with no tabs should land (#597).
+ *
+ * The empty state is the landing surface, not a backdrop: it already carries "+ New",
+ * the recent-session chips (#533) and "Restore sessions…" (#560). Opening a modal
+ * directory picker on top of it is what made the new-window flow unpleasant —
+ * cancelling that modal put you exactly where you wanted to be. So prompt only when
+ * the empty state is genuinely bare (a first run with no recents), where the picker is
+ * onboarding rather than an obstacle. And never prompt right after the user dismissed
+ * the restore modal — that is two modals in a row.
+ */
+async function landWithNoTabs({ declined = false } = {}) {
+  await recentSessionsReady;
+  if (declined || recentSessions.length > 0) {
+    updateEmptyState();
+    document.getElementById('empty-state-btn')?.focus();  // so Enter opens a tab
+    return;
+  }
+  await promptRepoSession();
 }
 
 /**
@@ -3712,11 +3736,29 @@ async function showIssuePicker() {
  * Main initialization
  */
 async function init() {
-  // Must be the FIRST thing init() does: getWindowId() mints and persists the id on
-  // first call, so any earlier caller (initLiveReload below passes windowId, and a
-  // stray fetch callback could too) makes this read true forever. When that happened
-  // the "new tab" branch became unreachable and whole-window restore silently died —
-  // the sessions were fine, the modal just never ran (#551).
+  // Fresh window requested (▾ new-tab menu / ⌘K → New Window). This MUST run before
+  // the isExistingTab capture below, not merely before getWindowId(): window.open()
+  // copies the opener's sessionStorage, so an un-reset fresh window still reports
+  // hasExistingWindowId() === true. That made it take the "existing tab" branch and
+  // land on the directory picker, never the genuine new-window path (#597).
+  //
+  // Deliberately scoped to session *identity* — window id, tab list, active tab. The
+  // inherited view preferences (deepsteve-context-* , deepsteve-overview-active) are
+  // left alone so a window opened from a context lands in that context. Never reach
+  // for sessionStorage.clear(): at recursionDepth > 0 (Baby Browser) the storage area
+  // is shared with the top-level instance, so it would wipe the parent's real state.
+  if (isFreshRequest()) {
+    WindowManager.resetWindowId();
+    SessionStores.clearTabSessions();
+    ActiveTab.clear();
+    history.replaceState(null, '', window.location.pathname);
+  }
+
+  // Nothing but the fresh-window reset above may precede this: getWindowId() mints and
+  // persists the id on first call, so any earlier caller (initLiveReload below passes
+  // windowId, and a stray fetch callback could too) makes this read true forever. When
+  // that happened the "new tab" branch became unreachable and whole-window restore
+  // silently died — the sessions were fine, the modal just never ran (#551).
   const isExistingTab = WindowManager.hasExistingWindowId();
 
   // Cache available agents and default agent setting for new-tab menu and settings
@@ -3805,16 +3847,6 @@ async function init() {
       return { id, cwd: s.cwd, container: s.container, ws: s.ws };
     }
   });
-
-  // Fresh window requested (e.g. from "New Window" command) — clear inherited sessionStorage
-  // Must run BEFORE initLiveReload/getWindowId so the new window gets its own ID
-  const freshParam = new URLSearchParams(window.location.search).get('fresh');
-  if (freshParam) {
-    WindowManager.resetWindowId();
-    SessionStores.clearTabSessions();
-    sessionStorage.removeItem(nsKey('deepsteve-active-tab'));
-    history.replaceState(null, '', window.location.pathname);
-  }
 
   // Wake detection (#563): after a system sleep, probe/kick every WebSocket
   // immediately instead of waiting for the browser to notice dead sockets.
@@ -4156,8 +4188,8 @@ async function init() {
       console.log('[init] Restoring from localStorage fallback');
       restoreSessions(savedSessions);
     } else {
-      console.log('[init] No saved sessions, prompting for new');
-      await promptRepoSession();
+      console.log('[init] No saved sessions, landing on the empty state');
+      await landWithNoTabs();
     }
   } else {
     // New tab - check for orphaned windows or legacy sessions
@@ -4176,8 +4208,9 @@ async function init() {
       const outcome = await offerSessionRestore({ onlyIfOrphans: true });
       if (outcome !== 'restored') {
         // Declined, nothing to offer, or another window claimed everything —
-        // start fresh either way.
-        await promptRepoSession();
+        // land on the empty state either way. `declined` suppresses the directory
+        // picker so dismissing the restore modal can't stack a second one (#597).
+        await landWithNoTabs({ declined: outcome === 'fresh' });
       }
     }
   }

@@ -7,6 +7,7 @@
  */
 
 import { register } from './shortcuts.js';
+import { openNewWindow } from './new-window.js';
 
 let enabled = true;
 let shortcut = 'Meta+k';
@@ -128,7 +129,7 @@ async function executeCommand(cmd) {
         callbacks.quickNewTerminal?.();
         break;
       case 'new-window':
-        window.open(window.location.origin + '?fresh=1', '_blank');
+        openNewWindow();
         break;
       case 'close-tab':
         callbacks.closeActiveTab?.();

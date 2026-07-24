@@ -308,6 +308,10 @@ function runTask(task, reason, { foreground = false } = {}) {
     clients: new Set(), cwd, claudeSessionId, agentType,
     codexHomeId,
     engine: sessionEngine, engineType, worktree, windowId: null,
+    // Unattended by construction (#597): no browser ever owned this tab, so a
+    // windowId-less scheduled run must not be offered up as a lost session by
+    // the restore modal. See buildWindowsView() in server.js.
+    scheduled: true,
     name, waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now(), prefill: true,
   });
   wireShellOutput(id);
