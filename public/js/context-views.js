@@ -20,6 +20,13 @@
  * tab's own context — first matching context in rail order, else "All" — via
  * revealTabContext(), so a fresh tab is never hidden the moment it opens (#547).
  *
+ * Contexts can be ARCHIVED (#601) — a server-side flag that keeps everything
+ * stored (dirs, icon, order) but drops the context out of the rail's main list,
+ * the ⌘↑/↓ cycle, and the auto-reveal above. Archived ones live behind an
+ * "Archived (N)" disclosure row just above "+ New context", and unarchive from
+ * the same right-click menu. Scheduled Tasks still sees them, so a dormant
+ * project's tasks keep firing.
+ *
  * Self-contained module following the cmd-tab-switch.js / command-palette.js
  * pattern: init(callbacks), setEnabled(val), plus applyFilter()/
  * requestNewTabInContext() for app.js to call.
@@ -37,12 +44,14 @@ const ACTIVE_KEY = nsKey('deepsteve-context-active');   // sessionStorage: activ
 const SIDEBAR_KEY = nsKey('deepsteve-context-sidebar'); // sessionStorage: open state (per window)
 const LAST_TAB_KEY = nsKey('deepsteve-context-last-tab'); // sessionStorage: { [contextId]: tabId } (per window, #541)
 const WIDTH_KEY = nsKey('deepsteve-context-width');     // sessionStorage: rail width in px (per window, #569)
+const ARCHIVED_KEY = nsKey('deepsteve-context-archived'); // sessionStorage: archived section expanded (per window, #601)
 
 let enabled = true;
 let contexts = [];          // [{ id, name, dirs: [] }]
 let activeContextId = null; // null = view all
 let lastTabByContext = {};  // { contextId: tabId } — last tab viewed while that context was active (#541)
 let sidebarOpen = false;
+let archivedOpen = false;   // archived section expanded in the rail (#601)
 let cmdChordArmed = false;  // true between a Cmd+P press and the Cmd release — see onKeyDown
 
 let cb = {};       // callbacks injected by app.js
@@ -76,6 +85,16 @@ function saveContext(c) {
 function deleteContextOnServer(id) {
   fetch('/api/contexts/' + encodeURIComponent(id), { method: 'DELETE' }).catch(() => {});
 }
+// Archive / unarchive (#601) — server-owned like name/dirs/icon, so the state is
+// shared by every window. Its own endpoint (not a field on the upsert) so a
+// name/dirs edit can never flip it.
+function setArchivedOnServer(id, archived) {
+  fetch('/api/contexts/' + encodeURIComponent(id) + '/archive', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ archived }),
+  }).catch(() => {});
+}
 // Persist a drag-to-reorder (#532). Send the full id order; the server rebuilds
 // its array and broadcasts the new list back (setContexts) to every window.
 function persistOrder(order) {
@@ -93,6 +112,21 @@ function deleteContext(ctx) {
   deleteContextOnServer(ctx.id);
   applyFilter();
 }
+// Archive / unarchive a context (#601). Optimistic local flip + server write; the
+// broadcast (setContexts) reconciles this and every other window. Archiving the
+// ACTIVE context falls back to "All" — otherwise the view would keep filtering to a
+// context that's no longer in the list.
+function archiveContext(ctx, archived) {
+  const local = contexts.find(c => c.id === ctx.id);
+  if (local) local.archived = !!archived;
+  if (archived && activeContextId === ctx.id) {
+    activeContextId = null;
+    saveActive();
+    notifyActive();
+  }
+  setArchivedOnServer(ctx.id, !!archived);
+  applyFilter();
+}
 function loadActive() {
   return sessionStorage.getItem(ACTIVE_KEY) || null;
 }
@@ -105,6 +139,13 @@ function loadSidebar() {
 }
 function saveSidebar() {
   sessionStorage.setItem(SIDEBAR_KEY, sidebarOpen ? '1' : '0');
+}
+// Archived section open/closed — view state, so per-window like the rail itself (#601).
+function loadArchivedOpen() {
+  return sessionStorage.getItem(ARCHIVED_KEY) === '1';
+}
+function saveArchivedOpen() {
+  sessionStorage.setItem(ARCHIVED_KEY, archivedOpen ? '1' : '0');
 }
 // Rail width (#569). Like the vertical-tabs sidebar (#552) the restored value is
 // guarded for SHAPE not size — no Math.max floor — so a width dragged down to the
@@ -154,6 +195,18 @@ export function orderRecentDirsByContext(contextDirs, recentDirs) {
   const contextGroup = (contextDirs || []).map((path) => ({ path }));
   const rest = (recentDirs || []).filter((d) => !ctxPaths.has(norm(d.path)));
   return { contextGroup, rest };
+}
+
+// The contexts the rail lists, ⌘↑/↓ cycles, and the new-tab auto-reveal (#547) can
+// jump to — i.e. everything except archived ones (#601). Lookups by id
+// (getActiveContext, setActiveContext) still use the full list; an active context
+// that gets archived (here or in another window) is dropped back to "All" by
+// archiveContext / setContexts, so the view never filters to an unlisted row.
+function visibleContexts() {
+  return contexts.filter(c => !c.archived);
+}
+function archivedContexts() {
+  return contexts.filter(c => c.archived);
 }
 
 function getActiveContext() {
@@ -286,7 +339,7 @@ function renderRail() {
   const list = document.createElement('div');
   list.className = 'context-list';
   list.appendChild(makeRow(null, 'All', activeContextId === null, null));
-  for (const ctx of contexts) {
+  for (const ctx of visibleContexts()) {
     list.appendChild(makeRow(ctx.id, ctx.name, ctx.id === activeContextId, ctx));
   }
   rail.appendChild(list);
@@ -298,6 +351,40 @@ function renderRail() {
     note.textContent = 'No tabs in this context — click to open one.';
     note.onclick = () => newTabInActiveContext();
     rail.appendChild(note);
+  }
+
+  // Archived section (#601) — a muted disclosure row right above "+ New context",
+  // rendered only when something is archived. Expanding lists the archived
+  // contexts with the same rows (and the same right-click menu, which offers
+  // Unarchive there), so they can be browsed and brought back.
+  const archived = archivedContexts();
+  if (archived.length) {
+    // Force the section open while an archived context is the ACTIVE view (it can be
+    // selected from this section, or by the Scheduled Tasks panel) — otherwise the
+    // rail would filter to a row nothing on screen shows.
+    const open = archivedOpen || archived.some(c => c.id === activeContextId);
+    const toggle = document.createElement('div');
+    toggle.className = 'context-archived-toggle';
+    toggle.textContent = `${open ? '▾' : '▸'} Archived (${archived.length})`;
+    toggle.title = open ? 'Hide archived contexts' : 'Show archived contexts';
+    toggle.onclick = () => {
+      archivedOpen = !open;
+      saveArchivedOpen();
+      // Collapsing while viewing an archived context would leave the filter pointing
+      // at a hidden row (and the section would just re-open) — go back to "All".
+      if (!archivedOpen && archived.some(c => c.id === activeContextId)) selectContext(null);
+      else renderRail();
+    };
+    rail.appendChild(toggle);
+
+    if (open) {
+      const archivedList = document.createElement('div');
+      archivedList.className = 'context-list context-archived-list';
+      for (const ctx of archived) {
+        archivedList.appendChild(makeRow(ctx.id, ctx.name, ctx.id === activeContextId, ctx));
+      }
+      rail.appendChild(archivedList);
+    }
   }
 
   const add = document.createElement('div');
@@ -418,6 +505,9 @@ function showRowMenu(x, y, ctx) {
     const hasIcon = ctx.icon || ctx.iconImage;
     addRowMenuItem(menu, hasIcon ? 'Change icon…' : 'Set icon…', () => showIconPicker(x, y, ctx));
     if (hasIcon) addRowMenuItem(menu, 'Clear icon', () => clearContextIcon(ctx));
+    // Archive (#601) — the non-destructive alternative to Delete: the context keeps
+    // its dirs/icon/position but leaves the list until it's unarchived.
+    addRowMenuItem(menu, ctx.archived ? 'Unarchive' : 'Archive', () => archiveContext(ctx, !ctx.archived));
     addRowMenuItem(menu, 'Delete', () => {
       if (confirm(`Delete context "${ctx.name}"?`)) deleteContext(ctx);
     }, 'var(--ds-accent-red)');
@@ -722,10 +812,18 @@ function endRowDrag() {
 
   const list = row.parentNode;
   if (!list) return;
-  const order = [...list.querySelectorAll('.context-row')].map(r => r.dataset.contextId).filter(Boolean);
+  const byId = new Map(contexts.map(c => [c.id, c]));
+  const listOrder = [...list.querySelectorAll('.context-row')]
+    .map(r => r.dataset.contextId).filter(id => id && byId.has(id));
+  // The rail can render TWO lists (main + archived, #601) and a drag only reorders
+  // within one of them. Splice the dragged list's new sequence back into the slots
+  // its members already occupied in the full array, so the other list's contexts
+  // keep their positions instead of being dropped / shoved to the end.
+  const inList = new Set(listOrder);
+  let i = 0;
+  const order = contexts.map(c => (inList.has(c.id) ? listOrder[i++] : c.id));
   // Optimistic local reorder so the rail is stable immediately; the server
   // broadcast (setContexts) reconciles this and every other window.
-  const byId = new Map(contexts.map(c => [c.id, c]));
   contexts = order.map(id => byId.get(id)).filter(Boolean);
   persistOrder(order);
   renderRail(); // rebuild rows with fresh handlers / cleared drag state
@@ -768,7 +866,8 @@ export function revealTabContext(tabId) {
   if (!ctx) return;
   const cwd = cb.getTabCwd?.(tabId);
   if (tabInContext(cwd, ctx)) return;
-  const match = contexts.find(c => tabInContext(cwd, c));
+  // Archived contexts (#601) are not a jump target — a tab in one reveals as "All".
+  const match = visibleContexts().find(c => tabInContext(cwd, c));
   selectContext(match ? match.id : null);
   noteActiveTab(tabId);                        // record as destination's last tab (#541); self-no-ops for All
   showToast(match ? match.name : 'All tabs');  // explain the jump (mirrors cycleContext)
@@ -933,7 +1032,7 @@ export function showToast(text) {
 // ------------------------------------------------------------------- keyboard
 
 function cycleContext(dir) {
-  const order = [null, ...contexts.map(c => c.id)];
+  const order = [null, ...visibleContexts().map(c => c.id)];
   if (order.length <= 1) return;
   const idx = order.indexOf(activeContextId);
   const next = dir > 0
@@ -1015,7 +1114,7 @@ function onKeyDown(e) {
 
   // Cmd+Up / Cmd+Down — cycle through [All, ...contexts].
   if ((e.code === 'ArrowUp' || e.code === 'ArrowDown') && !e.ctrlKey && !e.altKey && !e.shiftKey) {
-    if (contexts.length === 0) return; // nothing to cycle; leave native behavior
+    if (visibleContexts().length === 0) return; // nothing to cycle; leave native behavior
     e.preventDefault();
     e.stopPropagation();
     cycleContext(e.code === 'ArrowDown' ? 1 : -1);
@@ -1258,6 +1357,7 @@ export function init(callbacks) {
   contexts = [];                    // seeded from the server by fetchContexts() below
   activeContextId = loadActive();   // restored per-window; validated once contexts arrive
   sidebarOpen = loadSidebar();
+  archivedOpen = loadArchivedOpen();
   lastTabByContext = loadLastTabs(); // stale tab ids are validated at restore time (#541)
 
   toggleBtn = document.getElementById('context-toggle');
@@ -1341,6 +1441,9 @@ export function init(callbacks) {
 // every 'contexts' broadcast). Re-validates the active id and re-filters.
 export function setContexts(list) {
   contexts = Array.isArray(list) ? list : [];
+  // Only a DELETED context drops the view back to "All". An archived one (#601) may
+  // still be the active view — selected from the rail's archived section or by the
+  // Scheduled Tasks panel — and renderRail keeps its section expanded so it's visible.
   if (activeContextId && !contexts.find(c => c.id === activeContextId)) {
     activeContextId = null;
     saveActive();

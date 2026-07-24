@@ -1269,6 +1269,20 @@ kbd {
 .context-empty-note { padding: 8px 12px; font-size: 11px; color: var(--ds-text-secondary); cursor: pointer; line-height: 1.4; }
 .context-empty-note:hover { color: var(--ds-text-primary); }
 .context-empty-note:active { background: var(--ds-border); }
+/* Archived contexts (#601): a muted disclosure row + its list, rendered between the
+   context list and "+ New context". The rows reuse .context-row wholesale (icon, count,
+   right-click menu, drag) and are just dimmed so the tier reads as secondary. */
+/* margin-top:auto moves here (from .context-add) whenever the section exists, so the
+   archived block sits directly above "+ New context" at the foot of the rail instead
+   of floating under the list. The sibling rule drops .context-add's own auto margin —
+   two auto margins would split the free space and re-open the gap. */
+.context-archived-toggle { margin-top: auto; padding: 7px 12px; font-size: 11px; color: var(--ds-text-secondary); cursor: pointer; user-select: none; }
+.context-archived-toggle ~ .context-add { margin-top: 0; }
+.context-archived-toggle:hover { background: var(--ds-bg-tertiary); color: var(--ds-text-primary); }
+.context-archived-toggle:active { background: var(--ds-border); }
+.context-archived-list { padding-top: 0; opacity: 0.72; }
+.context-archived-list:hover { opacity: 1; }
+
 .context-add { margin-top: auto; padding: 9px 12px; cursor: pointer; color: var(--ds-accent-green-soft); font-size: 13px; border-top: 1px solid var(--ds-border); }
 .context-add:hover { background: var(--ds-bg-tertiary); }
 .context-add:active { background: var(--ds-border); }
@@ -1320,6 +1334,8 @@ kbd {
    out and "+ New context" shrinks to a centred +, but every hit target survives. */
 #context-rail.collapsed .context-rail-header,
 #context-rail.collapsed .context-hint,
+#context-rail.collapsed .context-archived-toggle,
+#context-rail.collapsed .context-archived-list,
 #context-rail.collapsed .context-empty-note { display: none; }
 
 /* Keep the base (radius-derived) .context-list inset when collapsed too, so the
