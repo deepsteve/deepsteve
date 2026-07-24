@@ -31,9 +31,17 @@ const CATCHUP_DELAY_MS = 10 * 1000; // let the daemon settle before the overdue 
 //   running   — agent called scheduled_task_started
 //   succeeded / failed — agent called scheduled_task_finished
 //   ended     — session closed with no self-report (fallback; crash or manual close)
+//   timed-out — exceeded the task's maxRuntimeMinutes and was closed by the tick (#596)
 // ACTIVE = not yet self-reported terminal; used by the overlap guard + onExit fallback.
 // Legacy 'started'/'completed' rows (pre-#525) still render in the UI badge.
 const ACTIVE_STATUSES = new Set(['queued', 'running', 'started']);
+
+// Default ceiling on a single run's wall-clock (#596). A run that parks on a
+// permission prompt is never reaped — armDetachReap only arms when a client
+// disconnects, and an unattended run never had one — so without this the overlap
+// guard skips every future fire of that task forever, signalled by nothing but one
+// log line per tick. 0 on a task means "no limit".
+const DEFAULT_MAX_RUNTIME_MINUTES = 60;
 
 // --- Persistent state (load on start, write-through on mutate) ---
 // Tasks live here; the named groups that drive scope:'group' are now the shared
@@ -362,11 +370,51 @@ function runTask(task, reason, { foreground = false } = {}) {
   return id;
 }
 
+// Close any run that has outlived its task's maxRuntimeMinutes (#596).
+//
+// Nothing else can rescue a wedged unattended run: it has no client, so the detach
+// reaper never arms, and while its session stays alive in an ACTIVE status the
+// overlap guard skips every subsequent fire of that task — permanently. Marking it
+// 'timed-out' (deliberately NOT an ACTIVE status) fixes all of that at once: the
+// onExit fallback won't overwrite the status, sweepLeakedWorktrees reclaims the
+// worktree, and the next fire is no longer blocked.
+//
+// Only runs with no attached client are eligible — if a human has the tab open,
+// they own it, whatever the clock says. Returns true if anything changed.
+function enforceRunTimeouts(now) {
+  if (!ctx) return false;
+  let changed = false;
+  for (const task of tasks) {
+    const limitMs = sanitizeMaxRuntime(task.maxRuntimeMinutes) * 60 * 1000;
+    if (limitMs <= 0) continue; // 0 = no limit
+    for (const run of task.runs || []) {
+      if (!ACTIVE_STATUSES.has(run.status)) continue;
+      const shell = ctx.shells.get(run.sessionId);
+      if (!shell || shell.clients.size > 0) continue;
+      const elapsed = now - (run.agentStartedAt || run.startedAt || now);
+      if (elapsed <= limitMs) continue;
+      const mins = Math.round(elapsed / 60000);
+      log_(`[scheduled] run ${run.sessionId} of "${task.title}" exceeded ${task.maxRuntimeMinutes}m (${mins}m elapsed) — closing`);
+      run.status = 'timed-out';
+      run.success = false;
+      run.endedAt = now;
+      run.summary = run.summary || `Timed out after ${mins}m with no completion report.`;
+      changed = true;
+      // Status is already terminal before teardown, so the onExit fallback leaves it alone.
+      try { ctx.closeSession(run.sessionId, 'scheduled-timeout'); }
+      catch (e) { log_(`timeout close failed for ${run.sessionId}: ${e.message}`); }
+    }
+  }
+  if (changed) { saveTasks(); broadcastTasks(); }
+  return changed;
+}
+
 // Fire any enabled task whose next run has arrived.
 function tick() {
   if (!ctx || !ctx.settings.scheduledTasksEnabled) return;
   const now = Date.now();
   let changed = false;
+  if (enforceRunTimeouts(now)) changed = true;
   for (const task of tasks) {
     if (!task.enabled) continue;
     if (task.once && task.firedAt) continue; // one-shot already fired — done, never again
@@ -467,7 +515,15 @@ function startScheduler() {
 
 // --- CRUD used by both MCP tools and REST ---------------------------------
 
-function createTask({ title, prompt, cron: cronStr, once, project, agentType, planMode, enabled, createdBy, keepOpen, keepOpenOnFailure, isolateWorktree }) {
+// Minutes → a non-negative integer, or the default when absent/garbage. 0 = no limit.
+function sanitizeMaxRuntime(v) {
+  if (v === undefined || v === null || v === '') return DEFAULT_MAX_RUNTIME_MINUTES;
+  const n = Math.round(Number(v));
+  if (!Number.isFinite(n) || n < 0) return DEFAULT_MAX_RUNTIME_MINUTES;
+  return n;
+}
+
+function createTask({ title, prompt, cron: cronStr, once, project, agentType, planMode, enabled, createdBy, keepOpen, keepOpenOnFailure, isolateWorktree, maxRuntimeMinutes }) {
   cron.parseCron(cronStr); // throws on invalid — caller catches (a one-shot still uses a cron)
   const now = Date.now();
   const task = {
@@ -485,6 +541,9 @@ function createTask({ title, prompt, cron: cronStr, once, project, agentType, pl
     // Per-run worktree isolation (#565), default ON — legacy tasks (field absent)
     // also isolate. Only takes effect for claude on a git-repo project; see runTask.
     isolateWorktree: isolateWorktree !== false,
+    // Wall-clock ceiling per run (#596); 0 = unlimited. Legacy tasks (field absent)
+    // inherit the default rather than staying unbounded.
+    maxRuntimeMinutes: sanitizeMaxRuntime(maxRuntimeMinutes),
     cron: cronStr.trim(),
     // One-shot (#528): fires at the next cron match then retires (firedAt set). firedAt
     // stays null on a manual Run now — only the scheduled/catch-up fire retires it.
@@ -516,6 +575,7 @@ function updateTask(id, fields) {
   if (fields.keepOpen !== undefined) task.keepOpen = !!fields.keepOpen;
   if (fields.keepOpenOnFailure !== undefined) task.keepOpenOnFailure = !!fields.keepOpenOnFailure;
   if (fields.isolateWorktree !== undefined) task.isolateWorktree = !!fields.isolateWorktree;
+  if (fields.maxRuntimeMinutes !== undefined) task.maxRuntimeMinutes = sanitizeMaxRuntime(fields.maxRuntimeMinutes);
   if (fields.once !== undefined) task.once = !!fields.once;
   if (fields.enabled !== undefined) task.enabled = !!fields.enabled;
   // Recompute next run from any schedule/enable change. A one-shot that has already
@@ -566,6 +626,7 @@ function taskView(task) {
     keepOpen: !!task.keepOpen,
     keepOpenOnFailure: !!task.keepOpenOnFailure,
     isolateWorktree: task.isolateWorktree !== false,
+    maxRuntimeMinutes: sanitizeMaxRuntime(task.maxRuntimeMinutes),
     enabled: !!task.enabled,
     nextRun: task.nextRun,
     lastRun: task.lastRun,
@@ -607,9 +668,27 @@ function featureOffResult() {
 
 // --- MCP tools ------------------------------------------------------------
 
+// An unattended run in flight: a live session with no browser attached whose run
+// hasn't self-reported terminal yet. The auto-updater asks before restarting (#596)
+// — with zero browsers connected, /api/request-restart auto-confirms, so nothing
+// else would stop it from killing a scheduled run mid-work and leaking its worktree
+// (shutdown skips the run's onExit, and the sweep skips ACTIVE runs).
+function unattendedRunInFlight() {
+  if (!ctx || !ctx.settings.scheduledTasksEnabled) return null;
+  for (const task of tasks) {
+    const run = task.runs && task.runs[0];
+    if (!run || !ACTIVE_STATUSES.has(run.status)) continue;
+    const shell = ctx.shells.get(run.sessionId);
+    if (!shell || shell.clients.size > 0) continue; // gone, or a human is watching it
+    return { reason: `unattended scheduled run ${run.sessionId} ("${task.title}") in flight` };
+  }
+  return null;
+}
+
 function init(context) {
   ctx = context;
   startScheduler();
+  if (ctx.registerRestartBlocker) ctx.registerRestartBlocker(unattendedRunInFlight);
 
   const callerShellId = (extra) => extra?.requestInfo?.url?.searchParams?.get('shellId') || null;
 
@@ -627,9 +706,10 @@ function init(context) {
         keep_open: z.boolean().optional().describe('Keep the tab open after each run finishes instead of auto-closing (default false).'),
         keep_open_on_failure: z.boolean().optional().describe('Keep the tab open when a run fails, even if auto-close is on (default false).'),
         isolate_worktree: z.boolean().optional().describe('Run each fire in a disposable git worktree/branch (scheduled-<runId>) so it never touches the main checkout; cleaned up after the run when clean/merged. Only applies to claude on a git-repo project. Default true.'),
+        max_runtime_minutes: z.number().optional().describe('Close a run that has not reported finished after this many minutes, so a stuck run cannot block future fires. Default 60; 0 disables the limit.'),
         enabled: z.boolean().optional().describe('Whether the schedule is active (default true).'),
       },
-      handler: async ({ title, prompt, cron: cronStr, once, project, agent_type, plan_mode, keep_open, keep_open_on_failure, isolate_worktree, enabled }, extra) => {
+      handler: async ({ title, prompt, cron: cronStr, once, project, agent_type, plan_mode, keep_open, keep_open_on_failure, isolate_worktree, max_runtime_minutes, enabled }, extra) => {
         let task;
         try {
           task = createTask({
@@ -638,6 +718,7 @@ function init(context) {
             agentType: agent_type, planMode: plan_mode, enabled,
             keepOpen: keep_open, keepOpenOnFailure: keep_open_on_failure,
             isolateWorktree: isolate_worktree,
+            maxRuntimeMinutes: max_runtime_minutes,
             createdBy: callerShellId(extra),
           });
         } catch (e) {
@@ -685,9 +766,10 @@ function init(context) {
         keep_open: z.boolean().optional().describe('Keep the tab open after each run finishes instead of auto-closing.'),
         keep_open_on_failure: z.boolean().optional().describe('Keep the tab open when a run fails, even if auto-close is on.'),
         isolate_worktree: z.boolean().optional().describe('Run each fire in a disposable git worktree/branch that is cleaned up after the run when clean/merged (claude + git-repo projects only).'),
+        max_runtime_minutes: z.number().optional().describe('Close a run that has not reported finished after this many minutes (0 disables the limit).'),
         enabled: z.boolean().optional(),
       },
-      handler: async ({ id, title, prompt, cron: cronStr, once, project, agent_type, plan_mode, keep_open, keep_open_on_failure, isolate_worktree, enabled }, extra) => {
+      handler: async ({ id, title, prompt, cron: cronStr, once, project, agent_type, plan_mode, keep_open, keep_open_on_failure, isolate_worktree, max_runtime_minutes, enabled }, extra) => {
         const fields = {};
         if (title !== undefined) fields.title = title;
         if (prompt !== undefined) fields.prompt = prompt;
@@ -699,6 +781,7 @@ function init(context) {
         if (keep_open !== undefined) fields.keepOpen = keep_open;
         if (keep_open_on_failure !== undefined) fields.keepOpenOnFailure = keep_open_on_failure;
         if (isolate_worktree !== undefined) fields.isolateWorktree = isolate_worktree;
+        if (max_runtime_minutes !== undefined) fields.maxRuntimeMinutes = max_runtime_minutes;
         if (enabled !== undefined) fields.enabled = enabled;
         let task;
         try { task = updateTask(id, fields); }
@@ -818,6 +901,7 @@ function registerRoutes(app, context) {
         agentType: b.agentType, planMode: b.planMode, enabled: b.enabled,
         keepOpen: b.keepOpen, keepOpenOnFailure: b.keepOpenOnFailure,
         isolateWorktree: b.isolateWorktree,
+        maxRuntimeMinutes: b.maxRuntimeMinutes,
       });
       res.json({ task });
     } catch (e) {
@@ -866,4 +950,4 @@ function registerRoutes(app, context) {
 
 // The mod loader only uses init/registerRoutes; the extra named exports are for
 // unit tests (test/unit/scheduled-worktree.test.js).
-module.exports = { init, registerRoutes, cleanupWorktree, isGitRepo, scheduledRunPrompt, worktreeContract };
+module.exports = { init, registerRoutes, cleanupWorktree, isGitRepo, scheduledRunPrompt, worktreeContract, enforceRunTimeouts };

@@ -121,11 +121,11 @@ function StatusBadge({ status }) {
   // rows (pre-#525) still map so old history renders.
   const map = {
     queued: C.amber, running: C.accent, succeeded: C.green, failed: C.red, ended: C.dim,
-    started: C.accent, completed: C.green, error: C.red,
+    'timed-out': C.red, started: C.accent, completed: C.green, error: C.red,
   };
   const label = {
     queued: 'queued', running: 'running', succeeded: 'done', failed: 'failed', ended: 'ended',
-    started: 'running', completed: 'done', error: 'error',
+    'timed-out': 'timed out', started: 'running', completed: 'done', error: 'error',
   }[status] || status;
   if (!status) return null;
   return <span style={{ color: map[status] || C.dim, fontSize: 11, border: `1px solid ${map[status] || C.dim}`, borderRadius: 4, padding: '0 5px' }}>{label}</span>;
@@ -200,6 +200,7 @@ function TaskForm({ task, projects, onClose }) {
   const [keepOpen, setKeepOpen] = useState(!!initial.keepOpen);
   const [keepOpenOnFailure, setKeepOpenOnFailure] = useState(!!initial.keepOpenOnFailure);
   const [isolateWorktree, setIsolateWorktree] = useState(initial.isolateWorktree !== false); // default on (#565)
+  const [maxRuntime, setMaxRuntime] = useState(initial.maxRuntimeMinutes != null ? String(initial.maxRuntimeMinutes) : '60'); // #596
   const [once, setOnce] = useState(!!initial.once);
   const [mode, setMode] = useState(initForm.mode);
   const [fld, setFld] = useState(initForm.fld);
@@ -214,7 +215,7 @@ function TaskForm({ task, projects, onClose }) {
     if (!title.trim()) return setErr('Title is required');
     if (!prompt.trim()) return setErr('Prompt is required');
     const proj = project === '__custom__' ? customPath.trim() : project;
-    const body = { title: title.trim(), prompt: prompt.trim(), cron: cronStr, once, project: proj, agentType, planMode, keepOpen, keepOpenOnFailure, isolateWorktree };
+    const body = { title: title.trim(), prompt: prompt.trim(), cron: cronStr, once, project: proj, agentType, planMode, keepOpen, keepOpenOnFailure, isolateWorktree, maxRuntimeMinutes: Number(maxRuntime) || 0 };
     setSaving(true);
     try {
       if (task && task.id) await api('PUT', `/api/scheduled-tasks/${task.id}`, body);
@@ -296,6 +297,11 @@ function TaskForm({ task, projects, onClose }) {
       <div style={{ display: 'flex', gap: 12, marginTop: 8, alignItems: 'center', flexWrap: 'wrap' }}>
         <label style={{ fontSize: 12, color: C.dim, opacity: agentType !== 'claude' ? 0.5 : 1 }} title={agentType !== 'claude' ? 'Worktree isolation only applies to claude (native --worktree support).' : ''}>
           <input type="checkbox" checked={isolateWorktree} disabled={agentType !== 'claude'} onChange={(e) => setIsolateWorktree(e.target.checked)} /> run in a disposable worktree
+        </label>
+        <label style={{ fontSize: 12, color: C.dim }} title="A run that never reports finished is closed after this long, so it can't block future fires. 0 = no limit.">
+          time limit
+          <input type="number" min="0" step="5" value={maxRuntime} onChange={(e) => setMaxRuntime(e.target.value)}
+            style={{ ...input(), width: 60, marginLeft: 6, marginTop: 0, padding: '2px 4px' }} /> min
         </label>
       </div>
       <div style={{ fontSize: 11, color: C.dim, marginTop: 4 }}>Each run gets its own git worktree/branch, removed after the run unless there is uncommitted or unmerged work. Skipped when the project is not a git repo.</div>

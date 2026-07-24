@@ -9,22 +9,26 @@ const os = require('os');
 const path = require('path');
 
 const { init } = require('../../mods/display-tab/tools.js');
+const { createPendingOpens } = require('../../pending-opens.js');
 
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-display-tab-'));
 
 function makeTools() {
   const displayTabs = new Map();
+  // The real queue (#596), not a bare array — the mod pushes raw JSON strings onto
+  // it, so this also pins that compatibility.
+  const pendingOpens = createPendingOpens();
   const ctx = {
     shells: new Map(),
     reloadClients: new Set(),
-    pendingOpens: [],
+    pendingOpens,
     log: () => {},
     displayTabs,
     setDisplayTab: (id, html) => displayTabs.set(id, html),
     deleteDisplayTab: (id) => displayTabs.delete(id),
     sessionPaths: (e) => ({ cwd: e.cwd }),
   };
-  return { tools: init(ctx), displayTabs };
+  return { tools: init(ctx), displayTabs, pendingOpens };
 }
 
 function writeFixture(name, contents) {
@@ -136,4 +140,25 @@ test('update_display_tab accepts file_path for an existing tab', async () => {
   const both = await tools.update_display_tab.handler({ tab_id: id, html: '<p>v3</p>', file_path: file });
   assert.ok(both.isError);
   assert.strictEqual(displayTabs.get(id), '<p>v2</p>', 'rejected update leaves content untouched');
+});
+
+test('a queued open-display-tab survives a flush while it exists, and not after', async () => {
+  const { tools, displayTabs, pendingOpens } = makeTools();
+  const file = writeFixture('queued.html', '<h1>queued</h1>');
+
+  // No reload clients, so the open message is parked for the next browser.
+  const res = await tools.create_display_tab.handler({ session_id: 'nope', file_path: file, name: 'Queued' });
+  assert.strictEqual(res.isError, undefined);
+  assert.ok(pendingOpens.length > 0, 'the mod still pushes raw JSON strings onto the queue');
+  const id = JSON.parse(pendingOpens.toArray()[0]).id;
+
+  const live = pendingOpens.takeFor('w1', (p) => displayTabs.has(p.id));
+  assert.ok(live.send.length > 0, 'an existing display tab is still delivered');
+
+  // Same message, but the tab was deleted before any browser connected.
+  pendingOpens.push(JSON.stringify({ type: 'open-display-tab', id, windowId: null }));
+  displayTabs.delete(id);
+  const stale = pendingOpens.takeFor('w1', (p) => displayTabs.has(p.id));
+  assert.deepStrictEqual(stale.send, []);
+  assert.strictEqual(stale.droppedStale, 1);
 });
