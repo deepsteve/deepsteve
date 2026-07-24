@@ -482,6 +482,104 @@ test('feature disabled → default inherit path (returns false) (#581)', async (
   assert.strictEqual(state.promptDirCalls, 0);
 });
 
+// #598: resolveContextRepo — the pure descriptor requestNewTabInContext (above)
+// and the GitHub issue picker in app.js now BOTH resolve through, so the issue
+// picker can't fall back to a globally last-selected tab from a foreign context.
+// The tests above are the regression net for the refactor; these pin the shape
+// the issue picker reads.
+
+const MULTI_CTX = { id: 'multi', name: 'Multi', dirs: ['/repo/a', '/repo/b'] };
+
+test('resolveContextRepo: feature disabled → inherit with the active tab cwd (#598)', async () => {
+  const { mod, state } = await setup({ contexts: [CTX_A], tabs: { tab1: '/repo/a' } });
+  state.activeTabId = 'tab1';
+  mod.setActiveContext('ctxa');
+  mod.setEnabled(false);
+
+  assert.deepStrictEqual(mod.resolveContextRepo(), { kind: 'inherit', cwd: '/repo/a' });
+});
+
+test('resolveContextRepo: All view → inherit with the active tab cwd (#598)', async () => {
+  const { mod, state } = await setup({ contexts: [CTX_A], tabs: { tab1: '/repo/a' } });
+  state.activeTabId = 'tab1';                      // no setActiveContext → All
+
+  assert.deepStrictEqual(mod.resolveContextRepo(), { kind: 'inherit', cwd: '/repo/a' });
+});
+
+test('resolveContextRepo: active tab already in-context → inherit (#598)', async () => {
+  const { mod, state } = await setup({ contexts: [CTX_A], tabs: { tab1: '/repo/a/sub' } });
+  state.activeTabId = 'tab1';
+  mod.setActiveContext('ctxa');
+
+  const d = mod.resolveContextRepo();
+  assert.strictEqual(d.kind, 'inherit');
+  assert.strictEqual(d.cwd, '/repo/a/sub');
+});
+
+test('resolveContextRepo: empty context + hidden foreign active tab → ask, never the foreign cwd (#598)', async () => {
+  const { mod, state } = await setup({ contexts: [CTX_A, EMPTY_CTX], tabs: { tab1: '/repo/a' } });
+  state.activeTabId = 'tab1';                      // the leak the issue reports
+  mod.setActiveContext('empty');
+
+  const d = mod.resolveContextRepo();
+  assert.strictEqual(d.kind, 'ask');               // nothing inferable → caller must prompt
+  assert.strictEqual(d.contextName, 'Empty');
+  assert.strictEqual(JSON.stringify(d).includes('/repo/a'), false);
+});
+
+test('resolveContextRepo: single-repo context, empty of tabs → that repo (#598)', async () => {
+  const { mod, state } = await setup({ contexts: [CTX_A, CTX_B], tabs: { tab1: '/repo/b' } });
+  state.activeTabId = 'tab1';                      // active tab is in ctxb
+  mod.setActiveContext('ctxa');
+
+  const d = mod.resolveContextRepo();
+  assert.strictEqual(d.kind, 'dirs');
+  assert.deepStrictEqual(d.dirs, ['/repo/a']);     // NOT /repo/b
+});
+
+test('resolveContextRepo: multi-repo context → all dirs in stored order (#598)', async () => {
+  const { mod } = await setup({ contexts: [MULTI_CTX], tabs: {} });
+  mod.setActiveContext('multi');
+
+  const d = mod.resolveContextRepo();
+  assert.strictEqual(d.kind, 'dirs');
+  assert.deepStrictEqual(d.dirs, ['/repo/a', '/repo/b']);
+  assert.strictEqual(d.contextName, 'Multi');
+});
+
+test('resolveContextRepo: no-cwd active tab (mod/display) in a context → not inherit (#598)', async () => {
+  const { mod, state } = await setup({ contexts: [CTX_A], tabs: { tab1: null } });
+  state.activeTabId = 'tab1';                      // global tab: visible everywhere, no repo
+  mod.setActiveContext('ctxa');
+
+  // Inheriting a null cwd would leave the picker with nothing; the context's own
+  // repo is the answer.
+  const d = mod.resolveContextRepo();
+  assert.strictEqual(d.kind, 'dirs');
+  assert.deepStrictEqual(d.dirs, ['/repo/a']);
+});
+
+test('resolveContextRepo: dirs is a copy, not the live context array (#598)', async () => {
+  const { mod } = await setup({ contexts: [MULTI_CTX], tabs: {} });
+  mod.setActiveContext('multi');
+
+  mod.resolveContextRepo().dirs.push('/repo/hacked');
+
+  assert.deepStrictEqual(mod.resolveContextRepo().dirs, ['/repo/a', '/repo/b']);
+  assert.deepStrictEqual(mod.getActiveContextInfo().dirs, ['/repo/a', '/repo/b']);
+});
+
+test('multi-repo context, empty of tabs → chooser owns it; no synchronous create (#598)', async () => {
+  const { mod, state } = await setup({ contexts: [MULTI_CTX], tabs: {} });
+  mod.setActiveContext('multi');
+
+  const handled = mod.requestNewTabInContext();
+
+  assert.strictEqual(handled, true);                  // owned — never falls through to inherit
+  assert.deepStrictEqual(state.createInDirCalls, []); // the chooser decides, not this call
+  assert.strictEqual(state.promptDirCalls, 0);        // a dir picker would be the wrong prompt
+});
+
 // #585: the closed-rail readout (#context-indicator) now carries two children —
 // a text label (every layout) and an icon chip (revealed by CSS only in the
 // collapsed vertical icon rail). updateIndicator() must fill both, follow the
