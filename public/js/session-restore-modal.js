@@ -26,6 +26,21 @@ function esc(s) {
 // ring-buffer rows (a recents key is a claudeSessionId, so it can never
 // collide with an 8-char shell id — but the prefix keeps the intent explicit).
 
+// How many closed tombstones the 'Recently closed' section draws before
+// collapsing behind a "Show N more" button. See buildSections().
+export const CLOSED_PREVIEW = 8;
+
+// Tombstones accumulate for the whole retention window (30 days by default), so
+// this one bucket is routinely in the hundreds while every other is a handful.
+// Drawing them all buried the sessions the user came here for under a wall of
+// deliberate closes. Collapsing is purely a rendering concern: the section's
+// checkbox and Select all still address the full list (see `allKeys` in
+// buildSections), so a hidden row is never an unselectable one.
+export function splitClosed(closed, expanded) {
+  const shown = expanded ? closed : (closed || []).slice(0, CLOSED_PREVIEW);
+  return { shown, hidden: (closed || []).length - shown.length };
+}
+
 export function recentRowKey(r) {
   return 'recent:' + r.key;
 }
@@ -194,10 +209,13 @@ export function showSessionRestoreModal(initialData, { secondaryLabel = 'Start F
         });
       }
       if (data.closed.length) {
+        const { shown, hidden } = splitClosed(data.closed, closedExpanded);
         sections.push({
           key: 'closed', title: 'Recently closed',
           meta: 'closed on purpose — check to resurrect',
-          rows: data.closed.map(s => sessionRow(s, { closed: true })),
+          rows: shown.map(s => sessionRow(s, { closed: true })),
+          allKeys: data.closed.map(s => s.id),
+          hidden,
         });
       }
       if (data.recents.length) {
@@ -211,12 +229,15 @@ export function showSessionRestoreModal(initialData, { secondaryLabel = 'Start F
     }
 
     // sectionKey → [row keys], rebuilt on every render; drives the header
-    // checkboxes' toggle-all and indeterminate state.
+    // checkboxes' toggle-all and indeterminate state. For a collapsed section
+    // this is the FULL set, not just the drawn rows.
     let sectionKeys = new Map();
+
+    let closedExpanded = false;
 
     function render() {
       const sections = buildSections();
-      sectionKeys = new Map(sections.map(sec => [sec.key, sec.rows.map(r => r.key)]));
+      sectionKeys = new Map(sections.map(sec => [sec.key, sec.allKeys || sec.rows.map(r => r.key)]));
       listEl.innerHTML = sections.map(sec => `
         <div class="restore-section${sec.key === 'closed' ? ' restore-section-closed' : ''}">
           <label class="restore-section-header">
@@ -233,6 +254,7 @@ export function showSessionRestoreModal(initialData, { secondaryLabel = 'Start F
               </div>
             </label>
           `).join('')}
+          ${sec.hidden ? `<button type="button" class="restore-show-more" data-expand="${esc(sec.key)}">Show ${sec.hidden} more</button>` : ''}
         </div>
       `).join('');
       syncUI();
@@ -268,6 +290,14 @@ export function showSessionRestoreModal(initialData, { secondaryLabel = 'Start F
         }
       }
       syncUI();
+    });
+
+    listEl.addEventListener('click', (e) => {
+      const btn = e.target.closest('[data-expand]');
+      if (!btn) return;
+      e.preventDefault();
+      closedExpanded = true;
+      render();
     });
 
     overlay.querySelector('#restore-select-all').onclick = () => {

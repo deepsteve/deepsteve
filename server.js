@@ -4050,6 +4050,20 @@ app.get('/api/shells', (req, res) => {
 // those. A client using the grouping as an existence oracle would discard localStorage
 // windows whose sessions are alive but ungrouped (e.g. entries written by a pre-#551
 // server, or start-issue sessions whose window never resolved).
+// A scheduled run's tab was never owned by a browser, so it is never a "lost
+// session" — not while it's in flight (the ungrouped check below) and not after
+// it auto-closes (the closed bucket in /api/recoverable-sessions). #597 flagged
+// live entries with `scheduled: true`, but tombstones written before that flag
+// existed have no such field, and there are hundreds of them; the worktree /
+// name shapes minted by mods/scheduled-tasks (`scheduled-<shellId>` worktree,
+// `⏰ ` name prefix) are the fallback that catches those.
+function isScheduledRun(entry) {
+  if (!entry) return false;
+  if (entry.scheduled) return true;
+  if (/^scheduled-/.test(entry.worktree || '')) return true;
+  return /^⏰/.test(entry.name || '');
+}
+
 function buildWindowsView({ collectUngrouped = false } = {}) {
   // Every browser window holds a live-reload socket carrying its windowId, so this
   // is the server's view of liveness. It only sees windows that are connected right
@@ -4087,7 +4101,7 @@ function buildWindowsView({ collectUngrouped = false } = {}) {
       // popped the restore modal on every startup that had a scheduled run in
       // flight. Once a window attaches, entry.windowId is set and the session
       // groups normally, so a crash of THAT window still offers it back.
-      if (collectUngrouped && !entry.scheduled && !(status === 'active' && entry.clients && entry.clients.size > 0)) {
+      if (collectUngrouped && !isScheduledRun(entry) && !(status === 'active' && entry.clients && entry.clients.size > 0)) {
         ungrouped.push(session);
       }
       return;
@@ -4142,7 +4156,7 @@ app.get('/api/recoverable-sessions', (req, res) => {
   };
 
   const closed = Object.entries(savedState)
-    .filter(([, e]) => e && e.closed && e.agentType !== 'tmux-attach')
+    .filter(([, e]) => e && e.closed && e.agentType !== 'tmux-attach' && !isScheduledRun(e))
     .map(([id, e]) => ({
       id,
       name: e.name || null,

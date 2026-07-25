@@ -155,3 +155,48 @@ test('applyClaim tolerates a claim message with missing fields', async () => {
   const out = applyClaim(before, new Set(['a']), {}); // no sessionIds/recentKeys
   assert.deepStrictEqual(out.data.windows[0].sessions.map(s => s.id), ['a']);
 });
+
+// --------------------------------------------------------------- splitClosed
+// The closed bucket is unbounded (every tombstone inside the 30-day retention
+// window), so it is the one section that collapses. What must NOT change is
+// selectability: collapsing is a rendering decision, and Select all / the
+// section checkbox keep addressing the full list.
+
+test('splitClosed shows only the preview slice until expanded', async () => {
+  const { splitClosed, CLOSED_PREVIEW } = await load();
+  const closed = Array.from({ length: 300 }, (_, i) => sess(`c${i}`));
+
+  const collapsed = splitClosed(closed, false);
+  assert.strictEqual(collapsed.shown.length, CLOSED_PREVIEW);
+  assert.strictEqual(collapsed.hidden, 300 - CLOSED_PREVIEW);
+  // Newest-first ordering comes from the server; the slice must not reorder.
+  assert.deepStrictEqual(collapsed.shown.map(s => s.id), closed.slice(0, CLOSED_PREVIEW).map(s => s.id));
+
+  const expanded = splitClosed(closed, true);
+  assert.strictEqual(expanded.shown.length, 300);
+  assert.strictEqual(expanded.hidden, 0);
+});
+
+test('splitClosed does not collapse a list that already fits', async () => {
+  const { splitClosed, CLOSED_PREVIEW } = await load();
+  const closed = Array.from({ length: CLOSED_PREVIEW }, (_, i) => sess(`c${i}`));
+  const out = splitClosed(closed, false);
+  assert.strictEqual(out.shown.length, CLOSED_PREVIEW);
+  assert.strictEqual(out.hidden, 0);
+});
+
+test('collapsing never removes a row from the selectable set', async () => {
+  const { splitClosed, allRowKeys, defaultSelection, CLOSED_PREVIEW } = await load();
+  const closed = Array.from({ length: 50 }, (_, i) => sess(`c${i}`));
+  const d = data({ closed });
+
+  assert.strictEqual(splitClosed(closed, false).shown.length, CLOSED_PREVIEW);
+  // Select all and the wipe-case default still cover all 50, not just the 8 drawn.
+  assert.strictEqual(allRowKeys(d).length, 50);
+  assert.strictEqual(defaultSelection(d).size, 50);
+});
+
+test('splitClosed tolerates a missing closed bucket', async () => {
+  const { splitClosed } = await load();
+  assert.deepStrictEqual(splitClosed(undefined, false), { shown: [], hidden: 0 });
+});

@@ -733,6 +733,8 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
 .restore-row-title.restore-row-derived { font-style: italic; color: var(--ds-text-primary); }
 .window-item.session-closed { opacity: 0.55; }
 .window-item.session-closed.checked { opacity: 0.85; }
+.restore-show-more { display: block; width: 100%; padding: 8px 12px; border: none; background: none; text-align: left; font: inherit; font-size: 12px; color: var(--ds-accent-blue); cursor: pointer; }
+.restore-show-more:hover { background: var(--ds-bg-tertiary); text-decoration: underline; }
 
 /* Theme selector in settings */
 .settings-section { margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--ds-border); }
