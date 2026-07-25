@@ -980,7 +980,7 @@ settingsBtn?.addEventListener('click', async () => {
         <label style="font-size: 13px; color: var(--ds-text-primary); display: flex; align-items: center; gap: 8px; margin-top: 10px;">
           Default model:
           <select id="scheduled-default-model" style="padding: 4px 6px; background: var(--ds-bg-primary); border: 1px solid var(--ds-border); border-radius: 4px; color: var(--ds-text-primary); font-size: 13px;">
-            <option value="" ${!currentScheduledDefaultModel ? 'selected' : ''}>Default (inherit)</option>
+            <option value="" ${!currentScheduledDefaultModel ? 'selected' : ''}>Unset</option>
             ${SCHEDULED_MODEL_ALIASES.map(m => `<option value="${m}" ${currentScheduledDefaultModel === m ? 'selected' : ''}>${m}</option>`).join('')}
             <option value="__custom__" ${scheduledModelIsCustom ? 'selected' : ''}>Custom&hellip;</option>
           </select>
@@ -990,12 +990,12 @@ settingsBtn?.addEventListener('click', async () => {
         <label style="font-size: 13px; color: var(--ds-text-primary); display: flex; align-items: center; gap: 8px; margin-top: 8px;">
           Default thinking level:
           <select id="scheduled-default-effort" style="padding: 4px 6px; background: var(--ds-bg-primary); border: 1px solid var(--ds-border); border-radius: 4px; color: var(--ds-text-primary); font-size: 13px;">
-            <option value="" ${!currentScheduledDefaultEffort ? 'selected' : ''}>Default (inherit)</option>
+            <option value="" ${!currentScheduledDefaultEffort ? 'selected' : ''}>Unset</option>
             ${SCHEDULED_EFFORT_LEVELS.map(l => `<option value="${l}" ${currentScheduledDefaultEffort === l ? 'selected' : ''}>${l}</option>`).join('')}
           </select>
         </label>
         <p style="font-size: 11px; color: var(--ds-text-secondary); margin-top: 4px;">
-          Used by any scheduled task that doesn't pin its own model / thinking level in the Scheduled panel — including tasks an agent creates later. Applies from the next run, no restart. "Default (inherit)" leaves it to Claude Code, which can silently fall back to a cheaper model when you hit usage limits. Claude only; other agents have no such flags.
+          Used by any scheduled task that doesn't pin its own model / thinking level in the Scheduled panel — including tasks an agent creates later. Applies from the next run, no restart. When unset, no model / thinking level flag is passed at all, so runs can silently fall back to a cheaper model when you hit usage limits. Claude only; other agents have no such flags.
         </p>
       </div>
       <div class="settings-section">
