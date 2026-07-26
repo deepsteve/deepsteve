@@ -38,9 +38,12 @@
       </button>
       <div id="tabs-list-wrapper">
         <div id="tabs-list"></div>
+        <!-- Prev/next TAB, not scroll (#610). tab-manager.js derives their disabled state from
+             the active tab's index; the glyphs are set in CSS per layout (‹ › horizontal,
+             ▲ ▼ vertical, ◄ ► under ascii-art) and all three read as navigation. -->
         <div id="tabs-arrows">
-          <button id="tabs-arrow-start" class="tabs-arrow" aria-label="Scroll tabs back"></button>
-          <button id="tabs-arrow-end" class="tabs-arrow" aria-label="Scroll tabs forward"></button>
+          <button id="tabs-arrow-start" class="tabs-arrow" aria-label="Previous tab" title="Previous tab"></button>
+          <button id="tabs-arrow-end" class="tabs-arrow" aria-label="Next tab" title="Next tab"></button>
         </div>
       </div>
       <div id="new-btn-group">

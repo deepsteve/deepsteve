@@ -12,7 +12,7 @@ initClientLog();
 import { SessionStore } from './session-store.js';
 import { SessionStores, getTabSessions } from './session-stores.js';
 import { WindowManager } from './window-manager.js';
-import { TabManager, getDefaultTabName, initTabArrows } from './tab-manager.js';
+import { TabManager, getDefaultTabName, initTabArrows, refreshTabArrows } from './tab-manager.js';
 import { createTerminal, setupTerminalIO, fitTerminal, resizeTerminal, observeTerminalResize, measureTerminalSize, updateTerminalTheme, installTerminalWheelGuard } from './terminal.js';
 import { createWebSocket } from './ws-client.js';
 import { createConnectionTracker } from './connection-status.js';
@@ -415,6 +415,9 @@ function notifyTabsChanged() {
   // when the grid already matches the active context, so the double call while
   // context views are on costs nothing.
   syncOverviewToContext();
+  // Same belt-and-braces for the prev/next arrows: they are an index into this set, so any
+  // add/remove/reorder moves their ends (#610).
+  refreshTabArrows();
 }
 
 // Expose session internals for mods that need direct terminal access (e.g. reparenting)
@@ -3853,8 +3856,14 @@ async function init() {
   // Initialize layout manager
   LayoutManager.init();
 
-  // Initialize tab scroll arrows
-  initTabArrows();
+  // Initialize the prev/next tab arrows. Same three callbacks as the Cmd-hold switcher below
+  // (and for the same reasons): getVisibleTabIds so navigation stays inside the active
+  // context, focusTab because a button press is a deliberate user jump (#559).
+  initTabArrows({
+    getOrderedTabIds: getVisibleTabIds,
+    getActiveTabId: () => activeId,
+    switchToTab: focusTab,
+  });
 
   // Keep macOS pinch-zoom (ctrl-wheel) away from xterm so the browser can zoom
   // over the terminal (#583). Delegated on #terminals; ModManager's #content-row
@@ -3910,7 +3919,10 @@ async function init() {
     // Overview mode is per-context view state (#590): reconcile the grid once the
     // filter has settled, so switching away hides the old context's tiles (and
     // restores their size) and switching back re-shows that context's grid.
-    onContextViewApplied: () => syncOverviewToContext(),
+    // The filter decides which tabs are navigable, so the arrows' ends move with it. Same
+    // belt-and-braces as syncOverviewToContext above: applyFilter() early-returns when
+    // context views are disabled, so notifyTabsChanged() covers that case separately.
+    onContextViewApplied: () => { syncOverviewToContext(); refreshTabArrows(); },
   });
 
   // File drag-and-drop upload
