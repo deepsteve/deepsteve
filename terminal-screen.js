@@ -51,18 +51,29 @@ class TerminalScreen {
     )
   }
 
+  // Scans BACKWARD from the end rather than translating the whole buffer and
+  // slicing (#607). buffer.length is viewport + scrollback (up to
+  // MAX_SCROLLBACK_LINES), so the old forward walk cost ~10k translateToString
+  // calls regardless of `count` — far too expensive for the prompt-submission
+  // poller, which reads one viewport every few hundred ms. Result is identical:
+  // trailing blank rows are dropped, then the last `count` rows are returned
+  // (interior blanks included).
   async lines(count) {
     await this.idlePromise
     if (this.disposed) return []
     const buffer = this.terminal.buffer.active
-    const lines = []
-    for (let i = 0; i < buffer.length; i++) {
+    const read = (i) => {
       const line = buffer.getLine(i)
-      if (!line) continue
-      lines.push(line.translateToString(true).replace(/\s+$/g, ''))
+      return line ? line.translateToString(true).replace(/\s+$/g, '') : ''
     }
-    while (lines.length && lines[lines.length - 1] === '') lines.pop()
-    return lines.slice(-count)
+    let last = buffer.length - 1
+    while (last >= 0 && read(last) === '') last--
+    if (last < 0) return []
+    // A non-positive count meant slice(-0)/slice(0) before, i.e. "everything".
+    const first = count > 0 ? Math.max(0, last - Math.trunc(count) + 1) : 0
+    const lines = []
+    for (let i = first; i <= last; i++) lines.push(read(i))
+    return lines
   }
 
   dispose() {

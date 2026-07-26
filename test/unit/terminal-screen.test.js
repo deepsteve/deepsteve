@@ -46,6 +46,28 @@ test('plain terminal output keeps interpreted scrollback behavior', async () => 
   screen.dispose()
 })
 
+// lines() scans backward from the end rather than translating the whole buffer
+// (#607 — the prompt-submission poller reads one viewport every few hundred ms).
+// This crosses the viewport/scrollback boundary and keeps interior blanks.
+test('a deep scrollback still yields exactly the last N rows', async () => {
+  const screen = new TerminalScreen({ cols: 40, rows: 4 })
+  for (let i = 0; i < 500; i++) screen.write(i === 250 ? '\r\n' : `row-${i}\r\n`)
+
+  assert.deepStrictEqual(await screen.lines(3), ['row-497', 'row-498', 'row-499'])
+  assert.deepStrictEqual(await screen.lines(1), ['row-499'])
+  const wide = await screen.lines(252)
+  assert.strictEqual(wide.length, 252)
+  assert.strictEqual(wide[0], 'row-248')
+  assert.strictEqual(wide[2], '', 'interior blank rows are preserved, not collapsed')
+  screen.dispose()
+})
+
+test('a screen with no output at all reads as empty', async () => {
+  const screen = new TerminalScreen({ cols: 20, rows: 4 })
+  assert.deepStrictEqual(await screen.lines(10), [])
+  screen.dispose()
+})
+
 test('Claude-style colors and in-place prompt updates remain readable', async () => {
   const screen = new TerminalScreen({ cols: 60, rows: 6 })
   screen.write(
