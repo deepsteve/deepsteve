@@ -165,11 +165,20 @@ document.addEventListener('contextmenu', (e) => {
   if (!e.target.closest('.tab')) hideContextMenu();
 });
 
-// Tab scroll arrow state
+// ── Tab nav arrows ───────────────────────────────────────────────────────────────────────────
+// ▲/▼ (‹/› horizontal) move to the previous / next tab. They are DERIVED from the active tab's
+// index in the strip, never from scroll geometry: #75 shipped them as scroll controls
+// (scrollBy ±150px, disabled when scrollTop hit the ends), and in the vertical sidebar a ~33px
+// tab means the whole list's overflow is often under one 150px step — so a single ▼ press
+// reached the true scroll bottom and disabled itself while tabs below the active one were
+// plainly on screen (#610). Index math has no such failure mode, and it removes every layout
+// read from this module: there is nothing left to go stale after a reflow.
 let arrowStart = null;
 let arrowEnd = null;
 let arrowsContainer = null;
-let tabsList = null;
+let getOrderedTabIds = () => [];
+let getActiveTabId = () => null;
+let switchToTab = () => {};
 
 function isVertical() {
   return document.getElementById('app-container')?.classList.contains('vertical-layout');
@@ -271,44 +280,70 @@ function endDrag() {
   dragState = null;
 }
 
-function updateTabArrows() {
-  if (!tabsList || !arrowStart || !arrowEnd || !arrowsContainer) return;
-
-  const vertical = isVertical();
-  const scrollPos = vertical ? tabsList.scrollTop : tabsList.scrollLeft;
-  const scrollSize = vertical ? tabsList.scrollHeight : tabsList.scrollWidth;
-  const clientSize = vertical ? tabsList.clientHeight : tabsList.clientWidth;
-
-  const hasOverflow = scrollSize > clientSize + 1; // 1px tolerance
-  const atStart = scrollPos <= 1;
-  const atEnd = scrollPos + clientSize >= scrollSize - 1;
-
-  arrowsContainer.classList.toggle('visible', hasOverflow);
-  arrowStart.classList.toggle('disabled', atStart);
-  arrowEnd.classList.toggle('disabled', atEnd);
+// Where we are in the strip. The ids are the context-filter-aware ordered list (app.js's
+// getVisibleTabIds), so navigation stays inside the active context — same source the Cmd-hold
+// switcher uses. Single helper because updateTabArrows() and the click handlers MUST agree:
+// an enabled ▼ that computes a different neighbour than the one it was enabled for is the bug
+// this replaced, in a new costume.
+function arrowNavState() {
+  const ids = getOrderedTabIds() || [];
+  return { ids, i: ids.indexOf(getActiveTabId()) };
 }
 
-export function initTabArrows() {
+// `disabled` is set on the element AND as a class. The class is the styling hook every theme
+// already keys off (:hover:not(.disabled) in styles.css, win-95.css, ascii-art.css); the
+// property is what makes "unclickable" true rather than cosmetic — .disabled is only
+// opacity:0.3 with no pointer-events, so before this the button stayed in the tab order and
+// merely no-op'd on click.
+function setArrowDisabled(el, disabled) {
+  el.disabled = disabled;
+  el.classList.toggle('disabled', disabled);
+}
+
+function updateTabArrows() {
+  if (!arrowStart || !arrowEnd || !arrowsContainer) return;
+
+  const { ids, i } = arrowNavState();
+
+  // Shown whenever there is somewhere to navigate. Deliberately not the old overflow gate:
+  // these are no longer scroll controls, so hiding them when the list happens to fit would
+  // hide a control that still works — and measuring overflow is the one thing that made the
+  // state stale in the first place.
+  arrowsContainer.classList.toggle('visible', ids.length > 1);
+
+  // i < 0 means the active tab isn't in the navigable set (e.g. the context filter hides it).
+  // Back has nowhere to go; Next lands on the first visible tab rather than stranding you.
+  setArrowDisabled(arrowStart, i <= 0);
+  setArrowDisabled(arrowEnd, i < 0 ? ids.length === 0 : i >= ids.length - 1);
+}
+
+/** Recompute the arrows' enabled state. For callers outside this module (app.js). */
+export function refreshTabArrows() {
+  updateTabArrows();
+}
+
+export function initTabArrows(callbacks = {}) {
   arrowStart = document.getElementById('tabs-arrow-start');
   arrowEnd = document.getElementById('tabs-arrow-end');
   arrowsContainer = document.getElementById('tabs-arrows');
-  tabsList = document.getElementById('tabs-list');
-  if (!arrowStart || !arrowEnd || !arrowsContainer || !tabsList) return;
+  if (!arrowStart || !arrowEnd || !arrowsContainer) return;
 
+  if (callbacks.getOrderedTabIds) getOrderedTabIds = callbacks.getOrderedTabIds;
+  if (callbacks.getActiveTabId) getActiveTabId = callbacks.getActiveTabId;
+  if (callbacks.switchToTab) switchToTab = callbacks.switchToTab;
+
+  // No wrapping, unlike the Cmd-hold switcher: a button that reports "disabled, you're at the
+  // end" must not then step past it.
   arrowStart.addEventListener('click', () => {
-    if (arrowStart.classList.contains('disabled')) return;
-    const amount = isVertical() ? { top: -150 } : { left: -150 };
-    tabsList.scrollBy({ ...amount, behavior: 'smooth' });
+    const { ids, i } = arrowNavState();
+    if (i > 0) switchToTab(ids[i - 1]);
   });
 
   arrowEnd.addEventListener('click', () => {
-    if (arrowEnd.classList.contains('disabled')) return;
-    const amount = isVertical() ? { top: 150 } : { left: 150 };
-    tabsList.scrollBy({ ...amount, behavior: 'smooth' });
+    const { ids, i } = arrowNavState();
+    const target = i < 0 ? ids[0] : ids[i + 1];
+    if (target) switchToTab(target);
   });
-
-  tabsList.addEventListener('scroll', updateTabArrows);
-  window.addEventListener('resize', updateTabArrows);
 
   updateTabArrows();
 }
@@ -520,8 +555,14 @@ export const TabManager = {
     const tab = document.getElementById('tab-' + sessionId);
     if (tab) {
       tab.classList.add('active');
+      // Also what makes the nav arrows scroll: they only change which tab is active, and this
+      // brings that tab on screen for free.
       tab.scrollIntoView({ block: 'nearest', inline: 'nearest' });
     }
+    // The active tab IS the arrows' state (#610). This is the only place it changes, and the
+    // one place that never refreshed them — which is why the enabled state went stale until
+    // some unrelated event happened to recompute it.
+    updateTabArrows();
   },
 
   /**
