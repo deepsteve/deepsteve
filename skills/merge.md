@@ -8,6 +8,8 @@ The user wants to merge their current worktree's branch into a **target branch**
 
 By default the target is the branch currently checked out in the **main worktree** (the primary checkout) — so if you work on a feature branch there, merges follow it automatically instead of always going to `main`. If the user passed a branch name as an argument to `/merge`, that argument is the target instead.
 
+**Definition of done**: a successful merge is not complete until this session is closed (step 10). Never close the session on any STOP path, or when `in_worktree=false`.
+
 Steps:
 
 1. **Gather state in one shot**: Run this single bash invocation and parse the `key=value` lines from its output. Use the resulting `branch`, `main_path`, `in_worktree`, `detected_target`, and `dirty` values for the rest of the steps.
@@ -34,7 +36,7 @@ Steps:
    - Otherwise: subject is `Merge <branch> into <target>`.
    - Do NOT include a `Co-Authored-By` trailer.
 
-4. **If `in_worktree=false`**: This is not a worktree session — you're already on the branch in the main checkout, so the worktree merge flow doesn't apply. If `dirty>0`, run `git add -A && git commit -m "<subject>" && git push` in a single bash invocation. If `dirty=0`, run `git push`. Then stop (skip all remaining steps).
+4. **If `in_worktree=false`**: This is not a worktree session — you're already on the branch in the main checkout, so the worktree merge flow doesn't apply. If `dirty>0`, run `git add -A && git commit -m "<subject>" && git push` in a single bash invocation. If `dirty=0`, run `git push`. Then STOP — skip all remaining steps, and do NOT close the session.
 
 5. **Auto-commit dirty changes (worktree path)**: If `dirty>0`, run `git add -A && git commit -m "<subject>"`.
 
@@ -54,11 +56,11 @@ Steps:
    - Otherwise, run `git -C <merge_dir> merge <branch> --no-edit` to merge the worktree branch into `<target>` from the directory that has it checked out. Do NOT use `git checkout <target>` in the current worktree — it is checked out in `<merge_dir>`.
 
 8. **Handle the result**:
-   - **Success**: Tell the user the branch was successfully merged into `<target>`. Show the merge output. Then continue to steps 9 and 10.
+   - **Success**: Do not write the summary yet — it goes in step 10, in the same message as the close. Continue to steps 9 and 10.
    - **Conflict**: Run `git -C <merge_dir> merge --abort` to leave `<target>` clean. Then rebase the worktree branch onto the target (`git rebase <target>`), resolve any conflicts, and retry the merge from step 7. If the rebase itself fails with conflicts you cannot resolve, abort the rebase (`git rebase --abort`), tell the user, and STOP.
    - **Local changes in the target** (`error: Your local changes ... would be overwritten by merge`, with no merge actually started — no `MERGE_HEAD`): the step-7 guard should have caught this, but if it slips through, handle it the same way — STOP and tell the user to commit or stash WIP in `<merge_dir>`, then re-run `/merge`. Do NOT run `git merge --abort` (there is no merge in progress) or rebase — this is **not** a Conflict, and rebasing the branch can't fix a dirty target.
    - **Other failure**: Show the error output to the user. STOP here — do not proceed to steps 9 or 10.
 
-9. **Close the GitHub issue** (success only): If `branch` matches `*github-issue-<n>*`, run `gh issue close <n> --comment "Merged into <target>."`. Otherwise skip silently.
+9. **Close the GitHub issue** (success only): If `branch` matches `*github-issue-<n>*`, run `gh issue close <n> --comment "Merged into <target>."`. Otherwise skip silently. If it fails, say so and continue to step 10 anyway.
 
-10. **Close this terminal** (success only): Call `mcp__deepsteve__close_session` with no arguments — it auto-detects the calling session.
+10. **Report and close this session — in ONE message** (success only): After step 9 returns, write your one- or two-line success summary (with the merge output) and call `mcp__deepsteve__close_session` (no arguments — it auto-detects the calling session) in that same assistant message; text written after that call is cut off when the session terminates. Never end your turn on a success summary without having called it — that is a failed merge, not a finished one.
