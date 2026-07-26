@@ -180,6 +180,19 @@ let mcp = null;
 async function mcpConnect() {
   const { Client: McpClient } = await import('@modelcontextprotocol/sdk/client/index.js');
   const { StreamableHTTPClientTransport } = await import('@modelcontextprotocol/sdk/client/streamableHttp.js');
+  // /api/version answers as soon as the HTTP server is listening, but /mcp is not
+  // mounted until initMCP has loaded every mod — a ~250ms window in which the
+  // endpoint 404s. Wait for the route itself rather than assuming daemon-ready
+  // implies MCP-ready.
+  await waitFor(async () => {
+    const r = await fetch(`${BASE}/mcp`, {
+      method: 'POST',
+      headers: { ...authHeaders(), 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 0, method: 'ping' }),
+    });
+    return r.status !== 404;
+  }, 'the /mcp endpoint to be mounted');
+
   const transport = new StreamableHTTPClientTransport(new URL(`${BASE}/mcp`), {
     requestInit: { headers: { ...authHeaders() } },
   });
@@ -321,9 +334,14 @@ test('start_issue inherits /rc from the caller and delivers it before the issue 
     return l.some(x => x.includes('GOT:/rc')) && l.some(x => x.includes('RC-MARKER-BODY-519')) ? l : null;
   }, 'child to receive /rc and the issue prompt', 30000, 500);
 
-  const rcIdx = lines.findIndex(x => x.includes('GOT:/rc'));
-  const promptIdx = lines.findIndex(x => x.includes('GOT:') && x.includes('GitHub issue #519'));
-  assert.ok(rcIdx >= 0, `child should have received /rc, screen: ${JSON.stringify(lines)}`);
-  assert.ok(promptIdx >= 0, `child should have received the issue prompt, screen: ${JSON.stringify(lines)}`);
-  assert.ok(rcIdx < promptIdx, `/rc (line ${rcIdx}) must land before the issue prompt (line ${promptIdx})`);
+  // Compare positions on the DE-WRAPPED screen. read_session_screen returns rows of
+  // an emulated 120-column terminal, and the echoed issue prompt is longer than that:
+  // it lands as "…GOT:I need you to wor" / "k on GitHub issue #519…", so no single row
+  // holds both "GOT:" and the issue number.
+  const flat = lines.join('');
+  const rcAt = flat.indexOf('GOT:/rc');
+  const promptAt = flat.indexOf('GOT:I need you to work on GitHub issue #519');
+  assert.ok(rcAt >= 0, `child should have received /rc, screen: ${JSON.stringify(lines)}`);
+  assert.ok(promptAt >= 0, `child should have received the issue prompt, screen: ${JSON.stringify(lines)}`);
+  assert.ok(rcAt < promptAt, `/rc (at ${rcAt}) must land before the issue prompt (at ${promptAt})`);
 });

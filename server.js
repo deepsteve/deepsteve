@@ -17,6 +17,7 @@ const { findGitRoot } = require('./git-root');
 const { createPendingOpens } = require('./pending-opens');
 const { classifyScreenTail, CLAUDE_SCREEN_MARKERS } = require('./screen-classifier');
 const { TerminalScreen } = require('./terminal-screen');
+const { readComposerDraft, isPromptStaged, isPromptOnScreen } = require('./composer-state');
 const NodePtyEngine = require('./engines/node-pty');
 const TmuxEngine = require('./engines/tmux');
 
@@ -487,6 +488,14 @@ const SETTINGS_SCHEMA = [
   // periodic samples to ~/.deepsteve/waiting-audit.jsonl. Server-side research
   // instrumentation, default off; read live at each call site (no restart to toggle).
   { name: 'waitingAuditEnabled',        type: 'boolean', default: false, broadcast: false },
+  // #607: confirm prompt submission instead of assuming it — wait for the composer
+  // to echo the text before sending Enter, then verify and re-send Enter (never the
+  // text) if the prompt is still staged. Changes which bytes reach the PTY and when,
+  // so it gets an escape hatch. Server-internal, no UI, read live at each call site
+  // (same shape as waitingAuditEnabled) so it toggles with no restart. The
+  // level-triggered readiness half of #607 is deliberately NOT gated by this —
+  // turning that off would restore the deadlock it exists to remove.
+  { name: 'promptSubmitVerify',         type: 'boolean', default: true,  broadcast: false },
   // Hold a caffeinate -i power assertion while any session is open (#563).
   // Server-side behavior only, so broadcast:false; macOS only (no-op elsewhere).
   { name: 'preventSleepWhileActive',    type: 'boolean', default: true, broadcast: false },
@@ -1731,6 +1740,13 @@ function submitToShell(id, text, eng, options = {}) {
     auditWaiting('submit', id, e, { len: text.length });
   }
   const engine = eng || getEngine(id);
+  // #607: opt-in confirmed Enter — wait for the composer to actually echo the text
+  // before sending \r, instead of guessing with a fixed delay. Opt-IN rather than
+  // agent sniffing so the policy lives in one place (drainPromptQueue) and so
+  // killShell's /exit keeps the timed path: it disposes entry.terminalScreen and
+  // removes the data handler BEFORE submitting, so an echo could never arrive and
+  // every shutdown would burn the full cap against killShell's 8s SIGTERM escalation.
+  if (options.confirmEcho && e && !e.killed) return submitWithConfirmedEnter(id, e, engine, text, options);
   engine.write(id, text);
   // Returns a Promise that resolves once the deferred Enter has been written, so
   // callers (deliverPromptWhenReady) can re-enable input exactly when the submit
@@ -1743,6 +1759,182 @@ function submitToShell(id, text, eng, options = {}) {
       resolve();
     }, 1000);
   });
+}
+
+// --- #607: confirmed submission, not assumed submission ---------------------
+//
+// The fixed 1s gap above is a proxy for "Ink has consumed the text". Under load
+// (many tabs, a cold Claude Code start, a busy machine) the child can go longer
+// than that without reading stdin: both writes sit in the tty buffer, a single
+// read() returns them together, Ink classifies the trailing \r as pasted text
+// rather than Enter, and the fully-typed prompt stays STAGED in the composer
+// forever while the session sits idle. That is #607.
+//
+// Two signals replace the guess. entry.outputSeq moving proves the child produced
+// output after our write, i.e. it read our write — the same principle
+// acknowledgeCodexSubmitOutput already uses. A non-empty composer read off the
+// interpreted screen corroborates it, and survives line wrapping and Claude Code's
+// large-paste collapsing in a way substring matching does not.
+//
+// Timing budget: these caps are sized together with PROMPT_READY_DEADLINE_MS so the
+// worst case (30s readiness + 5s echo + 16s verify = 51s) still fits inside the 60s
+// inputBlockTimer and the client's 60s loading banner. Raising one means re-checking
+// the others.
+const envMs = (name, fallback) => parseInt(process.env[name], 10) || fallback;
+const SUBMIT_TIMINGS = {
+  // Floor before Enter may be sent. Keeps a false-positive echo from producing a
+  // gap SHORTER than the legacy 1s and therefore more coalesce-prone, not less.
+  echoMinGapMs: envMs('DEEPSTEVE_SUBMIT_ECHO_MIN_MS', 300),
+  echoPollMs: envMs('DEEPSTEVE_SUBMIT_ECHO_POLL_MS', 150),
+  echoMaxWaitMs: envMs('DEEPSTEVE_SUBMIT_ECHO_MAX_MS', 5000),
+  echoSettleMs: envMs('DEEPSTEVE_SUBMIT_ECHO_SETTLE_MS', 150),
+  screenLines: 40,        // one viewport is all the composer needs
+  // TerminalScreen.lines() awaits an idle promise that sustained output can defer
+  // indefinitely, so every read is bounded.
+  screenReadMs: envMs('DEEPSTEVE_SUBMIT_SCREEN_READ_MS', 400),
+  verifyGraceMs: envMs('DEEPSTEVE_SUBMIT_VERIFY_MS', 4000),
+  verifyPollMs: envMs('DEEPSTEVE_SUBMIT_VERIFY_POLL_MS', 500),
+  verifyRetries: envMs('DEEPSTEVE_SUBMIT_VERIFY_RETRIES', 2),
+};
+
+const promptSleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * One viewport of interpreted screen for the submission poller, best-effort.
+ *
+ * Deliberately NOT readTerminalScreen: that resurrects a disposed emulator by
+ * replaying the whole scrollback, which is exactly wrong on the killShell path.
+ * The race guards against TerminalScreen.lines() awaiting an idle promise that
+ * sustained output can defer indefinitely.
+ */
+async function promptScreenView(entry) {
+  if (!entry || !entry.terminalScreen) return null;
+  try {
+    return await Promise.race([
+      entry.terminalScreen.lines(SUBMIT_TIMINGS.screenLines),
+      promptSleep(SUBMIT_TIMINGS.screenReadMs).then(() => null),
+    ]);
+  } catch { return null; }
+}
+
+// Layers 2+3 apply to screen-classified agents only (claude today). Codex has no
+// screenMarkers — classifyScreenState could never confirm anything for it — and
+// already has its own output-acknowledged Enter retry; hermes/opencode/pi/terminal
+// have no screen signal at all and keep the fixed 1s gap. settings is read live, so
+// the kill-switch takes effect with no restart.
+function promptSubmitConfirmEnabled(entry) {
+  return settings.promptSubmitVerify !== false
+    && !!entry && !entry.killed
+    && !!getAgentConfig(entry.agentType).screenMarkers;
+}
+
+/**
+ * Write `text`, wait for the composer to show it, then send Enter as its own write.
+ * Falls back to a timed Enter at the cap — confirmPromptSubmitted is the net for
+ * that case. Resolves once Enter has been written, same contract as submitToShell.
+ */
+async function submitWithConfirmedEnter(id, entry, engine, text, options) {
+  const baseSeq = entry.outputSeq || 0;
+  const startedAt = Date.now();
+  engine.write(id, text);
+
+  const deadline = startedAt + SUBMIT_TIMINGS.echoMaxWaitMs;
+  const floor = startedAt + SUBMIT_TIMINGS.echoMinGapMs;
+  let why = 'timeout';
+  while (Date.now() < deadline) {
+    await promptSleep(SUBMIT_TIMINGS.echoPollMs);
+    if (shells.get(id) !== entry || entry.killed) return;   // tab closed mid-submit
+    if (Date.now() < floor) continue;
+    if ((entry.outputSeq || 0) === baseSeq) continue;       // free gate: child hasn't read us
+    const view = await promptScreenView(entry);
+    if (view === null) { why = 'output'; break; }           // no emulator / read timed out
+    if (readComposerDraft(view)) { why = 'echo'; break; }
+  }
+  if (shells.get(id) !== entry || entry.killed) return;
+  if (why !== 'timeout') await promptSleep(SUBMIT_TIMINGS.echoSettleMs);
+  log(`[submit] id=${id} Enter after ${why} (+${Date.now() - startedAt}ms, len=${text.length})`);
+  if (options.retryCodexEnter) writeCodexEnterWithRetry(id, engine);
+  else try { engine.write(id, '\r'); } catch {}
+}
+
+/**
+ * After Enter: did the prompt actually go? (#607)
+ *
+ * The failure signature is precise — the agent is idle AND our prompt is still
+ * sitting in the composer — so both halves are required before retrying. Anything
+ * less would misread the transcript echo of a successful submit as a failure and
+ * double-submit every prompt.
+ *
+ * Retries re-send \r ONLY, never the text: if the first Enter merely landed late,
+ * re-typing would duplicate the prompt. An Enter on an empty composer is a no-op.
+ *
+ * @returns {'skipped'|'submitted'|'aborted'|'unverified'|'stuck'}
+ */
+async function confirmPromptSubmitted(id, text, options = {}) {
+  if (!options.verify) return 'skipped';
+  const entry = shells.get(id);
+  if (!entry) return 'aborted';
+  const engine = entry.engine || getEngine(id);
+  // Any write to this PTY that isn't ours invalidates the verdict: the user may
+  // have taken over via the banner's "Enable input", or meta_type may have typed.
+  // The retry \r deliberately does not bump lastInputTime — it is a key, not input,
+  // and bumping it would blind this guard.
+  const inputStamp = entry.lastInputTime;
+  // A frozen child produces no output at all, and its last painted frame still shows
+  // the composer as it was BEFORE we typed. Reading that stale frame would say
+  // "not staged" and declare success — which is precisely the load case #607 is
+  // about. So silence does not count against the window; it extends it, bounded.
+  let sinceSeq = entry.outputSeq || 0;
+  const hardDeadline = Date.now() + SUBMIT_TIMINGS.verifyGraceMs * (SUBMIT_TIMINGS.verifyRetries + 2);
+
+  for (let attempt = 0; ; attempt++) {
+    let until = Date.now() + SUBMIT_TIMINGS.verifyGraceMs;
+    // Only a POSITIVE "our prompt is still in the composer, and the agent is idle"
+    // reading justifies another Enter. An ambiguous screen for the whole window
+    // means we don't know, and the fail-closed answer is to leave it alone.
+    let sawStaged = false;
+    while (Date.now() < until) {
+      await promptSleep(SUBMIT_TIMINGS.verifyPollMs);
+      if (shells.get(id) !== entry || entry.killed) return 'aborted';
+      if (entry.lastInputTime !== inputStamp) return 'aborted';
+      const state = classifyScreenState(entry);
+      // Cheapest check, and no emulator read: a running turn means the prompt went
+      // through, whatever the composer happens to be showing.
+      if (state === 'working') return 'submitted';
+      if (state !== 'waiting') continue;
+      const view = await promptScreenView(entry);
+      if (view === null) continue;
+      if (isPromptStaged(view, text)) { sawStaged = true; continue; }
+      // Not staged — but that alone does not prove the submit took. A child that has
+      // not yet read its stdin shows exactly the same empty composer as one that
+      // submitted and moved on, and under load that is the likelier reading. Require
+      // positive evidence: the prompt echoed into the transcript. Anything else is
+      // indeterminate, and an indeterminate window ends in 'unverified', not a retry.
+      if (isPromptOnScreen(view, text)) return 'submitted';
+      // Indeterminate. If the child has produced NO output since our Enter, the frame
+      // we just read predates our typing — it is stale, not evidence, and letting it
+      // run out the clock is exactly how a stuck prompt gets declared fine under
+      // load. Extend instead, bounded by hardDeadline. (A staged composer is judged
+      // above and deliberately does NOT wait for output: an Enter swallowed silently
+      // produces no output at all, and that case must still be recoverable.)
+      if ((entry.outputSeq || 0) === sinceSeq && Date.now() < hardDeadline) {
+        until = Date.now() + SUBMIT_TIMINGS.verifyGraceMs;
+      }
+    }
+    if (!sawStaged) {
+      log(`[submit] id=${id} could not read the composer — not retrying Enter`);
+      return 'unverified';
+    }
+    if (attempt >= SUBMIT_TIMINGS.verifyRetries) break;
+    log(`[submit] id=${id} prompt still staged after ${SUBMIT_TIMINGS.verifyGraceMs}ms — re-sending Enter (${attempt + 1}/${SUBMIT_TIMINGS.verifyRetries})`);
+    // Re-baseline first: the next window must also wait for the child to react to
+    // THIS Enter rather than judging it against frames it painted before.
+    sinceSeq = entry.outputSeq || 0;
+    try { engine.write(id, '\r'); } catch { return 'aborted'; }
+  }
+  log(`[submit] id=${id} prompt may STILL be staged after ${SUBMIT_TIMINGS.verifyRetries} Enter retries — giving up`);
+  auditWaiting('submit-stuck', id, entry, { len: text.length, screen: auditScreenTail(entry, 500) });
+  return 'stuck';
 }
 
 /**
@@ -1847,12 +2039,13 @@ function observeCodexReadiness(entry, id, data) {
  * Deliver a prompt to a shell, handling the race between async fetch and idle readiness.
  * Prompts are queued per shell and submitted one at a time, each waiting for its
  * own readiness signal — so two pending prompts (e.g. an inherited `/rc` followed
- * by a start_issue prompt, #519) can't clobber each other's onIdleOnce slot.
+ * by a start_issue prompt, #519) can't clobber each other's readiness slot.
  * For each queue head: Codex waits for its rendered MCP lifecycle to settle; if
  * another agent's screen shows it idle right now, submit immediately; if it uses
  * a fixed initialPromptDelay because its screen can't be classified, use that
- * delay; otherwise install a single-shot
- * onIdleOnce callback that setWaiting invokes on the next idle transition (#568).
+ * delay; otherwise arm a level-triggered pending delivery that
+ * servePendingDelivery serves as soon as the screen reads idle, with a deadline
+ * so an unreadable screen can't park the prompt forever (#607).
  */
 function deliverPromptWhenReady(id, prompt, options = {}) {
   const e = shells.get(id);
@@ -1898,10 +2091,19 @@ function drainPromptQueue(id) {
   }
 
   function submitAndNotify() {
-    // Re-enable input only after the deferred Enter has actually been written, so
-    // the banner dismiss, the unblock, and a truthful "prompt-submitted" event all
-    // coincide with the submission landing (#512).
-    submitToShell(id, prompt, null, options).then(() => {
+    // Re-fetch: with the level-triggered readiness deadline this can fire tens of
+    // seconds after the drain that scheduled it (#607).
+    const live = shells.get(id);
+    if (!live) return;
+    const confirm = promptSubmitConfirmEnabled(live);
+    // Re-enable input only after the submission has actually been VERIFIED, so the
+    // banner dismiss, the unblock, and a truthful "prompt-submitted" event all
+    // coincide with the prompt landing (#512, tightened by #607 — the event used to
+    // mean "we wrote \r", which is exactly the lie #607 is about). Keeping input
+    // blocked through verification is also what makes the retry Enter safe.
+    submitToShell(id, prompt, null, { ...options, confirmEcho: confirm }).then(
+      () => confirmPromptSubmitted(id, prompt, { verify: confirm })
+    ).then(() => {
       const entry = shells.get(id);
       if (!entry) return;
       if (entry.promptQueue && entry.promptQueue.length > 0) {
@@ -1949,12 +2151,54 @@ function drainPromptQueue(id) {
     log(`[deliverPrompt] id=${id} using delay ${config.initialPromptDelay}ms`);
     setTimeout(submitAndNotify, config.initialPromptDelay);
   } else {
-    log(`[deliverPrompt] id=${id} installing onIdleOnce for next idle transition`);
-    e.onIdleOnce = () => {
-      log(`[deliverPrompt] id=${id} idle detected, submitting queued prompt (len=${prompt.length})`);
-      setTimeout(submitAndNotify, 500);
-    };
+    // #607: arm a LEVEL-triggered delivery instead of the old one-shot
+    // e.onIdleOnce, which setWaiting fired only on the false->true edge. If the
+    // screen classified 'unknown' at this instant while e.waitingForInput was
+    // ALREADY true, that edge had already passed — reclassifyWaiting no-ops on
+    // 'unknown' and setWaiting early-returns on a no-change — so the callback
+    // could never fire and the prompt was never even typed. Reachable for the
+    // 2nd queued prompt (inherited /rc, then the issue prompt) and for the async
+    // fetchIssueFromGitHub path, which arms delivery seconds after the tab has
+    // already gone idle.
+    log(`[deliverPrompt] id=${id} arming pending delivery (deadline ${PROMPT_READY_DEADLINE_MS}ms)`);
+    e.pendingDelivery = { submit: submitAndNotify, deadline: Date.now() + PROMPT_READY_DEADLINE_MS, len: prompt.length };
   }
+}
+
+// How long an armed delivery may sit in an AMBIGUOUS screen state before we give
+// up on readiness and submit anyway. A prompt delivered into an unclassifiable
+// screen is strictly better than one that is never delivered at all. Budgeted
+// against the 60s inputBlockTimer above together with the echo/verify caps in
+// submitToShell: 30s + 5s + 16s = 51s < 60s, so the whole delivery still lands while
+// input is blocked and the client's loading banner is up. Raise one of the three
+// and you must re-check the others.
+const PROMPT_READY_DEADLINE_MS = parseInt(process.env.DEEPSTEVE_PROMPT_READY_DEADLINE_MS, 10) || 30000;
+
+/**
+ * Serve an armed pending delivery (#607). Called from reclassifyWaiting, which
+ * already runs on every PTY chunk AND on the 1s waiting sweep — so this is
+ * level-triggered with no new timer: a screen that is idle RIGHT NOW submits,
+ * whether or not a false->true transition ever occurred.
+ */
+function servePendingDelivery(e, id, state) {
+  const pending = e.pendingDelivery;
+  if (!pending) return;
+  if (state === 'waiting') {
+    e.pendingDelivery = null;
+    setWaiting(e, id, false, 'deliver-level');
+    log(`[deliverPrompt] id=${id} screen idle — submitting pending prompt (len=${pending.len})`);
+    setTimeout(pending.submit, 500);
+    return;
+  }
+  // A decisively-working screen is not the hang condition — a turn has to end
+  // eventually — so only AMBIGUOUS time counts against the deadline. This also
+  // stops a legitimately long turn from getting a queued prompt shoved into it.
+  if (state === 'working') { pending.deadline = Date.now() + PROMPT_READY_DEADLINE_MS; return; }
+  if (Date.now() < pending.deadline) return;
+  e.pendingDelivery = null;
+  log(`[deliverPrompt] id=${id} readiness deadline reached (state=${state}) — submitting anyway (len=${pending.len})`);
+  auditWaiting('deliver-deadline', id, e, { len: pending.len, screen: auditScreenTail(e, 500) });
+  setTimeout(pending.submit, 0);
 }
 
 /**
@@ -2043,29 +2287,31 @@ function computeWaiting(entry) {
 }
 
 // The single place that flips entry.waitingForInput. Broadcasts {type:'state'} to
-// the session's clients only on a real change, and fires the one-shot onIdleOnce
-// (queued-prompt delivery) on the transition into waiting.
+// the session's clients only on a real change. Queued-prompt delivery used to hang
+// off this transition via a one-shot e.onIdleOnce; #607 replaced that with the
+// level-triggered servePendingDelivery below, because an edge that has already
+// passed can never fire again.
 function setWaiting(e, id, waiting, via, extra = {}) {
   if (waiting === !!e.waitingForInput) return;
   e.waitingForInput = waiting;
   auditWaiting('transition', id, e, { to: waiting, via, screen: auditScreenTail(e, waiting ? 1500 : 300), ...extra });
   const stateMsg = JSON.stringify({ type: 'state', waiting });
   e.clients.forEach((c) => c.send(stateMsg));
-  if (waiting && e.onIdleOnce) {
-    const cb = e.onIdleOnce;
-    e.onIdleOnce = null;
-    try { cb(); } catch (err) { log(`[idle] onIdleOnce threw: ${err.message}`); }
-  }
 }
 
-// Re-derive the waiting flag from the screen and apply it. 'unknown' is a no-op
-// (leave the flag as-is) — only a decisive 'working'/'waiting' moves it. Called on
-// every output chunk and on the periodic sweep, so a stuck state self-corrects.
+// Re-derive the waiting flag from the screen and apply it, then serve any armed
+// prompt delivery. 'unknown' leaves the flag as-is — only a decisive
+// 'working'/'waiting' moves it. Called on every output chunk and on the periodic
+// sweep, so a stuck state self-corrects.
+//
+// #607: an unclassified agent yields state 'unknown' rather than returning early,
+// so its pending delivery still gets its deadline served. Before this, a
+// terminal-type session routed through deliverPromptWhenReady installed an
+// onIdleOnce that nothing in the codebase could ever fire.
 function reclassifyWaiting(e, id, via) {
-  if (!getAgentConfig(e.agentType).screenMarkers) return; // agent isn't classified
-  const state = classifyScreenState(e);
-  if (state === 'unknown') return;
-  setWaiting(e, id, state === 'waiting', via);
+  const state = getAgentConfig(e.agentType).screenMarkers ? classifyScreenState(e) : 'unknown';
+  if (state !== 'unknown') setWaiting(e, id, state === 'waiting', via);
+  servePendingDelivery(e, id, state);
 }
 
 /**
@@ -2092,6 +2338,13 @@ function wireShellOutput(id, cols = 120, rows = 40) {
     const e = shells.get(id);
     if (!e) return;
     e.lastActivity = Date.now();
+    // Monotonic PTY-chunk counter (#607). "The child produced output since our
+    // write" is direct evidence it read that write, which is what lets the
+    // prompt submitter know its text was consumed before it sends Enter. A
+    // counter, not a timestamp: lastActivity is in ms (a chunk arriving in the
+    // same millisecond as our write is invisible) and is also bumped by the
+    // tmux-attach paths.
+    e.outputSeq = (e.outputSeq || 0) + 1;
     acknowledgeCodexSubmitOutput(e, id)
     // Append to scrollback buffer
     e.scrollback.push(data);
@@ -2136,8 +2389,9 @@ function wireShellOutput(id, cols = 120, rows = 40) {
 
     // #568 screen-state waiting detector. Any chunk carrying the spinner marker is
     // a live-turn heartbeat → refresh lastSpinnerTime. Then re-derive the waiting
-    // flag from the screen (reclassifyWaiting fires onIdleOnce / broadcasts state
-    // on a real transition; 'unknown' leaves the flag untouched). Runs on every
+    // flag from the screen (reclassifyWaiting broadcasts state on a real
+    // transition and serves any armed prompt delivery; 'unknown' leaves the flag
+    // untouched, but still counts against the delivery deadline). Runs on every
     // chunk; the periodic sweep handles the transition-to-idle when output stops.
     if (config.screenMarkers) {
       if (config.screenMarkers.spinner.test(plain)) e.lastSpinnerTime = Date.now();
@@ -4768,7 +5022,7 @@ app.post('/api/start-issue', (req, res) => {
   emitSessionOpen(id);
   recordRecentSession(id);
   // Route any synchronous prompt through deliverPromptWhenReady so agents
-  // get a one-shot onIdleOnce callback or their configured delay.
+  // get a level-triggered readiness wait or their configured delay.
   if (prompt) deliverPromptWhenReady(id, prompt);
   if (agentConfig.supportsSessionWatch) watchClaudeSessionDir(id);
   sessionEngine.onExit(id, () => {
