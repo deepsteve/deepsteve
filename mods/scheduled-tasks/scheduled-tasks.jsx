@@ -1,6 +1,6 @@
 import * as React from 'react';
 import * as ReactDOM from 'react-dom/client';
-const { useState, useEffect, useMemo } = React;
+const { useState, useEffect, useMemo, useRef } = React;
 
 const DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const DAY_FULL = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
@@ -155,7 +155,36 @@ function TaskCard({ task, onEdit }) {
   // A one-shot that has fired is retired ("done"): keep the row + history, but it will
   // never run again, so hide the schedule/run controls and just offer Delete (#528).
   const done = !!(task.once && task.firedAt);
-  const runNow = () => api('POST', `/api/scheduled-tasks/${task.id}/run`).catch((e) => alert(e.message));
+
+  // Run-now feedback (#611). The card only ever learned about a manual run through
+  // the scheduled-tasks broadcast → refetch → badge, and the overlap-guard skip
+  // (HTTP 200, started:false) produced nothing at all — the click read as dead.
+  // `busy` is both the in-flight signal and the double-click guard; `note` is the
+  // outcome, auto-cleared so it can't linger as stale status.
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState(null);
+  const noteTimer = useRef(null);
+  const showNote = (text, color) => {
+    clearTimeout(noteTimer.current);
+    setNote({ text, color });
+    noteTimer.current = setTimeout(() => setNote(null), 5000);
+  };
+  useEffect(() => () => clearTimeout(noteTimer.current), []);
+
+  const runNow = () => {
+    if (busy) return;
+    clearTimeout(noteTimer.current);
+    setNote(null);
+    setBusy(true);
+    api('POST', `/api/scheduled-tasks/${task.id}/run`)
+      .then((r) => {
+        if (r.started) showNote(`Started · ${r.sessionId}`, C.green);
+        else if (r.reason === 'active-run') showNote(`Skipped — run ${r.activeSessionId} is still active`, C.amber);
+        else showNote('Not started', C.amber);
+      })
+      .catch((e) => showNote(e.message, C.red))
+      .finally(() => setBusy(false));
+  };
   const toggle = () => api('POST', `/api/scheduled-tasks/${task.id}/enabled`, { enabled: !task.enabled }).catch((e) => alert(e.message));
   const del = () => { if (confirm(`Delete "${task.title}"?`)) api('DELETE', `/api/scheduled-tasks/${task.id}`).catch((e) => alert(e.message)); };
 
@@ -172,12 +201,13 @@ function TaskCard({ task, onEdit }) {
         {task.lastRun ? <span title={absTime(task.lastRun)}>last: {relTime(task.lastRun)}</span> : null}
       </div>
       <div style={{ display: 'flex', gap: 6, marginTop: 8, flexWrap: 'wrap' }}>
-        {!done ? <button onClick={runNow} style={btn()}>Run now</button> : null}
+        {!done ? <button onClick={runNow} disabled={busy} style={{ ...btn(), opacity: busy ? 0.6 : 1, cursor: busy ? 'default' : 'pointer' }}>{busy ? 'Starting…' : 'Run now'}</button> : null}
         {!done ? <button onClick={toggle} style={btn()}>{task.enabled ? 'Pause' : 'Resume'}</button> : null}
         {!done ? <button onClick={() => onEdit(task)} style={btn()}>Edit</button> : null}
         <button onClick={del} style={btn(C.red)}>Delete</button>
         {task.runs && task.runs.length ? <button onClick={() => setOpen(!open)} style={btn()}>{open ? 'Hide' : 'History'}</button> : null}
       </div>
+      {note ? <div style={{ fontSize: 11, color: note.color, marginTop: 6 }}>{note.text}</div> : null}
       {open && task.runs && (
         <div style={{ marginTop: 8, borderTop: `1px solid ${C.border}`, paddingTop: 6 }}>
           {task.runs.map((r, i) => (
