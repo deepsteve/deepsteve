@@ -261,6 +261,16 @@ function findRunByShell(shellId) {
   return null;
 }
 
+// The previous run still occupying this task, or null. A run that has self-reported
+// terminal (succeeded/failed) no longer blocks the next fire, even though its idle
+// tab may still be alive. Shared by runTask's overlap guard and the Run-now route,
+// which reports the reason back to the panel (#611).
+function activeRunFor(task) {
+  const last = task && task.runs && task.runs[0];
+  if (!last || !ACTIVE_STATUSES.has(last.status)) return null;
+  return (ctx && ctx.shells.has(last.sessionId)) ? last : null;
+}
+
 // Spawn a session for a task and record the run. Returns the new shell id, or
 // null if the run was skipped (overlap guard) or the scheduler isn't ready.
 // `foreground` opts out of the background open (#600) — only the panel's own
@@ -273,12 +283,10 @@ function runTask(task, reason, { foreground = false } = {}) {
     deliverPromptWhenReady, deliverToWindow, saveState, isShuttingDown, log,
   } = ctx;
 
-  // Overlap guard: don't stack a run on a still-running previous run. A run that
-  // has self-reported terminal (succeeded/failed) no longer blocks the next fire,
-  // even though its idle tab may still be alive.
-  const last = task.runs && task.runs[0];
-  if (last && ACTIVE_STATUSES.has(last.status) && shells.has(last.sessionId)) {
-    log(`[scheduled] "${task.title}" (${task.id}) skipped — previous run ${last.sessionId} still active`);
+  // Overlap guard: don't stack a run on a still-running previous run.
+  const blocking = activeRunFor(task);
+  if (blocking) {
+    log(`[scheduled] "${task.title}" (${task.id}) skipped — previous run ${blocking.sessionId} still active`);
     return null;
   }
 
@@ -1028,10 +1036,16 @@ function registerRoutes(app, context) {
     if (!featureEnabled()) return res.status(403).json({ error: FEATURE_OFF_MSG });
     const task = tasks.find(t => t.id === req.params.id);
     if (!task) return res.status(404).json({ error: 'Task not found' });
+    // A skipped run is not an error (still 200), but the panel has to be able to
+    // say *why* nothing happened — silence on this path is #611. Ask before firing,
+    // since runTask's own guard only returns null.
+    const blocking = activeRunFor(task);
+    if (blocking) return res.json({ started: false, reason: 'active-run', activeSessionId: blocking.sessionId });
     // The panel's Run-now button: the user explicitly asked for this run, so open
     // its tab in the foreground even when scheduled fires are silent (#600).
     const shellId = runTask(task, 'manual', { foreground: true });
-    res.json({ started: !!shellId, sessionId: shellId || null });
+    if (!shellId) return res.json({ started: false, reason: 'unavailable', sessionId: null });
+    res.json({ started: true, sessionId: shellId });
   });
 
   app.post('/api/scheduled-tasks/:id/enabled', (req, res) => {
