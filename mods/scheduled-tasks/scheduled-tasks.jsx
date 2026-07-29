@@ -1,6 +1,6 @@
 import * as React from 'react';
 import * as ReactDOM from 'react-dom/client';
-const { useState, useEffect, useMemo, useRef } = React;
+const { useState, useEffect, useMemo, useRef, useLayoutEffect } = React;
 
 const DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const DAY_FULL = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
@@ -132,6 +132,13 @@ function inside(p, dir) {
   return p === base || p.startsWith(base + '/');
 }
 
+// A one-shot that has already fired is retired — it will never run again (#528).
+function isRetired(t) { return !!(t && t.once && t.firedAt); }
+// "Active" = still going to fire on its schedule. Paused and retired tasks sort
+// below active ones, so a single live task among a hundred dead ones is never
+// pushed off the bottom of the panel (#613).
+function isActive(t) { return !!t && t.enabled !== false && !isRetired(t); }
+
 // ------------------------------------------------------------------ Task card
 // Mirrors ACTIVE_STATUSES in tools.js: a run that has not self-reported terminal yet.
 const ACTIVE_RUN_STATUSES = ['queued', 'running', 'started'];
@@ -157,7 +164,7 @@ function TaskCard({ task, onEdit }) {
   const last = task.runs && task.runs[0];
   // A one-shot that has fired is retired ("done"): keep the row + history, but it will
   // never run again, so hide the schedule/run controls and just offer Delete (#528).
-  const done = !!(task.once && task.firedAt);
+  const done = isRetired(task);
 
   // Run-now feedback (#611). The card only ever learned about a manual run through
   // the scheduled-tasks broadcast → refetch → badge, and the overlap-guard skip
@@ -215,7 +222,7 @@ function TaskCard({ task, onEdit }) {
       <div style={{ display: 'flex', gap: 6, marginTop: 8, flexWrap: 'wrap' }}>
         {!done ? <button onClick={runNow} disabled={busy} style={{ ...btn(), opacity: busy ? 0.6 : 1, cursor: busy ? 'default' : 'pointer' }}>{busy ? 'Starting…' : 'Run now'}</button> : null}
         {!done ? <button onClick={toggle} style={btn()}>{task.enabled ? 'Pause' : 'Resume'}</button> : null}
-        {!done ? <button onClick={() => onEdit(task)} style={btn()}>Edit</button> : null}
+        {!done ? <button onClick={onEdit} style={btn()}>Edit</button> : null}
         <button onClick={del} style={btn(C.red)}>Delete</button>
         {task.runs && task.runs.length ? <button onClick={() => setOpen(!open)} style={btn()}>{open ? 'Hide' : 'History'}</button> : null}
       </div>
@@ -481,12 +488,31 @@ function App() {
   const [data, setData] = useState({ tasks: [], projects: [], enabled: true, defaults: {} });
   const [contexts, setContexts] = useState([]); // the shared groups (#526)
   const [filter, setFilter] = useState({ type: 'all', value: '' });
-  const [editing, setEditing] = useState(null); // null | 'new' | task
+  // Only an id is kept, never the task object: every scheduled-tasks broadcast (incl.
+  // a plain scheduler tick) replaces the whole data.tasks array, so a held object goes
+  // stale. The live task is re-resolved from `sections` on each render (#613).
+  const [editing, setEditing] = useState(null); // null | { mode:'new' } | { mode:'edit', id }
   const [showGroups, setShowGroups] = useState(false);
   // The agent list is server-owned and includes custom config profiles (#537) as
   // custom:true rows with id 'config:<profileId>' — same source the main new-tab
   // menu uses, so the panel can't drift from it.
   const [agents, setAgents] = useState(FALLBACK_AGENTS);
+  // Scroll anchor captured at click time, consumed once by the layout effect below.
+  const pinRef = useRef(null);
+  const editingId = editing && editing.mode === 'edit' ? editing.id : null;
+  const creating = !!editing && editing.mode === 'new';
+
+  // A row slot keeps its data-task-id whether it is showing the card or the editor, so
+  // a pin taken before the swap still resolves after it. Store the id, not the node —
+  // the swap remounts that subtree, so a captured element would be disconnected.
+  const slotTop = (id) => {
+    const el = document.querySelector(`[data-task-id="${id}"]`);
+    return el ? el.getBoundingClientRect().top : null;
+  };
+  const openEdit = (id) => { pinRef.current = { id, top: slotTop(id) }; setEditing({ mode: 'edit', id }); setShowGroups(false); };
+  // The single close path — the form's Cancel and its post-save onClose both land here,
+  // so every one of them pins the same way.
+  const closeEditor = () => { pinRef.current = editingId ? { id: editingId, top: slotTop(editingId) } : null; setEditing(null); };
 
   useEffect(() => {
     let alive = true;
@@ -534,14 +560,56 @@ function App() {
       byProj.get(key).push(t);
     }
     const nameOf = (root) => { const p = data.projects.find((x) => x.root === root); return p ? p.name : (root ? root.split('/').pop() : 'No project'); };
-    return [...byProj.entries()].sort((a, b) => nameOf(a[0]).localeCompare(nameOf(b[0]))).map(([root, ts]) => ({ root, name: nameOf(root), tasks: ts }));
+    // Active-first, at both levels (#613). Within a section this is a partition rather
+    // than a sort, so each tier keeps its existing relative (creation) order exactly.
+    // A section with nothing active sinks below the ones that have live tasks, so the
+    // one task that still fires is never buried under a hundred paused ones.
+    return [...byProj.entries()]
+      .map(([root, ts]) => ({
+        root,
+        name: nameOf(root),
+        tasks: [...ts.filter(isActive), ...ts.filter((t) => !isActive(t))],
+        hasActive: ts.some(isActive),
+      }))
+      .sort((a, b) => (Number(b.hasActive) - Number(a.hasActive)) || a.name.localeCompare(b.name));
   }, [visible, data.projects]);
+
+  // No scroll jump (#613). Editing swaps the editor into the clicked row's own slot, so
+  // nothing above it moves — except when switching straight from editing another task,
+  // which collapses that editor higher up the list. The clicked row's top edge is the
+  // fixed point: pin it before the swap, restore it after commit. useLayoutEffect so the
+  // correction lands before paint. The scroller is the iframe viewport (index.html puts
+  // overflow on <body>, which propagates), so window.scrollBy/scrollTo are the right
+  // calls — and scrollIntoView is avoided since it can walk out to the parent document.
+  useLayoutEffect(() => {
+    const pin = pinRef.current;
+    pinRef.current = null;
+    if (!pin) return;
+    if (pin.toTop) { window.scrollTo(0, 0); return; } // "+ New" renders above the list
+    if (pin.top == null) return;
+    const now = slotTop(pin.id);
+    if (now == null) return; // the row was deleted or filtered away mid-flight
+    const delta = now - pin.top;
+    if (delta) window.scrollBy(0, delta);
+  }, [editing]);
+
+  // The edited task went away (deleted here, in another window, or by unschedule_task):
+  // drop the editor instead of leaving `editing` pointing at nothing. Checks data.tasks,
+  // not `visible` — a filter change alone must not count as "gone".
+  useEffect(() => {
+    if (editingId && !data.tasks.some((t) => t.id === editingId)) setEditing(null);
+  }, [data.tasks, editingId]);
+
+  // Changing what's shown closes any open editor: its row may not be in the new list at
+  // all, and an editor you cannot see is the bug this change just fixed. Covers both the
+  // Show <select> and the rail-driven onActiveContextChanged, which also calls setFilter.
+  useEffect(() => { setEditing(null); }, [filter]);
 
   return (
     <div style={{ padding: 12, color: C.text, fontSize: 13 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
         <div style={{ fontWeight: 700, fontSize: 15, flex: 1 }}>⏰ Scheduled</div>
-        <button onClick={() => { setEditing('new'); setShowGroups(false); }} style={btn(C.accent)}>+ New</button>
+        <button onClick={() => { pinRef.current = { toTop: true }; setEditing({ mode: 'new' }); setShowGroups(false); }} style={btn(C.accent)}>+ New</button>
         <button onClick={() => { setShowGroups(!showGroups); setEditing(null); }} style={btn()}>Groups</button>
       </div>
 
@@ -573,16 +641,27 @@ function App() {
       </div>
 
       {showGroups && <GroupsManager contexts={contexts} projects={data.projects} onClose={() => setShowGroups(false)} />}
-      {editing && <TaskForm task={editing === 'new' ? null : editing} projects={data.projects} agents={agents} defaults={data.defaults || {}} onClose={() => setEditing(null)} />}
+      {/* Only a NEW task's form lives up here — editing happens in the task's own row (#613). */}
+      {creating && <TaskForm key="new" task={null} projects={data.projects} agents={agents} defaults={data.defaults || {}} onClose={closeEditor} />}
 
-      {sections.length === 0 && !editing && (
+      {sections.length === 0 && !creating && (
         <div style={{ color: C.dim, fontSize: 13, marginTop: 20, textAlign: 'center' }}>No scheduled tasks yet.<br />Click <b>+ New</b> to create one.</div>
       )}
 
       {sections.map((sec) => (
         <div key={sec.root} style={{ marginBottom: 14 }}>
           <div style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: 0.5, color: C.dim, marginBottom: 6, borderBottom: `1px solid ${C.border}`, paddingBottom: 3 }}>{sec.name}</div>
-          {sec.tasks.map((t) => <TaskCard key={t.id} task={t} onEdit={(task) => { setEditing(task); setShowGroups(false); }} />)}
+          {/* One slot per task, keyed and tagged by id: it shows the card, or the editor in
+              the card's place. Keying the slot is what guarantees a fresh TaskForm mount
+              when you go straight from editing one task to another — a shared instance
+              would keep the first task's field values while saving to the second's id. */}
+          {sec.tasks.map((t) => (
+            <div key={t.id} data-task-id={t.id}>
+              {editingId === t.id
+                ? <TaskForm task={t} projects={data.projects} agents={agents} defaults={data.defaults || {}} onClose={closeEditor} />
+                : <TaskCard task={t} onEdit={() => openEdit(t.id)} />}
+            </div>
+          ))}
         </div>
       ))}
     </div>
