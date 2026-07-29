@@ -36,6 +36,14 @@ const CATCHUP_DELAY_MS = 10 * 1000; // let the daemon settle before the overdue 
 // Legacy 'started'/'completed' rows (pre-#525) still render in the UI badge.
 const ACTIVE_STATUSES = new Set(['queued', 'running', 'started']);
 
+// #612: the exact tools scheduledRunPrompt() *requires* the agent to call. deepsteve
+// imposes that contract, so deepsteve pre-permits it: an unattended run has nobody to
+// answer "Do you want to proceed?", and blocking on it wedges the run in `running`
+// forever, which makes the overlap guard skip every subsequent fire of the task.
+// Narrow by design — the self-report tools only, not a blanket permission widening.
+// `deepsteve` is the MCP server key hardcoded in server.js's mcpConfigArgs().
+const CONTRACT_TOOLS = ['mcp__deepsteve__scheduled_task_started', 'mcp__deepsteve__scheduled_task_finished'];
+
 // Default ceiling on a single run's wall-clock (#596). A run that parks on a
 // permission prompt is never reaped — armDetachReap only arms when a client
 // disconnects, and an unattended run never had one — so without this the overlap
@@ -313,18 +321,27 @@ function runTask(task, reason, { foreground = false } = {}) {
       && task.project && cwd === task.project && isGitRepo(cwd)) {
     worktree = ctx.validateWorktree(`scheduled-${id}`);
   }
-  const spawnArgs = getSpawnArgs(agentType, { sessionId: claudeSessionId, shellId: id, planMode: !!task.planMode, worktree, model, effort });
+  // Does this agent get deepsteve MCP at all? Decides both the self-report contract in
+  // the prompt below and — since we're the ones imposing it — whether to pre-permit the
+  // contract tools on the spawn (#612). Claude-only in practice: the flag lives in
+  // AGENT_CONFIGS.claude, so allowedToolsArgs is a no-op for codex.
+  const mcpWired = ctx.mcpConfigArgs(agentType, id).length > 0;
+  const allowedTools = mcpWired ? CONTRACT_TOOLS : null;
+  const spawnArgs = getSpawnArgs(agentType, { sessionId: claudeSessionId, shellId: id, planMode: !!task.planMode, worktree, model, effort, allowedTools });
   const sessionEngine = getDefaultEngine();
   const engineType = sessionEngine.constructor.name === 'TmuxEngine' ? 'tmux' : 'node-pty';
   const name = `⏰ ${task.title}`;
 
-  log(`[scheduled] running "${task.title}" (${task.id}) id=${id} agent=${agentType} model=${model || 'default'} effort=${effort || 'default'} profile=${task.configProfile || 'none'} engine=${engineType} cwd=${cwd} worktree=${worktree || 'none'} reason=${reason}`);
+  log(`[scheduled] running "${task.title}" (${task.id}) id=${id} agent=${agentType} model=${model || 'default'} effort=${effort || 'default'} profile=${task.configProfile || 'none'} engine=${engineType} cwd=${cwd} worktree=${worktree || 'none'} allowedTools=${allowedTools ? 'contract' : 'none'} reason=${reason}`);
   spawnSession(sessionEngine, id, agentType, spawnArgs, cwd, {
     cols: 120, rows: 40, env: sessionEnv(id, { name, windowId: null, cwd, agentType, worktree, codexHomeId, configDir }),
   });
   shells.set(id, {
     clients: new Set(), cwd, claudeSessionId, agentType,
     codexHomeId, configDir, model, effort,
+    // Persisted by serializeShellEntry so a restart-resumed run keeps the grant —
+    // Claude's --resume doesn't carry session flags forward (#612).
+    allowedTools,
     engine: sessionEngine, engineType, worktree, windowId: null,
     // Unattended by construction (#597): no browser ever owned this tab, so a
     // windowId-less scheduled run must not be offered up as a lost session by
@@ -339,7 +356,6 @@ function runTask(task, reason, { foreground = false } = {}) {
   // agents without deepsteve MCP get the raw prompt as before — except that an
   // isolated run must always be told its work area is disposable (#565).
   if (task.prompt) {
-    const mcpWired = ctx.mcpConfigArgs(agentType, id).length > 0;
     const iso = worktree ? {
       path: path.join(cwd, '.claude', 'worktrees', worktree),
       branch: `worktree-${worktree}`, repoRoot: cwd,
@@ -1046,4 +1062,4 @@ function registerRoutes(app, context) {
 
 // The mod loader only uses init/registerRoutes; the extra named exports are for
 // unit tests (test/unit/scheduled-worktree.test.js).
-module.exports = { init, registerRoutes, cleanupWorktree, isGitRepo, scheduledRunPrompt, worktreeContract, enforceRunTimeouts };
+module.exports = { init, registerRoutes, cleanupWorktree, isGitRepo, scheduledRunPrompt, worktreeContract, enforceRunTimeouts, CONTRACT_TOOLS };
