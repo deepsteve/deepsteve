@@ -44,6 +44,12 @@ const ACTIVE_STATUSES = new Set(['queued', 'running', 'started']);
 // `deepsteve` is the MCP server key hardcoded in server.js's mcpConfigArgs().
 const CONTRACT_TOOLS = ['mcp__deepsteve__scheduled_task_started', 'mcp__deepsteve__scheduled_task_finished'];
 
+// How long a tombstoned task (#614, see deleteTask) is kept once its last run has
+// stopped looking active. Normally the purge fires as soon as no run is ACTIVE; this
+// is only the backstop for a run whose shell died so hard that nothing ever moved its
+// status off ACTIVE (enforceRunTimeouts skips a run whose shell is already gone).
+const TOMBSTONE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
 // Default ceiling on a single run's wall-clock (#596). A run that parks on a
 // permission prompt is never reaped — armDetachReap only arms when a client
 // disconnects, and an unattended run never had one — so without this the overlap
@@ -80,6 +86,22 @@ function writeJson(file, data) {
 }
 function saveTasks() { writeJson(TASKS_FILE, tasks); }
 function broadcastTasks() { if (ctx) ctx.broadcast({ type: 'scheduled-tasks' }); }
+
+// --- Live tasks vs tombstones (#614) --------------------------------------
+//
+// `tasks` holds two kinds of row: real schedules, and tombstones — tasks that have
+// been deleted while one of their runs was still in flight (see deleteTask). A
+// tombstone is NOT a schedule: it never fires, and it is invisible to the panel and
+// to list_scheduled_tasks. It exists only so the live agent it spawned can still find
+// its run record and self-report.
+//
+// So: everything that schedules, lists or mutates a schedule goes through
+// liveTasks()/findLiveTask(); everything that reasons about a *run* (findRunByShell,
+// enforceRunTimeouts, sweepLeakedWorktrees, unattendedRunInFlight, the onExit
+// epilogue) deliberately iterates the full `tasks` — that is the whole point.
+function liveTasks() { return tasks.filter(t => !t.deleted); }
+function findLiveTask(id) { return liveTasks().find(t => t.id === id); }
+function activeRunOf(task) { return (task.runs || []).find(r => ACTIVE_STATUSES.has(r.status)); }
 
 // The shared contexts (#526), from server core via the initMCP ctx. Empty on an
 // older core that doesn't expose them (group scope then falls back to self-only).
@@ -177,7 +199,7 @@ function displayName(project) {
 // basenames disambiguated by parent dir on collision — mirrors /api/git-roots.
 function knownProjects() {
   const roots = new Set();
-  for (const t of tasks) if (t.project) roots.add(t.project);
+  for (const t of liveTasks()) if (t.project) roots.add(t.project);
   for (const c of getContexts()) for (const d of (c.dirs || [])) if (d) roots.add(d);
   if (ctx) {
     for (const entry of ctx.shells.values()) {
@@ -262,6 +284,8 @@ function scheduledRunPrompt(task, iso) {
 // { task, run } or null when the caller isn't a scheduled run.
 function findRunByShell(shellId) {
   if (!shellId) return null;
+  // Full `tasks`, tombstones included (#614): a run whose schedule was deleted
+  // mid-flight is exactly the case this has to keep answering.
   for (const task of tasks) {
     const run = (task.runs || []).find(r => r.sessionId === shellId);
     if (run) return { task, run };
@@ -381,6 +405,8 @@ function runTask(task, reason, { foreground = false } = {}) {
     // A real close with no self-report becomes 'ended' (we know it stopped, but
     // not that the work completed).
     if (!isShuttingDown()) {
+      // Full `tasks`: the schedule may have been deleted mid-run (#614), and this
+      // row is still the record of what happened.
       const t = tasks.find(x => x.id === task.id);
       const run = t && t.runs.find(r => r.sessionId === id);
       if (run && ACTIVE_STATUSES.has(run.status)) {
@@ -406,7 +432,7 @@ function runTask(task, reason, { foreground = false } = {}) {
   // else stores them: reconstructing what a past run actually used previously meant
   // digging through Claude transcripts, and effort isn't in there at all.
   task.runs.unshift({ startedAt: now, sessionId: id, status: 'queued', endedAt: null, agentStartedAt: null, success: null, summary: null, worktree, model, effort, configDir });
-  if (task.runs.length > MAX_RUNS) task.runs.length = MAX_RUNS;
+  trimRuns(task);
   saveTasks();
   broadcastTasks();
   // No windowId and no openBrowser: unattended. The tab queues (pendingOpens)
@@ -417,6 +443,16 @@ function runTask(task, reason, { foreground = false } = {}) {
   const background = !foreground && ctx.settings.scheduledTasksOpenInBackground !== false;
   deliverToWindow({ type: 'open-session', id, cwd, name, windowId: null, prefill: true, background }, null);
   return id;
+}
+
+// Bound a task's run history to MAX_RUNS — but never evict a row whose session is
+// still alive (#614). A keepOpen tab can outlive MAX_RUNS later fires, and dropping
+// its row orphans that live agent exactly the way a mid-run delete used to: its
+// self-report tools would find no record of the run it is sitting in.
+function trimRuns(task) {
+  if (!task.runs || task.runs.length <= MAX_RUNS) return;
+  task.runs = task.runs.slice(0, MAX_RUNS)
+    .concat(task.runs.slice(MAX_RUNS).filter(r => ctx && ctx.shells.has(r.sessionId)));
 }
 
 // Close any run that has outlived its task's maxRuntimeMinutes (#596).
@@ -433,7 +469,7 @@ function runTask(task, reason, { foreground = false } = {}) {
 function enforceRunTimeouts(now) {
   if (!ctx) return false;
   let changed = false;
-  for (const task of tasks) {
+  for (const task of tasks) { // tombstones included (#614) — their runs still need reaping
     const limitMs = sanitizeMaxRuntime(task.maxRuntimeMinutes) * 60 * 1000;
     if (limitMs <= 0) continue; // 0 = no limit
     for (const run of task.runs || []) {
@@ -458,13 +494,42 @@ function enforceRunTimeouts(now) {
   return changed;
 }
 
+// Drop tombstoned tasks (#614) once nothing still needs their record. Ordered after
+// enforceRunTimeouts in the tick so a run reaped this tick releases its tombstone in
+// the same pass. Returns true if anything was removed.
+function purgeTombstonedTasks(now) {
+  let changed = false;
+  for (let i = tasks.length - 1; i >= 0; i--) {
+    const t = tasks[i];
+    if (!t.deleted) continue;
+    const active = activeRunOf(t);
+    // An unreclaimed worktree pins the row too: sweepLeakedWorktrees reads
+    // task.project + run.worktree off it, and after a daemon restart the sweep is
+    // the ONLY thing that reclaims one (the restore handler replaces the run's own
+    // onExit cleanup). Purging first would leak the directory permanently — and the
+    // tick purges *before* the sweep runs, so this is not hypothetical.
+    const pinned = active || (t.runs || []).find(r => r.worktree && !r.worktreeRemoved);
+    const expired = now - (t.deletedAt || 0) > TOMBSTONE_TTL_MS;
+    if (pinned && !expired) continue;
+    log_(`purging deleted task "${t.title}" (${t.id})${pinned ? ` — run ${pinned.sessionId} still ${active ? `marked ${active.status}` : `holding worktree ${pinned.worktree}`} after ${Math.round(TOMBSTONE_TTL_MS / 86400000)}d` : ''}`);
+    tasks.splice(i, 1);
+    changed = true;
+  }
+  // Persist here rather than relying on the caller, exactly like enforceRunTimeouts —
+  // otherwise a purged row survives on disk until something else happens to save. No
+  // broadcast: a tombstone was never in the panel payload, so nothing on screen changes.
+  if (changed) saveTasks();
+  return changed;
+}
+
 // Fire any enabled task whose next run has arrived.
 function tick() {
   if (!ctx || !ctx.settings.scheduledTasksEnabled) return;
   const now = Date.now();
   let changed = false;
   if (enforceRunTimeouts(now)) changed = true;
-  for (const task of tasks) {
+  if (purgeTombstonedTasks(now)) changed = true;
+  for (const task of liveTasks()) {
     if (!task.enabled) continue;
     if (task.once && task.firedAt) continue; // one-shot already fired — done, never again
     if (task.nextRun == null) { task.nextRun = nextRunFor(task, now); changed = true; continue; }
@@ -490,7 +555,9 @@ function runCatchUp() {
   if (!ctx || !ctx.settings.scheduledTasksEnabled) return;
   const now = Date.now();
   let changed = false;
-  for (const task of tasks) {
+  // liveTasks() only: a tombstone must never be caught up either. Deliberately no
+  // purge here — a run resumed after a restart is still ACTIVE and needs its record.
+  for (const task of liveTasks()) {
     if (!task.enabled) continue;
     if (task.once && task.firedAt) continue; // one-shot already fired — never re-run or re-arm
     if (task.nextRun != null && task.nextRun <= now) {
@@ -525,7 +592,7 @@ const sweepAttempted = new Set();
 function sweepLeakedWorktrees() {
   if (!ctx) return;
   let changed = false;
-  for (const task of tasks) {
+  for (const task of tasks) { // tombstones included (#614) — their worktrees still need reclaiming
     if (!task.project) continue;
     for (const run of task.runs || []) {
       if (!run.worktree || run.worktreeRemoved) continue;
@@ -559,7 +626,7 @@ function startScheduler() {
     try { tick(); } catch (e) { log_(`tick error: ${e.message}`); }
     try { sweepLeakedWorktrees(); } catch (e) { log_(`worktree sweep error: ${e.message}`); }
   }, TICK_MS).unref();
-  log_(`scheduler started (${tasks.length} task(s))`);
+  log_(`scheduler started (${liveTasks().length} task(s))`);
 }
 
 // --- CRUD used by both MCP tools and REST ---------------------------------
@@ -646,11 +713,12 @@ function createTask({ title, prompt, cron: cronStr, once, project, agentType, co
   tasks.push(task);
   saveTasks();
   broadcastTasks();
+  log_(`created "${task.title}" (${task.id}) cron="${task.cron}"${task.once ? ' once' : ''} project=${task.project || 'none'} by=${task.createdBy || 'panel'}`);
   return task;
 }
 
 function updateTask(id, fields) {
-  const task = tasks.find(t => t.id === id);
+  const task = findLiveTask(id); // a tombstone is not a schedule — nothing to edit
   if (!task) return null;
   if (fields.cron !== undefined) { cron.parseCron(fields.cron); task.cron = fields.cron.trim(); }
   if (fields.title !== undefined) task.title = String(fields.title);
@@ -682,13 +750,40 @@ function updateTask(id, fields) {
   return task;
 }
 
+// Unschedule a task. Always takes effect immediately — the task never fires again —
+// but when one of its runs is still in flight the row is KEPT as a tombstone
+// (`deleted: true`) instead of being spliced out.
+//
+// #614: splicing takes `task.runs` with it, and that array is the only record of the
+// run <-> session link. Destroying it orphans a live agent: findRunByShell stops
+// resolving, so scheduled_task_started/finished answer "this session is not a
+// scheduled task run", the run is never recorded, the unattended tab never
+// auto-closes (auto-close lives inside scheduled_task_finished), and both
+// enforceRunTimeouts and sweepLeakedWorktrees lose track of it. Same spirit as the
+// session tombstones in #561: a delete may not destroy a record something live still
+// depends on. purgeTombstonedTasks drops the row once no run is active.
+//
+// Returns null when no such task exists, else { title, tombstoned, alreadyDeleted,
+// activeSession } so callers can say which of those three things happened.
 function deleteTask(id) {
-  const idx = tasks.findIndex(t => t.id === id);
-  if (idx === -1) return false;
-  tasks.splice(idx, 1);
+  const task = tasks.find(t => t.id === id); // tombstones too, so a re-delete is idempotent
+  if (!task) return null;
+  if (task.deleted) return { title: task.title, tombstoned: false, alreadyDeleted: true, activeSession: null };
+  const active = activeRunOf(task);
+  if (active) {
+    task.deleted = true;
+    task.deletedAt = Date.now();
+    task.enabled = false;
+    task.nextRun = null;
+  } else {
+    tasks.splice(tasks.indexOf(task), 1);
+  }
   saveTasks();
   broadcastTasks();
-  return true;
+  log_(active
+    ? `unscheduled "${task.title}" (${task.id}) — run ${active.sessionId} still in flight, keeping the record`
+    : `deleted "${task.title}" (${task.id})`);
+  return { title: task.title, tombstoned: !!active, alreadyDeleted: false, activeSession: active ? active.sessionId : null };
 }
 
 // Human-readable schedule for the panel/tools. A one-shot's cron (e.g. "0 15 * * *")
@@ -765,6 +860,35 @@ function featureOffResult() {
   return { content: [{ type: 'text', text: FEATURE_OFF_MSG }], isError: true };
 }
 
+// --- Self-report responses ------------------------------------------------
+
+// What scheduled_task_started/finished say when the caller's session has no run
+// record. Pre-#614 this was a bare "This session is not a scheduled task run", which
+// is what an agent saw after its own schedule had been deleted out from under it —
+// unfalsifiable and alarming enough to get filed as a bug. Now that a delete keeps
+// the record (see deleteTask), reaching this really does mean there is no run, so
+// name the causes and hand back the two calls that resolve the ambiguity.
+// Not isError: it is a no-op notice, not a failure.
+function noRunResult(shellId) {
+  return { content: [{ type: 'text', text: [
+    `No scheduled-task run is recorded for this session${shellId ? ` (${shellId})` : ''}, so there is nothing to mark. This is not an error and does not affect the work itself — just carry on and skip the start/finish bookkeeping.`,
+    ``,
+    `This happens when the conversation was resumed or forked under a new session id (the ⏰ header you are reading is replayed from the original run's transcript), or when the run's record has aged out of the task's history.`,
+    ``,
+    `To check whether the schedule is still live, call \`list_scheduled_tasks\` with \`scope: "all"\`. To stop it, call \`unschedule_task\` with the task id from the ⏰ header — that works whether or not the task appears in the listing, and it will tell you if no such task exists.`,
+  ].join('\n') }] };
+}
+
+// Appended to a self-report response when the run's schedule was deleted while the
+// run was still in flight. The run record survived (that is the tombstone's whole
+// job), so the bookkeeping still lands — the agent just needs to know the schedule
+// is gone and that nothing further will fire.
+function deletedScheduleNote(task) {
+  return task.deleted
+    ? ` This task's schedule was deleted while this run was in flight — it will not fire again, and this is its final run.`
+    : '';
+}
+
 // --- MCP tools ------------------------------------------------------------
 
 // An unattended run in flight: a live session with no browser attached whose run
@@ -774,7 +898,7 @@ function featureOffResult() {
 // (shutdown skips the run's onExit, and the sweep skips ACTIVE runs).
 function unattendedRunInFlight() {
   if (!ctx || !ctx.settings.scheduledTasksEnabled) return null;
-  for (const task of tasks) {
+  for (const task of tasks) { // tombstones included (#614) — an orphaned run is still live work
     const run = task.runs && task.runs[0];
     if (!run || !ACTIVE_STATUSES.has(run.status)) continue;
     const shell = ctx.shells.get(run.sessionId);
@@ -847,12 +971,12 @@ function init(context) {
       handler: async ({ scope, project }, extra) => {
         const effScope = scope || 'project';
         const proj = resolveProject(project, callerShellId(extra));
-        let list = tasks;
+        let list = liveTasks(); // tombstones are not schedules — never listed (#614)
         if (effScope === 'project') {
-          list = tasks.filter(t => t.project === proj);
+          list = list.filter(t => t.project === proj);
         } else if (effScope === 'group') {
           const dirs = groupScopeDirs(proj);
-          list = tasks.filter(t => dirs.some(d => pathInside(t.project, d)));
+          list = list.filter(t => dirs.some(d => pathInside(t.project, d)));
         }
         const header = effScope === 'all' ? 'All scheduled tasks:'
           : effScope === 'group' ? `Scheduled tasks in ${displayName(proj)}'s group:`
@@ -906,10 +1030,21 @@ function init(context) {
     },
 
     unschedule_task: {
-      description: 'Delete a scheduled task by id.',
+      description: 'Delete a scheduled task by id, so it never fires again. Works with the task id from a scheduled run\'s ⏰ header even if the task does not appear in list_scheduled_tasks, and always reports definitively whether anything is still scheduled under that id.',
       schema: { id: z.string().describe('Task id to delete') },
       handler: async ({ id }) => {
-        return { content: [{ type: 'text', text: deleteTask(id) ? `Deleted #${id}.` : `Task #${id} not found.` }] };
+        // Three distinguishable answers, not one ambiguous "not found" (#614): an
+        // agent winding its own recurring task down has to be able to tell "stopped"
+        // from "was already stopped" from "that id never existed".
+        const del = deleteTask(id);
+        const text = !del
+          ? `No scheduled task #${id} exists — nothing is scheduled under that id, so it cannot fire.`
+          : del.alreadyDeleted
+            ? `#${id} "${del.title}" was already unscheduled; it will not fire again.`
+            : del.tombstoned
+              ? `Unscheduled #${id} "${del.title}" — it will not fire again. A run is still in flight (session ${del.activeSession}); it keeps going and can still report its result.`
+              : `Deleted #${id} "${del.title}" — it will not fire again.`;
+        return { content: [{ type: 'text', text }] };
       },
     },
 
@@ -917,7 +1052,7 @@ function init(context) {
       description: 'Run a scheduled task immediately (does not change its schedule).',
       schema: { id: z.string().describe('Task id to run now') },
       handler: async ({ id }) => {
-        const task = tasks.find(t => t.id === id);
+        const task = findLiveTask(id);
         if (!task) return { content: [{ type: 'text', text: `Task #${id} not found.` }] };
         const shellId = runTask(task, 'manual');
         return { content: [{ type: 'text', text: shellId ? `Running #${id} now (session ${shellId}).` : `#${id} not started (a previous run may still be active).` }] };
@@ -932,14 +1067,15 @@ function init(context) {
       description: 'Mark the current scheduled-task run as started. Call this once, before you begin the work, when you are running as a scheduled task. Takes no parameters — the run is identified from your session.',
       schema: {},
       handler: async (_args, extra) => {
-        const found = findRunByShell(callerShellId(extra));
-        if (!found) return { content: [{ type: 'text', text: 'This session is not a scheduled task run — nothing to mark.' }] };
+        const shellId = callerShellId(extra);
+        const found = findRunByShell(shellId);
+        if (!found) return noRunResult(shellId);
         const { task, run } = found;
         run.status = 'running';
         run.agentStartedAt = Date.now();
         saveTasks();
         broadcastTasks();
-        return { content: [{ type: 'text', text: `Marked scheduled run of "${task.title}" (#${task.id}) as started.` }] };
+        return { content: [{ type: 'text', text: `Marked scheduled run of "${task.title}" (#${task.id}) as started.${deletedScheduleNote(task)}` }] };
       },
     },
 
@@ -952,7 +1088,7 @@ function init(context) {
       handler: async ({ success, summary }, extra) => {
         const shellId = callerShellId(extra);
         const found = findRunByShell(shellId);
-        if (!found) return { content: [{ type: 'text', text: 'This session is not a scheduled task run — nothing to mark.' }] };
+        if (!found) return noRunResult(shellId);
         const { task, run } = found;
         const ok = success !== false; // default true
         run.status = ok ? 'succeeded' : 'failed';
@@ -970,7 +1106,7 @@ function init(context) {
         if (!stayOpen && shellId && ctx.shells.has(shellId)) {
           try { ctx.closeSession(shellId, 'scheduled'); closed = true; } catch (e) { log_(`auto-close failed for ${shellId}: ${e.message}`); }
         }
-        return { content: [{ type: 'text', text: `Marked scheduled run of "${task.title}" (#${task.id}) as ${run.status}.${closed ? ' Closing this session.' : ''}` }] };
+        return { content: [{ type: 'text', text: `Marked scheduled run of "${task.title}" (#${task.id}) as ${run.status}.${closed ? ' Closing this session.' : ''}${deletedScheduleNote(task)}` }] };
       },
     },
   };
@@ -997,7 +1133,7 @@ function registerRoutes(app, context) {
   app.get('/api/scheduled-tasks', (req, res) => {
     // Enrich each task with a human-readable schedule + project name for the panel,
     // keeping the full stored fields (prompt, runs, nextRun) for editing/history.
-    const enriched = tasks.map(t => ({ ...t, schedule: scheduleLabel(t), projectName: displayName(t.project) }));
+    const enriched = liveTasks().map(t => ({ ...t, schedule: scheduleLabel(t), projectName: displayName(t.project) }));
     // Groups (now the shared "contexts") arrive over /api/contexts + the 'contexts'
     // broadcast, not in this payload.
     // `defaults` (#604) is what an unpinned task actually resolves to, so the form's
@@ -1044,13 +1180,16 @@ function registerRoutes(app, context) {
   });
 
   app.delete('/api/scheduled-tasks/:id', (req, res) => {
-    if (!deleteTask(req.params.id)) return res.status(404).json({ error: 'Task not found' });
-    res.json({ deleted: req.params.id });
+    const del = deleteTask(req.params.id);
+    if (!del) return res.status(404).json({ error: 'Task not found' });
+    // `tombstoned` (#614): unscheduled, but the row is kept until the run still in
+    // flight finishes reporting. The card disappears from the panel either way.
+    res.json({ deleted: req.params.id, tombstoned: !!del.tombstoned, activeSession: del.activeSession });
   });
 
   app.post('/api/scheduled-tasks/:id/run', (req, res) => {
     if (!featureEnabled()) return res.status(403).json({ error: FEATURE_OFF_MSG });
-    const task = tasks.find(t => t.id === req.params.id);
+    const task = findLiveTask(req.params.id);
     if (!task) return res.status(404).json({ error: 'Task not found' });
     // A skipped run is not an error (still 200), but the panel has to be able to
     // say *why* nothing happened — silence on this path is #611. Ask before firing,
@@ -1076,4 +1215,4 @@ function registerRoutes(app, context) {
 
 // The mod loader only uses init/registerRoutes; the extra named exports are for
 // unit tests (test/unit/scheduled-worktree.test.js).
-module.exports = { init, registerRoutes, cleanupWorktree, isGitRepo, scheduledRunPrompt, worktreeContract, enforceRunTimeouts, CONTRACT_TOOLS };
+module.exports = { init, registerRoutes, cleanupWorktree, isGitRepo, scheduledRunPrompt, worktreeContract, enforceRunTimeouts, CONTRACT_TOOLS, purgeTombstonedTasks, TOMBSTONE_TTL_MS };

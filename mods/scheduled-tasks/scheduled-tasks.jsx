@@ -133,6 +133,9 @@ function inside(p, dir) {
 }
 
 // ------------------------------------------------------------------ Task card
+// Mirrors ACTIVE_STATUSES in tools.js: a run that has not self-reported terminal yet.
+const ACTIVE_RUN_STATUSES = ['queued', 'running', 'started'];
+
 function StatusBadge({ status }) {
   // Self-reported run lifecycle (#525): queued → running → done/failed, plus
   // 'ended' when a session closed without self-reporting. Legacy started/completed
@@ -186,7 +189,16 @@ function TaskCard({ task, onEdit }) {
       .finally(() => setBusy(false));
   };
   const toggle = () => api('POST', `/api/scheduled-tasks/${task.id}/enabled`, { enabled: !task.enabled }).catch((e) => alert(e.message));
-  const del = () => { if (confirm(`Delete "${task.title}"?`)) api('DELETE', `/api/scheduled-tasks/${task.id}`).catch((e) => alert(e.message)); };
+  // Deleting a task whose run is still in flight is the case that hit #614, so say
+  // what happens to that run: it is unaffected and can still report its result (the
+  // server keeps the record as a tombstone), but the schedule stops here.
+  const inFlight = last && ACTIVE_RUN_STATUSES.includes(last.status) ? last : null;
+  const del = () => {
+    const warn = inFlight
+      ? `\n\nA run is still in flight (session ${inFlight.sessionId}). It keeps running and can still report its result, but the schedule will not fire again.`
+      : '';
+    if (confirm(`Delete "${task.title}"?${warn}`)) api('DELETE', `/api/scheduled-tasks/${task.id}`).catch((e) => alert(e.message));
+  };
 
   return (
     <div style={{ border: `1px solid ${C.border}`, borderRadius: 6, padding: 10, marginBottom: 8, background: C.bg2, opacity: done ? 0.7 : task.enabled ? 1 : 0.6 }}>
