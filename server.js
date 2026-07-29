@@ -1119,6 +1119,7 @@ const AGENT_CONFIGS = {
     planModeValue: 'plan',
     modelFlag: '--model',        // #592: alias ('opus'/'sonnet'/…) or full id ('claude-fable-5')
     effortFlag: '--effort',      // #592: low | medium | high | xhigh | max
+    allowedToolsFlag: '--allowedTools',  // #612: additive permission allowlist, comma-separated
     resumeFlag: '--resume',
     resumeDefault: '-c'
   },
@@ -1248,7 +1249,20 @@ function validateEffort(value) {
   return EFFORT_LEVELS.includes(v) ? v : null;
 }
 
-function getSpawnArgs(agentType, { sessionId, planMode, worktree, shellId, model, effort }) {
+const MAX_ALLOWED_TOOLS = 8;  // #612: ceiling on one session's --allowedTools list
+
+// A single tool name for --allowedTools. Covers MCP ids (mcp__deepsteve__foo) and
+// plain built-ins (Bash, Edit). Deliberately NOT the `Bash(git *)` specifier form —
+// nothing here needs it, and parens/spaces/globs are exactly what we don't want
+// reaching argv from a persisted file.
+function validateToolName(value) {
+  if (typeof value !== 'string') return null;
+  const v = value.trim();
+  if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(v)) return null;
+  return v;
+}
+
+function getSpawnArgs(agentType, { sessionId, planMode, worktree, shellId, model, effort, allowedTools }) {
   const config = getAgentConfig(agentType);
   const args = [];
 
@@ -1261,6 +1275,7 @@ function getSpawnArgs(agentType, { sessionId, planMode, worktree, shellId, model
   }
 
   args.push(...modelArgs(config, model, effort));
+  args.push(...allowedToolsArgs(config, allowedTools));
 
   if (worktree && config.supportsWorktree) {
     args.push('--worktree', worktree);
@@ -1284,7 +1299,19 @@ function modelArgs(config, model, effort) {
   return args;
 }
 
-function getResumeArgs(agentType, { sessionId, planMode, worktree, shellId, model, effort }) {
+// #612: pre-permit specific tools for this session. Same rule as modelArgs — the
+// caller is not trusted, every name is re-validated here at the argv boundary, and
+// the list is capped so a hand-edited state.json can't blow up the command line.
+// claude's --allowedTools is variadic ("<tools...>"), so we emit ONE comma-joined
+// value rather than N argv items: a variadic parser must not be able to swallow the
+// --worktree / --mcp-config that follow.
+function allowedToolsArgs(config, tools) {
+  if (!config.allowedToolsFlag || !Array.isArray(tools)) return [];
+  const clean = [...new Set(tools.map(validateToolName).filter(Boolean))].slice(0, MAX_ALLOWED_TOOLS);
+  return clean.length ? [config.allowedToolsFlag, clean.join(',')] : [];
+}
+
+function getResumeArgs(agentType, { sessionId, planMode, worktree, shellId, model, effort, allowedTools }) {
   const config = getAgentConfig(agentType);
   const args = [];
 
@@ -1317,6 +1344,10 @@ function getResumeArgs(agentType, { sessionId, planMode, worktree, shellId, mode
   // Same reason for --model/--effort (#592): a scheduled run pinned to a cheap
   // model must not silently revert to the default after a daemon restart.
   args.push(...modelArgs(config, model, effort));
+  // And for --allowedTools (#612): a restart-resumed scheduled run that lost its
+  // pre-permitted self-report tools would wedge on a permission prompt with nobody
+  // there to answer — the exact failure the flag exists to prevent.
+  args.push(...allowedToolsArgs(config, allowedTools));
 
   if (worktree && config.supportsWorktree) {
     args.push('--worktree', worktree);
@@ -2806,7 +2837,7 @@ let stateFrozen = false;  // Set during shutdown to prevent onExit handlers from
 // field it omits is silently wiped for every live shell on a graceful restart
 // (configDir was lost this way, breaking #537 profile resumes — #542).
 function serializeShellEntry(entry) {
-  return { cwd: entry.cwd, claudeSessionId: entry.claudeSessionId, agentType: entry.agentType || 'claude', codexHomeId: entry.codexHomeId || null, configDir: entry.configDir || null, engineType: entry.engineType || 'node-pty', worktree: entry.worktree || null, name: entry.name || null, planMode: !!entry.planMode, model: entry.model || null, effort: entry.effort || null, forkParent: entry.forkParent || null, lastActivity: entry.lastActivity || null, createdAt: entry.createdAt || null, windowId: entry.windowId || null, scheduled: !!entry.scheduled };
+  return { cwd: entry.cwd, claudeSessionId: entry.claudeSessionId, agentType: entry.agentType || 'claude', codexHomeId: entry.codexHomeId || null, configDir: entry.configDir || null, engineType: entry.engineType || 'node-pty', worktree: entry.worktree || null, name: entry.name || null, planMode: !!entry.planMode, model: entry.model || null, effort: entry.effort || null, allowedTools: Array.isArray(entry.allowedTools) && entry.allowedTools.length ? entry.allowedTools : null, forkParent: entry.forkParent || null, lastActivity: entry.lastActivity || null, createdAt: entry.createdAt || null, windowId: entry.windowId || null, scheduled: !!entry.scheduled };
 }
 
 // #561: a session record is never hard-deleted by any runtime path. Every close
@@ -5708,7 +5739,7 @@ function handleWsConnection(ws, req) {
       traceSession('SPAWN', { path: spawnFresh ? 'fresh' : 'resume', shell: id, name: restoredName, worktree: savedWorktree || null, cwd, claude: claudeSessionId, planMode: savedPlanMode, agent: savedAgentType, engine: restoredEngineType });
       const ptySize = { cols: initialCols, rows: initialRows };
 
-      const argOpts = { sessionId: claudeSessionId, planMode: savedPlanMode, worktree: savedWorktree, shellId: id, model: restored.model, effort: restored.effort };
+      const argOpts = { sessionId: claudeSessionId, planMode: savedPlanMode, worktree: savedWorktree, shellId: id, model: restored.model, effort: restored.effort, allowedTools: restored.allowedTools };
       const startArgs = spawnFresh ? getSpawnArgs(savedAgentType, argOpts) : getResumeArgs(savedAgentType, argOpts);
 
       // The connecting client's windowId wins over the saved one: restoring a window
@@ -5718,7 +5749,7 @@ function handleWsConnection(ws, req) {
       // deliverToWindow() it triggered would land nowhere (#551).
       const restoredWindowId = windowId || restored.windowId || null;
       spawnSession(sessionEngine, id, savedAgentType, startArgs, cwd, { ...ptySize, env: sessionEnv(id, { name: restoredName, worktree: savedWorktree, windowId: restoredWindowId, cwd, agentType: savedAgentType, configDir: restored.configDir, codexHomeId }) });
-      shells.set(id, { clients: new Set(), cwd, claudeSessionId, agentType: savedAgentType, codexHomeId, configDir: restored.configDir || null, engine: sessionEngine, engineType: restoredEngineType, worktree: savedWorktree, name: restoredName, planMode: savedPlanMode, model: restored.model || null, effort: restored.effort || null, forkParent: restored.forkParent || null, restored: true, scheduled: !!restored.scheduled, waitingForInput: false, lastActivity: Date.now(), createdAt: restored.createdAt || Date.now(), windowId: restoredWindowId });
+      shells.set(id, { clients: new Set(), cwd, claudeSessionId, agentType: savedAgentType, codexHomeId, configDir: restored.configDir || null, engine: sessionEngine, engineType: restoredEngineType, worktree: savedWorktree, name: restoredName, planMode: savedPlanMode, model: restored.model || null, effort: restored.effort || null, allowedTools: restored.allowedTools || null, forkParent: restored.forkParent || null, restored: true, scheduled: !!restored.scheduled, waitingForInput: false, lastActivity: Date.now(), createdAt: restored.createdAt || Date.now(), windowId: restoredWindowId });
       wireShellOutput(id, initialCols, initialRows);
       recordRecentSession(id);  // bump recency on same-browser reconnect + cross-browser restore
       if (agentConfig.supportsSessionWatch) watchClaudeSessionDir(id);
@@ -5752,13 +5783,13 @@ function handleWsConnection(ws, req) {
             // --resume died fast despite a transcript on disk — transient spawn
             // failure (observed during rapid double-restarts). Same args, one retry.
             tracePath = 'resume-retry';
-            respawnArgs = getResumeArgs(savedAgentType, { sessionId: entry.claudeSessionId, planMode: entry.planMode, worktree: entry.worktree, shellId: id, model: entry.model, effort: entry.effort });
+            respawnArgs = getResumeArgs(savedAgentType, { sessionId: entry.claudeSessionId, planMode: entry.planMode, worktree: entry.worktree, shellId: id, model: entry.model, effort: entry.effort, allowedTools: entry.allowedTools });
           } else {
             // The retry also died fast (unusable transcript), or the fresh spawn's
             // reused --session-id collided. Start over under a new id — last attempt.
             tracePath = 'fresh-fallback';
             newClaudeSessionId = randomUUID();
-            respawnArgs = getSpawnArgs(savedAgentType, { sessionId: newClaudeSessionId, planMode: entry.planMode, worktree: entry.worktree, shellId: id, model: entry.model, effort: entry.effort });
+            respawnArgs = getSpawnArgs(savedAgentType, { sessionId: newClaudeSessionId, planMode: entry.planMode, worktree: entry.worktree, shellId: id, model: entry.model, effort: entry.effort, allowedTools: entry.allowedTools });
           }
           log(`Session ${id} exited after ${elapsed}ms — respawning (${tracePath})`);
           traceSession('SPAWN', { path: tracePath, shell: id, name: entry.name || null, worktree: entry.worktree || null, cwd, claudeOld: entry.claudeSessionId, claude: newClaudeSessionId || entry.claudeSessionId, planMode: !!entry.planMode, elapsedMs: elapsed });
