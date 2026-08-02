@@ -115,10 +115,10 @@ test('bad args: no throw, nothing reported removed', () => {
   assert.deepStrictEqual(cleanupWorktree('/tmp', null, exec), { removed: false, branchDeleted: false });
 });
 
-test('isGitRepo distinguishes repos from plain dirs', (t) => {
-  // isGitRepo uses the production zsh -l -c path — skip where zsh is absent (CI).
-  try { execSync('command -v zsh', { encoding: 'utf8' }); }
-  catch { return t.skip('zsh not available'); }
+test('isGitRepo distinguishes repos from plain dirs', () => {
+  // No zsh skip here any more: isGitRepo is a pure-fs findGitRoot() check, so this
+  // runs on the bare CI runner too. While it shelled out to zsh this test was
+  // skipped there, which is how the gate reached #614's tombstone test unguarded.
   const repo = makeRepo();
   assert.strictEqual(isGitRepo(repo), true);
   const plain = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-sched-plain-'));
