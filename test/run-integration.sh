@@ -91,9 +91,11 @@ if [ -z "$DEEPSTEVE_URL" ]; then
 fi
 
 for f in test/integration/*.test.js; do
-  # -E so SKIP_PATTERN can be an alternation, e.g. "security-auth|tmux-engine" (the public-install
-  # suite skips both). A single-word pattern behaves identically under -E, so existing callers are
-  # unaffected.
+  # -E so SKIP_PATTERN can be an alternation, e.g. "security-auth|tmux-engine". A single-word
+  # pattern behaves identically under -E, so existing callers are unaffected. The only skip in
+  # use is the public-install suite's "tmux-engine" (that image installs just zsh + curl); do
+  # NOT add entries here for features the server under test predates — the public suite runs
+  # each release's own tests against that release, so version skew can't arise (#588).
   if [ -n "$skip" ] && echo "$f" | grep -Eq "$skip"; then
     echo "--- skipping $f ---"
     continue

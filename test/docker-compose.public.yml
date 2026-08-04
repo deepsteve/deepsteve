@@ -1,18 +1,37 @@
+# Runs the test suite against the LAST PUBLISHED RELEASE (Dockerfile.public installs via
+# deepsteve.com/install.sh, which 302s to releases/latest/download/install.sh).
+#
+# This suite is only meaningful when the working tree IS the release under test (#588).
+# .github/workflows/install-integration-tests.yml guarantees that by checking out the tag it
+# resolved before running this file. A local run from main tests main's tests against an older
+# server — the exact skew #588 removed — so check the release out first:
+#
+#   git checkout $(gh api repos/deepsteve/deepsteve/releases/latest --jq .tag_name)
+#   npm run test:docker:public
+#
+# Explicit project name (#588): compose otherwise derives it from this file's parent directory
+# — "test" — which is the SAME project as docker-compose.yml and docker-compose.install.yml,
+# whose services are also named server/test. A `down -v` would then reach into a concurrently
+# running source suite and delete its volumes.
+name: deepsteve-public
+
 services:
   server:
     build:
       context: ..
       dockerfile: test/Dockerfile.public
-    ports:
-      - "3000:3000"
+    # No host port publish (#588): the test container reaches us as server:3000 on the compose
+    # network and the healthcheck runs in-container, so nothing needs one — and 3000:3000
+    # collides with the developer's own daemon, which made this suite unrunnable locally.
     environment:
       - PORT=3000
       - DEEPSTEVE_BIND=0.0.0.0
       # Auth (#536): the test container reaches us as http://server:3000, so allowlist that host.
       - DEEPSTEVE_ALLOW_HOST=server
       # Test mode (#562): required so the test helpers accept this server — they refuse any target
-      # whose /api/version lacks testMode:true, with no bypass. The published build ships #562, so
-      # this enables test mode exactly as in the source-built suites.
+      # whose /api/version lacks testMode:true, with no bypass. Harmless on a release that predates
+      # #562 (it just ignores the variable), because that release's own helpers — the ones this
+      # suite runs, per #588 — predate the requirement too.
       - DEEPSTEVE_TEST_MODE=1
     volumes:
       # Token-only volume (#539): the app lives IN /root/.deepsteve here (unlike docker-compose.yml,

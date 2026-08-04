@@ -1,10 +1,32 @@
 name: Public Install Integration Tests
 
+# Tests the LAST PUBLISHED RELEASE with THAT RELEASE'S OWN TESTS (#588).
+#
+# test/Dockerfile.public installs via `curl deepsteve.com/install.sh | bash`, which 302s to
+# https://github.com/deepsteve/deepsteve/releases/latest/download/install.sh — so the server
+# under test is always the last published release, never main. This job used to run main's
+# test suite against it, and main is always ahead of the last release: every integration test
+# that landed after a release reddened this job until the next release shipped (e.g. #579's
+# context-icon.test.js asserting `iconImage === ''` against a v0.20.2 build with no such field).
+#
+# The fix is the `ref:` on the checkout below: resolve the release install.sh will install, and
+# check out that tag, so the container under test and the tests exercising it are one commit.
+# No per-feature skips, no "expected red" comments — the suite self-heals on every release and
+# answers only its real question: is the deployed build at deepsteve.com healthy?
+#
+# Do not replace the tag checkout with skip patterns for unreleased features; that was the
+# failed mitigation this issue removed. test/unit/public-suite-pin.test.js guards the steps.
+
 on:
   schedule:
     # Daily at 8am UTC
     - cron: '0 8 * * *'
   workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to test (default: the latest published release)'
+        required: false
+        type: string
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -16,11 +38,68 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
+      # releases/latest is the exact thing deepsteve.com/install.sh redirects to, so this is the
+      # same source of truth the server container will install from. Values reach the shell via
+      # env, never string-interpolated into the script body (#479 hardening).
+      - name: Resolve the release under test
+        id: rel
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -e
+          tag="${INPUT_TAG:-}"
+          if [ -z "$tag" ]; then
+            tag=$(gh api "repos/$REPO/releases/latest" --jq .tag_name)
+          fi
+          if [ -z "$tag" ]; then
+            echo "::error::could not resolve a release tag to test"
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "Testing published release $tag"
+
+      # Checks out the RELEASE, not main (#588): the compose file, Dockerfiles,
+      # run-integration.sh, test/helpers and test/integration all come from the tag. The
+      # workflow file itself still comes from the default branch — that is how scheduled
+      # workflows are dispatched — so this file is the one piece that stays current, and it
+      # must keep working against released trees (its contract has been stable since v0.17.0).
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+        with:
+          ref: ${{ steps.rel.outputs.tag }}
+
+      # Separate from the suite run so a broken install.sh fails here, before we spend minutes
+      # building the test image.
+      - name: Start the published server
+        run: docker compose -f test/docker-compose.public.yml up -d --build --wait --wait-timeout 300 server
+
+      # The tag came from the releases API; the server came from install.sh. Normally the same
+      # thing, but a release landing mid-run — or a warm docker layer cache holding an older
+      # install.sh — desyncs them, which is precisely the version-skew failure this job exists
+      # to not have. Name it here instead of letting it surface as confusing assertion noise.
+      # A file read, not GET /api/version: install.sh embeds package.json into the install dir
+      # in every build (release.sh), so this needs no auth token and no version-specific
+      # endpoint.
+      - name: Assert the installed build matches the checked-out tag
+        env:
+          TAG: ${{ steps.rel.outputs.tag }}
+        run: |
+          set -e
+          installed=$(docker compose -f test/docker-compose.public.yml exec -T server \
+                        node -p "require('/root/.deepsteve/package.json').version" | tr -d '\r\n')
+          expected=$(node -p "require('./package.json').version")
+          echo "installed=$installed  checked-out=$expected  ($TAG)"
+          if [ "$installed" != "$expected" ]; then
+            echo "::error::install.sh installed $installed but this job checked out $TAG ($expected). Re-run the job; if it persists, deepsteve.com/install.sh is not serving the latest release."
+            exit 1
+          fi
 
       - name: Run integration tests (public install)
         run: docker compose -f test/docker-compose.public.yml up --build --abort-on-container-exit --exit-code-from test
 
       - name: Cleanup
         if: always()
-        run: docker compose -f test/docker-compose.public.yml down -v
+        # `|| true`: when an earlier step fails before the checkout there is no compose file,
+        # and a second red step would just obscure the real failure.
+        run: docker compose -f test/docker-compose.public.yml down -v || true
