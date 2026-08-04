@@ -122,13 +122,18 @@ function gitRoot(dir) {
   return findGitRoot(dir) || dir;
 }
 
-// True when dir is inside a non-bare git work tree. gitRoot() can't answer this:
-// it returns its input on failure, indistinguishable from "dir IS the root".
+// True when dir is inside a git work tree — the gate for per-run worktree isolation.
+// gitRoot() can't answer this: its `|| dir` fallback makes "not a repo" and "dir IS
+// the root" the same answer. findGitRoot() can, by returning null.
+//
+// Pure-fs for the same reason gitRoot() is (#553), plus one this function taught us:
+// as `zsh -l -c 'git rev-parse --is-inside-work-tree'` it made worktree isolation
+// silently conditional on zsh being installed. Where it isn't, every fire fell back
+// to the shared checkout with nothing logged, and the #614 tombstone test — which
+// drives the whole runTask path — went red on the bare CI runner while the docker
+// suites (which apt-get zsh) stayed green.
 function isGitRepo(dir) {
-  try {
-    return execSync("zsh -l -c 'git rev-parse --is-inside-work-tree'",
-      { cwd: dir, encoding: 'utf8', timeout: 5000 }).trim() === 'true';
-  } catch { return false; }
+  return findGitRoot(dir) !== null;
 }
 
 // launchd-started daemons have a minimal PATH; login zsh matches gitRoot/ensureWorktree.
