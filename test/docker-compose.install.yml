@@ -1,10 +1,20 @@
+# Runs the test suite against a LOCALLY-GENERATED install.sh (test/Dockerfile.install runs
+# `release.sh`'s output, so this catches install-script bugs before the script is published).
+#
+# Explicit project name (#616, same reasoning as #588's on docker-compose.public.yml): compose
+# otherwise derives it from this file's parent directory — "test" — which is the SAME project as
+# docker-compose.yml and docker-compose.public.yml, whose services are also named server/test.
+# A `down -v` would then reach into a concurrently running sibling suite and delete its volumes.
+name: deepsteve-install
+
 services:
   server:
     build:
       context: ..
       dockerfile: test/Dockerfile.install
-    ports:
-      - "3000:3000"
+    # No host port publish (#616): the test container reaches us as server:3000 on the compose
+    # network and the healthcheck runs in-container, so nothing needs one — and 3000:3000
+    # collides with the developer's own daemon, which made this suite unrunnable locally.
     environment:
       - PORT=3000
       - DEEPSTEVE_BIND=0.0.0.0
