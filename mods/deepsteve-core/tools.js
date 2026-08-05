@@ -1,6 +1,23 @@
 const { z } = require('zod');
 const { randomUUID } = require('crypto');
 const path = require('path');
+const { execFileSync } = require('child_process');
+const { mergeWorktree } = require('./merge-worktree');
+
+// git via execFile with an argv array — no shell, so no quoting/injection concerns
+// and no dependence on `zsh -l` for PATH (git is /usr/bin/git, already on the
+// LaunchAgent's PATH; the CI unit runner has no zsh at all). Never throws: a
+// non-zero exit is a value, since "merge failed" is an expected outcome here.
+function runGit(args, cwd) {
+  try {
+    const stdout = execFileSync('git', args, {
+      cwd, encoding: 'utf8', timeout: 120000, stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    return { ok: true, stdout: stdout || '', stderr: '' };
+  } catch (e) {
+    return { ok: false, stdout: e.stdout || '', stderr: e.stderr || e.message || '' };
+  }
+}
 
 // Derive a short, single-line tab name from a shell command (used when a
 // terminal tab is opened with a `command` but no explicit `name`).
@@ -356,6 +373,32 @@ function init(context) {
         deliverToWindow({ type: 'open-session', id, cwd: spawnCwd, name, windowId, loading: true }, windowId);
 
         return { content: [{ type: 'text', text: JSON.stringify({ id, name, cwd: spawnCwd, worktree: worktree || null }) }] };
+      },
+    },
+    merge_worktree: {
+      description: 'Merge the calling session\'s worktree branch into a target branch, running the merge server-side in the checkout that has the target checked out. Use this instead of `git -C <main checkout> merge` from Bash: Claude Code 2.1.222+ isolates worktree sessions and refuses any Bash command that points git at the shared checkout, so the Bash form cannot work from a worktree. With no `target`, merges into whatever branch the main checkout currently has checked out. Refuses (without changing anything) when the target checkout is dirty, and aborts the merge on conflict so the target is left untouched. Commit your own worktree changes first — this merges committed work only.',
+      schema: {
+        target: z.string().optional().describe('Branch to merge into. Defaults to the branch currently checked out in the main worktree.'),
+        session_id: z.string().optional().describe('Caller session ID (auto-detected if omitted).'),
+      },
+      handler: async ({ target, session_id }, extra) => {
+        const callerId = session_id || extra?.requestInfo?.url?.searchParams?.get('shellId');
+        const caller = callerId ? shells.get(callerId) : null;
+        if (!caller) {
+          return { content: [{ type: 'text', text: `Session "${callerId || 'unknown'}" not found.` }], isError: true };
+        }
+        const { cwd, repoRoot } = sessionPaths(caller);
+        if (!cwd || !repoRoot) {
+          return { content: [{ type: 'text', text: 'Could not resolve this session\'s working directory.' }], isError: true };
+        }
+        const result = mergeWorktree({ git: runGit, worktreeCwd: cwd, repoRoot, target });
+        log(`[MCP] merge_worktree: ${result.branch || '?'} -> ${result.target || '?'} = ${result.status}`);
+        // Only `merged` is a success; every other status left the target unchanged
+        // and needs the agent to stop and report rather than continue the skill.
+        return {
+          content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+          ...(result.status === 'merged' ? {} : { isError: true }),
+        };
       },
     },
     open_browser_tab: {

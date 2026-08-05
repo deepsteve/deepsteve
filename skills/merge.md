@@ -8,59 +8,57 @@ The user wants to merge their current worktree's branch into a **target branch**
 
 By default the target is the branch currently checked out in the **main worktree** (the primary checkout) — so if you work on a feature branch there, merges follow it automatically instead of always going to `main`. If the user passed a branch name as an argument to `/merge`, that argument is the target instead.
 
-**Definition of done**: a successful merge is not complete until this session is closed (step 10). Never close the session on any STOP path, or when `in_worktree=false`.
+**Definition of done**: a successful merge is not complete until this session is closed (step 9). Never close the session on any STOP path, or when `in_worktree=false`.
+
+**Two rules about Bash in this skill.** Claude Code 2.1.222+ isolates worktree sessions and statically inspects every Bash command, refusing any it can't prove stays inside the worktree:
+
+- **Never run `git -C <other dir>`, `cd <other dir> && git …`, or any command naming `git` more than once.** All three are refused outright. That is why the merge itself goes through the `mcp__deepsteve__merge_worktree` tool (step 6) — the daemon runs it outside the guard — and why every `git` step below is its own separate Bash call.
+- Plain single-`git` commands **inside** this worktree are fine.
 
 Steps:
 
-1. **Gather state in one shot**: Run this single bash invocation and parse the `key=value` lines from its output. Use the resulting `branch`, `main_path`, `in_worktree`, `detected_target`, and `dirty` values for the rest of the steps.
+1. **Gather state.** Call `mcp__deepsteve__get_my_session_id`, then `mcp__deepsteve__get_session_info` with that id. From the result take `repoRoot` (the main checkout) and `worktree`; `in_worktree` is true when `worktree` is not null. Then run these as **two separate** bash invocations:
 
    ```sh
-   common=$(git rev-parse --git-common-dir)
-   gitdir=$(git rev-parse --git-dir)
-   [ "$(cd "$gitdir" && pwd)" = "$(cd "$common" && pwd)" ] && echo "in_worktree=false" || echo "in_worktree=true"
-   echo "branch=$(git branch --show-current)"
-   main_path=$(dirname "$(cd "$common" && pwd)")
-   echo "main_path=$main_path"
-   echo "detected_target=$(git -C "$main_path" branch --show-current)"
-   echo "dirty=$(git status --porcelain | wc -l | tr -d ' ')"
+   git branch --show-current
    ```
+   ```sh
+   git status --porcelain
+   ```
+
+   Call the first `branch` and the line count of the second `dirty`.
 
 2. **Resolve the target branch**:
    - If the user passed a branch-name argument to `/merge`, `target` = that argument.
-   - Otherwise `target` = `detected_target`.
-   - If `target` is empty (e.g. the main worktree is on a detached HEAD and no argument was given), ask the user which branch to merge into before continuing.
+   - Otherwise leave `target` unset — step 6 defaults it to whatever the main checkout has checked out, and reports back which branch that was.
    - If `target` equals `branch`, you're already on the target — there is nothing to merge. Tell the user and STOP.
 
 3. **Derive the commit subject** (used in steps 4 and 5):
    - If `branch` matches `*github-issue-<n>*`: run `gh issue view <n> --json title -q .title` to fetch the current title. Subject is `<title> (#<n>)`. If `gh` fails, fall back to the next bullet.
-   - Otherwise: subject is `Merge <branch> into <target>`.
+   - Otherwise: subject is `Merge <branch> into <target>` if the user named a target, and just `Merge <branch>` if they didn't (the target isn't resolved until step 6 — do not run a command to find it out).
    - Do NOT include a `Co-Authored-By` trailer.
 
-4. **If `in_worktree=false`**: This is not a worktree session — you're already on the branch in the main checkout, so the worktree merge flow doesn't apply. If `dirty>0`, run `git add -A && git commit -m "<subject>" && git push` in a single bash invocation. If `dirty=0`, run `git push`. Then STOP — skip all remaining steps, and do NOT close the session.
+4. **If `in_worktree=false`**: This is not a worktree session — you're already on the branch in the main checkout, so the worktree merge flow doesn't apply. If `dirty>0`, run `git add -A`, then `git commit -m "<subject>"`, then `git push` as three separate bash invocations. If `dirty=0`, just run `git push`. Then STOP — skip all remaining steps, and do NOT close the session.
 
-5. **Auto-commit dirty changes (worktree path)**: If `dirty>0`, run `git add -A && git commit -m "<subject>"`.
+5. **Auto-commit dirty changes (worktree path)**: If `dirty>0`, run these as **two separate** bash invocations (never `git add -A && git commit` — two `git`s in one command is refused):
 
-6. **Locate the merge directory** (`merge_dir` — the worktree where `target` is checked out; merges always run against the worktree that has the branch checked out):
-   - If `target` equals `detected_target`: `merge_dir` = `main_path` (the common case).
-   - Otherwise, find which worktree holds `target`:
-     ```sh
-     git worktree list --porcelain | awk -v t="refs/heads/<target>" '/^worktree /{wt=$2} /^branch /{if($2==t){print wt; exit}}'
-     ```
-     - If it prints a path, that's `merge_dir`.
-     - If it prints nothing, `target` isn't checked out in any worktree. Verify it exists with `git rev-parse --verify <target>`:
-       - If it exists, check it out in the main worktree: `git -C <main_path> checkout <target>` (this fails if the main worktree is dirty — if so, show the error and STOP), then set `merge_dir` = `main_path`. Tell the user you switched the main worktree to `<target>` to perform the merge.
-       - If it doesn't exist, tell the user the branch `<target>` wasn't found and STOP.
+   ```sh
+   git add -A
+   ```
+   ```sh
+   git commit -m "<subject>"
+   ```
 
-7. **Check the target checkout, then merge**:
-   - First confirm the target checkout isn't dirty: run `git -C <merge_dir> status --porcelain`. If it prints any lines, the **target** checkout at `<merge_dir>` has uncommitted changes that `git merge` will refuse to overwrite (it aborts pre-flight, leaving `<target>` untouched). STOP and tell the user: the target checkout — `<merge_dir>`, **not** the current worktree — has uncommitted changes; they should commit or stash them *in that checkout*, then re-run `/merge`. Do NOT auto-commit, stash, or rebase their changes yourself — that WIP is separate work in the main checkout.
-   - Otherwise, run `git -C <merge_dir> merge <branch> --no-edit` to merge the worktree branch into `<target>` from the directory that has it checked out. Do NOT use `git checkout <target>` in the current worktree — it is checked out in `<merge_dir>`.
+6. **Merge**: Call `mcp__deepsteve__merge_worktree`, passing `target` only if the user named one. It resolves the target, finds the checkout that has it checked out, refuses if that checkout is dirty, and merges — all server-side. Do NOT attempt the merge in Bash; it cannot work from a worktree session.
 
-8. **Handle the result**:
-   - **Success**: Do not write the summary yet — it goes in step 10, in the same message as the close. Continue to steps 9 and 10.
-   - **Conflict**: Run `git -C <merge_dir> merge --abort` to leave `<target>` clean. Then rebase the worktree branch onto the target (`git rebase <target>`), resolve any conflicts, and retry the merge from step 7. If the rebase itself fails with conflicts you cannot resolve, abort the rebase (`git rebase --abort`), tell the user, and STOP.
-   - **Local changes in the target** (`error: Your local changes ... would be overwritten by merge`, with no merge actually started — no `MERGE_HEAD`): the step-7 guard should have caught this, but if it slips through, handle it the same way — STOP and tell the user to commit or stash WIP in `<merge_dir>`, then re-run `/merge`. Do NOT run `git merge --abort` (there is no merge in progress) or rebase — this is **not** a Conflict, and rebasing the branch can't fix a dirty target.
-   - **Other failure**: Show the error output to the user. STOP here — do not proceed to steps 9 or 10.
+7. **Handle the result** — branch on the `status` field it returns:
+   - **`merged`**: Success. Do not write the summary yet — it goes in step 9, in the same message as the close. Continue to steps 8 and 9.
+   - **`conflict`**: The merge was already aborted for you, so the target is untouched. Rebase this worktree's branch onto the target — `git rebase <target>` (a single `git`, inside this worktree, so it is allowed) — resolve any conflicts, then retry from step 6. If the rebase itself fails with conflicts you cannot resolve, run `git rebase --abort`, tell the user, and STOP.
+   - **`target-dirty`**: The **target** checkout (`mergeDir` in the result — **not** this worktree) has uncommitted changes. STOP and tell the user to commit or stash them *in that checkout*, then re-run `/merge`. Do NOT auto-commit, stash, or rebase their changes yourself — that WIP is separate work in the main checkout.
+   - **`target-not-checked-out`**: The branch exists but no worktree has it checked out, and this session may not check it out for them. Tell the user to check it out in `repoRoot` first, then STOP.
+   - **`no-such-branch`** / **`no-target`** / **`detached`** / **`same-branch`**: Report the tool's `message` to the user and STOP.
+   - **`failed`** or any other status: Show the tool's `output`/`message` to the user. STOP here — do not proceed to steps 8 or 9.
 
-9. **Close the GitHub issue** (success only): If `branch` matches `*github-issue-<n>*`, run `gh issue close <n> --comment "Merged into <target>."`. Otherwise skip silently. If it fails, say so and continue to step 10 anyway.
+8. **Close the GitHub issue** (success only): If `branch` matches `*github-issue-<n>*`, run `gh issue close <n> --comment "Merged into <target>."`. Otherwise skip silently. If it fails, say so and continue to step 9 anyway.
 
-10. **Report and close this session — in ONE message** (success only): After step 9 returns, write your one- or two-line success summary (with the merge output) and call `mcp__deepsteve__close_session` (no arguments — it auto-detects the calling session) in that same assistant message; text written after that call is cut off when the session terminates. Never end your turn on a success summary without having called it — that is a failed merge, not a finished one.
+9. **Report and close this session — in ONE message** (success only): After step 8 returns, write your one- or two-line success summary (with the merge output from step 6) and call `mcp__deepsteve__close_session` (no arguments — it auto-detects the calling session) in that same assistant message; text written after that call is cut off when the session terminates. Never end your turn on a success summary without having called it — that is a failed merge, not a finished one.
