@@ -239,6 +239,33 @@ ds_linger_enabled() {
 # to emit — a heredoc expands when it EXECUTES, and a function body in a sourced file
 # is no different. Consequence to respect when editing: neither body may contain a bare
 # `$`, a backtick, or a backslash that is not an intended expansion.
+#
+# Non-obvious directives in the systemd unit, all of them load-bearing:
+#
+#   KillMode=process      THE important one. systemd's default is control-group: on
+#                         stop it SIGKILLs the whole cgroup, and cgroup membership is
+#                         inherited across fork() — so the tmux server the daemon
+#                         spawned dies with it. tmux has been the default engine since
+#                         #620 and durable sessions are the entire reason to run
+#                         deepsteve on a remote box, so the default would make every
+#                         restart.sh on Linux destroy every session. macOS does not
+#                         have this problem: launchctl unload leaves the daemonized
+#                         tmux server alone. Do not remove this line.
+#   TimeoutStopSec=30     Graceful shutdown takes ~12s worst case (8s /exit + 2s
+#                         SIGTERM + 2s SIGKILL + drain). The 90s default leaves
+#                         restart.sh's own 15s wait unrelated to the manager's
+#                         patience; 30s is comfortably above the real cost and bounded.
+#   DEEPSTEVE_LOG_DIR     The definition already knows the log dir, so tell the daemon
+#                         rather than making logging.js re-derive it. That turns the
+#                         "must mirror release.sh's LOG_DIR choices" coupling logging.js
+#                         has carried since #557 into a fallback for older installs.
+#   ExecStart="..."       systemd splits on whitespace with no shell, so an unquoted
+#                         path breaks on a $HOME containing a space.
+#   /usr/sbin:/sbin       Parity with the plist, which has always had them.
+#
+# Deliberately ABSENT: After=network.target (inert in a user unit, and we bind
+# loopback), and /opt/homebrew/bin — that omission is the documented reason
+# bin-path.js's FALLBACK_DIRS exists, so adding it here is a separate decision.
 ds_service_write() {
     local sp ds_install ds_log ds_port_val ds_node node_bin
     # Named ds_node, not NODE_PATH: that is a real Node environment variable (module
@@ -281,6 +308,8 @@ ds_service_write() {
         <string>127.0.0.1</string>
         <key>PATH</key>
         <string>$ds_install/node/bin:$HOME/.local/bin:$node_bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>DEEPSTEVE_LOG_DIR</key>
+        <string>$ds_log</string>
     </dict>
     <key>RunAtLoad</key>
     <true/>
@@ -297,18 +326,21 @@ PLISTEOF
         cat > "$sp" << UNITEOF
 [Unit]
 Description=deepsteve daemon
-After=network.target
 
 [Service]
 Type=simple
-ExecStart=$ds_node $ds_install/server.js
+ExecStart="$ds_node" "$ds_install/server.js"
 WorkingDirectory=$ds_install
 Environment=NODE_ENV=production
 Environment=PORT=$ds_port_val
 Environment=DEEPSTEVE_BIND=127.0.0.1
-Environment=PATH=$ds_install/node/bin:$HOME/.local/bin:$node_bin:/usr/local/bin:/usr/bin:/bin
+Environment=DEEPSTEVE_LOG_DIR=$ds_log
+Environment=PATH=$ds_install/node/bin:$HOME/.local/bin:$node_bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
 Restart=always
 RestartSec=5
+KillMode=process
+TimeoutStopSec=30
+SyslogIdentifier=deepsteve
 StandardOutput=append:$ds_log/deepsteve.log
 StandardError=append:$ds_log/deepsteve.error.log
 

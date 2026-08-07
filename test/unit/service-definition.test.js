@@ -109,6 +109,55 @@ test('both definitions bind loopback and use the same port', () => {
   assert.match(unit, /^Environment=PORT=3000$/m);
 });
 
+test('the systemd unit sets KillMode=process — without it every restart kills every session', () => {
+  // The single most important line in the unit, and the one most likely to be
+  // "cleaned up" by someone who does not know why it is there.
+  //
+  // systemd's default is KillMode=control-group: on stop it SIGKILLs the entire
+  // cgroup. cgroup membership is inherited across fork(), so the tmux server the
+  // daemon spawned is in deepsteve.service's cgroup and dies with it. tmux has been
+  // the default engine since #620 and surviving a restart is the whole reason to run
+  // deepsteve on a remote box — so the default turns every ./restart.sh on Linux into
+  // "lose all your sessions", the exact opposite of macOS, where launchctl unload
+  // leaves the daemonized tmux server alone.
+  const unit = fs.readFileSync(path.join(FIXTURES, 'service-linux.service'), 'utf8');
+  assert.match(unit, /^KillMode=process$/m,
+    'KillMode=process is what keeps the tmux server alive across a daemon restart');
+});
+
+test('the systemd unit bounds shutdown above the real worst case', () => {
+  // Graceful shutdown is ~12s worst case (8s /exit + 2s SIGTERM + 2s SIGKILL + drain),
+  // and restart.sh waits 15s. Below ~20s systemd would start killing mid-shutdown and
+  // state.json could be lost; the 90s default is unrelated to either number.
+  const unit = fs.readFileSync(path.join(FIXTURES, 'service-linux.service'), 'utf8');
+  const m = unit.match(/^TimeoutStopSec=(\d+)$/m);
+  assert.ok(m, 'TimeoutStopSec must be set explicitly');
+  assert.ok(Number(m[1]) >= 20, `TimeoutStopSec=${m[1]} is below the ~12s graceful shutdown + margin`);
+});
+
+test('both definitions hand the daemon its own log dir', () => {
+  // logging.js:38 already prefers env.DEEPSTEVE_LOG_DIR, so passing it here costs no JS
+  // change and demotes the "must mirror release.sh" duplication to a fallback for
+  // installs whose definition predates this.
+  const plist = fs.readFileSync(path.join(FIXTURES, 'service-darwin.plist'), 'utf8');
+  const unit = fs.readFileSync(path.join(FIXTURES, 'service-linux.service'), 'utf8');
+  assert.match(plist, /<key>DEEPSTEVE_LOG_DIR<\/key>\s*\n\s*<string>\{\{HOME\}\}\/Library\/Logs<\/string>/);
+  assert.match(unit, /^Environment=DEEPSTEVE_LOG_DIR=\{\{HOME\}\}\/\.local\/share\/deepsteve\/logs$/m);
+});
+
+test('ExecStart is quoted — systemd splits on whitespace with no shell', () => {
+  const unit = fs.readFileSync(path.join(FIXTURES, 'service-linux.service'), 'utf8');
+  assert.match(unit, /^ExecStart="[^"]+" "[^"]+"$/m,
+    'an unquoted ExecStart breaks on a $HOME containing a space');
+});
+
+test('the unit does not order itself after network.target', () => {
+  // Inert in a USER unit — network.target is a system target with no analogue in the
+  // user manager — and we bind loopback, so there is nothing to wait for.
+  const unit = fs.readFileSync(path.join(FIXTURES, 'service-linux.service'), 'utf8');
+  assert.ok(!/network\.target/.test(unit));
+});
+
 test('the systemd unit writes logs to FILES, not the journal', () => {
   // `append:` is what gives the daemon an O_APPEND fd it owns — which is the entire
   // premise of logging.js's rotate-by-ftruncate design. `journal` would hand it a
@@ -125,12 +174,33 @@ test('both PATHs include the bundled node dir and ~/.local/bin', () => {
     const src = fs.readFileSync(path.join(FIXTURES, f), 'utf8');
     assert.ok(src.includes('{{HOME}}/.deepsteve/node/bin'), `${f}: bundled node dir`);
     assert.ok(src.includes('{{HOME}}/.local/bin'), `${f}: ~/.local/bin`);
+    assert.ok(src.includes('/usr/sbin:/sbin'), `${f}: sbin dirs — the two PATHs must match`);
     assert.ok(!src.includes('/opt/homebrew/bin'),
       `${f}: still omits /opt/homebrew/bin — bin-path.js's FALLBACK_DIRS covers it`);
   }
 });
 
 // --- real systemd validation ---------------------------------------------
+
+test('launchd\'s own parser accepts the plist', (t) => {
+  // The darwin counterpart to systemd-analyze below: plutil is the real plist parser,
+  // so it catches malformed XML that a regex never would (an unescaped & in $HOME, a
+  // <key> without its <string>, a mis-nested dict). Skipped off macOS; between the two
+  // of them, CI and a dev machine cover one arm each for real.
+  let plutil;
+  try {
+    plutil = String(execFileSync('sh', ['-c', 'command -v plutil'], { encoding: 'utf8' })).trim();
+  } catch { /* not macOS */ }
+  if (!plutil) return t.skip('plutil not available on this platform');
+
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-plutil-'));
+  const p = path.join(dir, 'com.deepsteve.plist');
+  fs.writeFileSync(p, fs.readFileSync(path.join(FIXTURES, 'service-darwin.plist'), 'utf8')
+    .split('{{NODE}}').join('/usr/bin/true')
+    .split('{{NODEDIR}}').join('/usr/bin')
+    .split('{{HOME}}').join(dir));
+  execFileSync(plutil, ['-lint', p], { stdio: ['ignore', 'pipe', 'pipe'] });
+});
 
 test('systemd itself accepts the unit', (t) => {
   // The only check here that understands systemd. GitHub's ubuntu-latest runners are

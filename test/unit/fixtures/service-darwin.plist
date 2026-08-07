@@ -21,6 +21,8 @@
         <string>127.0.0.1</string>
         <key>PATH</key>
         <string>{{HOME}}/.deepsteve/node/bin:{{HOME}}/.local/bin:{{NODEDIR}}:{{NODEDIR}}:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>DEEPSTEVE_LOG_DIR</key>
+        <string>{{HOME}}/Library/Logs</string>
     </dict>
     <key>RunAtLoad</key>
     <true/>
