@@ -95,16 +95,10 @@ fi
 INSTALL_DIR="$HOME/.deepsteve"
 NODE_PATH=$(which node)
 
-if [ "$OS" = "Darwin" ]; then
-  SERVICE_PATH="$HOME/Library/LaunchAgents/com.deepsteve.plist"
-  LOG_DIR="$HOME/Library/Logs"
-  mkdir -p "$HOME/Library/LaunchAgents"
-else
-  SERVICE_PATH="$HOME/.config/systemd/user/deepsteve.service"
-  LOG_DIR="$HOME/.local/share/deepsteve/logs"
-  mkdir -p "$HOME/.config/systemd/user"
-  mkdir -p "$LOG_DIR"
-fi
+# The SERVICE_PATH / LOG_DIR branch that used to live here now lives in service.sh
+# (#621), which is embedded below and sourced before anything needs it —
+# ds_service_write creates both directories itself. $OS above is still needed for the
+# node download (platform + arch + checksum), which is a different question.
 
 mkdir -p "$INSTALL_DIR/public/js"
 mkdir -p "$INSTALL_DIR/public/css"
@@ -200,76 +194,30 @@ embed_binary "public/favicon.png" "public/favicon.png"
 embed_binary "public/icon-192.png" "public/icon-192.png"
 embed_binary "public/icon-512.png" "public/icon-512.png"
 
-# --- Uninstall script (use embed_text to avoid nested heredoc issues) ---
+# --- Shell library + entry points (use embed_text to avoid nested heredoc issues) ---
+# service.sh must be embedded BEFORE the source line below; uninstall.sh and status.sh
+# both source it from $INSTALL_DIR at run time. This is the ship list restart.sh's `cp`
+# mirrors, and test/unit/shell-deploy.test.js asserts the two agree.
+embed_text "service.sh" "service.sh"
 embed_text "uninstall.sh" "uninstall.sh"
+embed_text "status.sh" "status.sh"
 {
-  echo 'chmod +x "$INSTALL_DIR/uninstall.sh"'
+  # service.sh is deliberately NOT chmod +x — it is a sourced library, never an entry
+  # point, which is what keeps `./service.sh restart` from existing (see its header).
+  echo 'chmod +x "$INSTALL_DIR/uninstall.sh" "$INSTALL_DIR/status.sh"'
+  echo 'chmod 644 "$INSTALL_DIR/service.sh"'
   echo ""
 } >> "$OUT"
 
-# --- Service file (platform-conditional, needs variable expansion at install time) ---
-# Uses unquoted heredoc delimiters so $VARS expand at install time
+# --- Service definition ---
+# The plist and unit bodies live in service.sh (embedded above), so there is exactly
+# one copy of each and restart.sh/uninstall.sh drive the same verbs (#621). The
+# unquoted heredocs inside ds_service_write still expand at INSTALL time — a heredoc
+# expands when it executes, and a function body in a sourced file is no different — so
+# the emitted files are byte-identical to what this block used to produce.
 {
-  echo 'if [ "$OS" = "Darwin" ]; then'
-  echo 'cat > "$SERVICE_PATH" << PLISTEOF'
-  echo '<?xml version="1.0" encoding="UTF-8"?>'
-  echo '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">'
-  echo '<plist version="1.0">'
-  echo '<dict>'
-  echo '    <key>Label</key>'
-  echo '    <string>com.deepsteve</string>'
-  echo '    <key>ProgramArguments</key>'
-  echo '    <array>'
-  echo '        <string>$NODE_PATH</string>'
-  echo '        <string>$INSTALL_DIR/server.js</string>'
-  echo '    </array>'
-  echo '    <key>WorkingDirectory</key>'
-  echo '    <string>$INSTALL_DIR</string>'
-  echo '    <key>EnvironmentVariables</key>'
-  echo '    <dict>'
-  echo '        <key>NODE_ENV</key>'
-  echo '        <string>production</string>'
-  echo '        <key>PORT</key>'
-  echo '        <string>3000</string>'
-  echo '        <key>DEEPSTEVE_BIND</key>'
-  echo '        <string>127.0.0.1</string>'
-  echo '        <key>PATH</key>'
-  echo '        <string>$INSTALL_DIR/node/bin:$HOME/.local/bin:$(dirname $NODE_PATH):/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>'
-  echo '    </dict>'
-  echo '    <key>RunAtLoad</key>'
-  echo '    <true/>'
-  echo '    <key>KeepAlive</key>'
-  echo '    <true/>'
-  echo '    <key>StandardOutPath</key>'
-  echo '    <string>$LOG_DIR/deepsteve.log</string>'
-  echo '    <key>StandardErrorPath</key>'
-  echo '    <string>$LOG_DIR/deepsteve.error.log</string>'
-  echo '</dict>'
-  echo '</plist>'
-  echo 'PLISTEOF'
-  echo 'else'
-  echo 'cat > "$SERVICE_PATH" << UNITEOF'
-  echo '[Unit]'
-  echo 'Description=deepsteve daemon'
-  echo 'After=network.target'
-  echo ''
-  echo '[Service]'
-  echo 'Type=simple'
-  echo 'ExecStart=$NODE_PATH $INSTALL_DIR/server.js'
-  echo 'WorkingDirectory=$INSTALL_DIR'
-  echo 'Environment=NODE_ENV=production'
-  echo 'Environment=PORT=3000'
-  echo 'Environment=DEEPSTEVE_BIND=127.0.0.1'
-  echo 'Environment=PATH=$INSTALL_DIR/node/bin:$HOME/.local/bin:$(dirname $NODE_PATH):/usr/local/bin:/usr/bin:/bin'
-  echo 'Restart=always'
-  echo 'RestartSec=5'
-  echo 'StandardOutput=append:$LOG_DIR/deepsteve.log'
-  echo 'StandardError=append:$LOG_DIR/deepsteve.error.log'
-  echo ''
-  echo '[Install]'
-  echo 'WantedBy=default.target'
-  echo 'UNITEOF'
-  echo 'fi'
+  echo '. "$INSTALL_DIR/service.sh"'
+  echo 'ds_service_write || { echo "deepsteve: could not write the service definition" >&2; exit 1; }'
   echo ""
 } >> "$OUT"
 
@@ -278,8 +226,13 @@ cat >> "$OUT" << 'POSTAMBLE'
 cd "$INSTALL_DIR"
 npm install
 
-# Fix node-pty spawn-helper permissions
-find "$INSTALL_DIR/node_modules/node-pty" -name "spawn-helper" -exec chmod +x {} \;
+# Fix node-pty spawn-helper permissions.
+# Tolerate a missing dir: install.sh runs under `set -e`, so if npm install didn't
+# produce node_modules/node-pty, `find` exiting nonzero used to abort the installer
+# right here — BEFORE the service was ever written or started, leaving a half-install
+# with no daemon and no explanation. tmux is the default engine since #620, so an
+# absent node-pty is degraded, not fatal.
+find "$INSTALL_DIR/node_modules/node-pty" -name "spawn-helper" -exec chmod +x {} \; 2>/dev/null || true
 
 # Stamp install-source marker so the server knows this is a curl-pipe install.
 # Used by the auto-update system (GET /api/version, POST /api/update/curl-reinstall).
@@ -298,16 +251,18 @@ MARKEREOF
 # starts (below), because they need the auth token (#536/#538), which the server creates on
 # first boot.
 
-if [ "$OS" = "Darwin" ]; then
-  launchctl unload "$SERVICE_PATH" 2>/dev/null
-  launchctl load "$SERVICE_PATH"
+if ds_manager_available; then
+  ds_service_stop
+  ds_service_start || {
+    echo "deepsteve: the service manager refused to start the daemon. Try:" >&2
+    ds_start_hint >&2
+    exit 1
+  }
+  # Prints the loginctl enable-linger advice on Linux when lingering is off, so a
+  # headless install learns that the daemon dies at logout. Never enables it silently.
+  ds_maybe_enable_linger
 else
-  if command -v systemctl &>/dev/null && systemctl --user status &>/dev/null 2>&1; then
-    systemctl --user daemon-reload
-    systemctl --user enable --now deepsteve
-  else
-    echo "Note: systemd not available. Start manually: node $INSTALL_DIR/server.js"
-  fi
+  echo "Note: no service manager available. Start manually: node $INSTALL_DIR/server.js"
 fi
 
 # Global MCP registrations run AFTER the server is up so the auth token exists (#536/#538).
@@ -323,7 +278,13 @@ fi
 # get a separate per-session config carrying the token; this global one is only for `claude` runs
 # outside deepsteve.
 if command -v claude &>/dev/null; then
-    DS_TOKEN=$(cat "$HOME/.deepsteve/auth-token" 2>/dev/null)
+    # `|| true`: install.sh runs under `set -e`, and an assignment whose command
+    # substitution fails aborts the script. The token only exists once the daemon has
+    # booted and written it, so on any box where the daemon did NOT start — a Linux
+    # host with no systemd user bus being the case #621 cares about — the installer
+    # used to die right here, silently, before printing the "start it manually"
+    # instructions the user needed. An empty token is handled two lines down.
+    DS_TOKEN=$(cat "$HOME/.deepsteve/auth-token" 2>/dev/null || true)
     if [ -n "$DS_TOKEN" ]; then
         claude mcp add --scope user --transport http deepsteve http://localhost:3000/mcp \
             --header "Authorization: Bearer $DS_TOKEN" 2>/dev/null || true
