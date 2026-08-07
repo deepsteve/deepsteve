@@ -81,7 +81,14 @@ async function waitFor(check, what, timeoutMs = 15000, intervalMs = 100) {
 }
 
 async function startDaemon() {
-  const env = { ...process.env, HOME, PORT: String(PORT), TMUX_TMPDIR: path.join(tmpRoot, 'tmux') };
+  // TMUX_TMPDIR must not just be SET, it must EXIST: tmux falls back to /tmp when
+  // it can't use the directory, which puts this daemon's sessions on the real
+  // per-UID socket — the exact isolation failure the variable is here to prevent.
+  // Harmless while node-pty was the default and no tmux session was ever created;
+  // since #620 it leaked a ds-* session onto the developer's socket per run.
+  const tmuxTmp = path.join(tmpRoot, 'tmux');
+  fs.mkdirSync(tmuxTmp, { recursive: true, mode: 0o700 });
+  const env = { ...process.env, HOME, PORT: String(PORT), TMUX_TMPDIR: tmuxTmp };
   delete env.CLAUDECODE;
   for (const k of Object.keys(env)) if (k.startsWith('DEEPSTEVE_')) delete env[k];
   // Suppress the cold-start browser auto-open (see window-restore.test.js): plant
