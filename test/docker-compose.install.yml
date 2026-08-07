@@ -59,7 +59,10 @@ services:
     volumes:
       - ds_token:/auth   # read the server-seeded auth token (#539)
     # Copy the token where the test helper reads it (~/.deepsteve/auth-token), then run files
-    # serially (one process each); skip tmux — install.sh has no tmux.
+    # serially (one process each). No skip pattern any more (#621): tmux became a declared
+    # dependency off macOS, so install.sh refuses to run without it and Dockerfile.install
+    # now installs it — which means this suite covers the tmux engine too, where it used
+    # to skip those tests for want of the binary.
     # See test/run-integration.sh for why --test-concurrency=1 isn't enough.
     command:
       - sh
@@ -67,7 +70,7 @@ services:
       - |
         set -e
         cp /auth/token /root/.deepsteve/auth-token
-        exec sh test/run-integration.sh tmux-engine
+        exec sh test/run-integration.sh
 
 volumes:
   ds_token:

@@ -1,0 +1,129 @@
+// tmux is a declared dependency off macOS (#620/#621).
+//
+// The trade differs by platform. On macOS node-pty is a supported fallback: the daemon
+// restarts when the user asks it to, and losing sessions is an annoyance. On Linux the
+// service manager restarts the daemon on every crash and every unattended upgrade, so
+// "sessions die with the daemon" means they die at moments nobody chose — on the very
+// box whose purpose is staying up.
+//
+// server.js cannot be imported here (engines/node-pty.js's top-level require('node-pty')
+// has no binding under the unit job's --ignore-scripts), so the settings thunk is
+// extracted and evaluated in a vm — the same technique codex-lifecycle.test.js uses.
+const { test } = require('node:test');
+const assert = require('node:assert');
+const fs = require('fs');
+const path = require('path');
+const vm = require('vm');
+
+const REPO = path.join(__dirname, '..', '..');
+const serverSource = fs.readFileSync(path.join(REPO, 'server.js'), 'utf8');
+
+/** Evaluate the `engine` setting's `values` thunk with tmuxEngine/TMUX_REQUIRED injected. */
+function engineValues({ tmuxEngine, TMUX_REQUIRED }) {
+  const start = serverSource.indexOf('    values: () => {');
+  assert.ok(start >= 0, 'could not find the engine values thunk — did its shape change?');
+  const end = serverSource.indexOf('\n    } },', start);
+  assert.ok(end > start, 'could not find the end of the engine values thunk');
+  const body = serverSource.slice(start + '    values: '.length, end + '\n    }'.length);
+  const ctx = { tmuxEngine, TMUX_REQUIRED, result: null };
+  vm.runInNewContext(`result = (${body})()`, ctx);
+  // Back into this realm: an array built inside the vm has a different Array prototype,
+  // so deepStrictEqual would reject it as "same structure, not reference-equal".
+  return JSON.parse(JSON.stringify(ctx.result));
+}
+
+test('macOS keeps node-pty as a supported choice', () => {
+  assert.deepStrictEqual(
+    engineValues({ tmuxEngine: {}, TMUX_REQUIRED: false }),
+    ['node-pty', 'tmux'],
+  );
+});
+
+test('where tmux is required, node-pty is not offered once tmux exists', () => {
+  assert.deepStrictEqual(
+    engineValues({ tmuxEngine: {}, TMUX_REQUIRED: true }),
+    ['tmux'],
+  );
+});
+
+test('with no tmux at all, the enum still describes reality', () => {
+  // The daemon really did fall back to node-pty, so the enum has to be able to say so —
+  // otherwise the settings dropdown shows a value the server would reject.
+  for (const TMUX_REQUIRED of [true, false]) {
+    assert.deepStrictEqual(
+      engineValues({ tmuxEngine: null, TMUX_REQUIRED }),
+      ['node-pty'],
+      `TMUX_REQUIRED=${TMUX_REQUIRED}`,
+    );
+  }
+});
+
+test('a saved engine value is never validated against the thunk at load time', () => {
+  // This is what makes the narrowed Linux enum safe: settings load is a plain spread,
+  // so an existing install whose settings.json says "node-pty" keeps working even where
+  // the thunk no longer offers it. The thunk gates POSTs and the dropdown, nothing else.
+  // If loading ever started coercing enums, a Linux upgrade would silently rewrite the
+  // engine out from under a running install.
+  const at = serverSource.indexOf('// Load settings');
+  assert.ok(at >= 0, 'could not locate the settings load');
+  const loadRegion = serverSource.slice(at, serverSource.indexOf('function saveSettings', at));
+  assert.ok(loadRegion.length > 0, 'could not locate the settings load region');
+  assert.match(loadRegion, /\{ \.\.\.settings, \.\.\.JSON\.parse\(fs\.readFileSync\(SETTINGS_FILE/,
+    'expected the plain {...defaults, ...fromDisk} spread');
+  assert.ok(!/coerceSetting|applySettingsFromBody/.test(loadRegion),
+    'settings load must not validate against the schema — see the comment on the engine thunk');
+});
+
+test('TMUX_REQUIRED is platform-derived, and macOS is the only exemption', () => {
+  assert.match(serverSource, /const TMUX_REQUIRED = process\.platform !== 'darwin';/);
+});
+
+test('the daemon still BOOTS when a required tmux is missing', () => {
+  // Deliberate: refusing to start on a headless box means the UI that would explain why
+  // never comes up, and Restart=always/RestartSec=5 turns it into an invisible crash
+  // loop. install.sh does the refusing, where a human is watching a terminal.
+  const region = serverSource.slice(
+    serverSource.indexOf('const TMUX_REQUIRED'),
+    serverSource.indexOf('Session lifecycle event bus'),
+  );
+  assert.ok(region.length > 0, 'could not locate the engine-init block');
+  assert.ok(!/process\.exit/.test(region), 'the daemon must not exit when tmux is missing');
+  assert.match(region, /tmux is REQUIRED on this platform/, 'it must say so loudly instead');
+  assert.match(region, /apt\/dnf\/pacman/, 'and say how to fix it');
+});
+
+test('/api/engines tells the client whether tmux is required', () => {
+  // The browser has no idea what OS the daemon runs on, so this must be a fact sent from
+  // the server rather than something sniffed client-side.
+  assert.match(serverSource, /tmuxRequired: TMUX_REQUIRED,/);
+  const app = fs.readFileSync(path.join(REPO, 'public', 'js', 'app.js'), 'utf8');
+  assert.match(app, /enginesData\.tmuxRequired/, 'the settings warning must escalate on it');
+});
+
+test('install.sh refuses to install on Linux without tmux', () => {
+  // The other half: enforce where enforcement is free and visible.
+  const release = fs.readFileSync(path.join(REPO, 'release.sh'), 'utf8');
+  const gate = release.slice(release.indexOf('if [ "$OS" != "Darwin" ] && ! command -v tmux'));
+  assert.ok(gate.length > 0, 'release.sh must emit a tmux gate into install.sh');
+  assert.match(gate.slice(0, 900), /exit 1/, 'the gate must be fatal');
+  assert.match(gate.slice(0, 900), /apt-get install -y tmux/, 'and name the fix');
+});
+
+test('the local-install docker image satisfies the dependency it now declares', () => {
+  // Otherwise `npm run test:install` goes red at image build: install.sh would refuse.
+  const df = fs.readFileSync(path.join(REPO, 'test', 'Dockerfile.install'), 'utf8');
+  assert.match(df, /apt-get install[^\n]*\btmux\b/, 'Dockerfile.install must install tmux');
+  // And with tmux present the suite no longer needs to skip the tmux-engine tests.
+  const compose = fs.readFileSync(path.join(REPO, 'test', 'docker-compose.install.yml'), 'utf8');
+  assert.ok(!/run-integration\.sh\s+tmux-engine/.test(compose),
+    'with tmux installed, the tmux-engine skip is dead weight and hides real coverage');
+});
+
+test('the PUBLIC install image is deliberately left alone', () => {
+  // It installs the LAST RELEASED install.sh, which predates the tmux gate — adding tmux
+  // there would be testing a build that never had the requirement. Its tmux-engine skip
+  // must therefore stay. (#588: that suite runs each release's own tests against it.)
+  const compose = fs.readFileSync(path.join(REPO, 'test', 'docker-compose.public.yml'), 'utf8');
+  assert.match(compose, /run-integration\.sh\s+'?tmux-engine'?/,
+    'the public suite still has no tmux and must keep skipping those tests');
+});

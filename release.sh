@@ -110,6 +110,35 @@ if ! command -v node &>/dev/null; then
   fi
 fi
 
+# tmux is a declared dependency off macOS (#620/#621), and this is where declaring it
+# is cheap: a human is watching a terminal right now.
+#
+# Not merely a preference. deepsteve sessions live inside tmux so they survive a daemon
+# restart, and on Linux the daemon is restarted by systemd on every crash and every
+# unattended upgrade — so without tmux, sessions die at moments nobody chose. macOS keeps
+# node-pty as a supported fallback because there the daemon only restarts when the user
+# asks it to.
+#
+# Deliberately fatal here and NOT at daemon startup: refusing to boot on a headless box
+# means the UI that would explain why never comes up.
+if [ "$OS" != "Darwin" ] && ! command -v tmux >/dev/null 2>&1; then
+  echo "ERROR: tmux is required on Linux." >&2
+  echo "       deepsteve runs each session inside tmux so it survives a daemon restart;" >&2
+  echo "       node-pty is a macOS-only fallback. Install tmux and re-run this installer:" >&2
+  if command -v apt-get >/dev/null 2>&1; then
+    echo "         sudo apt-get install -y tmux" >&2
+  elif command -v dnf >/dev/null 2>&1; then
+    echo "         sudo dnf install -y tmux" >&2
+  elif command -v pacman >/dev/null 2>&1; then
+    echo "         sudo pacman -S --noconfirm tmux" >&2
+  elif command -v apk >/dev/null 2>&1; then
+    echo "         sudo apk add tmux" >&2
+  else
+    echo "         (install tmux with your package manager)" >&2
+  fi
+  exit 1
+fi
+
 INSTALL_DIR="$HOME/.deepsteve"
 NODE_PATH=$(which node)
 

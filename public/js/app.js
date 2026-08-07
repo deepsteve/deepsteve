@@ -1116,6 +1116,12 @@ settingsBtn?.addEventListener('click', async () => {
         ${(enginesData.tmuxAvailable === false || enginesData.tmuxRuntimeFailure) ? `
         <p class="version-warn" style="font-size: 12px; margin-top: 10px; line-height: 1.5;">
           <strong>Running the node-pty fallback — sessions will not survive a restart.</strong><br>
+          ${enginesData.tmuxRequired ? `
+             <strong>tmux is required on this platform</strong>, and this install does not have a
+             working one. Unlike macOS, the daemon here is restarted by the service manager on
+             every crash and every upgrade — so sessions will be lost at moments nobody chose.
+             Install it with <code>sudo apt install tmux</code> (or <code>dnf</code>/<code>pacman</code>)
+             and restart the daemon.<br>` : ''}
           ${enginesData.tmuxRuntimeFailure
             ? `tmux is installed but could not create a session: ${escapeHtml(enginesData.tmuxRuntimeFailure)}<br>
                A common cause is a socket path over the ~104-character limit — set a shorter

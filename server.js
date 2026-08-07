@@ -520,7 +520,20 @@ const SETTINGS_SCHEMA = [
   // The default can't itself consult tmuxEngine — buildDefaults() runs ~180 lines
   // before the engine is constructed. Only the `values` thunk is lazy enough.
   { name: 'engine',                     type: 'enum',    default: 'tmux',
-    values: () => tmuxEngine ? ['node-pty', 'tmux'] : ['node-pty'] },
+    // Where tmux is REQUIRED (#621, everything but macOS), node-pty is not offered once
+    // tmux exists — choosing it there is choosing an unsupported configuration. It stays
+    // in the list when tmux is MISSING, because that is what the daemon actually fell
+    // back to and the enum has to be able to describe reality.
+    //
+    // This cannot strand an existing install: settings load is
+    // `{...defaults, ...JSON.parse(file)}` with no enum validation, so a saved value
+    // absent from this list survives untouched. The thunk only gates POSTs and the
+    // Settings dropdown — which on Linux is exactly right: POSTing 'tmux' succeeds,
+    // POSTing 'node-pty' is refused.
+    values: () => {
+      if (!tmuxEngine) return ['node-pty'];
+      return TMUX_REQUIRED ? ['tmux'] : ['node-pty', 'tmux'];
+    } },
   // One-shot latch for the "you have tmux but you're on node-pty" offer (#620).
   // Broadcast so a second window dismisses its own copy of the modal when the
   // first one answers.
@@ -717,6 +730,21 @@ log(`Shell: sessions run under ${LOGIN_SHELL.path}${LOGIN_SHELL.loginFlag ? ` ${
 
 let tmuxEngine = null;
 let tmuxUnavailableReason = null;
+
+// tmux is a DECLARED DEPENDENCY off macOS (#620/#621), not merely the default.
+//
+// The trade differs by platform. On macOS node-pty is a supported fallback: the daemon
+// is restarted when the user chooses to, and losing sessions is an annoyance. On a
+// Linux box — which is the whole point of running deepsteve somewhere that isn't the
+// laptop — systemd restarts the daemon on every crash and every unattended upgrade, so
+// "sessions die with the daemon" means they die at times nobody chose.
+//
+// install.sh therefore REFUSES to install on Linux without tmux, where a human is
+// definitely watching a terminal. The daemon, by contrast, still boots: refusing to
+// start on a headless machine means the UI that would explain why never comes up, and
+// with Restart=always/RestartSec=5 the failure is an invisible crash loop that needs
+// journalctl to even see. Boot, degrade, and say so loudly instead.
+const TMUX_REQUIRED = process.platform !== 'darwin';
 {
   const tmuxCheck = new TmuxEngine({ binary: settings.tmuxBinary });
   if (tmuxCheck.available) {
@@ -728,6 +756,11 @@ let tmuxUnavailableReason = null;
     // being required — an unavailable engine has to be diagnosable from the log.
     tmuxUnavailableReason = tmuxCheck.unavailableReason;
     log(`Engine: tmux not available — ${tmuxUnavailableReason}`);
+    if (TMUX_REQUIRED) {
+      log('Engine: tmux is REQUIRED on this platform. Install it (apt/dnf/pacman install tmux) ' +
+          'and restart the daemon. Until then every session dies whenever the daemon does — ' +
+          'and systemd restarts the daemon on every crash and every upgrade.');
+    }
     // Also the fresh-install path since #620 made tmux the schema default: with no
     // tmux there is nothing to default to, so persist the downgrade. The UI says so
     // out loud rather than leaving this log line as the only trace — a node-pty
@@ -3594,6 +3627,11 @@ app.get('/api/engines', (req, res) => {
     // dropdown doesn't label an installed tmux "not installed" — but it drives the
     // same warning, because the user is on the perishable engine either way.
     tmuxRuntimeFailure,
+    // Off macOS the fallback is materially worse (systemd restarts the daemon on every
+    // crash and upgrade), so the client escalates its warning rather than showing the
+    // same "perishable engine" badge. Sent as a fact rather than sniffed client-side —
+    // the browser has no idea what the daemon is running on.
+    tmuxRequired: TMUX_REQUIRED,
     migrationOffer: shouldOfferEngineMigration(),
   });
 });
