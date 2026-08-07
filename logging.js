@@ -14,7 +14,7 @@
 // checkAndRotate() with a fake fs.
 
 const path = require('path');
-const os = require('os');
+const { logDir } = require('./paths');
 
 // Local-time ISO-8601 with milliseconds and numeric offset,
 // e.g. 2026-07-15T13:01:36.123-07:00 (issue #557: the old [HH:MM:SS.mmm]
@@ -30,15 +30,16 @@ function formatLogTimestamp(d = new Date()) {
          `${sign}${pad(Math.floor(abs / 60))}:${pad(abs % 60)}`;
 }
 
-// Where the service definition points our stdout/stderr — must mirror
-// release.sh's LOG_DIR choices. DEEPSTEVE_LOG_DIR overrides for tests.
+// Where the service definition points our stdout/stderr. The platform table now
+// lives in paths.logDir() (#621), whose shell twin ds_log_dir in service.sh is what
+// actually writes the plist/unit — and a unit test compares the two, so the "must
+// mirror release.sh" coupling this comment used to describe is finally enforced
+// rather than hoped for. DEEPSTEVE_LOG_DIR still overrides, and since #621 the
+// service definition passes it explicitly.
 // The rotator's inode guard makes a wrong guess harmless: a path whose
 // inode doesn't match our actual fd is never touched.
-function defaultLogPaths({ platform = process.platform, env = process.env, homedir = os.homedir() } = {}) {
-  const dir = env.DEEPSTEVE_LOG_DIR ||
-    (platform === 'darwin'
-      ? path.join(homedir, 'Library', 'Logs')
-      : path.join(homedir, '.local', 'share', 'deepsteve', 'logs'));
+function defaultLogPaths(opts = {}) {
+  const dir = logDir(opts);
   return [
     { path: path.join(dir, 'deepsteve.log'), fd: 1 },
     { path: path.join(dir, 'deepsteve.error.log'), fd: 2 },

@@ -1,12 +1,12 @@
 const fs = require('fs');
 const path = require('path');
-const os = require('os');
+const { stateDir } = require('../../paths');
 const { execFile } = require('child_process');
 const { promisify } = require('util');
 const { z } = require('zod');
 
 const execFileAsync = promisify(execFile);
-const CONFIG_FILE = path.join(os.homedir(), '.deepsteve', 'messages.json');
+const CONFIG_FILE = path.join(stateDir(), 'messages.json');
 
 function loadConfig() {
   try {

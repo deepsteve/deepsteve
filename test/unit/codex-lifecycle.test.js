@@ -25,6 +25,10 @@ function loadCodexHomeHelpers(home) {
     fs,
     path,
     os: { homedir: () => home },
+    // DS_DIR is a module-scope const in server.js (#621), outside every extracted
+    // range, so the vm context has to supply it. Same value stateDir() computes
+    // from this fake home, keeping the isolation these helpers rely on.
+    DS_DIR: path.join(home, '.deepsteve'),
     log: () => {},
   };
   vm.runInNewContext(`${code}
@@ -38,6 +42,10 @@ function loadArgumentHelpers(home) {
     fs,
     path,
     os: { homedir: () => home },
+    // DS_DIR is a module-scope const in server.js (#621), outside every extracted
+    // range, so the vm context has to supply it. Same value stateDir() computes
+    // from this fake home, keeping the isolation these helpers rely on.
+    DS_DIR: path.join(home, '.deepsteve'),
     PORT: 3456,
     AUTH_TOKEN: 'unit-token',
     CLAUDE_SCREEN_MARKERS: {},

@@ -24,10 +24,10 @@
 
 const fs = require('fs');
 const path = require('path');
-const os = require('os');
+const { stateDir } = require('./paths');
 const crypto = require('crypto');
 
-const AUTH_TOKEN_FILE = path.join(os.homedir(), '.deepsteve', 'auth-token');
+const AUTH_TOKEN_FILE = path.join(stateDir(), 'auth-token');
 const COOKIE_NAME = 'ds_auth';
 // Canonical UI host (#545): loopback per RFC 6761, but its own cookie "site" — isolated from the
 // shared `localhost` jar whose per-host cap is what evicted ds_auth (#544).

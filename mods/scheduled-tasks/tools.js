@@ -13,6 +13,7 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const { stateDir, expandTilde } = require('../../paths');
 const { execSync } = require('child_process');
 const { randomUUID } = require('crypto');
 const { z } = require('zod');
@@ -20,7 +21,7 @@ const cron = require('./cron');
 // Resolves to ~/.deepsteve/git-root.js once deployed — mods sit at ~/.deepsteve/mods/<id>/.
 const { findGitRoot } = require('../../git-root');
 
-const TASKS_FILE = path.join(os.homedir(), '.deepsteve', 'scheduled-tasks.json');
+const TASKS_FILE = path.join(stateDir(), 'scheduled-tasks.json');
 const MAX_RUNS = 20;          // per-task run history is bounded
 const TICK_MS = 30 * 1000;    // cron granularity is 1 min; 30s never misses a minute
 const CATCHUP_DELAY_MS = 10 * 1000; // let the daemon settle before the overdue pass
@@ -185,8 +186,7 @@ function cleanupWorktree(repoRoot, name, exec = zshExec) {
 // otherwise inherit the calling session's repo root.
 function resolveProject(rawProject, shellId) {
   if (rawProject && String(rawProject).trim()) {
-    let p = String(rawProject).trim();
-    if (p.startsWith('~')) p = path.join(os.homedir(), p.slice(1));
+    const p = expandTilde(String(rawProject).trim());
     return fs.existsSync(p) ? gitRoot(p) : p;
   }
   if (shellId && ctx && ctx.shells.has(shellId)) {

@@ -31,13 +31,14 @@ const { z } = require('zod');
 const { randomUUID } = require('crypto');
 const fs = require('fs');
 const os = require('os');
+const { stateDir } = require('../../paths');
 const path = require('path');
 
 const { resolveHtml } = require('../../html-source.js');
 const { findGitRoot } = require('../../git-root.js');
 
-const REGISTRY_FILE = path.join(os.homedir(), '.deepsteve', 'project-mods.json');
-const PAGES_DIR = path.join(os.homedir(), '.deepsteve', 'project-mods');
+const REGISTRY_FILE = path.join(stateDir(), 'project-mods.json');
+const PAGES_DIR = path.join(stateDir(), 'project-mods');
 
 // The three registration surfaces from #618, in rail → strip → tab order.
 const SURFACES = ['rail', 'button', 'tab'];

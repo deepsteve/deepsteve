@@ -23,13 +23,9 @@
  */
 const fs = require('fs');
 const path = require('path');
-const os = require('os');
-
-// `~` / `~/x` → absolute. Mirrors the tilde handling the callers used to do inline.
-function expandTilde(p) {
-  const s = String(p);
-  return s.startsWith('~') ? path.join(os.homedir(), s.slice(1)) : s;
-}
+// expandTilde moved to paths.js (#621) — it was only ever here by accident. Re-exported
+// below so tmux-path.js and test/unit/git-root.test.js keep importing it from here.
+const { expandTilde } = require('./paths');
 
 /**
  * The git repo root containing `startDir`, or null if it isn't inside a repo.

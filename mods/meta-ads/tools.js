@@ -1,11 +1,11 @@
 const fs = require('fs');
 const path = require('path');
-const os = require('os');
+const { stateDir } = require('../../paths');
 const { execSync } = require('child_process');
 const { z } = require('zod');
 
-const CONFIG_FILE = path.join(os.homedir(), '.deepsteve', 'meta-ads.json');
-const DATA_DIR = path.join(os.homedir(), '.deepsteve', 'meta-ads');
+const CONFIG_FILE = path.join(stateDir(), 'meta-ads.json');
+const DATA_DIR = path.join(stateDir(), 'meta-ads');
 const KB_PATH = path.join(DATA_DIR, 'knowledge-base.md');
 
 // ── Keychain helpers ────────────────────────────────────────

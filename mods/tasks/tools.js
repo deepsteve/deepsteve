@@ -1,9 +1,9 @@
 const fs = require('fs');
 const path = require('path');
-const os = require('os');
+const { stateDir } = require('../../paths');
 const { z } = require('zod');
 
-const TASKS_FILE = path.join(os.homedir(), '.deepsteve', 'tasks.json');
+const TASKS_FILE = path.join(stateDir(), 'tasks.json');
 let tasks = [];
 let nextId = 1;
 

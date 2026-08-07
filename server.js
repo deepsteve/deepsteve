@@ -14,6 +14,7 @@ const { createPowerAssertion } = require('./power-assertion');
 const { resolveForkTip } = require('./fork-resolve');
 const { formatLogTimestamp, createLogRotator, defaultLogPaths } = require('./logging');
 const { findGitRoot } = require('./git-root');
+const { stateDir, expandTilde } = require('./paths');
 const { createPendingOpens } = require('./pending-opens');
 const { classifyScreenTail, CLAUDE_SCREEN_MARKERS } = require('./screen-classifier');
 const { TerminalScreen } = require('./terminal-screen');
@@ -82,8 +83,12 @@ const ALLOW_HOSTS = [...parseCLIValues('allow-host'), ...envList('DEEPSTEVE_ALLO
 // Escape hatch for the localhost → deepsteve.localhost browser redirect (#545), for the rare
 // setup where *.localhost doesn't resolve (minimal Linux without systemd-resolved).
 const CANONICAL_REDIRECT = !(parseCLIFlag('no-canonical-redirect') || process.env.DEEPSTEVE_NO_CANONICAL_REDIRECT === '1');
-const CERTS_DIR = path.join(os.homedir(), '.deepsteve', 'certs');
-const AUTOMATIONS_DIR = path.join(os.homedir(), '.deepsteve', 'automations');
+// The state + install dir (#621). Resolved once: stateDir() reads os.homedir(), which is
+// constant for the process lifetime, so every path built from it below is exactly the
+// string the inline path.join(DS_DIR, …) used to produce.
+const DS_DIR = stateDir();
+const CERTS_DIR = path.join(DS_DIR, 'certs');
+const AUTOMATIONS_DIR = path.join(DS_DIR, 'automations');
 
 if (!net.isIP(BIND)) {
   console.error(`Error: '${BIND}' is not a valid IP address. Use --bind <address> with a valid IPv4 or IPv6 address.`);
@@ -102,7 +107,7 @@ if (BIND !== '127.0.0.1' && BIND !== '::1') {
   console.error('');
 }
 const SCROLLBACK_DEFAULT_KB = 100; // default scrollback buffer size in KB
-const RELOAD_FLAG = path.join(os.homedir(), '.deepsteve', '.reload');
+const RELOAD_FLAG = path.join(DS_DIR, '.reload');
 const reloadClients = new Set(); // WebSocket connections for live-reload
 // open-session messages waiting for a browser to connect. Self-cleaning (#596):
 // entries are dropped when their session/display tab closes, filtered for liveness
@@ -197,7 +202,7 @@ logRotator.start();
 // actually on screen. Gated by the default-off `waitingAuditEnabled` setting, read
 // live at every call site. Best-effort: a logging failure must never affect the
 // data path.
-const WAITING_AUDIT_FILE = path.join(os.homedir(), '.deepsteve', 'waiting-audit.jsonl');
+const WAITING_AUDIT_FILE = path.join(DS_DIR, 'waiting-audit.jsonl');
 const WAITING_AUDIT_MAX_BYTES = 64 * 1024 * 1024; // runaway guard if left enabled
 let waitingAuditBytes = -1; // -1 = not yet initialized from the existing file
 let waitingAuditCapped = false;
@@ -256,20 +261,20 @@ function auditClassifyBels(e, data) {
   e._auditOscOpen = oscOpen;
   return { bare, osc, ctx };
 }
-const STATE_FILE = path.join(os.homedir(), '.deepsteve', 'state.json');
-const DISPLAY_TABS_DIR = path.join(os.homedir(), '.deepsteve', 'display-tabs');
-const SCREENSHOTS_DIR = path.join(os.homedir(), '.deepsteve', 'screenshots');
-const SETTINGS_FILE = path.join(os.homedir(), '.deepsteve', 'settings.json');
-const CONTEXTS_FILE = path.join(os.homedir(), '.deepsteve', 'contexts.json');
+const STATE_FILE = path.join(DS_DIR, 'state.json');
+const DISPLAY_TABS_DIR = path.join(DS_DIR, 'display-tabs');
+const SCREENSHOTS_DIR = path.join(DS_DIR, 'screenshots');
+const SETTINGS_FILE = path.join(DS_DIR, 'settings.json');
+const CONTEXTS_FILE = path.join(DS_DIR, 'contexts.json');
 // Per-context uploaded icon images (#579): <contextId>.png / .svg. Emoji icons still
 // ride contexts.json (the `icon` string); an uploaded image sets `iconImage` (the ext).
-const ICONS_DIR = path.join(os.homedir(), '.deepsteve', 'icons');
+const ICONS_DIR = path.join(DS_DIR, 'icons');
 // Ring buffer of the last N session configs, for cross-browser restore (#533).
-const RECENT_SESSIONS_FILE = path.join(os.homedir(), '.deepsteve', 'recent-sessions.json');
+const RECENT_SESSIONS_FILE = path.join(DS_DIR, 'recent-sessions.json');
 // Legacy scheduled-tasks "project groups" file (#521). Superseded by contexts.json
 // (#526); read once on first load to migrate, then left in place untouched.
-const LEGACY_GROUPS_FILE = path.join(os.homedir(), '.deepsteve', 'project-groups.json');
-const RESTARTING_FLAG = path.join(os.homedir(), '.deepsteve', '.restarting');
+const LEGACY_GROUPS_FILE = path.join(DS_DIR, 'project-groups.json');
+const RESTARTING_FLAG = path.join(DS_DIR, '.restarting');
 const app = express();
 
 // Security layer (#536): Host allowlist, Origin allowlist, per-install token auth, and failure
@@ -788,15 +793,7 @@ function getEngine(id) {
 }
 
 function getShellProfilePath() {
-  let p = settings.shellProfile || '~/.zshrc';
-  if (p.startsWith('~')) p = path.join(os.homedir(), p.slice(1));
-  return p;
-}
-
-// Expand a leading ~ to the home dir (leaves anything else untouched).
-function expandTilde(dir) {
-  if (dir && dir.startsWith('~')) return path.join(os.homedir(), dir.slice(1));
-  return dir;
+  return expandTilde(settings.shellProfile || '~/.zshrc');
 }
 
 // Resolve a custom-config-profile id (#537) to its absolute config dir, or null.
@@ -908,7 +905,7 @@ async function ensureCerts() {
 }
 
 // --- Theme system ---
-const THEMES_DIR = path.join(os.homedir(), '.deepsteve', 'themes');
+const THEMES_DIR = path.join(DS_DIR, 'themes');
 const MAX_THEME_SIZE = 64 * 1024; // 64KB max per theme file
 
 // Ensure themes directory exists
@@ -1010,7 +1007,7 @@ function broadcastSkills() {
  * @param {{ cols?: number, rows?: number, env?: object }} opts
  */
 const CODEX_SHARED_HOME = path.join(os.homedir(), '.codex');
-const CODEX_SESSION_ROOT = path.join(os.homedir(), '.deepsteve', 'codex-sessions');
+const CODEX_SESSION_ROOT = path.join(DS_DIR, 'codex-sessions');
 const CODEX_SHARED_ENTRIES = [
   'auth.json',
   'config.toml',
@@ -1273,7 +1270,7 @@ function mcpConfigArgs(agentType, shellId) {
   // The MCP config carries the auth bearer token (#536). Write it to a per-shell 0600 file and pass
   // the PATH (claude's --mcp-config accepts file paths) — never inline JSON in argv, which `ps`
   // exposes to every other local user.
-  const dir = path.join(os.homedir(), '.deepsteve', 'mcp-configs');
+  const dir = path.join(DS_DIR, 'mcp-configs');
   const file = path.join(dir, `${shellId}.json`);
   const config = {
     mcpServers: {
@@ -1299,7 +1296,7 @@ function mcpConfigArgs(agentType, shellId) {
 // (continue newest) always finds the right one without UUID tracking.
 function piSessionDirArgs(agentType, shellId) {
   if (agentType !== 'pi' || !shellId) return [];
-  const dir = path.join(os.homedir(), '.deepsteve', 'pi-sessions', shellId);
+  const dir = path.join(DS_DIR, 'pi-sessions', shellId);
   try { fs.mkdirSync(dir, { recursive: true }); } catch {}
   return ['--session-dir', dir];
 }
@@ -3155,7 +3152,7 @@ const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, 'package.json'), 'ut
 // by settings.autoUpdateCheckIntervalHours. Broadcasts to reload clients when
 // the status changes so the UI can show a badge + toast without polling.
 
-const INSTALL_SOURCE_FILE = path.join(os.homedir(), '.deepsteve', '.install-source.json');
+const INSTALL_SOURCE_FILE = path.join(DS_DIR, '.install-source.json');
 
 let versionStatus = {
   current: pkg.version,
@@ -3400,7 +3397,7 @@ async function applyCurlReinstall() {
 
   updateInProgress = true;
   try {
-    const updateDir = path.join(os.homedir(), '.deepsteve', '.update');
+    const updateDir = path.join(DS_DIR, '.update');
     fs.mkdirSync(updateDir, { recursive: true });
     const tmpPath = path.join(updateDir, 'install.sh.tmp');
     const finalPath = path.join(updateDir, 'install.sh');
@@ -3627,7 +3624,7 @@ app.post('/api/settings', (req, res) => {
 
 // --- Command Palette: Custom Commands ---
 
-const COMMANDS_DIR = path.join(os.homedir(), '.deepsteve', 'commands');
+const COMMANDS_DIR = path.join(DS_DIR, 'commands');
 try { fs.mkdirSync(COMMANDS_DIR, { recursive: true }); } catch {}
 try { fs.mkdirSync(AUTOMATIONS_DIR, { recursive: true }); } catch {}
 
@@ -3747,7 +3744,7 @@ const BUILTIN_MODS = new Set(['browser-console', 'tasks', 'screenshots', 'go-kar
 const SKILLS_DIR = path.join(__dirname, 'skills');
 const CLAUDE_COMMANDS_DIR = path.join(os.homedir(), '.claude', 'commands');
 const CODEX_SKILLS_DIR = path.join(os.homedir(), '.agents', 'skills');
-const CODEX_SKILL_STORE_DIR = path.join(os.homedir(), '.deepsteve', 'codex-skills');
+const CODEX_SKILL_STORE_DIR = path.join(DS_DIR, 'codex-skills');
 const SKILL_ID_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/;
 
 // Install a skill file: copy source .md to ~/.claude/commands/deepsteve/{id}.md
@@ -4822,7 +4819,7 @@ app.post('/api/shells/clear-disconnected', (req, res) => {
 app.post('/api/mkdir', require('express').json(), (req, res) => {
   let dir = req.body.path;
   if (!dir) return res.status(400).json({ error: 'path required' });
-  if (dir.startsWith('~')) dir = path.join(os.homedir(), dir.slice(1));
+  dir = expandTilde(dir);
   dir = path.resolve(dir);
   try { fs.mkdirSync(dir, { recursive: true }); res.json({ created: dir }); }
   catch (e) { res.status(500).json({ error: e.message }); }
@@ -4830,7 +4827,7 @@ app.post('/api/mkdir', require('express').json(), (req, res) => {
 
 app.get('/api/dirs', (req, res) => {
   let input = req.query.path || '~';
-  if (input.startsWith('~')) input = path.join(os.homedir(), input.slice(1));
+  input = expandTilde(input);
   const absPath = path.resolve(input);
   let dirToList = absPath, prefix = '';
   try {
@@ -5076,7 +5073,7 @@ const ISSUE_CACHE_TTL = 10000; // 10 seconds
 
 app.get('/api/issues', (req, res) => {
   let cwd = req.query.cwd || process.env.HOME;
-  if (cwd.startsWith('~')) cwd = path.join(os.homedir(), cwd.slice(1));
+  cwd = expandTilde(cwd);
   const page = Math.max(1, parseInt(req.query.page) || 1);
   const perPage = 5;
   const limit = perPage * page;
@@ -5128,7 +5125,7 @@ app.post('/api/start-issue', (req, res) => {
   agentType = agentType || 'claude';
 
   cwd = cwd || process.env.HOME;
-  if (cwd.startsWith('~')) cwd = path.join(os.homedir(), cwd.slice(1));
+  cwd = expandTilde(cwd);
 
   // Build prompt helper (shared between sync and async paths)
   function buildPrompt(issueBody, issueLabels, issueUrl) {
@@ -5823,7 +5820,7 @@ function handleWsConnection(ws, req) {
 
   let id = url.searchParams.get('id');
   let cwd = url.searchParams.get('cwd') || process.env.HOME;
-  if (cwd.startsWith('~')) cwd = path.join(os.homedir(), cwd.slice(1));
+  cwd = expandTilde(cwd);
   const createNew = url.searchParams.get('new') === '1';
   const worktree = validateWorktree(url.searchParams.get('worktree'));
   const planMode = url.searchParams.get('planMode') === '1';

@@ -1,9 +1,9 @@
 const fs = require('fs');
 const path = require('path');
-const os = require('os');
+const { stateDir } = require('../../paths');
 const { z } = require('zod');
 
-const DNA_FILE = path.join(os.homedir(), '.deepsteve', 'agent-dna.json');
+const DNA_FILE = path.join(stateDir(), 'agent-dna.json');
 let dnaStore = {};
 
 // Load existing DNA

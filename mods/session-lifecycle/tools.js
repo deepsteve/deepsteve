@@ -10,10 +10,10 @@
 // the live value is read on every event with no restart needed.
 const fs = require('fs');
 const path = require('path');
-const os = require('os');
+const { stateDir } = require('../../paths');
 const { z } = require('zod');
 
-const LOG_FILE = path.join(os.homedir(), '.deepsteve', 'session-lifecycle.jsonl');
+const LOG_FILE = path.join(stateDir(), 'session-lifecycle.jsonl');
 const MAX_EVENTS = 5000; // keep the file bounded; oldest events drop off
 
 // In-memory mirror of the log. `events` is reassigned when trimming, so use let.

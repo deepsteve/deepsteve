@@ -1,9 +1,9 @@
 const fs = require('fs');
 const path = require('path');
-const os = require('os');
+const { stateDir } = require('../../paths');
 const { z } = require('zod');
 
-const CHAT_FILE = path.join(os.homedir(), '.deepsteve', 'agent-chat.json');
+const CHAT_FILE = path.join(stateDir(), 'agent-chat.json');
 
 function formatTimestamp(ts) {
   const d = new Date(ts);
