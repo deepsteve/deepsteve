@@ -38,7 +38,7 @@ export function showDirectoryPicker({ contextDirs = [], contextLabel = '' } = {}
     // a directory; session resume lives on its own surfaces.)
     const ctxHtml = contextDirs.length > 0 ? `
         <div class="recent-section">
-          <div class="recent-label">${esc(contextLabel || 'Context')}</div>
+          <div class="recent-label">${esc(contextLabel || 'Project')}</div>
           ${contextDirs.map(p => `
             <button class="recent-session-btn context-dir-btn" data-path="${esc(p)}" title="${esc(p)}">
               <span class="recent-name">${esc(p.split('/').pop())}</span>

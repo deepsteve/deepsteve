@@ -30,6 +30,7 @@ import { init as initHashCommands, beforeSend as hashCommandsBeforeSend, setWait
 import { init as initOverviewMode, setEnabled as setOverviewModeEnabled, setShortcut as setOverviewModeShortcut, setDefaultLayout as setOverviewDefaultLayout, toggle as toggleOverviewMode, isOverviewActive, updateFocus as updateOverviewFocus, onTabsReordered as onOverviewTabsReordered, syncToContext as syncOverviewToContext } from './overview-mode.js';
 import { init as initTerminalSearch, attachSearchAddon, closeIfOpen as closeTerminalSearch } from './terminal-search.js';
 import { init as initContextViews, setEnabled as setContextViewsEnabled, applyFilter as refreshContextFilter, requestNewTabInContext, resolveContextRepo, chooseContextDir, setContexts as applyServerContexts, setActiveContext as setActiveContextFromPanel, getActiveContextId, getActiveContextInfo, orderRecentDirsByContext, activeContextIsEmpty, noteActiveTab, revealTabContext, showToast } from './context-views.js';
+import * as ProjectMods from './project-mods.js';
 import { nsKey } from './storage-namespace.js';
 import { formatShortcut } from './shortcuts.js';
 import { init as initWakeWatch } from './wake-watch.js';
@@ -257,6 +258,11 @@ function applySettings(settings) {
   }
   if (settings.contextViewsEnabled !== undefined) {
     setContextViewsEnabled(settings.contextViewsEnabled);
+  }
+  // Project mods (#618): the gate lives with the list, not with this payload, so
+  // re-read it — refresh() re-renders every surface, dropping or restoring them.
+  if (settings.projectModsEnabled !== undefined) {
+    ProjectMods.refresh();
   }
   if (settings.symlinkWorktreeSettings !== undefined) {
     const el = document.querySelector('#symlink-worktree-settings');
@@ -749,6 +755,7 @@ settingsBtn?.addEventListener('click', async () => {
   const currentShortcutsHelpShortcut = [].concat(settingsData.shortcutsHelpShortcut || ['Meta+Shift+?', 'Meta+/']);
   const currentHashCommandsEnabled = settingsData.hashCommandsEnabled !== undefined ? settingsData.hashCommandsEnabled : true;
   const currentContextViewsEnabled = settingsData.contextViewsEnabled !== undefined ? settingsData.contextViewsEnabled : true;
+  const currentProjectModsEnabled = settingsData.projectModsEnabled !== false;
   const currentOverviewDefaultLayout = settingsData.overviewDefaultLayout || 'tall';
   const currentMetaControlsEnabled = !!settingsData.metaControlsEnabled;
   const currentInheritRc = settingsData.inheritRemoteControl !== false;
@@ -921,13 +928,23 @@ settingsBtn?.addEventListener('click', async () => {
         </label>
       </div>
       <div class="settings-section">
-        <h3>Context Views</h3>
+        <h3>Projects</h3>
         <label style="font-size: 13px; color: var(--ds-text-primary); cursor: pointer; display: flex; align-items: center; gap: 8px;">
           <input type="checkbox" id="context-views-enabled" ${currentContextViewsEnabled ? 'checked' : ''} style="accent-color: var(--ds-accent-green);">
-          Enabled <span style="font-size: 11px; color: var(--ds-text-secondary);">(group tabs into folder-based contexts)</span>
+          Enabled <span style="font-size: 11px; color: var(--ds-text-secondary);">(group tabs into folder-based projects)</span>
         </label>
         <p style="font-size: 11px; color: var(--ds-text-secondary); margin-top: 4px;">
-          Adds the ◧ context panel toggle next to the layout switcher. ⌘P toggles the panel, ⌘↑/⌘↓ switch contexts.
+          Adds the ◧ projects panel toggle next to the layout switcher. ⌘P toggles the panel, ⌘↑/⌘↓ switch projects.
+        </p>
+        <label style="font-size: 13px; color: var(--ds-text-primary); cursor: pointer; display: flex; align-items: center; gap: 8px; margin-top: 10px;">
+          <input type="checkbox" id="project-mods-enabled" ${currentProjectModsEnabled ? 'checked' : ''} style="accent-color: var(--ds-accent-green);">
+          Project mods
+        </label>
+        <p style="font-size: 11px; color: var(--ds-text-secondary); margin-top: 4px;">
+          Lets an agent register a page as a mod for the project it is working in — a dashboard or live tooling that
+          shows up in that project's rail entry, as a square button in the tab strip, or as a pinned background tab.
+          Entirely local to this machine, and to that one project. Turning this off hides every project mod and
+          refuses new ones.
         </p>
       </div>
       <div class="settings-section">
@@ -1431,6 +1448,7 @@ settingsBtn?.addEventListener('click', async () => {
     }
     const hashCommandsEnabled = overlay.querySelector('#hash-commands-enabled').checked;
     const contextViewsEnabled = overlay.querySelector('#context-views-enabled').checked;
+    const projectModsEnabled = overlay.querySelector('#project-mods-enabled').checked;
     const metaControlsEnabled = overlay.querySelector('#meta-controls-enabled').checked;
     const overviewDefaultLayout = overlay.querySelector('#overview-default-layout').value;
     const enabledAgents = [];
@@ -1473,7 +1491,7 @@ settingsBtn?.addEventListener('click', async () => {
     const preventSleepWhileActive = overlay.querySelector('#prevent-sleep-while-active').checked;
     const inheritRemoteControl = overlay.querySelector('#inherit-rc-newtab').checked;
     const inheritRemoteControlOnFork = overlay.querySelector('#inherit-rc-fork').checked;
-    const settingsPayload = { shellProfile, maxIssueTitleLength: newMaxTitle, wandPlanMode, wandPromptTemplate, symlinkWorktreeSettings, cmdTabSwitch, cmdTabSwitchHoldMs, commandPaletteEnabled, commandPaletteShortcut, shortcutsHelpEnabled, shortcutsHelpShortcut, hashCommandsEnabled, contextViewsEnabled, metaControlsEnabled, inheritRemoteControl, inheritRemoteControlOnFork, overviewDefaultLayout, enabledAgents, opencodeBinary, piBinary, engine: selectedEngine, scrollbackKB, recentSessionsLimit, autoUpdateCheckEnabled, autoUpdateCheckIntervalHours, autoUpdateApply, sessionLogEnabled, scheduledTasksEnabled, scheduledTasksOpenInBackground, scheduledDefaultModel, scheduledDefaultEffort, preventSleepWhileActive, customAgentConfigs };
+    const settingsPayload = { shellProfile, maxIssueTitleLength: newMaxTitle, wandPlanMode, wandPromptTemplate, symlinkWorktreeSettings, cmdTabSwitch, cmdTabSwitchHoldMs, commandPaletteEnabled, commandPaletteShortcut, shortcutsHelpEnabled, shortcutsHelpShortcut, hashCommandsEnabled, contextViewsEnabled, projectModsEnabled, metaControlsEnabled, inheritRemoteControl, inheritRemoteControlOnFork, overviewDefaultLayout, enabledAgents, opencodeBinary, piBinary, engine: selectedEngine, scrollbackKB, recentSessionsLimit, autoUpdateCheckEnabled, autoUpdateCheckIntervalHours, autoUpdateApply, sessionLogEnabled, scheduledTasksEnabled, scheduledTasksOpenInBackground, scheduledDefaultModel, scheduledDefaultEffort, preventSleepWhileActive, customAgentConfigs };
     let resp = await fetch('/api/settings', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1493,6 +1511,7 @@ settingsBtn?.addEventListener('click', async () => {
     setShortcutsHelpShortcut(shortcutsHelpShortcut);
     setHashCommandsEnabled(hashCommandsEnabled);
     setContextViewsEnabled(contextViewsEnabled);
+    ProjectMods.refresh();   // the project-mods gate ships with the list, not with settings (#618)
     // Refresh agents data — enabled set and/or custom config profiles (#537) may have
     // changed (custom-config edits aren't reflected in the enabledAgents diff), so just
     // re-fetch. Preserve the current picker selection if it still exists.
@@ -1782,6 +1801,9 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
         // Unified groups (#526): update the tab-strip rail and any panel subscribers.
         applyServerContexts(msg.contexts);
         ModManager.notifyContextsChanged(msg.contexts);
+      } else if (msg.type === 'project-mods') {
+        // Payload-less ping (#618) — refetch and re-derive all three surfaces.
+        ProjectMods.refresh();
       } else if (msg.type === 'agent-chat') {
         ModManager.notifyAgentChatChanged(msg.channels);
       } else if (msg.type === 'browser-eval-request') {
@@ -2290,6 +2312,147 @@ function createDisplayTab(id, name, opts = {}) {
   notifyTabsChanged();
 }
 
+/**
+ * Create a project-mod tab (#618) — an agent-authored page registered to one project.
+ *
+ * Shaped like a display tab (no PTY, no WebSocket, an iframe served same-origin) with
+ * two differences: the page is durable, so the tab can be re-opened forever from the
+ * rail / the strip button; and the window.deepsteve bridge is injected, the same call
+ * createModTab() makes, so the page can drive the UI and not merely render.
+ *
+ * cwd is set to the mod's project so the existing Projects filter scopes this tab to
+ * the project it belongs to, exactly the way display tabs are scoped (#530).
+ */
+function createProjectModTab(mod, opts = {}) {
+  const id = projectModTabId(mod.id);
+  if (sessions.has(id)) return id;
+  const background = !!opts.background;
+
+  const container = document.createElement('div');
+  container.className = 'terminal-container';
+  container.id = 'term-' + id;
+  document.getElementById('terminals').appendChild(container);
+
+  const iframe = document.createElement('iframe');
+  iframe.src = `/api/project-mods/${mod.id}/page`;
+  iframe.style.cssText = 'width:100%;height:100%;border:none;';
+  // allow-same-origin is what lets the bridge be injected cross-frame (and lets the
+  // page fetch /api/... with the auth cookie) — the same combination display tabs and
+  // mod iframes already use. See the trust note in mods/project-mods/tools.js.
+  iframe.sandbox = 'allow-scripts allow-forms allow-same-origin';
+  iframe.allow = 'autoplay';
+  container.appendChild(iframe);
+  iframe.addEventListener('load', () => {
+    ModManager.injectBridgeAPI(iframe, `project-mod:${mod.id}`, id);
+  });
+
+  const tabName = projectModTabName(mod);
+  sessions.set(id, {
+    term: null, fit: null, ws: null, container, cwd: mod.project,
+    name: tabName, waitingForInput: false, hasUnseenActivity: false, scrollControl: null,
+    type: 'project-mod', projectModId: mod.id,
+  });
+
+  SessionStores.add(getWindowId(), { id, name: tabName, type: 'project-mod', projectModId: mod.id, cwd: mod.project });
+
+  const tabCallbacks = {
+    onSwitch: (sessionId) => switchTo(sessionId),
+    onClose: async (sessionId) => {
+      if (await confirmCloseSession(sessionId)) killSession(sessionId);
+    },
+    onRename: (sessionId) => renameSession(sessionId),
+    onReorder: (orderedIds) => {
+      SessionStores.reorder(getWindowId(), orderedIds);
+      notifyTabsChanged();
+      onOverviewTabsReordered(orderedIds);
+    },
+    // No send-to-window (same as a mod tab): the hand-off message carries only
+    // {id, type, cwd, name}, so the target window could not rebuild the mod, and a
+    // project mod already appears in whichever window has its project in view.
+    getLiveWindows: () => [],
+    onSendToWindow: () => {},
+    onFork: () => {},
+    getSessionType: () => 'project-mod',
+    getModMenuItems: () => [],
+  };
+
+  TabManager.addTab(id, tabName, tabCallbacks);
+  updateEmptyState();
+
+  // A pinned mod opens unattended, so it must not steal focus (#600's rule verbatim) —
+  // except when nothing is active yet, where an inactive lone tab would leave a blank
+  // pane behind a hidden empty state.
+  if (!opts.restoreActive && (!background || !activeId)) {
+    focusTab(id);
+  }
+
+  const ro = new ResizeObserver(([entry]) => {
+    const { width, height } = entry.contentRect;
+    iframe.contentWindow?.postMessage({ type: 'resize', width, height }, '*');
+  });
+  ro.observe(container);
+  sessions.get(id).resizeObserver = ro;
+
+  notifyTabsChanged();
+  return id;
+}
+
+// Both derived, both owned by project-mods.js — see the notes there for why the tab id
+// and the tab label are computed from the mod rather than minted alongside it.
+const projectModTabId = (modId) => ProjectMods.tabIdFor(modId);
+const projectModTabName = (mod) => ProjectMods.tabNameFor(mod);
+
+/** Every open tab showing a given project mod (0 or 1, kept as a list for the sweeps). */
+function projectModTabIds(modId) {
+  const id = projectModTabId(modId);
+  return sessions.has(id) ? [id] : [];
+}
+
+/** Open this mod's tab, or focus it if it's already open. */
+function ensureProjectModTab(mod, { background = false, restoreActive = false } = {}) {
+  const id = projectModTabId(mod.id);
+  if (sessions.has(id)) {
+    if (!background && !restoreActive) focusTab(id);
+    return id;
+  }
+  return createProjectModTab(mod, { background, restoreActive });
+}
+
+/** The mod's page was rewritten — reload the iframe of every open tab showing it. */
+function reloadProjectModTab(mod) {
+  for (const id of projectModTabIds(mod.id)) {
+    const iframe = sessions.get(id)?.container?.querySelector('iframe');
+    // Cache-bust, the same way an updated display tab reloads.
+    if (iframe) iframe.src = `/api/project-mods/${mod.id}/page?t=${Date.now()}`;
+  }
+}
+
+/**
+ * The mod was renamed — carry it to any open tab (and its persisted entry).
+ *
+ * Only notifies when something actually changed. An unconditional notify here is a
+ * cycle: notifyTabsChanged() → applyFilter() → onContextViewApplied → ProjectMods
+ * .render() → back into this function.
+ */
+function renameProjectModTab(mod) {
+  const tabName = projectModTabName(mod);
+  let changed = false;
+  for (const id of projectModTabIds(mod.id)) {
+    const sess = sessions.get(id);
+    if (!sess || sess.name === tabName) continue;
+    sess.name = tabName;
+    TabManager.updateLabel(id, tabName);
+    SessionStores.rename(getWindowId(), id, tabName);
+    changed = true;
+  }
+  if (changed) notifyTabsChanged();
+}
+
+/** The mod was deleted or disabled — close its tabs without a confirm prompt. */
+function closeProjectModTabs(modId) {
+  for (const id of projectModTabIds(modId)) killSession(id);
+}
+
 // Display tabs post {type:'ds-audio-state', tabId, emitting} from the detector script
 // injected by the server. Toggle a speaker icon on the matching tab. The icon reflects
 // audio state regardless of which tab is active (unlike the unread .badge).
@@ -2382,7 +2545,10 @@ async function restoreSessions(sessionList, opts = {}) {
 
   // Pre-create placeholder tab stubs in correct order for instant visual feedback
   for (const entry of sessionList) {
-    if (!(entry.type === 'mod-tab' && entry.modId)) {
+    // Mod tabs and project-mod tabs (#618) get no placeholder: both may already be
+    // open (or may fail their liveness probe), and a placeholder for a tab that never
+    // materializes is an un-upgradable orphan in the strip.
+    if (!(entry.type === 'mod-tab' && entry.modId) && entry.type !== 'project-mod') {
       const name = entry.name || getDefaultTabName(entry.cwd);
       TabManager.addPlaceholderTab(entry.id, name);
     }
@@ -2399,6 +2565,20 @@ async function restoreSessions(sessionList, opts = {}) {
             return entry.id;
           }
           return null; // server no longer has it
+        })
+        .catch(() => null);
+    } else if (entry.type === 'project-mod' && entry.projectModId) {
+      // Probe the page the same way a display tab is probed — a project mod deleted
+      // while this window was closed must not restore as a 404 iframe (#618). Goes
+      // through ensureProjectModTab, not createProjectModTab, because autoOpenPinned()
+      // may already have opened this exact mod while the probe was in flight.
+      return fetch(`/api/project-mods/${entry.projectModId}/page`, { method: 'HEAD' })
+        .then(resp => {
+          if (!resp.ok) return null;
+          return ensureProjectModTab(
+            { id: entry.projectModId, name: entry.name, project: entry.cwd },
+            { restoreActive: true },
+          );
         })
         .catch(() => null);
     } else if (entry.type === 'mod-tab' && entry.modId) {
@@ -2525,6 +2705,9 @@ function confirmCloseSession(id) {
   const session = sessions.get(id);
   // Mod tabs are config UIs — always allow close
   if (session?.type === 'mod-tab') return Promise.resolve(true);
+  // A project mod's page is durable: closing the tab loses nothing, and it re-opens
+  // from the rail (or on the next visit, if it's pinned). No prompt (#618).
+  if (session?.type === 'project-mod') return Promise.resolve(true);
   // Display tabs hold non-recoverable agent-generated HTML
   if (session?.type === 'display-tab') return showCloseDisplayTabDialog();
 
@@ -2722,11 +2905,14 @@ function killSession(id) {
   const session = sessions.get(id);
   if (!session) return;
 
-  if (session.type === 'mod-tab' || session.type === 'display-tab') {
-    // Mod/display tabs: no PTY/WS to clean up
+  if (session.type === 'mod-tab' || session.type === 'display-tab' || session.type === 'project-mod') {
+    // Mod/display/project-mod tabs: no PTY/WS to clean up
     if (session.type === 'display-tab') {
       fetch(`/api/display-tab/${id}`, { method: 'DELETE' }).catch(() => {});
     }
+    // A project mod is deliberately NOT deleted here: closing its tab is closing a
+    // window onto something durable, not unregistering it. Deleting is an explicit
+    // action in the rail's right-click menu (#618).
     if (session.resizeObserver) session.resizeObserver.disconnect();
     session.container.remove();
   } else {
@@ -2833,6 +3019,18 @@ function renameSession(id) {
 
   TabManager.promptRename(id, session.name, (newName) => {
     const name = newName || getDefaultTabName(session.cwd);
+    // A project-mod tab's name IS the mod's name (#618) — renaming it here and not on
+    // the mod would be undone by the very next 'project-mods' broadcast, which
+    // re-derives every open tab's label from the registry. Write it to the registry
+    // instead and let the broadcast bring it back.
+    if (session.type === 'project-mod' && session.projectModId) {
+      fetch('/api/project-mods/' + encodeURIComponent(session.projectModId), {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name }),
+      }).catch(() => {});
+      return;
+    }
     session.name = name;
     TabManager.updateLabel(id, name);
     SessionStores.rename(getWindowId(), id, name);
@@ -3922,7 +4120,23 @@ async function init() {
     // The filter decides which tabs are navigable, so the arrows' ends move with it. Same
     // belt-and-braces as syncOverviewToContext above: applyFilter() early-returns when
     // context views are disabled, so notifyTabsChanged() covers that case separately.
-    onContextViewApplied: () => { syncOverviewToContext(); refreshTabArrows(); },
+    // Project mods are scoped to the project you're LOOKING at (#618), so the same
+    // hook that settles the filter re-derives the strip buttons and opens the pinned
+    // ones. Deliberately not the rail rows: renderRail() pulls those itself, and
+    // calling render() from inside applyFilter would re-enter it.
+    onContextViewApplied: () => { syncOverviewToContext(); refreshTabArrows(); ProjectMods.render(); },
+  });
+
+  // Project Mods (#618). Everything about the active view arrives through these, so
+  // project-mods.js never has to import context-views.js.
+  ProjectMods.init({
+    getActiveContext: () => getActiveContextInfo(),
+    getActiveTabCwd: () => (activeId ? sessions.get(activeId)?.cwd || null : null),
+    ensureModTab: (mod, opts) => ensureProjectModTab(mod, opts),
+    reloadModTab: (mod) => reloadProjectModTab(mod),
+    renameModTab: (mod) => renameProjectModTab(mod),
+    closeModTabs: (modId) => closeProjectModTabs(modId),
+    renderRail: () => refreshContextFilter(),
   });
 
   // File drag-and-drop upload
@@ -3955,6 +4169,9 @@ async function init() {
         applyServerContexts(msg.contexts);
         ModManager.notifyContextsChanged(msg.contexts);
       }
+      // The reload channel is the one that reaches a window with no session sockets,
+      // which is exactly when an unattended agent registers a project mod (#618).
+      if (msg.type === 'project-mods') ProjectMods.refresh();
       if (msg.type === 'recent-sessions') {
         recentSessions = msg.sessions || [];
         renderEmptyStateRecent();

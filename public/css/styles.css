@@ -933,6 +933,12 @@ kbd {
 /* color has to be restated: .nav-btn's `color: var(--ds-text-secondary)` is (1,2,0) and would beat
    the base .mod-toolbar-btn.active (0,2,0), greying out the text on the blue fill. */
 #app-container.vertical-layout .mod-toolbar-btn.active { background: var(--ds-accent-blue); color: #fff; }
+/* Project mod strip buttons (#618) — surface 3 of the issue: a square button at the top
+   of the vertical strip / the left of the horizontal one. Same .nav-btn.is-glyph shape as
+   the rest of #tabs' chrome, so it inherits the sizing, the collapsed-rail label
+   suppression and the vertical-layout treatment; only the vertical spacing is restated
+   (matching .mod-toolbar-btn, and resetting the base rule's horizontal margin-left). */
+#app-container.vertical-layout .project-mod-btn { margin: 6px 0 0 0; }
 #app-container.vertical-layout .mod-back-btn { width: 100%; margin-bottom: 6px; border: none; background: transparent; border-radius: 8px; transition: background 0.15s ease; }
 #app-container.vertical-layout .mod-back-btn:hover { background: var(--ds-bg-tertiary); }
 
@@ -1258,6 +1264,18 @@ kbd {
 /* Drag-to-reorder (#532): dim the row being dragged; the real DOM row moves
    live between slots as the pointer crosses each sibling's midpoint. */
 .context-row.dragging { opacity: 0.4; }
+
+/* Project mod rows (#618) — a mod registered to the ACTIVE project, rendered directly
+   beneath its row. Deliberately a .context-row with two overrides rather than a shape
+   of its own: the collapsed icon rail's rules key off .context-row-label /
+   .context-row-icon, so these degrade to the same 22px squares as every other row for
+   free, and a parallel class would have to restate all of it. The indent and the
+   smaller type are the whole visual difference — a child of the project above, not a
+   peer of it. In the collapsed rail the indent goes away (there is no hierarchy to
+   show at 48px, and 12px of it would push the square off-centre). */
+.context-row.project-mod-row { padding-left: 26px; font-size: 12px; }
+.context-row.project-mod-row .context-row-icon { opacity: 0.85; }
+#context-rail.collapsed .context-row.project-mod-row { padding-left: 12px; }
 /* Tab-count badge (#529). --ds-border (not --ds-bg-tertiary) so the pill stays
    legible on active/hover rows, which use --ds-bg-tertiary as their background. */
 .context-row-count {

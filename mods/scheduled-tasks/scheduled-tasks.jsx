@@ -320,9 +320,9 @@ function TaskForm({ task, projects, agents, defaults = {}, onClose }) {
       <label style={label()}>Prompt (runs each time)</label>
       <textarea style={{ ...input(), minHeight: 72, resize: 'vertical', fontFamily: 'inherit' }} value={prompt} onChange={(e) => setPrompt(e.target.value)} placeholder="Generate the weekly GA report using the analytics MCP and post it to…" />
 
-      <label style={label()}>Project</label>
+      <label style={label()}>Repo</label>
       <select style={input()} value={project} onChange={(e) => setProject(e.target.value)}>
-        <option value="">No project (home)</option>
+        <option value="">No repo (home)</option>
         {projects.map((p) => <option key={p.root} value={p.root}>{p.name}</option>)}
         <option value="__custom__">Custom path…</option>
       </select>
@@ -432,11 +432,15 @@ function TaskForm({ task, projects, agents, defaults = {}, onClose }) {
   );
 }
 
-// ------------------------------------------------------------------ Groups
-// Groups here are the shared "contexts" (#526): the same entity the Context View
-// rail manages. This editor picks members from the known-repo list; the rail can
-// also add arbitrary folders. Saving a name that already exists merges the picked
-// repos into that context (never wipes its other folders).
+// --------------------------------------------------------------- Projects
+// What this editor manages are the shared "contexts" (#526): the same entity the
+// rail manages, which the whole UI now calls PROJECTS (#618). Panel-local wording
+// only — the internal identifiers (contexts, GroupsManager, showGroups) and the
+// `group:` filter encoding are unchanged. The other axis, a single repo root, is a
+// REPO here; before #618 both were called "project" in this one panel.
+// This editor picks members from the known-repo list; the rail can also add
+// arbitrary folders. Saving a name that already exists merges the picked repos
+// into that project (never wipes its other folders).
 function GroupsManager({ contexts, projects, onClose }) {
   const [name, setName] = useState('');
   const [sel, setSel] = useState([]);
@@ -456,7 +460,7 @@ function GroupsManager({ contexts, projects, onClose }) {
   return (
     <div style={{ border: `1px solid ${C.border}`, borderRadius: 6, padding: 12, marginBottom: 10, background: C.bg2 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-        <div style={{ fontWeight: 600 }}>Groups (contexts)</div>
+        <div style={{ fontWeight: 600 }}>Projects</div>
         <button onClick={onClose} style={btn()}>Close</button>
       </div>
       {contexts.map((g) => (
@@ -466,18 +470,18 @@ function GroupsManager({ contexts, projects, onClose }) {
         </div>
       ))}
       <div style={{ borderTop: `1px solid ${C.border}`, marginTop: 10, paddingTop: 8 }}>
-        <label style={label()}>Group name</label>
+        <label style={label()}>Project name</label>
         <input style={input()} value={name} onChange={(e) => setName(e.target.value)} placeholder="acme" />
-        <label style={label()}>Repos in group</label>
+        <label style={label()}>Repos in project</label>
         <div style={{ maxHeight: 160, overflow: 'auto' }}>
           {projects.map((p) => (
             <label key={p.root} style={{ display: 'block', fontSize: 12, padding: '2px 0' }}>
               <input type="checkbox" checked={sel.includes(p.root)} onChange={() => toggle(p.root)} /> {p.name}
             </label>
           ))}
-          {projects.length === 0 && <div style={{ fontSize: 12, color: C.dim }}>No known projects yet.</div>}
+          {projects.length === 0 && <div style={{ fontSize: 12, color: C.dim }}>No known repos yet.</div>}
         </div>
-        <button onClick={create} style={{ ...btn(C.accent), marginTop: 8 }}>Save group</button>
+        <button onClick={create} style={{ ...btn(C.accent), marginTop: 8 }}>Save project</button>
       </div>
     </div>
   );
@@ -559,7 +563,7 @@ function App() {
       if (!byProj.has(key)) byProj.set(key, []);
       byProj.get(key).push(t);
     }
-    const nameOf = (root) => { const p = data.projects.find((x) => x.root === root); return p ? p.name : (root ? root.split('/').pop() : 'No project'); };
+    const nameOf = (root) => { const p = data.projects.find((x) => x.root === root); return p ? p.name : (root ? root.split('/').pop() : 'No repo'); };
     // Active-first, at both levels (#613). Within a section this is a partition rather
     // than a sort, so each tier keeps its existing relative (creation) order exactly.
     // A section with nothing active sinks below the ones that have live tasks, so the
@@ -610,7 +614,7 @@ function App() {
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
         <div style={{ fontWeight: 700, fontSize: 15, flex: 1 }}>⏰ Scheduled</div>
         <button onClick={() => { pinRef.current = { toTop: true }; setEditing({ mode: 'new' }); setShowGroups(false); }} style={btn(C.accent)}>+ New</button>
-        <button onClick={() => { setShowGroups(!showGroups); setEditing(null); }} style={btn()}>Groups</button>
+        <button onClick={() => { setShowGroups(!showGroups); setEditing(null); }} style={btn()}>Projects</button>
       </div>
 
       {!data.enabled && (
@@ -634,9 +638,9 @@ function App() {
             else if (type === 'all') window.deepsteve.setActiveContext?.(null);
           }}
         >
-          <option value="all:">All projects</option>
-          {contexts.length > 0 && <optgroup label="Groups">{contexts.map((g) => <option key={g.id} value={`group:${g.id}`}>Group: {g.name}</option>)}</optgroup>}
-          {data.projects.length > 0 && <optgroup label="Projects">{data.projects.map((p) => <option key={p.root} value={`project:${p.root}`}>{p.name}</option>)}</optgroup>}
+          <option value="all:">All repos</option>
+          {contexts.length > 0 && <optgroup label="Projects">{contexts.map((g) => <option key={g.id} value={`group:${g.id}`}>{g.name}</option>)}</optgroup>}
+          {data.projects.length > 0 && <optgroup label="Repos">{data.projects.map((p) => <option key={p.root} value={`project:${p.root}`}>{p.name}</option>)}</optgroup>}
         </select>
       </div>
 

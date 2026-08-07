@@ -1,6 +1,11 @@
 # Mods Guide
 
-Mods are extensions that add visual views and MCP tools to deepsteve. They run in sandboxed iframes with access to session data through a bridge API.
+There are two kinds of mod, and they are not the same thing:
+
+- **DeepSteve Mods** — mods on the UI of the DeepSteve platform itself. They live in `mods/`, are **global to the install** (every session loads every mod's `tools.js`), are enabled per browser, and can be published to the marketplace. This guide is about these.
+- **Project Mods** — custom behaviour, like a dashboard, that an agent implements **for one project**. One page, registered to one git repo root, stored outside the repo in `~/.deepsteve/`, visible only when you are looking at that project, and **never shared** — no store, no publishing, no other project. See [Project Mods](#project-mods) at the end.
+
+A rule of thumb: if the thing belongs to *deepsteve*, it's a DeepSteve Mod. If it belongs to *what you're building*, it's a Project Mod.
 
 ## Using Mods
 
@@ -336,3 +341,66 @@ Panel mods are auto-enabled on first visit (when no mod preferences have been sa
 ## Tutorials
 
 - [Three.js VR Skeleton](../mod-tutorials/threejs-vr-skeleton/) — Minimal three.js + WebXR starter template for building VR mods
+
+---
+
+## Project Mods
+
+A **Project Mod** is a page an agent writes for **one project** and nowhere else. Where a display tab is a one-shot snapshot that disappears with the session, a project mod is durable: it stays registered to the project and is reachable every session. The intended use is a dashboard or live tooling the project carries with it, rather than something you re-create each time.
+
+It is **entirely local**: the registry and the page live in `~/.deepsteve/`, never in the repo, never uploaded, never visible from another project.
+
+### Registration surfaces
+
+A mod declares which of three places it wants, via `surfaces`:
+
+| Surface | Where it appears |
+|---|---|
+| `rail` (default) | An entry beneath its project in the projects rail. Rendered for the **active** project only. |
+| `button` | A square button in the tab strip — the **top** of the strip in vertical tab layout, the **left** of it in horizontal. |
+| `tab` | A pinned tab that **auto-opens in the background** whenever its project is the active one, and keeps running while you work elsewhere. |
+
+Any combination is allowed; an empty list falls back to `["rail"]`, because a mod with no surface could never be opened.
+
+### Scoping
+
+A mod belongs to a **git repo root**, resolved the same way a scheduled task's project is (`findGitRoot`, or the calling session's `repoRoot`). It shows when you are *looking at* that project:
+
+- a project selected in the rail → the mod's repo root is inside one of that project's folders;
+- the **All** view → the active tab's cwd is inside the mod's repo root.
+
+Both directions are the same folder-prefix rule the rest of the Projects feature uses, so worktrees under `<repo>/.claude/worktrees/…` are included for free.
+
+### Authoring
+
+```
+create_project_mod({
+  session_id: process.env.DEEPSTEVE_SESSION_ID,   // infers the project from your session
+  name: "Build Dashboard",
+  icon: "📊",                                     // optional; else a monogram from the name
+  surfaces: ["rail", "button"],
+  file_path: "/repo/tools/dashboard.html",        // or inline `html`
+  replacements: { "%%REPO%%": "deepsteve" },      // optional literal find→replace
+})
+```
+
+Then `update_project_mod` (page and/or metadata), `edit_project_mod` (exact-substring patch, like the Edit tool), `list_project_mods` (`scope: "project" | "all"`), and `delete_project_mod`. Exactly one of `html` / `file_path` — the same `resolveHtml()` display tabs use.
+
+The page is served same-origin from `GET /api/project-mods/:id/page`, so it calls back into deepsteve with relative `/api/...` URLs (never a hard-coded port), and the host injects `window.deepsteve` into its iframe — the same bridge documented above — so a project mod can drive tabs, not just render.
+
+### Managing one
+
+Right-click its rail row or its strip button: Open, Rename, Set icon, toggle each of the three surfaces, Disable, Delete. Renaming its tab renames the mod. Closing its tab does **not** delete it — a pinned mod returns the next time its project is active.
+
+### Disk layout
+
+```
+~/.deepsteve/project-mods.json        # [{id, project, name, icon, surfaces, enabled, …}]
+~/.deepsteve/project-mods/<id>.html   # one page per mod
+```
+
+Deliberately outside the repo, so "not shared" is a guarantee rather than a gitignore convention. Unlike `display-tabs/`, these are **not** swept for staleness.
+
+### Trust
+
+A project mod's page is agent-authored HTML served same-origin, in an iframe with `allow-same-origin` (required for the bridge). That is the same authority an agent-authored display tab already has — a continuation of the existing model, not a new one. The server-authoritative kill switch is the `projectModsEnabled` setting: off hides every surface and refuses every write (MCP `isError`, REST 403), while reads stay open so existing mods remain inspectable.

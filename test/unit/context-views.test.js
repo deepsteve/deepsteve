@@ -681,13 +681,13 @@ test('no archived contexts → no Archived section (#601)', async () => {
   assert.deepStrictEqual(railChildren(rail, 'context-archived-toggle'), []);
 });
 
-// The collapsed icon rail hides the "+ New context" label (font-size:0 + a ::before glyph),
+// The collapsed icon rail hides the "+ New project" label (font-size:0 + a ::before glyph),
 // so the title attribute is the only thing left explaining the button (#602).
-test('+ New context carries a tooltip for the collapsed rail (#602)', async () => {
+test('+ New project carries a tooltip for the collapsed rail (#602)', async () => {
   const { toggle, rail } = await setup();
   toggle.listeners.click(); // open the rail → renderRail
   const [add] = railChildren(rail, 'context-add');
-  assert.strictEqual(add.title, 'New context');
+  assert.strictEqual(add.title, 'New project');
 });
 
 test('⌘↑/↓ cycling skips archived contexts (#601)', async () => {

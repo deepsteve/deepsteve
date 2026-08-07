@@ -2,6 +2,14 @@
  * Context Views — group tabs into folder-based "contexts" and filter the tab
  * strip to one context at a time (#522).
  *
+ * NAMING (#618): everything the USER sees now says **Projects** — the rail header,
+ * "+ New project", the editor, the ⌘? descriptions, the settings section. Every
+ * identifier stayed `context*`: this module, `contextViewsEnabled`, `/api/contexts`,
+ * `contexts.json`, the `{type:'contexts'}` broadcast, the `.context-*` CSS and the
+ * `window.deepsteve.onContextsChanged` mod API. That split is deliberate — renaming
+ * the internals would need a settings + on-disk migration and would break third-party
+ * mods, to buy nothing. Read "context" below as "project".
+ *
  * A context = { id, name, dirs: [absolute repo paths] }. A tab belongs to a
  * context when its cwd is inside one of those folders (prefix match), so
  * subdirectories AND worktree sessions (<repo>/.claude/worktrees/...) are
@@ -35,6 +43,10 @@
 import { nsKey } from './storage-namespace.js';
 import { register, registerInfo } from './shortcuts.js';
 import { tabIcon } from './tab-manager.js';
+// Project Mods (#618) register an entry beneath their project's row. One-way import:
+// project-mods.js learns about the active view through callbacks app.js injects, never
+// by importing this module back.
+import { railModsFor, makeRailRow } from './project-mods.js';
 
 // Context definitions are server-owned (#526): they are the same entity as the
 // Scheduled Tasks "project groups", loaded from /api/contexts and kept fresh by
@@ -299,7 +311,7 @@ function updateIndicator() {
   const ctx = getActiveContext();               // null in "All"
   const show = enabled && !sidebarOpen && !!ctx; // rail closed + real context
   const name = show ? ctx.name : '';
-  const tip  = show ? `Context: ${ctx.name} — click to open (⌘P)` : '';
+  const tip  = show ? `Project: ${ctx.name} — click to open (⌘P)` : '';
   // Drive both presentations: the tab-strip indicator (#context-indicator) and the
   // ruled terminal title (#context-rule-title). CSS picks what's visible — the
   // retro-monitor theme hides the former and reveals the latter (#535), and the
@@ -333,7 +345,7 @@ function renderRail() {
 
   const header = document.createElement('div');
   header.className = 'context-rail-header';
-  header.textContent = 'Contexts';
+  header.textContent = 'Projects';
   rail.appendChild(header);
 
   const list = document.createElement('div');
@@ -341,6 +353,7 @@ function renderRail() {
   list.appendChild(makeRow(null, 'All', activeContextId === null, null));
   for (const ctx of visibleContexts()) {
     list.appendChild(makeRow(ctx.id, ctx.name, ctx.id === activeContextId, ctx));
+    appendProjectModRows(list, ctx);
   }
   rail.appendChild(list);
 
@@ -348,7 +361,7 @@ function renderRail() {
   if (getActiveContext() && !activeContextHasTabs()) {
     const note = document.createElement('div');
     note.className = 'context-empty-note';
-    note.textContent = 'No tabs in this context — click to open one.';
+    note.textContent = 'No tabs in this project — click to open one.';
     note.onclick = () => newTabInActiveContext();
     rail.appendChild(note);
   }
@@ -366,7 +379,7 @@ function renderRail() {
     const toggle = document.createElement('div');
     toggle.className = 'context-archived-toggle';
     toggle.textContent = `${open ? '▾' : '▸'} Archived (${archived.length})`;
-    toggle.title = open ? 'Hide archived contexts' : 'Show archived contexts';
+    toggle.title = open ? 'Hide archived projects' : 'Show archived projects';
     toggle.onclick = () => {
       archivedOpen = !open;
       saveArchivedOpen();
@@ -382,6 +395,7 @@ function renderRail() {
       archivedList.className = 'context-list context-archived-list';
       for (const ctx of archived) {
         archivedList.appendChild(makeRow(ctx.id, ctx.name, ctx.id === activeContextId, ctx));
+        appendProjectModRows(archivedList, ctx);
       }
       rail.appendChild(archivedList);
     }
@@ -389,8 +403,8 @@ function renderRail() {
 
   const add = document.createElement('div');
   add.className = 'context-add';
-  add.textContent = '+ New context';
-  add.title = 'New context';  // the collapsed rail hides the label, leaving a bare "+" (#602)
+  add.textContent = '+ New project';
+  add.title = 'New project';  // the collapsed rail hides the label, leaving a bare "+" (#602)
   add.onclick = () => openContextEditor(null);
   rail.appendChild(add);
 
@@ -398,6 +412,19 @@ function renderRail() {
   hint.className = 'context-hint';
   hint.textContent = '⌘↑/↓ switch · ⌘P hide';
   rail.appendChild(hint);
+}
+
+/**
+ * Project Mods registered to `ctx` (#618), rendered directly beneath its row.
+ *
+ * Only for the ACTIVE project. Listing every project's mods would turn a rail of a
+ * dozen projects into a wall — and the row you just clicked is the one whose tooling
+ * you want. Everything else about a mod (its strip button, its pinned tab) is scoped
+ * the same way, so this matches rather than adds a rule.
+ */
+function appendProjectModRows(list, ctx) {
+  if (!ctx || ctx.id !== activeContextId) return;
+  for (const mod of railModsFor(ctx)) list.appendChild(makeRailRow(mod));
 }
 
 function makeRow(id, name, active, ctx) {
@@ -439,7 +466,7 @@ function makeRow(id, name, active, ctx) {
     wireRowDrag(row, ctx);
   } else {
     row.onclick = () => selectContext(id);
-    row.title = 'Right-click to add a context';
+    row.title = 'Right-click to add a project';
   }
   // Every row answers right-click with OUR menu, "All" included (#548). "All" is
   // a synthetic view — no id, no dirs — so its menu offers New context instead of
@@ -510,10 +537,10 @@ function showRowMenu(x, y, ctx) {
     // its dirs/icon/position but leaves the list until it's unarchived.
     addRowMenuItem(menu, ctx.archived ? 'Unarchive' : 'Archive', () => archiveContext(ctx, !ctx.archived));
     addRowMenuItem(menu, 'Delete', () => {
-      if (confirm(`Delete context "${ctx.name}"?`)) deleteContext(ctx);
+      if (confirm(`Delete project "${ctx.name}"?`)) deleteContext(ctx);
     }, 'var(--ds-accent-red)');
   } else {
-    addRowMenuItem(menu, 'New context', () => openContextEditor(null));
+    addRowMenuItem(menu, 'New project', () => openContextEditor(null));
   }
 
   menu.style.left = x + 'px';
@@ -890,7 +917,7 @@ function setSidebar(open) {
   if (resizer) resizer.style.display = open ? 'block' : 'none';
   if (toggleBtn) {
     toggleBtn.classList.toggle('active', open);
-    toggleBtn.title = open ? 'Hide contexts (⌘P)' : 'Show contexts (⌘P)';
+    toggleBtn.title = open ? 'Hide projects (⌘P)' : 'Show projects (⌘P)';
   }
   if (open) {
     renderRail();
@@ -998,7 +1025,7 @@ function autoSizeRail() {
     g.font = '13px system-ui';
   }
   let textW = 0;
-  for (const s of ['Contexts', '+ New context', 'All', ...contexts.map(c => c.name)]) {
+  for (const s of ['Projects', '+ New project', 'All', ...contexts.map(c => c.name)]) {
     textW = Math.max(textW, g.measureText(s || '').width);
   }
   // Allowance: row padding (12+12) + active border (3) + icon chip + gap + a
@@ -1063,7 +1090,7 @@ function isFormField(el) {
 const matchesPanelToggle = register({
   id: 'context-panel',
   group: 'Views',
-  description: 'Toggle the context panel',
+  description: 'Toggle the projects panel',
   shortcut: 'Meta+p',
   match: 'code', // e.code === 'KeyP' — pinned to the physical key, layout-independent
   isEnabled: () => enabled,
@@ -1081,7 +1108,7 @@ registerInfo({
 registerInfo({
   id: 'context-cycle',
   group: 'Views',
-  description: 'Cycle through All + your contexts',
+  description: 'Cycle through All + your projects',
   keys: ['⌘↑', '⌘↓'],
   isEnabled: () => enabled,
 });
@@ -1249,12 +1276,12 @@ function openContextEditor(ctx) {
   overlay.appendChild(modal);
 
   const h = document.createElement('h2');
-  h.textContent = isNew ? 'New context' : 'Edit context';
+  h.textContent = isNew ? 'New project' : 'Edit project';
   modal.appendChild(h);
 
   const nameInput = document.createElement('input');
   nameInput.type = 'text';
-  nameInput.placeholder = 'Context name';
+  nameInput.placeholder = 'Project name';
   nameInput.value = draft.name;
   nameInput.className = 'context-name-input';
   modal.appendChild(nameInput);

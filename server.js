@@ -448,6 +448,12 @@ const SETTINGS_SCHEMA = [
   { name: 'commandPaletteEnabled',      type: 'boolean', default: true },
   { name: 'hashCommandsEnabled',        type: 'boolean', default: true },
   { name: 'contextViewsEnabled',        type: 'boolean', default: true },
+  // Server-authoritative kill switch for Project Mods (#618). A mod's own enable/disable
+  // is client-side localStorage and never reaches the server, so the agent-facing write
+  // path needs a real setting to fail closed against — same reason scheduledTasksEnabled
+  // exists. Read live by mods/project-mods/tools.js off the mutated-in-place settings
+  // object, so toggling it takes effect with no restart.
+  { name: 'projectModsEnabled',         type: 'boolean', default: true },
   { name: 'commandPaletteShortcut',     type: 'string',  default: 'Meta+k' },
   { name: 'overviewModeEnabled',        type: 'boolean', default: true },
   { name: 'overviewModeShortcut',       type: 'string',  default: 'Meta+o' },
@@ -4753,7 +4759,7 @@ app.get('/api/contexts', (req, res) => res.json({ contexts }));
 app.post('/api/contexts', (req, res) => {
   const b = req.body || {};
   const name = String(b.name || '').trim();
-  if (!name) return res.status(400).json({ error: 'Context name required' });
+  if (!name) return res.status(400).json({ error: 'Project name required' });
   const dirs = Array.isArray(b.dirs) ? b.dirs.filter(Boolean) : [];
   const id = (b.id && String(b.id)) || genContextId();
   const existing = contexts.find(c => c.id === id);
@@ -4778,7 +4784,7 @@ app.post('/api/contexts', (req, res) => {
 
 app.delete('/api/contexts/:id', (req, res) => {
   const idx = contexts.findIndex(c => c.id === req.params.id);
-  if (idx === -1) return res.status(404).json({ error: 'Context not found' });
+  if (idx === -1) return res.status(404).json({ error: 'Project not found' });
   contexts.splice(idx, 1);
   removeIconFiles(req.params.id); // clean up any uploaded icon file (#579)
   saveContexts();
@@ -4808,7 +4814,7 @@ app.put('/api/contexts/:id/icon', express.raw({ type: '*/*', limit: '2mb' }), (r
   const ext = String(req.query.ext || '').toLowerCase();
   if (ext !== 'png' && ext !== 'svg') return res.status(400).json({ error: 'ext must be png or svg' });
   const ctx = contexts.find(c => c.id === req.params.id);
-  if (!ctx) return res.status(404).json({ error: 'Context not found' });
+  if (!ctx) return res.status(404).json({ error: 'Project not found' });
   const buf = req.body;
   if (!Buffer.isBuffer(buf) || buf.length === 0) return res.status(400).json({ error: 'Empty image data' });
   if (!iconBytesLookValid(ext, buf)) return res.status(400).json({ error: `Not a valid ${ext.toUpperCase()} image` });
@@ -4850,7 +4856,7 @@ app.get('/api/contexts/:id/icon', (req, res) => {
 // Backs the UI's "Clear icon" action.
 app.delete('/api/contexts/:id/icon', (req, res) => {
   const ctx = contexts.find(c => c.id === req.params.id);
-  if (!ctx) return res.status(404).json({ error: 'Context not found' });
+  if (!ctx) return res.status(404).json({ error: 'Project not found' });
   if (ctx.iconImage) removeIconFiles(ctx.id);
   ctx.icon = '';
   ctx.iconImage = '';
@@ -4867,7 +4873,7 @@ app.delete('/api/contexts/:id/icon', (req, res) => {
 // dormant project's tasks must keep firing), so nothing gates ctx.getContexts().
 app.post('/api/contexts/:id/archive', (req, res) => {
   const ctx = contexts.find(c => c.id === req.params.id);
-  if (!ctx) return res.status(404).json({ error: 'Context not found' });
+  if (!ctx) return res.status(404).json({ error: 'Project not found' });
   ctx.archived = req.body?.archived === true;
   saveContexts();
   broadcastContexts();
