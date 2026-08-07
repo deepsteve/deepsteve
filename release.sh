@@ -47,10 +47,29 @@ NODE_SHA256_LINUX_X64="9d942932535988091034dc94cc5f42b6dc8784d6366df3a36c4c9ccb3
 
 OUT="install.sh"
 
-# --- Preamble ---
-cat > "$OUT" << 'PREAMBLE'
+# --- Pinned constants ---
+# An UNQUOTED heredoc, so these expand now, at generation time.
+#
+# They used to be __PLACEHOLDER__ tokens inside the quoted preamble below, substituted
+# afterwards with `sed -i ''` — BSD-only syntax that made this generator refuse to run
+# on Linux (GNU sed reads the '' as the script and the real script as a filename). That
+# is why check-installer.yml is pinned to macos-latest, and why `npm run test:install`,
+# which starts with `bash release.sh`, could not be run by a Linux contributor at all.
+# Emitting them directly deletes the sed calls and the placeholders together (#621).
+cat > "$OUT" << EOF
 #!/bin/bash
 set -e
+
+# Pinned by release.sh at generation time.
+NODE_VERSION="$NODE_VERSION"
+NODE_SHA256_ARM64="$NODE_SHA256_ARM64"
+NODE_SHA256_X64="$NODE_SHA256_X64"
+NODE_SHA256_LINUX_ARM64="$NODE_SHA256_LINUX_ARM64"
+NODE_SHA256_LINUX_X64="$NODE_SHA256_LINUX_X64"
+EOF
+
+# --- Preamble ---
+cat >> "$OUT" << 'PREAMBLE'
 
 OS=$(uname -s)
 
@@ -61,13 +80,12 @@ if ! command -v node &>/dev/null; then
   else
     ARCH=$(uname -m)
     case "$ARCH" in arm64|aarch64) ARCH="arm64";; *) ARCH="x64";; esac
-    NODE_VERSION="__NODE_VERSION__"
     if [ "$OS" = "Darwin" ]; then
       NODE_PLATFORM="darwin"
-      if [ "$ARCH" = "arm64" ]; then NODE_SHA256="__NODE_SHA256_ARM64__"; else NODE_SHA256="__NODE_SHA256_X64__"; fi
+      if [ "$ARCH" = "arm64" ]; then NODE_SHA256="$NODE_SHA256_ARM64"; else NODE_SHA256="$NODE_SHA256_X64"; fi
     else
       NODE_PLATFORM="linux"
-      if [ "$ARCH" = "arm64" ]; then NODE_SHA256="__NODE_SHA256_LINUX_ARM64__"; else NODE_SHA256="__NODE_SHA256_LINUX_X64__"; fi
+      if [ "$ARCH" = "arm64" ]; then NODE_SHA256="$NODE_SHA256_LINUX_ARM64"; else NODE_SHA256="$NODE_SHA256_LINUX_X64"; fi
     fi
     NODE_DIR="$HOME/.deepsteve/node"
     mkdir -p "$NODE_DIR"
@@ -117,12 +135,6 @@ for moddir in mods/*/; do
   echo "mkdir -p \"\$INSTALL_DIR/mods/$modname\"" >> "$OUT"
 done
 echo "" >> "$OUT"
-
-sed -i '' "s/__NODE_VERSION__/$NODE_VERSION/g" "$OUT"
-sed -i '' "s/__NODE_SHA256_ARM64__/$NODE_SHA256_ARM64/g" "$OUT"
-sed -i '' "s/__NODE_SHA256_X64__/$NODE_SHA256_X64/g" "$OUT"
-sed -i '' "s/__NODE_SHA256_LINUX_ARM64__/$NODE_SHA256_LINUX_ARM64/g" "$OUT"
-sed -i '' "s/__NODE_SHA256_LINUX_X64__/$NODE_SHA256_LINUX_X64/g" "$OUT"
 
 # --- Embed text files as heredocs ---
 
@@ -185,7 +197,13 @@ embed_binary() {
   local src="$1"
   local dest="$2"
   echo "base64 -d << 'DEEPSTEVE_B64_EOF' > \"\$INSTALL_DIR/$dest\"" >> "$OUT"
-  base64 < "$src" >> "$OUT"
+  # Normalize the line wrapping: macOS base64 emits one unwrapped line, GNU wraps at 76.
+  # `base64 -d` reads either, so this was never a correctness problem — but it meant the
+  # same commit produced a byte-different install.sh depending on which OS generated it,
+  # which would defeat any future reproducibility check. Now that release.sh can run on
+  # Linux at all (#621), that matters. `fold` emits no trailing newline, hence the echo.
+  base64 < "$src" | tr -d '\n' | fold -w 76 >> "$OUT"
+  echo "" >> "$OUT"
   echo "DEEPSTEVE_B64_EOF" >> "$OUT"
   echo "" >> "$OUT"
 }

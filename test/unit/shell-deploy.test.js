@@ -122,6 +122,36 @@ test('uninstall.sh never removes the shared ~/Library/Logs directory', () => {
   assert.ok(guard, 'the log-dir rmdir must be guarded by a non-darwin check');
 });
 
+test('release.sh contains no BSD-only sed, so it runs on Linux too', () => {
+  // `sed -i ''` is BSD syntax; GNU sed reads the '' as the script and the real script
+  // as a filename. It is why check-installer.yml is pinned to macos-latest and why a
+  // Linux contributor could not run `npm run test:install` (which starts with
+  // `bash release.sh`). The five calls are gone, not ported — the constants they
+  // substituted are emitted directly from an unquoted heredoc instead.
+  assert.ok(!/sed -i ''/.test(code['release.sh']), "release.sh still uses BSD `sed -i ''`");
+  assert.ok(!/__NODE_[A-Z0-9_]*__/.test(src['release.sh']),
+    'the placeholder tokens went with the sed calls');
+});
+
+test('release.sh emits the pinned node constants directly', () => {
+  // The replacement for the placeholders: an unquoted heredoc that expands at
+  // generation time. If this regressed to a quoted one, install.sh would ship the
+  // literal variable names and every fresh install would fail its checksum check.
+  assert.match(src['release.sh'], /cat > "\$OUT" << EOF\n#!\/bin\/bash/,
+    'the constants heredoc must be UNQUOTED (<< EOF, not << \'EOF\')');
+  assert.match(src['release.sh'], /^NODE_VERSION="\$NODE_VERSION"$/m);
+});
+
+test('base64 embedding is wrapped identically on macOS and Linux', () => {
+  // macOS base64 emits one unwrapped line, GNU wraps at 76. `base64 -d` reads both, so
+  // this was never a correctness bug — but it made the generated install.sh
+  // byte-different depending on which OS built it, which defeats any reproducibility
+  // check. Now that release.sh runs on both, normalize.
+  const line = code['release.sh'].split('\n').find((l) => /^\s*base64 </.test(l));
+  assert.ok(line, 'expected the base64 embed');
+  assert.match(line, /tr -d '\\n' \| fold -w 76/);
+});
+
 test('install.sh is generated, never committed', () => {
   // It is a 3.5MB build artifact; the repo tracks release.sh instead.
   const ignore = fs.readFileSync(path.join(REPO, '.gitignore'), 'utf8');
