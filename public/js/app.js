@@ -290,6 +290,16 @@ function applySettings(settings) {
   }
 }
 
+// The one place the support tier becomes user-visible text (#622). The server owns the
+// tier (AGENT_CATALOG in server.js) and ships it as data; before this, "(experimental)"
+// was hardcoded into the server's `name` AND again into the Settings HTML, and Hermes
+// was in neither — so it read as experimental in the README and as supported in the UI.
+// See docs/agents.md for what the tiers mean.
+function agentLabel(agent) {
+  if (!agent) return '';
+  return agent.tier === 'experimental' ? `${agent.name} (experimental)` : agent.name;
+}
+
 // When the browser tab regains visibility, clear its notification state.
 document.addEventListener('visibilitychange', () => {
   if (!document.hidden && activeId) {
@@ -764,12 +774,17 @@ function showAutoCycleToast({ name, seconds = 5, onExpire, onCancel } = {}) {
 }
 
 settingsBtn?.addEventListener('click', async () => {
-  const [settingsData, themesData, versionData, defaultsData, enginesData] = await Promise.all([
+  const [settingsData, themesData, versionData, defaultsData, enginesData, agentsData] = await Promise.all([
     fetch('/api/settings').then(r => r.json()),
     fetch('/api/themes').then(r => r.json()),
     fetch('/api/version').then(r => r.json()).catch(() => ({ current: '?', latest: null, updateAvailable: false })),
     fetch('/api/settings/defaults').then(r => r.json()).catch(() => ({})),
-    fetch('/api/engines').then(r => r.json()).catch(() => ({ engines: [], current: null }))
+    fetch('/api/engines').then(r => r.json()).catch(() => ({ engines: [], current: null })),
+    // Fetched here rather than read off the page-load cache (#622): the agent rows are
+    // now generated from this, so a failed init fetch would render an empty section —
+    // and Settings is exactly where you land after installing an agent, so a fresh
+    // availability probe beats a snapshot taken when the page loaded.
+    fetch('/api/agents').then(r => r.json()).catch(() => null),
   ]);
   const currentProfile = settingsData.shellProfile || '~/.zshrc';
   const currentMaxTitle = settingsData.maxIssueTitleLength || 25;
@@ -807,8 +822,6 @@ settingsBtn?.addEventListener('click', async () => {
   const scheduledModelIsCustom = !!currentScheduledDefaultModel && !SCHEDULED_MODEL_ALIASES.includes(currentScheduledDefaultModel);
   const currentPreventSleep = settingsData.preventSleepWhileActive !== false;
   const currentDefaultAgent = settingsData.defaultAgent || 'claude';
-  const currentOpencodeBinary = settingsData.opencodeBinary || 'opencode';
-  const currentPiBinary = settingsData.piBinary || 'pi';
   const currentScrollbackKB = settingsData.scrollbackKB || 100;
   const currentRecentSessionsLimit = settingsData.recentSessionsLimit ?? 8;
   // Custom Claude config profiles (#537): editable [name, configDir] rows.
@@ -822,7 +835,30 @@ settingsBtn?.addEventListener('click', async () => {
       <button type="button" class="cc-remove" title="Remove" style="padding:4px 8px; font-size:12px; border-radius:4px; border:1px solid var(--ds-border); background:var(--ds-bg-secondary); color:var(--ds-text-secondary); cursor:pointer;">✕</button>
     </div>`;
   const customConfigsHtml = currentCustomConfigs.map(c => customConfigRowHtml(c.name, c.configDir, c.id)).join('');
-  const agents = window.__deepsteveAgents || [];
+  const agents = agentsData?.agents || window.__deepsteveAgents || [];
+  if (agentsData?.agents) window.__deepsteveAgents = agentsData.agents;
+  // One row per built-in agent, driven entirely by /api/agents (#622). Hand-writing a
+  // block per agent is what left Hermes with no checkbox at all — and then needed the
+  // renderedAgentIds preserve-hack in the save path to stop every save disabling it.
+  // Agents with a binarySetting also get a path input, revealed with their checkbox.
+  const builtinAgents = agents.filter(a => !a.custom);
+  const agentRowsHtml = builtinAgents.map(a => {
+    const id = escapeHtml(a.id);
+    const suffix = a.available ? '' : ' (not installed)';
+    // Also shown when the binary wasn't found: that's precisely when the path needs
+    // correcting, and the checkbox is disabled then, so it can't reveal the field.
+    const showBinaryRow = a.enabled || !a.available;
+    const binaryRow = a.binarySetting ? `
+        <div class="agent-binary-row" data-agent="${id}" style="display: ${showBinaryRow ? 'block' : 'none'}; margin: 0 0 8px 24px;">
+          <label style="font-size: 12px; color: var(--ds-text-secondary);">Binary path</label>
+          <input type="text" class="agent-binary" data-setting="${escapeHtml(a.binarySetting)}" value="${escapeHtml(a.binary || a.id)}" placeholder="${id}" style="width: 200px; padding: 4px 8px; border-radius: 4px; border: 1px solid var(--ds-border); background: var(--ds-bg-secondary); color: var(--ds-text-primary);">
+        </div>` : '';
+    return `
+        <label style="font-size: 13px; color: var(--ds-text-primary); cursor: pointer; display: flex; align-items: center; gap: 8px; margin-bottom: 8px;">
+          <input type="checkbox" class="agent-toggle" data-agent="${id}" ${a.enabled ? 'checked' : ''} ${a.available ? '' : 'disabled'} style="accent-color: var(--ds-accent-green);">
+          ${escapeHtml(agentLabel(a))}${suffix}
+        </label>${binaryRow}`;
+  }).join('');
   const themes = themesData.themes || [];
   const activeTheme = themesData.active || '';
 
@@ -1063,31 +1099,8 @@ settingsBtn?.addEventListener('click', async () => {
         <h3>Enabled Agents</h3>
         <p style="font-size: 13px; color: var(--ds-text-secondary); margin-bottom: 8px;">
           Choose which installed agents are enabled. If multiple are enabled, you can switch between them using the Engine dropdown.
-        </p>
-        <label style="font-size: 13px; color: var(--ds-text-primary); cursor: pointer; display: flex; align-items: center; gap: 8px; margin-bottom: 8px;">
-          <input type="checkbox" id="agent-claude" ${agents.find(a => a.id === 'claude')?.enabled !== false ? 'checked' : ''} style="accent-color: var(--ds-accent-green);">
-          Claude Code
-        </label>
-        <label style="font-size: 13px; color: var(--ds-text-primary); cursor: pointer; display: flex; align-items: center; gap: 8px; margin-bottom: 8px;">
-          <input type="checkbox" id="agent-codex" ${agents.find(a => a.id === 'codex')?.enabled ? 'checked' : ''} ${agents.find(a => a.id === 'codex')?.available ? '' : 'disabled'} style="accent-color: var(--ds-accent-green);">
-          Codex${agents.find(a => a.id === 'codex')?.available ? '' : ' (not installed)'}
-        </label>
-        <label style="font-size: 13px; color: var(--ds-text-primary); cursor: pointer; display: flex; align-items: center; gap: 8px; margin-bottom: 8px;">
-          <input type="checkbox" id="agent-opencode" ${agents.find(a => a.id === 'opencode')?.enabled ? 'checked' : ''} ${agents.find(a => a.id === 'opencode')?.available ? '' : 'disabled'} style="accent-color: var(--ds-accent-green);">
-          OpenCode (experimental)${agents.find(a => a.id === 'opencode')?.available ? '' : ' (not installed)'}
-        </label>
-        <div id="opencode-binary-row" style="display: ${agents.find(a => a.id === 'opencode')?.enabled ? 'block' : 'none'}; margin-top: 8px;">
-          <label style="font-size: 12px; color: var(--ds-text-secondary);">Binary path</label>
-          <input type="text" id="opencode-binary" value="${escapeHtml(currentOpencodeBinary)}" placeholder="opencode" style="width: 200px; padding: 4px 8px; border-radius: 4px; border: 1px solid var(--ds-border); background: var(--ds-bg-secondary); color: var(--ds-text-primary);">
-        </div>
-        <label style="font-size: 13px; color: var(--ds-text-primary); cursor: pointer; display: flex; align-items: center; gap: 8px; margin-bottom: 8px;">
-          <input type="checkbox" id="agent-pi" ${agents.find(a => a.id === 'pi')?.enabled ? 'checked' : ''} ${agents.find(a => a.id === 'pi')?.available ? '' : 'disabled'} style="accent-color: var(--ds-accent-green);">
-          Pi (experimental)${agents.find(a => a.id === 'pi')?.available ? '' : ' (not installed)'}
-        </label>
-        <div id="pi-binary-row" style="display: ${agents.find(a => a.id === 'pi')?.enabled ? 'block' : 'none'}; margin-top: 8px;">
-          <label style="font-size: 12px; color: var(--ds-text-secondary);">Binary path</label>
-          <input type="text" id="pi-binary" value="${escapeHtml(currentPiBinary)}" placeholder="pi" style="width: 200px; padding: 4px 8px; border-radius: 4px; border: 1px solid var(--ds-border); background: var(--ds-bg-secondary); color: var(--ds-text-primary);">
-        </div>
+          Agents marked <em>experimental</em> run, but get no deepsteve MCP tools and no skills — see <code>docs/agents.md</code>.
+        </p>${agentRowsHtml}
         <div style="margin-top: 16px; border-top: 1px solid var(--ds-border); padding-top: 12px;">
           <label style="font-size: 13px; color: var(--ds-text-primary); font-weight: 600;">Custom Claude configs</label>
           <p style="font-size: 11px; color: var(--ds-text-secondary); margin: 4px 0 8px;">
@@ -1249,18 +1262,12 @@ settingsBtn?.addEventListener('click', async () => {
     // The server will broadcast the theme CSS via WebSocket — applyTheme runs from the WS handler
   });
 
-  // Show/hide OpenCode binary path input based on checkbox
-  const agentOpencodeCheckbox = overlay.querySelector('#agent-opencode');
-  const opencodeBinaryRow = overlay.querySelector('#opencode-binary-row');
-  agentOpencodeCheckbox?.addEventListener('change', () => {
-    opencodeBinaryRow.style.display = agentOpencodeCheckbox.checked ? 'block' : 'none';
-  });
-
-  // Show/hide Pi binary path input based on checkbox
-  const agentPiCheckbox = overlay.querySelector('#agent-pi');
-  const piBinaryRow = overlay.querySelector('#pi-binary-row');
-  agentPiCheckbox?.addEventListener('change', () => {
-    piBinaryRow.style.display = agentPiCheckbox.checked ? 'block' : 'none';
+  // Reveal an agent's binary-path input with its checkbox. One handler for every agent
+  // that has one, paired by data-agent — the rows are generated from /api/agents.
+  overlay.querySelectorAll('.agent-toggle').forEach(cb => {
+    const row = overlay.querySelector(`.agent-binary-row[data-agent="${cb.dataset.agent}"]`);
+    if (!row) return;
+    cb.addEventListener('change', () => { row.style.display = cb.checked ? 'block' : 'none'; });
   });
 
   // #604: the scheduled default-model free-text field only exists for "Custom…".
@@ -1496,21 +1503,32 @@ settingsBtn?.addEventListener('click', async () => {
     const projectModsEnabled = overlay.querySelector('#project-mods-enabled').checked;
     const metaControlsEnabled = overlay.querySelector('#meta-controls-enabled').checked;
     const overviewDefaultLayout = overlay.querySelector('#overview-default-layout').value;
+    // Rebuilt from the rendered rows (#622). Every agent /api/agents knows about has a
+    // row, so there's no hand-maintained id list to fall out of sync — that list is what
+    // used to omit hermes and silently disable it on every save (#519).
+    const prevEnabledAgents = settingsData.enabledAgents || [];
     const enabledAgents = [];
-    if (overlay.querySelector('#agent-claude').checked) enabledAgents.push('claude');
-    if (overlay.querySelector('#agent-codex').checked) enabledAgents.push('codex');
-    if (overlay.querySelector('#agent-opencode').checked) enabledAgents.push('opencode');
-    if (overlay.querySelector('#agent-pi').checked) enabledAgents.push('pi');
-    // Preserve enabled agents that have no checkbox here (e.g. hermes) — rebuilding
-    // the list from only the rendered trio silently disabled them on every save (#519).
-    // Appended after the rendered ones because the server derives defaultAgent from
-    // the first entry.
-    const renderedAgentIds = ['claude', 'codex', 'opencode', 'pi'];
-    for (const a of settingsData.enabledAgents || []) {
-      if (!renderedAgentIds.includes(a)) enabledAgents.push(a);
+    const renderedAgentIds = new Set();
+    for (const cb of overlay.querySelectorAll('.agent-toggle')) {
+      renderedAgentIds.add(cb.dataset.agent);
+      // A missing binary renders the row disabled+unchecked. Keep its previous
+      // membership rather than reading that as "the user turned it off", so
+      // reinstalling the binary brings the agent straight back.
+      const keep = cb.disabled ? prevEnabledAgents.includes(cb.dataset.agent) : cb.checked;
+      if (keep) enabledAgents.push(cb.dataset.agent);
     }
-    const opencodeBinary = overlay.querySelector('#opencode-binary').value || 'opencode';
-    const piBinary = overlay.querySelector('#pi-binary').value || 'pi';
+    // Preserve only agents this page never rendered at all (an agent added by a newer
+    // server than this page's JS). Must key on "was it rendered", NOT on "is it already
+    // in the list" — the latter re-adds every agent the user just unchecked.
+    // Appended last because the server derives defaultAgent from the first entry.
+    for (const a of prevEnabledAgents) if (!renderedAgentIds.has(a)) enabledAgents.push(a);
+    // Overridable binary paths, keyed by the settings name the server sent with the row.
+    // Empty is posted as-is: these settings are fallbackOnEmpty, so blanking the field
+    // restores the default rather than pinning ''.
+    const agentBinaries = {};
+    for (const inp of overlay.querySelectorAll('.agent-binary')) {
+      if (inp.dataset.setting) agentBinaries[inp.dataset.setting] = inp.value.trim();
+    }
     // Custom Claude config profiles (#537): collect rows; drop incomplete ones. Keep the
     // existing id (data-id) so a profile's id is stable across saves (new rows have none;
     // the server assigns one).
@@ -1540,7 +1558,7 @@ settingsBtn?.addEventListener('click', async () => {
     const preventSleepWhileActive = overlay.querySelector('#prevent-sleep-while-active').checked;
     const inheritRemoteControl = overlay.querySelector('#inherit-rc-newtab').checked;
     const inheritRemoteControlOnFork = overlay.querySelector('#inherit-rc-fork').checked;
-    const settingsPayload = { shellProfile, maxIssueTitleLength: newMaxTitle, wandPlanMode, wandPromptTemplate, symlinkWorktreeSettings, cmdTabSwitch, cmdTabSwitchHoldMs, commandPaletteEnabled, commandPaletteShortcut, shortcutsHelpEnabled, shortcutsHelpShortcut, hashCommandsEnabled, contextViewsEnabled, projectModsEnabled, metaControlsEnabled, inheritRemoteControl, inheritRemoteControlOnFork, overviewDefaultLayout, enabledAgents, opencodeBinary, piBinary, ...(selectedEngine ? { engine: selectedEngine } : {}), scrollbackKB, recentSessionsLimit, autoUpdateCheckEnabled, autoUpdateCheckIntervalHours, autoUpdateApply, sessionLogEnabled, scheduledTasksEnabled, scheduledTasksOpenInBackground, scheduledDefaultModel, scheduledDefaultEffort, preventSleepWhileActive, customAgentConfigs };
+    const settingsPayload = { shellProfile, maxIssueTitleLength: newMaxTitle, wandPlanMode, wandPromptTemplate, symlinkWorktreeSettings, cmdTabSwitch, cmdTabSwitchHoldMs, commandPaletteEnabled, commandPaletteShortcut, shortcutsHelpEnabled, shortcutsHelpShortcut, hashCommandsEnabled, contextViewsEnabled, projectModsEnabled, metaControlsEnabled, inheritRemoteControl, inheritRemoteControlOnFork, overviewDefaultLayout, enabledAgents, ...agentBinaries, ...(selectedEngine ? { engine: selectedEngine } : {}), scrollbackKB, recentSessionsLimit, autoUpdateCheckEnabled, autoUpdateCheckIntervalHours, autoUpdateApply, sessionLogEnabled, scheduledTasksEnabled, scheduledTasksOpenInBackground, scheduledDefaultModel, scheduledDefaultEffort, preventSleepWhileActive, customAgentConfigs };
     let resp = await fetch('/api/settings', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -3292,7 +3310,7 @@ function showNewTabMenu(e) {
   // Build agent submenu item (only if multiple enabled)
   let html = '';
   if (enabledAgents.length > 1) {
-    const currentAgentName = agents.find(a => a.id === currentAgent)?.name || 'Claude Code';
+    const currentAgentName = agentLabel(agents.find(a => a.id === currentAgent)) || 'Claude Code';
     html += `<div class="context-menu-item context-menu-has-submenu" id="agent-submenu-trigger">Agent: ${currentAgentName} <span class="context-menu-arrow"></span></div>`;
   }
 
@@ -3386,7 +3404,7 @@ function showNewTabMenu(e) {
       submenu.className = 'context-menu context-submenu';
       submenu.innerHTML = enabledAgents.map(a => {
         const isSelected = a.id === getDefaultAgentType();
-        return `<div class="context-menu-item" data-agent="${a.id}">${isSelected ? '&#10003; ' : '&nbsp;&nbsp; '}${a.name}</div>`;
+        return `<div class="context-menu-item" data-agent="${a.id}">${isSelected ? '&#10003; ' : '&nbsp;&nbsp; '}${agentLabel(a)}</div>`;
       }).join('');
       // Append to body (not agentTrigger) to avoid overflow clipping from .new-tab-menu
       document.body.appendChild(submenu);

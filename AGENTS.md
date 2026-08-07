@@ -2,7 +2,9 @@
 
 ## Project Overview
 
-deepsteve is a macOS web UI for running multiple Claude Code instances in browser tabs using real PTYs. It's a plain Node.js application (no build step) with an Express + WebSocket backend and vanilla JS frontend.
+deepsteve is a macOS web UI for running multiple agent sessions in browser tabs using real PTYs. It's a plain Node.js application (no build step) with an Express + WebSocket backend and vanilla JS frontend.
+
+Claude Code and Codex are the supported agents; OpenCode, Pi, and Hermes run as experimental integrations with no deepsteve MCP tools and no skills. `docs/agents.md` is the per-agent capability matrix — read it before assuming a feature works for the agent you're in.
 
 ## Running the Application
 
@@ -113,12 +115,6 @@ deepsteve provides MCP tools available to all sessions:
 - **Browser Console**: `browser_eval`, `browser_console`
 - **Screenshots**: `screenshot_capture`
 - **Session Info**: `get_my_session_id`, `get_session_info`, `close_session`
-
-## OpenCode Commands
-
-Custom commands available via `/`:
-- `/github-issue` — Create a GitHub issue and optionally start working on it
-- `/merge` — Merge current worktree branch into main
 
 ## Common Tasks
 

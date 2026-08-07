@@ -272,7 +272,7 @@ function init(context) {
         labels: z.string().optional().describe('Comma-separated labels'),
         url: z.string().optional().describe('Issue URL'),
         cwd: z.string().optional().describe('Working directory (defaults to caller\'s cwd)'),
-        agent_type: z.string().optional().describe('Agent type (defaults to caller\'s): "claude", "codex", or an experimental agent such as "opencode", "pi", or "hermes".'),
+        agent_type: z.string().optional().describe('Agent type (defaults to caller\'s). Supported: "claude", "codex". Experimental: "opencode", "pi", "hermes" — these run, but get no deepsteve MCP tools and no skills, so the new session cannot call back into deepsteve. See docs/agents.md.'),
       },
       handler: async ({ session_id, number, title, body, labels, url, cwd, agent_type }, extra) => {
         const callerId = session_id || extra?.requestInfo?.url?.searchParams?.get('shellId');
@@ -428,7 +428,7 @@ function init(context) {
         session_id: z.string().optional().describe('Caller session ID (auto-detected if omitted)'),
         cwd: z.string().optional().describe('Working directory (defaults to caller\'s cwd)'),
         worktree: z.string().optional().describe('Worktree name'),
-        agent_type: z.string().optional().describe('Agent type for an AGENT session, e.g. "claude", "codex", or "pi" (experimental). OMIT this → a plain terminal (zsh), NOT the caller\'s agent. To inherit the caller\'s agent type instead, pass `fork: true`.'),
+        agent_type: z.string().optional().describe('Agent type for an AGENT session. Supported: "claude", "codex". Experimental: "opencode", "pi", "hermes" — they run, but get no deepsteve MCP tools and no skills (docs/agents.md). OMIT this → a plain terminal (zsh), NOT the caller\'s agent. To inherit the caller\'s agent type instead, pass `fork: true`.'),
         plan_mode: z.boolean().optional().describe('Start in plan mode'),
         fork: z.boolean().optional().describe('Inherit the caller\'s agent type. For Claude Code callers with a resumable session, also fork the conversation; other agents start a fresh session.'),
       },

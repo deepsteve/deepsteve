@@ -6,7 +6,7 @@
 
 https://deepsteve.com
 
-Run multiple AI agent sessions side-by-side in your browser, each with full terminal capabilities and persistent conversation history. Supports **Claude Code** and **Codex**, with experimental support for **OpenCode**, **Pi**, and **Hermes**.
+Run multiple AI agent sessions side-by-side in your browser, each with full terminal capabilities and persistent conversation history. Supports **Claude Code** and **Codex**. OpenCode, Pi, and Hermes also run, as experimental integrations — [docs/agents.md](docs/agents.md) is the per-agent breakdown of what each one actually gets.
 
 <p align="center">
   <img src="screenshots/deepsteve-preview.png" alt="deepsteve — full app with tabs and tasks panel" width="800">
@@ -23,7 +23,7 @@ Run multiple AI agent sessions side-by-side in your browser, each with full term
 
 ## Terminal Engines
 
-deepsteve runs agent sessions (Claude Code, Codex, and the experimental OpenCode, Pi, and Hermes integrations) inside **tmux** panes, connected to the browser via WebSocket. This is the default whenever tmux is installed, and it is what makes sessions durable: the agent belongs to the tmux server rather than to deepsteve, so it keeps working through a daemon crash, a `./restart.sh`, an auto-update, and closing the browser. Reconnecting reattaches the same live pane.
+deepsteve runs agent sessions (see [docs/agents.md](docs/agents.md)) inside **tmux** panes, connected to the browser via WebSocket. This is the default whenever tmux is installed, and it is what makes sessions durable: the agent belongs to the tmux server rather than to deepsteve, so it keeps working through a daemon crash, a `./restart.sh`, an auto-update, and closing the browser. Reconnecting reattaches the same live pane.
 
 Without tmux, deepsteve falls back to **node-pty**, which runs each session as a child process of the Node server. Everything works the same except durability — those sessions die with the server. The fallback is deliberately visible: the ⚙ button carries an orange dot and Settings → Terminal says which engine you are on and, if tmux wasn't found, where it looked. Install tmux to get durable sessions; if yours lives somewhere the search can't see, point the `tmuxBinary` setting at it.
 
@@ -48,7 +48,7 @@ curl -fsSL deepsteve.com/install.sh | bash
 
 - macOS
 - Node.js
-- [Claude Code](https://docs.anthropic.com/en/docs/claude-code) or [Codex CLI](https://developers.openai.com/codex/cli/) installed (OpenCode, Pi, and Hermes are experimental alternatives)
+- [Claude Code](https://docs.anthropic.com/en/docs/claude-code) or [Codex CLI](https://developers.openai.com/codex/cli/) installed — these are the two supported agents. OpenCode, Pi, and Hermes work too, but get no deepsteve MCP tools and no skills; see [docs/agents.md](docs/agents.md).
 
 ## Installation (from source)
 
@@ -110,7 +110,7 @@ Extend deepsteve with visual mods — alternative views, panels, and MCP tools f
 
 ### Skills
 
-Skills enabled in the Mods panel are installed for both Claude Code and Codex from the canonical prompts in `skills/*.md`.
+Skills enabled in the Mods panel are installed for Claude Code and Codex from the canonical prompts in `skills/*.md`. The experimental agents (OpenCode, Pi, Hermes) get no skills at all — enabling one in the Mods panel does nothing for those sessions.
 
 - Claude Code: invoke `chat.md` as `/deepsteve:chat`, with any arguments after the slash command.
 - Codex: mention the generated skill as `$deepsteve-chat`, with any arguments after the mention.
