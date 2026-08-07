@@ -17,6 +17,24 @@
 #               never happen unilaterally depends on it staying prompt-gated.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# One interface over launchd and systemd (#621). Sourced HERE, at the very top, for two
+# reasons beyond tidiness:
+#
+#  1. It fails before anything irreversible. A missing library aborts before the confirm
+#     handshake, before .restarting is touched, and before the old daemon is stopped.
+#  2. It makes the mid-restart edit hazard smaller, not larger. bash reads a script
+#     lazily by byte offset, so editing restart.sh while its background phase is running
+#     can resume it at a garbage offset — and the stop/start code used to be read from
+#     disk ~20s into the run. Sourcing parses every ds_* body into memory at second
+#     zero, so editing service.sh mid-restart now has no effect at all.
+if [ ! -r "$SCRIPT_DIR/service.sh" ]; then
+    echo "deepsteve: $SCRIPT_DIR/service.sh is missing — cannot restart." >&2
+    exit 1
+fi
+# shellcheck source=service.sh
+. "$SCRIPT_DIR/service.sh"
+
 REFRESH=0
 FORCE=0
 HAS_PROMPT=0
@@ -64,7 +82,7 @@ if [ "$BG" != 1 ]; then
     # server owns the confirmation wording; we echo it back and re-validate so a
     # stale or forged message can't slip through.
     if [ "$FORCE" = 1 ]; then
-        SERVER_PROMPT=$(curl -s -m 10 "${AUTH_HEADER[@]}" http://localhost:3000/api/restart-prompt 2>/dev/null)
+        SERVER_PROMPT=$(curl -s -m 10 "${AUTH_HEADER[@]}" "$(ds_url)/api/restart-prompt" 2>/dev/null)
         if [ -z "$SERVER_PROMPT" ]; then
             # Daemon unreachable: deterministic text so step 1 and step 2 agree.
             SERVER_PROMPT="Restarting DeepSteve (daemon not running - no active sessions)"
@@ -96,7 +114,7 @@ if [ "$BG" != 1 ]; then
     fi
 
     # Default path: ask the browser(s) for confirmation before restarting.
-    RESULT=$(curl -s -m 120 "${AUTH_HEADER[@]}" -X POST http://localhost:3000/api/request-restart 2>/dev/null | grep -o '"result":"[^"]*"' | cut -d'"' -f4)
+    RESULT=$(curl -s -m 120 "${AUTH_HEADER[@]}" -X POST "$(ds_url)/api/request-restart" 2>/dev/null | grep -o '"result":"[^"]*"' | cut -d'"' -f4)
     if [ "$RESULT" != "confirmed" ]; then
         echo "Restart cancelled."
         exit 0
@@ -116,6 +134,20 @@ cp package.json ~/.deepsteve/
 # (e.g. sleep-watch.js in #563) must never be missable here — a missed copy
 # crash-loops the daemon on the next restart with MODULE_NOT_FOUND.
 cp *.js ~/.deepsteve/
+# Ship the shell library and the read-only entry point too (#621), so a git-checkout
+# install's ~/.deepsteve/{uninstall,status}.sh source the SAME service.sh this script
+# just used. Before this, restart.sh copied no .sh at all, so a pure git install had no
+# uninstall.sh whatsoever — only install.sh ever put one there.
+#
+# Deliberately NOT `cp *.sh`: restart.sh must never land inside its own deploy target
+# (a copy in ~/.deepsteve would be a second restart entry point, and it would try to
+# deploy ~/.deepsteve onto itself), and release.sh is a maintainer tool. The list is
+# hand-maintained on purpose and pinned by test/unit/shell-deploy.test.js.
+cp service.sh uninstall.sh status.sh ~/.deepsteve/
+chmod +x ~/.deepsteve/uninstall.sh ~/.deepsteve/status.sh
+# service.sh stays non-executable: that is what keeps `./service.sh restart` from being
+# a second, unguarded way to restart the daemon. See its header.
+chmod 644 ~/.deepsteve/service.sh
 mkdir -p ~/.deepsteve/engines
 cp engines/*.js ~/.deepsteve/engines/
 cp -r public/* ~/.deepsteve/public/
@@ -174,33 +206,31 @@ fi
 touch ~/.deepsteve/.restarting
 
 # --- Stop old server ---
-launchctl unload ~/Library/LaunchAgents/com.deepsteve.plist 2>/dev/null
+# launchctl on macOS, `systemctl --user` on Linux — one interface, in service.sh (#621).
+# Until then this whole block was launchctl-only with no platform branch at all, which
+# is why restart.sh (and therefore the in-app git-pull auto-update, which spawns it)
+# simply did not work on Linux.
+ds_service_stop
 
-# Wait for old server process to fully exit (up to 15s).
-# The server's graceful shutdown can take ~12s worst case (8s shell exit +
-# 2s SIGTERM + 2s SIGKILL + 0.5s drain).
-WAITED=0
-while [ "$WAITED" -lt 15 ] && launchctl list 2>/dev/null | grep -q com.deepsteve; do
-    sleep 1
-    WAITED=$((WAITED + 1))
-done
-
-# Safety net: ensure the port is actually free (handles edge cases like
-# a child process holding the socket after the main process exits).
-WAITED=0
-while [ "$WAITED" -lt 5 ] && lsof -i :3000 -sTCP:LISTEN >/dev/null 2>&1; do
-    sleep 1
-    WAITED=$((WAITED + 1))
-done
+# Wait for the old process to fully exit (up to 15s), then for the port to actually be
+# free — a child can hold the socket briefly after the parent goes. Graceful shutdown is
+# ~12s worst case (8s shell exit + 2s SIGTERM + 2s SIGKILL + 0.5s drain).
+# The port check replaced `lsof -i :3000`: lsof is absent on minimal Linux images, and
+# the port now comes from the service definition rather than being hardcoded.
+ds_wait_stopped 15 || echo "Warning: the old daemon is still running after 15s; starting anyway." >&2
 
 # --- Start new server ---
-launchctl load ~/Library/LaunchAgents/com.deepsteve.plist
+ds_service_start || {
+    echo "deepsteve: the service manager refused to start the daemon. Recover with:" >&2
+    ds_start_hint >&2
+    exit 1
+}
 
 # Global MCP registrations run AFTER the server is up so the auth token exists (#536/#538).
 # Wait up to ~15s for the freshly-booted server's public health endpoint.
 if command -v claude &>/dev/null || command -v opencode &>/dev/null; then
     WAITED=0
-    while [ "$WAITED" -lt 15 ] && ! curl -sf -m 2 http://localhost:3000/healthz >/dev/null 2>&1; do
+    while [ "$WAITED" -lt 15 ] && ! curl -sf -m 2 "$(ds_url)/healthz" >/dev/null 2>&1; do
         sleep 1
         WAITED=$((WAITED + 1))
     done
@@ -212,10 +242,10 @@ fi
 if command -v claude &>/dev/null; then
     build_auth_header   # re-read the now-created token
     if [ ${#AUTH_HEADER[@]} -gt 0 ]; then
-        claude mcp add --transport http deepsteve http://localhost:3000/mcp \
+        claude mcp add --transport http deepsteve "$(ds_url)/mcp" \
             --header "Authorization: Bearer $(cat "$AUTH_TOKEN_FILE" 2>/dev/null)" 2>/dev/null || true
     else
-        claude mcp add --transport http deepsteve http://localhost:3000/mcp 2>/dev/null || true
+        claude mcp add --transport http deepsteve "$(ds_url)/mcp" 2>/dev/null || true
     fi
 fi
 
@@ -233,7 +263,7 @@ if command -v opencode &>/dev/null; then
         try { cfg = JSON.parse(fs.readFileSync(p, "utf8")); } catch {}
         if (!cfg || typeof cfg !== "object") cfg = { "$schema": "https://opencode.ai/config.json" };
         if (!cfg.mcp) cfg.mcp = {};
-        const entry = { type: "remote", url: "http://127.0.0.1:3000/mcp" };
+        const entry = { type: "remote", url: process.argv[2] };
         // opencode errors out at config load on a {file:...} pointing at a missing file, so
         // only reference the token if the server actually created it.
         if (fs.existsSync(path.join(os.homedir(), ".deepsteve", "auth-token"))) {
@@ -241,5 +271,5 @@ if command -v opencode &>/dev/null; then
         }
         cfg.mcp.deepsteve = entry;
         fs.writeFileSync(p, JSON.stringify(cfg, null, 2) + "\n");
-    ' "$OC_CONFIG" 2>/dev/null || true
+    ' "$OC_CONFIG" "http://127.0.0.1:$(ds_port)/mcp" 2>/dev/null || true
 fi

@@ -51,8 +51,9 @@ test('every script this file reasons about actually exists', () => {
 
 test('service.sh is the ONLY place that names launchctl or systemctl', () => {
   // The point of #621. Before it, release.sh and uninstall.sh each had their own
-  // platform branch and restart.sh had none at all.
-  for (const s of ['uninstall.sh', 'status.sh']) {
+  // platform branch and restart.sh had none at all — which is why restart.sh, and
+  // therefore the in-app git-pull auto-update that spawns it, did not work on Linux.
+  for (const s of ['restart.sh', 'uninstall.sh', 'status.sh']) {
     assert.ok(!/\b(launchctl|systemctl|loginctl)\b/.test(code[s]),
       `${s} drives the service manager directly — use the ds_* verbs from service.sh`);
   }
@@ -62,10 +63,60 @@ test('service.sh is the ONLY place that names launchctl or systemctl', () => {
 });
 
 test('nothing hardcodes the plist or unit path outside service.sh', () => {
-  for (const s of ['release.sh', 'uninstall.sh', 'status.sh']) {
+  for (const s of ['release.sh', 'restart.sh', 'uninstall.sh', 'status.sh']) {
     assert.ok(!/LaunchAgents/.test(code[s]), `${s} hardcodes the LaunchAgents path`);
     assert.ok(!/\.config\/systemd/.test(code[s]), `${s} hardcodes the systemd unit path`);
   }
+});
+
+test('restart.sh no longer probes the port with lsof, or hardcodes 3000', () => {
+  // lsof is absent on minimal Linux images; ds_port_in_use uses a node TCP probe, and
+  // the port comes from the service definition rather than a literal.
+  assert.ok(!/\blsof\b/.test(code['restart.sh']), 'restart.sh still uses lsof');
+  assert.ok(!/localhost:3000/.test(code['restart.sh']),
+    'restart.sh still hardcodes port 3000 — use $(ds_url) / $(ds_port)');
+});
+
+test('restart.sh sources service.sh before the confirm handshake and before any ds_ verb', () => {
+  // Ordering matters: a missing or broken library must fail BEFORE the browser is asked
+  // to confirm, before .restarting is touched, and before the old daemon is stopped.
+  const lines = src['restart.sh'].split('\n').map((l) => (/^\s*#/.test(l) ? '' : l));
+  const source = lines.findIndex((l) => /^\s*\.\s+"\$SCRIPT_DIR\/service\.sh"/.test(l));
+  const guard = lines.findIndex((l) => /! -r "\$SCRIPT_DIR\/service\.sh"/.test(l));
+  const firstCurl = lines.findIndex((l) => /\bcurl\b/.test(l));
+  const firstVerb = lines.findIndex((l) => /\bds_[a-z_]+\b/.test(l));
+  assert.ok(guard >= 0 && guard < source, 'the readability guard must precede the source');
+  assert.ok(source >= 0, 'restart.sh must source service.sh');
+  assert.ok(source < firstCurl, 'service.sh must be sourced before the first control curl');
+  assert.ok(source < firstVerb, 'service.sh must be sourced before the first ds_ verb');
+});
+
+test('the shell ship list is the same in restart.sh and release.sh', () => {
+  // Three deploy paths (install.sh, restart.sh, and a git checkout) must all leave the
+  // same set of shell files in ~/.deepsteve, or uninstall.sh/status.sh end up sourcing a
+  // service.sh from a different vintage than the one that wrote the service definition.
+  //
+  // Asserted rather than globbed because the list must NOT be `*.sh`: restart.sh must
+  // never copy itself into its own deploy target, and release.sh is a maintainer tool.
+  const rootShellFiles = fs.readdirSync(REPO).filter((f) => f.endsWith('.sh')).sort();
+  const expected = rootShellFiles.filter((f) => f !== 'restart.sh' && f !== 'release.sh');
+  assert.deepStrictEqual(expected, ['service.sh', 'status.sh', 'uninstall.sh'],
+    'a new root *.sh appeared — decide deliberately whether it ships, then update this list');
+
+  const cpLine = code['restart.sh'].split('\n').find((l) => /^\s*cp .*~\/\.deepsteve\/$/.test(l) && /\.sh/.test(l));
+  assert.ok(cpLine, 'restart.sh must copy the shell files');
+  for (const f of expected) {
+    assert.ok(cpLine.includes(f), `restart.sh does not deploy ${f}`);
+    assert.ok(new RegExp(`embed_text "${f.replace('.', '\\.')}"`).test(src['release.sh']),
+      `release.sh does not embed ${f}`);
+  }
+  assert.ok(!/\bcp \*\.sh\b/.test(code['restart.sh']),
+    'must not be a glob — restart.sh would copy itself into its own deploy target');
+});
+
+test('restart.sh deploys service.sh non-executable', () => {
+  assert.match(code['restart.sh'], /chmod 644 ~\/\.deepsteve\/service\.sh/);
+  assert.ok(!/chmod \+x[^\n]*\bservice\.sh/.test(code['restart.sh']));
 });
 
 test('release.sh no longer emits the plist/unit heredocs', () => {

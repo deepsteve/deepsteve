@@ -317,12 +317,11 @@ test('ds_port_in_use answers truthfully against a real listener', () => {
   });
 });
 
-test('ds_wait_stopped returns promptly when the manager reports stopped', async () => {
+test('ds_wait_stopped returns immediately when the manager reports stopped', async () => {
   const s = sandbox({ platform: 'linux', stubRc: 1 }); // is-active fails => not running
   // Pin a port nothing is on. Without this the sandbox falls back to ds_port's 3000
-  // default, and on a developer's machine that is their own live daemon — the
-  // port-free loop would then burn its full 5s and this test would time itself out
-  // against unrelated local state.
+  // default, and on a developer's machine that is their own live daemon — so the
+  // port-free loop would poll for its full 5s against unrelated local state.
   const freePort = await new Promise((resolve) => {
     const srv = require('net').createServer();
     srv.listen(0, '127.0.0.1', () => {
@@ -330,9 +329,12 @@ test('ds_wait_stopped returns promptly when the manager reports stopped', async 
       srv.close(() => resolve(p));
     });
   });
-  const started = Date.now();
   assert.strictEqual(s.run('ds_wait_stopped 5 && echo stopped', { DEEPSTEVE_PORT: String(freePort) }), 'stopped');
-  assert.ok(Date.now() - started < 4000, `must not sit through the whole timeout (took ${Date.now() - started}ms)`);
+  // Count the polls rather than the wall clock. A duration bound looks equivalent but
+  // is a flake waiting to happen: this spawns several `sh` subprocesses, and on a
+  // loaded machine that alone can cross any threshold tight enough to be meaningful.
+  const polls = s.calls().filter((c) => c.includes('is-active')).length;
+  assert.ok(polls <= 2, `expected the loop to exit on its first check, saw ${polls} polls`);
 });
 
 test('ds_linger_note prints the exact fix command when lingering is off', () => {
