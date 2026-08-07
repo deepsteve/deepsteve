@@ -95,6 +95,8 @@ Tests: `test/unit/engine-default.test.js` (detach contract, offer matrix, owners
 
 **Keep test temp paths SHORT.** `run-standalone.sh` exports a short `TMPDIR` (default `/tmp/ds-test`) because every suite derives its `TMUX_TMPDIR` from `os.tmpdir()`, and macOS's default `/var/folders/<2>/<28>/T/` is 52 characters before the suite's own directory — enough to push the tmux socket to exactly 104 and fail `new-session`. It failed *quietly*: the spawn fallback above keeps the suite green while it tests the wrong engine. `tmux-durability.test.js` asserts `tmuxRuntimeFailure === null` as a tripwire. Running one file by hand skips the runner, so prefix `TMPDIR=/tmp/ds-test` if a suite reports the fallback.
 
+**Known test-hygiene debt:** a standalone suite's daemon is SIGTERMed, and shutdown now *detaches* — correctly — so its scratch tmux server outlives it, and most suites delete their tmpRoot without a `kill-server` first. A full `run-standalone.sh` therefore leaves ~10 orphaned tmux servers under `$TMPDIR` (never on the developer's default socket — that is what the `TMUX_TMPDIR`-must-exist rule above protects). `tmux-durability.test.js` cleans up after itself; the others should grow the same `after` hook.
+
 ### Session Persistence
 
 Under tmux this is mostly moot — the session never went anywhere; startup reattaches the live pane. What follows is the node-pty path, and the tmux fallback when a pane really did die.
