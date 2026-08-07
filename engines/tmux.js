@@ -54,6 +54,11 @@ class TmuxEngine extends Engine {
     this._sessions = new Map(); // id → { attachPty, exitCallbacks }
     this._binary = binary || 'tmux';
     this._spawnPty = spawnPty || defaultSpawnPty;
+    // `exec` reaches _exec too, not just the version probe (#621). Without this,
+    // spawn() always really shelled out, so the argv it builds — the riskiest thing
+    // in this file, and the thing #621's login-shell change rewrites — could not be
+    // asserted on a runner with no tmux.
+    this._execFn = exec || execFileSync;
     this._probeOpts = { binary: this._binary };
     if (env) this._probeOpts.env = env;
     if (exec) this._probeOpts.exec = exec;
@@ -74,7 +79,7 @@ class TmuxEngine extends Engine {
 
   /** Run a tmux command directly — argv array, no shell. */
   _exec(args, opts = {}) {
-    return execFileSync(this._tmuxPath || 'tmux', args, { timeout: 5000, stdio: 'pipe', ...opts });
+    return this._execFn(this._tmuxPath || 'tmux', args, { timeout: 5000, stdio: 'pipe', ...opts });
   }
 
   get available() {
@@ -112,16 +117,27 @@ class TmuxEngine extends Engine {
     return SESSION_PREFIX + id;
   }
 
-  spawn(id, cmd, args, cwd, { cols = 120, rows = 40, env, stripEnv = [] } = {}) {
+  spawn(id, cmd, args, cwd, { cols = 120, rows = 40, env, stripEnv = [], shellCommand } = {}) {
     const sessionName = this._tmuxSessionName(id);
 
-    // spawnSession wraps commands in zsh -l -c <cmd>. tmux new-session
-    // already runs its command in $SHELL, so unwrap to avoid nested quoting.
+    // tmux new-session already runs its command in $SHELL, so a caller that has
+    // itself wrapped the command in a login shell must hand us the INNER command or
+    // we nest one shell inside another.
+    //
+    // `shellCommand` is spawnSession stating that directly (#621), three-way:
+    //   undefined → no opinion; build it from cmd+args
+    //   null      → a bare login shell, which is tmux's own default
+    //   string    → run exactly this
+    //
+    // It replaced a `cmd === 'zsh'` shape match. That worked only while spawnSession
+    // hardcoded the literal string 'zsh'; since #621 cmd is whatever
+    // resolveLoginShell() picked — '/bin/zsh' on a Mac, '/bin/bash' on Debian — so a
+    // name-based test would have silently stopped matching and re-nested a shell
+    // inside every single session. It would still mostly *work*, which is exactly
+    // what made it dangerous.
     let fullCmd;
-    if (cmd === 'zsh' && args.length === 3 && args[0] === '-l' && args[1] === '-c') {
-      fullCmd = args[2]; // already shell-escaped by spawnSession
-    } else if (cmd === 'zsh' && args.length === 1 && args[0] === '-l') {
-      fullCmd = null; // plain login shell — tmux default
+    if (shellCommand !== undefined) {
+      fullCmd = shellCommand;
     } else {
       fullCmd = [cmd, ...args.map(a => shellQuote(a))].join(' ');
     }

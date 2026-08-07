@@ -15,7 +15,7 @@ const { resolveForkTip } = require('./fork-resolve');
 const { formatLogTimestamp, createLogRotator, defaultLogPaths } = require('./logging');
 const { findGitRoot } = require('./git-root');
 const { stateDir, expandTilde } = require('./paths');
-const { resolveBinary, runBinary, resolveUrlOpener } = require('./bin-path');
+const { resolveBinary, runBinary, resolveUrlOpener, resolveLoginShell } = require('./bin-path');
 const { createPendingOpens } = require('./pending-opens');
 const { classifyScreenTail, CLAUDE_SCREEN_MARKERS } = require('./screen-classifier');
 const { TerminalScreen } = require('./terminal-screen');
@@ -704,8 +704,16 @@ function saveSettings() {
 // --- Engine initialization ---
 // Both engines coexist: node-pty is always enabled, tmux is enabled if installed.
 // settings.engine controls the default for new sessions, not a global mode switch.
+// The shell every session runs under (#621). Resolved ONCE at module scope: it is fs
+// work, and a stable value is what lets the log line, the spawn and the tmux unwrap
+// all be talking about the same shell. $SHELL first, then the passwd entry, then
+// zsh/bash/sh — see resolveLoginShell. On macOS a LaunchAgent's environment carries
+// SHELL=/bin/zsh, so this is the same shell as before, just named absolutely.
+const LOGIN_SHELL = resolveLoginShell();
+
 const ptyEngine = new NodePtyEngine();
 log('Engine: node-pty (always enabled)');
+log(`Shell: sessions run under ${LOGIN_SHELL.path}${LOGIN_SHELL.loginFlag ? ` ${LOGIN_SHELL.loginFlag}` : ''}`);
 
 let tmuxEngine = null;
 let tmuxUnavailableReason = null;
@@ -1162,9 +1170,15 @@ function spawnSession(eng, id, agentType, args, cwd, { cols = 120, rows = 40, en
   const env = childBaseEnv(extraEnv);
   const opts = { cols, rows, env, stripEnv: DAEMON_INTERNAL_ENV_KEYS };
 
-  let shellArgs;
+  // A session IS the user's interactive shell, so this is one of only two places a
+  // login shell is load-bearing rather than a PATH workaround (#621). LOGIN_SHELL is
+  // /bin/zsh on macOS — the same shell as before, now as an absolute path.
+  const loginArgs = LOGIN_SHELL.loginFlag ? [LOGIN_SHELL.loginFlag] : [];
+
+  let shellArgs, shellCommand;
   if (agentType === 'terminal') {
-    shellArgs = ['-l'];
+    shellArgs = loginArgs;
+    shellCommand = null; // bare login shell — tmux's own default
   } else {
     const bin = agentType === 'claude' ? 'claude'
       : agentType === 'codex' ? 'codex'
@@ -1173,18 +1187,24 @@ function spawnSession(eng, id, agentType, args, cwd, { cols = 120, rows = 40, en
       : agentType === 'pi' ? (settings.piBinary || 'pi')
       : 'claude';
     const quoted = args.map(a => `'${a.replace(/'/g, "'\\''")}'`).join(' ');
-    shellArgs = ['-l', '-c', `${bin} ${quoted}`];
+    shellCommand = `${bin} ${quoted}`;
+    shellArgs = [...loginArgs, '-c', shellCommand];
   }
+  // Tell the engine what we want run, instead of making it re-derive that by
+  // pattern-matching our argv. TmuxEngine unwraps it so the command doesn't end up
+  // inside a second shell; NodePtyEngine destructures only {cols, rows, env} and
+  // ignores it. See the three-way contract in engines/tmux.js.
+  opts.shellCommand = shellCommand;
 
   try {
-    eng.spawn(id, 'zsh', shellArgs, cwd, opts);
+    eng.spawn(id, LOGIN_SHELL.path, shellArgs, cwd, opts);
     return eng;
   } catch (e) {
     if (eng !== tmuxEngine || !tmuxEngine) throw e; // node-pty failing has no fallback
     tmuxRuntimeFailure = e.message;
     log(`Engine: tmux could not create a session for ${id}: ${e.message}`);
     log('Engine: falling back to node-pty for this session — it will NOT survive a restart');
-    ptyEngine.spawn(id, 'zsh', shellArgs, cwd, opts);
+    ptyEngine.spawn(id, LOGIN_SHELL.path, shellArgs, cwd, opts);
     return ptyEngine;
   }
 }
@@ -1264,11 +1284,6 @@ const AGENT_CONFIGS = {
 
 function getAgentConfig(agentType) {
   return AGENT_CONFIGS[agentType] || AGENT_CONFIGS.claude;
-}
-
-// Kept for backward compatibility with MCP context — delegates to spawnSession
-function spawnAgent(id, agentType, args, cwd, opts = {}) {
-  spawnSession(id, agentType, args, cwd, opts);
 }
 
 function mcpConfigArgs(agentType, shellId) {
@@ -3710,7 +3725,12 @@ app.post('/api/commands/execute', (req, res) => {
   };
 
   try {
-    const output = execSync(`zsh -l -c '${filePath.replace(/'/g, "'\\''")}'`, {
+    // The other place a login shell is genuinely wanted (#621): a script the user
+    // wrote in ~/.deepsteve/commands expects their own environment. execFileSync
+    // rather than execSync also removes a whole shell layer — the old form built a
+    // command STRING, so /bin/sh expanded any `$` or backtick in the filename before
+    // zsh ever saw it.
+    const output = execFileSync(LOGIN_SHELL.path, [...(LOGIN_SHELL.loginFlag ? [LOGIN_SHELL.loginFlag] : []), '-c', filePath], {
       env: childBaseEnv(env),
       cwd: env.DEEPSTEVE_CWD,
       timeout: 30000,
