@@ -1,0 +1,19 @@
+[Unit]
+Description=deepsteve daemon
+After=network.target
+
+[Service]
+Type=simple
+ExecStart={{NODE}} {{HOME}}/.deepsteve/server.js
+WorkingDirectory={{HOME}}/.deepsteve
+Environment=NODE_ENV=production
+Environment=PORT=3000
+Environment=DEEPSTEVE_BIND=127.0.0.1
+Environment=PATH={{HOME}}/.deepsteve/node/bin:{{HOME}}/.local/bin:{{NODEDIR}}:{{NODEDIR}}:/usr/bin:/bin
+Restart=always
+RestartSec=5
+StandardOutput=append:{{HOME}}/.local/share/deepsteve/logs/deepsteve.log
+StandardError=append:{{HOME}}/.local/share/deepsteve/logs/deepsteve.error.log
+
+[Install]
+WantedBy=default.target
