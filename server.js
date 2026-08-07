@@ -474,6 +474,12 @@ const SETTINGS_SCHEMA = [
   { name: 'hermesBinary',               type: 'string',  default: 'hermes',   fallbackOnEmpty: true, broadcast: false },
   { name: 'opencodeBinary',             type: 'string',  default: 'opencode', fallbackOnEmpty: true, broadcast: false },
   { name: 'piBinary',                   type: 'string',  default: 'pi',       fallbackOnEmpty: true, broadcast: false },
+  // Escape hatch for a tmux the pure-fs resolver can't see (#619) — a nix profile,
+  // asdf shim or custom --prefix that only a login shell's PATH used to reveal.
+  // A bare name is searched for in $PATH + tmux-path.js's FALLBACK_DIRS; a value
+  // with a '/' is used verbatim. Applies on daemon restart: the engine probes once,
+  // at construction.
+  { name: 'tmuxBinary',                 type: 'string',  default: 'tmux',     fallbackOnEmpty: true, broadcast: false },
   { name: 'symlinkWorktreeSettings',    type: 'boolean', default: false },
   { name: 'recentSessionsLimit',        type: 'number',  default: 8, clamp: [0, 50], round: true,
     sideEffect: (val, s) => { trimRecentSessions(); } },
@@ -663,13 +669,18 @@ const ptyEngine = new NodePtyEngine();
 log('Engine: node-pty (always enabled)');
 
 let tmuxEngine = null;
+let tmuxUnavailableReason = null;
 {
-  const tmuxCheck = new TmuxEngine();
+  const tmuxCheck = new TmuxEngine({ binary: settings.tmuxBinary });
   if (tmuxCheck.available) {
     tmuxEngine = tmuxCheck;
-    log(`Engine: tmux v${tmuxEngine.version} (available)`);
+    log(`Engine: tmux v${tmuxEngine.version} (available) at ${tmuxEngine.tmuxPath}`);
   } else {
-    log('Engine: tmux not available');
+    // Say WHERE we looked (#619). A bare "tmux not available" is the failure shape
+    // that hid the zsh dependency for as long as it did, and tmux is on its way to
+    // being required — an unavailable engine has to be diagnosable from the log.
+    tmuxUnavailableReason = tmuxCheck.unavailableReason;
+    log(`Engine: tmux not available — ${tmuxUnavailableReason}`);
     if (settings.engine === 'tmux') {
       settings.engine = 'node-pty';
       saveSettings();
@@ -3455,7 +3466,8 @@ app.get('/api/engines', (req, res) => {
   res.json({
     engines: [
       { id: 'node-pty', name: 'node-pty (built-in)', available: true },
-      { id: 'tmux', name: 'tmux', available: !!tmuxEngine, version: tmuxEngine?.version || null },
+      { id: 'tmux', name: 'tmux', available: !!tmuxEngine, version: tmuxEngine?.version || null,
+        reason: tmuxUnavailableReason },
     ],
     current: settings.engine || 'node-pty',
     tmuxAvailable: !!tmuxEngine,
@@ -3463,21 +3475,15 @@ app.get('/api/engines', (req, res) => {
 });
 
 app.get('/api/tmux-sessions', (req, res) => {
-  try {
-    const out = execSync("zsh -l -c 'tmux list-sessions -F \"#{session_name}\t#{session_windows}\t#{session_width}\t#{session_height}\t#{session_created}\"'", {
-      encoding: 'utf8', timeout: 5000, stdio: 'pipe',
-    }).trim();
-    if (!out) return res.json({ sessions: [] });
-    const sessions = out.split('\n').map(line => {
-      const [name, windows, width, height, created] = line.split('\t');
-      // Check if any deepsteve shell is already attached to this session
-      const attached = [...shells.values()].some(e => e.tmuxSession === name);
-      return { name, windows: parseInt(windows) || 1, width: parseInt(width), height: parseInt(height), created: parseInt(created) || null, attached };
-    });
-    res.json({ sessions });
-  } catch {
-    res.json({ sessions: [] });
-  }
+  // Goes through the engine so there is one place that knows how to invoke tmux
+  // (#619) — this used to run its own `zsh -l -c 'tmux list-sessions …'`.
+  if (!tmuxEngine) return res.json({ sessions: [] });
+  const sessions = tmuxEngine.listAllSessions().map(s => ({
+    ...s,
+    // Is any deepsteve shell already attached to this session?
+    attached: [...shells.values()].some(e => e.tmuxSession === s.name),
+  }));
+  res.json({ sessions });
 });
 
 app.post('/api/settings', (req, res) => {
@@ -5539,10 +5545,16 @@ function handleWsConnection(ws, req) {
       return;
     }
 
-    // Check tmux session exists
-    try {
-      execSync(`zsh -l -c 'tmux has-session -t "${tmuxSession.replace(/"/g, '\\"')}"'`, { timeout: 5000, stdio: 'pipe' });
-    } catch {
+    if (!tmuxEngine) {
+      ws.send(JSON.stringify({ type: 'error', message: `tmux not available — ${tmuxUnavailableReason}` }));
+      ws.close();
+      return;
+    }
+
+    // Check tmux session exists. Via the engine (#619): the name is user-supplied
+    // and now becomes one argv element instead of being interpolated into
+    // `zsh -l -c 'tmux has-session -t "…"'` with only `"` escaped.
+    if (!tmuxEngine.hasSession(tmuxSession)) {
       ws.send(JSON.stringify({ type: 'error', message: `tmux session "${tmuxSession}" not found` }));
       ws.close();
       return;
@@ -5550,8 +5562,8 @@ function handleWsConnection(ws, req) {
 
     const pty = require('node-pty');
     const id = randomUUID().slice(0, 8);
-    // Use resolved tmux path from engine (LaunchAgent PATH lacks Homebrew)
-    const tmuxBin = tmuxEngine?.tmuxPath || 'tmux';
+    // Resolved absolute path — a bare `tmux` is ENOENT under a LaunchAgent
+    const tmuxBin = tmuxEngine.tmuxPath;
     const attachPty = pty.spawn(tmuxBin, ['attach-session', '-t', tmuxSession], {
       name: 'xterm-256color',
       cols: initialCols,
