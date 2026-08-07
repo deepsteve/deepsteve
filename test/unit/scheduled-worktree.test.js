@@ -15,9 +15,14 @@ process.env.HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-sched-home-'));
 const { cleanupWorktree, isGitRepo, scheduledRunPrompt, worktreeContract } =
   require('../../mods/scheduled-tasks/tools.js');
 
-// Plain exec (no zsh) so these tests run on the bare CI runner; production
-// injects the default zsh -l -c wrapper for the LaunchAgent PATH.
+// Test-fixture git, string form — only used to BUILD the repos below, never injected.
 const exec = (cmd, cwd) => execSync(cmd, { cwd, encoding: 'utf8' }).trim();
+
+// What cleanupWorktree's `exec` seam takes since #621: an argv array, not a command
+// string. Production injects nothing and gets gitExec, which resolves git via
+// bin-path and execFileSyncs it — no shell, so no zsh dependency and no quoting.
+const gitArgv = (argv, cwd) => execSync(`git ${argv.map((a) => `'${String(a).replace(/'/g, "'\\''")}'`).join(' ')}`,
+  { cwd, encoding: 'utf8' }).trim();
 
 function makeRepo() {
   const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-sched-repo-'));
@@ -39,7 +44,7 @@ const branches = (repo) => exec('git branch --format="%(refname:short)"', repo).
 test('clean worktree: removed and branch deleted', () => {
   const repo = makeRepo();
   const wt = addWorktree(repo, 'scheduled-ab12cd34');
-  const res = cleanupWorktree(repo, 'scheduled-ab12cd34', exec);
+  const res = cleanupWorktree(repo, 'scheduled-ab12cd34', gitArgv);
   assert.deepStrictEqual(res, { removed: true, branchDeleted: true });
   assert.ok(!fs.existsSync(wt), 'worktree dir should be gone');
   assert.ok(!branches(repo).includes('worktree-scheduled-ab12cd34'), 'branch should be gone');
@@ -50,13 +55,13 @@ test('dirty worktree: kept (worktree AND branch), then removable once clean', ()
   const wt = addWorktree(repo, 'scheduled-dirty001');
   const stray = path.join(wt, 'uncommitted.txt');
   fs.writeFileSync(stray, 'work in progress');
-  const res = cleanupWorktree(repo, 'scheduled-dirty001', exec);
+  const res = cleanupWorktree(repo, 'scheduled-dirty001', gitArgv);
   assert.deepStrictEqual(res, { removed: false, branchDeleted: false });
   assert.ok(fs.existsSync(wt), 'dirty worktree must survive');
   assert.ok(branches(repo).includes('worktree-scheduled-dirty001'), 'branch must survive with its worktree');
   // Idempotent retry after the dirt is gone.
   fs.unlinkSync(stray);
-  const retry = cleanupWorktree(repo, 'scheduled-dirty001', exec);
+  const retry = cleanupWorktree(repo, 'scheduled-dirty001', gitArgv);
   assert.deepStrictEqual(retry, { removed: true, branchDeleted: true });
   assert.ok(!fs.existsSync(wt));
 });
@@ -67,7 +72,7 @@ test('unmerged commits: worktree removed, branch kept', () => {
   fs.writeFileSync(path.join(wt, 'result.txt'), 'kept work');
   exec('git add result.txt', wt);
   exec('git -c user.email=t@t -c user.name=t commit -q -m result', wt);
-  const res = cleanupWorktree(repo, 'scheduled-unmrgd01', exec);
+  const res = cleanupWorktree(repo, 'scheduled-unmrgd01', gitArgv);
   assert.deepStrictEqual(res, { removed: true, branchDeleted: false });
   assert.ok(!fs.existsSync(wt), 'clean worktree is removed even with unmerged commits');
   assert.ok(branches(repo).includes('worktree-scheduled-unmrgd01'), 'unmerged branch must survive');
@@ -80,7 +85,7 @@ test('merged commits: worktree removed and branch deleted', () => {
   exec('git add result.txt', wt);
   exec('git -c user.email=t@t -c user.name=t commit -q -m result', wt);
   exec('git merge -q worktree-scheduled-merged01', repo);
-  const res = cleanupWorktree(repo, 'scheduled-merged01', exec);
+  const res = cleanupWorktree(repo, 'scheduled-merged01', gitArgv);
   assert.deepStrictEqual(res, { removed: true, branchDeleted: true });
   assert.ok(fs.existsSync(path.join(repo, 'result.txt')), 'merged work stays in main');
 });
@@ -89,7 +94,7 @@ test('stale-locked clean worktree: unlocked and removed (claude locks its worktr
   const repo = makeRepo();
   const wt = addWorktree(repo, 'scheduled-locked01');
   exec(`git worktree lock --reason "claude session scheduled-locked01 (pid 99999)" "${wt}"`, repo);
-  const res = cleanupWorktree(repo, 'scheduled-locked01', exec);
+  const res = cleanupWorktree(repo, 'scheduled-locked01', gitArgv);
   assert.deepStrictEqual(res, { removed: true, branchDeleted: true });
   assert.ok(!fs.existsSync(wt), 'stale lock must not keep a clean worktree alive');
 });
@@ -99,20 +104,20 @@ test('locked AND dirty worktree: still kept', () => {
   const wt = addWorktree(repo, 'scheduled-lockdrt1');
   exec(`git worktree lock "${wt}"`, repo);
   fs.writeFileSync(path.join(wt, 'wip.txt'), 'uncommitted');
-  const res = cleanupWorktree(repo, 'scheduled-lockdrt1', exec);
+  const res = cleanupWorktree(repo, 'scheduled-lockdrt1', gitArgv);
   assert.deepStrictEqual(res, { removed: false, branchDeleted: false });
   assert.ok(fs.existsSync(wt), 'dirty worktree survives even after unlock');
 });
 
 test('worktree dir never created: no throw, prunes and reports removed', () => {
   const repo = makeRepo();
-  const res = cleanupWorktree(repo, 'scheduled-never123', exec);
+  const res = cleanupWorktree(repo, 'scheduled-never123', gitArgv);
   assert.deepStrictEqual(res, { removed: true, branchDeleted: true });
 });
 
 test('bad args: no throw, nothing reported removed', () => {
-  assert.deepStrictEqual(cleanupWorktree(null, 'x', exec), { removed: false, branchDeleted: false });
-  assert.deepStrictEqual(cleanupWorktree('/tmp', null, exec), { removed: false, branchDeleted: false });
+  assert.deepStrictEqual(cleanupWorktree(null, 'x', gitArgv), { removed: false, branchDeleted: false });
+  assert.deepStrictEqual(cleanupWorktree('/tmp', null, gitArgv), { removed: false, branchDeleted: false });
 });
 
 test('isGitRepo distinguishes repos from plain dirs', () => {

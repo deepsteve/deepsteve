@@ -2,7 +2,7 @@ const express = require('express');
 const https = require('https');
 const { WebSocketServer } = require('ws');
 const { randomUUID } = require('crypto');
-const { execSync, execFileSync, exec } = require('child_process');
+const { execSync, execFileSync, exec, execFile } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
@@ -15,6 +15,7 @@ const { resolveForkTip } = require('./fork-resolve');
 const { formatLogTimestamp, createLogRotator, defaultLogPaths } = require('./logging');
 const { findGitRoot } = require('./git-root');
 const { stateDir, expandTilde } = require('./paths');
+const { resolveBinary, runBinary, resolveUrlOpener } = require('./bin-path');
 const { createPendingOpens } = require('./pending-opens');
 const { classifyScreenTail, CLAUDE_SCREEN_MARKERS } = require('./screen-classifier');
 const { TerminalScreen } = require('./terminal-screen');
@@ -117,6 +118,19 @@ let restartState = null; // { resolve: fn, timeout: timer } — first browser re
 let metaConsentState = null; // { promise, resolve: fn, timeout: timer } — pending Meta Controls consent (#519)
 let metaConsentDeclinedAt = 0; // cooldown start so a retrying agent can't nag the user with modals
 
+// Open the UI in the user's browser. `open` is macOS-only; Linux wants xdg-open and a
+// headless box has neither (#621) — which is not an error, so say so once and move on
+// rather than failing invisibly the way the old bare `exec('open …')` did (it passed no
+// callback, so any failure was discarded).
+function openBrowserUrl(url = UI_URL) {
+  const opener = resolveUrlOpener();
+  if (!opener) {
+    log(`No URL opener found (open/xdg-open) — open ${url} yourself`);
+    return;
+  }
+  execFile(opener, [url], (e) => { if (e) log(`Failed to open browser: ${e.message}`); });
+}
+
 // Deliver a message to a specific browser window, falling back to first available client.
 // If no clients are connected, queues the message for flush on next connection.
 function deliverToWindow(msg, targetWindowId, { openBrowser } = {}) {
@@ -153,7 +167,7 @@ function deliverToWindow(msg, targetWindowId, { openBrowser } = {}) {
     // Keep windowId for flush routing
     pendingOpens.push(JSON.stringify(msgObj));
     if (openBrowser) {
-      exec(`open "${UI_URL}"`);
+      openBrowserUrl();
     }
   }
 }
@@ -1472,7 +1486,9 @@ function ensureWorktree(cwd, name) {
   }
   try {
     log(`Creating git worktree: ${name} in ${cwd}`);
-    execSync(`zsh -l -c 'git worktree add "${worktreePath}"'`, { cwd, encoding: 'utf8', timeout: 30000 });
+    // argv, no shell (#621): a worktree path containing a quote or a $ used to be
+    // re-interpreted by zsh on its way through the command string.
+    runBinary('git', ['worktree', 'add', worktreePath], { cwd, encoding: 'utf8', timeout: 30000 });
     symlinkWorktreeClaudeSettings(cwd, worktreePath);
     return worktreePath;
   } catch (e) {
@@ -2045,7 +2061,9 @@ async function confirmPromptSubmitted(id, text, options = {}) {
  */
 function fetchIssueFromGitHub(number, cwd) {
   return new Promise((resolve) => {
-    exec(`zsh -l -c 'gh issue view ${Number(number)} --json body,labels,url'`,
+    const gh = resolveBinary('gh');
+    if (!gh) { log(`[gh] Failed to fetch issue #${number}: gh not found on PATH`); resolve(null); return; }
+    execFile(gh, ['issue', 'view', String(Number(number)), '--json', 'body,labels,url'],
       { cwd, encoding: 'utf8', timeout: 15000 },
       (err, stdout) => {
         if (err) { log(`[gh] Failed to fetch issue #${number}: ${err.message}`); resolve(null); return; }
@@ -3198,7 +3216,7 @@ function refreshGitTreeClean() {
     return;
   }
   try {
-    const out = execFileSync('zsh', ['-l', '-c', `git -C "${sourcePath.replace(/"/g, '\\"')}" status --porcelain`], {
+    const out = runBinary('git', ['-C', sourcePath, 'status', '--porcelain'], {
       encoding: 'utf8',
       timeout: 5000,
       stdio: ['ignore', 'pipe', 'pipe']
@@ -3367,7 +3385,7 @@ async function applyGitPull() {
 
   updateInProgress = true;
   try {
-    execFileSync('zsh', ['-l', '-c', `git -C "${sourcePath.replace(/"/g, '\\"')}" pull --ff-only`], {
+    runBinary('git', ['-C', sourcePath, 'pull', '--ff-only'], {
       encoding: 'utf8',
       timeout: 5 * 60 * 1000,
       stdio: ['ignore', 'pipe', 'pipe']
@@ -3481,26 +3499,18 @@ app.delete('/api/update/pending', (req, res) => {
 
 app.get('/api/home', (req, res) => res.json({ home: os.homedir() }));
 
-// Is an agent binary on the user's PATH? `zsh -l` is required for the full PATH (a
-// LaunchAgent's /bin/sh has no Homebrew), but it's a LOGIN shell — it sources
-// ~/.zprofile/~/.zshrc every call (~50ms here), and /api/agents probes three binaries
-// synchronously on the event loop the WS upgrade handshake shares (#553). Every window's
-// init() fetches this, so a burst of windows (or nested Baby Browsers) stalled every
-// pending upgrade for ~140ms each. Cached because binaries don't come and go mid-session;
-// the TTL is short enough that installing an agent still shows up on the next page load.
-// Keyed on the binary name, so re-pointing *Binary in Settings re-probes immediately.
-const BIN_PROBE_TTL_MS = 60_000;
-const binProbeCache = new Map(); // bin -> { at, available }
+// Is an agent binary on the user's PATH?
+//
+// This was `zsh -l -c 'which <bin>'` — a subprocess, and a LOGIN shell at that, to
+// answer a question that is literally a PATH lookup. It sourced ~/.zprofile/~/.zshrc
+// every call (~50ms), and /api/agents probes three binaries synchronously on the
+// event loop the WS upgrade handshake shares (#553), so a burst of windows stalled
+// every pending upgrade for ~140ms each. That cost is what the 60s cache existed to
+// hide; resolveBinary is a statSync/accessSync walk over ~10 dirs, so the cache had
+// nothing left to buy and removing it makes /api/agents strictly more correct —
+// installing an agent now shows up immediately instead of up to a minute later (#621).
 function binaryAvailable(bin) {
-  const hit = binProbeCache.get(bin);
-  if (hit && Date.now() - hit.at < BIN_PROBE_TTL_MS) return hit.available;
-  let available = false;
-  try {
-    execSync(`zsh -l -c 'which ${bin}'`, { timeout: 5000, stdio: 'pipe' });
-    available = true;
-  } catch {}
-  binProbeCache.set(bin, { at: Date.now(), available });
-  return available;
+  return resolveBinary(bin) !== null;
 }
 
 app.get('/api/agents', (req, res) => {
@@ -4736,18 +4746,28 @@ app.get('/api/shells/:id/state', (req, res) => {
 });
 
 // Best-effort: the command running in a plain-terminal session right now, or
-// null when the shell is idle at its prompt. macOS-only (ps), computed on demand.
+// null when the shell is idle at its prompt. Computed on demand.
+//
+// macOS-only, and deliberately gated rather than ported (#621). This is not a path
+// difference that a resolveBinary() would fix: procps' `-g` selects by SESSION, so on
+// Linux the second call below would return the wrong set of processes while looking
+// like it worked. The correct Linux implementation is a /proc walk (tpgid from
+// /proc/<pid>/stat field 8, match pgrp field 5 across /proc/*/stat, read cmdline) —
+// a different mechanism that deserves its own tests. Returning null degrades one
+// optional, cosmetic field of /api/shells/:id/info; nothing asserts it.
 function getForegroundCommand(id) {
+  if (process.platform !== 'darwin') return null;
   try {
     const entry = shells.get(id);
     if (!entry) return null;
     const pid = (entry.engine || ptyEngine).getPid(id);
     if (!pid) return null;
+    const ps = resolveBinary('ps') || '/bin/ps';
     // The tty's foreground process group. If it's the shell itself, we're idle.
-    const tpgid = parseInt(execFileSync('/bin/ps', ['-o', 'tpgid=', '-p', String(pid)],
+    const tpgid = parseInt(execFileSync(ps, ['-o', 'tpgid=', '-p', String(pid)],
       { encoding: 'utf8', timeout: 2000 }).trim(), 10);
     if (!tpgid || tpgid === pid) return null;
-    const out = execFileSync('/bin/ps', ['-o', 'command=', '-g', String(tpgid)],
+    const out = execFileSync(ps, ['-o', 'command=', '-g', String(tpgid)],
       { encoding: 'utf8', timeout: 2000 }).trim();
     return out ? out.split('\n').map(s => s.trim()).filter(Boolean).join(' | ') : null;
   } catch { return null; }
@@ -5083,7 +5103,9 @@ app.get('/api/issues', (req, res) => {
     const pageIssues = cached.data.slice((page - 1) * perPage);
     return res.json({ issues: pageIssues, hasMore: pageIssues.length === perPage });
   }
-  exec(`zsh -l -c 'gh issue list --json number,title,body,labels,url --limit ${limit}'`,
+  const gh = resolveBinary('gh');
+  if (!gh) return res.status(500).json({ error: 'gh not found on PATH' });
+  execFile(gh, ['issue', 'list', '--json', 'number,title,body,labels,url', '--limit', String(limit)],
     { cwd, encoding: 'utf8', timeout: 15000 },
     (err, stdout) => {
       if (err) return res.status(500).json({ error: err.message });
@@ -5367,7 +5389,7 @@ const server = app.listen(PORT, BIND, () => {
       const connected = [...reloadClients].filter(c => c.readyState === 1);
       if (connected.length === 0) {
         log('No browser connected after startup, opening default browser');
-        exec(`open "${UI_URL}"`);
+        openBrowserUrl();
       }
     }, 5000);
   }

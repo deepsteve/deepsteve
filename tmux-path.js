@@ -1,7 +1,7 @@
 /**
  * Resolve the tmux binary without a login shell (#619).
  *
- * This replaces `zsh -l -c 'which tmux'`, which made the tmux engine silently
+ * This replaced `zsh -l -c 'which tmux'`, which made the tmux engine silently
  * conditional on zsh being installed. On macOS that was invisible (zsh is the
  * default shell); on Linux it is backwards — a box can have tmux and no zsh, and
  * there the probe threw, `TmuxEngine.available` was false, `settings.engine` got
@@ -9,16 +9,12 @@
  * It failed as "tmux not available", which is the wrong shape for a dependency we
  * intend to require.
  *
- * Why a fallback dir list rather than just `$PATH`: the macOS LaunchAgent plist
- * (see release.sh) sets
- *
- *     PATH=<install>/node/bin:$HOME/.local/bin:<node dir>:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
- *
- * which does NOT contain `/opt/homebrew/bin`. That omission is the entire reason
- * the login shell was here: on Apple Silicon, Homebrew's tmux is invisible to a
- * plain `$PATH` scan under launchd. So we scan `$PATH` first and then the handful
- * of prefixes package managers actually use. The Linux systemd unit has `/usr/bin`,
- * so an apt/dnf tmux is found by the PATH scan alone.
+ * The generic machinery — the $PATH-then-fallback-dirs scan and the reasons that
+ * list exists — moved to bin-path.js in #621, because seven more `zsh -l -c` sites
+ * turned out to be the same PATH lookup for git/gh/agent binaries. This file is now
+ * just tmux's view of it, with its public surface deliberately unchanged so
+ * test/unit/tmux-path.test.js passes verbatim — that test IS the check that the
+ * extraction preserved #619's contract.
  *
  * Anything more exotic (nix profile, asdf, a custom --prefix) is what the
  * `tmuxBinary` setting is for.
@@ -27,53 +23,13 @@
  * handle every root-level module, so this file ships automatically. That is why it
  * lives here and not in engines/, whose release.sh embed list is hand-maintained.
  *
- * Requires nothing but `fs`/`path`/`child_process` — deliberately NOT node-pty, so
- * test/unit/tmux-path.test.js can run on the bare CI unit runner, which installs
- * deps with --ignore-scripts and therefore has no node-pty binding (and no zsh —
- * which is what makes that job a genuine "tmux present, zsh absent" environment).
+ * Requires nothing but bin-path.js and child_process — deliberately NOT node-pty, so
+ * test/unit/tmux-path.test.js can run on the bare CI unit runner, which installs deps
+ * with --ignore-scripts and therefore has no node-pty binding (and no zsh — which is
+ * what makes that job a genuine "tmux present, zsh absent" environment).
  */
-const fs = require('fs');
-const path = require('path');
 const { execFileSync } = require('child_process');
-const { expandTilde } = require('./git-root');
-
-// Searched after $PATH, in order. Covers Homebrew (both prefixes), MacPorts, the
-// system dirs, and the usual Linux user/linuxbrew/nix locations.
-const FALLBACK_DIRS = [
-  '/opt/homebrew/bin',              // Homebrew, Apple Silicon — absent from the plist PATH
-  '/usr/local/bin',                 // Homebrew, Intel Mac
-  '/opt/local/bin',                 // MacPorts
-  '/usr/bin',
-  '/bin',
-  '~/.local/bin',
-  '/home/linuxbrew/.linuxbrew/bin', // Linuxbrew
-  '~/.nix-profile/bin',             // Nix
-];
-
-/** An existing, executable regular file (a directory named `tmux` must not match). */
-function isExecutableFile(p) {
-  try {
-    if (!fs.statSync(p).isFile()) return false;
-    fs.accessSync(p, fs.constants.X_OK);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-/** $PATH entries followed by the fallback dirs — tilde-expanded, de-duplicated. */
-function candidateDirs(env, extraDirs) {
-  const fromPath = String(env.PATH || '').split(path.delimiter).filter(Boolean);
-  const dirs = [];
-  const seen = new Set();
-  for (const d of [...fromPath, ...extraDirs]) {
-    const abs = expandTilde(d);
-    if (!abs || seen.has(abs)) continue;
-    seen.add(abs);
-    dirs.push(abs);
-  }
-  return dirs;
-}
+const { resolveBinary, isExecutableFile, candidateDirs, FALLBACK_DIRS } = require('./bin-path');
 
 /**
  * Absolute path to the tmux binary, or null.
@@ -81,18 +37,12 @@ function candidateDirs(env, extraDirs) {
  * `binary` containing a path separator (or a leading `~`) is treated as an explicit
  * location and used verbatim when executable — no searching, no silent fallback to
  * some other tmux, since a user who names a path means that one.
+ *
+ * Keeps its object-shaped `{binary}` signature (rather than bin-path's positional
+ * `name`) so #619's callers and tests are untouched.
  */
 function resolveTmuxPath({ env = process.env, binary = 'tmux', extraDirs = FALLBACK_DIRS } = {}) {
-  const name = String(binary || 'tmux');
-  if (name.includes(path.sep) || name.startsWith('~')) {
-    const abs = path.resolve(expandTilde(name));
-    return isExecutableFile(abs) ? abs : null;
-  }
-  for (const dir of candidateDirs(env, extraDirs)) {
-    const p = path.join(dir, name);
-    if (isExecutableFile(p)) return p;
-  }
-  return null;
+  return resolveBinary(String(binary || 'tmux'), { env, extraDirs });
 }
 
 /**

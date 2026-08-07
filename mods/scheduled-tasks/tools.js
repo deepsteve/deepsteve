@@ -14,7 +14,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { stateDir, expandTilde } = require('../../paths');
-const { execSync } = require('child_process');
+const { runBinary } = require('../../bin-path');
 const { randomUUID } = require('crypto');
 const { z } = require('zod');
 const cron = require('./cron');
@@ -137,9 +137,19 @@ function isGitRepo(dir) {
   return findGitRoot(dir) !== null;
 }
 
-// launchd-started daemons have a minimal PATH; login zsh matches gitRoot/ensureWorktree.
-function zshExec(cmd, cwd) {
-  return execSync(`zsh -l -c '${cmd}'`, { cwd, encoding: 'utf8', timeout: 15000 }).trim();
+// Run git, argv-style, with no shell layer at all (#621).
+//
+// This was `zsh -l -c '<cmd string>'`, for the same launchd-minimal-PATH reason
+// gitRoot/ensureWorktree had one — but a login shell to find git is a PATH lookup in
+// costume, and it made scheduled worktree cleanup silently conditional on zsh, the
+// exact failure #619 removed from the tmux engine. runBinary does the $PATH +
+// fallback-dirs scan and execs the absolute path directly.
+//
+// Taking argv rather than a string also fixes a real quoting bug: every caller below
+// interpolated a filesystem path into single quotes, so a repo path containing an
+// apostrophe broke the command outright.
+function gitExec(argv, cwd) {
+  return String(runBinary('git', argv, { cwd, encoding: 'utf8', timeout: 15000 })).trim();
 }
 
 // Remove a per-run scheduled worktree and delete its branch — conservatively (#565):
@@ -149,8 +159,9 @@ function zshExec(cmd, cwd) {
 // - `git branch -d` (never -D): git refuses when the branch has unmerged commits,
 //   so committed-but-unmerged work keeps its branch.
 // Claude's native --worktree <name> names the branch worktree-<name>.
-// Never throws. Returns { removed, branchDeleted }; `exec` is injectable for tests.
-function cleanupWorktree(repoRoot, name, exec = zshExec) {
+// Never throws. Returns { removed, branchDeleted }; `exec` is injectable for tests and
+// takes (argv, cwd) — an array, not a command string, since #621.
+function cleanupWorktree(repoRoot, name, exec = gitExec) {
   const res = { removed: false, branchDeleted: false };
   if (!repoRoot || !name) return res;
   const wtPath = path.join(repoRoot, '.claude', 'worktrees', name);
@@ -160,9 +171,9 @@ function cleanupWorktree(repoRoot, name, exec = zshExec) {
     // fire once that claude process is dead (onExit = the PTY exited; the sweep
     // requires the shell gone + a closed tombstone), so the lock is always stale
     // here — release it or `git worktree remove` refuses even a clean worktree.
-    try { exec(`git worktree unlock "${wtPath}"`, repoRoot); } catch {} // not locked is fine
+    try { exec(['worktree', 'unlock', wtPath], repoRoot); } catch {} // not locked is fine
     try {
-      exec(`git worktree remove "${wtPath}"`, repoRoot);
+      exec(['worktree', 'remove', wtPath], repoRoot);
       res.removed = true;
     } catch (e) {
       log_(`worktree ${name} kept (uncommitted changes or locked): ${String(e.message || e).split('\n')[0]}`);
@@ -171,13 +182,13 @@ function cleanupWorktree(repoRoot, name, exec = zshExec) {
   } else {
     // Dir already gone (run died before claude created it, or removed by hand).
     // Prune stale metadata so a registered-but-missing worktree can't pin the branch.
-    try { exec('git worktree prune', repoRoot); } catch {}
+    try { exec(['worktree', 'prune'], repoRoot); } catch {}
     res.removed = true;
   }
   const branch = `worktree-${name}`;
-  try { exec(`git rev-parse --verify --quiet "refs/heads/${branch}"`, repoRoot); }
+  try { exec(['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`], repoRoot); }
   catch { res.branchDeleted = true; return res; } // branch never created — nothing to delete
-  try { exec(`git branch -d "${branch}"`, repoRoot); res.branchDeleted = true; }
+  try { exec(['branch', '-d', branch], repoRoot); res.branchDeleted = true; }
   catch { log_(`worktree ${name} removed; branch ${branch} kept (unmerged commits)`); }
   return res;
 }
