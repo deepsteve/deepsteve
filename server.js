@@ -454,7 +454,28 @@ Issue description:
 
 Please read the issue carefully, understand the codebase context, and implement the changes needed.`;
 
-const AGENT_TYPES = ['claude', 'codex', 'hermes', 'opencode', 'pi'];
+// The agent integrations deepsteve ships, and how far each one actually goes (#622).
+// `tier` is the support promise, and it is DATA — not an "(experimental)" suffix baked
+// into `name`. That suffix used to be hardcoded here AND again in the Settings HTML,
+// which is exactly how Hermes ended up called experimental in the README and nowhere
+// else. Clients render the suffix from `tier` (see agentLabel() in public/js/app.js):
+//   supported    — deepsteve MCP + skills, real readiness signal, covered by tests;
+//                  a gap is a bug
+//   experimental — spawns and resumes, but no MCP, no skills, no readiness signal, and
+//                  only negative test coverage; a gap is the documented state
+// docs/agents.md is the per-agent breakdown and test/unit/agents-doc.test.js fails the
+// build when this table and that doc disagree — so a new agent can't ship undocumented.
+// `binarySetting` names the settings key holding an overridable binary path; agents
+// without one are probed by their literal id (claude is never probed — see /api/agents).
+const AGENT_CATALOG = [
+  { id: 'claude',   name: 'Claude Code', shortName: 'CC', tier: 'supported' },
+  { id: 'codex',    name: 'Codex',       shortName: 'CX', tier: 'supported' },
+  { id: 'hermes',   name: 'Hermes',      shortName: 'H',  tier: 'experimental', binarySetting: 'hermesBinary' },
+  { id: 'opencode', name: 'OpenCode',    shortName: 'OC', tier: 'experimental', binarySetting: 'opencodeBinary' },
+  { id: 'pi',       name: 'Pi',          shortName: 'Pi', tier: 'experimental', binarySetting: 'piBinary' },
+];
+
+const AGENT_TYPES = AGENT_CATALOG.map(a => a.id);
 
 const SETTINGS_SCHEMA = [
   { name: 'shellProfile',               type: 'string',  default: '~/.zshrc' },
@@ -491,7 +512,7 @@ const SETTINGS_SCHEMA = [
   { name: 'metaControlsEnabled',        type: 'boolean', default: false },
   { name: 'inheritRemoteControl',       type: 'boolean', default: true },
   { name: 'inheritRemoteControlOnFork', type: 'boolean', default: true },
-  { name: 'enabledAgents',              type: 'array',   default: ['claude', 'codex', 'hermes', 'opencode', 'pi'],
+  { name: 'enabledAgents',              type: 'array',   default: [...AGENT_TYPES],
     itemEnum: AGENT_TYPES, nonEmpty: true, broadcast: false,
     sideEffect: (val, s) => { s.defaultAgent = val[0]; },
     logValue: v => v.join(',') },
@@ -3564,18 +3585,29 @@ function binaryAvailable(bin) {
 app.get('/api/agents', (req, res) => {
   const enabledAgents = settings.enabledAgents || ['claude'];
   const defaultAgent = settings.defaultAgent || 'claude';
-  const agents = [
-    { id: 'claude', name: 'Claude Code', shortName: 'CC', available: true, enabled: enabledAgents.includes('claude'), isDefault: defaultAgent === 'claude' }
-  ];
-  const codexAvailable = binaryAvailable('codex');
-  agents.push({ id: 'codex', name: 'Codex', shortName: 'CX', available: codexAvailable, enabled: codexAvailable && enabledAgents.includes('codex'), isDefault: defaultAgent === 'codex' });
-  const hermesAvailable = binaryAvailable(settings.hermesBinary || 'hermes');
-  agents.push({ id: 'hermes', name: 'Hermes', shortName: 'H', available: hermesAvailable, enabled: hermesAvailable, isDefault: defaultAgent === 'hermes' });
-  // Auto-enable available agents
-  const opencodeAvailable = binaryAvailable(settings.opencodeBinary || 'opencode');
-  agents.push({ id: 'opencode', name: 'OpenCode (experimental)', shortName: 'OC', available: opencodeAvailable, enabled: opencodeAvailable, isDefault: defaultAgent === 'opencode' });
-  const piAvailable = binaryAvailable(settings.piBinary || 'pi');
-  agents.push({ id: 'pi', name: 'Pi (experimental)', shortName: 'Pi', available: piAvailable, enabled: piAvailable, isDefault: defaultAgent === 'pi' });
+  // One pass over AGENT_CATALOG, so adding an agent means adding a catalog row and
+  // nothing else. `enabled` gates on enabledAgents for EVERY agent (#622): hermes,
+  // opencode and pi used to be auto-enabled on binary presence alone, so their Settings
+  // checkboxes did nothing — unchecking one left it in the picker. Claude is the only
+  // agent never probed: it's the default agent and the fallback in getAgentConfig(),
+  // so reporting it unavailable would leave the picker empty on a slow `which`.
+  // binarySetting/binary are echoed back so the Settings UI can render the binary-path
+  // row generically instead of carrying its own id→settings-key map.
+  const agents = AGENT_CATALOG.map(a => {
+    const binary = a.binarySetting ? (settings[a.binarySetting] || a.id) : a.id;
+    const available = a.id === 'claude' || binaryAvailable(binary);
+    return {
+      id: a.id,
+      name: a.name,
+      shortName: a.shortName,
+      tier: a.tier,
+      available,
+      enabled: available && enabledAgents.includes(a.id),
+      isDefault: defaultAgent === a.id,
+      binarySetting: a.binarySetting || null,
+      binary,
+    };
+  });
   // Custom Claude config profiles (#537): appended at the END so they render last in
   // every picker. id is 'config:<pid>' so the client distinguishes them; the runtime
   // agentType stays 'claude' (resolved to a CLAUDE_CONFIG_DIR at spawn). configDir is
@@ -3586,6 +3618,7 @@ app.get('/api/agents', (req, res) => {
       id: 'config:' + p.id,
       name: p.name,
       shortName: (p.name || '').trim().slice(0, 2).toUpperCase() || 'CC',
+      tier: 'supported', // a profile IS a claude session, just pinned to another CLAUDE_CONFIG_DIR
       available: true,
       enabled: true,
       isDefault: false,

@@ -421,7 +421,18 @@ function TaskForm({ task, projects, agents, defaults = {}, onClose }) {
         </label>
       </div>
       <div style={{ fontSize: 11, color: C.dim, marginTop: 4 }}>Each run gets its own git worktree/branch, removed after the run unless there is uncommitted or unmerged work. Skipped when the project is not a git repo.</div>
-      {agentType !== 'claude' && <div style={{ fontSize: 11, color: C.amber, marginTop: 4 }}>Note: only claude is wired for deepsteve MCP tools (self-report + auto-close).</div>}
+      {/* #622: this used to say "only claude is wired for deepsteve MCP tools" for every
+          non-claude agent — including codex, which IS MCP-wired (mcpConfigArgs returns
+          args for claude and codex). The two cases fail differently and need different
+          warnings. See docs/agents.md. */}
+      {agentType === 'codex' && <div style={{ fontSize: 11, color: C.amber, marginTop: 4 }}>
+        Note: codex self-reports and auto-closes, but its contract tools are not pre-permitted — an
+        unattended run can block on a permission prompt and never report finished. Set a time limit.
+      </div>}
+      {agentType !== 'claude' && agentType !== 'codex' && <div style={{ fontSize: 11, color: C.amber, marginTop: 4 }}>
+        Note: {agentType} has no deepsteve MCP tools, so it cannot self-report — runs end as
+        “ended” rather than succeeded/failed, and the tab never auto-closes.
+      </div>}
 
       {err && <div style={{ color: C.red, fontSize: 12, marginTop: 8 }}>{err}</div>}
       <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>

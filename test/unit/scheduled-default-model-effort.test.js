@@ -210,6 +210,10 @@ function loadSettingsHelpers() {
   const real = {
     EFFORT_LEVELS,
     validateModel,
+    // enabledAgents' default is `[...AGENT_TYPES]` (#622), which is spread when the
+    // schema literal is *built* — unlike the lazily-referenced consts below, an
+    // undefined here throws "not iterable" before any test body runs.
+    AGENT_TYPES: ['claude', 'codex', 'hermes', 'opencode', 'pi'],
     broadcast: () => {},
     provisionAllProfileSkills: () => {},
     genContextId: () => 'id',

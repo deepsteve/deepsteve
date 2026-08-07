@@ -68,7 +68,15 @@ Safety layers (all three must hold — do not weaken any of them):
 
 ### Overview
 
-deepsteve runs as a macOS LaunchAgent daemon that serves a web UI for managing multiple Claude Code terminal sessions. Each browser tab gets its own PTY-backed Claude instance.
+deepsteve runs as a macOS LaunchAgent daemon that serves a web UI for managing multiple agent terminal sessions. Each browser tab gets its own PTY-backed agent instance.
+
+### Agent support tiers (#622)
+
+**`docs/agents.md` is the per-agent capability matrix — check it before assuming a feature works for a given agent.** Claude Code and Codex are **supported** (deepsteve MCP + skills wired, real readiness signal, test coverage); OpenCode, Pi, and Hermes are **experimental** (no MCP, no skills, a fixed 3s prompt-delivery timer, and only *negative* test assertions). Much of what follows in this file is Claude-only in practice — worktrees, fork, model/effort, config profiles, `/rc` inheritance, the waiting classifier, and confirmed submission all gate on `agentType === 'claude'` or on a flag that only `AGENT_CONFIGS.claude` carries.
+
+Two tables, deliberately separate: **`AGENT_CATALOG`** (`server.js`) is the *support promise* — `id`/`name`/`shortName`/`tier`, plus `binarySetting` when the path is user-overridable — and `AGENT_TYPES`, the `enabledAgents` default, `GET /api/agents`, the Settings checkboxes and the new-tab picker all derive from it, so adding an agent is one row. **`AGENT_CONFIGS`** is the *mechanics* (exit method, resume flags, `supportsWorktree`/`supportsSessionId`/`supportsSessionWatch`, `screenMarkers`). The tier is **data, never a string**: it used to be an `(experimental)` suffix hardcoded into the server's `name` *and* again into the Settings HTML, and Hermes was in neither — so it read experimental in the README and supported in the UI. `agentLabel()` (`public/js/app.js`) is now the only place the tier becomes text, and `test/unit/agents-doc.test.js` fails the build when the catalog and `docs/agents.md` disagree. Note `getAgentConfig()` falls back to **claude's** config for an unknown agentType, and `spawnSession`'s binary lookup falls back to the literal `claude` binary — a typo'd agent id launches Claude Code rather than throwing.
+
+Since #622 **every** agent honours `enabledAgents`; hermes/opencode/pi previously auto-enabled on binary presence alone, so their Settings checkboxes did nothing. The default remains all five, so behavior is unchanged unless a checkbox was actually unticked.
 
 ### Terminal Engines — tmux is the default (#620)
 
