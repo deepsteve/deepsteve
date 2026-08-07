@@ -90,6 +90,16 @@ if [ -z "$DEEPSTEVE_URL" ]; then
   echo "--- provisioned isolated test server: $DEEPSTEVE_URL (HOME=$SCRATCH) ---"
 fi
 
+# Every failing file is remembered, and the script exits nonzero if ANY failed (#621).
+#
+# This loop used to just run each file, so the script's exit status was whatever the LAST
+# `node --test` returned — there is no `set -e` here, and there cannot be one (the
+# provisioning above relies on non-fatal failures). Everything that consumes this script
+# takes its exit code as the verdict: `npm test`, all three docker suites, and CI's
+# integration job via `--exit-code-from test`. So a failure in any file but the
+# alphabetically last one (websocket.test.js) was reported as a pass — for every suite,
+# on every run.
+failed=""
 for f in test/integration/*.test.js; do
   # -E so SKIP_PATTERN can be an alternation, e.g. "security-auth|tmux-engine". A single-word
   # pattern behaves identically under -E, so existing callers are unaffected. The only skip in
@@ -104,5 +114,13 @@ for f in test/integration/*.test.js; do
   # --test-concurrency=1 here only serializes suites WITHIN this one file (cheap
   # insurance if a file ever holds two session-using describes); cross-file
   # serialization is what the per-file invocation above guarantees.
-  node --test --test-concurrency=1 --test-timeout 60000 "$f"
+  if ! node --test --test-concurrency=1 --test-timeout 60000 "$f"; then
+    failed="$failed $f"
+  fi
 done
+
+if [ -n "$failed" ]; then
+  echo "=== FAILED:$failed ==="
+  exit 1
+fi
+echo "=== all integration files passed ==="
