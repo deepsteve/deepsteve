@@ -10,15 +10,19 @@ describe('Tmux Engine', () => {
     return c;
   }
 
+  // Since #620 tmux is the default, so this suite usually isn't switching
+  // anything — but it still sets the engine explicitly rather than assuming,
+  // because the run order across files isn't guaranteed and an earlier file may
+  // have left node-pty selected.
+  let engineBefore = 'tmux';
+
   before(async () => {
     // Ensure no active sessions before switching engine
     await httpPost('/api/shells/killall').catch(() => {});
     await new Promise(r => setTimeout(r, 500));
 
-    const result = await httpPost('/api/settings', {
-      engine: 'tmux',
-      engineSwitchConfirm: true,
-    });
+    engineBefore = (await httpGet('/api/engines')).current || 'tmux';
+    const result = await httpPost('/api/settings', { engine: 'tmux' });
     assert.strictEqual(result.engine, 'tmux', 'engine should be tmux after switch');
   });
 
@@ -26,14 +30,13 @@ describe('Tmux Engine', () => {
     await cleanupSessions(clients);
     clients.length = 0;
 
-    // Switch back to node-pty so subsequent test files are unaffected.
-    // The engine switch kills all sessions internally, but killShell() has
-    // background escalation timers (up to 10s). Wait for those to settle
-    // so stale SIGTERM/SIGKILL won't hit PIDs reused by the next test suite.
-    await httpPost('/api/settings', {
-      engine: 'node-pty',
-      engineSwitchConfirm: true,
-    });
+    // Restore whatever the engine was, so file order can't matter. Changing this
+    // setting only affects NEWLY spawned sessions — the `engine` schema entry has
+    // no sideEffect, so nothing is killed here (an older comment claimed it was).
+    // The wait is for killShell()'s background escalation timers (up to 10s) from
+    // cleanupSessions above, so a stale SIGTERM/SIGKILL can't hit a pid the next
+    // suite has been given.
+    await httpPost('/api/settings', { engine: engineBefore });
     await new Promise(r => setTimeout(r, 3000));
   });
 

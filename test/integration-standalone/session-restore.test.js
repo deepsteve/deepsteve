@@ -263,6 +263,18 @@ before(async () => {
   // Sessions spawn through `zsh -l -c 'claude …'`, so a login shell sources this
   // and finds the stub ahead of any real claude on the system.
   fs.writeFileSync(path.join(HOME, '.zprofile'), 'export PATH="$HOME/bin:$PATH"\n');
+  // Pinned to node-pty (#620). Everything below characterizes the RESPAWN machinery
+  // — `--resume` vs a fresh id, the #542 `claude -c` theft guard, the bounded
+  // retry chain — and all of it is reached only because a node-pty session dies
+  // with the daemon. A tmux session does not: it is detached at shutdown and
+  // reattached at boot, so a restart never respawns anything and these tests would
+  // wait forever for a spawn that must not happen. That reattach path is asserted
+  // in tmux-durability.test.js, which checks the pane pid is unchanged.
+  fs.mkdirSync(path.join(HOME, '.deepsteve'), { recursive: true });
+  fs.writeFileSync(
+    path.join(HOME, '.deepsteve', 'settings.json'),
+    JSON.stringify({ engine: 'node-pty', engineMigrationOffered: true }, null, 2)
+  );
   stubLogPath = path.join(HOME, 'claude-invocations.log');
   PORT = await freePort();
   BASE = `http://127.0.0.1:${PORT}`;

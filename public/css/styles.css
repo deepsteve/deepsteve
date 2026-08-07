@@ -748,10 +748,20 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
 .version-ok { color: var(--ds-accent-green-soft); }
 .version-update { color: var(--ds-accent-blue); }
 .version-failed { color: var(--ds-text-secondary); }
+/* There is no --ds-warning token; --ds-accent-orange is the established warning
+   colour (the reconnect banner, the Action Required dot). --ds-accent-red stays
+   reserved for destructive actions and errors. */
+.version-warn { color: var(--ds-accent-orange); }
 
-/* Update-available badge on the settings button */
-#settings-btn.update-available { position: relative; }
-#settings-btn.update-available::after {
+/* Status dot on the settings button. Two independent conditions raise it — an
+   available update, and running the perishable node-pty fallback (#620) — and they
+   share one dot because an element has only one ::after. Orange is declared second
+   so it wins when both are true, which is the right precedence: an update can wait,
+   an install that loses your sessions on restart should not. */
+#settings-btn.update-available,
+#settings-btn.engine-fallback { position: relative; }
+#settings-btn.update-available::after,
+#settings-btn.engine-fallback::after {
   content: "";
   position: absolute;
   top: 3px;
@@ -759,13 +769,15 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: var(--ds-accent-blue);
   box-shadow: 0 0 0 1px var(--ds-bg-primary);
 }
+#settings-btn.update-available::after { background: var(--ds-accent-blue); }
+#settings-btn.engine-fallback::after { background: var(--ds-accent-orange); }
 /* Anchored to the ⚙, not to the button's right edge — vertical makes #settings-btn width:100%, so
    `right: 3px` put the dot ~180px away from the icon it is supposed to badge. The icon sits at the
    same 10px inset in both the expanded sidebar and the rail, so one rule covers both. */
-#app-container.vertical-layout #settings-btn.update-available::after {
+#app-container.vertical-layout #settings-btn.update-available::after,
+#app-container.vertical-layout #settings-btn.engine-fallback::after {
   top: 6px;
   right: auto;
   left: 20px;

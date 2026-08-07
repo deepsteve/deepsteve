@@ -180,11 +180,16 @@ class Client {
 }
 
 let clients = [];
-async function openSession(cfg) {
+// `engine` pins a session to one backend via the WS ?engine= override. Default is
+// whatever settings.engine says, which since #620 is tmux — the engine these tests
+// should exercise. Only the coalesced-recovery case pins node-pty; see its comment.
+async function openSession(cfg, { engine } = {}) {
   policy(cfg);
   const c = new Client();
   clients.push(c);
-  const s = await c.connect({ cwd: projDir, new: '1', agentType: 'claude' });
+  const params = { cwd: projDir, new: '1', agentType: 'claude' };
+  if (engine) params.engine = engine;
+  const s = await c.connect(params);
   await waitFor(() => events(s.id).some((e) => e.event === 'boot'), 'the stub TUI to boot');
   return { c, id: s.id };
 }
@@ -239,7 +244,19 @@ test('#607B: a coalesced text+Enter is detected and recovered, and submits exact
   // Enter path. This is the #607 symptom manufactured deterministically. Pre-fix
   // nothing noticed and the prompt stayed staged forever; now the verify pass sees
   // it still in the composer and re-sends Enter.
-  const { c, id } = await openSession({ policy: 'ink', readAfterMs: 9000 });
+  //
+  // Pinned to node-pty (#620). The recovery it characterizes depends on reading the
+  // composer back, and this case deliberately stalls the agent's stdin for 9s — so
+  // at verify time nothing has been drawn. Under tmux the daemon reads the pane
+  // through an attach PTY, that empty window is genuinely unreadable, and
+  // confirmPromptSubmitted correctly ends `unverified` rather than guessing:
+  //   [submit] <id> could not read the composer — not retrying Enter
+  // That is the designed safe outcome (an indeterminate screen must not trigger a
+  // re-send), and submission degrades to the pre-#607 timed path, which is what
+  // shipped for years. Echo-gating itself does work under tmux — the next test
+  // proves it there. Closing the gap means making the composer readable through
+  // tmux's repaint during an undrawn window, which is its own piece of work.
+  const { c, id } = await openSession({ policy: 'ink', readAfterMs: 9000 }, { engine: 'node-pty' });
   c.sendPrompt(PROMPT);
 
   const got = await waitFor(() => (submits(id).length === 1 ? submits(id) : null), 'the prompt to submit', 40000);
@@ -369,9 +386,14 @@ test('graceful shutdown of idle sessions is not slowed by echo confirmation', as
   // /exit, so echo confirmation could never succeed there. It must stay on the timed
   // path, or every shutdown would burn the echo cap per session against killShell's
   // 8s SIGTERM escalation. This guards the teardown of all 13 other standalone suites.
+  //
+  // Pinned to node-pty because /exit-on-shutdown is now a node-pty-only contract:
+  // since #620 a tmux-backed session is DETACHED at shutdown, never exited, which is
+  // the whole point (the agent survives the restart). The tmux side of this — that
+  // shutdown is fast and the session lives — is asserted in tmux-durability.test.js.
   const opened = [];
   for (let i = 0; i < 3; i++) {
-    const s = await openSession({ policy: 'ink' });
+    const s = await openSession({ policy: 'ink' }, { engine: 'node-pty' });
     opened.push(s);
     await waitFor(async () => (await shellState(s.id)).waitingForInput === true, 'the session to read idle');
   }

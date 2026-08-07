@@ -208,6 +208,18 @@ before(async () => {
     { mode: 0o755 }
   );
   fs.writeFileSync(path.join(HOME, '.zprofile'), 'export PATH="$HOME/bin:$PATH"\n');
+  // Pinned to node-pty (#620). The subject here is the detach REAPER and the
+  // sleep-holdoff logic wrapped around it — and a tmux-backed session never arms
+  // that reaper at all: the daemon is healthy, tmux holds the process, so a
+  // clientless session is deliberately left running. "It is still alive well past
+  // the grace period" is asserted in tmux-durability.test.js. Everything else #563
+  // covers (the reload heartbeat, the client wake watch, the caffeinate assertion)
+  // is engine-agnostic and unaffected.
+  fs.mkdirSync(path.join(HOME, '.deepsteve'), { recursive: true });
+  fs.writeFileSync(
+    path.join(HOME, '.deepsteve', 'settings.json'),
+    JSON.stringify({ engine: 'node-pty', engineMigrationOffered: true }, null, 2)
+  );
   PORT = await freePort();
   BASE = `http://127.0.0.1:${PORT}`;
   await startDaemon();

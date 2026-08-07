@@ -61,6 +61,24 @@ class Engine extends EventEmitter {
     throw new Error('removeDataListener() not implemented');
   }
 
+  /**
+   * True if this engine can release a session without ending it — i.e. the
+   * process lives somewhere the daemon isn't its parent (#620). Callers ask this
+   * rather than sniffing the class, the same way they ask `available`.
+   */
+  get canDetach() {
+    return false;
+  }
+
+  /**
+   * Release a session without killing it, and without reporting an exit.
+   * Only meaningful when `canDetach` is true; the base is a no-op returning
+   * false so a caller can fall through to kill().
+   */
+  detach(id) {
+    return false;
+  }
+
   /** Check if a session exists in this engine. */
   has(id) {
     return false;

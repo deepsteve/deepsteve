@@ -1,7 +1,15 @@
-const pty = require('node-pty');
 const { execFileSync } = require('child_process');
 const Engine = require('./engine');
 const { probeTmux } = require('../tmux-path');
+
+// node-pty is required lazily, at the one place that needs it (attaching), so that
+// merely requiring this module doesn't pull in a native binding. The CI unit job
+// installs with `--ignore-scripts` — no node-gyp build — and a top-level require
+// here made the engine untestable there, which is why the detach/exit contract
+// (#620) had no unit coverage at all. Callers that inject `spawnPty` never load it.
+function defaultSpawnPty(...args) {
+  return require('node-pty').spawn(...args);
+}
 
 const SESSION_PREFIX = 'ds-';
 
@@ -35,14 +43,17 @@ function shellQuote(s) {
  */
 class TmuxEngine extends Engine {
   /**
-   * @param {{binary?: string, env?: object, exec?: Function}} [opts]
+   * @param {{binary?: string, env?: object, exec?: Function, spawnPty?: Function}} [opts]
    *   binary — the `tmuxBinary` setting: a bare name to search for, or an explicit
-   *   path. exec/env are injection points for tests.
+   *   path. exec/env/spawnPty are injection points for tests; spawnPty stands in for
+   *   pty.spawn so the attach/detach lifecycle can be tested on a box with no tmux
+   *   (which is exactly what the CI unit job is).
    */
-  constructor({ binary = 'tmux', env, exec } = {}) {
+  constructor({ binary = 'tmux', env, exec, spawnPty } = {}) {
     super();
     this._sessions = new Map(); // id → { attachPty, exitCallbacks }
     this._binary = binary || 'tmux';
+    this._spawnPty = spawnPty || defaultSpawnPty;
     this._probeOpts = { binary: this._binary };
     if (env) this._probeOpts.env = env;
     if (exec) this._probeOpts.exec = exec;
@@ -174,7 +185,7 @@ class TmuxEngine extends Engine {
   _attach(id, cols, rows) {
     const sessionName = this._tmuxSessionName(id);
     const tmux = this._tmuxPath || 'tmux';
-    const attachPty = pty.spawn(tmux, ['attach-session', '-t', sessionName], {
+    const attachPty = this._spawnPty(tmux, ['attach-session', '-t', sessionName], {
       name: 'xterm-256color',
       cols: cols || 120,
       rows: rows || 40,
@@ -190,17 +201,41 @@ class TmuxEngine extends Engine {
     });
 
     attachPty.onExit(({ exitCode, signal }) => {
-      // Check if the tmux session is still alive
-      const alive = this._tmuxSessionAlive(id);
-      if (alive) {
-        // Attach PTY died but tmux session lives — could reattach later
-        // For now, treat as exit since the engine consumer expects it
-      }
+      // A deliberate detach() is not an exit (#620). Without this the daemon's
+      // universal 'exit' funnel would tombstone a session whose agent is still
+      // running happily in tmux — which is the whole point of detaching.
+      if (entry.detaching) return;
+      // Drop the entry so has() stops lying and write() stops writing into a
+      // dead attach PTY. Guarded like node-pty's (engines/node-pty.js) because
+      // an exit handler may have already re-attached a fresh PTY under this id.
+      if (this._sessions.get(id) === entry) this._sessions.delete(id);
       for (const cb of entry.exitCallbacks) {
         try { cb({ exitCode, signal }); } catch {}
       }
       this.emit('exit', id, exitCode, signal);
     });
+  }
+
+  /**
+   * Release a session without ending it: tear down our attach PTY and forget
+   * the session, leaving the tmux session (and the agent inside it) running.
+   *
+   * This is what makes a daemon restart non-destructive (#620) — the agent keeps
+   * working through the restart and startup's reattach picks it back up. The
+   * `detaching` flag is load-bearing: killing the attach PTY fires its onExit,
+   * and without the flag that reports an exit for a session that never exited.
+   */
+  detach(id) {
+    const entry = this._sessions.get(id);
+    if (!entry) return false;
+    entry.detaching = true;
+    this._sessions.delete(id);
+    try { entry.attachPty.kill(); } catch {}
+    return true;
+  }
+
+  get canDetach() {
+    return true;
   }
 
   /** Reattach to an existing tmux session (e.g. after daemon restart). */

@@ -490,8 +490,22 @@ const SETTINGS_SCHEMA = [
   { name: 'recentSessionsLimit',        type: 'number',  default: 8, clamp: [0, 50], round: true,
     sideEffect: (val, s) => { trimRecentSessions(); } },
   { name: 'scrollbackKB',               type: 'number',  default: SCROLLBACK_DEFAULT_KB, clamp: [1, 10000], round: true },
-  { name: 'engine',                     type: 'enum',    default: 'node-pty',
+  // tmux is the default (#620): a node-pty session is a child of server.js and dies
+  // with it, so a crash or a restart takes every running agent with it. This one word
+  // covers all three cases correctly, because the block right after engine init
+  // already downgrades-and-persists when tmux is missing:
+  //   fresh install + tmux    → nothing in settings.json overrides it → tmux
+  //   fresh install, no tmux  → downgraded to node-pty and saved
+  //   existing install        → its explicit saved value wins, until the one-time
+  //                             migration offer below flips it
+  // The default can't itself consult tmuxEngine — buildDefaults() runs ~180 lines
+  // before the engine is constructed. Only the `values` thunk is lazy enough.
+  { name: 'engine',                     type: 'enum',    default: 'tmux',
     values: () => tmuxEngine ? ['node-pty', 'tmux'] : ['node-pty'] },
+  // One-shot latch for the "you have tmux but you're on node-pty" offer (#620).
+  // Broadcast so a second window dismisses its own copy of the modal when the
+  // first one answers.
+  { name: 'engineMigrationOffered',     type: 'boolean', default: false },
   { name: 'autoUpdateCheckEnabled',     type: 'boolean', default: true },
   { name: 'autoUpdateCheckIntervalHours', type: 'number', default: 6, clamp: [1, 168] },
   { name: 'autoUpdateApply',            type: 'boolean', default: true },
@@ -687,9 +701,14 @@ let tmuxUnavailableReason = null;
     // being required — an unavailable engine has to be diagnosable from the log.
     tmuxUnavailableReason = tmuxCheck.unavailableReason;
     log(`Engine: tmux not available — ${tmuxUnavailableReason}`);
+    // Also the fresh-install path since #620 made tmux the schema default: with no
+    // tmux there is nothing to default to, so persist the downgrade. The UI says so
+    // out loud rather than leaving this log line as the only trace — a node-pty
+    // install is a perishable install, and the user should know they're on it.
     if (settings.engine === 'tmux') {
       settings.engine = 'node-pty';
       saveSettings();
+      log('Engine: falling back to node-pty — sessions will NOT survive a restart');
     }
   }
 }
@@ -1105,20 +1124,58 @@ function childBaseEnv(extraEnv) {
   return extraEnv ? { ...env, ...extraEnv } : env;
 }
 
+// Why tmux couldn't create a session at runtime, or null. Distinct from
+// tmuxUnavailableReason, which is about the binary not being *found*.
+let tmuxRuntimeFailure = null;
+
+/**
+ * Spawn a session, degrading from tmux to node-pty rather than failing outright.
+ *
+ * `tmux -V` succeeding at probe time does not prove `new-session` will work. The
+ * one that bit us is a socket path over the ~104-byte `sun_path` limit ("File
+ * name too long") from a long $TMPDIR; the tmux server refusing to start and
+ * resource limits get here too. That used to be nearly unreachable because almost
+ * nobody ran tmux — now it is the default, so the same throw comes out of the raw
+ * WS 'connection' handler as an **uncaught exception and kills the daemon**,
+ * taking every other session with it.
+ *
+ * Two rules, then: one session's spawn failure must never end the process, and a
+ * working perishable tab beats a dead app. The failure is recorded so the UI shows
+ * the same "you are on the fallback" warning it shows when tmux is missing —
+ * degrading *silently* is the exact thing this issue exists to stop.
+ *
+ * Returns the engine that actually spawned, so callers can record the truth
+ * instead of the engine they asked for.
+ */
 function spawnSession(eng, id, agentType, args, cwd, { cols = 120, rows = 40, env: extraEnv } = {}) {
   const env = childBaseEnv(extraEnv);
+  const opts = { cols, rows, env, stripEnv: DAEMON_INTERNAL_ENV_KEYS };
+
+  let shellArgs;
   if (agentType === 'terminal') {
-    eng.spawn(id, 'zsh', ['-l'], cwd, { cols, rows, env, stripEnv: DAEMON_INTERNAL_ENV_KEYS });
-    return;
+    shellArgs = ['-l'];
+  } else {
+    const bin = agentType === 'claude' ? 'claude'
+      : agentType === 'codex' ? 'codex'
+      : agentType === 'hermes' ? (settings.hermesBinary || 'hermes')
+      : agentType === 'opencode' ? (settings.opencodeBinary || 'opencode')
+      : agentType === 'pi' ? (settings.piBinary || 'pi')
+      : 'claude';
+    const quoted = args.map(a => `'${a.replace(/'/g, "'\\''")}'`).join(' ');
+    shellArgs = ['-l', '-c', `${bin} ${quoted}`];
   }
-  const bin = agentType === 'claude' ? 'claude'
-    : agentType === 'codex' ? 'codex'
-    : agentType === 'hermes' ? (settings.hermesBinary || 'hermes')
-    : agentType === 'opencode' ? (settings.opencodeBinary || 'opencode')
-    : agentType === 'pi' ? (settings.piBinary || 'pi')
-    : 'claude';
-  const quoted = args.map(a => `'${a.replace(/'/g, "'\\''")}'`).join(' ');
-  eng.spawn(id, 'zsh', ['-l', '-c', `${bin} ${quoted}`], cwd, { cols, rows, env, stripEnv: DAEMON_INTERNAL_ENV_KEYS });
+
+  try {
+    eng.spawn(id, 'zsh', shellArgs, cwd, opts);
+    return eng;
+  } catch (e) {
+    if (eng !== tmuxEngine || !tmuxEngine) throw e; // node-pty failing has no fallback
+    tmuxRuntimeFailure = e.message;
+    log(`Engine: tmux could not create a session for ${id}: ${e.message}`);
+    log('Engine: falling back to node-pty for this session — it will NOT survive a restart');
+    ptyEngine.spawn(id, 'zsh', shellArgs, cwd, opts);
+    return ptyEngine;
+  }
 }
 
 // Agent capabilities and argument mapping
@@ -2993,21 +3050,45 @@ async function shutdown(signal) {
     entry.clients.forEach((c) => { try { c.terminate(); } catch {} });
   }
 
-  const entries = [...shells.entries()];
-  if (entries.length === 0) {
+  const allEntries = [...shells.entries()];
+  if (allEntries.length === 0) {
     log('No active shells, exiting');
     process.exit(0);
   }
 
-  // Phase 1: Gracefully exit all shells so Claude persists sessions.
-  log(`Gracefully exiting ${entries.length} shells...`);
+  // Phase 0: a restart must not take the agents with it (#620). A tmux-backed
+  // session's process belongs to the tmux server, not to us, so we release our
+  // attach PTY and leave it running; startup's reattach block picks it back up.
+  // Only the *shutdown* path detaches — an explicit close (close_session, the ✕,
+  // DELETE /api/shells/:id, killall) still goes through killShell and really ends
+  // the session. `tmux-attach` tabs are excluded: they're a separate pseudo-engine
+  // that manages its own PTY and is never persisted.
+  const entries = [];
+  const detached = [];
+  for (const [id, entry] of allEntries) {
+    const eng = entry.engine || ptyEngine;
+    if (entry.agentType !== 'tmux-attach' && eng.canDetach) {
+      try {
+        if (eng.detach(id)) { detached.push(id); continue; }
+      } catch (e) { log(`Failed to detach ${id}, will kill instead: ${e.message}`); }
+    }
+    entries.push([id, entry]);
+  }
+  if (detached.length) {
+    log(`Detached ${detached.length} tmux session(s) — still running: ${detached.join(', ')}`);
+  }
+
+  // Phase 1: Gracefully exit the remaining shells so Claude persists sessions.
+  if (entries.length) log(`Gracefully exiting ${entries.length} shells...`);
   for (const [id, entry] of entries) {
     try {
       killShell(entry, id, 'shutdown');
     } catch {}
   }
 
-  // Phase 2: Wait up to 8s for shells to exit naturally (1s for \r delay + time to save)
+  // Phase 2: Wait up to 8s for shells to exit naturally (1s for \r delay + time to save).
+  // Detached sessions are deliberately absent from `alive` — nothing is going to
+  // exit, so a restart where every tab is tmux-backed skips this wait entirely.
   const alive = new Set(entries.map(([id]) => id));
   for (const [id, entry] of entries) {
     (entry.engine || ptyEngine).onExit(id, () => alive.delete(id));
@@ -3042,7 +3123,7 @@ async function shutdown(signal) {
   }
 
   if (alive.size === 0) {
-    log('All shells exited gracefully');
+    log(entries.length ? 'All shells exited gracefully' : 'Nothing to exit — every session was detached');
     process.exit(0);
   }
 
@@ -3468,6 +3549,15 @@ app.get('/api/settings', (req, res) => {
 
 app.get('/api/settings/defaults', (req, res) => res.json(buildDefaults()));
 
+// True when this install has tmux but is still on the perishable engine, and has
+// never been asked about it (#620). Existing installs all have an explicit
+// "engine": "node-pty" on disk — saveSettings() writes the whole object — so the
+// schema default alone would never move them; they get asked instead of migrated
+// behind their back.
+function shouldOfferEngineMigration() {
+  return !!tmuxEngine && settings.engine === 'node-pty' && !settings.engineMigrationOffered;
+}
+
 app.get('/api/engines', (req, res) => {
   res.json({
     engines: [
@@ -3477,7 +3567,35 @@ app.get('/api/engines', (req, res) => {
     ],
     current: settings.engine || 'node-pty',
     tmuxAvailable: !!tmuxEngine,
+    // The binary exists but can't actually create sessions here (see
+    // spawnSession's fallback). Kept separate from tmuxAvailable so the settings
+    // dropdown doesn't label an installed tmux "not installed" — but it drives the
+    // same warning, because the user is on the perishable engine either way.
+    tmuxRuntimeFailure,
+    migrationOffer: shouldOfferEngineMigration(),
   });
+});
+
+// The browser's answer to that offer. Deliberately not the WS consent machinery
+// used by meta-controls: this is an offer, not a security gate, so a plain
+// endpoint plus the startup fetch is enough — and it handles "no browser was
+// connected when the daemon booted" for free, since the offer simply waits for
+// one to show up.
+app.post('/api/engine-migration', (req, res) => {
+  const decision = req.body && req.body.decision;
+  if (decision !== 'migrate' && decision !== 'keep') {
+    return res.status(400).json({ error: 'decision must be "migrate" or "keep"' });
+  }
+  // Latch either way — asking twice is nagging.
+  settings.engineMigrationOffered = true;
+  if (decision === 'migrate') {
+    if (!tmuxEngine) return res.status(409).json({ error: `tmux not available — ${tmuxUnavailableReason}` });
+    settings.engine = 'tmux';
+  }
+  saveSettings();
+  broadcastSettings();
+  log(`[engine-migration] user chose "${decision}" — engine=${settings.engine}`);
+  res.json({ engine: settings.engine, engineMigrationOffered: true });
 });
 
 app.get('/api/tmux-sessions', (req, res) => {
@@ -4079,11 +4197,11 @@ app.post('/api/start-automation', (req, res) => {
   const name = `${icon} ${autoName}`;
 
   const spawnArgs = getSpawnArgs(agentType, { sessionId: claudeSessionId, shellId: id });
-  const sessionEngine = getDefaultEngine();
+  // spawnSession returns the engine that actually spawned — it can fall back from
+  // tmux to node-pty (#620), and engineType must record what happened.
+  const sessionEngine = spawnSession(getDefaultEngine(), id, agentType, spawnArgs, cwd, { cols: 120, rows: 40, env: sessionEnv(id, { name, windowId: windowId || null, cwd, agentType, configDir }) });
   const engineType = sessionEngine === tmuxEngine ? 'tmux' : 'node-pty';
-
   log(`[API] start-automation "${automationId}": id=${id}, agent=${agentType}, engine=${engineType}, cwd=${cwd}`);
-  spawnSession(sessionEngine, id, agentType, spawnArgs, cwd, { cols: 120, rows: 40, env: sessionEnv(id, { name, windowId: windowId || null, cwd, agentType, configDir }) });
   shells.set(id, { clients: new Set(), cwd, claudeSessionId, agentType, codexHomeId: agentType === 'codex' ? id : null, configDir: configDir || null, engine: sessionEngine, engineType, worktree: null, windowId: windowId || null, name, waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now(), prefill: true });
   wireShellOutput(id);
   emitSessionOpen(id);
@@ -5056,10 +5174,11 @@ app.post('/api/start-issue', (req, res) => {
   // When body is provided inline, build prompt synchronously
   const prompt = body ? buildPrompt(body, labels, url) : null;
 
-  const sessionEngine = getDefaultEngine();
+  // spawnSession returns the engine that actually spawned — it can fall back from
+  // tmux to node-pty (#620), and engineType must record what happened.
+  const sessionEngine = spawnSession(getDefaultEngine(), id, agentType, spawnArgs, worktreeCwd, { cols: 120, rows: 40, env: sessionEnv(id, { name, worktree, windowId: windowId || null, cwd: worktreeCwd, agentType, configDir }) });
   const engineType = sessionEngine === tmuxEngine ? 'tmux' : 'node-pty';
   log(`[API] start-issue #${number}: id=${id}, agent=${agentType}, engine=${engineType}, worktree=${worktree || 'none'}, cwd=${worktreeCwd}`);
-  spawnSession(sessionEngine, id, agentType, spawnArgs, worktreeCwd, { cols: 120, rows: 40, env: sessionEnv(id, { name, worktree, windowId: windowId || null, cwd: worktreeCwd, agentType, configDir }) });
   shells.set(id, { clients: new Set(), cwd: worktreeCwd, claudeSessionId: claudeSessionId, agentType, codexHomeId: agentType === 'codex' ? id : null, configDir: configDir || null, engine: sessionEngine, engineType, worktree: worktree || null, windowId: windowId || null, name, planMode: !!settings.wandPlanMode, waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now(), loading: true });
   wireShellOutput(id);
   emitSessionOpen(id);
@@ -5345,31 +5464,54 @@ if (tmuxEngine) {
   const tmuxSessions = tmuxEngine.listSessions();
   if (tmuxSessions.length > 0) {
     log(`tmux: found ${tmuxSessions.length} surviving session(s): ${tmuxSessions.join(', ')}`);
-    for (const id of tmuxSessions) {
+    // The `try` is the loop body (kept inline so the block below isn't re-indented
+    // for a pure-formatting diff). It runs at module scope on every boot, and since
+    // #620 for every session rather than the handful who opted into tmux — so an
+    // exception from any one of them (a pty.spawn failure inside reattach, say)
+    // would take the daemon down before it ever listens.
+    for (const id of tmuxSessions) try {
       const meta = savedState[id];
+      // Ownership rule (#620): destroy ONLY what this daemon can positively
+      // identify as its own and finished. tmux's socket is per-UID, not per-HOME,
+      // so listSessions() also returns ds-* sessions belonging to other daemons —
+      // a test daemon that forgot TMUX_TMPDIR, a `node server.js`, a second
+      // worktree. Each of those reads its own state.json, finds nothing, and used
+      // to destroy every real session on the box. Harmless while almost nobody ran
+      // tmux; catastrophic now that it is the default.
       if (!meta) {
-        log(`tmux: session ${id} has no metadata in state.json, killing orphan`);
+        log(`tmux: session ${id} is not in our state.json — leaving it alone (not ours to kill)`);
+        continue;
+      }
+      // A tombstoned session whose tmux session outlived the daemon means the kill
+      // didn't take. This one IS ours and IS finished, so reclaim it — and do not
+      // resurrect it as live, which is what the old code did (it also deleted the
+      // tombstone on the way past).
+      if (meta.closed) {
+        log(`tmux: session ${id} is closed (${meta.closeReason || 'unknown'}) but its tmux session survived — reclaiming`);
         tmuxEngine.destroy(id);
         continue;
       }
       if (tmuxEngine.reattach(id, 120, 40)) {
         const agentConfig = getAgentConfig(meta.agentType || 'claude');
+        // Carry the saved record back WHOLESALE rather than naming fields. This is
+        // the third writer of a shell entry (with the WS restore and spawn paths),
+        // and it hand-listed a subset — so every field added to serializeShellEntry
+        // since was silently dropped on reattach and then wiped from state.json by
+        // the next save: `forkParent` (the #497 fork-steal guard), `planMode`,
+        // `model`/`effort` (#592), `allowedTools` (#612) and `scheduled` (#597).
+        // Only a handful of people ran tmux, so it stayed hidden; it is the default
+        // path for everyone now. Spreading meta means a future serialized field is
+        // inherited here for free instead of quietly going missing.
         shells.set(id, {
+          ...meta,
           clients: new Set(),
-          cwd: meta.cwd,
-          claudeSessionId: meta.claudeSessionId,
           agentType: meta.agentType || 'claude',
-          codexHomeId: meta.codexHomeId || null,
-          configDir: meta.configDir || null,
           engine: tmuxEngine,
           engineType: 'tmux',
-          worktree: meta.worktree || null,
-          name: meta.name || null,
           restored: true,
           waitingForInput: false,
           lastActivity: meta.lastActivity || Date.now(),
           createdAt: meta.createdAt || Date.now(),
-          windowId: meta.windowId || null,
         });
         wireShellOutput(id);
         if (agentConfig.supportsSessionWatch) watchClaudeSessionDir(id);
@@ -5378,10 +5520,20 @@ if (tmuxEngine) {
           handleShellGone(id);
         });
         delete savedState[id]; // saved → live promotion, not a close
+        // The WS restore path bumps recency here and this one didn't, so a session
+        // that came back via reattach silently fell out of the recents ring.
+        // (No emitSessionOpen: restores deliberately don't emit 'open' — see the
+        // note on that function. The resulting close-with-no-open gap in the #485
+        // lifecycle log is pre-existing and shared by every restore path.)
+        recordRecentSession(id);
         log(`tmux: reattached session ${id} (${meta.name || meta.cwd})`);
       } else {
+        // The session vanished between listSessions() and here. Leave the saved
+        // entry alone: a later WS connect restores it the normal way.
         log(`tmux: failed to reattach session ${id}`);
       }
+    } catch (e) {
+      log(`tmux: error reattaching session ${id}, skipping it: ${e.message}`);
     }
     saveState();
   }
@@ -5732,8 +5884,9 @@ function handleWsConnection(ws, req) {
       const agentConfig = getAgentConfig(savedAgentType);
 
       const savedEngineType = restored.engineType || 'node-pty';
-      const sessionEngine = getEngineByType(savedEngineType);
-      const restoredEngineType = sessionEngine === tmuxEngine ? 'tmux' : 'node-pty';
+      // Both reassigned below if the tmux spawn fails and we degrade to node-pty.
+      let sessionEngine = getEngineByType(savedEngineType);
+      let restoredEngineType = sessionEngine === tmuxEngine ? 'tmux' : 'node-pty';
 
       // Claude only writes <sessionId>.jsonl once the first message is sent, so a
       // tab that was opened but never prompted has no transcript and `--resume` is
@@ -5766,7 +5919,19 @@ function handleWsConnection(ws, req) {
       // hand the agent a DEEPSTEVE_WINDOW_ID whose window no longer exists, and any
       // deliverToWindow() it triggered would land nowhere (#551).
       const restoredWindowId = windowId || restored.windowId || null;
-      spawnSession(sessionEngine, id, savedAgentType, startArgs, cwd, { ...ptySize, env: sessionEnv(id, { name: restoredName, worktree: savedWorktree, windowId: restoredWindowId, cwd, agentType: savedAgentType, configDir: restored.configDir, codexHomeId }) });
+      // Same crash exposure as the new-session path: this runs from the raw WS
+      // 'connection' event, so a throw here is uncaught and kills the daemon.
+      let spawnedEngine;
+      try {
+        spawnedEngine = spawnSession(sessionEngine, id, savedAgentType, startArgs, cwd, { ...ptySize, env: sessionEnv(id, { name: restoredName, worktree: savedWorktree, windowId: restoredWindowId, cwd, agentType: savedAgentType, configDir: restored.configDir, codexHomeId }) });
+      } catch (e) {
+        log(`[WS] Failed to restore shell ${id}: ${e.message}`);
+        try { ws.send(JSON.stringify({ type: 'error', message: `Failed to restore session: ${e.message}` })); } catch {}
+        try { ws.close(); } catch {}
+        return;
+      }
+      sessionEngine = spawnedEngine;
+      restoredEngineType = spawnedEngine === tmuxEngine ? 'tmux' : 'node-pty';
       shells.set(id, { clients: new Set(), cwd, claudeSessionId, agentType: savedAgentType, codexHomeId, configDir: restored.configDir || null, engine: sessionEngine, engineType: restoredEngineType, worktree: savedWorktree, name: restoredName, planMode: savedPlanMode, model: restored.model || null, effort: restored.effort || null, allowedTools: restored.allowedTools || null, forkParent: restored.forkParent || null, restored: true, scheduled: !!restored.scheduled, waitingForInput: false, lastActivity: Date.now(), createdAt: restored.createdAt || Date.now(), windowId: restoredWindowId });
       wireShellOutput(id, initialCols, initialRows);
       recordRecentSession(id);  // bump recency on same-browser reconnect + cross-browser restore
@@ -5891,16 +6056,30 @@ function handleWsConnection(ws, req) {
       spawnedPlanMode = !!planMode;
     }
 
-    const sessionEngine = getEngineByType(requestedEngine || settings.engine);
-    const engineType = sessionEngine === tmuxEngine ? 'tmux' : 'node-pty';
-    log(`[WS] Creating NEW shell: oldId=${oldId}, newId=${id}, agent=${agentType}, engine=${engineType}, session=${sessionId}, worktree=${worktree || 'none'}, cwd=${worktreeCwd}, planMode=${spawnedPlanMode}`);
-    traceSession('SPAWN', { path: spawnPath, shell: id, oldId: oldId || null, name: name || null, worktree: worktree || null, cwd: worktreeCwd, claude: sessionId, planMode: spawnedPlanMode, agent: agentType, engine: engineType, parentShell, parentClaude, parentWorktree });
+    const requestedSessionEngine = getEngineByType(requestedEngine || settings.engine);
+    log(`[WS] Creating NEW shell: oldId=${oldId}, newId=${id}, agent=${agentType}, engine=${requestedSessionEngine === tmuxEngine ? 'tmux' : 'node-pty'}, session=${sessionId}, worktree=${worktree || 'none'}, cwd=${worktreeCwd}, planMode=${spawnedPlanMode}`);
     // windowId is applied on every connect below, but it has to be set HERE too:
     // saveState() runs at the end of this block, so without it a new session
     // persists windowId:null and its window grouping is missing from state.json
     // until the next periodic save (#551). It also gives the agent a correct
     // DEEPSTEVE_WINDOW_ID, which sessionEnv otherwise reported as ''.
-    spawnSession(sessionEngine, id, agentType, spawnArgs, worktreeCwd, { cols: initialCols, rows: initialRows, env: sessionEnv(id, { name, worktree, windowId, cwd: worktreeCwd, agentType, configDir }) });
+    let sessionEngine;
+    try {
+      sessionEngine = spawnSession(requestedSessionEngine, id, agentType, spawnArgs, worktreeCwd, { cols: initialCols, rows: initialRows, env: sessionEnv(id, { name, worktree, windowId, cwd: worktreeCwd, agentType, configDir }) });
+    } catch (e) {
+      // Last resort: even the fallback failed. This handler runs from the raw WS
+      // 'connection' event, so letting it throw would be an uncaught exception and
+      // take the daemon (and everyone else's sessions) down with it.
+      log(`[WS] Failed to spawn shell ${id}: ${e.message}`);
+      try { ws.send(JSON.stringify({ type: 'error', message: `Failed to start session: ${e.message}` })); } catch {}
+      try { ws.close(); } catch {}
+      return;
+    }
+    // Record the engine that actually spawned, not the one we asked for — the
+    // fallback above can differ, and engineType is what restore and the shutdown
+    // detach branch key off.
+    const engineType = sessionEngine === tmuxEngine ? 'tmux' : 'node-pty';
+    traceSession('SPAWN', { path: spawnPath, shell: id, oldId: oldId || null, name: name || null, worktree: worktree || null, cwd: worktreeCwd, claude: sessionId, planMode: spawnedPlanMode, agent: agentType, engine: engineType, parentShell, parentClaude, parentWorktree });
     shells.set(id, { clients: new Set(), cwd: worktreeCwd, claudeSessionId: sessionId, agentType, codexHomeId: agentType === 'codex' ? id : null, configDir: configDir || null, engine: sessionEngine, engineType, worktree: worktree || null, windowId, name: name || null, planMode: spawnedPlanMode, forkParent: parentClaude, waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now() });
     wireShellOutput(id, initialCols, initialRows);
     emitSessionOpen(id);
@@ -6019,6 +6198,30 @@ function handleWsConnection(ws, req) {
     if (!shells.has(id)) return; // already killed by close-session
     entry.clients.delete(ws);
     if (entry.clients.size === 0) {
+      // A tmux-backed session outlives its browser (#620): the daemon is healthy,
+      // the agent is mid-turn, and tmux is holding the process — reaping it would
+      // destroy work nobody asked to end. Keep the entry LIVE rather than
+      // detaching it, which is both simpler and strictly better: the attach PTY
+      // stays open, so output produced while you're away still lands in the
+      // scrollback buffer and replays when you return (deepsteve never reads
+      // tmux's own history), and reconnecting uses the existing "session is still
+      // live" path instead of needing a reattach-before-respawn.
+      //
+      // Consequence, accepted deliberately: nothing reclaims a clientless tmux
+      // session any more. It runs until closed explicitly (the ✕, close_session,
+      // DELETE /api/shells/:id, killall). If that growth ever bites, the fix is an
+      // idle sweep alongside pruneClosedSessions(), not re-arming this reaper.
+      // Note: no savedState write. The entry stays in `shells`, and saveState()
+      // serializes every live shell — writing it into savedState too would file a
+      // live session under "not currently live" for every reader of that map.
+      // Keyed on the engine's own capability, not just the recorded engineType: a
+      // spawn that fell back to node-pty can leave engineType saying 'tmux', and
+      // skipping the reap for a node-pty session would leak it forever.
+      if (entry.agentType !== 'tmux-attach' && (entry.engine || ptyEngine).canDetach) {
+        log(`[WS] ${id}: last client left — tmux session kept running`);
+        saveState();
+        return;
+      }
       // Grace period to allow reconnect on refresh (sleep-aware — #563)
       armDetachReap(entry, () => {
         // Preserve session info so it can be restored on next connect. Must go

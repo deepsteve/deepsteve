@@ -23,7 +23,9 @@ Run multiple AI agent sessions side-by-side in your browser, each with full term
 
 ## Terminal Engines
 
-deepsteve currently uses **node-pty** to run agent sessions (Claude Code, Codex, and the experimental OpenCode, Pi, and Hermes integrations) as child processes on a Node server, connected to the browser via WebSocket. **tmux** support is currently being implemented as an alternative backend — running sessions inside tmux panes instead of node-pty, enabling native session persistence and detach/reattach without the Node process staying alive.
+deepsteve runs agent sessions (Claude Code, Codex, and the experimental OpenCode, Pi, and Hermes integrations) inside **tmux** panes, connected to the browser via WebSocket. This is the default whenever tmux is installed, and it is what makes sessions durable: the agent belongs to the tmux server rather than to deepsteve, so it keeps working through a daemon crash, a `./restart.sh`, an auto-update, and closing the browser. Reconnecting reattaches the same live pane.
+
+Without tmux, deepsteve falls back to **node-pty**, which runs each session as a child process of the Node server. Everything works the same except durability — those sessions die with the server. The fallback is deliberately visible: the ⚙ button carries an orange dot and Settings → Terminal says which engine you are on and, if tmux wasn't found, where it looked. Install tmux to get durable sessions; if yours lives somewhere the search can't see, point the `tmuxBinary` setting at it.
 
 ## Features
 

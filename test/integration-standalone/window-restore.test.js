@@ -312,10 +312,16 @@ test('a disconnected session keeps its window grouping across the 30s grace (#55
   //
   // Deliberately slow: the 30s grace is hardcoded (server.js, ws.on('close')) with
   // no env knob, and this is the one path that proves the fix.
+  //
+  // Pinned to node-pty (#620): the grace timer is the thing under test, and a
+  // tmux-backed session never arms it — it stays live in `shells` with no client,
+  // so its status never flips to 'saved' and the savedState rewrite this guards
+  // never happens. Under tmux the #551 bug is structurally absent rather than
+  // fixed: nothing rewrites the entry because nothing removes it.
   const a = track(new Client());
   const b = track(new Client());
-  const sa = await a.connect({ cwd: projDir, new: '1', agentType: 'claude', windowId: 'win-grace' });
-  const sb = await b.connect({ cwd: projDir, new: '1', agentType: 'claude', windowId: 'win-grace' });
+  const sa = await a.connect({ cwd: projDir, new: '1', agentType: 'claude', windowId: 'win-grace', engine: 'node-pty' });
+  const sb = await b.connect({ cwd: projDir, new: '1', agentType: 'claude', windowId: 'win-grace', engine: 'node-pty' });
 
   // Close the window: drop both session sockets without a close-session message.
   a.close();

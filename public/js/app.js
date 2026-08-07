@@ -281,6 +281,13 @@ function applySettings(settings) {
     if (!stillExists) window.__deepsteveDefaultAgent = data.defaultAgent || 'claude';
     if (typeof refreshEnginesDropdown === 'function') refreshEnginesDropdown();
   }).catch(() => {});
+  // Same "fact isn't in the payload" move for the engine (#620): tmuxAvailable and
+  // migrationOffer are derived, not settings. This is how a second window drops its
+  // copy of the migration modal once the first one answers — the answer broadcasts
+  // settings, which lands here, and migrationOffer is now false.
+  if (settings.engine !== undefined || settings.engineMigrationOffered !== undefined) {
+    if (typeof refreshEngineStatus === 'function') refreshEngineStatus();
+  }
 }
 
 // When the browser tab regains visibility, clear its notification state.
@@ -628,18 +635,42 @@ async function refreshSessionsDropdown() {
 // Settings modal
 const settingsBtn = document.getElementById('settings-btn');
 
-// --- Auto-update UI helpers ---
-function setUpdateAvailableBadge(on) {
+// --- Settings-button status badges ---
+// Two independent conditions raise the ⚙ dot and want a say in its tooltip, so
+// both funnel through one renderer instead of overwriting each other's title.
+let badgeUpdateAvailable = false;
+let badgeEngineFallback = false;
+function refreshSettingsBadges() {
   if (!settingsBtn) return;
-  settingsBtn.classList.toggle('update-available', !!on);
-  settingsBtn.title = on ? 'Settings — update available' : 'Settings';
+  settingsBtn.classList.toggle('update-available', badgeUpdateAvailable);
+  settingsBtn.classList.toggle('engine-fallback', badgeEngineFallback);
+  const notes = [];
+  if (badgeEngineFallback) notes.push('sessions will not survive a restart');
+  if (badgeUpdateAvailable) notes.push('update available');
+  settingsBtn.title = notes.length ? `Settings — ${notes.join('; ')}` : 'Settings';
 }
+function setUpdateAvailableBadge(on) { badgeUpdateAvailable = !!on; refreshSettingsBadges(); }
+function setEngineFallbackBadge(on) { badgeEngineFallback = !!on; refreshSettingsBadges(); }
 
 // Do an initial version fetch so the badge reflects the cached server state
 // even before any WebSocket broadcast arrives.
 fetch('/api/version').then(r => r.json()).then(data => {
   setUpdateAvailableBadge(!!data.updateAvailable);
 }).catch(() => {});
+
+// Same idea for the engine (#620): without tmux we're on node-pty, every session
+// dies with the daemon, and until now the only trace was one line in the server
+// log. Badge it, and offer the one-time migration to installs that have tmux but
+// are still on the old default.
+function refreshEngineStatus() {
+  return fetch('/api/engines').then(r => r.json()).then(data => {
+    setEngineFallbackBadge(data.tmuxAvailable === false || !!data.tmuxRuntimeFailure);
+    if (data.migrationOffer) showEngineMigrationOffer();
+    else dismissEngineMigrationOffer();
+    return data;
+  }).catch(() => null);
+}
+refreshEngineStatus();
 
 let autoApplyToastEl = null;
 let autoApplyCountdownTimer = null;
@@ -738,7 +769,7 @@ settingsBtn?.addEventListener('click', async () => {
     fetch('/api/themes').then(r => r.json()),
     fetch('/api/version').then(r => r.json()).catch(() => ({ current: '?', latest: null, updateAvailable: false })),
     fetch('/api/settings/defaults').then(r => r.json()).catch(() => ({})),
-    fetch('/api/engines').then(r => r.json()).catch(() => ({ engines: [], current: 'node-pty' }))
+    fetch('/api/engines').then(r => r.json()).catch(() => ({ engines: [], current: null }))
   ]);
   const currentProfile = settingsData.shellProfile || '~/.zshrc';
   const currentMaxTitle = settingsData.maxIssueTitleLength || 25;
@@ -1071,15 +1102,29 @@ settingsBtn?.addEventListener('click', async () => {
       <div class="settings-section">
         <h3>Default Terminal Engine</h3>
         <p style="font-size: 13px; color: var(--ds-text-secondary); margin-bottom: 8px;">
-          Default engine for new sessions. Existing sessions keep their engine. With tmux, sessions survive daemon restarts.
+          Default engine for new sessions. Existing sessions keep their engine.
+          Under tmux, agents keep running through a daemon restart and when you close the
+          browser; under node-pty they are children of the server and die with it.
         </p>
         <select id="engine-select" style="padding: 4px 8px; border-radius: 4px; border: 1px solid var(--ds-border); background: var(--ds-bg-secondary); color: var(--ds-text-primary);">
           ${(enginesData.engines || []).map(e => {
-            const experimental = e.id === 'tmux' ? ' (experimental)' : '';
-            const label = e.available ? `${e.name}${e.version ? ' v' + e.version : ''}${experimental}` : `${e.name} (not installed)`;
+            const isDefault = e.id === 'tmux' ? ' (recommended)' : '';
+            const label = e.available ? `${e.name}${e.version ? ' v' + e.version : ''}${isDefault}` : `${e.name} (not installed)`;
             return `<option value="${e.id}" ${e.id === enginesData.current ? 'selected' : ''} ${!e.available ? 'disabled' : ''}>${escapeHtml(label)}</option>`;
           }).join('')}
         </select>
+        ${(enginesData.tmuxAvailable === false || enginesData.tmuxRuntimeFailure) ? `
+        <p class="version-warn" style="font-size: 12px; margin-top: 10px; line-height: 1.5;">
+          <strong>Running the node-pty fallback — sessions will not survive a restart.</strong><br>
+          ${enginesData.tmuxRuntimeFailure
+            ? `tmux is installed but could not create a session: ${escapeHtml(enginesData.tmuxRuntimeFailure)}<br>
+               A common cause is a socket path over the ~104-character limit — set a shorter
+               <code>TMUX_TMPDIR</code> and restart the daemon.`
+            : `${escapeHtml(enginesData.engines?.find(e => e.id === 'tmux')?.reason || 'tmux was not found.')}<br>
+               Install tmux to get durable sessions. If it is installed somewhere the search
+               can't see, set <code>tmuxBinary</code> in <code>~/.deepsteve/settings.json</code>
+               to its full path and restart the daemon.`}
+        </p>` : ''}
       </div>
       <div class="settings-section">
         <h3>Scrollback Buffer</h3>
@@ -1474,7 +1519,11 @@ settingsBtn?.addEventListener('click', async () => {
       name: row.querySelector('.cc-name').value.trim(),
       configDir: row.querySelector('.cc-dir').value.trim(),
     })).filter(c => c.name && c.configDir);
-    const selectedEngine = overlay.querySelector('#engine-select')?.value || 'node-pty';
+    // Never guess this one. It used to fall back to the literal 'node-pty', so a
+    // failed /api/engines fetch (or a select that didn't render) turned an unrelated
+    // Settings save into a silent downgrade off the durable engine (#620). Unknown →
+    // omit the field; POST /api/settings only touches keys present in the body.
+    const selectedEngine = overlay.querySelector('#engine-select')?.value || enginesData.current || null;
     const scrollbackKB = Math.max(1, Math.min(10000, Math.round(Number(overlay.querySelector('#scrollback-kb').value)) || 100));
     const recentSessionsLimit = Math.max(0, Math.min(50, Math.round(Number(overlay.querySelector('#recent-sessions-limit').value)) || 0));
     const autoUpdateCheckEnabled = overlay.querySelector('#auto-update-check-enabled').checked;
@@ -1491,7 +1540,7 @@ settingsBtn?.addEventListener('click', async () => {
     const preventSleepWhileActive = overlay.querySelector('#prevent-sleep-while-active').checked;
     const inheritRemoteControl = overlay.querySelector('#inherit-rc-newtab').checked;
     const inheritRemoteControlOnFork = overlay.querySelector('#inherit-rc-fork').checked;
-    const settingsPayload = { shellProfile, maxIssueTitleLength: newMaxTitle, wandPlanMode, wandPromptTemplate, symlinkWorktreeSettings, cmdTabSwitch, cmdTabSwitchHoldMs, commandPaletteEnabled, commandPaletteShortcut, shortcutsHelpEnabled, shortcutsHelpShortcut, hashCommandsEnabled, contextViewsEnabled, projectModsEnabled, metaControlsEnabled, inheritRemoteControl, inheritRemoteControlOnFork, overviewDefaultLayout, enabledAgents, opencodeBinary, piBinary, engine: selectedEngine, scrollbackKB, recentSessionsLimit, autoUpdateCheckEnabled, autoUpdateCheckIntervalHours, autoUpdateApply, sessionLogEnabled, scheduledTasksEnabled, scheduledTasksOpenInBackground, scheduledDefaultModel, scheduledDefaultEffort, preventSleepWhileActive, customAgentConfigs };
+    const settingsPayload = { shellProfile, maxIssueTitleLength: newMaxTitle, wandPlanMode, wandPromptTemplate, symlinkWorktreeSettings, cmdTabSwitch, cmdTabSwitchHoldMs, commandPaletteEnabled, commandPaletteShortcut, shortcutsHelpEnabled, shortcutsHelpShortcut, hashCommandsEnabled, contextViewsEnabled, projectModsEnabled, metaControlsEnabled, inheritRemoteControl, inheritRemoteControlOnFork, overviewDefaultLayout, enabledAgents, opencodeBinary, piBinary, ...(selectedEngine ? { engine: selectedEngine } : {}), scrollbackKB, recentSessionsLimit, autoUpdateCheckEnabled, autoUpdateCheckIntervalHours, autoUpdateApply, sessionLogEnabled, scheduledTasksEnabled, scheduledTasksOpenInBackground, scheduledDefaultModel, scheduledDefaultEffort, preventSleepWhileActive, customAgentConfigs };
     let resp = await fetch('/api/settings', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -2885,6 +2934,71 @@ function showMetaControlsConsentDialog(msg) {
   document.addEventListener('keydown', onKey, true);
 
   metaConsentDialog = { dismiss: cleanup };
+}
+
+// One-time engine migration offer (#620). Every install that has ever saved
+// settings has an explicit "engine": "node-pty" on disk, so changing the schema
+// default moves nobody — those users get asked instead of migrated behind their
+// back. Shown from the startup /api/engines fetch, so a daemon that booted with no
+// browser open simply offers when one appears. Either answer latches
+// engineMigrationOffered, and the resulting settings broadcast dismisses the copy
+// open in any other window.
+let engineMigrationDialog = null;
+
+function dismissEngineMigrationOffer() {
+  if (engineMigrationDialog) engineMigrationDialog.dismiss();
+}
+
+function showEngineMigrationOffer() {
+  if (engineMigrationDialog) return; // already asking — don't stack or reset it
+
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.innerHTML = `
+    <div class="modal">
+      <h2>tmux is available</h2>
+      <p style="font-size:13px;color:var(--ds-text-secondary);margin-bottom:16px;">
+        You have tmux but are using the node-pty backend. tmux support in DeepSteve is
+        getting first-class support and your sessions will survive restarts.
+      </p>
+      <p style="font-size:12px;color:var(--ds-text-secondary);margin-bottom:16px;">
+        You can change this anytime in Settings → Terminal → Default Terminal Engine.
+      </p>
+      <div class="modal-buttons">
+        <button class="btn-secondary" id="engine-migrate-keep">Keep as-is</button>
+        <button class="btn-primary" id="engine-migrate-go">Migrate to tmux</button>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+
+  let cleaned = false;
+  const cleanup = () => {
+    if (cleaned) return;
+    cleaned = true;
+    document.removeEventListener('keydown', onKey, true);
+    overlay.remove();
+    engineMigrationDialog = null;
+  };
+  const decide = (decision) => {
+    cleanup();
+    fetch('/api/engine-migration', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ decision }),
+    }).catch(() => {});
+  };
+  overlay.querySelector('#engine-migrate-keep').onclick = () => decide('keep');
+  overlay.querySelector('#engine-migrate-go').onclick = () => decide('migrate');
+  const onKey = (e) => {
+    e.stopPropagation();
+    e.preventDefault();
+    // Escape is "keep as-is", not "ask me again": either way the offer is answered
+    // once. The setting stays reachable in Settings.
+    if (e.key === 'Escape') decide('keep');
+  };
+  document.addEventListener('keydown', onKey, true);
+
+  engineMigrationDialog = { dismiss: cleanup };
 }
 
 function showReloadOverlay() {
