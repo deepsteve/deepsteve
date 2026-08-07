@@ -1,19 +1,21 @@
 const pty = require('node-pty');
 const { execFileSync } = require('child_process');
 const Engine = require('./engine');
+const { probeTmux } = require('../tmux-path');
 
 const SESSION_PREFIX = 'ds-';
 
-/** Shell-quote a string for use in a single zsh -c layer. */
+/**
+ * Shell-quote a string for the command line **tmux itself** runs via $SHELL.
+ *
+ * This is NOT about how we invoke tmux — that goes through execFileSync with an
+ * argv array (#619), so there is no shell of ours to quote for. It is about the
+ * single `shell-command` argument `tmux new-session` takes, which tmux hands to a
+ * shell; the two remaining callers below both build that string.
+ */
 function shellQuote(s) {
   if (/^[a-zA-Z0-9_./:=-]+$/.test(s)) return s;
   return "'" + s.replace(/'/g, "'\\''") + "'";
-}
-
-/** Run a tmux command via zsh -l -c (for Homebrew PATH). */
-function tmuxExec(args, opts = {}) {
-  const cmd = ['tmux', ...args.map(shellQuote)].join(' ');
-  return execFileSync('zsh', ['-l', '-c', cmd], { timeout: 5000, stdio: 'pipe', ...opts });
 }
 
 /**
@@ -23,29 +25,45 @@ function tmuxExec(args, opts = {}) {
  *
  * tmux sessions survive daemon restarts; on startup, listSessions() returns
  * surviving sessions that can be reattached.
+ *
+ * Every tmux invocation is `execFileSync(<resolved absolute path>, argv)` — no
+ * shell layer (#619). Two consequences worth knowing: the engine works on a box
+ * with tmux and no zsh (the point of the change), and tmux commands now inherit the
+ * daemon's environment directly rather than whatever a login shell's profile files
+ * produced. The absolute path is load-bearing: a bare `tmux` is ENOENT under a
+ * LaunchAgent, whose PATH has no /opt/homebrew/bin.
  */
 class TmuxEngine extends Engine {
-  constructor() {
+  /**
+   * @param {{binary?: string, env?: object, exec?: Function}} [opts]
+   *   binary — the `tmuxBinary` setting: a bare name to search for, or an explicit
+   *   path. exec/env are injection points for tests.
+   */
+  constructor({ binary = 'tmux', env, exec } = {}) {
     super();
     this._sessions = new Map(); // id → { attachPty, exitCallbacks }
+    this._binary = binary || 'tmux';
+    this._probeOpts = { binary: this._binary };
+    if (env) this._probeOpts.env = env;
+    if (exec) this._probeOpts.exec = exec;
     this._tmuxVersion = null;
     this._tmuxPath = null; // Full path to tmux binary (needed for PTY spawns under LaunchAgent)
+    this._searchedDirs = [];
+    this._probeError = null;
     this._checkTmux();
   }
 
   _checkTmux() {
-    try {
-      const out = tmuxExec(['-V'], { encoding: 'utf8' }).trim();
-      const match = out.match(/(\d+\.\d+)/);
-      this._tmuxVersion = match ? match[1] : out;
-      // Resolve full path so pty.spawn() works under LaunchAgent (no Homebrew PATH)
-      this._tmuxPath = execFileSync('zsh', ['-l', '-c', 'which tmux'], {
-        encoding: 'utf8', timeout: 5000, stdio: 'pipe'
-      }).trim();
-    } catch {
-      this._tmuxVersion = null;
-      this._tmuxPath = null;
-    }
+    const r = probeTmux(this._probeOpts);
+    this._tmuxVersion = r.version;
+    this._tmuxPath = r.path;
+    this._searchedDirs = r.searched;
+    this._probeError = r.error;
+  }
+
+  /** Run a tmux command directly — argv array, no shell. */
+  _exec(args, opts = {}) {
+    return execFileSync(this._tmuxPath || 'tmux', args, { timeout: 5000, stdio: 'pipe', ...opts });
   }
 
   get available() {
@@ -56,9 +74,20 @@ class TmuxEngine extends Engine {
     return this._tmuxVersion;
   }
 
-  /** Full path to tmux binary (resolved via zsh -l for LaunchAgent PATH). */
+  /** Full path to the tmux binary (resolved by tmux-path.js, no login shell). */
   get tmuxPath() {
     return this._tmuxPath || 'tmux';
+  }
+
+  /**
+   * Why tmux wasn't found — so an unavailable engine can say where it looked
+   * instead of just "tmux not available". Null when available.
+   */
+  get unavailableReason() {
+    if (this.available) return null;
+    if (this._probeError) return `"${this._binary}" is not usable: ${this._probeError}`;
+    if (this._binary.includes('/')) return `no executable at "${this._binary}" (tmuxBinary setting)`;
+    return `no "${this._binary}" binary found in any of: ${this._searchedDirs.join(', ')}`;
   }
 
   /** Check if tmux supports -e flag (>= 3.2) */
@@ -127,7 +156,7 @@ class TmuxEngine extends Engine {
 
     // Create the tmux session
     try {
-      tmuxExec(tmuxArgs, { timeout: 10000 });
+      this._exec(tmuxArgs, { timeout: 10000 });
     } catch (e) {
       throw new Error(`Failed to create tmux session ${sessionName}: ${e.message}`);
     }
@@ -135,7 +164,7 @@ class TmuxEngine extends Engine {
     // Disable status bar — it steals a row from the pane, causing dimension
     // mismatch between what xterm.js reports and what programs inside see.
     try {
-      tmuxExec(['set-option', '-t', sessionName, 'status', 'off']);
+      this._exec(['set-option', '-t', sessionName, 'status', 'off']);
     } catch {}
 
     // Attach to the tmux session via a PTY for I/O
@@ -184,7 +213,7 @@ class TmuxEngine extends Engine {
   _tmuxSessionAlive(id) {
     const sessionName = this._tmuxSessionName(id);
     try {
-      tmuxExec(['has-session', '-t', sessionName]);
+      this._exec(['has-session', '-t', sessionName]);
       return true;
     } catch {
       return false;
@@ -201,7 +230,7 @@ class TmuxEngine extends Engine {
       try {
         const sessionName = this._tmuxSessionName(id);
         const hex = [...Buffer.from(data)].map(b => b.toString(16).padStart(2, '0'));
-        tmuxExec(['send-keys', '-t', sessionName, '-H', ...hex]);
+        this._exec(['send-keys', '-t', sessionName, '-H', ...hex]);
         return;
       } catch {
         // Fall through to direct write on failure
@@ -234,14 +263,14 @@ class TmuxEngine extends Engine {
     } catch {}
     // Fallback: kill the tmux session
     try {
-      tmuxExec(['kill-session', '-t', sessionName]);
+      this._exec(['kill-session', '-t', sessionName]);
     } catch {}
   }
 
   _getPanePid(id) {
     const sessionName = this._tmuxSessionName(id);
     try {
-      const out = tmuxExec(['display-message', '-t', sessionName, '-p', '#{pane_pid}'], {
+      const out = this._exec(['display-message', '-t', sessionName, '-p', '#{pane_pid}'], {
         encoding: 'utf8',
       }).trim();
       return parseInt(out, 10) || null;
@@ -263,7 +292,7 @@ class TmuxEngine extends Engine {
     // Kill the tmux session if still alive
     const sessionName = this._tmuxSessionName(id);
     try {
-      tmuxExec(['kill-session', '-t', sessionName]);
+      this._exec(['kill-session', '-t', sessionName]);
     } catch {}
   }
 
@@ -292,7 +321,7 @@ class TmuxEngine extends Engine {
    */
   listSessions() {
     try {
-      const out = tmuxExec(['list-sessions', '-F', '#{session_name}'], {
+      const out = this._exec(['list-sessions', '-F', '#{session_name}'], {
         encoding: 'utf8',
       }).trim();
       if (!out) return [];
@@ -301,6 +330,59 @@ class TmuxEngine extends Engine {
         .map(name => name.slice(SESSION_PREFIX.length));
     } catch {
       return [];
+    }
+  }
+
+  /**
+   * Every tmux session on the box, not just ours — what the "Attach tmux session"
+   * menu lists. Rows: { name, windows, width, height, created }.
+   *
+   * Lives here rather than inline in server.js so there is exactly one place that
+   * knows how to invoke tmux (#619); the endpoint used to run its own
+   * `zsh -l -c 'tmux list-sessions …'`.
+   *
+   * Pre-existing quirk carried over verbatim: modern tmux (3.6 checked) no longer
+   * has `#{session_width}`/`#{session_height}`, so those two come back empty and
+   * parse to NaN — as they did before this moved, with the same format string. Kept
+   * as-is because the response shape is public and the only consumer
+   * (public/js/app.js's "Attach tmux session" submenu) renders just name + attached.
+   */
+  listAllSessions() {
+    try {
+      const fmt = '#{session_name}\t#{session_windows}\t#{session_width}\t#{session_height}\t#{session_created}';
+      const out = this._exec(['list-sessions', '-F', fmt], { encoding: 'utf8' }).trim();
+      if (!out) return [];
+      return out.split('\n').map(line => {
+        const [name, windows, width, height, created] = line.split('\t');
+        return {
+          name,
+          windows: parseInt(windows) || 1,
+          width: parseInt(width),
+          height: parseInt(height),
+          created: parseInt(created) || null,
+        };
+      });
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Does a tmux session with this name exist? Takes a RAW, user-supplied name —
+   * safe because it becomes one argv element, never a shell word. (It used to be
+   * interpolated into `zsh -l -c 'tmux has-session -t "…"'` with only `"` escaped,
+   * so a name containing `'` or `$(…)` reached a login shell.)
+   *
+   * tmux's own lenient target matching (exact, then prefix, then fnmatch) is left
+   * as-is — server.js's attach-session call matches the same way, and the names the
+   * UI passes come straight out of listAllSessions().
+   */
+  hasSession(name) {
+    try {
+      this._exec(['has-session', '-t', name]);
+      return true;
+    } catch {
+      return false;
     }
   }
 
