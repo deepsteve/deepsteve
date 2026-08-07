@@ -17,7 +17,7 @@ Run multiple AI agent sessions side-by-side in your browser, each with full term
   <img src="screenshots/screenshot-35-issue-picker.png" alt="GitHub issue picker modal" width="400">
 </p>
 
-**Requires macOS.** deepsteve uses macOS LaunchAgents for daemon management and macOS-specific paths for logs and state.
+**Runs on macOS and Linux.** The daemon is managed by a LaunchAgent on macOS and a systemd user unit on Linux; both are driven through one interface (`service.sh`). On Linux tmux is a required dependency, not optional — sessions live inside it so they survive the restarts systemd performs on every crash and upgrade.
 
 > **Security notice:** DeepSteve is **localhost-first with token authentication**. Every surface (web UI WebSocket, MCP endpoint, REST APIs) enforces a Host allowlist, an Origin allowlist, and a per-install bearer token — closing the drive-by-webpage / DNS-rebinding hole. The browser is authenticated transparently via an HttpOnly cookie (no login screen). Auth is always on; do not expose it to an untrusted network regardless.
 
@@ -46,8 +46,10 @@ curl -fsSL deepsteve.com/install.sh | bash
 
 ## Requirements
 
-- macOS
+- macOS, or Linux with a systemd user instance
 - Node.js
+- tmux — **required on Linux** (the installer refuses without it), optional on macOS,
+  where node-pty is a supported fallback
 - [Claude Code](https://docs.anthropic.com/en/docs/claude-code) or [Codex CLI](https://developers.openai.com/codex/cli/) installed (OpenCode, Pi, and Hermes are experimental alternatives)
 
 ## Installation (from source)
@@ -157,10 +159,23 @@ Note: plain base-URL routing covers normal use. OpenRouter-specific request-body
 ```bash
 ./restart.sh            # restart (browser tabs silently reconnect)
 ./restart.sh --refresh  # restart + force browser reload
-
-tail -f ~/Library/Logs/deepsteve.log   # view logs
-launchctl list | grep deepsteve        # check status
+./status.sh             # is it running, on what port, where are the logs?
 ```
+
+`./status.sh` is read-only and safe to allowlist; `./restart.sh` is not. Both work the
+same on either platform — `service.sh` is the single interface over launchd and the
+systemd user unit, so nothing above needs a platform-specific variant.
+
+Logs:
+
+| | |
+|---|---|
+| macOS | `~/Library/Logs/deepsteve.log` |
+| Linux | `~/.local/share/deepsteve/logs/deepsteve.log` |
+
+(`./status.sh` prints the right one for this machine, along with the service state and,
+on Linux, whether user lingering is enabled — without it the daemon stops when your last
+login session ends and does not start at boot.)
 
 ## Security
 

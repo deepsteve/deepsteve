@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-deepsteve is a macOS web UI for running multiple Claude Code instances in browser tabs using real PTYs. It's a plain Node.js application (no build step) with an Express + WebSocket backend and vanilla JS frontend.
+deepsteve is a web UI for running multiple Claude Code instances in browser tabs using real PTYs, on macOS or Linux. It's a plain Node.js application (no build step) with an Express + WebSocket backend and vanilla JS frontend.
 
 ## Running the Application
 
@@ -13,21 +13,25 @@ deepsteve is a macOS web UI for running multiple Claude Code instances in browse
 ```
 
 ### Production
-Installed as a macOS LaunchAgent. Check if running:
+Installed as a macOS LaunchAgent or a Linux systemd user unit, both driven through
+`service.sh` (#621). Check if running:
 ```bash
-launchctl list | grep deepsteve
+./status.sh   # read-only; safe to allowlist. ./restart.sh is not.
 ```
 
 ### Logs
+`./status.sh` prints the right directory for this machine:
 ```bash
-tail -f ~/Library/Logs/deepsteve.log
-tail -f ~/Library/Logs/deepsteve.error.log
+tail -f ~/Library/Logs/deepsteve.log                    # macOS
+tail -f ~/.local/share/deepsteve/logs/deepsteve.log     # Linux
 ```
 
 ### Stop/Restart
+Restart with `./restart.sh` (it handles both platforms). Stopping has no wrapper on
+purpose — doing it without the deploy/confirm machinery is a manual act:
 ```bash
-launchctl unload ~/Library/LaunchAgents/com.deepsteve.plist
-# Then restart via the LaunchAgent or manually
+launchctl unload ~/Library/LaunchAgents/com.deepsteve.plist   # macOS
+systemctl --user stop deepsteve                               # Linux
 ```
 
 ## Code Style

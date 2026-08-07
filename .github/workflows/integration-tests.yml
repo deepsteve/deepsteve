@@ -48,3 +48,135 @@ jobs:
       - name: Cleanup
         if: always()
         run: docker compose -f test/docker-compose.yml down -v
+
+  # Install and manage the daemon under a REAL systemd user instance (#621).
+  #
+  # Everything else runs deepsteve as PID 1 in a container, so before this the Linux
+  # service path had never executed at all: Dockerfile.install and Dockerfile.public both
+  # stub systemctl to `exit 0`, which means an installer that wrote no unit and started
+  # nothing looked exactly like one that worked. The ubuntu-latest runner is a full
+  # systemd VM, so `systemctl --user` here is the real thing — no systemd-in-docker
+  # gymnastics required.
+  #
+  # The load-bearing assertion is the last one: a restart must NOT kill the tmux server.
+  # systemd's default KillMode=control-group SIGKILLs the whole cgroup, and the tmux
+  # server the daemon forked lives in it — so without KillMode=process every restart
+  # destroys every session, which is the exact opposite of what running deepsteve on a
+  # remote box is for.
+  systemd:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+
+      # tmux is a declared dependency off macOS since #621 — install.sh refuses without it.
+      # Deliberately NOT installing zsh: the daemon resolves the login shell now, and the
+      # runner's shell is bash, so this doubles as a zsh-less check of that path.
+      - name: Install tmux
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends tmux
+
+      # A systemd user manager needs a runtime dir and, without a login session, lingering.
+      # Fail loudly rather than skipping: a silent skip is how the Linux arm went unverified
+      # for this long in the first place.
+      - name: Bring up the systemd user instance
+        run: |
+          sudo loginctl enable-linger "$USER"
+          echo "XDG_RUNTIME_DIR=/run/user/$(id -u)" >> "$GITHUB_ENV"
+          for _ in $(seq 1 30); do
+            [ -d "/run/user/$(id -u)" ] && break
+            sleep 1
+          done
+          XDG_RUNTIME_DIR=/run/user/$(id -u) systemctl --user show-environment >/dev/null \
+            || { echo "No systemd --user bus on this runner; this job cannot be meaningful."; exit 1; }
+
+      # release.sh only became runnable on Linux in #621 (it used BSD `sed -i ''`), so
+      # generating the installer here is itself part of what this job proves.
+      - name: Generate install.sh
+        run: |
+          npm version "$(node -p "require('./package.json').version")-ci" --no-git-tag-version --allow-same-version
+          ./release.sh
+
+      - name: Install
+        run: bash ./install.sh
+
+      - name: The unit was written, and carries the directives that matter
+        run: |
+          UNIT="$HOME/.config/systemd/user/deepsteve.service"
+          test -s "$UNIT" || { echo "no unit file written"; exit 1; }
+          cat "$UNIT"
+          grep -q '^KillMode=process$'   "$UNIT" || { echo "KillMode=process missing — a restart would kill every session"; exit 1; }
+          grep -q '^TimeoutStopSec='     "$UNIT" || { echo "TimeoutStopSec missing"; exit 1; }
+          grep -q '^Environment=DEEPSTEVE_LOG_DIR=' "$UNIT" || { echo "DEEPSTEVE_LOG_DIR missing"; exit 1; }
+          systemd-analyze --user verify "$UNIT"
+
+      - name: The daemon is actually running under systemd
+        run: |
+          for _ in $(seq 1 30); do
+            systemctl --user is-active --quiet deepsteve && break
+            sleep 1
+          done
+          systemctl --user is-active deepsteve
+          systemctl --user is-enabled deepsteve
+          curl -sf --retry 15 --retry-delay 1 --retry-all-errors http://localhost:3000/healthz
+
+      - name: status.sh agrees, and is read-only
+        run: |
+          ./status.sh
+          ./status.sh | grep -q 'systemd --user'
+          ./status.sh | grep -q 'health        ok'
+
+      - name: Logs go to files, and the daemon can rotate them
+        run: |
+          LOGDIR="$HOME/.local/share/deepsteve/logs"
+          test -s "$LOGDIR/deepsteve.log" || { echo "nothing in $LOGDIR/deepsteve.log — is StandardOutput=append: working?"; exit 1; }
+          head -5 "$LOGDIR/deepsteve.log"
+
+      # THE regression test for KillMode. Create a real session (so the daemon forks a
+      # tmux server into its own cgroup), restart the unit the way systemd does on every
+      # crash and upgrade, and require the session to still be there.
+      - name: A restart preserves live tmux sessions
+        run: |
+          TOKEN=$(cat "$HOME/.deepsteve/auth-token")
+          node -e '
+            const WebSocket = require(process.env.HOME + "/.deepsteve/node_modules/ws");
+            const ws = new WebSocket("ws://127.0.0.1:3000/?agentType=terminal&cwd=" + encodeURIComponent(process.env.HOME), {
+              headers: { Authorization: "Bearer " + process.argv[1], Origin: "http://localhost:3000" },
+            });
+            const t = setTimeout(() => { console.error("timed out creating a session"); process.exit(1); }, 30000);
+            ws.on("message", (raw) => {
+              let m; try { m = JSON.parse(raw.toString()); } catch { return; }
+              if (m.type === "session") { clearTimeout(t); console.log(m.id); process.exit(0); }
+            });
+            ws.on("error", (e) => { console.error(e.message); process.exit(1); });
+          ' "$TOKEN" > /tmp/session-id
+          SID=$(cat /tmp/session-id)
+          echo "created session $SID"
+          sleep 5
+          tmux ls
+          tmux has-session -t "ds-$SID" || { echo "the daemon did not create a tmux session"; exit 1; }
+
+          systemctl --user restart deepsteve
+          for _ in $(seq 1 30); do
+            systemctl --user is-active --quiet deepsteve && break
+            sleep 1
+          done
+          sleep 3
+          tmux ls || true
+          tmux has-session -t "ds-$SID" || {
+            echo "REGRESSION: the tmux session did not survive a daemon restart."
+            echo "That is KillMode=control-group SIGKILLing the daemon's whole cgroup — see #621."
+            exit 1
+          }
+          echo "session ds-$SID survived the restart"
+
+      - name: Uninstall tears everything down
+        run: |
+          "$HOME/.deepsteve/uninstall.sh"
+          test ! -e "$HOME/.config/systemd/user/deepsteve.service" || { echo "unit file survived"; exit 1; }
+          test ! -d "$HOME/.deepsteve" || { echo "install dir survived"; exit 1; }
+          systemctl --user is-active --quiet deepsteve && { echo "still running after uninstall"; exit 1; } || true
+
+      - name: Daemon log on failure
+        if: failure()
+        run: |
+          journalctl --user -u deepsteve -n 100 --no-pager || true
+          cat "$HOME/.local/share/deepsteve/logs/deepsteve.error.log" 2>/dev/null || true

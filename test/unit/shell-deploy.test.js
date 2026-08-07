@@ -203,6 +203,23 @@ test('base64 embedding is wrapped identically on macOS and Linux', () => {
   assert.match(line, /tr -d '\\n' \| fold -w 76/);
 });
 
+test('CI runs the daemon under a real systemd user instance (#621)', () => {
+  // Guarding the guard, in the public-suite-pin.test.js style. Everything else runs
+  // deepsteve as PID 1 in a container, and both install-flow images stub systemctl to
+  // `exit 0` — so this job is the ONLY thing that exercises the Linux service path. If
+  // it gets dropped, the arm silently goes back to being unverified, which is the state
+  // #621 found it in.
+  const wf = fs.readFileSync(path.join(REPO, '.github', 'workflows', 'integration-tests.yml'), 'utf8');
+  assert.match(wf, /^  systemd:$/m, 'the systemd job must exist');
+  const job = wf.slice(wf.indexOf('\n  systemd:'));
+  assert.match(job, /systemctl --user is-active/, 'it must assert the daemon really started');
+  assert.match(job, /systemd-analyze --user verify/, 'and validate the unit with systemd itself');
+  assert.match(job, /tmux has-session/, 'and prove a restart preserves live sessions (the KillMode test)');
+  assert.match(job, /uninstall\.sh/, 'and check teardown');
+  assert.ok(!/apt-get install[^\n]*\bzsh\b/.test(job),
+    'installing zsh here would blind the job to a zsh dependency creeping back');
+});
+
 test('install.sh is generated, never committed', () => {
   // It is a 3.5MB build artifact; the repo tracks release.sh instead.
   const ignore = fs.readFileSync(path.join(REPO, '.gitignore'), 'utf8');

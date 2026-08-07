@@ -134,3 +134,60 @@ test('start()/stop() drive tick via the injected interval', () => {
   watch.stop();
   assert.strictEqual(intervalFn, null);
 });
+
+// --- platform (#621) ------------------------------------------------------
+//
+// #621 proposed gating this to darwin ("a rented Linux box does not sleep"). It is
+// deliberately NOT gated — see the reasoning in sleep-watch.js's header. These tests
+// exist so that decision cannot be quietly reversed: gating start() would turn all
+// three red, which is the argument a future change has to answer.
+
+test('the watch runs on Linux too — it is deliberately NOT gated to darwin (#621)', () => {
+  let intervalFn = null;
+  const watch = createSleepWatch({
+    now: () => 0,
+    setIntervalFn: (fn) => { intervalFn = fn; return { unref() {} }; },
+    clearIntervalFn: () => { intervalFn = null; },
+    platform: 'linux',
+    log: () => {},
+  });
+  watch.start();
+  assert.ok(intervalFn, 'start() must schedule the tick regardless of platform');
+});
+
+test('a Linux suspend still produces a holdoff', () => {
+  // The concrete cost of gating: without a recorded wake, armDetachReap() treats a
+  // browser that was frozen by the same suspend as a peer that left, and reaps a live
+  // agent session. Linux laptops suspend, hypervisors pause guests for live migration,
+  // and containers get cgroup-frozen — all of which look exactly like this.
+  let t = 0;
+  let intervalFn = null;
+  const watch = createSleepWatch({
+    now: () => t,
+    setIntervalFn: (fn) => { intervalFn = fn; return { unref() {} }; },
+    clearIntervalFn: () => {},
+    platform: 'linux',
+    tickMs: 5000,
+    gapMs: 15000,
+    log: () => {},
+  });
+  watch.start();
+  t = 100_000;
+  intervalFn();
+  t += 300_000;          // a five-minute suspend
+  intervalFn();
+  assert.strictEqual(watch.lastWakeAt(), t, 'the wake must be recorded on Linux');
+  assert.ok(watch.holdoffRemaining(120_000) > 0, 'and it must produce a real holdoff');
+});
+
+test('platform is reported, never enforced', () => {
+  const mac = createSleepWatch({ platform: 'darwin', log: () => {} });
+  const lin = createSleepWatch({ platform: 'linux', log: () => {} });
+  assert.strictEqual(mac.isPlatformRelevant(), true);
+  assert.strictEqual(lin.isPlatformRelevant(), false);
+  // ...and the flag changes nothing about behavior.
+  for (const w of [mac, lin]) {
+    assert.strictEqual(w.lastWakeAt(), 0);
+    assert.strictEqual(w.holdoffRemaining(120_000), 0);
+  }
+});
