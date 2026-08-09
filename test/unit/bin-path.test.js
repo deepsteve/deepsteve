@@ -158,14 +158,23 @@ test('runBinary does not leak its own options into the exec opts', () => {
 
 // --- resolveLoginShell ----------------------------------------------------
 
-test('macOS is a provable no-op: $SHELL=/bin/zsh resolves to /bin/zsh -l', () => {
+test('macOS is a provable no-op: an absolute zsh in $SHELL resolves to itself, -l', () => {
   // THE load-bearing case for #621. A real LaunchAgent daemon's environment carries
   // SHELL=/bin/zsh (verified with `ps eww` on a live install), so the session spawn
   // goes from spawn('zsh', ['-l','-c',…]) to spawn('/bin/zsh', ['-l','-c',…]) — the
   // only delta being an absolute path, which is strictly better under launchd's PATH.
   // PATH is deliberately empty to prove the separator branch, not a search, found it.
-  const got = resolveLoginShell({ env: { SHELL: '/bin/zsh', PATH: '' }, userInfo: () => ({ shell: '/bin/zsh' }) });
-  assert.deepStrictEqual(got, { path: '/bin/zsh', loginFlag: '-l' });
+  //
+  // The zsh is a FIXTURE, not the literal /bin/zsh, and extraDirs is empty — because
+  // the separator branch ends in isExecutableFile(), i.e. real un-injected I/O. Naming
+  // /bin/zsh made the assertion a question about the machine: true on every Mac, false
+  // on the bare ubuntu job, which then walked the fallback dirs to /usr/bin/bash. That
+  // is exactly the "works on the maintainer's Mac" class this file exists to exclude,
+  // and it is why the empty extraDirs matters as much as the fixture — a real system
+  // dir must not be able to answer either.
+  const zsh = fakeBin(scratchDir(), 'zsh');
+  const got = resolveLoginShell({ env: { SHELL: zsh, PATH: '' }, userInfo: () => ({ shell: zsh }), extraDirs: [] });
+  assert.deepStrictEqual(got, { path: zsh, loginFlag: '-l' });
 });
 
 test('falls back to the passwd entry when $SHELL is unset', () => {
