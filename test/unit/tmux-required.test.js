@@ -119,11 +119,24 @@ test('the local-install docker image satisfies the dependency it now declares', 
     'with tmux installed, the tmux-engine skip is dead weight and hides real coverage');
 });
 
-test('the PUBLIC install image is deliberately left alone', () => {
-  // It installs the LAST RELEASED install.sh, which predates the tmux gate — adding tmux
-  // there would be testing a build that never had the requirement. Its tmux-engine skip
-  // must therefore stay. (#588: that suite runs each release's own tests against it.)
+test('the PUBLIC install image satisfies the dependency the released install.sh declares', () => {
+  // This assertion is the INVERSE of the one #621 shipped, and the flip is the lesson.
+  //
+  // #621 deliberately left this image alone, and was right at the time: the public suite
+  // installs the LAST RELEASED install.sh, which then was v0.21.0 — no tmux gate — so
+  // adding tmux would have been testing a requirement that build never had. But that
+  // rationale was true only until a release CONTAINED the gate. v0.22.0 published it, and
+  // `curl deepsteve.com/install.sh | bash` in a tmux-less image now exits 1: the suite
+  // died at `docker build`, before a single test ran.
+  //
+  // The trap is structural, so it is worth naming rather than just fixing: #588 has this
+  // job check out the release TAG, so the image lives at the tag too — a fix on main
+  // cannot reach the cron until a release carries it. Whenever install.sh changes what it
+  // REQUIRES, this image has to change in the same release, not the one after.
+  const df = fs.readFileSync(path.join(REPO, 'test', 'Dockerfile.public'), 'utf8');
+  assert.match(df, /apt-get install[^\n]*\btmux\b/,
+    'the released install.sh refuses on Linux without tmux — without it the image cannot build');
   const compose = fs.readFileSync(path.join(REPO, 'test', 'docker-compose.public.yml'), 'utf8');
-  assert.match(compose, /run-integration\.sh\s+'?tmux-engine'?/,
-    'the public suite still has no tmux and must keep skipping those tests');
+  assert.ok(!/run-integration\.sh\s+'?tmux-engine'?/.test(compose),
+    'with tmux installed the skip is dead weight, and it hid the default engine from this suite');
 });

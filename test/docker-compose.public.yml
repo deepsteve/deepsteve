@@ -71,16 +71,20 @@ services:
     volumes:
       - ds_token:/auth   # read the server-seeded auth token (#539)
     # Copy the token where the test helper reads it (~/.deepsteve/auth-token), then run files
-    # serially (one process each). Skip only tmux-engine: the public install image has no tmux
-    # (Dockerfile.public installs just zsh + curl). See test/run-integration.sh for why
-    # --test-concurrency=1 isn't enough.
+    # serially (one process each). See test/run-integration.sh for why --test-concurrency=1
+    # isn't enough.
+    #
+    # NO skip pattern any more. tmux-engine was skipped because the public image had no tmux;
+    # it now must (Dockerfile.public), since install.sh refuses to install on Linux without
+    # it — so the skip's only justification is gone and this suite covers the DEFAULT engine
+    # against the released build. Verified against v0.22.0: tmux-engine.test.js 10/10.
     command:
       - sh
       - -c
       - |
         set -e
         cp /auth/token /root/.deepsteve/auth-token
-        exec sh test/run-integration.sh 'tmux-engine'
+        exec sh test/run-integration.sh
 
 volumes:
   ds_token:

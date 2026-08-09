@@ -3,9 +3,15 @@
 # See also: Dockerfile (repo source), Dockerfile.install (local install.sh).
 FROM node:22-bookworm
 
-# zsh: server.js spawns 'zsh -l' for all session types
+# tmux: a DECLARED dependency off macOS since #621 — the published install.sh REFUSES to
+#   run on Linux without it, so this is not a preference: without this package the image
+#   cannot be built at all and the whole suite dies at `docker build`. Dockerfile.install
+#   grew the same line in #621; this file was missed because it tests the PREVIOUS release,
+#   which had no such gate — the miss only became reachable when v0.22.0 published one.
+#   It also means this suite finally exercises the default engine, so no tmux-engine skip.
+# zsh: a login shell for session spawning (resolveLoginShell prefers $SHELL, then passwd)
 # curl: used by docker-compose healthcheck + public install
-RUN apt-get update && apt-get install -y --no-install-recommends zsh curl && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends zsh curl tmux && rm -rf /var/lib/apt/lists/*
 
 # Stub out launchctl/systemctl — not available in Docker
 RUN printf '#!/bin/sh\nexit 0\n' > /usr/local/bin/launchctl && chmod +x /usr/local/bin/launchctl \
