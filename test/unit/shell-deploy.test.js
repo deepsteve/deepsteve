@@ -98,8 +98,14 @@ test('the shell ship list is the same in restart.sh and release.sh', () => {
   //
   // Asserted rather than globbed because the list must NOT be `*.sh`: restart.sh must
   // never copy itself into its own deploy target, and release.sh is a maintainer tool.
+  // install.sh is excluded because it is not a source file at all: release.sh GENERATES
+  // it (gitignored), so it is present on exactly the machines that have cut a release —
+  // i.e. this test failed for the maintainer running the documented release steps, and
+  // passed in CI, which checks out a clean tree.
+  const GENERATED = new Set(['install.sh']);
+  const TOOLING = new Set(['restart.sh', 'release.sh']);
   const rootShellFiles = fs.readdirSync(REPO).filter((f) => f.endsWith('.sh')).sort();
-  const expected = rootShellFiles.filter((f) => f !== 'restart.sh' && f !== 'release.sh');
+  const expected = rootShellFiles.filter((f) => !TOOLING.has(f) && !GENERATED.has(f));
   assert.deepStrictEqual(expected, ['service.sh', 'status.sh', 'uninstall.sh'],
     'a new root *.sh appeared — decide deliberately whether it ships, then update this list');
 
