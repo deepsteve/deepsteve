@@ -32,6 +32,7 @@ const net = require('node:net');
 const os = require('node:os');
 const path = require('node:path');
 const WebSocket = require('ws');
+const { createIsolatedTmux, runTmux, reapTmuxServer } = require('../helpers/tmux-socket');
 
 const REPO_ROOT = path.resolve(__dirname, '..', '..');
 
@@ -48,7 +49,8 @@ try {
 }
 const SKIP = TMUX_BIN ? false : 'tmux is not installed';
 
-let tmpRoot, HOME, PORT, BASE, projDir, tmuxTmp;
+let tmpRoot, HOME, PORT, BASE, projDir;
+let iso = null;   // { tmpRoot, tmuxTmp, socket } — the ONLY tmux this suite may touch
 let daemon = null;
 let daemonLog = '';
 
@@ -84,14 +86,15 @@ async function waitFor(check, what, timeoutMs = 20000, intervalMs = 100) {
 }
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-/** Run tmux against THIS test's private socket dir, never the user's. */
+/**
+ * Run tmux against THIS suite's own socket, by explicit `-S` path.
+ *
+ * Not by TMUX_TMPDIR: tmux treats that as a hint and silently falls back to the
+ * developer's real per-UID socket whenever it cannot use the directory, and this
+ * file's `after()` runs kill-server. See test/helpers/tmux-socket.js.
+ */
 function tmux(args) {
-  return execFileSync(TMUX_BIN, args, {
-    encoding: 'utf8',
-    timeout: 5000,
-    stdio: 'pipe',
-    env: { ...process.env, TMUX_TMPDIR: tmuxTmp },
-  }).trim();
+  return runTmux(TMUX_BIN, iso, args);
 }
 function tmuxSessionNames() {
   try { return tmux(['list-sessions', '-F', '#{session_name}']).split('\n').filter(Boolean); }
@@ -113,7 +116,8 @@ async function startDaemon() {
   env.PATH = `${path.join(HOME, 'bin')}:${process.env.PATH}`;
   // Isolate tmux's socket: it is per-UID, NOT per-HOME (see CLAUDE.md). Without
   // this a scratch-HOME daemon shares the real user's socket.
-  env.TMUX_TMPDIR = tmuxTmp;
+  if (!iso) throw new Error('startDaemon called before the isolated tmux socket exists');
+  env.TMUX_TMPDIR = iso.tmuxTmp;
 
   fs.mkdirSync(path.join(HOME, '.deepsteve'), { recursive: true });
   fs.writeFileSync(path.join(HOME, '.deepsteve', '.restarting'), ''); // no browser auto-open
@@ -185,12 +189,14 @@ function track(c) { clients.push(c); return c; }
 before(async () => {
   if (SKIP) return;
   tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-tmuxdur-'));
+  // FIRST, and in one call — naming the socket dir separately from creating it is
+  // the window that let kill-server reach the developer's real tmux server. Nothing
+  // that can throw may come between these two statements.
+  iso = createIsolatedTmux(tmpRoot);
   HOME = path.join(tmpRoot, 'home');
   projDir = path.join(tmpRoot, 'proj');
-  tmuxTmp = path.join(tmpRoot, 'tmux-tmp');
   fs.mkdirSync(path.join(HOME, 'bin'), { recursive: true });
   fs.mkdirSync(projDir, { recursive: true });
-  fs.mkdirSync(tmuxTmp, { recursive: true, mode: 0o700 });
   fs.writeFileSync(
     path.join(HOME, 'bin', 'open'),
     '#!/bin/bash\nexit 0\n',
@@ -202,11 +208,13 @@ before(async () => {
 });
 
 after(async () => {
+  if (SKIP) return; // mirror before()'s early return — see the guard in tmux()
   for (const c of clients) c.close();
   clients = [];
   await stopDaemon('SIGKILL').catch(() => {});
-  // Our own socket dir, so this can't touch the developer's real sessions.
-  try { tmux(['kill-server']); } catch {}
+  // Kills ONLY a server whose socket file sits at our own -S path; with no such
+  // file there is nothing of ours running and it does nothing.
+  reapTmuxServer(TMUX_BIN, iso);
   // The daemon and the tmux server both write under HOME, and a killed process's
   // last writes can land after the signal — an immediate rm races them and throws
   // ENOTEMPTY. Settle, then retry.

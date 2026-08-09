@@ -1,6 +1,7 @@
 const { execFileSync } = require('child_process');
 const Engine = require('./engine');
 const { probeTmux } = require('../tmux-path');
+const { terminalEnv, TERMINAL_ENV_KEYS } = require('../terminal-env');
 
 // node-pty is required lazily, at the one place that needs it (attaching), so that
 // merely requiring this module doesn't pull in a native binding. The CI unit job
@@ -14,6 +15,17 @@ function defaultSpawnPty(...args) {
 const SESSION_PREFIX = 'ds-';
 
 /**
+ * What node-pty deletes from a child's environment — but only when it owns the env
+ * object (`opt.env === process.env` by identity, unixTerminal.js `_sanitizeEnv`).
+ * The moment we pass an env of our own it stops running, and we inherit the duty.
+ *
+ * Not cosmetic: a daemon started by hand from inside a tmux pane has TMUX set, and
+ * `tmux attach-session` refuses outright with "sessions should be nested with care,
+ * unset $TMUX to force" — every tab would come up dead.
+ */
+const PTY_UNSAFE_ENV = ['TMUX', 'TMUX_PANE', 'STY', 'WINDOW', 'WINDOWID', 'TERMCAP', 'COLUMNS', 'LINES'];
+
+/**
  * Shell-quote a string for the command line **tmux itself** runs via $SHELL.
  *
  * This is NOT about how we invoke tmux — that goes through execFileSync with an
@@ -24,6 +36,14 @@ const SESSION_PREFIX = 'ds-';
 function shellQuote(s) {
   if (/^[a-zA-Z0-9_./:=-]+$/.test(s)) return s;
   return "'" + s.replace(/'/g, "'\\''") + "'";
+}
+
+/** The subset of `src` named by `keys` that is actually defined. */
+function pick(src, keys) {
+  const out = {};
+  if (!src) return out;
+  for (const k of keys) if (src[k] !== undefined) out[k] = src[k];
+  return out;
 }
 
 /**
@@ -48,11 +68,18 @@ class TmuxEngine extends Engine {
    *   path. exec/env/spawnPty are injection points for tests; spawnPty stands in for
    *   pty.spawn so the attach/detach lifecycle can be tested on a box with no tmux
    *   (which is exactly what the CI unit job is).
+   *
+   *   `env` is the daemon's environment. It reaches the $PATH probe *and*, since
+   *   #624, every runtime read of it — the spawn-time diff against what the pane
+   *   would inherit anyway, and the env the attach client is given. That is what
+   *   makes the locale bug testable: a test that inherits the runner's env has a
+   *   locale and passes against the bug.
    */
   constructor({ binary = 'tmux', env, exec, spawnPty } = {}) {
     super();
     this._sessions = new Map(); // id → { attachPty, exitCallbacks }
     this._binary = binary || 'tmux';
+    this._env = env || process.env;
     this._spawnPty = spawnPty || defaultSpawnPty;
     // `exec` reaches _exec too, not just the version probe (#621). Without this,
     // spawn() always really shelled out, so the argv it builds — the riskiest thing
@@ -106,11 +133,27 @@ class TmuxEngine extends Engine {
     return `no "${this._binary}" binary found in any of: ${this._searchedDirs.join(', ')}`;
   }
 
-  /** Check if tmux supports -e flag (>= 3.2) */
-  get _supportsEnvFlag() {
+  /** Is the resolved tmux at least this version? */
+  _atLeast(major, minor) {
     if (!this._tmuxVersion) return false;
     const parts = this._tmuxVersion.split('.').map(Number);
-    return parts[0] > 3 || (parts[0] === 3 && parts[1] >= 2);
+    return parts[0] > major || (parts[0] === major && parts[1] >= minor);
+  }
+
+  /** Check if tmux supports -e flag (>= 3.2) */
+  get _supportsEnvFlag() {
+    return this._atLeast(3, 2);
+  }
+
+  /**
+   * Can we declare terminal features with the top-level `-T` flag (>= 3.2)?
+   *
+   * Gated because an unknown flag makes tmux exit with a usage error, which would
+   * kill the attach PTY — a broken tab, not a degraded one. Older tmux simply
+   * keeps today's 256-colour behaviour.
+   */
+  get _supportsFeaturesFlag() {
+    return this._atLeast(3, 2);
   }
 
   _tmuxSessionName(id) {
@@ -149,7 +192,7 @@ class TmuxEngine extends Engine {
     const extraEnv = {};
     if (env) {
       for (const [key, val] of Object.entries(env)) {
-        if (val !== undefined && val !== process.env[key]) {
+        if (val !== undefined && val !== this._env[key]) {
           extraEnv[key] = val;
         }
       }
@@ -160,7 +203,24 @@ class TmuxEngine extends Engine {
     // the daemon, so sessions would still see PORT=3000. Set each to empty to
     // override that inheritance.
     for (const key of stripEnv) {
-      if (process.env[key] !== undefined) extraEnv[key] = '';
+      if (this._env[key] !== undefined) extraEnv[key] = '';
+    }
+
+    // #624: pin the pane's locale and colour depth, past the diff loop above.
+    //
+    // The diff drops anything equal to the daemon's env, on the reasoning that the
+    // pane inherits it anyway. That reasoning does not hold for these two: a pane
+    // inherits the tmux SERVER's global environment, and the server belongs to
+    // whichever process started it — quite possibly the user's own interactive
+    // tmux, since we share the per-UID default socket. "Same as ours" therefore
+    // proves nothing about what the agent will see, so state it explicitly.
+    //
+    // Deliberately after the diff and the strip: `env`'s value wins when the caller
+    // supplied one (childBaseEnv already layers terminalEnv in), the first -e pair
+    // stays DEEPSTEVE_SESSION_ID, and a stripEnv key is never resurrected.
+    const wantedTerminalEnv = { ...terminalEnv({ env: this._env }), ...pick(env, TERMINAL_ENV_KEYS) };
+    for (const [key, val] of Object.entries(wantedTerminalEnv)) {
+      if (extraEnv[key] === undefined) extraEnv[key] = val;
     }
 
     if (this._supportsEnvFlag) {
@@ -170,7 +230,10 @@ class TmuxEngine extends Engine {
       }
       if (fullCmd) tmuxArgs.push(fullCmd);
     } else {
-      // Older tmux: wrap with env command
+      // Older tmux: wrap with env command. Note a session with no command of its own
+      // (a plain terminal) gets nothing here, since there is no argv to prefix —
+      // pre-existing, and it costs only the pane's locale on tmux < 3.2. The attach
+      // client's own `-u` still renders it correctly.
       if (fullCmd && Object.keys(extraEnv).length > 0) {
         const envPrefix = Object.entries(extraEnv)
           .map(([k, v]) => `${k}=${shellQuote(v)}`)
@@ -198,14 +261,52 @@ class TmuxEngine extends Engine {
     this._attach(id, cols, rows);
   }
 
+  /**
+   * Everything needed to spawn an attach client, as `{ file, argv, opts }` (#624).
+   *
+   * Public and separate from _attach() because there are TWO attach call sites —
+   * this engine, and server.js's `tmux-attach` WS path, which drives a raw node-pty
+   * for a session it doesn't own. They were independent copies and drifted; there
+   * is now one definition, so a fix can't land in only one of them.
+   *
+   * What the flags are for — both are top-level, `attach-session` accepts neither:
+   *
+   *   -u          tmux writes UTF-8 to this client regardless of its locale. Without
+   *               it, tty_check_codeset() replaces every non-ASCII glyph with the
+   *               right number of underscores, which is what turned the Claude Code
+   *               banner into `_______`. `-u` rather than locale alone because it
+   *               cannot be defeated by a hostile LC_ALL=C, and it has existed since
+   *               tmux 1.x, so it needs no version gate.
+   *   -T RGB,256  Assert 24-bit colour instead of letting tmux probe for it. Our
+   *               consumer is xterm.js, which is unconditionally truecolor, so this
+   *               is a fact about deepsteve rather than a guess about a terminal.
+   *               Without it tmux quantizes every 24-bit SGR to the 256-colour
+   *               palette. Per-CLIENT deliberately: `set -as terminal-features` is
+   *               server-global and we share the user's default socket.
+   *
+   * And the env: the daemon's, plus a UTF-8 locale so the agent's own toolkit picks
+   * its Unicode glyph set (Ink and friends gate on LC_CTYPE), minus the vars node-pty
+   * only strips when it owns the env object.
+   */
+  attachSpawnArgs(sessionName, cols, rows) {
+    const argv = ['-u'];
+    if (this._supportsFeaturesFlag) argv.push('-T', 'RGB,256');
+    argv.push('attach-session', '-t', sessionName);
+
+    const env = { ...this._env, ...terminalEnv({ env: this._env }) };
+    for (const key of PTY_UNSAFE_ENV) delete env[key];
+
+    return {
+      file: this._tmuxPath || 'tmux',
+      argv,
+      opts: { name: 'xterm-256color', cols: cols || 120, rows: rows || 40, env },
+    };
+  }
+
   _attach(id, cols, rows) {
     const sessionName = this._tmuxSessionName(id);
-    const tmux = this._tmuxPath || 'tmux';
-    const attachPty = this._spawnPty(tmux, ['attach-session', '-t', sessionName], {
-      name: 'xterm-256color',
-      cols: cols || 120,
-      rows: rows || 40,
-    });
+    const { file, argv, opts } = this.attachSpawnArgs(sessionName, cols, rows);
+    const attachPty = this._spawnPty(file, argv, opts);
 
     const entry = { attachPty, exitCallbacks: [], dataCallbacks: [] };
     this._sessions.set(id, entry);

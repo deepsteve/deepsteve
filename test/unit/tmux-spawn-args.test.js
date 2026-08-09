@@ -9,6 +9,12 @@
 // Runs on the bare CI runner with no tmux at all: TmuxEngine takes an injected `exec`
 // (which since #621 reaches _exec, not just the version probe) and an injected
 // spawnPty, and node-pty is required lazily (#620).
+//
+// #624 added the `attach-session` side, which is where the glyph/colour defects
+// lived. Note the injected env below is DELIBERATELY locale-free: the underscore bug
+// only exists in an environment with no LC_ALL/LC_CTYPE/LANG, which is what a
+// launchd/systemd daemon has and an interactive test runner does not. A test that
+// inherited process.env would pass against the bug.
 const { test } = require('node:test');
 const assert = require('node:assert');
 const fs = require('fs');
@@ -16,10 +22,15 @@ const os = require('os');
 const path = require('path');
 
 const TmuxEngine = require('../../engines/tmux');
+const { LOCALE_VARS } = require('../../terminal-env');
 
 // A fake tmux on disk, so probeTmux() resolves and reports a version. `-V` is the
 // only call the constructor makes; everything after is captured.
-function makeEngine({ version = '3.5a', binaryName = 'tmux' } = {}) {
+//
+// `env` stands in for the daemon's environment — since #624 the engine reads it at
+// runtime too (the spawn-time diff, and the attach client's env), not just to find
+// tmux on $PATH. Tests that care about the daemon's env add keys here.
+function makeEngine({ version = '3.5a', binaryName = 'tmux', env: extraEnv } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-tmuxargs-'));
   const bin = path.join(dir, binaryName);
   fs.writeFileSync(bin, '#!/bin/sh\nexit 0\n');
@@ -38,8 +49,9 @@ function makeEngine({ version = '3.5a', binaryName = 'tmux' } = {}) {
     return { onData() {}, onExit() {}, write() {}, resize() {}, kill() {}, pid: 4242 };
   };
 
-  const eng = new TmuxEngine({ binary: bin, env: { PATH: dir }, exec, spawnPty });
-  return { eng, calls, ptys, bin };
+  const daemonEnv = { PATH: dir, ...extraEnv };
+  const eng = new TmuxEngine({ binary: bin, env: daemonEnv, exec, spawnPty });
+  return { eng, calls, ptys, bin, daemonEnv };
 }
 
 /** The argv of the `new-session` call, which is what we actually care about. */
@@ -49,10 +61,30 @@ function newSessionArgv(calls) {
   return c.argv;
 }
 
+/** The `-e KEY=VAL` pairs of a new-session argv, as an object. */
+function envPairs(argv) {
+  const out = {};
+  for (let i = 0; i < argv.length - 1; i++) {
+    if (argv[i] !== '-e') continue;
+    const eq = argv[i + 1].indexOf('=');
+    out[argv[i + 1].slice(0, eq)] = argv[i + 1].slice(eq + 1);
+  }
+  return out;
+}
+
 test('the fake tmux is actually resolved — otherwise every assertion below is vacuous', () => {
   const { eng } = makeEngine();
   assert.strictEqual(eng.available, true, 'engine must consider the stub usable');
   assert.strictEqual(eng.version, '3.5');
+});
+
+test('the injected daemon env is locale-free — otherwise the #624 assertions are vacuous', () => {
+  const { daemonEnv } = makeEngine();
+  for (const name of LOCALE_VARS) {
+    assert.strictEqual(daemonEnv[name], undefined,
+      `${name} must be absent, or these tests pass against the bug they exist to catch`);
+  }
+  assert.strictEqual(daemonEnv.COLORTERM, undefined);
 });
 
 test('an injected exec reaches _exec, not just the version probe (#621)', () => {
@@ -80,9 +112,14 @@ test('a terminal session passes no command at all (tmux runs its default $SHELL)
   eng.spawn('abc12345', '/bin/zsh', ['-l'], '/repo', { shellCommand: null });
 
   const argv = newSessionArgv(calls);
-  // Last flag pair is -c <cwd>; nothing may follow it.
-  assert.strictEqual(argv[argv.length - 2], '-c');
-  assert.strictEqual(argv[argv.length - 1], '/repo');
+  const at = argv.indexOf('-c');
+  assert.strictEqual(argv[at + 1], '/repo', '-c must be followed by the cwd');
+  // Since #624 every session carries -e pairs, so "no command" can no longer be
+  // spelled as "nothing follows the cwd". It is instead: everything after the cwd
+  // is an -e flag or its value, i.e. there is no trailing shell-command argument.
+  const trailing = argv.slice(at + 2);
+  assert.ok(trailing.length % 2 === 0 && trailing.every((a, i) => (i % 2 === 0 ? a === '-e' : a.includes('='))),
+    `only -e pairs may follow the cwd, got ${JSON.stringify(trailing)}`);
   assert.ok(!argv.some((a) => a.includes('zsh')), 'no shell should be named');
 });
 
@@ -152,7 +189,10 @@ test('tmux < 3.2 wraps with `env`, and still does not add a shell', () => {
   eng.spawn('abc12345', '/bin/zsh', ['-l', '-c', inner], '/repo',
     { env: { DEEPSTEVE_SESSION_ID: 'abc12345' }, shellCommand: inner });
   const last = newSessionArgv(calls).slice(-1)[0];
-  assert.match(last, /^env DEEPSTEVE_SESSION_ID=abc12345 claude '--foo'$/);
+  assert.match(last, /^env DEEPSTEVE_SESSION_ID=abc12345 /, 'the caller env comes first, then the rest');
+  assert.match(last, / LC_CTYPE=\S+ /, 'the #624 locale must survive the pre-3.2 path too');
+  assert.match(last, / COLORTERM=truecolor /);
+  assert.ok(last.endsWith(` ${inner}`), 'the command still comes last');
   assert.ok(!last.includes('zsh'), 'the env wrapper must not reintroduce a shell');
 });
 
@@ -163,9 +203,135 @@ test('the engine never invokes a shell — only the resolved tmux binary', () =>
     assert.strictEqual(c.file, bin, `every exec must be tmux itself, got ${c.file}`);
   }
   // The attach PTY runs tmux too, not a shell — that is what makes the session
-  // survive the daemon (#620).
+  // survive the daemon (#620). Since #624 the subcommand is preceded by top-level
+  // flags, so it is no longer argv[0].
   for (const p of ptys) {
     assert.strictEqual(p.file, bin, `attach must spawn tmux, got ${p.file}`);
-    assert.strictEqual(p.argv[0], 'attach-session');
+    assert.ok(p.argv.includes('attach-session'), `expected an attach, got ${JSON.stringify(p.argv)}`);
+    assert.ok(!p.argv.some((a) => a.includes('sh')), 'no shell may appear in the attach argv');
   }
+});
+
+// ---------------------------------------------------------------------------
+// #624 — the attach client. Every non-ASCII glyph rendered as an underscore and
+// truecolor was quantized to 256 colours, because the attach invocation carried
+// neither a UTF-8 signal nor a colour capability. Both are argv/env facts, so they
+// are asserted here rather than behaviourally.
+// ---------------------------------------------------------------------------
+
+/** The attach PTY's spawn record. */
+function attachPty(ptys) {
+  assert.strictEqual(ptys.length, 1, 'expected exactly one attach PTY');
+  return ptys[0];
+}
+
+test('#624: the attach client declares UTF-8 and truecolor', () => {
+  const { eng, ptys, bin } = makeEngine({ version: '3.5a' });
+  eng.spawn('abc12345', '/bin/zsh', ['-l'], '/repo', { shellCommand: null });
+  const p = attachPty(ptys);
+  assert.strictEqual(p.file, bin);
+  // Both are TOP-LEVEL tmux flags — `attach-session` accepts neither — so they must
+  // precede the subcommand or tmux exits with a usage error and the tab is dead.
+  assert.deepStrictEqual(p.argv, ['-u', '-T', 'RGB,256', 'attach-session', '-t', 'ds-abc12345']);
+});
+
+test('#624: -T is gated on tmux 3.2, -u is not', () => {
+  // -T did not exist before 3.2. An unknown flag makes tmux exit immediately, which
+  // would kill the attach PTY — a broken session rather than a degraded one. -u has
+  // been there since 1.x, so it is unconditional and no locale can defeat it.
+  const { eng, ptys } = makeEngine({ version: '3.0a' });
+  eng.spawn('abc12345', '/bin/zsh', ['-l'], '/repo', { shellCommand: null });
+  assert.deepStrictEqual(attachPty(ptys).argv, ['-u', 'attach-session', '-t', 'ds-abc12345']);
+});
+
+test('#624: the attach client gets a UTF-8 locale the daemon does not have', () => {
+  const { eng, ptys } = makeEngine();
+  eng.spawn('abc12345', '/bin/zsh', ['-l'], '/repo', { shellCommand: null });
+  const { env } = attachPty(ptys).opts;
+  assert.match(env.LC_CTYPE, /utf-?8/i);
+  assert.strictEqual(env.COLORTERM, 'truecolor');
+});
+
+test('#624: a daemon that already has a UTF-8 locale keeps it', () => {
+  const { eng, ptys } = makeEngine({ env: { LANG: 'en_GB.UTF-8' } });
+  eng.spawn('abc12345', '/bin/zsh', ['-l'], '/repo', { shellCommand: null });
+  const { env } = attachPty(ptys).opts;
+  assert.strictEqual(env.LANG, 'en_GB.UTF-8');
+  assert.strictEqual(env.LC_CTYPE, undefined, 'a configured locale must not be overridden');
+});
+
+test('#624: passing our own env means WE strip what node-pty used to', () => {
+  // node-pty's _sanitizeEnv runs only when opt.env IS process.env by identity. The
+  // moment we hand it an object the duty is ours — and TMUX reaching a `tmux
+  // attach-session` makes it refuse outright ("sessions should be nested with
+  // care"), which is every tab dead for anyone who started the daemon from inside
+  // a tmux pane.
+  const dirty = { TMUX: '/tmp/tmux-501/default,1234,0', TMUX_PANE: '%3', STY: '1.pts-0', WINDOW: '2',
+    WINDOWID: '7', TERMCAP: 'xx', COLUMNS: '80', LINES: '24' };
+  const { eng, ptys } = makeEngine({ env: dirty });
+  eng.spawn('abc12345', '/bin/zsh', ['-l'], '/repo', { shellCommand: null });
+  const { env } = attachPty(ptys).opts;
+  for (const key of Object.keys(dirty)) {
+    assert.strictEqual(env[key], undefined, `${key} must be stripped from the attach env`);
+  }
+});
+
+test('#624: the attach env does not leak back into the daemon env', () => {
+  const { eng, ptys, daemonEnv } = makeEngine({ env: { TMUX: '/tmp/x,1,0' } });
+  eng.spawn('abc12345', '/bin/zsh', ['-l'], '/repo', { shellCommand: null });
+  attachPty(ptys).opts.env.CLOBBER = 'yes';
+  assert.strictEqual(daemonEnv.TMUX, '/tmp/x,1,0', 'the daemon env must be copied, not mutated');
+  assert.strictEqual(daemonEnv.CLOBBER, undefined);
+});
+
+test('#624: reattach after a restart gets the same treatment', () => {
+  // The path every surviving session takes at startup. It renders immediately —
+  // unlike the pane env, which only applies at new-session.
+  const { eng, ptys } = makeEngine();
+  eng.reattach('abc12345', 100, 30);
+  const p = attachPty(ptys);
+  assert.ok(p.argv.includes('-u'));
+  assert.match(p.opts.env.LC_CTYPE, /utf-?8/i);
+  assert.strictEqual(p.opts.cols, 100);
+  assert.strictEqual(p.opts.rows, 30);
+});
+
+test('#624: the pane gets the locale too, so the agent picks its Unicode glyph set', () => {
+  const { eng, calls } = makeEngine({ version: '3.5a' });
+  const inner = "claude '--foo'";
+  eng.spawn('abc12345', '/bin/zsh', ['-l', '-c', inner], '/repo',
+    { env: { DEEPSTEVE_SESSION_ID: 'abc12345' }, shellCommand: inner });
+  const pairs = envPairs(newSessionArgv(calls));
+  assert.match(pairs.LC_CTYPE, /utf-?8/i);
+  assert.strictEqual(pairs.COLORTERM, 'truecolor');
+});
+
+test('#624: the pane env survives the "same as the daemon, skip it" diff', () => {
+  // spawn() drops any caller value equal to the daemon's, because the pane inherits
+  // it anyway. That is false for these two: a pane inherits the tmux SERVER's
+  // environment, and the server belongs to whoever started it — possibly the user's
+  // own tmux, since we share the per-UID default socket.
+  const { eng, calls } = makeEngine({ version: '3.5a', env: { LC_CTYPE: 'en_US.UTF-8', COLORTERM: 'truecolor' } });
+  eng.spawn('abc12345', '/bin/zsh', ['-l'], '/repo',
+    { env: { LC_CTYPE: 'en_US.UTF-8', COLORTERM: 'truecolor' }, shellCommand: null });
+  const pairs = envPairs(newSessionArgv(calls));
+  assert.strictEqual(pairs.LC_CTYPE, 'en_US.UTF-8', 'must be stated explicitly, not assumed inherited');
+  assert.strictEqual(pairs.COLORTERM, 'truecolor');
+});
+
+test('#624: a caller-supplied locale beats the engine default', () => {
+  // childBaseEnv already layers terminalEnv in, so in production the value normally
+  // arrives this way; the engine default is the backstop for any other caller.
+  const { eng, calls } = makeEngine({ version: '3.5a' });
+  eng.spawn('abc12345', '/bin/zsh', ['-l'], '/repo',
+    { env: { LC_CTYPE: 'ja_JP.UTF-8' }, shellCommand: null });
+  assert.strictEqual(envPairs(newSessionArgv(calls)).LC_CTYPE, 'ja_JP.UTF-8');
+});
+
+test('#624: a stripEnv key is never resurrected by the terminal-env pass', () => {
+  // #517: daemon-internal vars are blanked so a leaked PORT can't make an agent kill
+  // the daemon. The terminal-env pass runs after that and must not undo it.
+  const { eng, calls } = makeEngine({ version: '3.5a', env: { PORT: '3000' } });
+  eng.spawn('abc12345', '/bin/zsh', ['-l'], '/repo', { stripEnv: ['PORT'], shellCommand: null });
+  assert.strictEqual(envPairs(newSessionArgv(calls)).PORT, '');
 });

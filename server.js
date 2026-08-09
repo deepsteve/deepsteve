@@ -19,6 +19,7 @@ const { resolveBinary, runBinary, resolveUrlOpener, resolveLoginShell } = requir
 const { createPendingOpens } = require('./pending-opens');
 const { classifyScreenTail, CLAUDE_SCREEN_MARKERS } = require('./screen-classifier');
 const { TerminalScreen } = require('./terminal-screen');
+const { terminalEnv } = require('./terminal-env');
 const { readComposerDraft, isPromptStaged, isPromptOnScreen } = require('./composer-state');
 const NodePtyEngine = require('./engines/node-pty');
 const TmuxEngine = require('./engines/tmux');
@@ -1194,6 +1195,13 @@ const DAEMON_INTERNAL_ENV_KEYS = ['PORT', 'NODE_ENV', 'DEEPSTEVE_BIND', 'DEEPSTE
 function childBaseEnv(extraEnv) {
   const env = { ...process.env };
   for (const k of DAEMON_INTERNAL_ENV_KEYS) delete env[k];
+  // A service-managed daemon has no locale at all — neither the launchd plist nor
+  // the systemd unit declares one — so every agent ran under C/POSIX. Fill that in
+  // here, at the one place both engines pass through, rather than in either engine:
+  // the two must hand the agent the same environment or a tmux session stops being
+  // a faithful replica of a node-pty one, which is the whole of #624. terminalEnv()
+  // yields nothing when the user already set a locale, and extraEnv still wins.
+  Object.assign(env, terminalEnv({ env }));
   return extraEnv ? { ...env, ...extraEnv } : env;
 }
 
@@ -5830,13 +5838,15 @@ function handleWsConnection(ws, req) {
 
     const pty = require('node-pty');
     const id = randomUUID().slice(0, 8);
-    // Resolved absolute path — a bare `tmux` is ENOENT under a LaunchAgent
-    const tmuxBin = tmuxEngine.tmuxPath;
-    const attachPty = pty.spawn(tmuxBin, ['attach-session', '-t', tmuxSession], {
-      name: 'xterm-256color',
-      cols: initialCols,
-      rows: initialRows,
-    });
+    // The engine owns the attach recipe — resolved absolute path (a bare `tmux` is
+    // ENOENT under a LaunchAgent), `-u`, `-T RGB,256` and the locale-filled env
+    // (#624). This used to be an independent copy of that spawn and drifted from
+    // the engine's; asking for it keeps the two attach paths identical by
+    // construction. The PTY itself still belongs to this handler, because a
+    // tmux-attach tab is a session we don't own and must never kill.
+    const { file: tmuxBin, argv: attachArgv, opts: attachOpts } =
+      tmuxEngine.attachSpawnArgs(tmuxSession, initialCols, initialRows);
+    const attachPty = pty.spawn(tmuxBin, attachArgv, attachOpts);
 
     const entry = {
       clients: new Set(),
