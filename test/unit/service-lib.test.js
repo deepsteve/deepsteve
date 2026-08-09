@@ -115,7 +115,10 @@ test('status.sh is executable and calls no mutating verb', () => {
 // --- 2. executable tests --------------------------------------------------
 
 /** A scratch $HOME plus recording launchctl/systemctl/loginctl stubs on PATH. */
-function sandbox({ platform = 'linux', stubRc = 0 } = {}) {
+// A username no linger file can plausibly exist for. See the `id` stub below.
+const SANDBOX_USER = 'ds-sandbox-user';
+
+function sandbox({ platform = 'linux', stubRc = 0, lingerOn = false } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-servicelib-'));
   const bin = path.join(dir, 'bin');
   const home = path.join(dir, 'home');
@@ -126,9 +129,25 @@ function sandbox({ platform = 'linux', stubRc = 0 } = {}) {
 
   for (const name of ['launchctl', 'systemctl', 'loginctl']) {
     const p = path.join(bin, name);
-    fs.writeFileSync(p, `#!/bin/sh\necho "${name} $*" >> "${log}"\nexit ${stubRc}\n`);
+    // ds_linger_enabled's second branch greps this stub's STDOUT for Linger=yes, so
+    // `lingerOn` is how a test says "lingering is already on" without needing a real
+    // systemd. The call log is a separate fd and stays complete either way.
+    const say = lingerOn && name === 'loginctl' ? 'echo "Linger=yes"\n' : '';
+    fs.writeFileSync(p, `#!/bin/sh\necho "${name} $*" >> "${log}"\n${say}exit ${stubRc}\n`);
     fs.chmodSync(p, 0o755);
   }
+
+  // `id` is stubbed for exactly the reason launchctl is. ds_linger_enabled's FIRST
+  // branch is `[ -e /var/lib/systemd/linger/$(id -un) ]` — a real path built from a
+  // real username, neither of which the sandbox controlled. GitHub's ubuntu runner
+  // enables lingering for `runner`, so that file exists there and every sandbox
+  // silently answered "lingering is already on": ds_linger_note printed nothing and
+  // ds_maybe_enable_linger returned before its opt-in branch. Green on a Mac, red in
+  // CI. A sentinel username makes the answer the harness's to decide, and `lingerOn`
+  // above is the supported way to flip it.
+  const idStub = path.join(bin, 'id');
+  fs.writeFileSync(idStub, `#!/bin/sh\necho "${SANDBOX_USER}"\n`);
+  fs.chmodSync(idStub, 0o755);
 
   // The real node's directory is on PATH: ds_port_in_use runs a node TCP probe (it
   // replaced lsof, which minimal Linux images lack) and ds_node_path falls back to
@@ -342,6 +361,18 @@ test('ds_linger_note prints the exact fix command when lingering is off', () => 
   const out = s.run('ds_linger_note');
   assert.match(out, /loginctl enable-linger/);
   assert.match(out, /does not start at boot/);
+  // The command must name the user, or it is not copy-pasteable. Asserting the
+  // sandbox's own username also pins that `id` is the stub — if the real one ever
+  // leaks back in, this fails loudly instead of the note silently vanishing.
+  assert.match(out, new RegExp(`loginctl enable-linger ${SANDBOX_USER}`));
+});
+
+test('ds_linger_note stays quiet when lingering is already on', () => {
+  // The other half of the branch, and the one whose absence let #621 ship a harness
+  // that could not tell "lingering is on" from "the harness leaked the real host in".
+  const s = sandbox({ platform: 'linux', lingerOn: true });
+  assert.strictEqual(s.run('ds_linger_note'), '');
+  assert.strictEqual(s.run('ds_linger_enabled && echo yes'), 'yes');
 });
 
 test('lingering is never auto-enabled without the explicit opt-in', () => {
