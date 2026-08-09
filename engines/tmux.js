@@ -2,6 +2,7 @@ const { execFileSync } = require('child_process');
 const Engine = require('./engine');
 const { probeTmux } = require('../tmux-path');
 const { terminalEnv, TERMINAL_ENV_KEYS } = require('../terminal-env');
+const { tmuxSocketPath } = require('../paths');
 
 // node-pty is required lazily, at the one place that needs it (attaching), so that
 // merely requiring this module doesn't pull in a native binding. The CI unit job
@@ -60,10 +61,17 @@ function pick(src, keys) {
  * daemon's environment directly rather than whatever a login shell's profile files
  * produced. The absolute path is load-bearing: a bare `tmux` is ENOENT under a
  * LaunchAgent, whose PATH has no /opt/homebrew/bin.
+ *
+ * Every invocation also carries `-S <socket>` (#625) — see the `socket` option
+ * below. The engine deliberately emits NO whole-server verb: there is no
+ * `kill-server` anywhere in this file, and a unit test keeps it that way. Everything
+ * destructive here names one session (`kill-session -t ds-<id>`), so a mis-aimed
+ * call can cost at most one session instead of every session on a socket.
  */
 class TmuxEngine extends Engine {
   /**
-   * @param {{binary?: string, env?: object, exec?: Function, spawnPty?: Function}} [opts]
+   * @param {{binary?: string, socket?: string|null, env?: object, exec?: Function,
+   *          spawnPty?: Function}} [opts]
    *   binary — the `tmuxBinary` setting: a bare name to search for, or an explicit
    *   path. exec/env/spawnPty are injection points for tests; spawnPty stands in for
    *   pty.spawn so the attach/detach lifecycle can be tested on a box with no tmux
@@ -74,12 +82,32 @@ class TmuxEngine extends Engine {
    *   would inherit anyway, and the env the attach client is given. That is what
    *   makes the locale bug testable: a test that inherits the runner's env has a
    *   locale and passes against the bug.
+   *
+   *   socket — WHICH tmux server this engine talks to (#625). Three-way, the same
+   *   shape as spawn()'s `shellCommand`, because "not specified" and "deliberately
+   *   the default one" are genuinely different requests:
+   *
+   *     undefined → deepsteve's own socket, tmuxSocketPath(). The normal case.
+   *     null      → tmux's OWN default per-UID socket, on purpose. Exactly two
+   *                 features want this, and both are about sessions deepsteve did
+   *                 not create: the "Attach tmux session" submenu and the tab it
+   *                 opens. server.js reaches them through a separately named engine
+   *                 instance (userTmux()) so that access is opt-in and greppable
+   *                 rather than ambient.
+   *     '<path>'  → that exact socket (the `tmuxSocket` setting).
+   *
+   *   The socket's PARENT DIRECTORY is the caller's to create: with -S, tmux only
+   *   bind()s, it does not mkdir (it creates a directory only for its own default
+   *   socket). This file stays fs-free so the bare CI unit job can construct engines.
    */
-  constructor({ binary = 'tmux', env, exec, spawnPty } = {}) {
+  constructor({ binary = 'tmux', socket, env, exec, spawnPty } = {}) {
     super();
     this._sessions = new Map(); // id → { attachPty, exitCallbacks }
     this._binary = binary || 'tmux';
     this._env = env || process.env;
+    // `socket || null` collapses '' to null rather than emitting `-S ''`, which tmux
+    // reads as a relative path in cwd. undefined is the only value that means "ours".
+    this._socket = socket === undefined ? tmuxSocketPath() : (socket || null);
     this._spawnPty = spawnPty || defaultSpawnPty;
     // `exec` reaches _exec too, not just the version probe (#621). Without this,
     // spawn() always really shelled out, so the argv it builds — the riskiest thing
@@ -104,9 +132,28 @@ class TmuxEngine extends Engine {
     this._probeError = r.error;
   }
 
-  /** Run a tmux command directly — argv array, no shell. */
+  /**
+   * Which tmux server this engine talks to: an absolute socket path, or null for
+   * tmux's own default per-UID socket. Read by server.js so /api/engines and the
+   * fallback panel can NAME the socket rather than saying "tmux failed".
+   */
+  get socket() {
+    return this._socket;
+  }
+
+  /**
+   * Global flags that must precede EVERY tmux command — `-S` is a client flag, not a
+   * subcommand argument, so it goes before the verb. Both invocation points funnel
+   * through here: _exec() for the ten command sites, and _attach() for the PTY.
+   */
+  _socketArgs() {
+    return this._socket ? ['-S', this._socket] : [];
+  }
+
+  /** Run a tmux command directly — argv array, no shell, always on our socket. */
   _exec(args, opts = {}) {
-    return this._execFn(this._tmuxPath || 'tmux', args, { timeout: 5000, stdio: 'pipe', ...opts });
+    return this._execFn(this._tmuxPath || 'tmux', [...this._socketArgs(), ...args],
+      { timeout: 5000, stdio: 'pipe', ...opts });
   }
 
   get available() {
@@ -282,14 +329,20 @@ class TmuxEngine extends Engine {
    *               is a fact about deepsteve rather than a guess about a terminal.
    *               Without it tmux quantizes every 24-bit SGR to the 256-colour
    *               palette. Per-CLIENT deliberately: `set -as terminal-features` is
-   *               server-global and we share the user's default socket.
+   *               server-global, and while #625 means that server is now ours alone,
+   *               a per-client assertion is still the narrower and more honest one.
+   *
+   * `-S <socket>` leads the argv when this engine has one (#625) — it is a top-level
+   * flag like the two above, and putting it here rather than at the call sites is what
+   * keeps the socket and the attach recipe from drifting apart the way the two attach
+   * paths themselves once did.
    *
    * And the env: the daemon's, plus a UTF-8 locale so the agent's own toolkit picks
    * its Unicode glyph set (Ink and friends gate on LC_CTYPE), minus the vars node-pty
    * only strips when it owns the env object.
    */
   attachSpawnArgs(sessionName, cols, rows) {
-    const argv = ['-u'];
+    const argv = [...this._socketArgs(), '-u'];
     if (this._supportsFeaturesFlag) argv.push('-T', 'RGB,256');
     argv.push('attach-session', '-t', sessionName);
 
@@ -486,8 +539,14 @@ class TmuxEngine extends Engine {
   }
 
   /**
-   * Every tmux session on the box, not just ours — what the "Attach tmux session"
-   * menu lists. Rows: { name, windows, width, height, created }.
+   * Every tmux session on THIS ENGINE'S socket — what the "Attach tmux session" menu
+   * lists. Rows: { name, windows, width, height, created }.
+   *
+   * Since #625 that menu is about the USER's own tmux, so server.js calls this on the
+   * `socket: null` engine (userTmux()), never on the daemon's own. Called on the
+   * daemon's engine it would just list our `ds-*` sessions, which all already have
+   * tabs — hence "attach to a session deepsteve did not create" is now literally what
+   * the endpoint returns rather than something the caller has to filter for.
    *
    * Lives here rather than inline in server.js so there is exactly one place that
    * knows how to invoke tmux (#619); the endpoint used to run its own
@@ -520,7 +579,11 @@ class TmuxEngine extends Engine {
   }
 
   /**
-   * Does a tmux session with this name exist? Takes a RAW, user-supplied name —
+   * Does a tmux session with this name exist on THIS ENGINE'S socket? The companion
+   * to listAllSessions() and, like it, called on userTmux() since #625 — it gate-keeps
+   * the tmux-attach path, whose names come straight out of that listing.
+   *
+   * Takes a RAW, user-supplied name —
    * safe because it becomes one argv element, never a shell word. (It used to be
    * interpolated into `zsh -l -c 'tmux has-session -t "…"'` with only `"` escaped,
    * so a name containing `'` or `$(…)` reached a login shell.)

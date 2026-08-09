@@ -21,6 +21,7 @@ const net = require('node:net');
 const os = require('node:os');
 const path = require('node:path');
 const WebSocket = require('ws');
+const { TmuxSandbox } = require('../helpers/tmux-sandbox');
 
 const REPO_ROOT = path.resolve(__dirname, '..', '..');
 
@@ -45,6 +46,9 @@ exit 0
 let tmpRoot, HOME, projDir, PORT, BASE;
 let daemon = null;
 let daemonLog = '';
+// null until before() has validated one. `after()` uses `sandbox?.cleanup()`, so a
+// before() that throws leaves a no-op rather than an unaimed tmux command (#625).
+let sandbox = null;
 
 function freePort() {
   return new Promise((resolve, reject) => {
@@ -81,14 +85,13 @@ async function waitFor(check, what, timeoutMs = 15000, intervalMs = 100) {
 }
 
 async function startDaemon() {
-  // TMUX_TMPDIR must not just be SET, it must EXIST: tmux falls back to /tmp when
-  // it can't use the directory, which puts this daemon's sessions on the real
-  // per-UID socket — the exact isolation failure the variable is here to prevent.
-  // Harmless while node-pty was the default and no tmux session was ever created;
-  // since #620 it leaked a ds-* session onto the developer's socket per run.
-  const tmuxTmp = path.join(tmpRoot, 'tmux');
-  fs.mkdirSync(tmuxTmp, { recursive: true, mode: 0o700 });
-  const env = { ...process.env, HOME, PORT: String(PORT), TMUX_TMPDIR: tmuxTmp };
+  // This is where the "TMUX_TMPDIR must not just be SET, it must EXIST" rule used to
+  // live. #625 removed the rule rather than restating it: the daemon derives its socket
+  // from $HOME/.deepsteve/tmux.sock and passes it as `-S`, which has no fallback, so a
+  // scratch HOME IS a scratch tmux server. The sandbox anchors on that same HOME so
+  // `after()` can reap the tmux server that outlives the daemon.
+  sandbox = TmuxSandbox.forHome(HOME);
+  const env = { ...process.env, HOME, PORT: String(PORT) };
   delete env.CLAUDECODE;
   for (const k of Object.keys(env)) if (k.startsWith('DEEPSTEVE_')) delete env[k];
   // Suppress the cold-start browser auto-open (see window-restore.test.js): plant
@@ -239,6 +242,10 @@ after(async () => {
   caller.close();
   windowA.close();
   await stopDaemon().catch(() => {});
+  // A SIGTERMed daemon DETACHES its tmux sessions, so the scratch tmux server
+  // outlives it and the rm below would only unlink its socket — leaving a running
+  // server nothing can ever reach again. Reap it by name (#625).
+  try { sandbox?.cleanup(); } catch (e) { console.error(e.message); }
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 

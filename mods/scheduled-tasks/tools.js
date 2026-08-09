@@ -428,7 +428,10 @@ function runTask(task, reason, { foreground = false } = {}) {
       if (run && ACTIVE_STATUSES.has(run.status)) {
         run.status = 'ended'; run.endedAt = Date.now(); saveTasks(); broadcastTasks();
       }
-      ctx.handleShellGone(id);
+      // Named, because an unattended run's death is the one this log line has to be
+      // able to explain on its own: nobody was watching, and the run row above is the
+      // only other trace (#625).
+      ctx.handleShellGone(id, 'scheduled-run-ended');
       // PTY is dead and the tab is gone (auto-close after scheduled_task_finished,
       // manual close of a kept-open tab, or a crash-'ended' run): reclaim the
       // per-run worktree. Conservative — see cleanupWorktree. The isShuttingDown

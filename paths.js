@@ -80,6 +80,57 @@ function statePath(...segments) {
 }
 
 /**
+ * deepsteve's OWN tmux server socket (#625).
+ *
+ * Before this, the tmux engine passed no socket flag and inherited tmux's default —
+ * `$TMUX_TMPDIR`-or-`/tmp` + `tmux-<uid>/default`, which is per-UID and NOT per-HOME.
+ * So the HOME isolation every test daemon already does correctly bought nothing, and
+ * isolation instead rode on a convention (set TMUX_TMPDIR *and* mkdir it) with a
+ * silent fallback to the developer's real socket. A test's `kill-server` took that
+ * fallback and destroyed every live agent on the machine, three times in one morning.
+ *
+ * Deriving the socket from stateDir() makes socket isolation a consequence of HOME
+ * isolation, automatically and for every caller. `tmux -S <path>` has no fallback of
+ * its own (man tmux: "If -S is specified, the default socket directory is not used"):
+ * point it somewhere unusable and tmux starts a NEW EMPTY server there — it can never
+ * silently resolve to someone else's sessions, which the env var can.
+ *
+ * Side benefit: this is far shorter than the old `$TMPDIR/tmux-<uid>/default`, and it
+ * is EXACT — tmux appends nothing — so the ~104-byte sun_path budget is finally a
+ * number a caller can check instead of a silent "tmux is installed and unusable".
+ *
+ * Twinned by ds_tmux_socket in service.sh (test/unit/service-definition.test.js
+ * compares them), and by test/helpers/tmux-sandbox.js, which derives a test daemon's
+ * socket from the same expression so both sides are provably on one server.
+ */
+function tmuxSocketPath(opts = {}) {
+  return path.join(stateDir(opts), 'tmux.sock');
+}
+
+/**
+ * Where tmux puts its OWN default socket — i.e. where every deepsteve session created
+ * before #625 still lives. `$TMUX_TMPDIR`-or-`/tmp` + `tmux-<uid>/default`, which is
+ * what `man tmux` documents for `-L`.
+ *
+ * This exists so the one-time migration can name that socket with `-S` instead of
+ * letting tmux resolve it, and the difference is not academic. **A tmux client inside a
+ * pane ignores TMUX_TMPDIR entirely** and uses the socket named in `$TMUX` — so a
+ * process that inherited `TMUX` (every agent-run test, since a deepsteve tab IS a tmux
+ * pane) silently talks to whatever server it happens to be sitting in. That is what
+ * made the old test-isolation convention a no-op rather than merely fragile: the rule
+ * was "set TMUX_TMPDIR and mkdir it", and inside a pane neither clause did anything at
+ * all. A killing path must not inherit its target from ambient state, so it computes
+ * the path and passes `-S`.
+ *
+ * Not used for anything deepsteve creates — only for finding what predates the move.
+ */
+function defaultTmuxSocketPath({ env = process.env, uid } = {}) {
+  const id = uid !== undefined ? uid : (typeof process.getuid === 'function' ? process.getuid() : 0);
+  const base = env.TMUX_TMPDIR || '/tmp';
+  return path.join(base, `tmux-${id}`, 'default');
+}
+
+/**
  * Where the service definition points our stdout/stderr.
  *
  * Mirrored by ds_log_dir in service.sh, which is what actually writes the
@@ -95,4 +146,7 @@ function logDir({ platform = process.platform, env = process.env, homedir = os.h
     : path.join(homedir, '.local', 'share', 'deepsteve', 'logs');
 }
 
-module.exports = { expandTilde, stateDir, statePath, logDir, DEFAULT_STATE_DIRNAME };
+module.exports = {
+  expandTilde, stateDir, statePath, tmuxSocketPath, defaultTmuxSocketPath, logDir,
+  DEFAULT_STATE_DIRNAME,
+};

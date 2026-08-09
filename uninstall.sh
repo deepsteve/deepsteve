@@ -34,6 +34,15 @@ if [ "$(ds_platform)" != "darwin" ]; then
     rmdir "$LOG_DIR" 2>/dev/null || true
 fi
 
+# End deepsteve's own tmux server BEFORE the directory holding its socket goes (#625).
+# Shutdown detaches rather than kills (#620), so its sessions are still running here —
+# and the rm below would only unlink the socket, leaving panes alive that nothing can
+# ever reach again. Legitimately a whole-server verb: the socket is named with -S and
+# is provably ours, and uninstalling deepsteve is meant to end deepsteve's sessions.
+if command -v tmux >/dev/null 2>&1; then
+    tmux -S "$(ds_tmux_socket)" kill-server 2>/dev/null || true
+fi
+
 rm -rf "$(ds_install_dir)"
 
 # Remove installed skills from Claude Code commands

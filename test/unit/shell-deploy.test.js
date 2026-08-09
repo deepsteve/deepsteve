@@ -220,7 +220,14 @@ test('CI runs the daemon under a real systemd user instance (#621)', () => {
   const job = wf.slice(wf.indexOf('\n  systemd:'));
   assert.match(job, /systemctl --user is-active/, 'it must assert the daemon really started');
   assert.match(job, /systemd-analyze --user verify/, 'and validate the unit with systemd itself');
-  assert.match(job, /tmux has-session/, 'and prove a restart preserves live sessions (the KillMode test)');
+  // `-S <socket>` is part of the assertion, not incidental: since #625 the daemon runs
+  // its own tmux server, so a bare `tmux has-session` would query the runner's default
+  // socket, find nothing, and fail with "the daemon did not create a tmux session" —
+  // pointing every future reader at KillMode instead of at the query.
+  assert.match(job, /tmux -S "\$SOCK" has-session/,
+    'and prove a restart preserves live sessions (the KillMode test), asking OUR socket');
+  assert.match(job, /SOCK="\$HOME\/\.deepsteve\/tmux\.sock"/,
+    'the socket must be the one paths.js derives (#625)');
   assert.match(job, /uninstall\.sh/, 'and check teardown');
   assert.ok(!/apt-get install[^\n]*\bzsh\b/.test(job),
     'installing zsh here would blind the job to a zsh dependency creeping back');

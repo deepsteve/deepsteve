@@ -21,20 +21,23 @@
  */
 const { test, before, after } = require('node:test');
 const assert = require('node:assert');
-const { spawn, execFileSync } = require('node:child_process');
+const { spawn } = require('node:child_process');
 const fs = require('node:fs');
 const net = require('node:net');
 const os = require('node:os');
 const path = require('node:path');
+const { TmuxSandbox } = require('../helpers/tmux-sandbox');
 
 const REPO_ROOT = path.resolve(__dirname, '..', '..');
 
-let TMUX_BIN = null;
-try { TMUX_BIN = execFileSync('/usr/bin/which', ['tmux'], { encoding: 'utf8' }).trim() || null; } catch {}
-const SKIP = TMUX_BIN ? false : 'tmux is not installed';
+// The daemon's own resolver rather than a hand-rolled `which` (#625): this skips
+// exactly when the daemon would have fallen back to node-pty, and it finds a tmux the
+// bare `which` could not (/opt/homebrew/bin, which a LaunchAgent's PATH omits).
+const SKIP = TmuxSandbox.skipReason();
 
 let tmpRoot;
 const running = []; // every daemon we start, so `after` can guarantee teardown
+const sandboxes = []; // one per install — each daemon has its OWN socket (#625)
 
 function freePort() {
   return new Promise((resolve, reject) => {
@@ -65,10 +68,14 @@ async function waitFor(check, what, timeoutMs = 20000) {
  */
 function makeInstall(name, settings) {
   const HOME = path.join(tmpRoot, name);
-  const tmuxTmp = path.join(HOME, 'tmux-tmp');
   fs.mkdirSync(path.join(HOME, '.deepsteve'), { recursive: true });
   fs.mkdirSync(path.join(HOME, 'bin'), { recursive: true });
-  fs.mkdirSync(tmuxTmp, { recursive: true, mode: 0o700 });
+  // Each install gets its own tmux server for free (#625): the daemon derives its
+  // socket from this HOME. Registered so `after` reaps every one of them — a SIGKILLed
+  // daemon leaves its tmux server running, and rm -rf(tmpRoot) would only unlink the
+  // socket, orphaning a server nothing can reach.
+  const sandbox = TmuxSandbox.forHome(HOME);
+  sandboxes.push(sandbox);
   fs.writeFileSync(path.join(HOME, 'bin', 'open'), '#!/bin/bash\nexit 0\n', { mode: 0o755 });
   fs.writeFileSync(path.join(HOME, '.deepsteve', '.restarting'), ''); // no browser auto-open
   if (settings) {
@@ -76,7 +83,7 @@ function makeInstall(name, settings) {
   }
 
   const inst = {
-    HOME, tmuxTmp, proc: null, port: null, base: null, log: '',
+    HOME, sandbox, proc: null, port: null, base: null, log: '',
     token() {
       try { return fs.readFileSync(path.join(HOME, '.deepsteve', 'auth-token'), 'utf8').trim(); }
       catch { return ''; }
@@ -103,7 +110,6 @@ function makeInstall(name, settings) {
       delete env.CLAUDECODE;
       for (const k of Object.keys(env)) if (k.startsWith('DEEPSTEVE_')) delete env[k];
       env.PATH = `${path.join(HOME, 'bin')}:${process.env.PATH}`;
-      env.TMUX_TMPDIR = tmuxTmp; // per-UID socket — never share the developer's
       inst.proc = spawn('node', ['server.js'], { cwd: REPO_ROOT, env });
       running.push(inst);
       inst.proc.stdout.on('data', d => { inst.log += d.toString(); });
@@ -138,6 +144,9 @@ after(async () => {
   for (const inst of running) { try { await inst.stop('SIGKILL'); } catch {} }
   running.length = 0;
   await sleep(300);
+  // Reap each install's tmux server by name before the tree goes (#625).
+  for (const s of sandboxes) { try { s.cleanup(); } catch (e) { console.error(e.message); } }
+  sandboxes.length = 0;
   if (tmpRoot) fs.rmSync(tmpRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
 });
 

@@ -14,7 +14,7 @@ const { createPowerAssertion } = require('./power-assertion');
 const { resolveForkTip } = require('./fork-resolve');
 const { formatLogTimestamp, createLogRotator, defaultLogPaths } = require('./logging');
 const { findGitRoot } = require('./git-root');
-const { stateDir, expandTilde } = require('./paths');
+const { stateDir, expandTilde, tmuxSocketPath, defaultTmuxSocketPath } = require('./paths');
 const { resolveBinary, runBinary, resolveUrlOpener, resolveLoginShell } = require('./bin-path');
 const { createPendingOpens } = require('./pending-opens');
 const { classifyScreenTail, CLAUDE_SCREEN_MARKERS } = require('./screen-classifier');
@@ -89,6 +89,10 @@ const CANONICAL_REDIRECT = !(parseCLIFlag('no-canonical-redirect') || process.en
 // constant for the process lifetime, so every path built from it below is exactly the
 // string the inline path.join(DS_DIR, …) used to produce.
 const DS_DIR = stateDir();
+// A Unix socket's sun_path, minus the NUL. The tmux socket lives under DS_DIR since
+// #625, so this is what bounds how deep a $HOME (or a test's mkdtemp) can be before
+// tmux stops working. Reported at boot; the `tmuxSocket` setting is the way out.
+const SUN_PATH_LIMIT = process.platform === 'darwin' ? 103 : 107;
 const CERTS_DIR = path.join(DS_DIR, 'certs');
 const AUTOMATIONS_DIR = path.join(DS_DIR, 'automations');
 
@@ -527,6 +531,14 @@ const SETTINGS_SCHEMA = [
   // with a '/' is used verbatim. Applies on daemon restart: the engine probes once,
   // at construction.
   { name: 'tmuxBinary',                 type: 'string',  default: 'tmux',     fallbackOnEmpty: true, broadcast: false },
+  // Escape hatch for a socket path the state dir can't host (#625). Two real cases:
+  // a $HOME long enough to blow the ~104-byte sun_path limit, and an NFS/SMB home
+  // where bind() is unsupported — the latter being a NEW failure mode, since before
+  // #625 the socket always lived under /tmp and was therefore always local. Empty
+  // means derive it: paths.js's tmuxSocketPath(), i.e. ~/.deepsteve/tmux.sock.
+  // Tilde-expanded. Applies on daemon restart: the socket is fixed at engine
+  // construction, like tmuxBinary above.
+  { name: 'tmuxSocket',                 type: 'string',  default: '',         broadcast: false },
   { name: 'symlinkWorktreeSettings',    type: 'boolean', default: false },
   { name: 'recentSessionsLimit',        type: 'number',  default: 8, clamp: [0, 50], round: true,
     sideEffect: (val, s) => { trimRecentSessions(); } },
@@ -767,11 +779,49 @@ let tmuxUnavailableReason = null;
 // with Restart=always/RestartSec=5 the failure is an invisible crash loop that needs
 // journalctl to even see. Boot, degrade, and say so loudly instead.
 const TMUX_REQUIRED = process.platform !== 'darwin';
+
+// deepsteve's OWN tmux server (#625). Everything the engine runs carries
+// `-S TMUX_SOCKET`, so a daemon with an isolated HOME has an isolated tmux — which is
+// what finally makes "a test can never reach the developer's sessions" a property of
+// the architecture rather than of a convention every suite has to re-implement.
+//
+// The mkdir is required and cannot be assumed: with -S tmux only bind()s (it creates a
+// directory only for its own default socket), and ~/.deepsteve is otherwise created
+// lazily by saveSettings()/writeStateFile(), neither of which is guaranteed to have run
+// by the time the engine is constructed on a first boot.
+const TMUX_SOCKET = expandTilde(settings.tmuxSocket) || tmuxSocketPath();
+try { fs.mkdirSync(path.dirname(TMUX_SOCKET), { recursive: true }); } catch {}
+
+// The user's OWN tmux — tmux's default per-UID socket. Reached by exactly two
+// features, both of which are about sessions deepsteve did NOT create: the "Attach
+// tmux session" submenu (GET /api/tmux-sessions) and the tmux-attach tab it opens.
+// A separate, named engine instance rather than a flag on those calls, so that access
+// is opt-in and greppable instead of ambient — which is the whole shape of #625.
+// Lazy + memoized: a daemon that never opens that menu never probes tmux twice.
+let _userTmux;
+function userTmux() {
+  if (_userTmux === undefined) {
+    _userTmux = tmuxEngine ? new TmuxEngine({ binary: settings.tmuxBinary, socket: null }) : null;
+  }
+  return _userTmux;
+}
+
 {
-  const tmuxCheck = new TmuxEngine({ binary: settings.tmuxBinary });
+  const tmuxCheck = new TmuxEngine({ binary: settings.tmuxBinary, socket: TMUX_SOCKET });
   if (tmuxCheck.available) {
     tmuxEngine = tmuxCheck;
     log(`Engine: tmux v${tmuxEngine.version} (available) at ${tmuxEngine.tmuxPath}`);
+    // Name the socket and its size at boot. The one failure this pre-empts —
+    // "tmux is installed and completely unusable" from a socket path over sun_path —
+    // used to be diagnosable only by reading spawnSession's fallback message after a
+    // session had already degraded. ~104 bytes on macOS, 108 on Linux; warn early.
+    const sockBytes = Buffer.byteLength(TMUX_SOCKET);
+    log(`Engine: tmux socket ${TMUX_SOCKET} (${sockBytes} bytes; sun_path limit ~${SUN_PATH_LIMIT})`);
+    if (sockBytes > SUN_PATH_LIMIT - 12) {
+      log(`Engine: WARNING — that socket path is close to the ${SUN_PATH_LIMIT}-byte limit. ` +
+          'If tmux cannot create sessions, set `tmuxSocket` in ~/.deepsteve/settings.json ' +
+          'to a shorter path and restart.');
+    }
   } else {
     // Say WHERE we looked (#619). A bare "tmux not available" is the failure shape
     // that hid the zsh dependency for as long as it did, and tmux is on its way to
@@ -3033,11 +3083,37 @@ function tombstoneSession(id, entry, reason) {
 // non-closed) and when an explicit close path already removed the shell (that
 // path wrote savedState itself — e.g. the ws-close grace path writes a
 // NON-closed entry that must not be overwritten with closed:true).
-function handleShellGone(id) {
-  if (shuttingDown) return;
+//
+// It LOGS (#625). This function is the funnel every unexpected session death flows
+// through, and it used to be silent: three mass closures left no trace in the daemon
+// log beyond the periodic `Saved N sessions` lines, and the trigger was only found by
+// monkey-patching WebSocket.prototype.send in the browser to capture a stack. One line
+// per close — not a roster, which is the #557 lesson.
+//
+// `reason` is optional: killShell already records why in closeReasons (it survives the
+// shells.delete that happens first), so almost every caller can stay `handleShellGone(id)`
+// and still produce a truthful line. Pass one only where the caller knows something
+// closeReasons does not.
+//
+// Both early returns log too. "handleShellGone did nothing" and "handleShellGone was
+// never called" are different diagnoses that used to look identical from the log, and
+// both of these are legitimate outcomes rather than errors.
+function handleShellGone(id, reason) {
+  if (shuttingDown) {
+    log(`[shell-gone] ${id} ignored — shutting down (the final snapshot owns persistence)`);
+    return;
+  }
   const entry = shells.get(id);
-  if (!entry) return;
-  tombstoneSession(id, entry);
+  if (!entry) {
+    log(`[shell-gone] ${id} already removed — an explicit close path handled it`);
+    return;
+  }
+  const why = reason || closeReasons.get(id) || 'exited';
+  const upSec = entry.createdAt ? Math.round((Date.now() - entry.createdAt) / 1000) : '?';
+  log(`[shell-gone] ${id} reason=${why} engine=${entry.engineType || 'node-pty'} ` +
+      `agent=${entry.agentType || 'claude'} clients=${entry.clients ? entry.clients.size : 0} ` +
+      `up=${upSec}s name=${entry.name || '-'} cwd=${entry.cwd || '-'}`);
+  tombstoneSession(id, entry, why);
   notifyClientsShellExited(id);
   disposeTerminalScreen(entry);
   shells.delete(id);
@@ -3668,6 +3744,13 @@ app.get('/api/engines', (req, res) => {
     // dropdown doesn't label an installed tmux "not installed" — but it drives the
     // same warning, because the user is on the perishable engine either way.
     tmuxRuntimeFailure,
+    // The socket we actually bound and how big it is (#625), so the fallback panel can
+    // NAME the offending path instead of saying "tmux failed". A path over the limit is
+    // the one runtime failure with a self-evident fix, and the user cannot see the
+    // number from the browser any other way.
+    tmuxSocket: TMUX_SOCKET,
+    tmuxSocketBytes: Buffer.byteLength(TMUX_SOCKET),
+    sunPathLimit: SUN_PATH_LIMIT,
     // Off macOS the fallback is materially worse (systemd restarts the daemon on every
     // crash and upgrade), so the client escalates its warning rather than showing the
     // same "perishable engine" badge. Sent as a fact rather than sniffed client-side —
@@ -3702,8 +3785,14 @@ app.post('/api/engine-migration', (req, res) => {
 app.get('/api/tmux-sessions', (req, res) => {
   // Goes through the engine so there is one place that knows how to invoke tmux
   // (#619) — this used to run its own `zsh -l -c 'tmux list-sessions …'`.
+  //
+  // userTmux(), not tmuxEngine (#625): this menu is about the user's OWN tmux, on
+  // tmux's default per-UID socket. Our own ds-* sessions have moved to
+  // ~/.deepsteve/tmux.sock and no longer appear here — which is a small improvement,
+  // since offering a raw second attach to a pane that already has a tab was never
+  // useful. Reaching the shared socket is deliberate and named; it is not the default.
   if (!tmuxEngine) return res.json({ sessions: [] });
-  const sessions = tmuxEngine.listAllSessions().map(s => ({
+  const sessions = userTmux().listAllSessions().map(s => ({
     ...s,
     // Is any deepsteve shell already attached to this session?
     attached: [...shells.values()].some(e => e.tmuxSession === s.name),
@@ -5590,14 +5679,20 @@ if (tmuxEngine) {
     for (const id of tmuxSessions) try {
       const meta = savedState[id];
       // Ownership rule (#620): destroy ONLY what this daemon can positively
-      // identify as its own and finished. tmux's socket is per-UID, not per-HOME,
-      // so listSessions() also returns ds-* sessions belonging to other daemons —
-      // a test daemon that forgot TMUX_TMPDIR, a `node server.js`, a second
-      // worktree. Each of those reads its own state.json, finds nothing, and used
-      // to destroy every real session on the box. Harmless while almost nobody ran
-      // tmux; catastrophic now that it is the default.
+      // identify as its own and finished.
+      //
+      // #625 moved us onto our own socket, so "everything here is ours" is now
+      // SUPPOSED to be true — but this rule stays verbatim as the second line of
+      // defence, because every way it can still be false is a way we cannot identify
+      // the session: state.json lost, rolled back or hand-edited; the daemon died
+      // between spawn() and saveState(); a human ran `tmux -S <ours> new -s ds-foo`;
+      // two daemons sharing one DEEPSTEVE_HOME. Tightening this to "destroy unknown"
+      // would buy garbage collection of a rare orphan and cost a fresh way to kill a
+      // live agent — which is the trade this whole issue exists to refuse.
       if (!meta) {
-        log(`tmux: session ${id} is not in our state.json — leaving it alone (not ours to kill)`);
+        log(`tmux: session ${id} is on our socket but absent from state.json — leaving it ` +
+            `alone (not ours to kill). Reclaim it manually with: ` +
+            `tmux -S ${TMUX_SOCKET} kill-session -t ds-${id}`);
         continue;
       }
       // A tombstoned session whose tmux session outlived the daemon means the kill
@@ -5635,7 +5730,11 @@ if (tmuxEngine) {
         if (agentConfig.supportsSessionWatch) watchClaudeSessionDir(id);
         tmuxEngine.onExit(id, () => {
           if (agentConfig.supportsSessionWatch) unwatchClaudeSessionDir(id);
-          handleShellGone(id);
+          // Named explicitly: a reattached session has no closeReasons entry (nothing
+          // in THIS process ever asked it to close), so without this the line would
+          // read `reason=exited` for the one case where "the pane died on its own"
+          // is the whole diagnosis.
+          handleShellGone(id, 'tmux-pane-exited');
         });
         delete savedState[id]; // saved → live promotion, not a close
         // The WS restore path bumps recency here and this one didn't, so a session
@@ -5654,6 +5753,66 @@ if (tmuxEngine) {
       log(`tmux: error reattaching session ${id}, skipping it: ${e.message}`);
     }
     saveState();
+  }
+}
+
+// --- one-time migration off tmux's shared per-UID socket (#625) ---
+//
+// Sessions created before this change live on tmux's default socket, and every one of
+// them is alive right now: restart.sh stops the old daemon, whose shutdown DETACHES
+// tmux sessions rather than killing them (#620). The reattach pass above looked only
+// at OUR socket, so it found nothing, and their state.json records are still
+// non-closed — i.e. restorable.
+//
+// Leaving them running is the one option that is actually unsafe. The record says
+// "restorable", so the first WS reconnect spawns `claude --resume <same uuid>` in a
+// fresh pane on the new socket WHILE the old pane is still working the same worktree
+// and writing the same transcript. Two live agents, one conversation. So: end the old
+// pane and tombstone the record. The conversation is untouched and comes back on
+// reconnect exactly as any other tombstone does (#561); only an in-flight turn is lost.
+//
+// Deliberately NOT a sweep and deliberately NOT kill-server: this only ever names ids
+// that OUR OWN state.json already claims, one `kill-session -t ds-<id>` each. And the
+// whole pass is skipped unless such a record exists, so it costs a fresh install
+// nothing and goes permanently quiet after the first boot that finds them.
+if (tmuxEngine) {
+  // One list-sessions per socket, not a has-session per record: an install with a few
+  // dozen restorable entries would otherwise fork tmux a few dozen times at boot.
+  let onOurs = [];
+  try { onOurs = tmuxEngine.listSessions(); } catch { onOurs = []; }
+  const stranded = Object.keys(savedState).filter(id => {
+    const m = savedState[id];
+    return m && !m.closed && m.engineType === 'tmux' && !onOurs.includes(id);
+  });
+  if (stranded.length > 0) {
+    // NOT userTmux() (which is socket:null, i.e. "whatever tmux resolves"): this is a
+    // killing path, and it must not inherit its target from ambient state. A tmux client
+    // that inherited `TMUX` — as any process started from inside a pane does — ignores
+    // TMUX_TMPDIR and talks to the server it is sitting in. So compute the path tmux
+    // would have used for a daemon under launchd/systemd, which is where pre-#625
+    // sessions actually are, and name it with -S.
+    const legacySocket = defaultTmuxSocketPath();
+    const legacyTmux = new TmuxEngine({ binary: settings.tmuxBinary, socket: legacySocket });
+    let onShared = [];
+    try { onShared = legacyTmux.listSessions(); } catch { onShared = []; }
+    const migrating = stranded.filter(id => onShared.includes(id));
+    for (const id of migrating) {
+      const meta = savedState[id];
+      log(`tmux: ds-${id} (${meta.name || meta.cwd || 'unnamed'}) predates the socket move ` +
+          `(#625) and is still running on ${legacySocket} — ending its old pane. The ` +
+          `conversation is intact and resumes when you reopen the tab.`);
+      try { legacyTmux.destroy(id); } catch (e) {
+        log(`tmux: could not end the old pane for ds-${id}: ${e.message} — reclaim it with ` +
+            `\`tmux -S ${legacySocket} kill-session -t ds-${id}\``);
+      }
+      pendingOpens.drop(id);
+      savedState[id] = { ...meta, closed: true, closedAt: Date.now(), closeReason: 'socket-migration' };
+    }
+    if (migrating.length) {
+      log(`tmux: migrated ${migrating.length} pre-#625 session(s) off the shared socket. ` +
+          `New sessions live on ${TMUX_SOCKET}.`);
+      saveState();
+    }
   }
 }
 
@@ -5830,7 +5989,11 @@ function handleWsConnection(ws, req) {
     // Check tmux session exists. Via the engine (#619): the name is user-supplied
     // and now becomes one argv element instead of being interpolated into
     // `zsh -l -c 'tmux has-session -t "…"'` with only `"` escaped.
-    if (!tmuxEngine.hasSession(tmuxSession)) {
+    //
+    // userTmux() (#625): the name came out of GET /api/tmux-sessions, which lists the
+    // user's default per-UID socket — so the existence check and the attach below must
+    // ask that same server, not deepsteve's own.
+    if (!userTmux().hasSession(tmuxSession)) {
       ws.send(JSON.stringify({ type: 'error', message: `tmux session "${tmuxSession}" not found` }));
       ws.close();
       return;
@@ -5840,12 +6003,17 @@ function handleWsConnection(ws, req) {
     const id = randomUUID().slice(0, 8);
     // The engine owns the attach recipe — resolved absolute path (a bare `tmux` is
     // ENOENT under a LaunchAgent), `-u`, `-T RGB,256` and the locale-filled env
-    // (#624). This used to be an independent copy of that spawn and drifted from
-    // the engine's; asking for it keeps the two attach paths identical by
-    // construction. The PTY itself still belongs to this handler, because a
-    // tmux-attach tab is a session we don't own and must never kill.
+    // (#624), plus the socket flags (#625). This used to be an independent copy of
+    // that spawn and drifted from the engine's; asking for it keeps the two attach
+    // paths identical by construction. The PTY itself still belongs to this handler,
+    // because a tmux-attach tab is a session we don't own and must never kill.
+    //
+    // userTmux(), not tmuxEngine (#625): the session name came out of
+    // GET /api/tmux-sessions, which lists the user's default per-UID socket, so the
+    // attach must ask that same server. On a socket:null engine attachSpawnArgs emits
+    // no -S at all, which makes this call site byte-for-byte its pre-#625 self.
     const { file: tmuxBin, argv: attachArgv, opts: attachOpts } =
-      tmuxEngine.attachSpawnArgs(tmuxSession, initialCols, initialRows);
+      userTmux().attachSpawnArgs(tmuxSession, initialCols, initialRows);
     const attachPty = pty.spawn(tmuxBin, attachArgv, attachOpts);
 
     const entry = {
@@ -6075,7 +6243,7 @@ function handleWsConnection(ws, req) {
           const elapsed = Date.now() - attemptStart;
           const entry = shells.get(id);
           if (elapsed >= 5000 || !claudeSessionId || !agentConfig.supportsSessionWatch || !entry || restoreAttempt >= 2) {
-            handleShellGone(id);
+            handleShellGone(id, `restore-gave-up-after-attempt-${restoreAttempt}`);
             return;
           }
           restoreAttempt++;

@@ -25,6 +25,7 @@ const net = require('node:net');
 const os = require('node:os');
 const path = require('node:path');
 const WebSocket = require('ws');
+const { TmuxSandbox } = require('../helpers/tmux-sandbox');
 
 const REPO_ROOT = path.resolve(__dirname, '..', '..');
 
@@ -52,6 +53,9 @@ exit 0
 
 let tmpRoot, HOME, PORT, BASE, projDir;
 let daemon = null;
+// null until before() has validated one. `after()` uses `sandbox?.cleanup()`, so a
+// before() that throws leaves a no-op rather than an unaimed tmux command (#625).
+let sandbox = null;
 let daemonLog = '';
 
 function freePort() {
@@ -92,11 +96,13 @@ async function startDaemon() {
   fs.mkdirSync(path.join(HOME, '.deepsteve'), { recursive: true });
   fs.writeFileSync(path.join(HOME, '.deepsteve', '.restarting'), ''); // no browser auto-open
   env.PATH = `${path.join(HOME, 'bin')}:${process.env.PATH}`;
-  // tmux's default socket is per-UID, not per-HOME — without this the scratch
-  // daemon reaps the real user's ds-* sessions as orphans (see CLAUDE.md).
-  const tmuxTmp = path.join(HOME, 'tmux-tmp');
-  fs.mkdirSync(tmuxTmp, { recursive: true, mode: 0o700 });
-  env.TMUX_TMPDIR = tmuxTmp;
+  // The daemon derives its tmux socket from $HOME/.deepsteve/tmux.sock and passes it
+  // as `-S` (#625), so a scratch HOME IS a scratch tmux server — there is no
+  // TMUX_TMPDIR to set, and setting one would isolate nothing while reading like it
+  // did. The sandbox anchors on that same HOME so this suite and the daemon are
+  // provably on ONE socket, and so `after()` can reap the tmux server that outlives
+  // the daemon (shutdown detaches rather than kills).
+  sandbox = TmuxSandbox.forHome(HOME);
 
   daemon = spawn('node', ['server.js', '--test-mode'], { cwd: REPO_ROOT, env });
   daemon.stdout.on('data', d => { daemonLog += d.toString(); });
@@ -211,6 +217,10 @@ before(async () => {
 
 after(async () => {
   await stopDaemon().catch(() => {});
+  // A SIGTERMed daemon DETACHES its tmux sessions, so the scratch tmux server
+  // outlives it and the rm below would only unlink its socket — leaving a running
+  // server nothing can ever reach again. Reap it by name (#625).
+  try { sandbox?.cleanup(); } catch (e) { console.error(e.message); }
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 

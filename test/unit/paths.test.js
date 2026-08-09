@@ -11,7 +11,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
-const { expandTilde, stateDir, statePath, logDir, DEFAULT_STATE_DIRNAME } = require('../../paths');
+const { expandTilde, stateDir, statePath, tmuxSocketPath, logDir, DEFAULT_STATE_DIRNAME } = require('../../paths');
 
 const REPO = path.join(__dirname, '..', '..');
 const HOME = '/home/tester';
@@ -56,6 +56,21 @@ test('statePath joins onto the state dir', () => {
 
 test('the default dirname is the literal every shell script also hardcodes', () => {
   assert.strictEqual(DEFAULT_STATE_DIRNAME, '.deepsteve');
+});
+
+test('tmuxSocketPath tracks the state dir, so HOME isolation is socket isolation (#625)', () => {
+  // The property the whole issue rests on: the tmux socket moves with the state dir,
+  // so a daemon with its own HOME (every test daemon, every second instance) gets its
+  // own tmux server without doing anything. Before this it inherited tmux's per-UID
+  // default and a test could — and did — kill the developer's live sessions.
+  assert.strictEqual(tmuxSocketPath({ env: {}, homedir: HOME }), '/home/tester/.deepsteve/tmux.sock');
+  assert.strictEqual(
+    tmuxSocketPath({ env: { DEEPSTEVE_HOME: '/srv/ds' }, homedir: HOME }), '/srv/ds/tmux.sock');
+  assert.strictEqual(
+    path.dirname(tmuxSocketPath({ env: {}, homedir: HOME })), stateDir({ env: {}, homedir: HOME }));
+  // And it is short. A Unix socket's sun_path is 104 bytes including the NUL, and the
+  // old `$TMPDIR/tmux-<uid>/default` regularly came within a couple of bytes of it.
+  assert.ok(Buffer.byteLength(tmuxSocketPath()) < 100, tmuxSocketPath());
 });
 
 // --- logDir ---------------------------------------------------------------

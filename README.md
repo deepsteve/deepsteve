@@ -25,6 +25,8 @@ Run multiple AI agent sessions side-by-side in your browser, each with full term
 
 deepsteve runs agent sessions (see [docs/agents.md](docs/agents.md)) inside **tmux** panes, connected to the browser via WebSocket. This is the default whenever tmux is installed, and it is what makes sessions durable: the agent belongs to the tmux server rather than to deepsteve, so it keeps working through a daemon crash, a `./restart.sh`, an auto-update, and closing the browser. Reconnecting reattaches the same live pane.
 
+deepsteve runs its **own** tmux server, on the socket `~/.deepsteve/tmux.sock`, so its panes never mix with the ones you start yourself — `tmux ls` shows yours, `tmux -S ~/.deepsteve/tmux.sock ls` shows deepsteve's. (Set `tmuxSocket` in `~/.deepsteve/settings.json` if that path won't work, e.g. a home directory on a network filesystem.) One consequence worth knowing: **uninstalling ends deepsteve's sessions**, since removing `~/.deepsteve` would otherwise leave panes running that nothing could reach again.
+
 Without tmux, deepsteve falls back to **node-pty**, which runs each session as a child process of the Node server. Everything works the same except durability — those sessions die with the server. The fallback is deliberately visible: the ⚙ button carries an orange dot and Settings → Terminal says which engine you are on and, if tmux wasn't found, where it looked. Install tmux to get durable sessions; if yours lives somewhere the search can't see, point the `tmuxBinary` setting at it.
 
 ## Features

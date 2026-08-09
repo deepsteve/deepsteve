@@ -7,10 +7,12 @@
 # composes set it to http://server:3000), it is used as-is — the helpers still verify
 # the target reports /api/version.testMode === true before any destructive call.
 # If it is NOT set, this script provisions a throwaway daemon: scratch HOME (own
-# auth-token/state/settings), random port, DEEPSTEVE_TEST_MODE=1, and an isolated
-# TMUX_TMPDIR — tmux's default socket is per-UID, NOT per-HOME, so without it the
-# scratch daemon would see the developer's real ds-* tmux sessions and destroy them
-# as orphans at startup. The daemon and scratch dir are torn down on exit.
+# auth-token/state/settings), random port, DEEPSTEVE_TEST_MODE=1. The scratch HOME is
+# also what isolates tmux since #625 — the daemon runs its own tmux server on
+# $HOME/.deepsteve/tmux.sock and passes it as `-S`, so there is no TMUX_TMPDIR here and
+# there must not be one: that variable has a silent fallback to the developer's real
+# per-UID socket, and isolation resting on it is what let a test destroy every live
+# agent on the machine. The daemon and scratch dir are torn down on exit.
 #
 # Serial execution is REQUIRED, not just nice-to-have: the suite shares one
 # server, and the "killall removes all active sessions" tests (session-lifecycle,
@@ -47,18 +49,31 @@ if [ -z "$DEEPSTEVE_URL" ]; then
   for v in $(env | awk -F= '/^DEEPSTEVE_/{print $1}'); do unset "$v"; done
   unset CLAUDECODE
 
+  # Saved BEFORE the `export HOME="$SCRATCH"` further down: the reaper in cleanup()
+  # anchors a TmuxSandbox, which refuses to point at whatever the current $HOME is —
+  # and by then $HOME *is* the scratch dir we are trying to reap.
+  REAL_HOME="$HOME"
   SCRATCH="$(mktemp -d)"
   PORT="$(node -e 'const s=require("net").createServer();s.listen(0,"127.0.0.1",()=>{console.log(s.address().port);s.close();})')"
-  mkdir -p "$SCRATCH/.deepsteve" "$SCRATCH/tmux"
+  # This is also the tmux socket's directory since #625, so pre-creating it is newly
+  # load-bearing rather than merely tidy.
+  mkdir -p "$SCRATCH/.deepsteve"
   # Backstop against the browser auto-open (TEST_MODE already skips it server-side).
   : > "$SCRATCH/.deepsteve/.restarting"
 
-  HOME="$SCRATCH" PORT="$PORT" DEEPSTEVE_TEST_MODE=1 TMUX_TMPDIR="$SCRATCH/tmux" \
+  HOME="$SCRATCH" PORT="$PORT" DEEPSTEVE_TEST_MODE=1 \
     node server.js >"$SCRATCH/server.log" 2>&1 &
   SERVER_PID=$!
   cleanup() {
     kill "$SERVER_PID" 2>/dev/null || true
     wait "$SERVER_PID" 2>/dev/null || true
+    # Shutdown DETACHES tmux sessions (#620), so the scratch tmux server outlives the
+    # daemon and the rm below would only unlink its socket — leaving a running server
+    # nothing can ever reach again. Reaped through the one helper allowed to exec tmux,
+    # which is also why this is `node -e` and not a `tmux` command here (#625).
+    env HOME="$REAL_HOME" \
+      node -e 'require("./test/helpers/tmux-sandbox").TmuxSandbox.reapHome(process.argv[1])' \
+      "$SCRATCH" 2>/dev/null || true
     rm -rf "$SCRATCH"
   }
   trap cleanup EXIT INT TERM

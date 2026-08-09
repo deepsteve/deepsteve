@@ -24,6 +24,11 @@ const path = require('path');
 const TmuxEngine = require('../../engines/tmux');
 const { LOCALE_VARS } = require('../../terminal-env');
 
+// Every tmux command carries `-S <socket>` since #625, so the assertions here are about
+// what follows it. `socketArgv()` strips the prefix (asserting it is there first); the
+// prefix itself is the subject of test/unit/tmux-socket.test.js.
+const SOCKET = '/tmp/ds-fake/tmux.sock';
+
 // A fake tmux on disk, so probeTmux() resolves and reports a version. `-V` is the
 // only call the constructor makes; everything after is captured.
 //
@@ -40,7 +45,7 @@ function makeEngine({ version = '3.5a', binaryName = 'tmux', env: extraEnv } = {
   const exec = (file, argv) => {
     calls.push({ file, argv });
     if (argv[0] === '-V') return `tmux ${version}`;
-    if (argv[0] === 'display-message') return '12345';
+    if (argv.includes('display-message')) return '12345';
     return '';
   };
   const ptys = [];
@@ -50,15 +55,22 @@ function makeEngine({ version = '3.5a', binaryName = 'tmux', env: extraEnv } = {
   };
 
   const daemonEnv = { PATH: dir, ...extraEnv };
-  const eng = new TmuxEngine({ binary: bin, env: daemonEnv, exec, spawnPty });
+  const eng = new TmuxEngine({ binary: bin, socket: SOCKET, env: daemonEnv, exec, spawnPty });
   return { eng, calls, ptys, bin, daemonEnv };
+}
+
+/** A command's argv with the socket prefix removed — and asserted present. */
+function afterSocket(argv) {
+  assert.deepStrictEqual(argv.slice(0, 2), ['-S', SOCKET],
+    'every tmux command must lead with the socket flag (#625)');
+  return argv.slice(2);
 }
 
 /** The argv of the `new-session` call, which is what we actually care about. */
 function newSessionArgv(calls) {
-  const c = calls.find((x) => x.argv[0] === 'new-session');
-  assert.ok(c, 'spawn() must issue a new-session');
-  return c.argv;
+  const c = calls.find((x) => x.argv.includes('new-session'));
+  assert.ok(c, 'a new-session must be issued by spawn()');
+  return afterSocket(c.argv);
 }
 
 /** The `-e KEY=VAL` pairs of a new-session argv, as an object. */
@@ -92,7 +104,7 @@ test('an injected exec reaches _exec, not just the version probe (#621)', () => 
   // none of this file could exist on a runner without tmux.
   const { eng, calls } = makeEngine();
   eng.spawn('abc12345', '/bin/zsh', ['-l', '-c', "claude '--x'"], '/repo', { shellCommand: "claude '--x'" });
-  assert.ok(calls.some((c) => c.argv[0] === 'new-session'), 'new-session must go through the injected exec');
+  assert.ok(calls.some((c) => c.argv.includes('new-session')), 'new-session must go through the injected exec');
 });
 
 test('an agent session passes the inner command through verbatim — no second shell', () => {
@@ -231,8 +243,10 @@ test('#624: the attach client declares UTF-8 and truecolor', () => {
   const p = attachPty(ptys);
   assert.strictEqual(p.file, bin);
   // Both are TOP-LEVEL tmux flags — `attach-session` accepts neither — so they must
-  // precede the subcommand or tmux exits with a usage error and the tab is dead.
-  assert.deepStrictEqual(p.argv, ['-u', '-T', 'RGB,256', 'attach-session', '-t', 'ds-abc12345']);
+  // precede the subcommand or tmux exits with a usage error and the tab is dead. Since
+  // #625 `-S <socket>` leads them, for the same reason and with the same consequence.
+  assert.deepStrictEqual(afterSocket(p.argv),
+    ['-u', '-T', 'RGB,256', 'attach-session', '-t', 'ds-abc12345']);
 });
 
 test('#624: -T is gated on tmux 3.2, -u is not', () => {
@@ -241,7 +255,7 @@ test('#624: -T is gated on tmux 3.2, -u is not', () => {
   // been there since 1.x, so it is unconditional and no locale can defeat it.
   const { eng, ptys } = makeEngine({ version: '3.0a' });
   eng.spawn('abc12345', '/bin/zsh', ['-l'], '/repo', { shellCommand: null });
-  assert.deepStrictEqual(attachPty(ptys).argv, ['-u', 'attach-session', '-t', 'ds-abc12345']);
+  assert.deepStrictEqual(afterSocket(attachPty(ptys).argv), ['-u', 'attach-session', '-t', 'ds-abc12345']);
 });
 
 test('#624: the attach client gets a UTF-8 locale the daemon does not have', () => {
@@ -309,8 +323,9 @@ test('#624: the pane gets the locale too, so the agent picks its Unicode glyph s
 test('#624: the pane env survives the "same as the daemon, skip it" diff', () => {
   // spawn() drops any caller value equal to the daemon's, because the pane inherits
   // it anyway. That is false for these two: a pane inherits the tmux SERVER's
-  // environment, and the server belongs to whoever started it — possibly the user's
-  // own tmux, since we share the per-UID default socket.
+  // environment, and the server belongs to whoever started it — which, even now that
+  // #625 gives us our own socket, is the FIRST daemon to have started it and not
+  // necessarily this one.
   const { eng, calls } = makeEngine({ version: '3.5a', env: { LC_CTYPE: 'en_US.UTF-8', COLORTERM: 'truecolor' } });
   eng.spawn('abc12345', '/bin/zsh', ['-l'], '/repo',
     { env: { LC_CTYPE: 'en_US.UTF-8', COLORTERM: 'truecolor' }, shellCommand: null });
@@ -334,4 +349,48 @@ test('#624: a stripEnv key is never resurrected by the terminal-env pass', () =>
   const { eng, calls } = makeEngine({ version: '3.5a', env: { PORT: '3000' } });
   eng.spawn('abc12345', '/bin/zsh', ['-l'], '/repo', { stripEnv: ['PORT'], shellCommand: null });
   assert.strictEqual(envPairs(newSessionArgv(calls)).PORT, '');
+});
+
+// ---------------------------------------------------------------------------
+// #625 — the socket. Every invocation must carry it, and the engine must never
+// reach for a verb whose blast radius is the whole server.
+// ---------------------------------------------------------------------------
+
+test('EVERY invocation carries the socket, including the attach PTY (#625)', () => {
+  // The attach PTY is a SECOND invocation point that does not go through _exec, so it
+  // is the one a socket change is most likely to miss — and missing it would put the
+  // daemon's own attach on tmux's shared per-UID socket while its commands went
+  // elsewhere: the session would appear to vanish, which reads as a durability bug
+  // rather than as a socket bug.
+  const { eng, calls, ptys } = makeEngine();
+  eng.spawn('abc12345', '/bin/zsh', ['-l'], '/repo', { shellCommand: null });
+  eng.write('abc12345', '\x1b[13;2u');   // the send-keys path
+  eng.kill('abc12345', 'SIGTERM');       // display-message, then kill-session
+  eng.listSessions();
+  eng.canReattach('abc12345');
+
+  const probes = calls.filter((c) => c.argv[0] === '-V');
+  assert.strictEqual(probes.length, 1, 'the version probe needs no socket and must not get one');
+
+  for (const c of calls.filter((c) => c.argv[0] !== '-V')) {
+    assert.deepStrictEqual(c.argv.slice(0, 2), ['-S', SOCKET],
+      `tmux ${c.argv.join(' ')} is missing the socket flag`);
+  }
+  assert.ok(calls.length > 5, 'expected several commands — otherwise this asserts nothing');
+  for (const p of ptys) {
+    assert.deepStrictEqual(p.argv.slice(0, 2), ['-S', SOCKET],
+      `the attach PTY is missing the socket flag: ${p.argv.join(' ')}`);
+  }
+  assert.ok(ptys.length >= 1, 'expected an attach PTY');
+});
+
+test('the engine never issues a whole-server verb (#625)', () => {
+  // Nothing here emits kill-server today; pinning it makes the incident structurally
+  // impossible from the daemon's side too, not only from the tests'.
+  const src = fs.readFileSync(path.join(__dirname, '..', '..', 'engines', 'tmux.js'), 'utf8');
+  const code = src.replace(/\/\*[\s\S]*?\*\//g, '')
+    .split('\n').filter((l) => !/^\s*\/\//.test(l)).join('\n');
+  // tmux-guard-allow: asserting the ABSENCE of the verb requires writing it
+  assert.doesNotMatch(code, /kill-server/,
+    'engines/tmux.js must only ever destroy one named session at a time');
 });

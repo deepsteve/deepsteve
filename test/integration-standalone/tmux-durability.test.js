@@ -17,8 +17,11 @@
  *   - Closing the browser (last WS client gone) no longer reaps a tmux session
  *     after the detach grace period.
  *   - A ds-* tmux session this daemon has no record of is left strictly alone
- *     rather than destroyed — tmux's socket is per-UID, so that used to let any
- *     second daemon wipe the real one's sessions.
+ *     rather than destroyed.
+ *   - Since #625, that the daemon and this suite are on the SAME socket at all —
+ *     which is what stops every assertion above from passing vacuously — and that a
+ *     session left on tmux's old shared socket is ended and tombstoned rather than
+ *     left to double-run against a --resume of the same transcript.
  *
  * Skips itself when tmux is not installed.
  *
@@ -26,13 +29,13 @@
  */
 const { test, before, after } = require('node:test');
 const assert = require('node:assert');
-const { spawn, execFileSync } = require('node:child_process');
+const { spawn } = require('node:child_process');
 const fs = require('node:fs');
 const net = require('node:net');
 const os = require('node:os');
 const path = require('node:path');
 const WebSocket = require('ws');
-const { createIsolatedTmux, runTmux, reapTmuxServer } = require('../helpers/tmux-socket');
+const { TmuxSandbox } = require('../helpers/tmux-sandbox');
 
 const REPO_ROOT = path.resolve(__dirname, '..', '..');
 
@@ -41,18 +44,20 @@ const REPO_ROOT = path.resolve(__dirname, '..', '..');
 const DETACH_GRACE_MS = 2000;
 const DETACH_HOLDOFF_MS = 0;
 
-let TMUX_BIN = null;
-try {
-  TMUX_BIN = execFileSync('/usr/bin/which', ['tmux'], { encoding: 'utf8' }).trim() || null;
-} catch {
-  try { TMUX_BIN = execFileSync('which', ['tmux'], { encoding: 'utf8' }).trim() || null; } catch { TMUX_BIN = null; }
-}
-const SKIP = TMUX_BIN ? false : 'tmux is not installed';
+// The daemon's own resolver, not a hand-rolled `which` pair (#625) — so this suite
+// skips exactly when the daemon would fall back, and finds the same binary it will.
+const SKIP = TmuxSandbox.skipReason();
 
 let tmpRoot, HOME, PORT, BASE, projDir;
-let iso = null;   // { tmpRoot, tmuxTmp, socket } — the ONLY tmux this suite may touch
 let daemon = null;
 let daemonLog = '';
+// null until before() has validated one, which is the whole point: the previous
+// version of this file reaped through a module-level `let` that `before()` assigned
+// LATE, so a before() that threw first left it undefined — and `after()` still ran.
+// Node drops env keys whose value is undefined, so the reap fell through to the
+// developer's real socket and destroyed every live agent on the machine (#625).
+// `sandbox?.cleanup()` on a null is a no-op; there is no third state.
+let sandbox = null;
 
 function freePort() {
   return new Promise((resolve, reject) => {
@@ -86,38 +91,37 @@ async function waitFor(check, what, timeoutMs = 20000, intervalMs = 100) {
 }
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-/**
- * Run tmux against THIS suite's own socket, by explicit `-S` path.
- *
- * Not by TMUX_TMPDIR: tmux treats that as a hint and silently falls back to the
- * developer's real per-UID socket whenever it cannot use the directory, and this
- * file's `after()` runs kill-server. See test/helpers/tmux-socket.js.
- */
-function tmux(args) {
-  return runTmux(TMUX_BIN, iso, args);
-}
-function tmuxSessionNames() {
-  try { return tmux(['list-sessions', '-F', '#{session_name}']).split('\n').filter(Boolean); }
-  catch { return []; } // no server running == no sessions
-}
+// All tmux goes through the sandbox, which binds `-S <this HOME's socket>` into every
+// argv it builds. `-S` has no fallback — and it beats an inherited `TMUX`, which the
+// TMUX_TMPDIR this replaces did not: inside a pane that variable is ignored outright.
+// So there is no state of the world in which these land on the developer's server.
 function tmuxHasSession(name) {
-  return tmuxSessionNames().includes(name);
+  return sandbox.hasSession(name);
 }
 function pidAlive(pid) {
   try { process.kill(pid, 0); return true; } catch { return false; }
 }
 
-async function startDaemon() {
+/**
+ * @param {{env?: object}} [extra] additional environment. The only caller that uses it
+ *   is the #625 migration test, which passes `sandbox.legacy.env` so that the path the
+ *   daemon computes for "tmux's own default socket" (paths.js's defaultTmuxSocketPath,
+ *   which reads TMUX_TMPDIR) lands on a stand-in rather than the developer's real one.
+ */
+async function startDaemon(extra = {}) {
   const env = { ...process.env, HOME, PORT: String(PORT) };
   delete env.CLAUDECODE;
   for (const k of Object.keys(env)) if (k.startsWith('DEEPSTEVE_')) delete env[k];
   env.DEEPSTEVE_DETACH_GRACE_MS = String(DETACH_GRACE_MS);
   env.DEEPSTEVE_DETACH_HOLDOFF_MS = String(DETACH_HOLDOFF_MS);
   env.PATH = `${path.join(HOME, 'bin')}:${process.env.PATH}`;
-  // Isolate tmux's socket: it is per-UID, NOT per-HOME (see CLAUDE.md). Without
-  // this a scratch-HOME daemon shares the real user's socket.
-  if (!iso) throw new Error('startDaemon called before the isolated tmux socket exists');
-  env.TMUX_TMPDIR = iso.tmuxTmp;
+  // Nothing tmux-shaped to set: the daemon derives its own socket from
+  // $HOME/.deepsteve/tmux.sock and passes it as `-S` (#625). `sandbox` was anchored on
+  // the same HOME, so this suite and the daemon are on ONE tmux server by construction
+  // rather than by convention — which is what makes every assertion below meaningful,
+  // and is asserted outright by the "SAME tmux server" test.
+  if (!sandbox) throw new Error('startDaemon called before the sandbox exists');
+  Object.assign(env, extra.env || {});
 
   fs.mkdirSync(path.join(HOME, '.deepsteve'), { recursive: true });
   fs.writeFileSync(path.join(HOME, '.deepsteve', '.restarting'), ''); // no browser auto-open
@@ -192,11 +196,14 @@ before(async () => {
   // FIRST, and in one call — naming the socket dir separately from creating it is
   // the window that let kill-server reach the developer's real tmux server. Nothing
   // that can throw may come between these two statements.
-  iso = createIsolatedTmux(tmpRoot);
   HOME = path.join(tmpRoot, 'home');
   projDir = path.join(tmpRoot, 'proj');
   fs.mkdirSync(path.join(HOME, 'bin'), { recursive: true });
   fs.mkdirSync(projDir, { recursive: true });
+  // Anchored on HOME, so it derives the very socket the daemon will bind. Its
+  // constructor also mkdirs the socket's directory and refuses a path over sun_path,
+  // which is the check the "keep TMPDIR short" rule used to rely on a tripwire for.
+  sandbox = TmuxSandbox.forHome(HOME);
   fs.writeFileSync(
     path.join(HOME, 'bin', 'open'),
     '#!/bin/bash\nexit 0\n',
@@ -212,9 +219,11 @@ after(async () => {
   for (const c of clients) c.close();
   clients = [];
   await stopDaemon('SIGKILL').catch(() => {});
-  // Kills ONLY a server whose socket file sits at our own -S path; with no such
-  // file there is nothing of ours running and it does nothing.
-  reapTmuxServer(TMUX_BIN, iso);
+  // This line was once `tmux(['kill-server'])`, and it is the line that filed #625:
+  // a whole-server verb, aimed by an environment variable that was undefined whenever
+  // before() threw early. cleanup() kills each session on OUR socket BY NAME, and the
+  // `?.` means a suite that never got a sandbox reaps nothing at all.
+  try { sandbox?.cleanup(); } catch (e) { console.error(e.message); }
   // The daemon and the tmux server both write under HOME, and a killed process's
   // last writes can land after the signal — an immediate rm races them and throws
   // ENOTEMPTY. Settle, then retry.
@@ -235,7 +244,88 @@ test('a fresh install with tmux present defaults to the tmux engine', { skip: SK
   assert.strictEqual(r.tmuxRuntimeFailure, null,
     `tmux cannot create sessions here, so this suite would silently test node-pty. ` +
     `Usually the socket path is too long — re-run with a short TMPDIR.`);
+  // The daemon reports the socket it actually bound (#625). If this suite's sandbox
+  // derived a different one, everything below would be inspecting an empty server.
+  assert.strictEqual(r.tmuxSocket, sandbox.socketPath,
+    'the daemon bound a different socket than this suite is inspecting');
 });
+
+test('the daemon and this suite are on the SAME tmux server (#625)', { skip: SKIP }, async () => {
+  // The non-vacuity check for the whole file. Under the old TMUX_TMPDIR scheme there
+  // was no way to assert this: the test and the daemon each resolved a socket from an
+  // env var with a fallback, and a mismatch showed up as "no sessions" — which reads
+  // identically to "the session died", i.e. as a passing negative assertion.
+  const c = track(new Client());
+  const s = await c.connect({ cwd: projDir, new: '1', agentType: 'terminal' });
+  await sleep(1000);
+
+  assert.ok(fs.existsSync(sandbox.socketPath),
+    `the daemon never bound ${sandbox.socketPath}`);
+  assert.ok(sandbox.hasSession(`ds-${s.id}`),
+    'we cannot see the session the daemon just created — the two are on different sockets');
+
+  // And the developer's own socket is not this one. Belt and braces on the check the
+  // sandbox constructor already refuses to skip.
+  assert.notStrictEqual(path.resolve(sandbox.socketPath),
+    path.join(os.homedir(), '.deepsteve', 'tmux.sock'),
+    'this suite is pointed at the real install');
+
+  c.close();
+  await fetch(`${BASE}/api/shells/${s.id}?forget=1`, { method: 'DELETE', headers: authHeaders() }).catch(() => {});
+});
+
+test('a session left on tmux\'s old shared socket is ended, not left to double-run (#625)',
+  { skip: SKIP }, async () => {
+    // The migration path. Before #625 every session lived on tmux's default per-UID
+    // socket; after it, the daemon looks only at its own. A record left non-closed and
+    // a pane left running is the dangerous combination: the record says "restorable",
+    // so the next reconnect spawns `claude --resume <same uuid>` in a NEW pane while
+    // the old one is still working the same worktree and writing the same transcript.
+    //
+    // sandbox.legacy is a second socket this sandbox owns, standing in for the shared
+    // one. Its `env` is what makes defaultTmuxSocketPath() — which the daemon names
+    // with `-S`, precisely so a killing path cannot inherit its target — compute this
+    // socket instead of the developer's real one.
+    const id = 'feed0001';
+    const legacy = sandbox.legacy;
+
+    await stopDaemon('SIGKILL');
+    legacy.newSession(`ds-${id}`);
+    assert.ok(legacy.hasSession(`ds-${id}`), 'seeded a pre-#625 pane on the shared socket');
+
+    const statePath = path.join(HOME, '.deepsteve', 'state.json');
+    const state = readState();
+    state[id] = {
+      cwd: projDir,
+      claudeSessionId: 'aaaaaaaa-bbbb-cccc-dddd-ffffffffffff',
+      agentType: 'terminal',
+      engineType: 'tmux',
+      name: 'pre-625',
+      lastActivity: Date.now(),
+      createdAt: Date.now(),
+    };
+    fs.writeFileSync(statePath, JSON.stringify(state, null, 2));
+
+    await startDaemon({ env: legacy.env });
+
+    await waitFor(() => /predates the socket move/.test(daemonLog) || null,
+      'the daemon to report the pre-#625 session');
+    assert.ok(!legacy.hasSession(`ds-${id}`),
+      'the old pane must be ended — leaving it running is what lets two agents share one transcript');
+
+    const after = readState()[id];
+    assert.ok(after, 'the record survives — the conversation must stay recoverable (#561)');
+    assert.strictEqual(after.closed, true, 'and it is tombstoned, so a reconnect resumes rather than reattaches');
+    assert.strictEqual(after.closeReason, 'socket-migration');
+    assert.strictEqual(after.claudeSessionId, 'aaaaaaaa-bbbb-cccc-dddd-ffffffffffff',
+      'with the transcript id intact');
+
+    await fetch(`${BASE}/api/shells/${id}?forget=1`, { method: 'DELETE', headers: authHeaders() }).catch(() => {});
+    try { legacy.cleanup(); } catch {}
+    // Back to a plain daemon for whatever runs next.
+    await stopDaemon('SIGKILL');
+    await startDaemon();
+  });
 
 test('agent survives a daemon CRASH and is reattached under the same pid', { skip: SKIP }, async () => {
   const c = track(new Client());
@@ -360,7 +450,7 @@ test('reattach carries every persisted field, not a hand-picked subset', { skip:
 
   await stopDaemon('SIGKILL');
   // A live tmux session for it, plus the state.json record that makes it ours.
-  tmux(['new-session', '-d', '-s', `ds-${id}`, 'sleep 600']);
+  sandbox.newSession(`ds-${id}`);
   const statePath = path.join(HOME, '.deepsteve', 'state.json');
   const state = readState();
   state[id] = meta;
@@ -379,13 +469,18 @@ test('reattach carries every persisted field, not a hand-picked subset', { skip:
   assert.deepStrictEqual(after.allowedTools, meta.allowedTools, 'allowedTools survived the reattach');
 
   await fetch(`${BASE}/api/shells/${id}?forget=1`, { method: 'DELETE', headers: authHeaders() }).catch(() => {});
-  try { tmux(['kill-session', '-t', `ds-${id}`]); } catch {}
+  try { sandbox.killSession(`ds-${id}`); } catch {}
 });
 
 test('a ds-* session we have no record of is left strictly alone', { skip: SKIP }, async () => {
-  // Stand in for another daemon's session on the shared per-UID socket.
+  // Before #625 this stood in for another daemon's session on the shared per-UID
+  // socket. That specific hazard is gone — the socket is ours now — but the rule it
+  // pins is still the second line of defence, and the cases that survive are on OUR
+  // socket: a session left by a previous daemon on this HOME, a state.json rolled back
+  // or hand-edited, a crash between spawn() and saveState(). "We cannot identify it"
+  // must still mean "we do not touch it".
   const foreign = 'ds-cafe1234';
-  tmux(['new-session', '-d', '-s', foreign, 'sleep 600']);
+  sandbox.newSession(foreign);
   assert.ok(tmuxHasSession(foreign), 'foreign session created');
 
   await stopDaemon('SIGKILL');
@@ -393,8 +488,10 @@ test('a ds-* session we have no record of is left strictly alone', { skip: SKIP 
 
   assert.ok(tmuxHasSession(foreign),
     'startup must not destroy a ds-* session missing from its own state.json');
-  assert.match(daemonLog, /not in our state\.json — leaving it alone/,
+  assert.match(daemonLog, /absent from state\.json — leaving it alone/,
     'and it says so rather than doing it silently');
+  assert.match(daemonLog, new RegExp(`kill-session -t ${foreign}`),
+    'and tells the reader the exact command to reclaim it, since nothing else will (#625)');
 
-  try { tmux(['kill-session', '-t', foreign]); } catch {}
+  try { sandbox.killSession(foreign); } catch {}
 });

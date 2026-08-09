@@ -7,24 +7,26 @@
 # Usage: run-standalone.sh
 set -e
 
-# Keep every temp path SHORT, because tmux sockets live under one.
+# Keep every temp path SHORT, because a tmux socket lives under one.
 #
-# Each suite sets TMUX_TMPDIR inside its mkdtemp $HOME (it must — tmux's default
-# socket is per-UID, not per-HOME, so a scratch daemon would otherwise see and
-# reattach the real one's ds-* sessions). tmux then appends `tmux-<uid>/default`,
-# and the whole thing has to fit a Unix socket's sun_path: 104 bytes on macOS.
-# macOS's default $TMPDIR is /var/folders/<2>/<28>/T/ — 52 characters before the
-# suite's own directory — which put the socket at exactly 104 and made
-# `tmux new-session` fail with "File name too long".
+# Since #625 each suite's daemon binds `$HOME/.deepsteve/tmux.sock` — where $HOME is
+# the suite's mkdtemp — and passes it to tmux as `-S`. That is EXACT (tmux appends no
+# `tmux-<uid>/default` of its own) and it is much shorter than the old path, but it
+# still has to fit a Unix socket's sun_path: 104 bytes on macOS. macOS's default
+# $TMPDIR is /var/folders/<2>/<28>/T/ — ~49 characters before the suite's own
+# directory — which leaves single-digit margin once a long mkdtemp prefix like
+# `ds-scheduled-restore-offer-` is added. So: keep TMPDIR short.
 #
-# That matters more since #620 made tmux the default: the daemon now degrades to
-# node-pty instead of crashing, so the suite would go green while testing the
-# engine we are trying to move off. Short TMPDIR here, and node's os.tmpdir()
-# (which reads TMPDIR) shortens every path the suites derive from it.
+# What changed is the failure MODE, and it is the good half of #625. It used to be
+# silent: tmux fell back, the daemon degraded to node-pty (#620), and the suite went
+# green while testing the engine we are trying to move off — catchable only by
+# tmux-durability.test.js's `tmuxRuntimeFailure === null` tripwire. Now TmuxSandbox's
+# constructor measures the exact path it is about to use and throws with the byte
+# count, so an over-long path fails the suite that has it, by name.
 #
 # Running a single file by hand (`node --test test/integration-standalone/x.js`)
-# skips this — prefix it with `TMPDIR=/tmp/ds-test` if a suite reports tmux
-# falling back.
+# skips this — prefix it with `TMPDIR=/tmp/ds-test` if a suite reports the socket
+# path being too long.
 TMPDIR="${DS_TEST_TMPDIR:-/tmp/ds-test}"
 mkdir -p "$TMPDIR"
 export TMPDIR

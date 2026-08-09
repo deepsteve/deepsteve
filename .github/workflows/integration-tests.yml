@@ -151,8 +151,12 @@ jobs:
           SID=$(cat /tmp/session-id)
           echo "created session $SID"
           sleep 5
-          tmux ls
-          tmux has-session -t "ds-$SID" || { echo "the daemon did not create a tmux session"; exit 1; }
+          # -S: since #625 the daemon runs its OWN tmux server, so a bare `tmux` here
+          # would query the runner's default socket and find nothing — which reads as
+          # "the daemon never created a session" rather than "we asked the wrong server".
+          SOCK="$HOME/.deepsteve/tmux.sock"
+          tmux -S "$SOCK" ls
+          tmux -S "$SOCK" has-session -t "ds-$SID" || { echo "the daemon did not create a tmux session"; exit 1; }
 
           systemctl --user restart deepsteve
           for _ in $(seq 1 30); do
@@ -160,8 +164,8 @@ jobs:
             sleep 1
           done
           sleep 3
-          tmux ls || true
-          tmux has-session -t "ds-$SID" || {
+          tmux -S "$SOCK" ls || true
+          tmux -S "$SOCK" has-session -t "ds-$SID" || {
             echo "REGRESSION: the tmux session did not survive a daemon restart."
             echo "That is KillMode=control-group SIGKILLing the daemon's whole cgroup — see #621."
             exit 1

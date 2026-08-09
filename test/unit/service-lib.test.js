@@ -96,6 +96,7 @@ test('the exported ds_* surface is exactly this list', () => {
     'ds_service_uninstall',
     'ds_service_write',
     'ds_start_hint',
+    'ds_tmux_socket',
     'ds_url',
     'ds_wait_responding',
     'ds_wait_stopped',

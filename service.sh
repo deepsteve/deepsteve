@@ -67,6 +67,22 @@ ds_install_dir() {
     printf '%s\n' "${DEEPSTEVE_HOME:-$HOME/.deepsteve}"
 }
 
+# deepsteve's OWN tmux server socket. Twin of paths.js's tmuxSocketPath(), compared
+# against it by test/unit/service-definition.test.js.
+#
+# The daemon passes this to every tmux invocation as `-S` (#625), which is what makes
+# socket isolation a consequence of HOME isolation rather than of a convention every
+# caller has to remember. Two consumers here: uninstall.sh, which must end this server
+# before it deletes the directory holding its socket, and status.sh, which reports it.
+#
+# Note the `tmuxSocket` setting can override this on the daemon side. A caller here has
+# no cheap way to read settings.json, so this is the default path only — which is the
+# right answer for both consumers: an install that moved its socket is exactly the one
+# whose owner knows where it went.
+ds_tmux_socket() {
+    printf '%s\n' "$(ds_install_dir)/tmux.sock"
+}
+
 # Twin of paths.js's logDir(). These two MUST agree: the service definition written
 # here is what actually opens the daemon's stdout/stderr, and logging.js rotates them
 # through the fds it was handed. test/unit/service-definition.test.js compares the two

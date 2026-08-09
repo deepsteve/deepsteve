@@ -43,4 +43,18 @@ try {
 ' "$MARKER" 2>/dev/null
 fi
 
+# The tmux server deepsteve owns (#625). Worth a line: it is where every session
+# actually lives, its length is what decides whether tmux works at all (~104-byte
+# sun_path), and "how many sessions survived that restart" is the first thing anyone
+# asks. Read-only — list-sessions mutates nothing.
+if command -v tmux >/dev/null 2>&1; then
+    DS_SOCK="$(ds_tmux_socket)"
+    if [ -S "$DS_SOCK" ]; then
+        DS_SESSIONS="$(tmux -S "$DS_SOCK" list-sessions -F '#{session_name}' 2>/dev/null | grep -c . || true)"
+        printf '  tmux          %s  (%s session(s))\n' "$DS_SOCK" "${DS_SESSIONS:-0}"
+    else
+        printf '  tmux          %s  (no server running)\n' "$DS_SOCK"
+    fi
+fi
+
 ds_is_responding 3

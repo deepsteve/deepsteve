@@ -27,13 +27,13 @@
  */
 const { test, before, after } = require('node:test');
 const assert = require('node:assert');
-const { spawn, execFileSync } = require('node:child_process');
+const { spawn } = require('node:child_process');
 const fs = require('node:fs');
 const net = require('node:net');
 const os = require('node:os');
 const path = require('node:path');
 const WebSocket = require('ws');
-const { createIsolatedTmux, runTmux, reapTmuxServer } = require('../helpers/tmux-socket');
+const { TmuxSandbox } = require('../helpers/tmux-sandbox');
 
 const REPO_ROOT = path.resolve(__dirname, '..', '..');
 
@@ -43,17 +43,15 @@ const REPO_ROOT = path.resolve(__dirname, '..', '..');
 // proves the assertion is about the codeset path and not about UTF-8 generally.
 const GLYPHS = '▐▛███▜▌ · ✻ … ⏵⏵ ✔';
 
-let TMUX_BIN = null;
-try {
-  TMUX_BIN = execFileSync('/usr/bin/which', ['tmux'], { encoding: 'utf8' }).trim() || null;
-} catch {
-  try { TMUX_BIN = execFileSync('which', ['tmux'], { encoding: 'utf8' }).trim() || null; } catch { TMUX_BIN = null; }
-}
-const SKIP = TMUX_BIN ? false : 'tmux is not installed';
+// The daemon's own resolver, not a hand-rolled `which` pair (#625) — so this suite
+// skips exactly when the daemon would fall back, and finds the same binary it will.
+const SKIP = TmuxSandbox.skipReason();
 
 let tmpRoot, HOME, PORT, BASE, projDir;
-let iso = null;   // { tmpRoot, tmuxTmp, socket } — the ONLY tmux this suite may touch
 let daemon = null;
+// null until before() has validated one. `after()` uses `sandbox?.cleanup()`, so a
+// before() that throws leaves a no-op rather than an unaimed tmux command (#625).
+let sandbox = null;
 
 function freePort() {
   return new Promise((resolve, reject) => {
@@ -91,12 +89,13 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
  * Run tmux against THIS suite's own socket, by explicit `-S` path.
  *
  * Not by TMUX_TMPDIR: tmux treats that as a hint and silently falls back to the
- * developer's real per-UID socket whenever it cannot use the directory, which made
- * an earlier version of this file destroy every live agent on the box three times.
- * See test/helpers/tmux-socket.js for the full account.
+ * developer's real per-UID socket whenever it cannot use the directory — and inside a
+ * pane it ignores the variable outright and uses `$TMUX`. Either way an earlier
+ * version of this file destroyed every live agent on the box, three times in one
+ * morning. See test/helpers/tmux-sandbox.js for the full account.
  */
 function tmux(args) {
-  return runTmux(TMUX_BIN, iso, args);
+  return sandbox.run(args);
 }
 
 async function startDaemon() {
@@ -107,12 +106,12 @@ async function startDaemon() {
   // which has no locale at all. Inheriting the runner's would hide both defects.
   for (const k of ['LC_ALL', 'LC_CTYPE', 'LANG', 'COLORTERM']) delete env[k];
   env.PATH = `${path.join(HOME, 'bin')}:${process.env.PATH}`;
-  // Isolate the DAEMON's tmux socket: it is per-UID, NOT per-HOME (see CLAUDE.md).
-  // The engine has no -S plumbing, so this one is still TMUX_TMPDIR — safe here only
-  // because createIsolatedTmux() already created the directory, which is the whole
-  // condition tmux would otherwise silently fall back on.
-  if (!iso) throw new Error('startDaemon called before the isolated tmux socket exists');
-  env.TMUX_TMPDIR = iso.tmuxTmp;
+  // Nothing to set for the DAEMON's socket any more (#625): it derives its own from
+  // $HOME/.deepsteve/tmux.sock and passes it as `-S`. `sandbox` is anchored on the
+  // same HOME, so this suite and the daemon are on ONE server by construction — which
+  // matters here more than most, since every assertion below reads a pane the daemon
+  // created and would pass vacuously against an empty server.
+  if (!sandbox) throw new Error('startDaemon called before the sandbox exists');
 
   fs.mkdirSync(path.join(HOME, '.deepsteve'), { recursive: true });
   fs.writeFileSync(path.join(HOME, '.deepsteve', '.restarting'), ''); // no browser auto-open
@@ -179,16 +178,17 @@ async function openTerminal() {
 before(async () => {
   if (SKIP) return;
   tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-glyph-'));
-  // FIRST, and in one call. Naming the socket dir on one line and creating it on a
-  // later one is the exact two-line window that let after()'s kill-server reach the
-  // developer's real tmux server: anything throwing in between left the path set and
-  // the directory absent, which is precisely tmux's silent-fallback condition.
-  // Nothing that can throw may come between these two statements.
-  iso = createIsolatedTmux(tmpRoot);
   HOME = path.join(tmpRoot, 'home');
   projDir = path.join(tmpRoot, 'proj');
   fs.mkdirSync(path.join(HOME, 'bin'), { recursive: true });
   fs.mkdirSync(projDir, { recursive: true });
+  // Anchored on HOME, and it names and creates its socket dir in ONE call. Naming on
+  // one line and creating on a later one is the exact two-line window that let this
+  // file's after() reach the developer's real tmux server: anything throwing in
+  // between left the path set and the directory absent, tmux's silent-fallback
+  // condition. Since #625 the daemon derives the same socket from this HOME, so there
+  // is no second path to keep in step either.
+  sandbox = TmuxSandbox.forHome(HOME);
   fs.writeFileSync(path.join(HOME, 'bin', 'open'), '#!/bin/bash\nexit 0\n', { mode: 0o755 });
   PORT = await freePort();
   BASE = `http://127.0.0.1:${PORT}`;
@@ -196,18 +196,17 @@ before(async () => {
 });
 
 after(async () => {
-  // No SKIP guard needed for correctness any more — reapTmuxServer refuses to act
-  // without a valid handle — but mirror before()'s early return anyway so a skipped
-  // suite does no work at all.
+  // No SKIP guard needed for correctness any more — `sandbox?.cleanup()` is a no-op
+  // without one — but mirror before()'s early return anyway so a skipped suite does
+  // no work at all.
   if (SKIP) return;
   for (const c of clients) c.close();
   clients = [];
   await stopDaemon('SIGKILL').catch(() => {});
   // Shutdown DETACHES tmux sessions rather than killing them (#620), so this suite's
-  // scratch tmux server outlives its daemon and something has to reap it. This kills
-  // ONLY a server whose socket file sits at our own -S path; with no such file there
-  // is nothing of ours running and it does nothing.
-  reapTmuxServer(TMUX_BIN, iso);
+  // scratch tmux server outlives its daemon and something has to reap it. cleanup()
+  // kills each session on OUR socket by name; with no server there it does nothing.
+  try { sandbox?.cleanup(); } catch (e) { console.error(e.message); }
   await sleep(500);
   if (tmpRoot) fs.rmSync(tmpRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
 });

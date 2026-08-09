@@ -29,6 +29,7 @@ const net = require('node:net');
 const os = require('node:os');
 const path = require('node:path');
 const WebSocket = require('ws');
+const { TmuxSandbox } = require('../helpers/tmux-sandbox');
 
 const REPO_ROOT = path.resolve(__dirname, '..', '..');
 
@@ -63,6 +64,9 @@ let projDir;      // project dir for the fork pair (tests 1-2)
 let projDir2;     // separate project dir for the self-fork test (isolates watchers)
 let daemon = null;
 let daemonLog = '';
+// null until before() has validated one. `after()` uses `sandbox?.cleanup()`, so a
+// before() that throws leaves a no-op rather than an unaimed tmux command (#625).
+let sandbox = null;
 let stubLogPath;
 
 function freePort() {
@@ -100,11 +104,14 @@ async function startDaemon() {
   const env = { ...process.env, HOME, PORT: String(PORT) };
   delete env.CLAUDECODE;
   for (const k of Object.keys(env)) if (k.startsWith('DEEPSTEVE_')) delete env[k];
-  // tmux's default socket is per-UID (not per-HOME), so a scratch-HOME daemon would
-  // otherwise see the REAL daemon's ds-* sessions and — finding them absent from its
-  // own state.json — kill them as orphans (server.js startup reattach). A scratch
-  // TMUX_TMPDIR isolates the socket. Mandatory for any isolated daemon (see CLAUDE.md).
-  env.TMUX_TMPDIR = path.join(HOME, 'tmux-tmp');
+  // This suite was the live counter-example for the old rule: it set TMUX_TMPDIR and
+  // never mkdir'd the directory, so tmux fell back and its daemon put ds-* sessions on
+  // the developer's REAL socket on every run. #625 removed the rule instead of fixing
+  // the instance — the daemon derives its socket from $HOME/.deepsteve/tmux.sock and
+  // passes it as `-S`, so a scratch HOME IS a scratch tmux server and there is nothing
+  // left to forget. The sandbox anchors on that same HOME so `after()` can reap the
+  // tmux server that outlives the daemon (shutdown detaches rather than kills).
+  sandbox = TmuxSandbox.forHome(HOME);
   // Suppress the cold-start browser auto-open (see session-restore.test.js).
   fs.mkdirSync(path.join(HOME, '.deepsteve'), { recursive: true });
   fs.writeFileSync(path.join(HOME, '.deepsteve', '.restarting'), '');
@@ -212,6 +219,10 @@ before(async () => {
 after(async () => {
   closeClients();
   await stopDaemon().catch(() => {});
+  // A SIGTERMed daemon DETACHES its tmux sessions, so the scratch tmux server
+  // outlives it and the rm below would only unlink its socket — leaving a running
+  // server nothing can ever reach again. Reap it by name (#625).
+  try { sandbox?.cleanup(); } catch (e) { console.error(e.message); }
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 

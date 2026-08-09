@@ -35,10 +35,11 @@ if (!BASE_URL) {
     '',
     'To run a single file against your own isolated instance:',
     '  SCRATCH=$(mktemp -d)',
-    '  HOME="$SCRATCH" PORT=3999 DEEPSTEVE_TEST_MODE=1 TMUX_TMPDIR="$SCRATCH/tmux" node server.js &',
+    '  HOME="$SCRATCH" PORT=3999 DEEPSTEVE_TEST_MODE=1 node server.js &',
     '  HOME="$SCRATCH" DEEPSTEVE_URL=http://127.0.0.1:3999 node --test test/integration/<file>',
-    '(HOME must match the server\'s: the helper reads $HOME/.deepsteve/auth-token. TMUX_TMPDIR',
-    'isolates the per-UID tmux socket so the test daemon cannot touch real ds-* sessions.)',
+    '(HOME must match the server\'s: the helper reads $HOME/.deepsteve/auth-token. Since',
+    '#625 HOME is also what isolates tmux — the daemon binds its own socket at',
+    '$HOME/.deepsteve/tmux.sock — so there is deliberately nothing else to set here.)',
   ].join('\n'));
 }
 

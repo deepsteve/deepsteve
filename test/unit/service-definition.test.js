@@ -95,6 +95,34 @@ test('the state dir agrees between service.sh and paths.js', () => {
   }
 });
 
+test('the tmux socket agrees between service.sh and paths.js (#625)', () => {
+  // uninstall.sh ends deepsteve's tmux server through ds_tmux_socket before deleting
+  // the directory that holds it, and status.sh reports it. If the two implementations
+  // drift, the uninstall silently misses — leaving live panes on a socket whose file
+  // has just been unlinked, reachable by nothing, forever.
+  const { tmuxSocketPath } = require('../../paths');
+  for (const platform of ['darwin', 'linux']) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-tmuxsock-'));
+    const shellAnswer = String(execFileSync('sh', ['-c', `. "${SERVICE_SH}"; ds_tmux_socket`], {
+      encoding: 'utf8', env: { HOME: dir, PATH: '/usr/bin:/bin', DEEPSTEVE_PLATFORM: platform },
+    })).trim();
+    assert.strictEqual(shellAnswer, tmuxSocketPath({ env: {}, homedir: dir }), `${platform}`);
+  }
+});
+
+test('DEEPSTEVE_HOME moves the socket on both sides (#625)', () => {
+  // The property that makes HOME isolation *be* socket isolation: a second instance
+  // relocates its socket along with the rest of its state, on both sides of the split.
+  const { tmuxSocketPath } = require('../../paths');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-tmuxsock-alt-'));
+  const shellAnswer = String(execFileSync('sh', ['-c', `. "${SERVICE_SH}"; ds_tmux_socket`], {
+    encoding: 'utf8',
+    env: { HOME: '/nonexistent', PATH: '/usr/bin:/bin', DEEPSTEVE_HOME: dir, DEEPSTEVE_PLATFORM: 'linux' },
+  })).trim();
+  assert.strictEqual(shellAnswer, path.join(dir, 'tmux.sock'));
+  assert.strictEqual(shellAnswer, tmuxSocketPath({ env: { DEEPSTEVE_HOME: dir }, homedir: '/nonexistent' }));
+});
+
 // --- properties the fixtures encode, stated explicitly --------------------
 //
 // The fixture diff catches ANY change; these say which changes would be bugs, so a

@@ -1137,8 +1137,14 @@ settingsBtn?.addEventListener('click', async () => {
              and restart the daemon.<br>` : ''}
           ${enginesData.tmuxRuntimeFailure
             ? `tmux is installed but could not create a session: ${escapeHtml(enginesData.tmuxRuntimeFailure)}<br>
-               A common cause is a socket path over the ~104-character limit — set a shorter
-               <code>TMUX_TMPDIR</code> and restart the daemon.`
+               deepsteve's tmux socket is
+               <code>${escapeHtml(enginesData.tmuxSocket || '~/.deepsteve/tmux.sock')}</code>${
+                 enginesData.tmuxSocketBytes
+                   ? ` (${enginesData.tmuxSocketBytes} bytes; the limit is about ${enginesData.sunPathLimit || 103})`
+                   : ''}.
+               The two things that break it are a path over that limit and a home directory
+               on a network filesystem. Either way, set <code>tmuxSocket</code> in
+               <code>~/.deepsteve/settings.json</code> to a short local path and restart the daemon.`
             : `${escapeHtml(enginesData.engines?.find(e => e.id === 'tmux')?.reason || 'tmux was not found.')}<br>
                Install tmux to get durable sessions. If it is installed somewhere the search
                can't see, set <code>tmuxBinary</code> in <code>~/.deepsteve/settings.json</code>
