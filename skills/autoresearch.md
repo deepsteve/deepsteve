@@ -34,17 +34,19 @@ Steps:
    - `title`: the issue title
    - `body`: the issue body, PLUS the full research protocol below appended to the end
 
-   The `body` field is what gets delivered as the initial prompt. Include the issue body you drafted, then append the following research protocol instructions. The agent's first action will be to write this protocol to `CLAUDE.md` in the worktree so it persists across context clears.
+   The `body` field is what gets delivered as the initial prompt. Include the issue body you drafted, then append the following research protocol instructions. The agent's first action will be to write this protocol to `AUTORESEARCH.md` in the worktree so it persists across context clears.
 
    Append this to the body:
 
    ---
 
-   ## FIRST ACTION — Write Research Protocol to CLAUDE.md
+   ## FIRST ACTION — Write Research Protocol to AUTORESEARCH.md
 
-   Before doing anything else, write a `CLAUDE.md` file in the repo root containing the full research protocol below, customized for this specific problem. This file persists across context clears and ensures you never lose your instructions.
+   Before doing anything else, write an `AUTORESEARCH.md` file in the repo root containing the full research protocol below, customized for this specific problem. This file persists on disk, so you can re-read it after a context clear and never lose your instructions.
 
-   Write this to `CLAUDE.md`:
+   Then make it load automatically: if the repo root has **no** `CLAUDE.md`, create one whose entire contents are `Read AUTORESEARCH.md before doing anything — it is your research protocol.` **If a `CLAUDE.md` already exists, leave it exactly as it is** — it belongs to the repo you are working in, this worktree merges back into that repo, and overwriting it would destroy that project's own instructions. In that case just re-read `AUTORESEARCH.md` yourself at the start of each phase.
+
+   Write this to `AUTORESEARCH.md`:
 
    ```
    # Autoresearch Protocol
@@ -144,7 +146,7 @@ Steps:
 
    Customize the template: name the harness and editable files appropriately for the domain (e.g., `evaluate.py` + `compress.py`), fill in domain-specific metrics, adapt phase descriptions to the problem, and fill in concrete target values.
 
-   After writing `CLAUDE.md`, create the initial file structure, then begin the research loop starting with Phase 0 (baseline).
+   After writing `AUTORESEARCH.md`, create the initial file structure, then begin the research loop starting with Phase 0 (baseline).
 
    ---
 

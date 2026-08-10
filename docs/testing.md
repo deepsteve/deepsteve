@@ -1,0 +1,71 @@
+# Testing
+
+How the suites are wired, and the rules that keep them from destroying the machine they run
+on. Those rules are not hypothetical — a bare `npm test` once wiped every live session (#562),
+and a suite's `kill-server` once killed every running agent on the box, three times in twenty
+minutes (#624/#625). Read this before adding a suite, a daemon fixture, or anything that
+touches tmux from a test.
+
+| command | what it runs |
+|---|---|
+| `npm run test:unit` | `node --test test/unit/*.test.js` — bare Node, no daemon, no shell |
+| `npm run test:standalone` | `test/run-standalone.sh` — one throwaway daemon per suite file |
+| `npm test` | `test/run-integration.sh` — one provisioned daemon for the whole suite |
+| `npm run test:docker`, `:install`, `:docker:public` | the three container suites |
+
+## The suite can never target the production daemon (#562)
+
+`npm test` (= `test/run-integration.sh`) **auto-provisions a throwaway daemon** when `DEEPSTEVE_URL` is unset: scratch `HOME` (own auth-token/state/settings), random port, `DEEPSTEVE_TEST_MODE=1`; torn down on exit. The scratch `HOME` is also what isolates tmux since #625 — the daemon binds its own socket under it — so there is no `TMUX_TMPDIR` here, and there must not be one. It is safe to run alongside the live daemon. The docker suites set `DEEPSTEVE_URL=http://server:3000` and skip provisioning.
+
+Safety layers (all three must hold — do not weaken any of them):
+- `test/helpers/ws-client.js` **requires `DEEPSTEVE_URL`** — importing it without one throws; there is no localhost:3000 fallback (that fallback once let a bare `npm test` wipe every live session).
+- Destructive helpers (`httpPost`, `httpDelete`, `WsClient.connect`) first verify the target reports `/api/version.testMode === true`, i.e. was started with `DEEPSTEVE_TEST_MODE=1`. There is no bypass, and none is needed for the public-install suite: since #588 it runs each release's own helpers against that release (see below).
+- The server itself refuses `POST /api/shells/killall` (403) unless started in test mode.
+
+`DEEPSTEVE_TEST_MODE=1` (or `--test-mode`) also disables the startup browser auto-open and the auto-update check. Never set it on a real install. Guard regression tests live in `test/unit/ws-client-guard.test.js` (`npm run test:unit`).
+
+## Docker suites
+
+**The Public Install suite runs the release's own tests, not main's (#588).** `test/Dockerfile.public` installs via `deepsteve.com/install.sh`, which 302s to `releases/latest/download/install.sh` — so the server under test is always the **last published release**. Main is always ahead of it, so running main's suite against it reddened the daily cron on every post-release feature test until the next release shipped (#579's `context-icon.test.js` asserting `iconImage === ''` against a build where the field didn't exist yet). `.github/workflows/install-integration-tests.yml` now resolves that release tag and `actions/checkout`s **it** before bringing the compose up, so the container under test and the tests exercising it are one commit; a step then asserts the installed `package.json` version equals the checked-out tag, so an `install.sh`-vs-API desync is named rather than surfacing as assertion noise. Three consequences: (1) a new test on main reaches this suite when it *ships*, not when it merges — that is the point, the job's real question is "is the deployed build healthy"; (2) CI uses the **tag's** compose/Dockerfiles/runner, so edits to `test/docker-compose.public.yml` don't affect the cron until the next release, and the workflow file — the one piece that stays current — must keep working against released trees (its contract has been stable since v0.17.0); (3) a local `npm run test:docker:public` from main still has the old skew, so check the release out first (`git checkout $(gh api repos/deepsteve/deepsteve/releases/latest --jq .tag_name)`). **Never add `SKIP_PATTERN` entries for features the released server predates** — that was the failed mitigation #588 removed, and it went stale and read as "we skip tests for features we didn't build." There is **no skip pattern left in any compose file**: `tmux-engine` used to be the one legitimate permanent skip because neither install image had tmux, and #621/v0.22.0 removed its justification from both — `Dockerfile.install` in #621, `Dockerfile.public` at v0.22.0, where it stopped being optional. **A published `install.sh` refuses to install on Linux without tmux, so the public image MUST apt-get it or the suite dies at `docker build`, not at a test.** That is a standing trap in this suite's design: a change to what `install.sh` *requires* only reaches the public image when it ships, and the image lives at the tag, so the breakage lands in the cron a release later than the change. It bit exactly once, on v0.22.0. Upside of the fix: all three suites now exercise the **default** engine rather than the node-pty fallback. The durability behavior itself is still covered outside Docker, by `test/integration-standalone/tmux-durability.test.js`.
+
+**Corollary of consequence (2) above, learned the hard way:** because the cron checks out the *tag*, a test-infrastructure fix cannot reach it until a release contains it — so a broken public image stays broken through every push to main until the next release ships. When a release changes an install-time *dependency*, check `test/Dockerfile.public` in the same change. `test/unit/public-suite-pin.test.js` guards the workflow's shape.
+
+**Every `test/docker-compose*.yml` declares its own `name:` and publishes no host port (#616).** The three suites are projects `deepsteve-source` / `deepsteve-install` / `deepsteve-public`; without an explicit `name:` compose derives one from the parent directory — `test` for all of them — and since their services are all called `server`/`test`, two suites then share one project: an `up` recreates the sibling's containers and a `down -v` deletes its volumes. And no publish is needed because nothing outside the compose network ever dials the server (the test container uses `DEEPSTEVE_URL=http://server:3000`, the healthcheck curls `localhost:3000` *inside* the server container, and `ws-client.js` has no localhost fallback by #562's design) — while `3000:3000` collides with the developer's own daemon, which is every machine that develops deepsteve. #588 fixed both for the public compose only and #616 found the other two still broken a release later, so `test/unit/compose-projects.test.js` now asserts both properties across a **glob** of `test/docker-compose*.yml`, covering a fourth file on arrival. The `npm run test:*:clean` scripts need no `-p`: they pass `-f <file>` and compose reads the project name out of it. One-time after this change: `docker compose -p test down -v` sweeps the containers/volumes orphaned by the rename.
+
+## tmux, and the engine a suite actually tests
+
+The engine model itself is in [terminal-engines.md](terminal-engines.md); this is only what a
+test has to do about it. Short version: **a test never runs `tmux` itself** — the sandbox does.
+
+**Suites that pin `engine: 'node-pty'` do it deliberately** — via the WS `?engine=` override, or a pre-seeded `settings.json` when it's the whole file. They characterize machinery that only *exists* because a node-pty session dies with the daemon, so under tmux they would wait forever for something that must not happen: `session-restore.test.js` (the whole `--resume` / #542 / bounded-respawn chain — a tmux session is reattached, never respawned), `sleep-reap.test.js` (the detach reaper, which tmux never arms), `window-restore.test.js`'s 30s-grace case (#551's savedState rewrite, which tmux never reaches), and `prompt-submit.test.js`'s 607B + shutdown cases. Each pin says why in place. The tmux side of each is covered by `tmux-durability.test.js`. **Don't add a pin to make a red test green** without checking it's this same "the path is structurally absent under tmux" reason.
+
+**Reaching the reattach path in a test requires `agentType: 'claude'`.** `recordRecentSession()` early-returns for `terminal` and `tmux-attach`, and every tmux case in the suite used `terminal` — so the whole suite structurally could not execute the statement that threw for a release. The seeded-state case in `tmux-durability.test.js` is claude-typed for exactly this reason; no `claude` binary is needed, since reattach hooks up to a pre-made tmux session rather than spawning an agent.
+
+**Keep test temp paths SHORT.** `run-standalone.sh` exports a short `TMPDIR` (default `/tmp/ds-test`) because each suite's daemon binds `$HOME/.deepsteve/tmux.sock` with `$HOME` under `os.tmpdir()`, and macOS's default `/var/folders/<2>/<28>/T/` is ~49 characters before the suite's own `mkdtemp` — which a long prefix like `ds-scheduled-restore-offer-` can push past a Unix socket's 104-byte `sun_path`. What changed with #625 is the failure *mode*, and it is the good half: the path is now exact (tmux appends no `tmux-<uid>/default` of its own), so `TmuxSandbox`'s constructor measures it and throws with the byte count and the fix. It used to fail silently — the spawn fallback kept the suite green while it tested node-pty, catchable only by `tmux-durability.test.js`'s `tmuxRuntimeFailure === null` tripwire, which still stands. Running one file by hand skips the runner, so prefix `TMPDIR=/tmp/ds-test`.
+
+**A test may never run `tmux` without `-S`, and only `test/helpers/tmux-sandbox.js` may run it at all.** `TMUX_TMPDIR` is a *hint*: tmux silently falls back to `/tmp/tmux-<uid>/default` — the developer's real socket — whenever it can't use the directory, and "can't use" includes "doesn't exist yet". A suite that names its tmpdir on one line and `mkdir`s it on a later one has a window where anything throwing in between leaves the variable set and the directory absent; `after()` still runs, and its `kill-server` reaps **the developer's server**, taking every live agent with it. That is not theoretical — it happened three times in one morning while building #624, and it is silent: the sessions die cleanly, the tmux server exits, every tab closes, and nothing logs a cause. A guard that checks only the path *string* sails straight through, because the string was always fine.
+
+**And the variable is worse than that: inside a pane it does nothing at all.** A tmux client that inherits `TMUX` ignores `TMUX_TMPDIR` entirely and talks to the server named there. Since #620 every deepsteve tab *is* a pane, so an agent running the suite had no isolation whatever — `mkdir` or not. #624 fixed the test side by passing `-S`; #625 finished the job by giving the **engine** `-S` (`tmuxSocketPath()`), which is what let `TMUX_TMPDIR` be deleted from the tree rather than merely worked around. `-S` beats an inherited `TMUX`, and pointing it somewhere unusable starts a new empty server rather than silently resolving to someone else's.
+
+So, the rules `test/unit/tmux-sandbox-guard.test.js` enforces: `TMUX_TMPDIR`, `kill-server`, a hand-resolved tmux binary, and any tmux exec outside the sandbox all fail the build. `sandbox = TmuxSandbox.forHome(HOME)` in `startDaemon()`, `sandbox?.cleanup()` in `after()` — the `?.` is load-bearing, not defensive: it is what makes a `before()` that throws a no-op rather than an unaimed tmux command, which is the exact shape of the incident. The sandbox names and creates its socket dir in ONE call, and refuses to construct on a `HOME` that is missing, is the real one, or would derive a socket over `sun_path`. `cleanup()` kills each session on its own socket **by name**; `kill-server` is banned because it names no target, so a mis-aimed one is invisible until every agent is gone. `sandbox.legacy` is the only remaining `TMUX_TMPDIR` in the tree — minted inside the helper, and only so the #625 migration path can be tested against a stand-in for the shared socket. `test/unit/tmux-sandbox-acceptance.test.js` drives a real child suite whose `before()` throws, because a green happy path proves nothing here.
+
+**One residue nothing can fix from inside a suite:** when `node --test` cancels a file on its own timeout it kills the process, so no `after` runs and that suite's scratch tmux server survives — under its own scratch `HOME`, harmless, and `rm -rf /tmp/ds-test` sweeps it.
+
+## The bare `unit` CI job, and what it forbids
+
+The `unit` job in `.github/workflows/integration-tests.yml` runs on ubuntu-latest with
+`npm install --ignore-scripts` and **no zsh**. Both are deliberate, and both constrain what a
+unit test may do:
+
+- **`--ignore-scripts` means node-pty's native binding is never built, so nothing under
+  `test/unit/` may import `engines/node-pty`** — requiring it throws. `engines/tmux.js` *is*
+  importable, because #620 made its node-pty `require` lazy (only needed at attach time, and
+  callers that inject `spawnPty` never load it). That is what lets the detach/exit contract
+  have unit coverage at all.
+- **No zsh** is the standing regression test for the login-shell resolver — see
+  [platform.md](platform.md). It has caught a `zsh -l -c` creeping back twice (#565, #614).
+  `test/Dockerfile` installs no zsh for the same reason.
+
+So a unit test should be a pure `fs` read plus, at most, a `vm` eval of a literal — the shape
+`agents-doc.test.js`, `public-suite-pin.test.js` and `claude-md-budget.test.js` all use. Any
+test that needs a daemon, a PTY or a real binary belongs in `test/integration-standalone/`.

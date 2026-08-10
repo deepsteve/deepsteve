@@ -70,7 +70,8 @@ systemctl --user stop deepsteve                               # Linux
 - `public/js/*.js` — Frontend modules (ES modules)
 
 ### Configuration
-- `CLAUDE.md` — Detailed project documentation for Claude agents
+- `CLAUDE.md` — the map and the invariant list. Mechanism lives in `docs/`, one page per area;
+  `CLAUDE.md`'s table says which page to read before doing what
 - `opencode.json` — OpenCode config (MCP servers, commands)
 - `.claude/commands/` — Claude slash command definitions
 
@@ -82,10 +83,12 @@ systemctl --user stop deepsteve                               # Linux
 - Log errors with timestamps: `log('ERROR:', error.message)`
 
 ### PTY/Shell Management
-- Use `node-pty` for pseudo-terminals
+- Sessions run in **tmux** panes by default, with `node-pty` as the fallback engine — both
+  always exist. See `docs/terminal-engines.md`
 - Always remove listeners with `.removeListener()`, never `.off()`
 - Delete `env.CLAUDECODE` when spawning nested Claude instances
-- Detect BEL character (`\x07`) to know Claude is waiting for input
+- Whether a session is waiting is decided by the screen classifier plus BEL (`\x07`), not by
+  silence alone — see `docs/sessions.md`
 
 ### WebSocket Messages
 - JSON format for structured messages
@@ -102,13 +105,18 @@ systemctl --user stop deepsteve                               # Linux
 
 ## Testing
 
-There is no formal test framework. Manual testing via browser.
+`node --test` throughout — `npm run test:unit` (bare, no daemon), `npm run test:standalone`,
+`npm test` (auto-provisions an isolated daemon; safe alongside the live one), plus three
+docker suites. See `docs/testing.md` before writing one — it carries the rules that keep a
+suite off the production daemon and off the developer's tmux socket.
 
 ## Security Notes
 
-- No authentication, no CORS, no WebSocket origin checking
-- Designed for localhost only
-- Server binds to `127.0.0.1` by default
+- **Auth is always on**, with no off switch (#536): host allowlist, origin allowlist, and a
+  per-install bearer token, all checked before application code runs. Agents read the token
+  from `DEEPSTEVE_API_TOKEN`.
+- Server binds to `127.0.0.1` by default; the canonical browser URL is
+  `http://deepsteve.localhost:3000`. See `docs/platform.md`.
 
 ## MCP Tools
 

@@ -77,8 +77,9 @@ Claude is the one agent never probed, because it is the default and the fallback
 | Graceful exit | `/exit` | SIGTERM | Ctrl+C | Ctrl+C | SIGTERM | SIGHUP |
 | Test coverage | deep | moderate | negative only | negative only | negative only | incidental |
 
-Every agent is launched through a login shell — `zsh -l -c '<binary> <args>'`
-(`spawnSession`) — so they all inherit your `PATH`, and all of them get the
+Every agent is launched through a login shell — `resolveLoginShell()` picks it (`$SHELL`,
+then the passwd entry, then zsh/bash/sh; see [platform.md](platform.md)) — so they all
+inherit your `PATH`, and all of them get the
 `DEEPSTEVE_*` environment variables (`DEEPSTEVE_SESSION_ID`, `DEEPSTEVE_API_URL`,
 `DEEPSTEVE_API_TOKEN`, …). An experimental agent with no MCP can still reach the REST API
 through those, if it has a shell tool.
@@ -264,7 +265,7 @@ classification.
 deepsteve can close by wiring more plumbing.
 
 **Spawn.** `pi --session-dir ~/.deepsteve/pi-sessions/<shellId>`. The binary is
-`piBinary` (default `pi`).
+`piBinary` (default `pi`); upstream is `@mariozechner/pi-coding-agent`.
 
 **Resume, and what survives a restart.** Storage isolation is by directory, and the
 directory is keyed on the **shell id** — which is stable across a restart, so resume
@@ -299,7 +300,10 @@ appears in the picker and cannot be a default. You get one from the `+` menu, th
 `#terminal` hash command, the `deepsteve:terminal` skill, or `open_terminal` **without**
 `agent_type` — that last one is a common surprise: `open_terminal` defaults to a plain
 `zsh`, does not inherit the caller's agent type, and silently ignores `prompt` unless you
-pass `agent_type` or `fork: true`.
+pass `agent_type` or `fork: true`. The resolution is
+`effectiveAgentType = agent_type || (fork ? caller.agentType : null)`
+(`mods/deepsteve-core/tools.js`), and the symptom of getting it wrong is a new tab reporting
+`agentType: "terminal"` in `GET /api/shells` while your `prompt` went nowhere.
 
 It runs `zsh -l` and takes no arguments. On restart the tab, its name and its `cwd` come
 back; running processes, scrollback and any environment set during the session do not.
@@ -311,6 +315,17 @@ through as `CLAUDE_CONFIG_DIR`, so typing `claude` yourself picks up the profile
 
 Exit is SIGHUP, not SIGTERM: an interactive login zsh traps SIGINT in ZLE and often
 ignores SIGTERM.
+
+## MCP tools a wired session gets
+
+These come from `mods/deepsteve-core` and exist for every agent whose tier says MCP is
+wired — in practice `claude` and `codex`. Mods add more; see [mods.md](mods.md).
+
+- **Session self-discovery**: `get_my_session_id` (no parameters) returns the 8-char shell ID without needing Bash permissions — the ID is embedded in the MCP URL via `--mcp-config` at spawn time. Each PTY also gets env vars at spawn: `DEEPSTEVE_SESSION_ID`, `DEEPSTEVE_TAB_NAME` (initial tab name), `DEEPSTEVE_WORKTREE` (worktree **name** or empty), `DEEPSTEVE_CWD` (the agent's actual working directory — the `.claude/worktrees/<name>` path for worktree sessions, otherwise the session cwd), `DEEPSTEVE_WINDOW_ID` (browser window ID or empty), `DEEPSTEVE_API_URL` (e.g. `http://localhost:3000`), and `DEEPSTEVE_API_TOKEN` (bearer token for REST calls to that URL, #536). For live metadata (e.g. after a tab rename), use the `get_session_info` MCP tool or `GET $DEEPSTEVE_API_URL/api/shells/$DEEPSTEVE_SESSION_ID/info` (REST endpoints require `-H "Authorization: Bearer $DEEPSTEVE_API_TOKEN"`) — both return `cwd` (actual working directory, i.e. the worktree path for worktree sessions), `repoRoot` (the main repo checkout), `worktree` (the worktree name or null), and `runningCommand` (for a plain `terminal` session, the command running in its foreground right now, or null when idle at the prompt — computed on demand from the shell's tty foreground process group via `getForegroundCommand()`; always null for agent sessions). **Worktree gotcha:** for Claude (which has native `--worktree` support), the PTY is spawned in the main repo and Claude Code itself moves into `.claude/worktrees/<name>`; `entry.cwd` therefore holds the main repo path, so `cwd`/`DEEPSTEVE_CWD` are resolved to the worktree subdir via `sessionPaths()` rather than reported raw.
+- **Session self-close**: `close_session` closes a session from within the agent. The MCP response is sent synchronously before the PTY teardown begins (`killShell` uses `setTimeout` for escalation), so the agent always receives the acknowledgment. A session can close itself or any other session.
+- **Meta Controls (`meta_type`, #519)**: lets an agent type into its own or another session's PTY — a **server-side write**, so it works regardless of browser tab focus. Params: `text`, `keys` (control keys sent before text: `Escape`, `Enter`, arrows, `C-c`… — one engine-write each with 250ms gaps, since Ink needs separate stdin reads), `clear_first` (ONE Escape to clear staged composer text — deliberately not two; double-Esc opens Claude Code's history menu), `wait_for_idle` (poll up to 30s for the BEL classifier's idle before typing), `session_id` (defaults to caller), `submit` (default `true`; builds on `submitToShell()`; `submit:false` stages via `engine.write`). The return is **truthful**: `state_before` (`idle`/`busy`/`unknown` via `sessionInputState()`), `landed` (readback heuristic — the ANSI-stripped scrollback tail must contain the typed text), and `screen_tail`. Self-typing enables recursive/self-driving loops, so it is gated behind the `metaControlsEnabled` setting (default **off**) — but instead of failing, a call while disabled triggers an **in-browser consent dialog** (`requestMetaControlsConsent()` in server.js, modeled on the restart confirm: `confirm-meta-controls` over the reload WS, decision via `POST /api/meta-controls-consent`, first response wins, all windows dismissed via `confirm-meta-controls-resolved`). Approval flips the persistent setting; decline starts a 60s cooldown against modal-nagging; **zero connected browsers never auto-confirms**. The handler reads `settings.metaControlsEnabled` live; the tool is always registered (like all mod tools).
+- **`read_session_screen`**: ungated read-only companion to `meta_type` — returns the last N lines (default 40, max 200) of a session's server-side interpreted terminal buffer plus `state` (`idle`/`busy`/`unknown`) and `seconds_since_output`. Cursor movement, erase operations, alternate-screen redraws, reflow, and CSI intermediate bytes are resolved before lines are returned. Use it to check what a session is doing or to verify typed input landed — no more `browser_eval` poking at `window.__deepsteve` internals.
+- **Browser Console / Screenshots**: these operate on the deepsteve UI tab only — they do NOT access your project's website or any other browser tab. `screenshot_capture` and `scene_snapshot` save PNGs to disk and return the file path; use the `Read` tool on that path to view the image. Do NOT try to base64-decode or re-save — the bytes are already on disk at the returned path. All three return an immediate `isError` when no browser window is connected, rather than broadcasting into the void.
 
 ## Adding an agent
 
