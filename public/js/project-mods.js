@@ -13,6 +13,12 @@
  *   3. tab    — a pinned tab that auto-opens in the background whenever its project
  *               is the active one, and keeps running while you work elsewhere
  *
+ * Those are LAUNCHER placements. What a launcher does is the second axis, `openMode`
+ * (#628): 'tab' opens a real, closeable tab; 'view' takes over the content area and
+ * consumes no tab at all, so a mod that asked for a button launcher is represented by that
+ * button and nothing else. The view lives in mod-manager.js's single fullscreen slot rather
+ * than a container of our own — two takeover mechanisms would race switchTo()'s delegation.
+ *
  * Scoping is the same folder-prefix rule the whole Projects feature is built on
  * (tabInContext / pathInside): a mod shows when you are LOOKING at its project —
  * the active project in the rail, or, in the "All" view, the project of the active
@@ -29,6 +35,7 @@ let mods = [];            // every project mod, all projects — the server send
 let featureEnabled = true; // projectModsEnabled; false hides every surface
 let cb = {};              // callbacks injected by app.js
 const buttons = new Map(); // modId → button element currently in #tabs
+const railRows = new Map(); // modId → the rail row context-views last drew for it (#628)
 const lastSeen = new Map(); // modId → updatedAt, so a page rewrite can reload open tabs
 
 // ------------------------------------------------------------------- scoping
@@ -86,6 +93,21 @@ export const getMods = () => mods;
  * namespace (both are 8-char randomUUID slices).
  */
 export const tabIdFor = (modId) => 'pm-' + modId;
+
+/**
+ * A project mod's id in mod-manager's single fullscreen view slot (#628) — derived for the
+ * same reason tabIdFor is, and namespaced so it can never collide with a DeepSteve mod id.
+ *
+ * It is also the modId the window.deepsteve bridge is injected under, in BOTH modes. That
+ * is not a coincidence: it is what makes mod-manager's per-view callback sweeps, its
+ * toolbar .active sweep and handleModChanged()'s cache-bust all correct for a project mod
+ * without a single branch in that file.
+ */
+export const VIEW_PREFIX = 'project-mod:';
+export const viewIdFor = (modId) => VIEW_PREFIX + modId;
+
+/** True when this mod opens as a view rather than a tab. Absent openMode = 'tab' (#628). */
+const opensAsView = (mod) => mod?.openMode === 'view';
 
 /**
  * A project mod's tab label. The icon is prefixed into the NAME rather than carried
@@ -159,7 +181,9 @@ export function render() {
     do {
       dirty = false;
       syncOpenTabs();
+      syncModView();   // before renderButtons/makeRailRow, so the .active they paint is settled
       renderButtons();
+      paintRailRows();
       autoOpenPinned();
     } while (dirty);
   } finally {
@@ -182,11 +206,44 @@ function syncOpenTabs() {
     if (prev !== undefined && prev !== mod.updatedAt) cb.reloadModTab?.(mod);
     lastSeen.set(mod.id, mod.updatedAt);
     if (!mod.enabled) cb.closeModTabs?.(mod.id);
-    else cb.renameModTab?.(mod);
+    else {
+      // A view never owns a tab. Flipping a mod tab→view — or restoring a persisted entry
+      // written before the flip — leaves one behind, and closing it here is the guarantee
+      // that it goes away. Cheap and idempotent: the callback is a no-op for a mod with no
+      // open tab, which is every view-mode mod after the first pass.
+      if (opensAsView(mod)) cb.closeModTabs?.(mod.id);
+      cb.renameModTab?.(mod);
+    }
   }
   for (const id of [...lastSeen.keys()]) {
-    if (!seen.has(id)) { lastSeen.delete(id); cb.closeModTabs?.(id); }
+    if (!seen.has(id)) { lastSeen.delete(id); railRows.delete(id); cb.closeModTabs?.(id); }
   }
+}
+
+/**
+ * Reconcile the ONE view slot against the registry (#628).
+ *
+ * A view has no tab, no session and no strip presence, so this pass is the only thing that
+ * can keep it honest — and one rule covers every case: the slot may only hold a mod that is
+ * still registered, still enabled, still in view mode, and still belongs to the project you
+ * are looking at. Deleted, disabled, projectModsEnabled turned off, openMode flipped back to
+ * 'tab', and "you switched project" all collapse into that.
+ *
+ * Dismissing on a project switch is deliberate — it is the same visibility rule the launcher
+ * itself follows, so a view can never outlive the chrome that opens it.
+ *
+ * Idempotent by construction, which is what lets the render() guard absorb the re-entrancy:
+ * hiding fires onViewChanged → render(), and by then the slot is empty and this returns at
+ * the first check.
+ */
+function syncModView() {
+  const viewId = cb.getViewInfo?.()?.id;
+  // Empty, or a DeepSteve Mod owns it — either way, not ours to reconcile.
+  if (!viewId || !viewId.startsWith(VIEW_PREFIX)) return;
+  const modId = viewId.slice(VIEW_PREFIX.length);
+  const mod = getMod(modId);
+  if (mod && opensAsView(mod) && visibleMods().some(m => m.id === modId)) return;
+  cb.hideModView?.(modId);
 }
 
 /**
@@ -202,6 +259,7 @@ function syncOpenTabs() {
 function renderButtons() {
   const tabs = document.getElementById('tabs');
   const anchor = document.getElementById('tabs-list-wrapper');
+  const openViewId = cb.getViewInfo?.()?.id || null;
   for (const btn of buttons.values()) btn.remove();
   buttons.clear();
   if (!tabs || !anchor) return;
@@ -210,6 +268,8 @@ function renderButtons() {
     if (!mod.surfaces.includes('button')) continue;
     const btn = document.createElement('button');
     btn.className = 'project-mod-btn nav-btn is-glyph';
+    // Rebuilt wholesale, so the .active state can't drift from the slot (#628).
+    if (openViewId === viewIdFor(mod.id)) btn.classList.add('active');
     btn.dataset.projectModId = mod.id;
     btn.title = `${mod.name} — project mod`;
     btn.setAttribute('aria-label', mod.name);
@@ -242,14 +302,29 @@ function renderButtons() {
  */
 function autoOpenPinned() {
   for (const mod of visibleMods()) {
-    if (mod.surfaces.includes('tab')) cb.ensureModTab?.(mod, { background: true });
+    // The server can't persist openMode:'view' together with the 'tab' surface, but the
+    // client can hold a list mid-flight — and pinning a view would mean auto-taking over
+    // the screen, so re-check rather than trust.
+    if (!opensAsView(mod) && mod.surfaces.includes('tab')) cb.ensureModTab?.(mod, { background: true });
   }
 }
 
-/** Focus this mod's tab if it's open, else open one (focused — the user just asked). */
+/**
+ * The single choke point for "the user asked to open this mod" — the rail row, the strip
+ * button and the menu's Open item all land here.
+ *
+ * A tab-mode mod focuses its tab or opens one. A view-mode mod toggles the fullscreen slot:
+ * clicking the launcher again dismisses it, the same way a DeepSteve Mod's toolbar button
+ * behaves. While the view is merely BACKGROUNDED, a click brings it back rather than
+ * dismissing it — otherwise the launcher would appear to do nothing.
+ */
 export function openMod(id) {
   const mod = getMod(id);
-  if (mod) cb.ensureModTab?.(mod, { background: false });
+  if (!mod) return;
+  if (!opensAsView(mod)) { cb.ensureModTab?.(mod, { background: false }); return; }
+  const { id: openId, front } = cb.getViewInfo?.() || {};
+  if (openId === viewIdFor(mod.id) && front) cb.hideModView?.(mod.id);
+  else cb.showModView?.(mod);
 }
 
 // ------------------------------------------------------------------ rail rows
@@ -262,6 +337,7 @@ export function openMod(id) {
  */
 export function makeRailRow(mod) {
   const row = document.createElement('div');
+  railRows.set(mod.id, row);
   // `has-icon` follows the same rule project rows follow (#569): the expanded rail shows
   // a chip only for a CHOSEN icon, never a derived monogram — otherwise every row grows
   // an identical-looking square. The collapsed icon rail shows one either way.
@@ -286,7 +362,23 @@ export function makeRailRow(mod) {
     e.preventDefault();
     showModMenu(e.clientX, e.clientY, mod);
   });
+  paintRailRows();
   return row;
+}
+
+/**
+ * Mark whichever rail row owns the view slot, reusing the .context-row.active styling
+ * project rows already have (including the collapsed icon-rail treatment).
+ *
+ * A sweep over remembered nodes rather than a rebuild, because render() may NOT call
+ * cb.renderRail() — see the note in refresh(). A row detached by a later renderRail() is
+ * simply replaced in the map by the new one; toggling a class on a stale node is a no-op.
+ */
+function paintRailRows() {
+  const openViewId = cb.getViewInfo?.()?.id || null;
+  for (const [modId, row] of railRows) {
+    row.classList.toggle('active', openViewId === viewIdFor(modId));
+  }
 }
 
 // -------------------------------------------------------- row right-click menu
@@ -360,6 +452,15 @@ function showModMenu(x, y, mod) {
       patchMod(mod.id, { surfaces: next });
     });
   }
+
+  addMenuSeparator(menu);
+  // The second axis (#628): the three above say WHERE the launchers go, this says what one
+  // DOES. Each direction is a single-field PUT, and the server's cross-field rule resolves
+  // the conflict in favour of whichever field was passed — so ticking this drops the "tab"
+  // surface, and ticking "Pin as a background tab" above flips this back off.
+  addMenuItem(menu, `${opensAsView(mod) ? '✓ ' : '   '}Open as a full view (no tab)`, () => {
+    patchMod(mod.id, { openMode: opensAsView(mod) ? 'tab' : 'view' });
+  });
 
   addMenuSeparator(menu);
   addMenuItem(menu, mod.enabled ? 'Disable' : 'Enable', () => patchMod(mod.id, { enabled: !mod.enabled }));

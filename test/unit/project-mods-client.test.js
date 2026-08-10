@@ -90,8 +90,10 @@ const CTX_B = { id: 'ctxb', name: 'Beta', dirs: [REPO_B] };
 // pull a mod registered to a nested repo root into it.
 const CTX_PARENT = { id: 'ctxp', name: 'All repos', dirs: ['/repo'] };
 
-const modA = { id: 'ma', project: REPO_A, name: 'A Dash', icon: '📊', surfaces: ['rail', 'button', 'tab'], enabled: true, updatedAt: 1 };
-const modB = { id: 'mb', project: REPO_B, name: 'B Dash', icon: '', surfaces: ['rail'], enabled: true, updatedAt: 1 };
+const modA = { id: 'ma', project: REPO_A, name: 'A Dash', icon: '📊', surfaces: ['rail', 'button', 'tab'], openMode: 'tab', enabled: true, updatedAt: 1 };
+const modB = { id: 'mb', project: REPO_B, name: 'B Dash', icon: '', surfaces: ['rail'], openMode: 'tab', enabled: true, updatedAt: 1 };
+// The #628 shape: launchers only, no tab. Same project as modA so one context shows both.
+const viewA = { id: 'va', project: REPO_A, name: 'A Glance', icon: '🔭', surfaces: ['rail', 'button'], openMode: 'view', enabled: true, updatedAt: 1 };
 
 let importCount = 0;
 
@@ -118,6 +120,13 @@ async function setup({ mods = [modA, modB], enabled = true, activeContext = null
     closed: [],
     railRenders: 0,
     fetches: [],
+    // A simulated ModManager view slot (#628). Recorders alone are not enough: openMod()'s
+    // toggle and syncModView()'s teardown both READ the slot back, so it has to hold state.
+    // `slot` may also be set to a bare DeepSteve mod id, to assert we leave those alone.
+    slot: null,
+    front: false,
+    shown: [],
+    hidden: [],
   };
 
   globalThis.fetch = (url, opts) => {
@@ -138,6 +147,16 @@ async function setup({ mods = [modA, modB], enabled = true, activeContext = null
     renameModTab: (m) => state.renamed.push(m.id),
     closeModTabs: (id) => state.closed.push(id),
     renderRail: () => { state.railRenders++; },
+    showModView: (m) => {
+      state.shown.push(m.id);
+      state.slot = mod.viewIdFor(m.id);
+      state.front = true;
+    },
+    hideModView: (id) => {
+      state.hidden.push(id);
+      if (state.slot === mod.viewIdFor(id)) { state.slot = null; state.front = false; }
+    },
+    getViewInfo: () => ({ id: state.slot, front: state.front }),
   });
   await flush();
   return { mod, state, tabs, anchor };
@@ -171,6 +190,16 @@ test('the tab id is derived from the mod id, so a mod can only ever have one tab
   // mod id are 8-char randomUUID slices, so a bare mod id could collide with a session.
   assert.ok(mod.tabIdFor('ma').startsWith('pm-'));
   assert.notStrictEqual(mod.tabIdFor('ma'), mod.tabIdFor('mb'));
+});
+
+test('the view id is derived and namespaced, so it can never collide with a mod id', async () => {
+  const { mod } = await setup();
+  assert.strictEqual(mod.viewIdFor('ma'), 'project-mod:ma');
+  assert.notStrictEqual(mod.viewIdFor('ma'), mod.viewIdFor('mb'));
+  // It is also the id the bridge is injected under, which is what makes ModManager's
+  // per-view callback sweeps cover a project mod without a branch in that file.
+  assert.strictEqual(mod.viewIdFor('ma'), mod.VIEW_PREFIX + 'ma');
+  assert.notStrictEqual(mod.viewIdFor('ma'), mod.tabIdFor('ma'));
 });
 
 test('the tab label carries the mod icon, and is idempotent for the restore stub', async () => {
@@ -356,7 +385,157 @@ test('a deleted or disabled mod closes its open tabs', async () => {
   assert.deepStrictEqual(state.closed, ['ma'], 'deleted closes it too');
 });
 
+// ------------------------------------------------------------ openMode: view (#628)
+
+test('a view-mode mod opens as a view from every launcher, and never as a tab', async () => {
+  const { mod, state, tabs } = await setup({ mods: [viewA], activeContext: CTX_A });
+
+  const [btn] = tabs.children.filter(c => c.className?.includes('project-mod-btn'));
+  btn.listeners.click();
+  assert.deepStrictEqual(state.shown, ['va']);
+  assert.deepStrictEqual(state.ensured, [], 'a view consumes no tab — that is the whole point');
+
+  // The rail row and the menu's Open item route through the same openMod() choke point.
+  state.slot = null; state.front = false;
+  mod.makeRailRow(viewA).onclick();
+  assert.deepStrictEqual(state.shown, ['va', 'va']);
+  assert.deepStrictEqual(state.ensured, []);
+});
+
+test('an absent openMode still means "tab" on the client, matching the server default', async () => {
+  const legacy = { ...modA, surfaces: ['rail', 'button'] };
+  delete legacy.openMode;
+  const { state, tabs } = await setup({ mods: [legacy], activeContext: CTX_A });
+  const [btn] = tabs.children.filter(c => c.className?.includes('project-mod-btn'));
+  btn.listeners.click();
+  assert.deepStrictEqual(state.ensured.at(-1), { modId: 'ma', background: false });
+  assert.deepStrictEqual(state.shown, [], 'no openMode is not "view"');
+});
+
+test('a view-mode mod is never auto-opened as a pinned tab, even if the list says so', async () => {
+  // The server can't persist this combination, but a client can hold a list mid-flight —
+  // and pinning a view would mean auto-taking over the screen.
+  const contradictory = { ...viewA, surfaces: ['rail', 'button', 'tab'] };
+  const { state } = await setup({ mods: [contradictory], activeContext: CTX_A });
+  assert.deepStrictEqual(state.ensured, []);
+  assert.deepStrictEqual(state.shown, [], 'and it is not auto-SHOWN either — opening is a user act');
+});
+
+test('clicking the launcher again dismisses the view; clicking it while backgrounded re-shows it', async () => {
+  const { mod, state } = await setup({ mods: [viewA], activeContext: CTX_A });
+
+  mod.openMod('va');
+  assert.deepStrictEqual(state.shown, ['va']);
+
+  mod.openMod('va');
+  assert.deepStrictEqual(state.hidden, ['va'], 'a second click on the launcher is the dismiss');
+  assert.strictEqual(state.slot, null);
+
+  // Backgrounded (someone clicked a tab, but the slot still holds it): a click must bring
+  // it back rather than dismiss, or the launcher would look like it did nothing.
+  state.slot = mod.viewIdFor('va');
+  state.front = false;
+  mod.openMod('va');
+  assert.deepStrictEqual(state.hidden, ['va'], 'no second dismiss');
+  assert.deepStrictEqual(state.shown, ['va', 'va']);
+});
+
+test('the launcher that owns the view slot is marked .active, and no other is', async () => {
+  const { mod, state, tabs } = await setup({ mods: [modA, viewA], activeContext: CTX_A });
+  const rowA = mod.makeRailRow(modA);
+  const rowView = mod.makeRailRow(viewA);
+
+  const buttonFor = (id) => tabs.children.find(c => c.dataset?.projectModId === id);
+  assert.strictEqual(buttonFor('va').classList.contains('active'), false);
+
+  mod.openMod('va');
+  mod.render();
+  assert.strictEqual(buttonFor('va').classList.contains('active'), true);
+  assert.strictEqual(buttonFor('ma').classList.contains('active'), false, 'a tab-mode mod is never active');
+  assert.strictEqual(rowView.classList.contains('active'), true, 'the rail row too, via .context-row.active');
+  assert.strictEqual(rowA.classList.contains('active'), false);
+
+  mod.openMod('va');
+  mod.render();
+  assert.strictEqual(buttonFor('va').classList.contains('active'), false, 'cleared on dismiss');
+  assert.strictEqual(rowView.classList.contains('active'), false);
+});
+
+test('syncModView drops a view whose mod is gone, disabled, flipped to tab, or out of project', async () => {
+  const cases = [
+    ['deleted from the registry', (s) => { s.mods = []; }],
+    ['disabled', (s) => { s.mods = [{ ...viewA, enabled: false }]; }],
+    ['flipped back to openMode:tab', (s) => { s.mods = [{ ...viewA, openMode: 'tab' }]; }],
+    ['the feature turned off', (s) => { s.enabled = false; }],
+  ];
+  for (const [why, mutate] of cases) {
+    const box = { mods: [viewA], enabled: true };
+    const { mod, state } = await setup({ mods: box.mods, enabled: box.enabled, activeContext: CTX_A });
+    mod.openMod('va');
+    assert.strictEqual(state.slot, mod.viewIdFor('va'), why);
+
+    mutate(box);
+    // A fresh /api/project-mods answer, the way a 'project-mods' broadcast delivers one.
+    globalThis.fetch = () => Promise.resolve({ json: () => Promise.resolve({ mods: box.mods, enabled: box.enabled }) });
+    await mod.refresh();
+    assert.deepStrictEqual(state.hidden, ['va'], `dismissed when ${why}`);
+    assert.strictEqual(state.slot, null);
+  }
+});
+
+test('switching project dismisses the view — a view must not outlive the chrome that opens it', async () => {
+  const { mod, state } = await setup({ mods: [viewA], activeContext: CTX_A });
+  mod.openMod('va');
+  assert.strictEqual(state.slot, mod.viewIdFor('va'));
+
+  state.view.activeContext = CTX_B;
+  mod.render();
+  assert.deepStrictEqual(state.hidden, ['va']);
+  assert.strictEqual(state.slot, null);
+});
+
+test('a DeepSteve Mod occupying the slot is never touched', async () => {
+  const { mod, state } = await setup({ mods: [viewA], activeContext: CTX_A });
+  state.slot = 'tower';   // a bare mod id — not our namespace
+  state.front = true;
+
+  mod.render();
+  state.view.activeContext = CTX_B;
+  mod.render();
+  // Even our own mod vanishing entirely must not reach into someone else's view.
+  globalThis.fetch = () => Promise.resolve({ json: () => Promise.resolve({ mods: [], enabled: true }) });
+  await mod.refresh();
+
+  assert.deepStrictEqual(state.hidden, [], 'we only reconcile ids under our own prefix');
+  assert.strictEqual(state.slot, 'tower');
+});
+
+test('flipping a mod to view mode closes the tab it used to own', async () => {
+  const { mod, state } = await setup({ mods: [modA], activeContext: CTX_A });
+  assert.deepStrictEqual(state.closed, []);
+
+  globalThis.fetch = () => Promise.resolve({
+    json: () => Promise.resolve({ mods: [{ ...modA, surfaces: ['rail', 'button'], openMode: 'view', updatedAt: 2 }], enabled: true }),
+  });
+  await mod.refresh();
+  assert.ok(state.closed.includes('ma'), 'a view never owns a tab, including a stale restored one');
+});
+
 // ------------------------------------------------------------------ re-entrancy
+
+test('render() with a view open is idempotent — the onViewChanged loop must settle', async () => {
+  // hideModView fires onViewChanged → render(), which the re-entrancy guard absorbs only
+  // because syncModView() is idempotent: after a hide the slot is empty and it returns at
+  // the first check.
+  const { mod, state } = await setup({ mods: [viewA], activeContext: CTX_A });
+  mod.openMod('va');
+
+  mod.render();
+  mod.render();
+  assert.deepStrictEqual(state.shown, ['va'], 'render() never re-opens');
+  assert.deepStrictEqual(state.hidden, [], 'and never dismisses a view that is still valid');
+  assert.strictEqual(state.slot, mod.viewIdFor('va'));
+});
 
 test('render() never calls back into the rail — only refresh() does', async () => {
   // renderRail runs applyFilter, whose onContextViewApplied hook calls render(). If

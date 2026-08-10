@@ -2422,7 +2422,7 @@ function createProjectModTab(mod, opts = {}) {
   iframe.allow = 'autoplay';
   container.appendChild(iframe);
   iframe.addEventListener('load', () => {
-    ModManager.injectBridgeAPI(iframe, `project-mod:${mod.id}`, id);
+    ModManager.injectBridgeAPI(iframe, projectModViewId(mod.id), id);
   });
 
   const tabName = projectModTabName(mod);
@@ -2476,9 +2476,12 @@ function createProjectModTab(mod, opts = {}) {
   return id;
 }
 
-// Both derived, both owned by project-mods.js — see the notes there for why the tab id
-// and the tab label are computed from the mod rather than minted alongside it.
+// All derived, all owned by project-mods.js — see the notes there for why the tab id, the
+// view id and the label are computed from the mod rather than minted alongside it. The view
+// id doubles as the id its bridge is injected under, in BOTH modes, which is what makes
+// ModManager's per-view callback sweeps cover a project mod.
 const projectModTabId = (modId) => ProjectMods.tabIdFor(modId);
+const projectModViewId = (modId) => ProjectMods.viewIdFor(modId);
 const projectModTabName = (mod) => ProjectMods.tabNameFor(mod);
 
 /** Every open tab showing a given project mod (0 or 1, kept as a list for the sweeps). */
@@ -2497,13 +2500,40 @@ function ensureProjectModTab(mod, { background = false, restoreActive = false } 
   return createProjectModTab(mod, { background, restoreActive });
 }
 
-/** The mod's page was rewritten — reload the iframe of every open tab showing it. */
+/**
+ * Show this mod as a VIEW (#628): it takes over the content area and consumes no tab, so
+ * nothing is added to the strip, there is no session entry and nothing is persisted.
+ *
+ * `dismissOnLeave` is what distinguishes it from a DeepSteve Mod view: clicking any tab
+ * tears it down rather than parking it behind a ← button, because a project mod's launcher
+ * is already in the strip and a back button would be the second thing representing it.
+ * `persist:false` keeps it out of the reload restore, which could only ever be racy — see
+ * the note on restoreSessions below.
+ */
+function showProjectModView(mod) {
+  ModManager.showView({
+    id: projectModViewId(mod.id),
+    // tabNameFor, not mod.name: the icon belongs in the label everywhere else a project mod
+    // appears. dismissOnLeave means this name never actually reaches the ← button, but the
+    // descriptor should still describe the page honestly.
+    name: projectModTabName(mod),
+    src: `/api/project-mods/${mod.id}/page`,
+    sandbox: 'allow-scripts allow-forms allow-same-origin',
+    allow: 'autoplay',
+    persist: false,
+    dismissOnLeave: true,
+  });
+}
+
+/** The mod's page was rewritten — reload the iframe of every open tab, and the view. */
 function reloadProjectModTab(mod) {
   for (const id of projectModTabIds(mod.id)) {
     const iframe = sessions.get(id)?.container?.querySelector('iframe');
     // Cache-bust, the same way an updated display tab reloads.
     if (iframe) iframe.src = `/api/project-mods/${mod.id}/page?t=${Date.now()}`;
   }
+  const viewId = projectModViewId(mod.id);
+  if (ModManager.getActiveViewId() === viewId) ModManager.handleModChanged(viewId);
 }
 
 /**
@@ -2654,6 +2684,12 @@ async function restoreSessions(sessionList, opts = {}) {
       return fetch(`/api/project-mods/${entry.projectModId}/page`, { method: 'HEAD' })
         .then(resp => {
           if (!resp.ok) return null;
+          // A mod flipped to openMode:'view' can still carry a persisted tab entry from
+          // before the flip. Reject it here — when the registry fetch has already landed —
+          // so the existing null-result cleanup drops it without the tab ever appearing.
+          // If the registry is still in flight, syncOpenTabs() closes it on the first
+          // render instead, so the entry is reclaimed either way.
+          if (ProjectMods.getMod(entry.projectModId)?.openMode === 'view') return null;
           return ensureProjectModTab(
             { id: entry.projectModId, name: entry.name, project: entry.cwd },
             { restoreActive: true },
@@ -4234,6 +4270,12 @@ async function init() {
     // Unified groups/contexts (#526): let a panel read + drive the active context.
     getActiveContextId: () => getActiveContextId(),
     setActiveContext: (id) => setActiveContextFromPanel(id),
+    // The one fullscreen view slot changed occupant (#628). Project mods paint an .active
+    // launcher off it and reconcile a view whose mod went away, so they need to know.
+    // Fires before ProjectMods.init() during boot, where cb is {} and every call is
+    // optional-chained — and re-entrantly from syncModView(), which render()'s guard
+    // absorbs.
+    onViewChanged: () => ProjectMods.render(),
   });
 
   // Initialize Context Views (folder-based tab grouping + left panel).
@@ -4281,6 +4323,12 @@ async function init() {
     renameModTab: (mod) => renameProjectModTab(mod),
     closeModTabs: (modId) => closeProjectModTabs(modId),
     renderRail: () => refreshContextFilter(),
+    // openMode:'view' (#628). One snapshot rather than three getters, so openMod()'s toggle
+    // and syncModView()'s teardown always see the occupant and the front/back state agree
+    // within a single render pass.
+    showModView: (mod) => showProjectModView(mod),
+    hideModView: (modId) => ModManager.hideView(projectModViewId(modId)),
+    getViewInfo: () => ({ id: ModManager.getActiveViewId(), front: ModManager.isModViewVisible() }),
   });
 
   // File drag-and-drop upload

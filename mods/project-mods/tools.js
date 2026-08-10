@@ -10,6 +10,11 @@
  * host chrome (the projects rail, the tab strip, a pinned tab), so they live in core
  * client code — public/js/project-mods.js — not in a mod iframe.
  *
+ * Two axes, deliberately separate (#628): `surfaces` says WHERE the launchers go, `openMode`
+ * says what a launcher DOES — open a real tab, or take over the content area as a view that
+ * consumes no tab at all. Conflating them is what the original three-surface design got
+ * wrong: a mod could ask for a button launcher and still be handed a tab it never wanted.
+ *
  * Disk layout (deliberately outside the repo, so "not shared" is a guarantee rather
  * than a gitignore convention):
  *
@@ -43,6 +48,12 @@ const PAGES_DIR = path.join(stateDir(), 'project-mods');
 // The three registration surfaces from #618, in rail → strip → tab order.
 const SURFACES = ['rail', 'button', 'tab'];
 const DEFAULT_SURFACES = ['rail'];
+
+// How a launcher OPENS the mod (#628) — a different axis from `surfaces`, which only says
+// WHERE the launchers go. 'tab' is what every pre-#628 mod did, so it is the default and no
+// registry migration is needed.
+const OPEN_MODES = ['tab', 'view'];
+const DEFAULT_OPEN_MODE = 'tab';
 
 const MAX_NAME_LEN = 60;
 const MAX_ICON_LEN = 8;   // one emoji can be several code points (ZWJ sequences, skin tones)
@@ -82,13 +93,15 @@ function normalize(m) {
   if (!m || typeof m !== 'object') return null;
   if (typeof m.id !== 'string' || !/^[a-zA-Z0-9_-]{1,32}$/.test(m.id)) return null;
   if (typeof m.project !== 'string' || !m.project) return null;
-  const surfaces = cleanSurfaces(m.surfaces);
+  // A pre-#628 row has no openMode at all, which cleans to 'tab' — that IS the migration.
+  const { surfaces, openMode } = cleanPlacement(m.surfaces, m.openMode);
   return {
     id: m.id,
     project: m.project,
     name: typeof m.name === 'string' && m.name.trim() ? m.name.trim().slice(0, MAX_NAME_LEN) : 'Project mod',
     icon: cleanIcon(m.icon),
     surfaces,
+    openMode,
     enabled: m.enabled !== false,
     createdAt: Number(m.createdAt) || 0,
     updatedAt: Number(m.updatedAt) || 0,
@@ -131,6 +144,55 @@ function cleanSurfaces(raw) {
   if (!Array.isArray(raw)) return [...DEFAULT_SURFACES];
   const picked = SURFACES.filter(s => raw.includes(s));
   return picked.length ? picked : [...DEFAULT_SURFACES];
+}
+
+function cleanOpenMode(raw) {
+  return OPEN_MODES.includes(raw) ? raw : DEFAULT_OPEN_MODE;
+}
+
+/**
+ * The one cross-field rule (#628): openMode 'view' and the 'tab' surface are mutually
+ * exclusive. A view takes over the content area and consumes no tab, so it cannot also be a
+ * pinned background tab — that combination is the very duplicate the view mode exists to
+ * remove.
+ *
+ * `explicit` names which of the two fields the caller actually passed, and that one wins. A
+ * partial update then reads as an instruction rather than a contradiction: ticking "Pin as a
+ * background tab" on a view flips it back to a tab, ticking "Open as a full view" drops the
+ * pin — so the right-click checklist can go either way with a single-field PUT. With both
+ * passed (or neither), openMode wins, since it is the more specific statement.
+ *
+ * Every writer goes through here — normalize(), create, update, REST PUT — so the illegal
+ * combination cannot reach disk from any direction.
+ */
+function cleanPlacement(rawSurfaces, rawOpenMode, explicit = null) {
+  let surfaces = cleanSurfaces(rawSurfaces);
+  let openMode = cleanOpenMode(rawOpenMode);
+  if (openMode === 'view' && surfaces.includes('tab')) {
+    if (explicit === 'surfaces') {
+      openMode = 'tab';
+    } else {
+      surfaces = surfaces.filter(s => s !== 'tab');
+      if (!surfaces.length) surfaces = [...DEFAULT_SURFACES];
+    }
+  }
+  return { surfaces, openMode };
+}
+
+/**
+ * Apply a partial placement edit to a stored row. Shared by update_project_mod and the REST
+ * PUT so the "which field did the caller mean" rule is written once. A no-op when neither
+ * field was passed, so an unrelated rename can't disturb the placement.
+ */
+function applyPlacement(mod, rawSurfaces, rawOpenMode) {
+  if (rawSurfaces === undefined && rawOpenMode === undefined) return;
+  const next = cleanPlacement(
+    rawSurfaces !== undefined ? rawSurfaces : mod.surfaces,
+    rawOpenMode !== undefined ? rawOpenMode : mod.openMode,
+    rawOpenMode !== undefined ? 'openMode' : 'surfaces',
+  );
+  mod.surfaces = next.surfaces;
+  mod.openMode = next.openMode;
 }
 
 // Control characters are stripped from both name and icon before anything is stored:
@@ -215,7 +277,7 @@ const callerShellId = (extra) => extra?.requestInfo?.url?.searchParams?.get('she
 // server-internal field doesn't leak into the browser by accident.
 const serialize = (m) => ({
   id: m.id, project: m.project, name: m.name, icon: m.icon,
-  surfaces: m.surfaces, enabled: m.enabled,
+  surfaces: m.surfaces, openMode: m.openMode, enabled: m.enabled,
   createdAt: m.createdAt, updatedAt: m.updatedAt,
 });
 
@@ -243,7 +305,8 @@ function init(context) {
         'Register a PROJECT MOD: a page that belongs to ONE project (this repo) and nowhere else. ' +
         'Unlike a display tab — a one-shot snapshot that disappears with the session — a project mod is durable: ' +
         'it stays registered to the project and is reachable every session from the projects rail, a square button ' +
-        'in the tab strip, or a pinned tab that opens in the background and keeps running. Use it for a dashboard or ' +
+        'in the tab strip, or a pinned tab that opens in the background and keeps running. For a glance-at-it ' +
+        'dashboard that should not occupy a tab at all, pass open_mode:"view". Use it for a dashboard or ' +
         'live tooling the project should carry with it. It is entirely local — never uploaded, never shared, never ' +
         'visible in another project. Supply the page EITHER inline via html OR — cheaper, preferred when the page ' +
         'already exists on disk — via file_path, which the server reads itself. The page is served from the deepsteve ' +
@@ -256,10 +319,11 @@ function init(context) {
         file_path: z.string().optional().describe('Absolute path to an HTML file the server reads instead of you passing html. Mutually exclusive with html'),
         replacements: z.record(z.string()).optional().describe('Literal find→replace pairs applied server-side, e.g. {"%%REPO%%": "deepsteve"} — lets a file on disk stay a reusable template'),
         icon: z.string().optional().describe('An emoji shown in the rail and on the tab-strip button. Defaults to a monogram derived from the name'),
-        surfaces: z.array(z.enum(['rail', 'button', 'tab'])).optional().describe('Where the mod registers: "rail" = an entry under the project in the projects rail (default), "button" = a square button at the top/left of the tab strip, "tab" = a pinned tab that auto-opens in the background whenever this project is active'),
+        surfaces: z.array(z.enum(['rail', 'button', 'tab'])).optional().describe('Where the LAUNCHERS go: "rail" = an entry under the project in the projects rail (default), "button" = a square button at the top/left of the tab strip, "tab" = a pinned tab that auto-opens in the background whenever this project is active. "tab" is dropped for open_mode:"view"'),
+        open_mode: z.enum(['tab', 'view']).optional().describe('What a launcher DOES. "tab" (default) opens a real, closeable tab at the end of the strip. "view" takes over the content area WITHOUT consuming a tab and is dismissed back to whatever you were looking at — use it for a glance-at-it dashboard that should not sit among the work tabs. Incompatible with the "tab" surface, which is dropped if you pass both'),
         project: z.string().optional().describe('Absolute path to the project, canonicalized to its git repo root. Defaults to the calling session\'s repo root'),
       },
-      handler: async ({ name, session_id, html, file_path, replacements, icon, surfaces, project }, extra) => {
+      handler: async ({ name, session_id, html, file_path, replacements, icon, surfaces, open_mode, project }, extra) => {
         const cleanedName = cleanName(name);
         if (!cleanedName) return err('name is required.');
 
@@ -277,12 +341,14 @@ function init(context) {
         if (resolved.error) return err(resolved.error);
 
         const now = Date.now();
+        const placement = cleanPlacement(surfaces, open_mode);
         const mod = {
           id: genId(),
           project: proj,
           name: cleanedName,
           icon: cleanIcon(icon),
-          surfaces: cleanSurfaces(surfaces),
+          surfaces: placement.surfaces,
+          openMode: placement.openMode,
           enabled: true,
           createdAt: now,
           updatedAt: now,
@@ -295,17 +361,18 @@ function init(context) {
         }
         mods.push(mod);
         saveRegistry();
-        log(`created ${mod.id} "${mod.name}" for ${proj} [${mod.surfaces.join(',')}]`);
+        log(`created ${mod.id} "${mod.name}" for ${proj} [${mod.surfaces.join(',')}] as ${mod.openMode}`);
         broadcastMods();
 
-        return ok({ id: mod.id, name: mod.name, project: mod.project, surfaces: mod.surfaces });
+        return ok({ id: mod.id, name: mod.name, project: mod.project, surfaces: mod.surfaces, openMode: mod.openMode });
       },
     },
 
     update_project_mod: {
       description:
-        'Update a project mod: replace its page (html or file_path) and/or its metadata (name, icon, surfaces, enabled). ' +
-        'Every field is optional — pass only what changes. Open tabs showing this mod reload.',
+        'Update a project mod: replace its page (html or file_path) and/or its metadata (name, icon, surfaces, ' +
+        'open_mode, enabled). Every field is optional — pass only what changes. An open tab or view showing this ' +
+        'mod reloads.',
       schema: {
         mod_id: z.string().describe('The project mod id returned by create_project_mod'),
         html: z.string().optional().describe('New page content. Mutually exclusive with file_path'),
@@ -313,10 +380,11 @@ function init(context) {
         replacements: z.record(z.string()).optional().describe('Literal find→replace pairs applied server-side'),
         name: z.string().optional().describe('New display name'),
         icon: z.string().optional().describe('New emoji icon; pass "" to clear it back to a derived monogram'),
-        surfaces: z.array(z.enum(['rail', 'button', 'tab'])).optional().describe('New registration surfaces'),
+        surfaces: z.array(z.enum(['rail', 'button', 'tab'])).optional().describe('New launcher placements. Passing "tab" on a view-mode mod flips it back to open_mode:"tab"'),
+        open_mode: z.enum(['tab', 'view']).optional().describe('New open mode: "tab" opens a real tab, "view" takes over the content area and consumes no tab. Passing "view" drops the "tab" surface'),
         enabled: z.boolean().optional().describe('false hides the mod from every surface without deleting it'),
       },
-      handler: async ({ mod_id, html, file_path, replacements, name, icon, surfaces, enabled }) => {
+      handler: async ({ mod_id, html, file_path, replacements, name, icon, surfaces, open_mode, enabled }) => {
         const mod = findMod(mod_id);
         if (!mod) return err(`Project mod "${mod_id}" not found.`);
 
@@ -337,7 +405,7 @@ function init(context) {
           mod.name = cleaned;
         }
         if (icon !== undefined) mod.icon = cleanIcon(icon);
-        if (surfaces !== undefined) mod.surfaces = cleanSurfaces(surfaces);
+        applyPlacement(mod, surfaces, open_mode);
         if (enabled !== undefined) mod.enabled = !!enabled;
 
         mod.updatedAt = Date.now();
@@ -475,14 +543,14 @@ function registerRoutes(app, context) {
     const mod = findMod(req.params.id);
     if (!mod) return res.status(404).json({ error: 'Project mod not found' });
 
-    const { name, icon, surfaces, enabled } = req.body || {};
+    const { name, icon, surfaces, openMode, enabled } = req.body || {};
     if (name !== undefined) {
       const cleaned = cleanName(name);
       if (!cleaned) return res.status(400).json({ error: 'name must not be empty' });
       mod.name = cleaned;
     }
     if (icon !== undefined) mod.icon = cleanIcon(icon);
-    if (surfaces !== undefined) mod.surfaces = cleanSurfaces(surfaces);
+    applyPlacement(mod, surfaces, openMode);
     if (enabled !== undefined) mod.enabled = !!enabled;
 
     mod.updatedAt = Date.now();
@@ -507,6 +575,8 @@ function registerRoutes(app, context) {
 // The mod loader only uses init/registerRoutes; the extra named exports are for unit tests.
 module.exports = {
   init, registerRoutes,
-  resolveProject, cleanSurfaces, cleanIcon, cleanName,
-  SURFACES, DEFAULT_SURFACES, FEATURE_OFF_MSG, REGISTRY_FILE, PAGES_DIR,
+  resolveProject, normalize, cleanSurfaces, cleanIcon, cleanName,
+  cleanOpenMode, cleanPlacement, applyPlacement,
+  SURFACES, DEFAULT_SURFACES, OPEN_MODES, DEFAULT_OPEN_MODE,
+  FEATURE_OFF_MSG, REGISTRY_FILE, PAGES_DIR,
 };

@@ -350,17 +350,37 @@ A **Project Mod** is a page an agent writes for **one project** and nowhere else
 
 It is **entirely local**: the registry and the page live in `~/.deepsteve/`, never in the repo, never uploaded, never visible from another project.
 
-### Registration surfaces
+### Launcher surfaces
 
-A mod declares which of three places it wants, via `surfaces`:
+Two independent axes: **`surfaces` says where the launchers go, `openMode` says what a launcher does.**
+
+A mod declares which of three launcher placements it wants, via `surfaces`:
 
 | Surface | Where it appears |
 |---|---|
 | `rail` (default) | An entry beneath its project in the projects rail. Rendered for the **active** project only. |
 | `button` | A square button in the tab strip — the **top** of the strip in vertical tab layout, the **left** of it in horizontal. |
-| `tab` | A pinned tab that **auto-opens in the background** whenever its project is the active one, and keeps running while you work elsewhere. |
+| `tab` | A pinned tab that **auto-opens in the background** whenever its project is the active one, and keeps running while you work elsewhere. Not available with `openMode: "view"`. |
 
 Any combination is allowed; an empty list falls back to `["rail"]`, because a mod with no surface could never be opened.
+
+### Open mode
+
+| `openMode` | What a launcher does |
+|---|---|
+| `tab` (default) | Opens a real, closeable tab at the end of the strip. This is what every mod did before the mode existed, so nothing changes for one that doesn't ask. |
+| `view` | Takes over the content area and **consumes no tab at all**. Nothing is added to the strip, so the mod is represented by its launcher and nothing else — which is the point of choosing `button` in the first place. |
+
+A view:
+
+- is dismissed by clicking its launcher again, by clicking any tab, or by switching to another project — it can't outlive the chrome that opens it, and it never leaves a back button behind;
+- can't be closed by accident, because there is nothing closeable;
+- reloads in place when `update_project_mod` / `edit_project_mod` rewrites its page;
+- is **not** restored after a page reload. Re-opening is one click on a launcher that is, by definition, on screen.
+
+`openMode: "view"` and the `"tab"` surface are mutually exclusive — a view can't also be a pinned background tab. Set either one and the other yields: passing `open_mode: "view"` drops a `"tab"` surface, and adding `"tab"` back to a view-mode mod flips it to `openMode: "tab"`. That is what lets the right-click checklist toggle in both directions with a single click.
+
+There is exactly **one** full-content view slot in the window, shared with fullscreen DeepSteve Mods: showing a second view replaces the first.
 
 ### Scoping
 
@@ -378,24 +398,25 @@ create_project_mod({
   session_id: process.env.DEEPSTEVE_SESSION_ID,   // infers the project from your session
   name: "Build Dashboard",
   icon: "📊",                                     // optional; else a monogram from the name
-  surfaces: ["rail", "button"],
+  surfaces: ["rail", "button"],                   // where the launchers go
+  open_mode: "view",                              // …and what they do; "tab" is the default
   file_path: "/repo/tools/dashboard.html",        // or inline `html`
   replacements: { "%%REPO%%": "deepsteve" },      // optional literal find→replace
 })
 ```
 
-Then `update_project_mod` (page and/or metadata), `edit_project_mod` (exact-substring patch, like the Edit tool), `list_project_mods` (`scope: "project" | "all"`), and `delete_project_mod`. Exactly one of `html` / `file_path` — the same `resolveHtml()` display tabs use.
+Then `update_project_mod` (page and/or metadata — `name`, `icon`, `surfaces`, `open_mode`, `enabled`), `edit_project_mod` (exact-substring patch, like the Edit tool), `list_project_mods` (`scope: "project" | "all"`), and `delete_project_mod`. Exactly one of `html` / `file_path` — the same `resolveHtml()` display tabs use.
 
 The page is served same-origin from `GET /api/project-mods/:id/page`, so it calls back into deepsteve with relative `/api/...` URLs (never a hard-coded port), and the host injects `window.deepsteve` into its iframe — the same bridge documented above — so a project mod can drive tabs, not just render.
 
 ### Managing one
 
-Right-click its rail row or its strip button: Open, Rename, Set icon, toggle each of the three surfaces, Disable, Delete. Renaming its tab renames the mod. Closing its tab does **not** delete it — a pinned mod returns the next time its project is active.
+Right-click its rail row or its strip button: Open, Rename, Set icon, toggle each of the three launcher surfaces, toggle "Open as a full view (no tab)", Disable, Delete. Renaming its tab renames the mod. Closing its tab does **not** delete it — a pinned mod returns the next time its project is active.
 
 ### Disk layout
 
 ```
-~/.deepsteve/project-mods.json        # [{id, project, name, icon, surfaces, enabled, …}]
+~/.deepsteve/project-mods.json        # [{id, project, name, icon, surfaces, openMode, enabled, …}]
 ~/.deepsteve/project-mods/<id>.html   # one page per mod
 ```
 
