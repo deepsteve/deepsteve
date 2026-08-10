@@ -192,6 +192,57 @@ jobs:
           fi
           echo "and the daemon logged the reattach"
 
+      # THE regression test for #630, and the only place in CI where an AGENT session's
+      # tmux argv runs against a real tmux. `npm run test:standalone` runs in no job,
+      # and every other Linux tmux path here uses agentType=terminal — i.e. the "no
+      # command at all" arm, which was never broken. The bug needs exactly this
+      # environment: a service-managed daemon whose PATH is the unit's, not a login
+      # shell's, so a dir that only ~/.bash_profile adds is the thing to look for.
+      - name: An agent pane gets the user's login PATH (#630)
+        run: |
+          TOKEN=$(cat "$HOME/.deepsteve/auth-token")
+          mkdir -p "$HOME/login-only"
+          # A stand-in agent that records which copy of itself the shell found. The
+          # decoy in ~/.local/bin is reachable from the unit's PATH, so skipping the
+          # login shell is a NAMED wrong answer rather than a timeout.
+          mkdir -p "$HOME/.local/bin"
+          for d in "$HOME/login-only" "$HOME/.local/bin"; do
+            printf '#!/bin/sh\nprintf "%%s" "$0" > "$HOME/pane-stub"\nexec /bin/sleep 300\n' > "$d/claude"
+            chmod +x "$d/claude"
+          done
+          echo 'export PATH="$HOME/login-only:$PATH"' >> "$HOME/.bash_profile"
+          # Anti-vacuity: if the unit's PATH already carried login-only, a non-login
+          # shell would find the stub too and this step would pass against the bug.
+          grep -q 'login-only' "$HOME/.config/systemd/user/deepsteve.service" \
+            && { echo "vacuous: the unit's PATH contains login-only"; exit 1; }
+
+          node -e '
+            const WebSocket = require(process.env.HOME + "/.deepsteve/node_modules/ws");
+            const ws = new WebSocket("ws://127.0.0.1:3000/?agentType=claude&new=1&cwd=" + encodeURIComponent(process.env.HOME), {
+              headers: { Authorization: "Bearer " + process.argv[1], Origin: "http://localhost:3000" },
+            });
+            const t = setTimeout(() => { console.error("timed out creating a session"); process.exit(1); }, 30000);
+            ws.on("message", (raw) => {
+              let m; try { m = JSON.parse(raw.toString()); } catch { return; }
+              if (m.type === "session") { clearTimeout(t); console.log(m.engineType); process.exit(0); }
+            });
+            ws.on("error", (e) => { console.error(e.message); process.exit(1); });
+          ' "$TOKEN" > /tmp/agent-engine
+          [ "$(cat /tmp/agent-engine)" = "tmux" ] || {
+            echo "the agent session did not land on tmux ($(cat /tmp/agent-engine)) — this step would test nothing"
+            exit 1
+          }
+
+          for _ in $(seq 1 30); do [ -f "$HOME/pane-stub" ] && break; sleep 1; done
+          test -f "$HOME/pane-stub" || { echo "REGRESSION (#630): the pane never started an agent at all"; exit 1; }
+          test "$(cat "$HOME/pane-stub")" = "$HOME/login-only/claude" || {
+            echo "REGRESSION (#630): the pane ran $(cat "$HOME/pane-stub") — its shell never sourced"
+            echo "~/.bash_profile, i.e. tmux was handed a single shell-command argument and ran it"
+            echo "through a NON-login shell. Agents lose everything a login profile exports."
+            exit 1
+          }
+          echo "the agent pane ran under a login shell"
+
       - name: Uninstall tears everything down
         run: |
           "$HOME/.deepsteve/uninstall.sh"

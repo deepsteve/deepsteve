@@ -15,6 +15,17 @@
 // only exists in an environment with no LC_ALL/LC_CTYPE/LANG, which is what a
 // launchd/systemd daemon has and an interactive test runner does not. A test that
 // inherited process.env would pass against the bug.
+//
+// #630 INVERTED several of the assertions below, and the story is worth knowing
+// before editing them. #621's unwrap was right that a login shell must not nest
+// inside tmux's own — so it handed tmux the inner command as ONE string. But tmux
+// runs a single `shell-command` argument through `default-shell -c`, a NON-login
+// shell, so removing the nesting also removed the `-l`: ~/.zprofile was never
+// sourced and /opt/homebrew/bin never reached an agent's PATH under the default
+// engine. Handing tmux the argv as MULTIPLE arguments (exec'd directly, tmux 2.0+)
+// gives one shell AND the login flag. So "the login shell must NOT appear in the
+// tmux command" — the old assertion, and the bug in one line — is now "it must
+// appear, exactly once, with its login flag, as separate argv elements".
 const { test } = require('node:test');
 const assert = require('node:assert');
 const fs = require('fs');
@@ -103,23 +114,28 @@ test('an injected exec reaches _exec, not just the version probe (#621)', () => 
   // Before this, spawn() called execFileSync directly and genuinely shelled out, so
   // none of this file could exist on a runner without tmux.
   const { eng, calls } = makeEngine();
-  eng.spawn('abc12345', '/bin/zsh', ['-l', '-c', "claude '--x'"], '/repo', { shellCommand: "claude '--x'" });
+  eng.spawn('abc12345', '/bin/zsh', ['-l', '-c', "claude '--x'"], '/repo');
   assert.ok(calls.some((c) => c.argv.includes('new-session')), 'new-session must go through the injected exec');
 });
 
-test('an agent session passes the inner command through verbatim — no second shell', () => {
+test('#630: an agent session runs under a LOGIN shell, and exactly one shell', () => {
+  // The pre-#630 shape was one string, `claude '--worktree' '…'`, which tmux runs
+  // through `default-shell -c` — one shell, but the wrong one and not a login one.
   const { eng, calls } = makeEngine();
   const inner = "claude '--worktree' 'scheduled-ab12'";
-  eng.spawn('abc12345', '/bin/zsh', ['-l', '-c', inner], '/repo', { shellCommand: inner });
+  eng.spawn('abc12345', '/bin/zsh', ['-l', '-c', inner], '/repo');
 
   const argv = newSessionArgv(calls);
-  assert.strictEqual(argv[argv.length - 1], inner,
-    'the trailing command must be exactly what spawnSession asked for');
-  assert.ok(!argv.some((a) => a.includes('/bin/zsh')),
-    'the login shell must NOT appear in the tmux command — tmux already runs it in $SHELL');
+  assert.deepStrictEqual(argv.slice(-4), ['/bin/zsh', '-l', '-c', inner],
+    'the pane argv must be the login shell, its login flag, -c and the inner command');
+  assert.strictEqual(argv.filter((a) => a === '/bin/zsh').length, 1,
+    'exactly one shell — nesting is what #621 removed and this must not bring back');
+  assert.ok(!argv.some((a) => a.includes('/bin/zsh') && a.includes(' ')),
+    'the pane command must be argv ELEMENTS, never one joined string: a single '
+    + 'shell-command argument is what tmux runs through a non-login shell (#630)');
 });
 
-test('a terminal session passes no command at all (tmux runs its default $SHELL)', () => {
+test('a terminal session passes no command at all (tmux forks default-shell, as a login shell)', () => {
   const { eng, calls } = makeEngine();
   eng.spawn('abc12345', '/bin/zsh', ['-l'], '/repo', { shellCommand: null });
 
@@ -135,44 +151,92 @@ test('a terminal session passes no command at all (tmux runs its default $SHELL)
   assert.ok(!argv.some((a) => a.includes('zsh')), 'no shell should be named');
 });
 
-test('REGRESSION (#621): a bash login shell produces the same argv as a zsh one', () => {
-  // The whole point. The old unwrap matched on `cmd === 'zsh'`; on Debian, where
-  // resolveLoginShell() returns /bin/bash, it fell through to the generic branch and
-  // emitted "/bin/bash -l -c 'claude …'" as tmux's command — a shell inside a shell.
+test('REGRESSION (#621): nothing but the shell path depends on which shell was resolved', () => {
+  // The whole point of #621. Its old unwrap matched on `cmd === 'zsh'`; on Debian,
+  // where resolveLoginShell() returns /bin/bash, it fell through to the generic
+  // branch and emitted "/bin/bash -l -c 'claude …'" as tmux's single command string
+  // — a shell inside a shell. Since #630 the shell IS in the argv, deliberately, so
+  // the two argvs legitimately differ; what must not differ is anything else.
   const inner = "claude '--foo'";
   const zsh = makeEngine();
-  zsh.eng.spawn('abc12345', '/bin/zsh', ['-l', '-c', inner], '/repo', { shellCommand: inner });
+  zsh.eng.spawn('abc12345', '/bin/zsh', ['-l', '-c', inner], '/repo');
   const bash = makeEngine();
-  bash.eng.spawn('abc12345', '/bin/bash', ['-l', '-c', inner], '/repo', { shellCommand: inner });
+  bash.eng.spawn('abc12345', '/bin/bash', ['-l', '-c', inner], '/repo');
 
-  assert.deepStrictEqual(newSessionArgv(bash.calls), newSessionArgv(zsh.calls),
-    'the tmux argv must not depend on which login shell was resolved');
+  const zshArgv = newSessionArgv(zsh.calls);
+  const bashArgv = newSessionArgv(bash.calls);
+  assert.deepStrictEqual(zshArgv.slice(-4), ['/bin/zsh', '-l', '-c', inner]);
+  assert.deepStrictEqual(bashArgv.slice(-4), ['/bin/bash', '-l', '-c', inner]);
+  assert.deepStrictEqual(
+    bashArgv.map((a) => (a === '/bin/bash' ? '<shell>' : a)),
+    zshArgv.map((a) => (a === '/bin/zsh' ? '<shell>' : a)),
+    'only the shell path may depend on which login shell was resolved');
 });
 
-test('REGRESSION (#621): an absolute-path shell is not re-nested', () => {
-  // Even staying on zsh, spawnSession now passes '/bin/zsh' rather than 'zsh'. A
+test('REGRESSION (#621): an absolute-path shell is named once, not nested', () => {
+  // Even staying on zsh, spawnSession passes '/bin/zsh' rather than 'zsh'. A
   // name-based match would have missed that too.
   const inner = "claude '--foo'";
   const { eng, calls } = makeEngine();
-  eng.spawn('abc12345', '/bin/zsh', ['-l', '-c', inner], '/repo', { shellCommand: inner });
+  eng.spawn('abc12345', '/bin/zsh', ['-l', '-c', inner], '/repo');
   const argv = newSessionArgv(calls);
-  assert.strictEqual(argv.filter((a) => a.includes('zsh')).length, 0);
+  assert.strictEqual(argv.filter((a) => a.includes('zsh')).length, 1);
   assert.strictEqual(argv[argv.length - 1], inner);
 });
 
-test('shellCommand undefined still builds a quoted command from cmd+args', () => {
+test('#630: the pane argv IS the argv node-pty is given', () => {
+  // The parity claim, stated as argv. NodePtyEngine.spawn does pty.spawn(cmd, args, …)
+  // (engines/node-pty.js), so proving the tmux pane argv is [cmd, ...args] proves the
+  // two engines hand the agent the same process — the argv analogue of the env
+  // invariant #624 established, and the one #630 found broken.
+  //
+  // node-pty's side is asserted against its SOURCE, not by requiring it: the bare CI
+  // unit job installs --ignore-scripts, so there is no native binding and the require
+  // would throw.
+  const cmd = '/bin/zsh';
+  const args = ['-l', '-c', "claude '--foo'"];
+  const { eng, calls } = makeEngine();
+  eng.spawn('abc12345', cmd, args, '/repo');
+  assert.deepStrictEqual(newSessionArgv(calls).slice(-(1 + args.length)), [cmd, ...args]);
+
+  const src = fs.readFileSync(path.join(__dirname, '..', '..', 'engines', 'node-pty.js'), 'utf8');
+  assert.match(src, /pty\.spawn\(cmd,\s*args,/,
+    'node-pty stopped forwarding cmd+args verbatim — the parity assertion above is now a lie');
+});
+
+test('#630: a string shellCommand is refused, loudly', () => {
+  // The mode that dropped the login flag is unrepresentable rather than merely
+  // discouraged. spawnSession's catch turns this into a node-pty fallback with the
+  // orange badge, so a caller that regresses degrades visibly instead of silently.
+  const { eng } = makeEngine();
+  assert.throws(
+    () => eng.spawn('abc12345', '/bin/zsh', ['-l', '-c', 'claude'], '/repo', { shellCommand: 'claude' }),
+    /#630/);
+});
+
+test('shellCommand undefined passes cmd+args through as argv elements', () => {
   // The "no opinion" arm, for any caller that is not spawnSession. Distinguishing it
-  // from null is why this is a three-way and not a truthiness check.
+  // from null is why this is a two-way and not a truthiness check.
   const { eng, calls } = makeEngine();
   eng.spawn('abc12345', 'htop', ['-d', '5'], '/repo');
-  assert.strictEqual(newSessionArgv(calls).slice(-1)[0], 'htop -d 5');
+  assert.deepStrictEqual(newSessionArgv(calls).slice(-3), ['htop', '-d', '5']);
+});
+
+test('#630: ONE argv element is still an sh(1) command line — tmux\'s cliff', () => {
+  // Documents the boundary rather than guarding it. tmux runs a single
+  // shell-command argument through a shell; only two or more are exec'd directly.
+  // spawnSession never produces one (an agent is always shell + -l + -c + inner),
+  // but a generic caller with no args does, and gets the pre-#630 behaviour.
+  const { eng, calls } = makeEngine();
+  eng.spawn('abc12345', 'htop', [], '/repo');
+  assert.strictEqual(newSessionArgv(calls).slice(-1)[0], 'htop');
 });
 
 test('shellCommand null and undefined are different things', () => {
   const withNull = makeEngine();
   withNull.eng.spawn('abc12345', 'htop', ['-d', '5'], '/repo', { shellCommand: null });
   const argv = newSessionArgv(withNull.calls);
-  assert.ok(!argv.includes('htop -d 5'), 'null means "no command", not "derive one"');
+  assert.ok(!argv.includes('htop'), 'null means "no command", not "derive one"');
 });
 
 test('session name, geometry and cwd are unchanged', () => {
@@ -187,28 +251,38 @@ test('tmux >= 3.2 forwards env with -e, before the command', () => {
   const { eng, calls } = makeEngine({ version: '3.5a' });
   const inner = "claude '--foo'";
   eng.spawn('abc12345', '/bin/zsh', ['-l', '-c', inner], '/repo',
-    { env: { DEEPSTEVE_SESSION_ID: 'abc12345' }, shellCommand: inner });
+    { env: { DEEPSTEVE_SESSION_ID: 'abc12345' } });
   const argv = newSessionArgv(calls);
   const at = argv.indexOf('-e');
   assert.ok(at > 0, 'expected an -e pair');
   assert.strictEqual(argv[at + 1], 'DEEPSTEVE_SESSION_ID=abc12345');
-  assert.strictEqual(argv[argv.length - 1], inner, 'the command still comes last');
+  assert.deepStrictEqual(argv.slice(-4), ['/bin/zsh', '-l', '-c', inner],
+    'the pane argv still comes last, after every -e pair');
 });
 
-test('tmux < 3.2 wraps with `env`, and still does not add a shell', () => {
+test('tmux < 3.2 wraps with `env`, and still does not nest a shell', () => {
   const { eng, calls } = makeEngine({ version: '3.0a' });
   const inner = "claude '--foo'";
   eng.spawn('abc12345', '/bin/zsh', ['-l', '-c', inner], '/repo',
-    { env: { DEEPSTEVE_SESSION_ID: 'abc12345' }, shellCommand: inner });
-  const last = newSessionArgv(calls).slice(-1)[0];
-  assert.match(last, /^env DEEPSTEVE_SESSION_ID=abc12345 /, 'the caller env comes first, then the rest');
-  assert.match(last, / LC_CTYPE=\S+ /, 'the #624 locale must survive the pre-3.2 path too');
-  assert.match(last, / COLORTERM=truecolor /);
-  assert.ok(last.endsWith(` ${inner}`), 'the command still comes last');
-  assert.ok(!last.includes('zsh'), 'the env wrapper must not reintroduce a shell');
+    { env: { DEEPSTEVE_SESSION_ID: 'abc12345' } });
+  const argv = newSessionArgv(calls);
+  const at = argv.indexOf('env');
+  assert.ok(at > 0, 'expected an env(1) prefix');
+  assert.strictEqual(argv[at + 1], 'DEEPSTEVE_SESSION_ID=abc12345', 'the caller env comes first');
+  const pairs = argv.slice(at + 1, -4);
+  assert.ok(pairs.every((a) => a.includes('=')), `only KEY=VAL may sit between env and the shell, got ${JSON.stringify(pairs)}`);
+  assert.ok(pairs.some((a) => /^LC_CTYPE=\S+$/.test(a)), 'the #624 locale must survive the pre-3.2 path too');
+  assert.ok(pairs.includes('COLORTERM=truecolor'));
+  // Since #630 the pane argv NAMES the login shell — the point of the change. What
+  // must not come back is a second one, or a joined command string for env to re-parse.
+  assert.deepStrictEqual(argv.slice(-4), ['/bin/zsh', '-l', '-c', inner]);
+  assert.strictEqual(argv.filter((a) => a.includes('zsh')).length, 1,
+    'the env wrapper must not reintroduce a shell');
 });
 
 test('the engine never invokes a shell — only the resolved tmux binary', () => {
+  // "Invokes", not "names". Since #630 the pane argv for an agent session names the
+  // login shell (that is the fix); what the ENGINE execs is still only tmux.
   const { eng, calls, ptys, bin } = makeEngine();
   eng.spawn('abc12345', '/bin/zsh', ['-l'], '/repo', { shellCommand: null });
   for (const c of calls) {
@@ -314,7 +388,7 @@ test('#624: the pane gets the locale too, so the agent picks its Unicode glyph s
   const { eng, calls } = makeEngine({ version: '3.5a' });
   const inner = "claude '--foo'";
   eng.spawn('abc12345', '/bin/zsh', ['-l', '-c', inner], '/repo',
-    { env: { DEEPSTEVE_SESSION_ID: 'abc12345' }, shellCommand: inner });
+    { env: { DEEPSTEVE_SESSION_ID: 'abc12345' } });
   const pairs = envPairs(newSessionArgv(calls));
   assert.match(pairs.LC_CTYPE, /utf-?8/i);
   assert.strictEqual(pairs.COLORTERM, 'truecolor');

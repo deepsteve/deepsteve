@@ -79,7 +79,9 @@ Claude is the one agent never probed, because it is the default and the fallback
 
 Every agent is launched through a login shell — `resolveLoginShell()` picks it (`$SHELL`,
 then the passwd entry, then zsh/bash/sh; see [platform.md](platform.md)) — so they all
-inherit your `PATH`, and all of them get the
+inherit the `PATH` your login profile builds, under **both** terminal engines. That last
+part was not true between #621 and #630, where agent panes under tmux ran a *non-login*
+shell and lost anything `~/.zprofile` exported. All of them also get the
 `DEEPSTEVE_*` environment variables (`DEEPSTEVE_SESSION_ID`, `DEEPSTEVE_API_URL`,
 `DEEPSTEVE_API_TOKEN`, …). An experimental agent with no MCP can still reach the REST API
 through those, if it has a shell tool.

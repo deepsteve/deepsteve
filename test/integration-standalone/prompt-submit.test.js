@@ -30,6 +30,7 @@ const os = require('node:os');
 const path = require('node:path');
 const WebSocket = require('ws');
 const { TmuxSandbox } = require('../helpers/tmux-sandbox');
+const { writeLoginProfile } = require('../helpers/login-profile');
 
 const REPO_ROOT = path.resolve(__dirname, '..', '..');
 const STUB_SRC = path.join(REPO_ROOT, 'test', 'helpers', 'stubs', 'fake-claude-tui.js');
@@ -225,7 +226,7 @@ before(async () => {
     '#!/bin/bash\necho "$*" >> "$HOME/open-invocations.log"\nexit 0\n',
     { mode: 0o755 },
   );
-  fs.writeFileSync(path.join(HOME, '.zprofile'), 'export PATH="$HOME/bin:$PATH"\n');
+  writeLoginProfile(HOME, 'export PATH="$HOME/bin:$PATH"');
 
   PORT = await freePort();
   BASE = `http://127.0.0.1:${PORT}`;

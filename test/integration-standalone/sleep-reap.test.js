@@ -31,6 +31,7 @@ const os = require('node:os');
 const path = require('node:path');
 const WebSocket = require('ws');
 const { TmuxSandbox } = require('../helpers/tmux-sandbox');
+const { writeLoginProfile } = require('../helpers/login-profile');
 
 const REPO_ROOT = path.resolve(__dirname, '..', '..');
 
@@ -211,7 +212,7 @@ before(async () => {
     '#!/bin/bash\necho "$*" >> "$HOME/open-invocations.log"\nexit 0\n',
     { mode: 0o755 }
   );
-  fs.writeFileSync(path.join(HOME, '.zprofile'), 'export PATH="$HOME/bin:$PATH"\n');
+  writeLoginProfile(HOME, 'export PATH="$HOME/bin:$PATH"');
   // Pinned to node-pty (#620). The subject here is the detach REAPER and the
   // sleep-holdoff logic wrapped around it — and a tmux-backed session never arms
   // that reaper at all: the daemon is healthy, tmux holds the process, so a

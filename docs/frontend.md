@@ -12,7 +12,7 @@ Cmd+K opens a command palette for keyboard-driven access to tabs, settings, and 
 
 - **Settings**: `commandPaletteEnabled` (default `true`) and `commandPaletteShortcut` (default `Meta+k`) follow the 3-place settings pattern (defaults, POST handler, broadcastSettings).
 - **Built-in commands**: Hard-coded in `BUILTIN_COMMANDS` array (new-tab, close-tab, settings, mods, next/prev-tab). Client dispatches these via callbacks.
-- **Custom commands**: Executable files in `~/.deepsteve/commands/`. Optional `.json` sidecar for name/description metadata. Executed server-side via `zsh -l -c` (for PATH). Not the same as Skills (which are Claude slash commands in `skills/*.md`).
+- **Custom commands**: Executable files in `~/.deepsteve/commands/`. Optional `.json` sidecar for name/description metadata. Executed server-side under `resolveLoginShell()`'s shell with its login flag (for PATH; literally `zsh -l -c` before #621). Not the same as Skills (which are Claude slash commands in `skills/*.md`).
 - **API**: `GET /api/commands` returns built-in + custom commands. `POST /api/commands/execute` runs a custom command by ID.
 - **Client**: `command-palette.js` is a self-contained ES module (like `cmd-tab-switch.js`) with `init()`, `setEnabled()`, `setShortcut()` exports.
 

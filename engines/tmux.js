@@ -45,19 +45,6 @@ const MAX_SILENT_REATTACHES = 3;
  */
 const REATTACH_RESET_MS = 60000;
 
-/**
- * Shell-quote a string for the command line **tmux itself** runs via $SHELL.
- *
- * This is NOT about how we invoke tmux — that goes through execFileSync with an
- * argv array (#619), so there is no shell of ours to quote for. It is about the
- * single `shell-command` argument `tmux new-session` takes, which tmux hands to a
- * shell; the two remaining callers below both build that string.
- */
-function shellQuote(s) {
-  if (/^[a-zA-Z0-9_./:=-]+$/.test(s)) return s;
-  return "'" + s.replace(/'/g, "'\\''") + "'";
-}
-
 /** The subset of `src` named by `keys` that is actually defined. */
 function pick(src, keys) {
   const out = {};
@@ -103,9 +90,9 @@ class TmuxEngine extends Engine {
    *   makes the locale bug testable: a test that inherits the runner's env has a
    *   locale and passes against the bug.
    *
-   *   socket — WHICH tmux server this engine talks to (#625). Three-way, the same
-   *   shape as spawn()'s `shellCommand`, because "not specified" and "deliberately
-   *   the default one" are genuinely different requests:
+   *   socket — WHICH tmux server this engine talks to (#625). Three-way, because
+   *   "not specified" and "deliberately the default one" are genuinely different
+   *   requests:
    *
    *     undefined → deepsteve's own socket, tmuxSocketPath(). The normal case.
    *     null      → tmux's OWN default per-UID socket, on purpose. Exactly two
@@ -232,27 +219,47 @@ class TmuxEngine extends Engine {
   spawn(id, cmd, args, cwd, { cols = 120, rows = 40, env, stripEnv = [], shellCommand } = {}) {
     const sessionName = this._tmuxSessionName(id);
 
-    // tmux new-session already runs its command in $SHELL, so a caller that has
-    // itself wrapped the command in a login shell must hand us the INNER command or
-    // we nest one shell inside another.
+    // What the pane runs, as ARGV — never as a string (#630).
     //
-    // `shellCommand` is spawnSession stating that directly (#621), three-way:
-    //   undefined → no opinion; build it from cmd+args
-    //   null      → a bare login shell, which is tmux's own default
-    //   string    → run exactly this
+    // tmux's `shell-command` is two different things depending on how many arguments
+    // it gets. ONE argument is an sh(1) command line, which tmux runs through the
+    // session's `default-shell` — a NON-login shell, and not even necessarily the
+    // shell resolveLoginShell() picked. TWO OR MORE are exec'd directly with no shell
+    // in between (tmux(1), "shell-command"; landed in tmux 2.0, March 2015).
     //
-    // It replaced a `cmd === 'zsh'` shape match. That worked only while spawnSession
-    // hardcoded the literal string 'zsh'; since #621 cmd is whatever
-    // resolveLoginShell() picked — '/bin/zsh' on a Mac, '/bin/bash' on Debian — so a
-    // name-based test would have silently stopped matching and re-nested a shell
-    // inside every single session. It would still mostly *work*, which is exactly
-    // what made it dangerous.
-    let fullCmd;
-    if (shellCommand !== undefined) {
-      fullCmd = shellCommand;
-    } else {
-      fullCmd = [cmd, ...args.map(a => shellQuote(a))].join(' ');
+    // #621 handed over the one-string form to stop a login shell nesting inside
+    // tmux's own, and that worked — but it also threw spawnSession's `-l` on the
+    // floor. ~/.zprofile is where `brew shellenv` puts /opt/homebrew/bin on PATH and
+    // the LaunchAgent plist does not carry it, so `gh` was "command not found" in
+    // every tmux agent session while node-pty sessions — which really do exec
+    // `/bin/zsh -l -c …` — were fine. Handing tmux [cmd, ...args] verbatim makes the
+    // pane argv byte-for-byte the one node-pty is given (engines/node-pty.js), with
+    // exactly one shell in it, and deletes the quoting layer rather than fixing it.
+    //
+    //   shellCommand === null → no command at all: tmux forks `default-shell` as a
+    //                           LOGIN shell of its own (tmux(1), `default-command`).
+    //                           What a plain terminal tab wants, and the one case
+    //                           that was never broken.
+    //   otherwise             → exec [cmd, ...args] directly.
+    //
+    // `-l`/`-c` after the shell path are pane arguments, not tmux flags: tmux bundles
+    // OpenBSD's getopt (it needs optreset, which glibc lacks) and imports none from
+    // libc, so parsing is non-permuting and stops at `cmd`. No `--` separator — it is
+    // undocumented in tmux(1), so a tmux that did not special-case it would pass `--`
+    // to execvp as argv[0] and every pane would die instantly.
+    //
+    // NOTE the cliff: a paneArgv of exactly ONE element is back in sh(1) territory.
+    // spawnSession never produces one (an agent is shell + -l + -c + inner), but a
+    // generic caller with no args does, and gets the pre-#630 behaviour for it.
+    if (typeof shellCommand === 'string') {
+      // Unrepresentable rather than merely discouraged. spawnSession's catch turns
+      // this into a node-pty fallback with the orange badge, so it is visible.
+      throw new TypeError(
+        'TmuxEngine.spawn: shellCommand no longer takes a string (#630) — a single '
+        + 'shell-command argument is run by a NON-login shell, which is the bug. Pass '
+        + 'the argv as cmd+args, or null for a bare login shell.');
     }
+    const paneArgv = shellCommand === null ? [] : [cmd, ...args];
 
     const tmuxArgs = ['new-session', '-d', '-s', sessionName, '-x', String(cols), '-y', String(rows)];
     if (cwd) tmuxArgs.push('-c', cwd);
@@ -297,19 +304,19 @@ class TmuxEngine extends Engine {
       for (const [key, val] of Object.entries(extraEnv)) {
         tmuxArgs.push('-e', `${key}=${val}`);
       }
-      if (fullCmd) tmuxArgs.push(fullCmd);
+      // An empty paneArgv spreads to nothing, which IS "no trailing shell-command".
+      tmuxArgs.push(...paneArgv);
     } else {
-      // Older tmux: wrap with env command. Note a session with no command of its own
-      // (a plain terminal) gets nothing here, since there is no argv to prefix —
+      // Older tmux: prefix with env(1). Still multiple arguments, so tmux execs env
+      // directly and there is no quoting to get wrong — which is what took
+      // shellQuote() with it (#630). Note a session with no command of its own (a
+      // plain terminal) gets nothing here, since there is no argv to prefix —
       // pre-existing, and it costs only the pane's locale on tmux < 3.2. The attach
       // client's own `-u` still renders it correctly.
-      if (fullCmd && Object.keys(extraEnv).length > 0) {
-        const envPrefix = Object.entries(extraEnv)
-          .map(([k, v]) => `${k}=${shellQuote(v)}`)
-          .join(' ');
-        tmuxArgs.push(`env ${envPrefix} ${fullCmd}`);
-      } else if (fullCmd) {
-        tmuxArgs.push(fullCmd);
+      if (paneArgv.length && Object.keys(extraEnv).length > 0) {
+        tmuxArgs.push('env', ...Object.entries(extraEnv).map(([k, v]) => `${k}=${v}`), ...paneArgv);
+      } else {
+        tmuxArgs.push(...paneArgv);
       }
     }
 

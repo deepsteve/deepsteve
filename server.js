@@ -1313,10 +1313,14 @@ function spawnSession(eng, id, agentType, args, cwd, { cols = 120, rows = 40, en
   // /bin/zsh on macOS — the same shell as before, now as an absolute path.
   const loginArgs = LOGIN_SHELL.loginFlag ? [LOGIN_SHELL.loginFlag] : [];
 
-  let shellArgs, shellCommand;
+  let shellArgs;
   if (agentType === 'terminal') {
     shellArgs = loginArgs;
-    shellCommand = null; // bare login shell — tmux's own default
+    // The one thing we still have to state to the engine: run no command, so tmux
+    // forks `default-shell` as a LOGIN shell of its own — which is what node-pty
+    // gets from the bare `-l` above. NodePtyEngine destructures only
+    // {cols, rows, env} and ignores the option. Contract: engines/tmux.js.
+    opts.shellCommand = null;
   } else {
     const bin = agentType === 'claude' ? 'claude'
       : agentType === 'codex' ? 'codex'
@@ -1325,14 +1329,13 @@ function spawnSession(eng, id, agentType, args, cwd, { cols = 120, rows = 40, en
       : agentType === 'pi' ? (settings.piBinary || 'pi')
       : 'claude';
     const quoted = args.map(a => `'${a.replace(/'/g, "'\\''")}'`).join(' ');
-    shellCommand = `${bin} ${quoted}`;
-    shellArgs = [...loginArgs, '-c', shellCommand];
+    shellArgs = [...loginArgs, '-c', `${bin} ${quoted}`];
+    // Deliberately NO opts.shellCommand (#630): the tmux engine now execs
+    // [cmd, ...args] verbatim, so the login flag above reaches the pane. Handing it
+    // the inner command instead — #621's way of stopping a shell nesting inside a
+    // shell — dropped the `-l`, and with it ~/.zprofile, and with that
+    // /opt/homebrew/bin, so `gh` was not on any agent's PATH under the default engine.
   }
-  // Tell the engine what we want run, instead of making it re-derive that by
-  // pattern-matching our argv. TmuxEngine unwraps it so the command doesn't end up
-  // inside a second shell; NodePtyEngine destructures only {cols, rows, env} and
-  // ignores it. See the three-way contract in engines/tmux.js.
-  opts.shellCommand = shellCommand;
 
   try {
     eng.spawn(id, LOGIN_SHELL.path, shellArgs, cwd, opts);

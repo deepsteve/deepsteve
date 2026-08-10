@@ -28,6 +28,7 @@ const os = require('node:os');
 const path = require('node:path');
 const WebSocket = require('ws');
 const { TmuxSandbox } = require('../helpers/tmux-sandbox');
+const { writeLoginProfile } = require('../helpers/login-profile');
 
 const REPO_ROOT = path.resolve(__dirname, '..', '..');
 
@@ -264,9 +265,10 @@ before(async () => {
     '#!/bin/bash\necho "$*" >> "$HOME/open-invocations.log"\nexit 0\n',
     { mode: 0o755 }
   );
-  // Sessions spawn through `zsh -l -c 'claude …'`, so a login shell sources this
-  // and finds the stub ahead of any real claude on the system.
-  fs.writeFileSync(path.join(HOME, '.zprofile'), 'export PATH="$HOME/bin:$PATH"\n');
+  // Sessions spawn through `<login shell> -l -c 'claude …'`, so a login shell sources
+  // this and finds the stub ahead of any real claude on the system. Every profile the
+  // resolved shell might read, not just ~/.zprofile — see the helper for why (#630).
+  writeLoginProfile(HOME, 'export PATH="$HOME/bin:$PATH"');
   // Pinned to node-pty (#620). Everything below characterizes the RESPAWN machinery
   // — `--resume` vs a fresh id, the #542 `claude -c` theft guard, the bounded
   // retry chain — and all of it is reached only because a node-pty session dies

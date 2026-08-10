@@ -33,6 +33,7 @@ const os = require('node:os');
 const path = require('node:path');
 const WebSocket = require('ws');
 const { TmuxSandbox } = require('../helpers/tmux-sandbox');
+const { writeLoginProfile } = require('../helpers/login-profile');
 
 const REPO_ROOT = path.resolve(__dirname, '..', '..');
 
@@ -228,7 +229,7 @@ before(async () => {
   );
   // Sessions spawn through `zsh -l -c 'claude …'`, so a login shell sources this
   // and finds the stub ahead of any real claude on the system.
-  fs.writeFileSync(path.join(HOME, '.zprofile'), 'export PATH="$HOME/bin:$PATH"\n');
+  writeLoginProfile(HOME, 'export PATH="$HOME/bin:$PATH"');
   PORT = await freePort();
   BASE = `http://127.0.0.1:${PORT}`;
   await startDaemon();
