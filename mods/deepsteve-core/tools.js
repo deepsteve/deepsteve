@@ -3,6 +3,8 @@ const { randomUUID } = require('crypto');
 const path = require('path');
 const { execFileSync } = require('child_process');
 const { mergeWorktree } = require('./merge-worktree');
+const { stateDir } = require('../../paths');
+const { splitAtMarker, capOutput, createRunLog } = require('../../terminal-run');
 
 // git via execFile with an argv array — no shell, so no quoting/injection concerns
 // and no dependence on `zsh -l` for PATH (git is /usr/bin/git, already on the
@@ -57,6 +59,28 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // only recognizes control bytes that arrive as separate stdin reads. settleMs:
 // how long to let the echo/redraw reach the scrollback before reading it back.
 const TIMINGS = { keyGapMs: 250, settleMs: 500, waitForIdleMs: 30000, idlePollMs: 250 };
+
+// run_in_terminal knobs (#631), exported alongside TIMINGS for the same reason.
+// maxWatchMs is an absolute ceiling on the poll loop, independent of the caller's
+// timeout: the tool call may return long before the command does, and a watcher whose
+// marker never arrives must not poll for the daemon's whole lifetime.
+const RUN_TIMINGS = {
+  pollMs: 250,
+  defaultTimeoutSec: 120,
+  maxTimeoutSec: 900,
+  captureLines: 2000,   // how much of the interpreted screen becomes captured output
+  scanLines: 60,        // cheap tail scanned each poll for the completion marker
+  maxWatchMs: 12 * 60 * 60 * 1000,
+};
+
+// Created by init() and shared with registerRoutes(); mcp-server.js always calls init
+// first. Lazily, not at require time, so a test that repoints HOME before requiring
+// this module (the test/unit/project-mods.test.js pattern) still gets a scratch path.
+let runLog = null;
+function getRunLog() {
+  if (!runLog) runLog = createRunLog({ file: path.join(stateDir(), 'terminal-runs.jsonl') });
+  return runLog;
+}
 
 function init(context) {
   const {
@@ -452,10 +476,13 @@ function init(context) {
       },
     },
     open_terminal: {
-      description: 'Open a new tab in the caller\'s browser window. IMPORTANT: by default (no `agent_type`) this opens a PLAIN TERMINAL (zsh) — NOT an agent session — and `prompt` is IGNORED. To open Claude Code, Codex, or another agent — and actually deliver `prompt` — you MUST pass `agent_type` (for example, "claude" or "codex"); or pass `fork: true` to inherit the caller\'s agent type. It does NOT auto-inherit the caller\'s agent type otherwise. Inherits cwd/worktree from the caller.',
+      description: 'Open a new LONG-LIVED tab in the caller\'s browser window — something that keeps running and that someone then has to close. '
+        + 'For a one-shot command whose output you want, use `run_in_terminal` instead: it returns the output and closes its own tab. '
+        + 'IMPORTANT: by default (no `agent_type`) this opens a PLAIN TERMINAL (zsh) — NOT an agent session — and `prompt` is IGNORED. To open Claude Code, Codex, or another agent — and actually deliver `prompt` — you MUST pass `agent_type` (for example, "claude" or "codex"); or pass `fork: true` to inherit the caller\'s agent type. It does NOT auto-inherit the caller\'s agent type otherwise. Inherits cwd/worktree from the caller. '
+        + 'A tab you open is yours to close: call `close_session` with the id this returns when you are done with it.',
       schema: {
         prompt: z.string().optional().describe('Initial prompt to send to the new session. Delivered ONLY to agent sessions (requires `agent_type` or `fork`); IGNORED for a plain terminal — use `command` for those.'),
-        command: z.string().optional().describe('Shell command to auto-run on startup (plain terminal tabs only). Runs as if typed at the prompt; the tab stays open afterward. Ignored for agent sessions.'),
+        command: z.string().optional().describe('Shell command to auto-run on startup (plain terminal tabs only). Runs as if typed at the prompt, and the tab stays open afterward until someone closes it — YOU are the one who opened it, so close it with `close_session` when you are done. For a command that just runs once and finishes, use `run_in_terminal` instead. Ignored for agent sessions.'),
         name: z.string().optional().describe('Tab name for the new session'),
         session_id: z.string().optional().describe('Caller session ID (auto-detected if omitted)'),
         cwd: z.string().optional().describe('Working directory (defaults to caller\'s cwd)'),
@@ -520,7 +547,16 @@ function init(context) {
           });
           saveState();
           deliverToWindow({ type: 'open-session', id, cwd: effectiveCwd, name: tabName, windowId }, windowId);
-          return { content: [{ type: 'text', text: JSON.stringify({ id, name: tabName || id, cwd: effectiveCwd, worktree: null, command: hasCommand ? rawCommand : null }) }] };
+          return { content: [{ type: 'text', text: JSON.stringify({
+            id, name: tabName || id, cwd: effectiveCwd, worktree: null,
+            command: hasCommand ? rawCommand : null,
+            // #631: 0 of the first 102 terminal tabs an agent opened were ever closed by
+            // an agent. Nothing asked them to — so ask here, at the point of use, the way
+            // merge_worktree returns autoCloseMessage. A doc line three files away does
+            // not reach the model holding the id.
+            cleanupReminder: `This tab stays open until someone closes it. Call close_session with session_id "${id}" when you are done with it. `
+              + 'If you only needed one command\'s output, run_in_terminal would have closed itself.',
+          }) }] };
         }
 
         // Agent session
@@ -611,7 +647,210 @@ function init(context) {
         return { content: [{ type: 'text', text: JSON.stringify({ id, name: tabName || id, cwd: spawnCwd, worktree: validatedWorktree }) }] };
       },
     },
+    run_in_terminal: {
+      description: 'Run ONE shell command in a disposable terminal tab and return what it printed. '
+        + 'The tab is visible while it runs, then closes itself — you never have to clean it up. '
+        + 'Use this instead of `open_terminal` for anything one-shot: a `git` command in the main checkout, '
+        + '`gh`, a build, a test run. It is also the way OUT of Claude Code\'s worktree isolation guard, '
+        + 'which refuses Bash commands that reach the shared checkout — this runs in the daemon\'s shell, not yours. '
+        + 'The default working directory is the caller\'s `cwd`, which for a worktree session is the MAIN CHECKOUT. '
+        + 'Runs in a login shell, so it has the same PATH a terminal tab does. '
+        + 'Blocks until the command exits or `timeout_seconds` elapses; on timeout you get the output so far and '
+        + 'the tab still tears itself down on its own. Every run is recorded to ~/.deepsteve/terminal-runs.jsonl.',
+      schema: {
+        command: z.string().describe('The shell command to run. One command (it may be a pipeline or a `&&` chain); it is not typed at a prompt, it IS the tab\'s process.'),
+        cwd: z.string().optional().describe('Working directory. Defaults to the caller\'s cwd — the main checkout for a worktree session.'),
+        name: z.string().optional().describe('Tab name (defaults to the command, shortened).'),
+        timeout_seconds: z.number().optional().describe('How long to wait for the command before returning what it has printed so far (default 120, max 900). The run keeps going and still cleans itself up.'),
+        session_id: z.string().optional().describe('Caller session ID (auto-detected if omitted)'),
+      },
+      handler: async ({ session_id, command, cwd, name, timeout_seconds }, extra) => {
+        const callerId = session_id || extra?.requestInfo?.url?.searchParams?.get('shellId');
+        const caller = callerId ? shells.get(callerId) : null;
+        if (!caller) {
+          return { content: [{ type: 'text', text: `Session "${callerId || 'unknown'}" not found.` }], isError: true };
+        }
+        const rawCommand = typeof command === 'string' ? command.trim() : '';
+        if (!rawCommand) {
+          return { content: [{ type: 'text', text: 'command is required.' }], isError: true };
+        }
+
+        const effectiveCwd = cwd || caller.cwd;
+        const effectiveConfigDir = caller.configDir || null;
+        const windowId = caller.windowId || null;
+        const id = randomUUID().slice(0, 8);
+        // 8 lowercase hex — terminal-run.js validates the shape before interpolating it
+        // into a shell string and a RegExp, so it may not be a caller-supplied value.
+        const nonce = randomUUID().replace(/-/g, '').slice(0, 8);
+        const tabName = name || deriveTabName(rawCommand);
+        const startedAt = Date.now();
+
+        const shellEngine = getDefaultEngine();
+        const shellEngineType = shellEngine.constructor.name === 'TmuxEngine' ? 'tmux' : 'node-pty';
+        log(`[MCP] run_in_terminal: id=${id}, engine=${shellEngineType}, cwd=${effectiveCwd}, caller=${callerId}, command=${JSON.stringify(rawCommand)}`);
+
+        spawnSession(shellEngine, id, 'terminal', [], effectiveCwd, {
+          cols: 120, rows: 40,
+          env: sessionEnv(id, { name: tabName, windowId, cwd: effectiveCwd, agentType: 'terminal', configDir: effectiveConfigDir }),
+          runCommand: rawCommand, runNonce: nonce,
+        });
+        shells.set(id, {
+          clients: new Set(), cwd: effectiveCwd,
+          claudeSessionId: null, agentType: 'terminal',
+          configDir: effectiveConfigDir,
+          engine: shellEngine, engineType: shellEngineType,
+          worktree: null, windowId,
+          name: tabName, initialPrompt: null,
+          waitingForInput: false, lastActivity: Date.now(), createdAt: startedAt,
+        });
+        wireShellOutput(id);
+        emitSessionOpen(id);
+        saveState();
+        // Background (#600): a 200ms `git status` must not yank the user's focus out of
+        // whatever they were doing. The tab still appears in the strip with the
+        // unseen-activity badge, so a run that matters is still discoverable.
+        deliverToWindow({ type: 'open-session', id, cwd: effectiveCwd, name: tabName, windowId, background: true }, windowId);
+
+        // Record the launch BEFORE waiting for it. The audit question this log exists to
+        // answer is "what did an agent execute", and that has to survive the daemon dying
+        // mid-command — which is exactly when the answer matters most.
+        getRunLog().append({
+          ts: startedAt, status: 'started', session_id: id, caller: callerId || null,
+          cwd: effectiveCwd, command: rawCommand, exit_code: null, duration_ms: null, output: '',
+        });
+
+        const state = { finalized: false, exitSnapshot: null, record: null };
+
+        // Snapshot the raw transcript SYNCHRONOUSLY before handleShellGone runs: it
+        // calls disposeTerminalScreen, so anything read after this point is gone. This
+        // is the path for a shell that died without reaching the marker — killed, or a
+        // tab the user closed mid-run. (A command calling `exit` is NOT this case: the
+        // wrapper's subshell keeps the run's own shell alive to report it.)
+        shellEngine.onExit(id, () => {
+          const entry = shells.get(id);
+          if (entry && !state.exitSnapshot) state.exitSnapshot = (entry.scrollback || []).join('');
+          handleShellGone(id, 'terminal-run-ended');
+        });
+
+        async function capture() {
+          const entry = shells.get(id);
+          if (entry) {
+            try { return await screenLines(entry, RUN_TIMINGS.captureLines); } catch { /* fall through */ }
+          }
+          const raw = state.exitSnapshot || '';
+          return stripEscapeSequences(raw).split(/\r\n|\n|\r/).map((l) => l.replace(/\s+$/g, ''));
+        }
+
+        // Idempotent: the watcher owns finalization, but the timeout path may have
+        // already returned to the caller by the time it runs.
+        async function finalize() {
+          if (state.finalized) return state.record;
+          state.finalized = true;
+          const { output, exitCode, found } = splitAtMarker(await capture(), nonce);
+          const status = found ? 'finished' : 'gone';
+
+          let autoCloseInSeconds = null;
+          const live = shells.get(id);
+          if (live) {
+            if (live.lastInputTime) {
+              // Someone typed in this tab, so it is theirs now — the same rule the merge
+              // auto-close follows (#627). Nothing else writes to this PTY: the command
+              // arrived in argv, not as input, and no prompt is ever delivered here.
+              log(`[MCP] run_in_terminal: leaving ${id} open — the user typed in it`);
+            } else {
+              const armed = armSessionAutoClose
+                ? armSessionAutoClose(id, { reason: 'terminal-run-finished', policy: 'terminal-run' })
+                : null;
+              if (armed) autoCloseInSeconds = Math.max(0, Math.round((armed.closeAt - Date.now()) / 1000));
+              // arm() returns null here only when the configured linger is 0 (the
+              // session is live — we just read it) — i.e. "close it now".
+              else if (closeSession) closeSession(id, 'terminal-run-finished');
+            }
+          }
+
+          state.record = getRunLog().append({
+            ts: Date.now(), status, session_id: id, caller: callerId || null,
+            cwd: effectiveCwd, command: rawCommand, exit_code: exitCode,
+            duration_ms: Date.now() - startedAt, output,
+          });
+          log(`[MCP] run_in_terminal: ${id} ${status} exit=${exitCode ?? '?'} in ${state.record.duration_ms}ms`);
+          return { ...state.record, auto_close_in_seconds: autoCloseInSeconds };
+        }
+
+        // Poll the interpreted screen rather than hooking the data stream: it resolves
+        // tmux's repaints (raw scrollback does not) and needs no second onData listener.
+        // A backward scan of `scanLines` is cheap enough to run four times a second.
+        async function watch() {
+          const deadline = startedAt + RUN_TIMINGS.maxWatchMs;
+          for (;;) {
+            const entry = shells.get(id);
+            if (!entry) return finalize();                       // exited, or closed
+            if (isShuttingDown && isShuttingDown()) return null;  // the final snapshot owns it
+            if (Date.now() > deadline) {
+              log(`[MCP] run_in_terminal: ${id} gave up watching after ${Math.round(RUN_TIMINGS.maxWatchMs / 3600000)}h`);
+              return finalize();
+            }
+            try {
+              const tail = await screenLines(entry, RUN_TIMINGS.scanLines);
+              if (splitAtMarker(tail, nonce).found) return finalize();
+            } catch { /* transient read failure — try again next tick */ }
+            await sleep(RUN_TIMINGS.pollMs);
+          }
+        }
+
+        const watcher = watch().catch((e) => {
+          log(`[MCP] run_in_terminal: watcher for ${id} failed: ${e.message}`);
+          return null;
+        });
+
+        const timeoutSec = Math.max(1, Math.min(RUN_TIMINGS.maxTimeoutSec,
+          Math.round(Number(timeout_seconds) || RUN_TIMINGS.defaultTimeoutSec)));
+        const TIMED_OUT = Symbol('timeout');
+        // Cleared, not leaked: a bare `sleep(timeoutSec * 1000)` in the race leaves a
+        // live timer behind for every fast run, which pins the event loop open for the
+        // full timeout after the answer is already known.
+        let timeoutTimer = null;
+        const timedOut = new Promise((resolve) => { timeoutTimer = setTimeout(() => resolve(TIMED_OUT), timeoutSec * 1000); });
+        const done = await Promise.race([watcher, timedOut]);
+        clearTimeout(timeoutTimer);
+
+        if (done !== TIMED_OUT && done) {
+          return { content: [{ type: 'text', text: JSON.stringify({
+            run_id: done.id, session_id: id, status: done.status,
+            exit_code: done.exit_code, output: done.output, truncated: done.truncated,
+            cwd: effectiveCwd, command: rawCommand, duration_ms: done.duration_ms,
+            auto_close_in_seconds: done.auto_close_in_seconds ?? null,
+            log_path: getRunLog().file,
+          }, null, 2) }] };
+        }
+
+        // Still running (or the watcher bailed for shutdown). The watcher keeps going,
+        // so the run is still recorded and the tab still closes itself — there is
+        // nothing for the caller to clean up either way. Capped like a stored record:
+        // this is the one path whose output never passes through the run log, and a
+        // chatty build would otherwise hand the caller an unbounded transcript.
+        const partial = capOutput(splitAtMarker(await capture(), nonce).output);
+        return { content: [{ type: 'text', text: JSON.stringify({
+          session_id: id, status: 'running', exit_code: null,
+          output: partial.output, truncated: partial.truncated,
+          cwd: effectiveCwd, command: rawCommand,
+          duration_ms: Date.now() - startedAt,
+          log_path: getRunLog().file,
+          note: `Still running after ${timeoutSec}s — this is the output so far. The tab closes itself when the command finishes and the full run is written to the log; do not close it yourself. Use read_session_screen with session_id "${id}" to check on it.`,
+        }, null, 2) }] };
+      },
+    },
   };
 }
 
-module.exports = { init, deriveTabName, TIMINGS };
+// Read the durable record of one-shot runs (#631). Same shape as the mod's other REST
+// surfaces: a display tab or the user can render it without going through MCP.
+function registerRoutes(app) {
+  app.get('/api/terminal-runs', (req, res) => {
+    // getRunLog() rather than the bare `runLog`: the log loads from disk when it is
+    // constructed, so reading it must not depend on a run having happened this boot.
+    res.json({ runs: getRunLog().list({ limit: req.query.limit, session: req.query.session }) });
+  });
+}
+
+module.exports = { init, registerRoutes, deriveTabName, TIMINGS, RUN_TIMINGS };

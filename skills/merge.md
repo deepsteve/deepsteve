@@ -15,6 +15,8 @@ By default the target is the branch currently checked out in the **main worktree
 - **Never run `git -C <other dir>`, `cd <other dir> && git …`, or any command naming `git` more than once.** All three are refused outright. That is why the merge itself goes through the `mcp__deepsteve__merge_worktree` tool (step 6) — the daemon runs it outside the guard — and why every `git` step below is its own separate Bash call.
 - Plain single-`git` commands **inside** this worktree are fine.
 
+**When you need a command the guard refuses** — something in the main checkout that isn't the merge, or a `gh` call that comes back `command not found` — use `mcp__deepsteve__run_in_terminal`. It runs one command in the daemon's login shell, hands you the output and exit code, and closes its own tab. **Do not use `open_terminal` for this**: that opens a tab that stays open until someone closes it, and agents running this skill have left 100+ of them behind.
+
 Steps:
 
 1. **Gather state.** Call `mcp__deepsteve__get_my_session_id`, then `mcp__deepsteve__get_session_info` with that id. From the result take `repoRoot` (the main checkout) and `worktree`; `in_worktree` is true when `worktree` is not null. Then run these as **two separate** bash invocations:
@@ -61,6 +63,10 @@ Steps:
 
 8. **Close the GitHub issue** (success only): If `branch` matches `*github-issue-<n>*`, run `gh issue close <n> --comment "Merged into <target>."`. Otherwise skip silently. If it fails, say so and continue to step 9 anyway.
 
-9. **Report and close this session — in ONE message** (success only): After step 8 returns, write your one- or two-line success summary (with the merge output from step 6) and call `mcp__deepsteve__close_session` (no arguments — it auto-detects the calling session) in that same assistant message; text written after that call is cut off when the session terminates.
+   If `gh` is not on `$PATH` here, run the same command through `mcp__deepsteve__run_in_terminal` — it uses a login shell, which has one.
+
+8b. **Close any tab you opened** (success only, and before step 9 — text after `close_session` is cut off, so this cannot go last): if you called `open_terminal` at any point in this session, call `mcp__deepsteve__close_session` with each id it returned. Runs you did through `run_in_terminal` need nothing; those tabs close themselves.
+
+9. **Report and close this session — in ONE message** (success only): After steps 8 and 8b are done, write your one- or two-line success summary (with the merge output from step 6) and call `mcp__deepsteve__close_session` (no arguments — it auto-detects the calling session) in that same assistant message; text written after that call is cut off when the session terminates.
 
    Step 6 already armed the close, so if you skip this the daemon closes the session at `autoCloseAt` anyway — the merge is finished either way. Calling it is still the right ending: it closes now instead of leaving a finished tab sitting there. So don't stall, don't poll, and don't wait for the auto-close — make the call and end your turn. If the user types anything in this tab first, the auto-close is cancelled and the tab is theirs.

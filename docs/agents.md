@@ -318,6 +318,56 @@ through as `CLAUDE_CONFIG_DIR`, so typing `claude` yourself picks up the profile
 Exit is SIGHUP, not SIGTERM: an interactive login zsh traps SIGINT in ZLE and often
 ignores SIGTERM.
 
+### Disposable runs — `run_in_terminal` (#631)
+
+**A terminal tab you open is yours to close.** Agents did not: of the first 102 terminal
+sessions this install ever had, **zero** were closed by an agent — 95 by the user and the
+rest still sitting open. Nothing had ever asked them to, and `open_terminal`'s own
+description said the opposite ("the tab stays open afterward"). It now names the id and
+asks, in the tool description and in a `cleanupReminder` on the result.
+
+For anything one-shot, `run_in_terminal` removes the question entirely. It is a different
+kind of tab: the pane's process **is** the command rather than a shell you type into, so
+
+- the tool call blocks until the command exits, and returns its **output and exit code**
+  (`timeout_seconds`, default 120, returns what it has so far — the run continues, is
+  still recorded, and still tears its own tab down);
+- the exit code comes from a nonce-tagged marker line the wrapper prints, not from the
+  PTY's exit status, because under tmux the PTY we own is an *attach client* and its
+  status belongs to tmux. The nonce stops a command that echoes the marker text from
+  faking another run's completion;
+- the command runs in a `( … )` subshell, so `… ; exit 3` is a run that exited 3 rather
+  than a run that vanished — under tmux a shell that exits outright takes its pane down
+  before the attach client has painted it, and since deepsteve never reads tmux's own
+  history the entire transcript came back as tmux's literal `[exited]`;
+- after the command finishes the pane execs a login shell, so the tab lingers
+  (`terminalRunLingerSeconds`, default 20) and stays usable — **typing in it cancels the
+  close** and the tab is yours, exactly as after a merge (#627). That reuses
+  `session-auto-close.js` wholesale, including its entry-identity re-check;
+- otherwise the daemon closes it with `closeReason: 'terminal-run-finished'`, which is
+  what makes "did an agent clean up after itself?" answerable from `state.json` at all;
+- capture polls the *interpreted* screen (`readTerminalScreen`), which resolves tmux's
+  repaints where raw scrollback does not. When the shell dies without reaching the marker
+  the tool's `onExit` hook snapshots `entry.scrollback` synchronously first, because
+  `handleShellGone` disposes the screen — that path reports `exit_code: null`, unknown
+  rather than guessed;
+- every run is appended to `~/.deepsteve/terminal-runs.jsonl` (`GET /api/terminal-runs`)
+  — once when it launches and once when it ends, so a command survives in the record even
+  if the daemon dies mid-run. Deliberately not behind `sessionLogEnabled`, which defaults
+  to off: an audit trail for the escape hatch to the un-isolated main checkout cannot.
+
+Why agents reach for a terminal in the first place, and why this is the fix: Claude Code's
+worktree isolation guard (#617) refuses any Bash command that reaches the shared checkout,
+so a worktree session cannot run `git status` or `gh` there. `merge_worktree` covers the
+merge; `run_in_terminal` covers the rest, running in the daemon's shell rather than the
+agent's. The other half of the pull was `$PATH` — until #630 an agent pane under tmux ran
+a *non-login* shell and could not see `gh` at all, while a terminal tab could. #630 fixed
+that for agent sessions; a run gets the same login shell, for the same reason and by the
+same mechanism (no `opts.shellCommand`, so the engine execs the argv verbatim).
+
+`open_terminal` is still the right tool for something long-lived that you then own: a dev
+server, a log tail, a watcher.
+
 ## MCP tools a wired session gets
 
 These come from `mods/deepsteve-core` and exist for every agent whose tier says MCP is

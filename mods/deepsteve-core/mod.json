@@ -1,6 +1,6 @@
 {
   "name": "DeepSteve Core",
-  "version": "0.9.0",
+  "version": "0.10.0",
   "minDeepsteveVersion": "0.4.0",
   "enabledByDefault": true,
   "description": "Session info, session close, issue spawning, terminal spawning",
@@ -9,7 +9,11 @@
     { "name": "get_session_info", "description": "Get session metadata by deepsteve session ID" },
     { "name": "close_session", "description": "Close a session and its browser tab" },
     { "name": "meta_type", "description": "Type text into a session's terminal and optionally press Enter" },
+    { "name": "read_session_screen", "description": "Read the recent terminal screen of a session, plus its idle/busy state" },
     { "name": "start_issue", "description": "Open a new deepsteve session for a GitHub issue" },
-    { "name": "open_terminal", "description": "Open a new tab: plain terminal by default, or a Claude/agent session if agent_type is passed" }
+    { "name": "merge_worktree", "description": "Merge this worktree's branch into the main checkout, server-side" },
+    { "name": "open_browser_tab", "description": "Open a URL in a browser tab beside the session" },
+    { "name": "open_terminal", "description": "Open a new long-lived tab: plain terminal by default, or a Claude/agent session if agent_type is passed" },
+    { "name": "run_in_terminal", "description": "Run one command in a disposable terminal tab, return its output, and close the tab" }
   ]
 }

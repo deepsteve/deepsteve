@@ -23,6 +23,7 @@ const { classifyScreenTail, CLAUDE_SCREEN_MARKERS } = require('./screen-classifi
 const { TerminalScreen } = require('./terminal-screen');
 const { terminalEnv } = require('./terminal-env');
 const { readComposerDraft, isPromptStaged, isPromptOnScreen } = require('./composer-state');
+const { wrapRunCommand } = require('./terminal-run');
 const NodePtyEngine = require('./engines/node-pty');
 const TmuxEngine = require('./engines/tmux');
 
@@ -634,6 +635,17 @@ const SETTINGS_SCHEMA = [
     sanitize: (raw) => {
       const n = Math.round(Number(raw));
       return Number.isFinite(n) && n >= 0 && n <= 120 ? n : null;
+    } },
+  // #631: seconds a finished `run_in_terminal` tab lingers before the daemon closes it.
+  // The linger is the window in which a user watching the run can claim the tab —
+  // typing in it cancels the close, exactly as it does after a merge. 0 = close the
+  // moment the command finishes. `custom` for the same reason as the entry above: a
+  // POSTed 0 must mean 0, and a garbage value must be rejected rather than silently
+  // reinstating the leak this feature exists to close.
+  { name: 'terminalRunLingerSeconds',   type: 'custom',  default: 20, broadcast: false,
+    sanitize: (raw) => {
+      const n = Math.round(Number(raw));
+      return Number.isFinite(n) && n >= 0 && n <= 600 ? n : null;
     } },
   // Custom Claude Code config profiles (#537): each row = { id, name, configDir }.
   // A profile is agentType:'claude' + a CLAUDE_CONFIG_DIR — NOT a new agent type.
@@ -1304,7 +1316,7 @@ let tmuxRuntimeFailure = null;
  * Returns the engine that actually spawned, so callers can record the truth
  * instead of the engine they asked for.
  */
-function spawnSession(eng, id, agentType, args, cwd, { cols = 120, rows = 40, env: extraEnv } = {}) {
+function spawnSession(eng, id, agentType, args, cwd, { cols = 120, rows = 40, env: extraEnv, runCommand, runNonce } = {}) {
   const env = childBaseEnv(extraEnv);
   const opts = { cols, rows, env, stripEnv: DAEMON_INTERNAL_ENV_KEYS };
 
@@ -1315,12 +1327,26 @@ function spawnSession(eng, id, agentType, args, cwd, { cols = 120, rows = 40, en
 
   let shellArgs;
   if (agentType === 'terminal') {
-    shellArgs = loginArgs;
-    // The one thing we still have to state to the engine: run no command, so tmux
-    // forks `default-shell` as a LOGIN shell of its own — which is what node-pty
-    // gets from the bare `-l` above. NodePtyEngine destructures only
-    // {cols, rows, env} and ignores the option. Contract: engines/tmux.js.
-    opts.shellCommand = null;
+    if (runCommand) {
+      // A one-shot run (#631): the pane runs exactly this command, prints a marker
+      // carrying its exit status, then execs a login shell so the tab stays claimable.
+      //
+      // Deliberately NO opts.shellCommand, for the same #630 reason spelled out in the
+      // agent branch below: the engine execs [cmd, ...args] verbatim, so the `-l` above
+      // reaches the pane. That matters more here than anywhere — a run only replaces a
+      // hand-opened terminal tab if it has the same PATH one does, and "`gh` works in a
+      // terminal tab but not in my session" is half of why agents open those tabs.
+      shellArgs = [...loginArgs, '-c', wrapRunCommand(runCommand, {
+        nonce: runNonce, shellPath: LOGIN_SHELL.path, loginFlag: LOGIN_SHELL.loginFlag,
+      })];
+    } else {
+      shellArgs = loginArgs;
+      // The one thing we still have to state to the engine: run no command, so tmux
+      // forks `default-shell` as a LOGIN shell of its own — which is what node-pty
+      // gets from the bare `-l` above. NodePtyEngine destructures only
+      // {cols, rows, env} and ignores the option. Contract: engines/tmux.js.
+      opts.shellCommand = null;
+    }
   } else {
     const bin = agentType === 'claude' ? 'claude'
       : agentType === 'codex' ? 'codex'
@@ -5740,12 +5766,28 @@ const sessionAutoClose = createSessionAutoClose({
 // integration test overrides the resolved delay in ms — same shape as
 // DEEPSTEVE_DETACH_GRACE_MS above.
 const MERGE_AUTOCLOSE_MS_OVERRIDE = parseInt(process.env.DEEPSTEVE_MERGE_AUTOCLOSE_MS, 10) || 0;
+const TERMINAL_RUN_LINGER_MS_OVERRIDE = parseInt(process.env.DEEPSTEVE_TERMINAL_RUN_LINGER_MS, 10) || 0;
 
 // The server owns the policy (how long, and whether at all) so a mod can't invent its
 // own; the mod decides only WHETHER this session has finished. Reads the setting live.
-function armSessionAutoClose(id, { reason = 'auto-close' } = {}) {
-  const delayMs = MERGE_AUTOCLOSE_MS_OVERRIDE || (settings.mergeAutoCloseMinutes || 0) * 60000;
-  return sessionAutoClose.arm(id, { delayMs, reason });
+//
+// `policy` is which of those server-owned delays applies — the mod names the situation,
+// never a duration (#631 added the second one). Defaulting it to 'merge' is what keeps
+// merge_worktree's existing call site, and its tests, untouched.
+const AUTOCLOSE_POLICIES = {
+  merge: () => MERGE_AUTOCLOSE_MS_OVERRIDE || (settings.mergeAutoCloseMinutes || 0) * 60000,
+  // ?? not || : 0 is a meaningful value here (close immediately, no linger), and the
+  // schema entry goes out of its way to make 0 representable.
+  'terminal-run': () => TERMINAL_RUN_LINGER_MS_OVERRIDE || (settings.terminalRunLingerSeconds ?? 20) * 1000,
+};
+
+function armSessionAutoClose(id, { reason = 'auto-close', policy = 'merge' } = {}) {
+  const resolve = AUTOCLOSE_POLICIES[policy];
+  if (!resolve) {
+    log(`[auto-close] unknown policy "${policy}" for ${id} — not arming`);
+    return null;
+  }
+  return sessionAutoClose.arm(id, { delayMs: resolve(), reason });
 }
 
 // --- one-time migration off tmux's shared per-UID socket (#625) ---
