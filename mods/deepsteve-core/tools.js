@@ -19,6 +19,14 @@ function runGit(args, cwd) {
   }
 }
 
+// "2 minutes" / "45 seconds" — the auto-close delay in words, so the agent has a
+// sentence to paraphrase to the user instead of an epoch timestamp (#627).
+function describeDelay(seconds) {
+  if (seconds < 90) return `${seconds} second${seconds === 1 ? '' : 's'}`;
+  const mins = Math.round(seconds / 60);
+  return `${mins} minute${mins === 1 ? '' : 's'}`;
+}
+
 // Derive a short, single-line tab name from a shell command (used when a
 // terminal tab is opened with a `command` but no explicit `name`).
 function deriveTabName(cmd) {
@@ -59,6 +67,7 @@ function init(context) {
     reloadClients, deliverToWindow, settings, log, isShuttingDown,
     emitSessionOpen,
     stripEscapeSequences, readTerminalScreen, sessionInputState, maybeInheritRemoteControl, requestMetaControlsConsent,
+    armSessionAutoClose,
   } = context;
 
   // Read the interpreted terminal buffer maintained at the PTY boundary. Tests
@@ -376,7 +385,7 @@ function init(context) {
       },
     },
     merge_worktree: {
-      description: 'Merge the calling session\'s worktree branch into a target branch, running the merge server-side in the checkout that has the target checked out. Use this instead of `git -C <main checkout> merge` from Bash: Claude Code 2.1.222+ isolates worktree sessions and refuses any Bash command that points git at the shared checkout, so the Bash form cannot work from a worktree. With no `target`, merges into whatever branch the main checkout currently has checked out. Refuses (without changing anything) when the target checkout is dirty, and aborts the merge on conflict so the target is left untouched. Commit your own worktree changes first — this merges committed work only.',
+      description: 'Merge the calling session\'s worktree branch into a target branch, running the merge server-side in the checkout that has the target checked out. Use this instead of `git -C <main checkout> merge` from Bash: Claude Code 2.1.222+ isolates worktree sessions and refuses any Bash command that points git at the shared checkout, so the Bash form cannot work from a worktree. With no `target`, merges into whatever branch the main checkout currently has checked out. Refuses (without changing anything) when the target checkout is dirty, and aborts the merge on conflict so the target is left untouched. Commit your own worktree changes first — this merges committed work only. On success from a worktree session the daemon arms an auto-close of that session and the result says exactly when (`autoCloseAt` / `autoCloseMessage`); calling `close_session` after your report closes it immediately instead, and typing in the tab cancels the auto-close.',
       schema: {
         target: z.string().optional().describe('Branch to merge into. Defaults to the branch currently checked out in the main worktree.'),
         session_id: z.string().optional().describe('Caller session ID (auto-detected if omitted).'),
@@ -393,10 +402,33 @@ function init(context) {
         }
         const result = mergeWorktree({ git: runGit, worktreeCwd: cwd, repoRoot, target });
         log(`[MCP] merge_worktree: ${result.branch || '?'} -> ${result.target || '?'} = ${result.status}`);
+        // #627: a successful merge FINISHES this worktree session, so the daemon arms
+        // the close here rather than trusting the agent to remember step 9 — it doesn't
+        // (30/30 in #609, and again on Opus 5 after the prose had been strengthened as
+        // far as it goes). An explicit close_session still closes immediately; any
+        // input to the tab cancels.
+        //
+        // Worktree callers ONLY. merge_worktree is a general tool, not a private skill
+        // callback: called from a main-checkout session with an explicit target it does
+        // an ordinary, legitimate merge in a long-lived tab nobody asked to end, and
+        // auto-closing that would be the worst failure this feature could have.
+        // `caller.worktree` is also exactly what get_session_info reports as
+        // in_worktree, which is what skills/merge.md branches on at step 4.
+        const payload = { ...result };
+        if (result.status === 'merged' && caller.worktree && armSessionAutoClose) {
+          const armed = armSessionAutoClose(callerId, { reason: 'merged' });
+          if (armed) {
+            const seconds = Math.max(0, Math.round((armed.closeAt - Date.now()) / 1000));
+            payload.autoCloseAt = armed.closeAt;
+            payload.autoCloseInSeconds = seconds;
+            payload.autoCloseMessage = `This session is finished and will close automatically in ${describeDelay(seconds)}. `
+              + 'Call close_session once your report is written to close it now instead; typing in this tab cancels the auto-close.';
+          }
+        }
         // Only `merged` is a success; every other status left the target unchanged
         // and needs the agent to stop and report rather than continue the skill.
         return {
-          content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+          content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }],
           ...(result.status === 'merged' ? {} : { isError: true }),
         };
       },

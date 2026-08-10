@@ -18,6 +18,7 @@ const { stateDir, expandTilde, tmuxSocketPath, defaultTmuxSocketPath } = require
 const { resolveBinary, runBinary, resolveUrlOpener, resolveLoginShell } = require('./bin-path');
 const { createPendingOpens } = require('./pending-opens');
 const { reattachSurvivingTmuxSessions } = require('./tmux-reattach');
+const { createSessionAutoClose } = require('./session-auto-close');
 const { classifyScreenTail, CLAUDE_SCREEN_MARKERS } = require('./screen-classifier');
 const { TerminalScreen } = require('./terminal-screen');
 const { terminalEnv } = require('./terminal-env');
@@ -617,6 +618,23 @@ const SETTINGS_SCHEMA = [
   // How long closed-session tombstones survive in state.json before the retention
   // sweep prunes them (#561). Server-internal — no client UI reads it.
   { name: 'closedSessionRetentionDays', type: 'number',  default: 30, clamp: [1, 365], round: true, broadcast: false },
+  // #627: minutes to wait after a successful merge_worktree before the daemon closes
+  // the calling worktree session itself, so a finished merge stops depending on the
+  // agent remembering its last step — it forgot 30/30 times in #609, and again after
+  // the prompt had been hardened as far as prose goes. 0 turns it off entirely.
+  //
+  // `custom` rather than `number` because 0 has to be representable: coerceSetting's
+  // number branch does `if (!n) n = fallback ?? default`, so a POSTed 0 is falsy and
+  // silently becomes the default — and worse, a garbage value would silently DISABLE
+  // the safety net. Rejecting at POST time surfaces it in the response `warnings`
+  // instead, which is the same reason #604 chose `custom` for scheduledDefaultModel.
+  // Server-internal (no client UI reads it) and read live at arm time, so a change
+  // applies with no restart.
+  { name: 'mergeAutoCloseMinutes',      type: 'custom',  default: 2, broadcast: false,
+    sanitize: (raw) => {
+      const n = Math.round(Number(raw));
+      return Number.isFinite(n) && n >= 0 && n <= 120 ? n : null;
+    } },
   // Custom Claude Code config profiles (#537): each row = { id, name, configDir }.
   // A profile is agentType:'claude' + a CLAUDE_CONFIG_DIR — NOT a new agent type.
   // broadcast:false — the browser reads profiles via GET /api/agents (like enabledAgents).
@@ -1990,6 +2008,11 @@ function submitToShell(id, text, eng, options = {}) {
   const e = shells.get(id);
   if (e) {
     e.lastInputTime = Date.now();
+    // #627: someone is deliberately driving this session (meta_type, a delivered
+    // prompt, an inherited /rc), so it isn't finished — release any pending
+    // auto-close. killShell's own /exit also lands here, harmlessly: that path has
+    // already cancelled. Keeps the rule statable as "any input, from any source".
+    sessionAutoClose.cancel(id, 'prompt submitted');
     auditWaiting('submit', id, e, { len: text.length });
   }
   const engine = eng || getEngine(id);
@@ -2700,8 +2723,11 @@ function killShell(entry, id, reason = 'closed') {
   log(`Killing shell ${id} (pid=${pid}, agent=${entry.agentType || 'claude'}, waitingForInput=${entry.waitingForInput})`);
   traceSession('CLOSE', { shell: id, name: entry.name || null, worktree: entry.worktree || null, cwd: entry.cwd, claude: entry.claudeSessionId, planMode: !!entry.planMode, pid, agent: entry.agentType || 'claude', waitingForInput: !!entry.waitingForInput, shuttingDown: !!shuttingDown });
 
-  // Clean up timers and engine data listener
+  // Clean up timers and engine data listener. The auto-close cancel is here as well
+  // as in tombstoneSession because the detach reaper (armDetachReap) tears a session
+  // down WITHOUT tombstoning it — it deliberately writes a non-closed savedState entry.
   clearTimeout(entry.inputBlockTimer);
+  sessionAutoClose.cancel(id, 'session killed');
   if (entry._engineDataHandler) {
     eng.removeListener('data', entry._engineDataHandler);
     entry._engineDataHandler = null;
@@ -3076,6 +3102,11 @@ function tombstoneSession(id, entry, reason) {
   // before the tmux-attach return so ephemeral sessions are retracted too.
   const dropped = pendingOpens.drop(id);
   if (dropped) log(`[pendingOpens] dropped ${dropped} queued message(s) for closed session ${id}`);
+  // Same argument as the drop above: this is the one place every close path passes
+  // through, so it is where a pending #627 auto-close is released. (The auto-closer
+  // re-checks the entry identity at fire time and would drop a stale timer anyway —
+  // this just frees it now rather than at its deadline.)
+  sessionAutoClose.cancel(id, 'session closed');
   if (entry.agentType === 'tmux-attach') return; // ephemeral — never persisted
   savedState[id] = {
     ...serializeShellEntry(entry),
@@ -3192,6 +3223,11 @@ async function shutdown(signal) {
   log(`Received ${signal}, saving state...`);
   saveState();
   powerAssertion.dispose(); // release the sleep assertion (caffeinate) up front
+  // Not cosmetic: shutdown DETACHES tmux sessions so they survive the restart (#620),
+  // and a #627 auto-close firing inside that ~12s window would really close one —
+  // destroying exactly what the detach preserves. (The auto-closer also checks
+  // isShuttingDown at fire time; this releases the timers outright.)
+  sessionAutoClose.clearAll();
 
   // If .reload flag exists, tell all browsers to refresh after restart
   const shouldReload = fs.existsSync(RELOAD_FLAG);
@@ -5656,13 +5692,15 @@ setInterval(() => {
 // for (the daemon was frozen before sleepWatch's own overdue tick could run —
 // overdue timers run in due-time order, so the reaper can beat the detector),
 // re-arm instead of reaping so a post-wake reconnect always wins the race.
+// The deferral rule itself lives on sleepWatch (#627 made this its second caller —
+// see sleep-watch.js deferMsFor for why it keys on the due time, not the arm time).
+const sleepDeferMs = (dueAt) => sleepWatch.deferMsFor(dueAt, { holdoffMs: DETACH_HOLDOFF_MS });
+
 function armDetachReap(entry, reap, delayMs = DETACH_GRACE_MS) {
-  const armedAt = Date.now();
+  const dueAt = Date.now() + delayMs;
   entry.killTimer = setTimeout(() => {
     if (entry.clients.size > 0) return;
-    const lateMs = Date.now() - armedAt - delayMs;
-    let deferMs = sleepWatch.holdoffRemaining(DETACH_HOLDOFF_MS);
-    if (lateMs > 10000) deferMs = Math.max(deferMs, DETACH_HOLDOFF_MS);
+    const deferMs = sleepDeferMs(dueAt);
     if (deferMs > 0) {
       log(`[sleep-watch] detach reap deferred ${Math.ceil(deferMs / 1000)}s (recent wake)`);
       armDetachReap(entry, reap, Math.max(deferMs, 1000));
@@ -5670,6 +5708,41 @@ function armDetachReap(entry, reap, delayMs = DETACH_GRACE_MS) {
     }
     reap();
   }, delayMs);
+}
+
+// Daemon-armed deferred session close (#627). Sits beside armDetachReap because they
+// are the two timers that can end a session on their own — but they are otherwise
+// unrelated: the reaper fires only when the LAST CLIENT left, while this one fires on
+// a finished merge whether or not anyone is watching, and is cancelled by input rather
+// than by presence. Since #620 a tmux session never arms the reaper at all, so for an
+// unattended worktree merge this is the only thing that will ever close the tab.
+const sessionAutoClose = createSessionAutoClose({
+  closeSession: (id, reason) => closeSession(id, reason),
+  getEntry: (id) => shells.get(id),
+  // A session asking the user a question is not finished, whatever the idle classifier
+  // says: classifyScreenTail deliberately folds permission dialogs into 'waiting'
+  // (right for prompt delivery, wrong here) — so a tab blocked on step 8's `gh issue
+  // close` permission prompt would otherwise read as idle and get closed mid-question.
+  sessionState: (entry) => {
+    const permission = getAgentConfig(entry.agentType).screenMarkers?.permission;
+    if (permission?.some((re) => re.test(screenTail(entry)))) return 'busy';
+    return sessionInputState(entry);
+  },
+  shouldDefer: sleepDeferMs,
+  isShuttingDown: () => shuttingDown,
+  log,
+});
+
+// Test hook: the setting is in minutes (a 2-minute suite is not a suite), so an
+// integration test overrides the resolved delay in ms — same shape as
+// DEEPSTEVE_DETACH_GRACE_MS above.
+const MERGE_AUTOCLOSE_MS_OVERRIDE = parseInt(process.env.DEEPSTEVE_MERGE_AUTOCLOSE_MS, 10) || 0;
+
+// The server owns the policy (how long, and whether at all) so a mod can't invent its
+// own; the mod decides only WHETHER this session has finished. Reads the setting live.
+function armSessionAutoClose(id, { reason = 'auto-close' } = {}) {
+  const delayMs = MERGE_AUTOCLOSE_MS_OVERRIDE || (settings.mergeAutoCloseMinutes || 0) * 60000;
+  return sessionAutoClose.arm(id, { delayMs, reason });
 }
 
 // --- one-time migration off tmux's shared per-UID socket (#625) ---
@@ -6409,6 +6482,13 @@ function handleWsConnection(ws, req) {
     // message stays "waiting".
     entry.lastActivity = Date.now();
     entry.lastInputTime = Date.now();
+    // #627: a user typing in a tab after its merge keeps the tab. Only real input
+    // reaches here — resize/rename/ping/close-session and the other control messages
+    // all returned above — so merely HAVING the tab open never cancels, and neither
+    // does a reconnect. The byte count is logged because that is the only way to
+    // diagnose it if some future TUI turns on a reporting mode (focus tracking, say)
+    // that would otherwise disarm every pending close invisibly.
+    sessionAutoClose.cancel(id, `user input, ${str.length} byte(s)`);
     // #558 audit: keystroke-resolution ordering, debounced to 1/s per shell
     // (typing bursts collapse into a `burst` suppressed-count). clearedWaiting is
     // now always false — keystrokes no longer touch the flag.
@@ -6499,7 +6579,7 @@ function broadcastToWindow(windowId, msg) {
 }
 
 // Initialize MCP server (async, ~100ms for dynamic import)
-initMCP({ app, security, shells, wss, broadcast, broadcastToWindow, log, MODS_DIR, closeSession, tombstoneSession, handleShellGone, spawnSession, sessionEnv, getSpawnArgs, mcpConfigArgs, getAgentConfig, resolveConfigDir, validateModel, validateEffort, wireShellOutput, watchClaudeSessionDir, unwatchClaudeSessionDir, resolveForkParentSession, saveState, validateWorktree, ensureWorktree, sessionPaths, submitToShell, fetchIssueFromGitHub, deliverPromptWhenReady, reloadClients, deliverToWindow, settings, isShuttingDown: () => shuttingDown, displayTabs, setDisplayTab, deleteDisplayTab, screenshots, setScreenshot, deleteScreenshot, getScreenshotPath, getDefaultEngine, getForegroundCommand, sessionLog, emitSessionOpen, getContexts: () => contexts, pathInside, getSavedSession: (id) => savedState[id] || null, stripEscapeSequences, readTerminalScreen, sessionInputState, maybeInheritRemoteControl, requestMetaControlsConsent, registerRestartBlocker }).catch(e => log('MCP init failed:', e.message));
+initMCP({ app, security, shells, wss, broadcast, broadcastToWindow, log, MODS_DIR, closeSession, tombstoneSession, handleShellGone, spawnSession, sessionEnv, getSpawnArgs, mcpConfigArgs, getAgentConfig, resolveConfigDir, validateModel, validateEffort, wireShellOutput, watchClaudeSessionDir, unwatchClaudeSessionDir, resolveForkParentSession, saveState, validateWorktree, ensureWorktree, sessionPaths, submitToShell, fetchIssueFromGitHub, deliverPromptWhenReady, reloadClients, deliverToWindow, settings, isShuttingDown: () => shuttingDown, displayTabs, setDisplayTab, deleteDisplayTab, screenshots, setScreenshot, deleteScreenshot, getScreenshotPath, getDefaultEngine, getForegroundCommand, sessionLog, emitSessionOpen, getContexts: () => contexts, pathInside, getSavedSession: (id) => savedState[id] || null, stripEscapeSequences, readTerminalScreen, sessionInputState, maybeInheritRemoteControl, requestMetaControlsConsent, registerRestartBlocker, armSessionAutoClose }).catch(e => log('MCP init failed:', e.message));
 
 // Watch themes directory for changes and broadcast to clients
 let themeWatchDebounce = null;

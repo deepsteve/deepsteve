@@ -72,6 +72,10 @@ function makeHarness({ agentType = 'claude', screen = F.EMPTY_COMPOSER, state = 
     shells,
     log: (m) => logs.push(m),
     auditWaiting: () => {},
+    // #627: submitToShell releases any pending post-merge auto-close, on the rule
+    // that input from ANY source (meta_type, a delivered prompt, an inherited /rc)
+    // means the session isn't finished. Irrelevant to submission mechanics.
+    sessionAutoClose: { cancel: () => false },
     auditScreenTail: () => '',
     getEngine: () => engine,
     process: { env: ENV },

@@ -89,6 +89,9 @@ function loadSubmitHelpers() {
     shells,
     log: () => {},
     auditWaiting: () => {},
+    // #627: submitToShell releases any pending post-merge auto-close. Nothing to do
+    // with codex submission — the binding just has to exist in the slice's scope.
+    sessionAutoClose: { cancel: () => false },
     getEngine: () => null,
     // #607 read the SUBMIT_TIMINGS env overrides at slice-evaluation time. Codex
     // never takes the confirmed-Enter path (no screenMarkers), so the defaults are

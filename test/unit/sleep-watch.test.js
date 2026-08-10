@@ -191,3 +191,49 @@ test('platform is reported, never enforced', () => {
     assert.strictEqual(w.holdoffRemaining(120_000), 0);
   }
 });
+
+// --- deferMsFor: the deferral decision armDetachReap used to inline (#627) --------
+// Extracted when the post-merge auto-close became its second caller. These are the
+// only direct coverage of the rule — armDetachReap itself lives in server.js, which
+// this job cannot require.
+
+function watchAt(t0) {
+  let t = t0;
+  const w = createSleepWatch({ now: () => t, tickMs: 5000, gapMs: 15000, log: () => {} });
+  return { w, set: (v) => { t = v; } };
+}
+
+test('deferMsFor: no wake detected means act now', () => {
+  const { w } = watchAt(1_000_000);
+  assert.strictEqual(w.deferMsFor(1_000_000, { holdoffMs: 120_000 }), 0);
+});
+
+test('deferMsFor: a recent wake defers by whatever is left of the holdoff', () => {
+  const { w, set } = watchAt(0);
+  set(100_000); w.tick();
+  set(400_000); w.tick();          // a 300s gap — wake recorded at t=400_000
+  set(430_000);                    // 30s after the wake
+  assert.strictEqual(w.deferMsFor(430_000, { holdoffMs: 120_000 }), 90_000);
+});
+
+test('deferMsFor: a timer that fired long past its due time defers the full holdoff', () => {
+  // Overdue timers run in due-time order, so a consumer's timer can fire BEFORE the
+  // tick that would have detected the wake. Lateness is the independent signal, and
+  // it is why this can't just be holdoffRemaining().
+  const { w, set } = watchAt(1_000_000);
+  set(1_000_000 + 60_000);         // 60s past due, and no wake recorded yet
+  assert.strictEqual(w.deferMsFor(1_000_000, { holdoffMs: 120_000 }), 120_000);
+});
+
+test('deferMsFor: keyed on the due time, so a re-arming caller never defers forever', () => {
+  // The reason it takes dueAt rather than armedAt: the #627 auto-close re-arms in a
+  // loop while a session is mid-turn, and keeps its ONE original arm time. Measuring
+  // lateness from that would report permanent lateness and the close could never fire.
+  const { w, set } = watchAt(1_000_000);
+  const armedAt = 1_000_000;
+  set(armedAt + 600_000);          // ten minutes of busy re-arms later
+  assert.strictEqual(w.deferMsFor(armedAt + 600_000, { holdoffMs: 120_000 }), 0,
+    'on time for THIS round, however long ago the first arm was');
+  assert.strictEqual(w.deferMsFor(armedAt, { holdoffMs: 120_000 }), 120_000,
+    'and measuring from the original arm is exactly the forever-defer bug');
+});

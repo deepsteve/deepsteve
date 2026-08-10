@@ -64,6 +64,30 @@ function createSleepWatch({
     lastTick = t;
   }
 
+  // Ms until it is safe to treat client silence as real absence again.
+  // 0 when no wake has been detected (or the holdoff has fully elapsed).
+  function holdoffRemaining(holdoffMs) {
+    if (!lastWakeAt) return 0;
+    return Math.max(0, lastWakeAt + holdoffMs - now());
+  }
+
+  // Ms a timer that has just fired should wait before acting, or 0 to act now.
+  // Two independent reasons to hold off, and a consumer needs both:
+  //   - a wake was detected recently (holdoffRemaining), or
+  //   - THIS timer fired far later than it was due, which means the daemon was
+  //     frozen before the tick that would have detected the wake could run.
+  //     Overdue timers run in due-time order, so a consumer's timer can beat the
+  //     detector's own overdue tick.
+  //
+  // Keyed on `dueAt`, NOT on when the timer was armed: a consumer that re-arms in a
+  // loop (the #627 auto-close busy re-check) keeps one original arm time, and
+  // measuring lateness from that would report permanent lateness and defer forever.
+  // Extracted from armDetachReap (#563) when #627 became its second caller.
+  function deferMsFor(dueAt, { holdoffMs, lateGraceMs = 10000 } = {}) {
+    const remaining = holdoffRemaining(holdoffMs);
+    return now() - dueAt > lateGraceMs ? Math.max(remaining, holdoffMs) : remaining;
+  }
+
   return {
     start() {
       if (timer) return;
@@ -81,12 +105,8 @@ function createSleepWatch({
     // frozen cgroup, which are rarer but not rare enough to stop watching for.
     isPlatformRelevant() { return platform === 'darwin'; },
     lastWakeAt() { return lastWakeAt; },
-    // Ms until it is safe to treat client silence as real absence again.
-    // 0 when no wake has been detected (or the holdoff has fully elapsed).
-    holdoffRemaining(holdoffMs) {
-      if (!lastWakeAt) return 0;
-      return Math.max(0, lastWakeAt + holdoffMs - now());
-    },
+    holdoffRemaining,
+    deferMsFor,
   };
 }
 
