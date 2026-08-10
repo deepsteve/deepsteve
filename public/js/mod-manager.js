@@ -22,7 +22,13 @@ const ACTIVE_PANEL_KEY = nsKey('deepsteve-active-panel'); // Which panel tab is 
 let allMods = [];          // [{ id, name, description, entry, toolbar }]
 let enabledMods = new Set(); // mod IDs that are enabled
 let hasExplicitModPrefs = false; // true if user has saved mod prefs before
-let activeViewId = null;   // mod ID currently showing in the fullscreen iframe (or null)
+// The page currently occupying the ONE fullscreen view slot, or null. Generalized from a
+// bare mod id in #628: the slot also hosts pages that are not DeepSteve Mods (a project
+// mod's view). `id` is what every per-view sweep keys off, so a non-mod view namespaces it
+// ('project-mod:<modId>') — the same string its bridge is injected under, which is exactly
+// what makes those sweeps correct for it while every `=== someModId` comparison in this file
+// correctly never matches.
+let activeView = null;     // { id, name, src, sandbox, allow, persist, dismissOnLeave }
 let iframe = null;
 let modContainer = null;
 let backBtn = null;
@@ -253,7 +259,7 @@ function init(appHooks) {
           if (hooks?.closeModTabs) hooks.closeModTabs(id);
         } else {
           _removeToolbarButton(id);
-          if (activeViewId === id) _hideMod();
+          if (activeView?.id === id) _hideMod();
         }
       }
     }
@@ -1147,7 +1153,7 @@ function _createModCard(mod, marketplaceOverlay) {
             if (hooks?.closeModTabs) hooks.closeModTabs(depId);
           } else {
             _removeToolbarButton(depId);
-            if (activeViewId === depId) _hideMod();
+            if (activeView?.id === depId) _hideMod();
           }
           alsoDisabled.push(depMod?.name || depId);
         }
@@ -1159,7 +1165,7 @@ function _createModCard(mod, marketplaceOverlay) {
           if (hooks?.closeModTabs) hooks.closeModTabs(mod.id);
         } else {
           _removeToolbarButton(mod.id);
-          if (activeViewId === mod.id) {
+          if (activeView?.id === mod.id) {
             _hideMod();
           }
         }
@@ -1267,7 +1273,7 @@ function _createModCard(mod, marketplaceOverlay) {
               _unloadPanelMod(depId);
             } else {
               _removeToolbarButton(depId);
-              if (activeViewId === depId) _hideMod();
+              if (activeView?.id === depId) _hideMod();
             }
           }
           enabledMods.delete(mod.id);
@@ -1275,7 +1281,7 @@ function _createModCard(mod, marketplaceOverlay) {
             _unloadPanelMod(mod.id);
           } else {
             _removeToolbarButton(mod.id);
-            if (activeViewId === mod.id) _hideMod();
+            if (activeView?.id === mod.id) _hideMod();
           }
           _saveEnabledMods();
         }
@@ -1683,7 +1689,7 @@ function _createToolbarButton(mod) {
   btn.append(iconEl, labelEl);
 
   btn.addEventListener('click', () => {
-    if (activeViewId === mod.id) {
+    if (activeView?.id === mod.id) {
       _hideMod();
     } else {
       _showMod(mod);
@@ -1696,7 +1702,7 @@ function _createToolbarButton(mod) {
   tabs.insertBefore(btn, layoutToggle.nextSibling);
 
   // If this mod is currently the active view, mark it
-  if (activeViewId === mod.id) {
+  if (activeView?.id === mod.id) {
     btn.classList.add('active');
   }
 
@@ -1715,7 +1721,70 @@ function _removeToolbarButton(modId) {
 }
 
 /**
- * Show a mod's iframe view.
+ * Put any page in the fullscreen view slot (#628). There is exactly ONE slot: showing a
+ * second view replaces the first, destroying its iframe and dropping its bridge callbacks.
+ *
+ *   id             unique; namespaced for non-mod views so it can't collide with a mod id
+ *   name           back-button label ("← <name>")
+ *   src            iframe src
+ *   sandbox        sandbox attribute (default 'allow-scripts allow-same-origin')
+ *   allow          optional allow attribute
+ *   persist        false = don't remember this view across a page reload
+ *   dismissOnLeave true = leaving for a tab tears the view down instead of backgrounding it
+ *                  behind a ← button (a project-mod view: its launcher is already on screen,
+ *                  so a back button would be a second strip item for one mod)
+ */
+function showView(view) {
+  if (!view?.id || !view.src) return;
+
+  // A different occupant: tear its iframe down AND drop the callbacks it registered, which
+  // are keyed by the id its bridge was injected under. Sweeping them was missing before
+  // #628, so switching straight from one view to another leaked them against a dead iframe.
+  if (activeView && activeView.id !== view.id) {
+    _forgetViewCallbacks(activeView.id);
+    _destroyIframe();
+  }
+
+  activeView = view;
+  // Removing rather than leaving it is the point: a non-persisting view must not let the
+  // PREVIOUS occupant's id survive to be restored on the next reload.
+  if (view.persist === false) localStorage.removeItem(ACTIVE_VIEW_KEY);
+  else localStorage.setItem(ACTIVE_VIEW_KEY, view.id);
+
+  // Update toolbar button states (a non-mod view matches none of them, which is correct —
+  // it took the slot from whichever mod had it).
+  for (const [id, btn] of toolbarButtons) {
+    btn.classList.toggle('active', id === view.id);
+  }
+
+  if (!iframe) {
+    iframe = document.createElement('iframe');
+    iframe.src = view.src;
+    iframe.setAttribute('sandbox', view.sandbox || 'allow-scripts allow-same-origin');
+    if (view.allow) iframe.setAttribute('allow', view.allow);
+    modContainer.appendChild(iframe);
+    iframe.addEventListener('load', () => {
+      _injectBridgeAPI(iframe, view.id, view.bridgeTabId || null);
+    });
+  }
+
+  showModView();
+  hooks?.onViewChanged?.();
+}
+
+/** Dismiss the view slot, but only if `id` is what's in it — a stale call is a no-op. */
+function hideView(id) {
+  if (activeView && activeView.id === id) _hideMod();
+}
+
+/** The view slot's occupant id, or null. */
+function getActiveViewId() {
+  return activeView?.id ?? null;
+}
+
+/**
+ * Show a DeepSteve Mod's iframe view — the original caller of the slot. The two early
+ * returns are mod-manifest concepts and deliberately stay here rather than in showView().
  */
 function _showMod(mod) {
   // Tools-only mods have no entry point — nothing to show
@@ -1728,50 +1797,31 @@ function _showMod(mod) {
     return;
   }
 
-  // If a different mod is showing, clean up its iframe
-  if (activeViewId && activeViewId !== mod.id) {
-    _destroyIframe();
-  }
+  showView({
+    id: mod.id,
+    name: mod.name,
+    src: `/mods/${mod.id}/${mod.entry || 'index.html'}`,
+    allow: mod.permissions?.length ? mod.permissions.join('; ') : null,
+  });
+}
 
-  activeViewId = mod.id;
-  localStorage.setItem(ACTIVE_VIEW_KEY, mod.id);
-
-  // Update toolbar button states
-  for (const [id, btn] of toolbarButtons) {
-    btn.classList.toggle('active', id === mod.id);
-  }
-
-  // Create iframe if needed
-  if (!iframe) {
-    const entry = mod.entry || 'index.html';
-    iframe = document.createElement('iframe');
-    iframe.src = `/mods/${mod.id}/${entry}`;
-    iframe.setAttribute('sandbox', 'allow-scripts allow-same-origin');
-    if (mod.permissions?.length) {
-      iframe.setAttribute('allow', mod.permissions.join('; '));
-    }
-    modContainer.appendChild(iframe);
-    iframe.addEventListener('load', () => {
-      _injectBridgeAPI(iframe, mod.id);
-    });
-  }
-
-  showModView();
+/** Drop every bridge callback registered by the page that occupied the slot under `id`. */
+function _forgetViewCallbacks(id) {
+  if (!id) return;
+  sessionCallbacks = sessionCallbacks.filter(e => e.modId !== id);
+  activeSessionCallbacks = activeSessionCallbacks.filter(e => e.modId !== id);
+  userActivityCallbacks = userActivityCallbacks.filter(e => e.modId !== id);
+  settingsCallbacks = settingsCallbacks.filter(e => e.modId !== id);
 }
 
 /**
- * Hide the active mod view, return to terminals.
+ * Hide the active view, return to terminals.
  */
 function _hideMod() {
-  const hiddenModId = activeViewId;
-  activeViewId = null;
+  const hiddenModId = activeView?.id ?? null;
+  activeView = null;
   localStorage.removeItem(ACTIVE_VIEW_KEY);
-  sessionCallbacks = sessionCallbacks.filter(e => e.modId !== hiddenModId);
-  activeSessionCallbacks = activeSessionCallbacks.filter(e => e.modId !== hiddenModId);
-  userActivityCallbacks = userActivityCallbacks.filter(e => e.modId !== hiddenModId);
-  if (hiddenModId) {
-    settingsCallbacks = settingsCallbacks.filter(e => e.modId !== hiddenModId);
-  }
+  _forgetViewCallbacks(hiddenModId);
 
   _destroyIframe();
 
@@ -1790,6 +1840,8 @@ function _hideMod() {
   if (visiblePanelId) {
     _showPanel();
   }
+
+  hooks?.onViewChanged?.();
 }
 
 /**
@@ -1817,7 +1869,7 @@ function _destroyIframe() {
  * Show the mod view (hide terminals, show mod container).
  */
 function showModView() {
-  if (!activeViewId) return;
+  if (!activeView) return;
   document.getElementById('content-row').style.display = 'none';
   modContainer.style.display = 'flex';
   backBtn.style.display = 'none';
@@ -1826,9 +1878,19 @@ function showModView() {
 }
 
 /**
- * Switch from mod view to terminal view for a specific session.
+ * Leave the view for a terminal session. A DeepSteve Mod view is only BACKGROUNDED \u2014 it
+ * stays loaded and a \u2190 button returns to it.
  */
 function showTerminalForSession(id) {
+  // A view that opted out of backgrounding leaves nothing behind in the tab strip (#628):
+  // its launcher is on screen by definition, so a \u2190 button would be a second strip item for
+  // one mod \u2014 exactly the duplicate the view mode exists to remove.
+  if (activeView?.dismissOnLeave) {
+    _hideMod();
+    hooks.focusSession(id);
+    return;
+  }
+
   modContainer.style.display = 'none';
   document.getElementById('content-row').style.display = '';
   modViewVisible = false;
@@ -1838,10 +1900,9 @@ function showTerminalForSession(id) {
     _showPanel();
   }
 
-  // Show back button with mod name
-  if (activeViewId) {
-    const mod = allMods.find(m => m.id === activeViewId);
-    backBtn.textContent = `\u2190 ${mod?.name || 'Back'}`;
+  // Show back button with the view's name
+  if (activeView) {
+    backBtn.textContent = `\u2190 ${activeView.name || 'Back'}`;
     backBtn.style.display = '';
   }
 
@@ -2015,7 +2076,7 @@ function isModViewVisible() {
  * Check if a mod is currently active.
  */
 function isModActive() {
-  return activeViewId !== null;
+  return activeView !== null;
 }
 
 /**
@@ -2267,7 +2328,7 @@ function handleSkillsChanged(enabledSkills) {
 }
 
 function handleModChanged(modId) {
-  if (activeViewId === modId && iframe) {
+  if (activeView?.id === modId && iframe) {
     iframe.src = iframe.src.replace(/(\?v=\d+)?$/, `?v=${Date.now()}`);
   }
   const panelEntry = panelMods.get(modId);
@@ -2352,6 +2413,9 @@ export const ModManager = {
   notifyBabyBrowserRequest,
   notifyWSReconnected,
   injectBridgeAPI: _injectBridgeAPI,
+  showView,
+  hideView,
+  getActiveViewId,
   isModViewVisible,
   isModActive,
   handleModChanged,

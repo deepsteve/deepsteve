@@ -951,6 +951,11 @@ kbd {
    suppression and the vertical-layout treatment; only the vertical spacing is restated
    (matching .mod-toolbar-btn, and resetting the base rule's horizontal margin-left). */
 #app-container.vertical-layout .project-mod-btn { margin: 6px 0 0 0; }
+/* The button owns the fullscreen view slot right now (#628) — same treatment (and the same
+   specificity caveat as the line above) as an active .mod-toolbar-btn. Rail rows need
+   nothing: .context-row.active already covers them, collapsed icon rail included. */
+.project-mod-btn.active { background: var(--ds-accent-blue); color: #fff; }
+#app-container.vertical-layout .project-mod-btn.active { background: var(--ds-accent-blue); color: #fff; }
 #app-container.vertical-layout .mod-back-btn { width: 100%; margin-bottom: 6px; border: none; background: transparent; border-radius: 8px; transition: background 0.15s ease; }
 #app-container.vertical-layout .mod-back-btn:hover { background: var(--ds-bg-tertiary); }
 
