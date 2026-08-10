@@ -27,6 +27,25 @@ const SESSION_PREFIX = 'ds-';
 const PTY_UNSAFE_ENV = ['TMUX', 'TMUX_PANE', 'STY', 'WINDOW', 'WINDOWID', 'TERMCAP', 'COLUMNS', 'LINES'];
 
 /**
+ * How many times an attach PTY may die and be silently re-attached, in a row,
+ * before we stop and report a real exit (#626).
+ */
+const MAX_SILENT_REATTACHES = 3;
+
+/**
+ * How long an attach must survive before its death counts as a NEW incident
+ * rather than another strike against the retry budget.
+ *
+ * This is a duration, not a "did it produce output?" test, and the difference is
+ * load-bearing: attaching to a live tmux session always makes tmux repaint the
+ * pane, so *every* re-attach produces data within milliseconds. Resetting the
+ * budget on data therefore reset it on every retry, turning the bound into an
+ * infinite loop that spawned PTYs until the daemon hit `posix_spawnp failed` and
+ * stopped serving — strictly worse than the false-death bug being fixed here.
+ */
+const REATTACH_RESET_MS = 60000;
+
+/**
  * Shell-quote a string for the command line **tmux itself** runs via $SHELL.
  *
  * This is NOT about how we invoke tmux — that goes through execFileSync with an
@@ -71,11 +90,12 @@ function pick(src, keys) {
 class TmuxEngine extends Engine {
   /**
    * @param {{binary?: string, socket?: string|null, env?: object, exec?: Function,
-   *          spawnPty?: Function}} [opts]
+   *          spawnPty?: Function, now?: Function}} [opts]
    *   binary — the `tmuxBinary` setting: a bare name to search for, or an explicit
-   *   path. exec/env/spawnPty are injection points for tests; spawnPty stands in for
-   *   pty.spawn so the attach/detach lifecycle can be tested on a box with no tmux
-   *   (which is exactly what the CI unit job is).
+   *   path. exec/env/spawnPty/now are injection points for tests; spawnPty stands in
+   *   for pty.spawn so the attach/detach lifecycle can be tested on a box with no
+   *   tmux (which is exactly what the CI unit job is), and `now` drives the #626
+   *   re-attach budget (see REATTACH_RESET_MS).
    *
    *   `env` is the daemon's environment. It reaches the $PATH probe *and*, since
    *   #624, every runtime read of it — the spawn-time diff against what the pane
@@ -100,7 +120,7 @@ class TmuxEngine extends Engine {
    *   bind()s, it does not mkdir (it creates a directory only for its own default
    *   socket). This file stays fs-free so the bare CI unit job can construct engines.
    */
-  constructor({ binary = 'tmux', socket, env, exec, spawnPty } = {}) {
+  constructor({ binary = 'tmux', socket, env, exec, spawnPty, now } = {}) {
     super();
     this._sessions = new Map(); // id → { attachPty, exitCallbacks }
     this._binary = binary || 'tmux';
@@ -109,6 +129,8 @@ class TmuxEngine extends Engine {
     // reads as a relative path in cwd. undefined is the only value that means "ours".
     this._socket = socket === undefined ? tmuxSocketPath() : (socket || null);
     this._spawnPty = spawnPty || defaultSpawnPty;
+    // Injectable clock, for the #626 re-attach budget (see REATTACH_RESET_MS).
+    this._now = now || Date.now;
     // `exec` reaches _exec too, not just the version probe (#621). Without this,
     // spawn() always really shelled out, so the argv it builds — the riskiest thing
     // in this file, and the thing #621's login-shell change rewrites — could not be
@@ -356,12 +378,34 @@ class TmuxEngine extends Engine {
     };
   }
 
-  _attach(id, cols, rows) {
+  /**
+   * Open (or re-open) the attach PTY for a session.
+   *
+   * @param {string} id
+   * @param {number} cols
+   * @param {number} rows
+   * @param {object} [carry] - the previous entry, when this is a silent re-attach.
+   *   Carrying `dataCallbacks`/`exitCallbacks` forward is LOAD-BEARING: onData()
+   *   and onExit() push into whatever entry is current at registration time, so a
+   *   re-attach that started with empty arrays would leave the session deaf and
+   *   its eventual exit unnoticed.
+   */
+  _attach(id, cols, rows, carry) {
     const sessionName = this._tmuxSessionName(id);
     const { file, argv, opts } = this.attachSpawnArgs(sessionName, cols, rows);
     const attachPty = this._spawnPty(file, argv, opts);
 
-    const entry = { attachPty, exitCallbacks: [], dataCallbacks: [] };
+    const entry = {
+      attachPty,
+      exitCallbacks: carry ? carry.exitCallbacks : [],
+      dataCallbacks: carry ? carry.dataCallbacks : [],
+      // Remembered so a silent re-attach comes back at the same size instead of
+      // snapping the pane to the 120x40 default.
+      cols: cols || 120,
+      rows: rows || 40,
+      reattachAttempts: carry ? carry.reattachAttempts : 0,
+      attachedAt: this._now(),
+    };
     this._sessions.set(id, entry);
 
     attachPty.onData((data) => {
@@ -371,10 +415,39 @@ class TmuxEngine extends Engine {
     });
 
     attachPty.onExit(({ exitCode, signal }) => {
-      // A deliberate detach() is not an exit (#620). Without this the daemon's
-      // universal 'exit' funnel would tombstone a session whose agent is still
-      // running happily in tmux — which is the whole point of detaching.
+      // A deliberate detach() or destroy() is not an exit (#620). Without this the
+      // daemon's universal 'exit' funnel would tombstone a session whose agent is
+      // still running happily in tmux — which is the whole point of detaching.
       if (entry.detaching) return;
+
+      // The attach PTY is our PIPE into the pane, not the agent itself (#626). If
+      // tmux still has the session, the agent is alive and it was our pipe that
+      // broke — reporting an exit here tombstones a live agent, and the next boot
+      // then reads that `closed` record and destroys the still-running tmux
+      // session as "the kill didn't take". So ask tmux, and re-attach instead.
+      //
+      // Bounded, because an attach that fails instantly (a tmux server refusing
+      // connections, a socket we cannot reach) would otherwise spin forever. An
+      // attach that lived a good while before dying is a fresh incident, not
+      // another strike — see REATTACH_RESET_MS for why that is measured in time
+      // rather than in "did it produce output?".
+      const strikes = (this._now() - entry.attachedAt) >= REATTACH_RESET_MS ? 0 : entry.reattachAttempts;
+      if (this._sessions.get(id) === entry
+          && strikes < MAX_SILENT_REATTACHES
+          && this._tmuxSessionAlive(id)) {
+        const attempt = strikes + 1;
+        this._sessions.delete(id);
+        try {
+          this._attach(id, entry.cols, entry.rows, { ...entry, reattachAttempts: attempt });
+          this.emit('reattach', id, attempt);
+          return;
+        } catch (e) {
+          // Couldn't rebuild the pipe. Fall through and report the exit — a
+          // session we cannot read is worse than one we admit we lost.
+          this.emit('reattach-failed', id, attempt, e);
+        }
+      }
+
       // Drop the entry so has() stops lying and write() stops writing into a
       // dead attach PTY. Guarded like node-pty's (engines/node-pty.js) because
       // an exit handler may have already re-attached a fresh PTY under this id.
@@ -491,6 +564,12 @@ class TmuxEngine extends Engine {
   destroy(id) {
     const entry = this._sessions.get(id);
     if (entry) {
+      // Same flag detach() uses, and required for the same reason it is there —
+      // but here it suppresses the #626 silent re-attach rather than the exit
+      // report. Killing the attach PTY fires its onExit *before* the kill-session
+      // below has run, so has-session still answers "alive" and we would helpfully
+      // re-attach to the session we are in the middle of destroying.
+      entry.detaching = true;
       try { entry.attachPty.kill(); } catch {}
     }
     this._sessions.delete(id);

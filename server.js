@@ -17,6 +17,7 @@ const { findGitRoot } = require('./git-root');
 const { stateDir, expandTilde, tmuxSocketPath, defaultTmuxSocketPath } = require('./paths');
 const { resolveBinary, runBinary, resolveUrlOpener, resolveLoginShell } = require('./bin-path');
 const { createPendingOpens } = require('./pending-opens');
+const { reattachSurvivingTmuxSessions } = require('./tmux-reattach');
 const { classifyScreenTail, CLAUDE_SCREEN_MARKERS } = require('./screen-classifier');
 const { TerminalScreen } = require('./terminal-screen');
 const { terminalEnv } = require('./terminal-env');
@@ -822,6 +823,13 @@ function userTmux() {
           'If tmux cannot create sessions, set `tmuxSocket` in ~/.deepsteve/settings.json ' +
           'to a shorter path and restart.');
     }
+    // Our attach PTY died but tmux still had the session, so the engine rebuilt the
+    // pipe instead of reporting a death that didn't happen (#626). Rare and always
+    // worth knowing about: it is the difference between a lost agent and a hiccup.
+    tmuxEngine.on('reattach', (id, attempt) =>
+      log(`tmux: attach PTY for ${id} died but its tmux session is alive — re-attached (attempt ${attempt})`));
+    tmuxEngine.on('reattach-failed', (id, attempt, e) =>
+      log(`tmux: attach PTY for ${id} died and re-attach ${attempt} failed (${e.message}) — reporting the session as exited`));
   } else {
     // Say WHERE we looked (#619). A bare "tmux not available" is the failure shape
     // that hid the zsh dependency for as long as it did, and tmux is on its way to
@@ -5664,98 +5672,6 @@ function armDetachReap(entry, reap, delayMs = DETACH_GRACE_MS) {
   }, delayMs);
 }
 
-// --- tmux session reattach on startup ---
-// If tmux is available, check for surviving tmux sessions and reattach them
-// regardless of the default engine setting.
-if (tmuxEngine) {
-  const tmuxSessions = tmuxEngine.listSessions();
-  if (tmuxSessions.length > 0) {
-    log(`tmux: found ${tmuxSessions.length} surviving session(s): ${tmuxSessions.join(', ')}`);
-    // The `try` is the loop body (kept inline so the block below isn't re-indented
-    // for a pure-formatting diff). It runs at module scope on every boot, and since
-    // #620 for every session rather than the handful who opted into tmux — so an
-    // exception from any one of them (a pty.spawn failure inside reattach, say)
-    // would take the daemon down before it ever listens.
-    for (const id of tmuxSessions) try {
-      const meta = savedState[id];
-      // Ownership rule (#620): destroy ONLY what this daemon can positively
-      // identify as its own and finished.
-      //
-      // #625 moved us onto our own socket, so "everything here is ours" is now
-      // SUPPOSED to be true — but this rule stays verbatim as the second line of
-      // defence, because every way it can still be false is a way we cannot identify
-      // the session: state.json lost, rolled back or hand-edited; the daemon died
-      // between spawn() and saveState(); a human ran `tmux -S <ours> new -s ds-foo`;
-      // two daemons sharing one DEEPSTEVE_HOME. Tightening this to "destroy unknown"
-      // would buy garbage collection of a rare orphan and cost a fresh way to kill a
-      // live agent — which is the trade this whole issue exists to refuse.
-      if (!meta) {
-        log(`tmux: session ${id} is on our socket but absent from state.json — leaving it ` +
-            `alone (not ours to kill). Reclaim it manually with: ` +
-            `tmux -S ${TMUX_SOCKET} kill-session -t ds-${id}`);
-        continue;
-      }
-      // A tombstoned session whose tmux session outlived the daemon means the kill
-      // didn't take. This one IS ours and IS finished, so reclaim it — and do not
-      // resurrect it as live, which is what the old code did (it also deleted the
-      // tombstone on the way past).
-      if (meta.closed) {
-        log(`tmux: session ${id} is closed (${meta.closeReason || 'unknown'}) but its tmux session survived — reclaiming`);
-        tmuxEngine.destroy(id);
-        continue;
-      }
-      if (tmuxEngine.reattach(id, 120, 40)) {
-        const agentConfig = getAgentConfig(meta.agentType || 'claude');
-        // Carry the saved record back WHOLESALE rather than naming fields. This is
-        // the third writer of a shell entry (with the WS restore and spawn paths),
-        // and it hand-listed a subset — so every field added to serializeShellEntry
-        // since was silently dropped on reattach and then wiped from state.json by
-        // the next save: `forkParent` (the #497 fork-steal guard), `planMode`,
-        // `model`/`effort` (#592), `allowedTools` (#612) and `scheduled` (#597).
-        // Only a handful of people ran tmux, so it stayed hidden; it is the default
-        // path for everyone now. Spreading meta means a future serialized field is
-        // inherited here for free instead of quietly going missing.
-        shells.set(id, {
-          ...meta,
-          clients: new Set(),
-          agentType: meta.agentType || 'claude',
-          engine: tmuxEngine,
-          engineType: 'tmux',
-          restored: true,
-          waitingForInput: false,
-          lastActivity: meta.lastActivity || Date.now(),
-          createdAt: meta.createdAt || Date.now(),
-        });
-        wireShellOutput(id);
-        if (agentConfig.supportsSessionWatch) watchClaudeSessionDir(id);
-        tmuxEngine.onExit(id, () => {
-          if (agentConfig.supportsSessionWatch) unwatchClaudeSessionDir(id);
-          // Named explicitly: a reattached session has no closeReasons entry (nothing
-          // in THIS process ever asked it to close), so without this the line would
-          // read `reason=exited` for the one case where "the pane died on its own"
-          // is the whole diagnosis.
-          handleShellGone(id, 'tmux-pane-exited');
-        });
-        delete savedState[id]; // saved → live promotion, not a close
-        // The WS restore path bumps recency here and this one didn't, so a session
-        // that came back via reattach silently fell out of the recents ring.
-        // (No emitSessionOpen: restores deliberately don't emit 'open' — see the
-        // note on that function. The resulting close-with-no-open gap in the #485
-        // lifecycle log is pre-existing and shared by every restore path.)
-        recordRecentSession(id);
-        log(`tmux: reattached session ${id} (${meta.name || meta.cwd})`);
-      } else {
-        // The session vanished between listSessions() and here. Leave the saved
-        // entry alone: a later WS connect restores it the normal way.
-        log(`tmux: failed to reattach session ${id}`);
-      }
-    } catch (e) {
-      log(`tmux: error reattaching session ${id}, skipping it: ${e.message}`);
-    }
-    saveState();
-  }
-}
-
 // --- one-time migration off tmux's shared per-UID socket (#625) ---
 //
 // Sessions created before this change live on tmux's default socket, and every one of
@@ -5877,6 +5793,26 @@ if (HTTPS_ENABLED) {
 }
 
 wss.on('connection', handleWsConnection);
+
+// --- tmux session reattach on startup ---
+// Surviving tmux sessions are reattached regardless of the default engine setting:
+// they exist, and they are ours.
+//
+// Placement is load-bearing (#626). This must run AFTER the WebSocket servers are
+// constructed, because reattaching broadcasts (recentSessions) and `wss`/`httpsWss`
+// are `const`/`let` — reading them earlier is a temporal dead zone ReferenceError,
+// which is exactly what every session hit on every boot from #620 until #626.
+// It is still safe this late: the whole module body runs to completion before the
+// event loop turns, so no connection can be served before this returns, wherever in
+// the body it sits.
+{
+  const summary = reattachSurvivingTmuxSessions({
+    tmuxEngine, savedState, shells, log, getAgentConfig, wireShellOutput,
+    watchClaudeSessionDir, unwatchClaudeSessionDir, handleShellGone, recordRecentSession,
+    socketPath: TMUX_SOCKET,
+  });
+  if (summary.found.length) saveState();
+}
 
 function handleWsConnection(ws, req) {
   const url = new URL(req.url, 'http://localhost');
@@ -6440,6 +6376,13 @@ function handleWsConnection(ws, req) {
       if (parsed.type === 'close-session') {
         entry.clients.delete(ws);
         ws.close();
+        // The server may have closed this session already — scheduled auto-close,
+        // DELETE /api/shells/:id, killall — in which case the browser is only
+        // echoing back the tab teardown we asked it to do. Mirrors the guard
+        // ws.on('close') already has. Without it the echo re-tombstones the entry
+        // and overwrites the real closeReason with 'user-closed' (#626), so
+        // state.json blames the user for every unattended auto-close.
+        if (shells.get(id) !== entry) return;
         if (entry.clients.size === 0) {
           log(`[WS] close-session: last client detached from ${id}, killing shell`);
           tombstoneSession(id, entry, 'user-closed');

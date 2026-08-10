@@ -103,6 +103,25 @@ function pidAlive(pid) {
 }
 
 /**
+ * The startup reattach must SAY it reattached (#626).
+ *
+ * This is not log-tidying. From #620 until #626 the reattach block ran at module
+ * scope above `const wss` and its last statement broadcast, so every session on
+ * every boot threw `Cannot access 'wss' before initialization` into the
+ * per-session catch and was reported as "error reattaching … skipping it". The
+ * throw happened to land after every load-bearing statement, so sessions did come
+ * back — meaning the ONLY observable symptom was the log, and every assertion in
+ * this suite passed against it. Assert the line, or the next regression is
+ * invisible for another release.
+ */
+function assertReattached(id, what) {
+  assert.match(daemonLog, new RegExp(`tmux: reattached session ${id}\\b`),
+    `startup should log the reattach of ${id} (${what})`);
+  assert.doesNotMatch(daemonLog, /error reattaching session|FAILED to reattach session/,
+    `no session should fail to reattach (${what})`);
+}
+
+/**
  * @param {{env?: object}} [extra] additional environment. The only caller that uses it
  *   is the #625 migration test, which passes `sandbox.legacy.env` so that the path the
  *   daemon computes for "tmux's own default socket" (paths.js's defaultTmuxSocketPath,
@@ -369,6 +388,7 @@ test('agent survives a daemon CRASH and is reattached under the same pid', { ski
   assert.ok(persisted, 'still persisted, so another crash could recover it again');
   assert.ok(!persisted.closed, 'reattached session is not tombstoned');
   assert.strictEqual(persisted.engineType, 'tmux');
+  assertReattached(id, 'after a crash');
 
   c.close();
 });
@@ -397,6 +417,7 @@ test('agent survives a GRACEFUL restart (the case the default flip alone did not
     const after = await waitFor(() => shellById(id).then(s => s && s.status === 'active' ? s : null),
       'session to be reattached after graceful restart');
     assert.strictEqual(after.pid, panePid, 'same pane pid across the restart');
+    assertReattached(id, 'after a graceful restart');
 
     c.close();
   });
@@ -427,11 +448,18 @@ test('reattach carries every persisted field, not a hand-picked subset', { skip:
   // Built by hand rather than by driving a real agent: these fields need a claude
   // binary to arrive naturally, and the thing under test is purely "does reattach
   // preserve what was persisted".
+  //
+  // agentType is 'claude' deliberately (#626). Every other case in this suite uses
+  // 'terminal', and recordRecentSession() — the call that threw the TDZ on every
+  // boot for a whole release — early-returns for terminals. So the entire suite
+  // structurally could not reach the broken statement. No claude binary is needed:
+  // reattach hooks up to the pre-made `sleep 600` tmux session below, it never
+  // spawns an agent.
   const id = 'beef0001';
   const meta = {
     cwd: projDir,
     claudeSessionId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
-    agentType: 'terminal',
+    agentType: 'claude',
     codexHomeId: null,
     configDir: '/tmp/some-profile',
     engineType: 'tmux',
@@ -467,6 +495,13 @@ test('reattach carries every persisted field, not a hand-picked subset', { skip:
     assert.deepStrictEqual(after[key], meta[key], `${key} survived the reattach`);
   }
   assert.deepStrictEqual(after.allowedTools, meta.allowedTools, 'allowedTools survived the reattach');
+  assertReattached(id, 'a claude-typed session, which is the one that reaches recordRecentSession');
+
+  // The recents ring is the best-effort tail that used to throw. It must actually
+  // run now, not merely fail quietly.
+  const recents = await (await fetch(`${BASE}/api/recent-sessions`, { headers: authHeaders() })).json();
+  assert.ok((recents.sessions || []).some(r => r.shellId === id),
+    'a reattached session is recorded as recent');
 
   await fetch(`${BASE}/api/shells/${id}?forget=1`, { method: 'DELETE', headers: authHeaders() }).catch(() => {});
   try { sandbox.killSession(`ds-${id}`); } catch {}

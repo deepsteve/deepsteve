@@ -29,6 +29,10 @@ const { TmuxSandbox } = require('../helpers/tmux-sandbox');
 
 const REPO_ROOT = path.resolve(__dirname, '..', '..');
 
+// The restart test below is about tmux durability specifically — under node-pty a
+// session dies with the daemon by design, so there would be nothing to assert.
+const NO_TMUX = TmuxSandbox.skipReason();
+
 // Stub `claude`: logs argv, fails a --resume with no transcript, otherwise acts
 // like a live REPL (blocks on stdin, exits on /exit).
 const CLAUDE_STUB = `#!/bin/bash
@@ -135,6 +139,15 @@ function stopDaemon() {
 
 const readState = () => JSON.parse(fs.readFileSync(path.join(HOME, '.deepsteve', 'state.json'), 'utf8'));
 
+// Via the sandbox, which binds `-S <this HOME's socket>` into every argv (#625), so
+// there is no state of the world in which this reads the developer's tmux server.
+function tmuxHasSession(name) {
+  return sandbox.hasSession(name);
+}
+function pidAlive(pid) {
+  try { process.kill(pid, 0); return true; } catch { return false; }
+}
+
 async function api(method, p, body) {
   const r = await fetch(`${BASE}${p}`, {
     method,
@@ -192,13 +205,15 @@ async function fireAndWait(taskId) {
   return shellId;
 }
 
-async function makeTask(title) {
+async function makeTask(title, extra = {}) {
   const res = await api('POST', '/api/scheduled-tasks', {
-    title, prompt: 'say hello', cron: '0 3 * * *', project: projDir, isolateWorktree: false,
+    title, prompt: 'say hello', cron: '0 3 * * *', project: projDir, isolateWorktree: false, ...extra,
   });
   assert.ok(res.task && res.task.id, `task created: ${JSON.stringify(res)}`);
   return res.task.id;
 }
+
+const taskById = async (id) => ((await api('GET', '/api/scheduled-tasks')).tasks || []).find(t => t.id === id);
 
 before(async () => {
   tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-sched-unattended-'));
@@ -297,4 +312,88 @@ test('noRestore refuses a tombstone, a plain reconnect still restores it', async
   );
 
   await api('POST', `/api/shells/${shellId}/close`);
+});
+
+test('a RUNNING scheduled task is not killed by a daemon restart, with no browser attached',
+  { skip: NO_TMUX }, async () => {
+    // #626's hard requirement, stated as an assertion. No browser has ever
+    // connected to this run — that is the whole point, and it is the case #596
+    // spent an issue making robust. What used to make this ambiguous is that
+    // startup's reattach threw `Cannot access 'wss' before initialization` for
+    // every session on every boot, so nothing in any log distinguished "the
+    // reattach worked" from "a browser happened to reconnect and rescued it".
+    const taskId = await makeTask('unattended-survives-restart', { keepOpen: true });
+    const shellId = await fireAndWait(taskId);
+
+    const before = (await api('GET', '/api/shells')).shells.find(s => s.id === shellId);
+    assert.ok(before && before.pid, 'the run reports a pane pid');
+    assert.strictEqual(before.engineType, 'tmux', 'the run must be tmux-backed or there is nothing to survive');
+    assert.ok(tmuxHasSession(`ds-${shellId}`), 'its tmux session exists');
+    assert.ok(pidAlive(before.pid), 'the agent process is running');
+
+    const logBefore = daemonLog.length;
+    await stopDaemon();            // the full graceful shutdown path
+    await new Promise(r => setTimeout(r, 500));
+
+    // The daemon is gone. The agent must not be.
+    assert.ok(tmuxHasSession(`ds-${shellId}`), 'shutdown detached rather than killed');
+    assert.ok(pidAlive(before.pid), 'the scheduled run kept working through the restart');
+
+    await startDaemon();
+
+    const after = await waitFor(
+      async () => (await api('GET', '/api/shells')).shells.find(s => s.id === shellId && s.status === 'active'),
+      "the scheduled run's session to be reattached");
+    assert.strictEqual(after.pid, before.pid, 'reattached to the SAME pane — not respawned, not resumed');
+    assert.strictEqual(after.connectedClients, 0, 'and it came back with no browser involved');
+    assert.ok(!readState()[shellId].closed, 'it is live, not a tombstone');
+
+    // Reattach, not a lucky WS reconnect. This is the assertion that fails against
+    // the pre-#626 daemon.
+    const fresh = daemonLog.slice(logBefore);
+    assert.match(fresh, new RegExp(`tmux: reattached session ${shellId}\\b`),
+      'startup must log the reattach it performed');
+    assert.doesNotMatch(fresh, /error reattaching session|FAILED to reattach session/,
+      'and no session may fail to reattach');
+
+    // The run row is the ONLY record of the run↔session link (findRunByShell
+    // matches run.sessionId), so losing it across a restart orphans the live agent:
+    // its self-report is refused, it never auto-closes, and the overlap guard
+    // blocks every future fire of the task.
+    const task = await taskById(taskId);
+    const run = (task.runs || []).find(r => r.sessionId === shellId);
+    assert.ok(run, 'the run is still linked to its session');
+    // ACTIVE_STATUSES in the mod. The stub agent has no MCP, so it never calls
+    // scheduled_task_started and the row legitimately stays 'queued' — what matters
+    // is that it is still in a NON-TERMINAL state, because that is what the overlap
+    // guard, enforceRunTimeouts and sweepLeakedWorktrees all key off.
+    assert.ok(['queued', 'running', 'started'].includes(run.status),
+      `the run is still in flight, got ${run.status}`);
+
+    await api('POST', `/api/shells/${shellId}/close`);
+  });
+
+test('a browser echoing close-session cannot rewrite a server-set closeReason', async () => {
+  // Auto-close sends the tab a `close-tab`; the browser tears the tab down and
+  // sends `close-session` back. That echo used to re-tombstone the entry as
+  // 'user-closed', overwriting the true reason — which is how a scheduled run that
+  // completed and auto-closed came to look, in state.json, like something a person
+  // had closed. Forensics that lie are worse than none.
+  const taskId = await makeTask('unattended-close-reason');
+  const shellId = await fireAndWait(taskId);
+
+  const client = await connectSession({ id: shellId, cwd: projDir });
+  assert.strictEqual(client.msg.type, 'session');
+
+  await api('POST', `/api/shells/${shellId}/close`);
+  await waitFor(async () => readState()[shellId]?.closed, 'the tombstone to be written');
+  const reason = readState()[shellId].closeReason;
+  assert.ok(reason && reason !== 'user-closed', `server-set reason, got ${reason}`);
+
+  client.ws.send(JSON.stringify({ type: 'close-session' }));
+  await new Promise(r => setTimeout(r, 1000));
+
+  assert.strictEqual(readState()[shellId].closeReason, reason,
+    'the echo must not overwrite why the session actually ended');
+  try { client.ws.close(); } catch {}
 });

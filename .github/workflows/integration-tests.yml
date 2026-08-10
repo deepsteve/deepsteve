@@ -172,6 +172,26 @@ jobs:
           }
           echo "session ds-$SID survived the restart"
 
+          # Surviving is only half of it: the new daemon must have REATTACHED, i.e.
+          # rebuilt its pipe into the pane. From #620 until #626 that step threw
+          # `Cannot access 'wss' before initialization` for every session on every
+          # boot and the error was swallowed per session, so a check that stopped at
+          # has-session (like this one did) stayed green throughout. #626 also proved
+          # the daemon can be left serving with a half-wired session, which looks
+          # exactly like success from the outside — so assert the log.
+          LOG="$HOME/.local/share/deepsteve/logs/deepsteve.log"
+          grep -q "tmux: reattached session $SID" "$LOG" || {
+            echo "REGRESSION: the daemon never logged reattaching ds-$SID — see #626."
+            tail -40 "$LOG" || true
+            exit 1
+          }
+          if grep -qE "error reattaching session|FAILED to reattach session" "$LOG"; then
+            echo "REGRESSION: a session failed to reattach at startup — see #626."
+            grep -E "error reattaching session|FAILED to reattach session" "$LOG"
+            exit 1
+          fi
+          echo "and the daemon logged the reattach"
+
       - name: Uninstall tears everything down
         run: |
           "$HOME/.deepsteve/uninstall.sh"

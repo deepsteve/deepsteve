@@ -50,14 +50,33 @@ function fakePty() {
 
 // A TmuxEngine whose probe succeeds and whose PTYs are fakes. Nothing here shells
 // out, so it runs anywhere node does.
-function engineWithFakePtys() {
+//
+// `exec` is command-AWARE, which #626 made necessary: the engine now asks
+// `has-session` before believing an attach-PTY exit means the agent died, so a fake
+// that answered every argv with the version string would report "session alive" for
+// every session that ever genuinely ended. `sessionAlive` is what a test is really
+// choosing between: did tmux lose the session (a real exit), or only our pipe?
+function engineWithFakePtys({ sessionAlive = false } = {}) {
   const ptys = [];
+  // A controllable clock: the #626 retry budget resets only when an attach has
+  // SURVIVED for a while, so a test that wants "this one was healthy" advances
+  // time rather than emitting output.
+  const clock = { t: 1_000_000 };
   const eng = new TmuxEngine({
     binary: '/fake/bin/tmux',
-    exec: () => 'tmux 3.6a',
+    exec: (bin, args) => {
+      // `includes`, not `args[0]`: since #625 every argv is prefixed with
+      // `-S <socket>`, so position 0 is the flag, not the verb.
+      if (Array.isArray(args) && args.includes('has-session')) {
+        if (!sessionAlive) throw new Error("can't find session");
+        return '';
+      }
+      return 'tmux 3.6a';
+    },
     spawnPty: (...args) => { const p = fakePty(); p.args = args; ptys.push(p); return p; },
+    now: () => clock.t,
   });
-  return { eng, ptys };
+  return { eng, ptys, clock };
 }
 
 describe('#620 engine detach capability', () => {
@@ -187,28 +206,157 @@ describe('#620 migration offer', () => {
   }
 });
 
-// The startup reattach ownership rule. tmux's socket is per-UID, not per-HOME, so
-// listSessions() returns ds-* sessions belonging to other daemons too. Before #620
-// anything absent from our state.json was destroyed — which, once tmux is the
-// default, means a stray `node server.js` wipes every real session on the box.
-function reattachAction(meta) {
-  if (!meta) return 'leave-alone';
-  if (meta.closed) return 'destroy';
-  return 'reattach';
-}
+// The startup reattach ownership rule used to be mirrored here as a local
+// reattachAction() — a copy of server.js's logic that could drift from it, and did
+// not exercise a single line of the real path. Since #626 that logic lives in
+// tmux-reattach.js and is driven directly by test/unit/tmux-reattach.test.js.
 
-describe('#620 startup reattach ownership', () => {
-  test("a session we have no record of is left strictly alone", () => {
-    assert.strictEqual(reattachAction(undefined), 'leave-alone');
+// The attach PTY is the daemon's PIPE into the pane, not the agent. Conflating the
+// two is the mirror image of #626's startup bug and strictly worse: the daemon
+// declares a live agent dead, tombstones it, and the NEXT boot reads that `closed`
+// record and destroys the still-running tmux session as "the kill didn't take".
+// So the only question that matters on an attach-PTY exit is what tmux says.
+describe('#626 an attach-PTY death is not an agent death', () => {
+  test('our pipe dies but tmux still has the session → re-attach, report nothing', () => {
+    const { eng, ptys } = engineWithFakePtys({ sessionAlive: true });
+
+    const exits = [];
+    const reattaches = [];
+    eng.on('exit', (id) => exits.push(id));
+    eng.on('reattach', (id, attempt) => reattaches.push({ id, attempt }));
+    eng._attach('alive1', 80, 24);
+    eng.onExit('alive1', () => exits.push('per-session-callback'));
+
+    ptys[0]._onExit({ exitCode: 1, signal: 0 }); // our attach PTY, not the agent
+
+    assert.deepStrictEqual(exits, [], 'nothing downstream was told the session ended');
+    assert.deepStrictEqual(reattaches, [{ id: 'alive1', attempt: 1 }]);
+    assert.strictEqual(ptys.length, 2, 'a fresh attach PTY was opened');
+    assert.strictEqual(eng.has('alive1'), true, 'and the session is still addressable');
   });
 
-  test('our own tombstoned session is reclaimed', () => {
-    // Ours and finished — the kill just didn't take. Safe to destroy, and leaving
-    // it would strand a live agent no UI can reach.
-    assert.strictEqual(reattachAction({ closed: true, closeReason: 'user' }), 'destroy');
+  test('the rebuilt pipe keeps the data and exit callbacks', () => {
+    // onData()/onExit() push into whatever entry is current when they are called,
+    // so a re-attach starting with empty arrays would leave the session silently
+    // deaf and its real exit unnoticed — a subtler way to lose the same agent.
+    const { eng, ptys } = engineWithFakePtys({ sessionAlive: true });
+    const seen = [];
+    eng._attach('carry1', 80, 24);
+    eng.onData('carry1', (d) => seen.push(d));
+
+    ptys[0]._onExit({ exitCode: 1, signal: 0 });
+    ptys[1]._onData('after the re-attach');
+
+    assert.deepStrictEqual(seen, ['after the re-attach']);
   });
 
-  test('our own open session is reattached', () => {
-    assert.strictEqual(reattachAction({ cwd: '/tmp', agentType: 'claude' }), 'reattach');
+  test('the rebuilt pipe keeps the size, rather than snapping back to 120x40', () => {
+    const { eng, ptys } = engineWithFakePtys({ sessionAlive: true });
+    eng._attach('size1', 203, 51);
+    ptys[0]._onExit({ exitCode: 1, signal: 0 });
+    assert.strictEqual(ptys[1].args[2].cols, 203);
+    assert.strictEqual(ptys[1].args[2].rows, 51);
+  });
+
+  test('tmux has no such session → a real exit, reported exactly as before', () => {
+    const { eng, ptys } = engineWithFakePtys({ sessionAlive: false });
+    const exits = [];
+    eng.on('exit', (id, code, signal) => exits.push({ id, code, signal }));
+    eng._attach('dead1', 80, 24);
+
+    ptys[0]._onExit({ exitCode: 3, signal: 0 });
+
+    assert.deepStrictEqual(exits, [{ id: 'dead1', code: 3, signal: 0 }]);
+    assert.strictEqual(eng.has('dead1'), false);
+    assert.strictEqual(ptys.length, 1, 'no pointless re-attach to a session that is gone');
+  });
+
+  test('the silent re-attach is bounded, so a refusing tmux server cannot spin', () => {
+    const { eng, ptys } = engineWithFakePtys({ sessionAlive: true });
+    const exits = [];
+    eng.on('exit', (id) => exits.push(id));
+    eng._attach('flap1', 80, 24);
+
+    // Each fresh attach PTY dies immediately, without ever producing data. Fire
+    // exactly one onExit per PTY (as node-pty does) and stop when a death no
+    // longer produces a replacement — that is the engine giving up.
+    for (let guard = 0; guard < 10; guard++) {
+      const before = ptys.length;
+      ptys[ptys.length - 1]._onExit({ exitCode: 1, signal: 0 });
+      if (ptys.length === before) break;
+    }
+
+    assert.strictEqual(ptys.length, 4, 'the original plus MAX_SILENT_REATTACHES (3)');
+    assert.deepStrictEqual(exits, ['flap1'], 'then it gives up and reports the exit, once');
+  });
+
+  test('an attach that lived a long time before dying starts a fresh budget', () => {
+    // Otherwise a session that hiccuped three times over its lifetime would be one
+    // stumble away from being declared dead forever after.
+    const { eng, ptys, clock } = engineWithFakePtys({ sessionAlive: true });
+    const exits = [];
+    eng.on('exit', (id) => exits.push(id));
+    eng._attach('heal1', 80, 24);
+
+    for (let i = 0; i < 5; i++) {
+      clock.t += 10 * 60 * 1000; // this attach ran happily for ten minutes
+      ptys[ptys.length - 1]._onExit({ exitCode: 1, signal: 0 });
+    }
+    assert.deepStrictEqual(exits, [], 'five well-separated hiccups, no exit');
+    assert.strictEqual(ptys.length, 6);
+  });
+
+  test('output alone does NOT clear the budget', () => {
+    // The bug this replaced: attaching to a live tmux session always makes tmux
+    // repaint the pane, so every retry produced data within milliseconds. Resetting
+    // on data reset the budget on every retry — the bound never engaged and the
+    // daemon spawned PTYs until `posix_spawnp failed`.
+    const { eng, ptys } = engineWithFakePtys({ sessionAlive: true });
+    const exits = [];
+    eng.on('exit', (id) => exits.push(id));
+    eng._attach('flood1', 80, 24);
+
+    for (let guard = 0; guard < 20; guard++) {
+      const before = ptys.length;
+      ptys[ptys.length - 1]._onData('\x1b[H\x1b[2J redrawn by tmux'); // the repaint
+      ptys[ptys.length - 1]._onExit({ exitCode: 1, signal: 0 });
+      if (ptys.length === before) break;
+    }
+    assert.strictEqual(ptys.length, 4, 'still bounded at MAX_SILENT_REATTACHES');
+    assert.deepStrictEqual(exits, ['flood1']);
+  });
+
+  test('detach() still never triggers a re-attach, even with tmux holding the session', () => {
+    // detach()'s whole purpose is leaving the session running, so "tmux still has
+    // it" is the expected state, not evidence our pipe broke.
+    const { eng, ptys } = engineWithFakePtys({ sessionAlive: true });
+    const reattaches = [];
+    eng.on('reattach', (id) => reattaches.push(id));
+    eng._attach('det1', 80, 24);
+
+    assert.strictEqual(eng.detach('det1'), true);
+
+    assert.deepStrictEqual(reattaches, []);
+    assert.strictEqual(ptys.length, 1);
+    assert.strictEqual(eng.has('det1'), false);
+  });
+
+  test('destroy() still never triggers a re-attach', () => {
+    // Killing the attach PTY fires its onExit BEFORE destroy()'s kill-session runs,
+    // so has-session still answers "alive" — without a suppression flag we would
+    // helpfully re-attach to the session we are destroying.
+    const { eng, ptys } = engineWithFakePtys({ sessionAlive: true });
+    const reattaches = [];
+    const exits = [];
+    eng.on('reattach', (id) => reattaches.push(id));
+    eng.on('exit', (id) => exits.push(id));
+    eng._attach('des1', 80, 24);
+
+    eng.destroy('des1');
+
+    assert.deepStrictEqual(reattaches, []);
+    assert.deepStrictEqual(exits, []);
+    assert.strictEqual(ptys.length, 1);
+    assert.strictEqual(eng.has('des1'), false);
   });
 });
