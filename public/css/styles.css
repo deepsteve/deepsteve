@@ -1187,6 +1187,67 @@ kbd {
 .shortcuts-help-sep { font-size: 10px; color: var(--ds-text-secondary); }
 .shortcuts-help-desc { flex: 1; font-size: 13px; color: var(--ds-text-primary); }
 
+/* Scheduled task run history (#633) — z-index above modals (100) and menus (200),
+   below the command palette (250) and the shortcuts overlay (260), which stay
+   reachable over it. Every color is a --ds-* var so the page themes for free;
+   what it must NOT lean on is hue alone, since win-95 collapses green-soft and
+   blue to two navies — hence the glyph inside every cell. */
+.sched-hist-overlay { position: fixed; inset: 0; background: var(--ds-overlay); z-index: 240; display: flex; padding: 24px; }
+.sched-hist { flex: 1; min-width: 0; background: var(--ds-bg-secondary); border: 1px solid var(--ds-border); border-radius: 8px; box-shadow: 0 8px 32px var(--ds-shadow); display: flex; flex-direction: column; overflow: hidden; outline: none; }
+.sched-hist-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding: 12px 16px; background: var(--ds-bg-primary); border-bottom: 1px solid var(--ds-border); }
+.sched-hist-title { font-size: 14px; font-weight: 600; color: var(--ds-text-bright); }
+.sched-hist-legend { margin-top: 3px; font-size: 11px; color: var(--ds-text-secondary); }
+.sched-hist-close { padding: 4px 10px; background: var(--ds-btn-neutral); border: 1px solid var(--ds-border); border-radius: 4px; color: var(--ds-text-primary); font-family: inherit; font-size: 12px; cursor: pointer; flex-shrink: 0; }
+.sched-hist-close:hover { background: var(--ds-btn-neutral-hover); }
+/* ONE scroll container for the whole grid. Per-row overflow-x would let rows
+   scroll independently and destroy even the column-to-column alignment. */
+.sched-hist-body { flex: 1; overflow: auto; padding: 8px 0 20px; }
+.sched-hist-body::-webkit-scrollbar { width: 8px; height: 8px; }
+.sched-hist-body::-webkit-scrollbar-thumb { background: var(--ds-border); border-radius: 4px; }
+.sched-hist-note { padding: 24px 16px; font-size: 13px; color: var(--ds-text-secondary); text-align: center; }
+.sched-hist-warn { margin: 8px 16px 4px; padding: 6px 10px; border: 1px solid var(--ds-accent-orange); border-radius: 4px; font-size: 12px; color: var(--ds-accent-orange); }
+
+.sched-hist-group { margin-top: 10px; }
+.sched-hist-group-head { position: sticky; left: 0; display: flex; align-items: baseline; gap: 8px; padding: 8px 16px 4px; font-size: 12px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: var(--ds-text-bright); }
+.sched-hist-repo { margin-top: 2px; }
+.sched-hist-repo-head { position: sticky; left: 0; display: flex; align-items: baseline; gap: 8px; padding: 4px 16px 2px 28px; font-size: 11px; color: var(--ds-text-secondary); }
+.sched-hist-tag { padding: 0 5px; border: 1px solid var(--ds-border); border-radius: 4px; font-size: 10px; color: var(--ds-text-secondary); white-space: nowrap; }
+.sched-hist-tag.bad { border-color: var(--ds-accent-red); color: var(--ds-accent-red); }
+
+.sched-hist-row { display: flex; align-items: center; gap: 10px; padding: 2px 16px 2px 28px; min-width: min-content; }
+.sched-hist-row.dim { opacity: 0.55; }
+/* Sticky label column. The opaque background is load-bearing: without it the run
+   cells scroll visibly through the task titles. */
+.sched-hist-label { position: sticky; left: 16px; z-index: 1; flex: 0 0 260px; padding: 3px 8px 3px 0; background: var(--ds-bg-secondary); }
+.sched-hist-task-title { font-size: 13px; color: var(--ds-text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sched-hist-task-sub { font-size: 11px; color: var(--ds-text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sched-hist-runs { display: flex; align-items: center; gap: 3px; }
+.sched-hist-cellwrap { position: relative; }
+/* flex: 0 0 auto or a long row squashes every cell to nothing. */
+.sched-hist-cell { flex: 0 0 auto; width: 22px; height: 22px; display: flex; align-items: center; justify-content: center; padding: 0; border: 1px solid var(--ds-border); border-radius: 4px; background: var(--ds-bg-tertiary); color: var(--ds-text-secondary); font-family: inherit; font-size: 12px; line-height: 1; cursor: pointer; }
+.sched-hist-cell:hover { border-color: var(--ds-text-secondary); }
+.sched-hist-cell.selected { outline: 2px solid var(--ds-accent-blue); outline-offset: 1px; }
+.sched-hist-cell.ok { border-color: var(--ds-accent-green-soft); color: var(--ds-accent-green-soft); }
+.sched-hist-cell.bad { border-color: var(--ds-accent-red); color: var(--ds-accent-red); }
+.sched-hist-cell.running { border-color: var(--ds-accent-blue); color: var(--ds-accent-blue); }
+.sched-hist-cell.queued { border-color: var(--ds-accent-orange); color: var(--ds-accent-orange); }
+.sched-hist-cell.muted { color: var(--ds-text-secondary); }
+.sched-hist-idle { padding: 0 8px; height: 22px; display: flex; align-items: center; border: 1px dashed var(--ds-border); border-radius: 4px; font-size: 11px; color: var(--ds-text-secondary); white-space: nowrap; }
+/* "never run" is the only idle state that is a bug signal — the other two are
+   states the user chose. Only this one gets a color. */
+.sched-hist-idle.never { border-color: var(--ds-accent-orange); color: var(--ds-accent-orange); }
+.sched-hist-span { margin-left: 8px; font-size: 10px; color: var(--ds-text-secondary); white-space: nowrap; }
+
+.sched-hist-detail { position: absolute; top: 26px; left: 0; z-index: 2; width: 320px; padding: 10px 12px; background: var(--ds-bg-primary); border: 1px solid var(--ds-border); border-radius: 6px; box-shadow: 0 4px 20px var(--ds-shadow); cursor: default; }
+.sched-hist-detail-head { margin-bottom: 6px; font-size: 12px; font-weight: 600; color: var(--ds-text-bright); }
+.sched-hist-detail-row { display: flex; gap: 8px; padding: 1px 0; font-size: 11px; }
+.sched-hist-detail-key { flex: 0 0 92px; color: var(--ds-text-secondary); }
+.sched-hist-detail-val { flex: 1; min-width: 0; color: var(--ds-text-primary); overflow-wrap: anywhere; }
+.sched-hist-detail-foot { margin-top: 8px; padding-top: 6px; border-top: 1px solid var(--ds-border); }
+.sched-hist-detail-hint { font-size: 11px; color: var(--ds-text-secondary); }
+.sched-hist-go { padding: 3px 8px; background: var(--ds-btn-neutral); border: 1px solid var(--ds-border); border-radius: 4px; color: var(--ds-text-primary); font-family: inherit; font-size: 11px; cursor: pointer; }
+.sched-hist-go:hover { background: var(--ds-btn-neutral-hover); }
+
 /* Hash Commands (#) autocomplete */
 .hash-command-popup { position: absolute; bottom: 8px; left: 16px; right: 16px; max-width: 420px; background: var(--ds-bg-secondary); border: 1px solid var(--ds-border); border-radius: 6px; box-shadow: 0 4px 20px var(--ds-shadow); z-index: 200; display: flex; flex-direction: column; font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', Menlo, monospace; overflow: hidden; }
 .hash-command-input { padding: 10px 14px; border-bottom: 1px solid var(--ds-border); font-size: 14px; color: var(--ds-text-bright); white-space: pre; line-height: 1.4; }

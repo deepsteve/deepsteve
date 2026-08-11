@@ -2147,6 +2147,13 @@ function _injectBridgeAPI(iframeEl, modId, tabInstanceId) {
       hideAutoCycleToast() {
         if (hooks.hideAutoCycleToast) hooks.hideAutoCycleToast();
       },
+      // Open the cross-project scheduled-run history page (#633). It renders in
+      // the top document rather than in this iframe because mod iframes receive
+      // no theme variables, so a grid built in here would be stuck on hardcoded
+      // fallback colors.
+      openScheduledHistory() {
+        if (hooks.openScheduledHistory) hooks.openScheduledHistory();
+      },
       createSession(cwd, opts) {
         return hooks.createSession(cwd, opts);
       },

@@ -211,8 +211,24 @@ function displayName(project) {
   return project ? path.basename(project) : 'No project';
 }
 
-// Every project we know about (from tasks, groups, and live sessions), with
-// basenames disambiguated by parent dir on collision — mirrors /api/git-roots.
+// Display names for a set of repo roots: the basename, widened to `parent/base`
+// only where two roots would otherwise collide — mirrors /api/git-roots.
+// Pure and scoped to the roots handed in, so a caller that renders a *different*
+// root set (the run-history grid includes tombstoned tasks' roots, which
+// knownProjects() never sees) gets names disambiguated against what it shows.
+function disambiguate(roots) {
+  const list = [...new Set([...roots].filter(Boolean))].sort();
+  const baseCounts = {};
+  for (const r of list) { const b = path.basename(r); baseCounts[b] = (baseCounts[b] || 0) + 1; }
+  const names = new Map();
+  for (const root of list) {
+    const base = path.basename(root);
+    names.set(root, baseCounts[base] > 1 ? path.join(path.basename(path.dirname(root)), base) : base);
+  }
+  return names;
+}
+
+// Every project we know about (from tasks, groups, and live sessions).
 function knownProjects() {
   const roots = new Set();
   for (const t of liveTasks()) if (t.project) roots.add(t.project);
@@ -222,14 +238,7 @@ function knownProjects() {
       try { const { repoRoot } = ctx.sessionPaths(entry); if (repoRoot) roots.add(repoRoot); } catch {}
     }
   }
-  const list = [...roots];
-  const baseCounts = {};
-  for (const r of list) { const b = path.basename(r); baseCounts[b] = (baseCounts[b] || 0) + 1; }
-  return list.sort().map(root => {
-    const base = path.basename(root);
-    const name = baseCounts[base] > 1 ? path.join(path.basename(path.dirname(root)), base) : base;
-    return { root, name };
-  });
+  return [...disambiguate(roots)].map(([root, name]) => ({ root, name }));
 }
 
 // Folders that define `project`'s group scope: the dirs of every context that
@@ -884,6 +893,162 @@ function taskView(task) {
   };
 }
 
+// --- Cross-project run history (#633) -------------------------------------
+//
+// The status page's whole point is that a schedule which has quietly stopped
+// firing becomes visible, so this deliberately shows MORE than the panel does:
+// tasks with no runs at all, tasks whose repo folder is gone, and tombstoned
+// tasks (a delete that landed mid-run, #614) — none of which reach the panel.
+//
+// It also shows LESS in one place that matters: `prompt` is stripped. The grid
+// never renders it and it is the bulk of the payload, which is refetched on
+// every scheduled-tasks broadcast.
+
+const DIR_EXISTS_TTL_MS = 30 * 1000;
+const dirExistsCache = new Map(); // root -> { ok, at }
+
+// TTL-cached existsSync. A missing repo root is exactly the case where the
+// volume may be unmounted, and a blocking stat on the event loop is what #553
+// took off the request path — so never call this per row, and never uncached.
+function dirExists(root, now = Date.now()) {
+  if (!root) return true; // '' is the "no repo" bucket, not a missing folder
+  const hit = dirExistsCache.get(root);
+  if (hit && now - hit.at < DIR_EXISTS_TTL_MS) return hit.ok;
+  let ok = false;
+  try { ok = fs.existsSync(root); } catch { ok = false; }
+  // The live key set is the distinct repo roots across all tasks — a handful.
+  // The cap is only so a long-running daemon whose projects churn can't grow
+  // this without bound; dropping the whole map just costs one extra stat each.
+  if (dirExistsCache.size >= 500) dirExistsCache.clear();
+  dirExistsCache.set(root, { ok, at: now });
+  return ok;
+}
+
+// One run row, trimmed to what the grid renders. Every field is optional:
+// worktree/model/effort arrived with #565/#592, so older rows lack them.
+function runView(r) {
+  return {
+    startedAt: r.startedAt || null,
+    agentStartedAt: r.agentStartedAt || null,
+    endedAt: r.endedAt || null,
+    status: r.status || null,
+    success: r.success != null ? r.success : null,
+    summary: r.summary || null,
+    sessionId: r.sessionId || null,
+    worktree: r.worktree || null,
+    worktreeRemoved: !!r.worktreeRemoved,
+    model: r.model || null,
+    effort: r.effort || null,
+  };
+}
+
+function historyTaskView(task) {
+  return {
+    id: task.id,
+    title: task.title,
+    schedule: scheduleLabel(task),
+    cron: task.cron,
+    agentType: task.agentType || null,
+    enabled: !!task.enabled,
+    once: !!task.once,
+    firedAt: task.firedAt || null,
+    nextRun: task.nextRun || null,
+    lastRun: task.lastRun || null,
+    deleted: !!task.deleted,
+    // Passed through whole, never sliced: trimRuns() can leave more than
+    // MAX_RUNS rows, and the ones it keeps past the cap — runs whose session is
+    // still live — are appended at the END. Slicing to 20 would drop exactly the
+    // in-flight run the page most needs to show. The client orders for display.
+    runs: (task.runs || []).map(runView),
+  };
+}
+
+// A task still fires on its schedule: enabled, and not a one-shot that already
+// went. Mirrors isActive() in the panel so the two surfaces order the same way.
+function isSchedulable(task) {
+  return !!task && task.enabled !== false && !task.deleted && !(task.once && task.firedAt);
+}
+
+/**
+ * The whole grid, as data: Project (context) -> repo -> task -> runs.
+ *
+ * Pure — every input is injected, so the truth tables in
+ * test/unit/scheduled-run-history.test.js need no daemon and no filesystem.
+ *
+ * @param {object[]} taskList   the FULL task array, tombstones included
+ * @param {object[]} contextList contexts in their stored (rail drag) order
+ * @param {(root: string) => boolean} exists  folder-existence probe
+ */
+function buildRunHistory({ tasks: taskList = [], contexts: contextList = [], exists = dirExists, enabled = true, now = Date.now() } = {}) {
+  const withRepo = taskList.filter(t => t && t.id);
+
+  // Names are disambiguated against the roots this page actually renders — which
+  // includes tombstoned tasks' roots, so knownProjects() is the wrong source.
+  const names = disambiguate(withRepo.map(t => t.project));
+
+  const byRoot = new Map();
+  for (const t of withRepo) {
+    const root = t.project || '';
+    if (!byRoot.has(root)) byRoot.set(root, []);
+    byRoot.get(root).push(t);
+  }
+
+  // Active tasks first, as a PARTITION so each tier keeps its creation order —
+  // one live task among a hundred paused ones must not sink out of sight (#613).
+  const orderTasks = (list) => [...list.filter(isSchedulable), ...list.filter(t => !isSchedulable(t))];
+
+  // The same repo under two contexts is two rows, so the key must carry BOTH.
+  // Separated by NUL because that is the one byte neither a group id nor a path
+  // can contain, so no id/path pair can forge another row's key.
+  const repoView = (groupId, root) => ({
+    key: `${groupId == null ? '' : groupId}\u0000${root}`,
+    root: root || null,
+    name: root ? (names.get(root) || path.basename(root)) : displayName(root),
+    missing: root ? !exists(root) : false,
+    tasks: orderTasks(byRoot.get(root)).map(historyTaskView),
+  });
+
+  const grouped = new Set();
+  const groups = [];
+  // Contexts keep their stored order — that is the order the user dragged the
+  // rail into. Archived ones are still listed (a dormant project's tasks keep
+  // firing, server.js:5274) but sink below the live ones.
+  const ordered = [...contextList.filter(c => !c.archived), ...contextList.filter(c => c.archived)];
+  for (const c of ordered) {
+    const dirs = (c.dirs || []).filter(Boolean);
+    // A repo can sit inside two contexts (or a context and its own nested
+    // sub-context) and is then listed under BOTH, matching how the panel's
+    // single-select Show filter already behaves. `key` is what keeps the two
+    // copies distinct; any count over them must dedupe by task id.
+    const roots = [...byRoot.keys()].filter(root => dirs.some(d => pathInside(root, d)));
+    if (!roots.length) continue;
+    for (const r of roots) grouped.add(r);
+    groups.push({
+      id: c.id || null,
+      name: c.name || '(unnamed)',
+      archived: !!c.archived,
+      repos: roots.sort((a, b) => (names.get(a) || '').localeCompare(names.get(b) || '')).map(r => repoView(c.id, r)),
+    });
+  }
+
+  // Everything that matched no context, including '' (a task with no repo at
+  // all). pathInside('', dir) is false, so '' can only ever land here.
+  const loose = [...byRoot.keys()].filter(r => !grouped.has(r));
+  if (loose.length) {
+    groups.push({
+      id: null,
+      name: 'Ungrouped',
+      archived: false,
+      // '' ("No project") sorts last — it is a fallback bucket, not a repo.
+      repos: loose
+        .sort((a, b) => (!a - !b) || (names.get(a) || '').localeCompare(names.get(b) || ''))
+        .map(r => repoView(null, r)),
+    });
+  }
+
+  return { enabled: !!enabled, generatedAt: now, groups };
+}
+
 function formatTaskLines(list) {
   if (list.length === 0) return 'No scheduled tasks.';
   return list.map(t => {
@@ -1198,6 +1363,22 @@ function registerRoutes(app, context) {
     });
   });
 
+  // The cross-project run-history grid (#633). Read-only, and deliberately NOT
+  // feature-gated — same carve-out as list_scheduled_tasks: when the scheduler is
+  // off you especially want to see the history and be told why nothing is firing,
+  // which is what the `enabled` flag in the payload drives.
+  //
+  // Registered ahead of the POST and the /:id routes: nothing collides today, but
+  // Express resolves in registration order, so this stays safe if a
+  // GET /api/scheduled-tasks/:id is ever added.
+  app.get('/api/scheduled-tasks/history', (req, res) => {
+    res.json(buildRunHistory({
+      tasks,                       // the FULL array — tombstones included, on purpose
+      contexts: getContexts(),
+      enabled: !!ctx.settings.scheduledTasksEnabled,
+    }));
+  });
+
   app.post('/api/scheduled-tasks', (req, res) => {
     if (!featureEnabled()) return res.status(403).json({ error: FEATURE_OFF_MSG });
     const b = req.body || {};
@@ -1269,4 +1450,4 @@ function registerRoutes(app, context) {
 
 // The mod loader only uses init/registerRoutes; the extra named exports are for
 // unit tests (test/unit/scheduled-worktree.test.js).
-module.exports = { init, registerRoutes, cleanupWorktree, isGitRepo, scheduledRunPrompt, worktreeContract, enforceRunTimeouts, CONTRACT_TOOLS, purgeTombstonedTasks, TOMBSTONE_TTL_MS };
+module.exports = { init, registerRoutes, cleanupWorktree, isGitRepo, scheduledRunPrompt, worktreeContract, enforceRunTimeouts, CONTRACT_TOOLS, purgeTombstonedTasks, TOMBSTONE_TTL_MS, buildRunHistory, disambiguate };
