@@ -25,6 +25,11 @@ const { MARKER_PREFIX } = require('../../terminal-run');
 
 RUN_TIMINGS.pollMs = 5;
 
+// The caller's cwd has to be a directory that really exists: since #632 the handler
+// refuses a spawn whose cwd is gone, so the old opaque '/repo' placeholder would now
+// (correctly) be refused before ever reaching the stub spawnSession. Nothing here is
+// about cwd validation — that lives in spawn-cwd.test.js.
+const CALLER_CWD = SCRATCH_HOME;
 const RUN_LOG = path.join(SCRATCH_HOME, '.deepsteve', 'terminal-runs.jsonl');
 const readLog = () => (fs.existsSync(RUN_LOG) ? fs.readFileSync(RUN_LOG, 'utf8').trim().split('\n').map(JSON.parse) : []);
 const callerExtra = (shellId) => ({ requestInfo: { url: new URL(`http://localhost:3000/mcp?shellId=${shellId}`) } });
@@ -38,7 +43,7 @@ const parse = (res) => JSON.parse(res.content[0].text);
  * have printed — the daemon learns the exit status from that line and nowhere else.
  */
 function makeContext({ linger = 20000 } = {}) {
-  const shells = new Map([['caller', { cwd: '/repo', windowId: 'w1', configDir: null }]]);
+  const shells = new Map([['caller', { cwd: CALLER_CWD, windowId: 'w1', configDir: null }]]);
   const spawns = [];
   const armCalls = [];
   const closes = [];
@@ -91,7 +96,7 @@ test('a finished run returns the output and the exit code, and closes its own ta
   await new Promise((r) => setImmediate(r));
   assert.strictEqual(c.spawns.length, 1);
   assert.strictEqual(c.spawns[0].agentType, 'terminal');
-  assert.strictEqual(c.spawns[0].cwd, '/repo', 'defaults to the caller cwd — the main checkout for a worktree session');
+  assert.strictEqual(c.spawns[0].cwd, CALLER_CWD, 'defaults to the caller cwd — the main checkout for a worktree session');
   assert.strictEqual(c.spawns[0].opts.runCommand, 'git status --porcelain');
   assert.match(c.spawns[0].opts.runNonce, /^[0-9a-f]{8}$/);
 
@@ -231,7 +236,7 @@ test('open_terminal still returns its old fields, plus a cleanup reminder naming
   const c = makeContext();
   const p = parse(await c.tools.open_terminal.handler({ command: 'npm run dev' }, callerExtra('caller')));
 
-  assert.strictEqual(p.cwd, '/repo');
+  assert.strictEqual(p.cwd, CALLER_CWD);
   assert.strictEqual(p.command, 'npm run dev');
   assert.strictEqual(p.worktree, null);
   assert.ok(p.id);

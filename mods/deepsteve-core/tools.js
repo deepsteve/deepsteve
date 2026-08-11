@@ -3,7 +3,7 @@ const { randomUUID } = require('crypto');
 const path = require('path');
 const { execFileSync } = require('child_process');
 const { mergeWorktree } = require('./merge-worktree');
-const { stateDir } = require('../../paths');
+const { stateDir, spawnCwdProblem } = require('../../paths');
 const { splitAtMarker, capOutput, createRunLog } = require('../../terminal-run');
 
 // git via execFile with an argv array — no shell, so no quoting/injection concerns
@@ -35,6 +35,24 @@ function deriveTabName(cmd) {
   const oneLine = cmd.replace(/\s+/g, ' ').trim();
   const MAX = 24;
   return oneLine.length > MAX ? oneLine.slice(0, MAX - 1) + '…' : oneLine;
+}
+
+/**
+ * Refuse a spawn whose cwd is gone (#632), or null to proceed.
+ *
+ * spawnSession throws on its own and the MCP SDK turns that into an isError result,
+ * so this is about the message rather than about safety: the default cwd here is the
+ * CALLER's, and the way it goes stale is a worktree that merge_worktree removed out
+ * from under the very session now asking for a terminal. Telling the agent to pass an
+ * explicit cwd is the actionable half.
+ */
+function refuseMissingCwd(cwd) {
+  const problem = spawnCwdProblem(cwd);
+  if (!problem) return null;
+  return {
+    content: [{ type: 'text', text: `${problem.message} — pass an explicit \`cwd\` that exists.` }],
+    isError: true,
+  };
 }
 
 // Control keys meta_type can send (#519). Values are the raw bytes written to the
@@ -316,6 +334,8 @@ function init(context) {
 
         // Inherit from caller, allow overrides
         const effectiveCwd = cwd || caller.cwd;
+        const refusal = refuseMissingCwd(effectiveCwd);
+        if (refusal) return refusal;
         const effectiveAgentType = agent_type || caller.agentType || 'claude';
         // Custom config profiles are a Claude-only surface (#537). An explicit
         // override to Codex/another agent must not leak CLAUDE_CONFIG_DIR.
@@ -499,6 +519,10 @@ function init(context) {
         }
 
         const effectiveCwd = cwd || caller.cwd;
+        // Covers both branches below — the plain shell and the agent session, whose
+        // ensureWorktree() would otherwise fail confusingly on a missing parent.
+        const refusal = refuseMissingCwd(effectiveCwd);
+        if (refusal) return refusal;
         // agent_type provided → agent session; fork → inherit caller's agent; otherwise → plain shell
         const effectiveAgentType = agent_type || (fork ? (caller.agentType || 'claude') : null);
         // Inherit custom configs only for Claude agent sessions (#537). Plain terminals
@@ -676,6 +700,10 @@ function init(context) {
         }
 
         const effectiveCwd = cwd || caller.cwd;
+        // Worst case of the three: a run whose cwd silently relocated to $HOME returns
+        // the command's real output, so the caller believes `git status` ran in a repo.
+        const refusal = refuseMissingCwd(effectiveCwd);
+        if (refusal) return refusal;
         const effectiveConfigDir = caller.configDir || null;
         const windowId = caller.windowId || null;
         const id = randomUUID().slice(0, 8);

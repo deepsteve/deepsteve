@@ -175,17 +175,24 @@ test('nobody re-implements tilde expansion inline — use paths.expandTilde() (#
   }
 });
 
-test('paths.js pulls in nothing but os and path, so it can never cycle', () => {
+test('paths.js pulls in nothing but node builtins, so it can never cycle', () => {
   // git-root.js requires paths.js; if paths.js ever required git-root.js back, the
   // partially-initialised module would export undefined and expandTilde would be a
   // TypeError at require time in whichever file lost the race.
   // Only real statements — the header comment mentions require('../../<mod>') when
   // explaining why mods resolve core modules relatively, and prose must not trip this.
+  //
+  // The guard is against FIRST-PARTY requires, which is what the cycle argument is
+  // about; a node builtin cannot cycle back into this repo. `fs` joined the list with
+  // #632's spawnCwdProblem, which has to stat the directory it is judging.
+  const BUILTINS = ['fs', 'os', 'path'];
   const src = fs.readFileSync(path.join(REPO, 'paths.js'), 'utf8');
   const requires = src.split('\n')
     .filter((l) => /^\s*(const|let|var)\s.*=\s*require\(/.test(l))
     .map((l) => l.match(/require\(['"]([^'"]+)['"]\)/)[1]);
-  assert.deepStrictEqual(requires.sort(), ['os', 'path']);
+  const firstParty = requires.filter((r) => !BUILTINS.includes(r));
+  assert.deepStrictEqual(firstParty, [],
+    `paths.js must require only node builtins (${BUILTINS.join(', ')}) — a first-party require can cycle`);
 });
 
 test('paths.js lives at the repo root so restart.sh and release.sh ship it', () => {

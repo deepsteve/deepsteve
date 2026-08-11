@@ -34,6 +34,7 @@
  * handle every root-level module, so this file ships automatically. That is why
  * it lives here and not in a subdirectory, whose embed list is hand-maintained.
  */
+const fs = require('fs');
 const path = require('path');
 const os = require('os');
 
@@ -62,6 +63,59 @@ function expandTilde(p, homedir = os.homedir()) {
   if (!p) return p;
   const s = String(p);
   return s.startsWith('~') ? path.join(homedir, s.slice(1)) : s;
+}
+
+/**
+ * Is this usable as a session's SPAWN cwd? Returns null when yes, or
+ * `{ code, cwd, message }` describing the problem (#632).
+ *
+ * A directory that stopped existing used to be invisible, because the two engines
+ * disagree about what it means and neither says anything:
+ *
+ *   - tmux `new-session -c /gone` SUCCEEDS. The pane child does chdir(cwd) →
+ *     chdir(home) → chdir("/"), so the agent comes up in $HOME while state.json,
+ *     shells.get(id).cwd, DEEPSTEVE_CWD and the tab name all keep claiming the
+ *     path that is gone. Every `git status` it runs then hits the home directory.
+ *   - node-pty's child fails its own chdir and _exit(1)s — but only AFTER
+ *     posix_spawn/forkpty has returned, so pty.spawn() throws nothing and the tab
+ *     merely vanishes.
+ *
+ * Falsy in, null out, and that is load-bearing rather than defensive:
+ * serializeShellEntry writes `cwd` unconditionally, so a saved record can carry
+ * undefined, which spawns in the daemon's cwd today. Refusing falsy would make
+ * those records unrestorable. Only a *specified* path that is missing is refused.
+ *
+ * statSync (not lstatSync) on purpose: a symlink to a live directory is a fine
+ * place to work, and a symlink whose target is gone should be refused.
+ */
+function spawnCwdProblem(cwd) {
+  if (!cwd) return null;
+  let st;
+  try {
+    st = fs.statSync(cwd);
+  } catch (e) {
+    return e.code === 'ENOENT'
+      ? { code: 'cwd-missing', cwd, message: `Working directory no longer exists: ${cwd}` }
+      : { code: 'cwd-unusable', cwd, message: `Working directory is not usable (${e.code}): ${cwd}` };
+  }
+  if (!st.isDirectory()) {
+    return { code: 'cwd-not-a-directory', cwd, message: `Working directory is not a directory: ${cwd}` };
+  }
+  return null;
+}
+
+/**
+ * Throwing form of spawnCwdProblem, for the one enforcement point (spawnSession).
+ * `code` and `cwd` ride on the Error so a caller can forward them to the client
+ * without re-parsing the message.
+ */
+function assertSpawnCwd(cwd) {
+  const problem = spawnCwdProblem(cwd);
+  if (!problem) return;
+  const err = new Error(problem.message);
+  err.code = problem.code;
+  err.cwd = problem.cwd;
+  throw err;
 }
 
 /**
@@ -147,6 +201,7 @@ function logDir({ platform = process.platform, env = process.env, homedir = os.h
 }
 
 module.exports = {
-  expandTilde, stateDir, statePath, tmuxSocketPath, defaultTmuxSocketPath, logDir,
+  expandTilde, spawnCwdProblem, assertSpawnCwd,
+  stateDir, statePath, tmuxSocketPath, defaultTmuxSocketPath, logDir,
   DEFAULT_STATE_DIRNAME,
 };

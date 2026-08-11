@@ -1846,6 +1846,31 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
         // sees `closed` and re-dials the same dead id forever.
         ws.close();
         resolveReady(null);
+      } else if (msg.type === 'error') {
+        // The server refused this connect — #632's missing cwd, or any spawn failure —
+        // and has closed its side. This message used to have no branch at all, so it
+        // was parsed, matched against nothing, and dropped. Tear down the way `gone`
+        // does, and SAY WHY.
+        //
+        // settle() is not optional: without it trackPendingCreate's 1500ms timer still
+        // fires and pins "Server unreachable — your new session will open when it
+        // reconnects…" over a create the server has definitively refused.
+        if (pendingCreate) pendingCreate.settle();
+        showSessionErrorBanner(msg.message || 'The server refused to start this session.');
+        const failedId = assignedId || existingId;
+        if (failedId && sessions.has(failedId)) {
+          killSession(failedId);
+        } else {
+          connHandle.untrack();
+          if (existingId) {
+            SessionStores.remove(getWindowId(), existingId);
+            TabManager.removeTab(existingId);
+          }
+        }
+        // Removing the placeholder loses nothing: the server kept its saved record,
+        // so a refused restore still appears in the restore modal (flagged there).
+        ws.close();
+        resolveReady(null);
       } else if (msg.type === 'theme') {
         applyTheme(msg.css || '');
       } else if (msg.type === 'settings') {
@@ -2044,6 +2069,46 @@ function trackPendingCreate(ws, resolveReady, connHandle) {
     updatePendingBanner();
   }, 1500);
   return entry;
+}
+
+/**
+ * Persistent banner for a session the server REFUSED to start (#632) — most often
+ * a cwd that no longer exists. Until this existed the server's `{type:'error'}` was
+ * parsed, matched against nothing, and dropped, so a deleted repo just became a
+ * silent $HOME shell (under tmux) or a tab that vanished (under node-pty).
+ *
+ * Deliberately not alert(): "Restore All" over a deleted repo refuses N sessions at
+ * once, and N modal alerts each block the event loop while the other sockets close.
+ * Deliberately not showToast(): it auto-hides after 1.3s and is pointer-events:none,
+ * and you cannot read — let alone copy — a filesystem path in 1.3s. Dedupe by message
+ * is what turns one deleted repo with eight tabs into one line.
+ */
+const sessionErrors = new Set();
+let sessionErrorBannerEl = null;
+
+function showSessionErrorBanner(message) {
+  if (sessionErrors.has(message)) return;
+  sessionErrors.add(message);
+  if (!sessionErrorBannerEl) {
+    sessionErrorBannerEl = document.createElement('div');
+    sessionErrorBannerEl.className = 'session-error-banner';
+    const list = document.createElement('div');
+    list.className = 'session-error-banner-list';
+    const btn = document.createElement('button');
+    btn.className = 'session-error-banner-dismiss';
+    btn.textContent = 'Dismiss';
+    btn.addEventListener('click', () => {
+      sessionErrors.clear();
+      sessionErrorBannerEl.remove();
+      sessionErrorBannerEl = null;
+    });
+    sessionErrorBannerEl.append(list, btn);
+    document.body.appendChild(sessionErrorBannerEl);
+  }
+  const line = document.createElement('div');
+  line.className = 'session-error-banner-line';
+  line.textContent = message;
+  sessionErrorBannerEl.querySelector('.session-error-banner-list').appendChild(line);
 }
 
 /**

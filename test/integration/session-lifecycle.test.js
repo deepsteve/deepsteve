@@ -1,5 +1,8 @@
 const { describe, it, afterEach } = require('node:test');
 const assert = require('node:assert');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
 const { WsClient, httpGet, httpPost, httpDelete, cleanupSessions } = require('../helpers/ws-client');
 
 describe('Session Lifecycle', () => {
@@ -184,5 +187,58 @@ describe('Session Lifecycle', () => {
     client.sendInput('pwd\r');
     const output = await client.waitForOutput(/\/tmp/, 10000);
     assert.ok(output.includes('/tmp'), 'shell should start in /tmp');
+  });
+
+  // --- #632: a cwd that no longer exists ---------------------------------
+  //
+  // Deliberately NOT engine-pinned: the refusal happens before any engine is
+  // touched, so it must hold under the default (tmux) too. agentType 'terminal'
+  // throughout, so no agent binary is needed.
+
+  it('refuses a new session in a directory that does not exist (#632)', async () => {
+    const gone = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-632-new-'));
+    fs.rmSync(gone, { recursive: true, force: true });
+
+    const client = createClient();
+    const msg = await client.connect({ new: '1', agentType: 'terminal', cwd: gone });
+
+    assert.strictEqual(msg.type, 'error', 'a missing cwd must be refused, not relocated to $HOME');
+    assert.strictEqual(msg.code, 'cwd-missing');
+    assert.ok(msg.message.includes(gone), `the refusal must name the missing path, got: ${msg.message}`);
+
+    const data = await httpGet('/api/shells');
+    assert.ok(!data.shells.some(s => s.cwd === gone && s.status === 'active'),
+      'nothing may be left running for a refused spawn');
+  });
+
+  it('a refused restore keeps the saved record — retryable, not destroyed (#632)', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-632-restore-'));
+    const client = createClient();
+    const session = await client.connect({ new: '1', agentType: 'terminal', cwd: dir });
+    assert.strictEqual(session.type, 'session', 'the directory exists, so this must start normally');
+    const id = session.id;
+
+    // Tombstone it, then pull the directory out from under the record — the shape
+    // this issue is really about (a merged worktree, a deleted repo).
+    client.close();
+    await new Promise(r => setTimeout(r, 300));
+    await httpDelete(`/api/shells/${id}?force=1`);
+    fs.rmSync(dir, { recursive: true, force: true });
+
+    // An explicit restore: no noRestore, so this is the real restore path.
+    const restorer = createClient();
+    const msg = await restorer.connect({ id });
+    assert.strictEqual(msg.type, 'error', 'restoring into a deleted directory must be refused');
+    assert.strictEqual(msg.code, 'cwd-missing');
+    assert.ok(msg.message.includes(dir), `the refusal must name the missing path, got: ${msg.message}`);
+
+    // The whole point of refusing this way: the tombstone survived, so the
+    // conversation is still resurrectable if the directory comes back.
+    const recoverable = await httpGet('/api/recoverable-sessions');
+    const row = (recoverable.closed || []).find(s => s.id === id);
+    assert.ok(row, 'a refused restore must NOT purge the saved record');
+    assert.strictEqual(row.cwdMissing, true, 'and the restore surface must flag why');
+
+    await httpDelete(`/api/shells/${id}?forget=1`);
   });
 });

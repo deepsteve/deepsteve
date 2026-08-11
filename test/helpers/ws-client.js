@@ -187,6 +187,15 @@ class WsClient {
           clearTimeout(timeout);
           resolve(parsed);
         }
+        // A refused connect (#632: a cwd that no longer exists) is answered with
+        // `error` and then a server-side close. Without this arm the promise stays
+        // pending for the full 10s and the test fails as "connection timed out"
+        // rather than on its own assertion — the `close` handler below only settles
+        // _messageWaiters, not this one.
+        if (parsed.type === 'error') {
+          clearTimeout(timeout);
+          resolve(parsed);
+        }
 
         // Notify message waiters
         this._messageWaiters = this._messageWaiters.filter(w => {

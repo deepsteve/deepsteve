@@ -14,7 +14,7 @@ const { createPowerAssertion } = require('./power-assertion');
 const { resolveForkTip } = require('./fork-resolve');
 const { formatLogTimestamp, createLogRotator, defaultLogPaths } = require('./logging');
 const { findGitRoot } = require('./git-root');
-const { stateDir, expandTilde, tmuxSocketPath, defaultTmuxSocketPath } = require('./paths');
+const { stateDir, expandTilde, spawnCwdProblem, assertSpawnCwd, tmuxSocketPath, defaultTmuxSocketPath } = require('./paths');
 const { resolveBinary, runBinary, resolveUrlOpener, resolveLoginShell } = require('./bin-path');
 const { createPendingOpens } = require('./pending-opens');
 const { reattachSurvivingTmuxSessions } = require('./tmux-reattach');
@@ -1317,6 +1317,17 @@ let tmuxRuntimeFailure = null;
  * instead of the engine they asked for.
  */
 function spawnSession(eng, id, agentType, args, cwd, { cols = 120, rows = 40, env: extraEnv, runCommand, runNonce } = {}) {
+  // #632: refuse a cwd that no longer exists, rather than letting tmux relocate the
+  // pane to $HOME and say nothing. Deliberately ABOVE the try/catch below — that
+  // catch degrades tmux → node-pty, and a missing directory must never degrade:
+  // node-pty's pty.spawn() would return successfully and its child would _exit(1),
+  // which is the silent-vanish half of the same bug.
+  //
+  // It validates the SPAWN cwd — the value handed to eng.spawn — and nothing else.
+  // Not DEEPSTEVE_CWD, not getWorktreePath(): a Claude session with --worktree is
+  // spawned in the repo root and creates .claude/worktrees/<name> itself, so the
+  // agent's own cwd legitimately does not exist yet at this point (see sessionEnv).
+  assertSpawnCwd(cwd);
   const env = childBaseEnv(extraEnv);
   const opts = { cols, rows, env, stripEnv: DAEMON_INTERNAL_ENV_KEYS };
 
@@ -4452,9 +4463,24 @@ app.post('/api/start-automation', (req, res) => {
     }
   }
 
-  // Automation's configured repo overrides caller CWD
-  if (meta.repo && fs.existsSync(meta.repo)) {
-    cwd = meta.repo;
+  // Automation's configured repo overrides caller CWD.
+  //
+  // #632: this used to be `if (meta.repo && fs.existsSync(meta.repo))`, which on a
+  // repo that had been deleted or renamed silently DECLINED the override and left cwd
+  // at the caller's — or, with no caller, at $HOME. So the automation ran in the home
+  // directory under its own name, which is this issue's symptom by another route. A
+  // configured repo IS the intended cwd: honor it, and let the check below refuse it
+  // if it is gone. expandTilde because a `~/…` repo previously failed that existsSync
+  // and took the same silent fallback.
+  if (meta.repo) cwd = expandTilde(meta.repo);
+
+  // Covers both inputs: the configured repo above, and the caller's own cwd, which is
+  // the one that goes stale on its own (a worktree merged away under the session that
+  // triggered this).
+  const cwdProblem = spawnCwdProblem(cwd);
+  if (cwdProblem) {
+    log(`[API] start-automation ${automationId} refused: ${cwdProblem.message}`);
+    return res.status(400).json({ error: cwdProblem.message, code: cwdProblem.code, cwd: cwdProblem.cwd });
   }
 
   const id = randomUUID().slice(0, 8);
@@ -4828,6 +4854,22 @@ app.get('/api/windows', (req, res) => {
 app.get('/api/recoverable-sessions', (req, res) => {
   const { windows, knownSessionIds, ungrouped } = buildWindowsView({ collectUngrouped: true });
 
+  // #632: does restoring this row still have somewhere to go? Restore spawns in the
+  // recorded `cwd` verbatim, so stat exactly that — NOT sessionPaths(e).cwd. One rule
+  // covers both worktree shapes: Claude records the repo root (and recreates its own
+  // worktree), other agents record the worktree path itself.
+  //
+  // Memoized per request because the closed bucket routinely runs to hundreds of rows
+  // over the retention window sharing a handful of directories. Cost is then one stat
+  // per distinct path — noise next to deriveSessionLabel, which reads transcript tails
+  // for every row on this same endpoint.
+  const cwdSeen = new Map();
+  const cwdMissing = (cwd) => {
+    if (!cwd) return false;
+    if (!cwdSeen.has(cwd)) cwdSeen.set(cwd, !!spawnCwdProblem(cwd));
+    return cwdSeen.get(cwd);
+  };
+
   // Enrich a session row with worktree + derived label from its state entry.
   const enrich = (session) => {
     const entry = shells.get(session.id) || savedState[session.id];
@@ -4835,6 +4877,7 @@ app.get('/api/recoverable-sessions', (req, res) => {
       ...session,
       worktree: (entry && entry.worktree) || null,
       label: session.name ? null : deriveSessionLabel(entry),
+      cwdMissing: cwdMissing(session.cwd),
     };
   };
 
@@ -4845,6 +4888,7 @@ app.get('/api/recoverable-sessions', (req, res) => {
       name: e.name || null,
       label: e.name ? null : deriveSessionLabel(e),
       cwd: e.cwd || null,
+      cwdMissing: cwdMissing(e.cwd),
       worktree: e.worktree || null,
       agentType: e.agentType || 'claude',
       status: 'closed',
@@ -4870,6 +4914,7 @@ app.get('/api/recoverable-sessions', (req, res) => {
       name: r.name || null,
       label: r.name ? null : deriveSessionLabel(r),
       cwd: r.cwd || null,
+      cwdMissing: cwdMissing(r.cwd),
       worktree: r.worktree || null,
       agentType: r.agentType || 'claude',
       updatedAt: r.updatedAt || null,
@@ -5409,6 +5454,15 @@ app.post('/api/start-issue', (req, res) => {
 
   cwd = cwd || process.env.HOME;
   cwd = expandTilde(cwd);
+
+  // #632: refuse before ensureWorktree() and before the async issue fetch. Without
+  // this the spawn throw becomes a 500 HTML body (there is no try/catch around the
+  // spawn below), which tells the caller nothing about which directory is gone.
+  const cwdProblem = spawnCwdProblem(cwd);
+  if (cwdProblem) {
+    log(`[API] start-issue #${number} refused: ${cwdProblem.message}`);
+    return res.status(400).json({ error: cwdProblem.message, code: cwdProblem.code, cwd: cwdProblem.cwd });
+  }
 
   // Build prompt helper (shared between sync and async paths)
   function buildPrompt(issueBody, issueLabels, issueUrl) {
@@ -6218,6 +6272,22 @@ function handleWsConnection(ws, req) {
       // Restore this session with --resume flag using saved agent session ID
       const restored = savedState[id];
       cwd = restored.cwd;
+      // #632: a saved cwd is the likeliest one to have stopped existing — a deleted
+      // repo, or a worktree that merge_worktree/prune-worktrees removed since. Refuse
+      // rather than restore the conversation into $HOME.
+      //
+      // This `return` is ABOVE the `delete savedState[id]` further down, and that is
+      // the point: the record survives the refusal, so the session stays listed in the
+      // restore modal (flagged `cwdMissing`) and works again if the directory comes
+      // back. Never move a purge above this — it would destroy exactly the records
+      // this refusal exists to protect.
+      const restoreCwdProblem = spawnCwdProblem(cwd);
+      if (restoreCwdProblem) {
+        log(`[WS] Refusing to restore ${id}: ${restoreCwdProblem.message} (record kept)`);
+        try { ws.send(JSON.stringify({ type: 'error', code: restoreCwdProblem.code, cwd: restoreCwdProblem.cwd, message: `Failed to restore session: ${restoreCwdProblem.message}` })); } catch {}
+        try { ws.close(); } catch {}
+        return;
+      }
       const claudeSessionId = restored.claudeSessionId;
       const savedWorktree = validateWorktree(restored.worktree);
       const savedAgentType = restored.agentType || 'claude';
@@ -6268,7 +6338,7 @@ function handleWsConnection(ws, req) {
         spawnedEngine = spawnSession(sessionEngine, id, savedAgentType, startArgs, cwd, { ...ptySize, env: sessionEnv(id, { name: restoredName, worktree: savedWorktree, windowId: restoredWindowId, cwd, agentType: savedAgentType, configDir: restored.configDir, codexHomeId }) });
       } catch (e) {
         log(`[WS] Failed to restore shell ${id}: ${e.message}`);
-        try { ws.send(JSON.stringify({ type: 'error', message: `Failed to restore session: ${e.message}` })); } catch {}
+        try { ws.send(JSON.stringify({ type: 'error', code: e.code || null, cwd: e.cwd || null, message: `Failed to restore session: ${e.message}` })); } catch {}
         try { ws.close(); } catch {}
         return;
       }
@@ -6319,7 +6389,18 @@ function handleWsConnection(ws, req) {
           log(`Session ${id} exited after ${elapsed}ms — respawning (${tracePath})`);
           traceSession('SPAWN', { path: tracePath, shell: id, name: entry.name || null, worktree: entry.worktree || null, cwd, claudeOld: entry.claudeSessionId, claude: newClaudeSessionId || entry.claudeSessionId, planMode: !!entry.planMode, elapsedMs: elapsed });
           sessionEngine.destroy(id);
-          spawnSession(sessionEngine, id, savedAgentType, respawnArgs, cwd, { ...ptySize, env: sessionEnv(id, { name: entry.name, worktree: entry.worktree, windowId: entry.windowId, cwd, agentType: savedAgentType, configDir: entry.configDir, codexHomeId: entry.codexHomeId }) });
+          // A throw here would be swallowed by the engine's onExit dispatch, leaving a
+          // live-but-deaf tab: destroy() has already run, the shells entry survives, and
+          // nothing below re-arms wireShellOutput/armRestoreExit. #632 adds one new way
+          // to reach that — the directory vanishing between the restore and this respawn
+          // — so retire the session properly instead.
+          try {
+            spawnSession(sessionEngine, id, savedAgentType, respawnArgs, cwd, { ...ptySize, env: sessionEnv(id, { name: entry.name, worktree: entry.worktree, windowId: entry.windowId, cwd, agentType: savedAgentType, configDir: entry.configDir, codexHomeId: entry.codexHomeId }) });
+          } catch (err) {
+            log(`Session ${id} respawn failed: ${err.message}`);
+            handleShellGone(id, 'respawn-failed');
+            return;
+          }
           if (newClaudeSessionId) {
             entry.claudeSessionId = newClaudeSessionId;
             entry.forkParent = null;  // fresh id starts an unrelated conversation — drop stale lineage (#503)
@@ -6345,6 +6426,22 @@ function handleWsConnection(ws, req) {
   }
 
   if (!id || !shells.has(id)) {
+    // #632: this block is the only place the URL's `cwd` reaches a spawn, so it is
+    // the only place a new session can be refused for it. Deliberately the FIRST
+    // statement: above `delete savedState[id]`, and above ensureWorktree(), which
+    // would otherwise run `git worktree add` against a nonexistent cwd, fail, and
+    // log a misleading "Failed to create worktree". Refusing here also names the
+    // cwd the client asked for rather than ensureWorktree's fallback.
+    //
+    // Attaching to a LIVE shell never lands here, on purpose: a running session
+    // whose directory was deleted underneath it must stay reachable.
+    const cwdProblem = spawnCwdProblem(cwd);
+    if (cwdProblem) {
+      log(`[WS] Refusing new session in ${cwd}: ${cwdProblem.message}`);
+      try { ws.send(JSON.stringify({ type: 'error', code: cwdProblem.code, cwd: cwdProblem.cwd, message: `Failed to start session: ${cwdProblem.message}` })); } catch {}
+      try { ws.close(); } catch {}
+      return;
+    }
     const oldId = id;
     // #554: a create retry re-sends new=1 with the client-minted id — honor it so
     // repeated attempts converge on one shell instead of spawning one per retry.
@@ -6413,7 +6510,7 @@ function handleWsConnection(ws, req) {
       // 'connection' event, so letting it throw would be an uncaught exception and
       // take the daemon (and everyone else's sessions) down with it.
       log(`[WS] Failed to spawn shell ${id}: ${e.message}`);
-      try { ws.send(JSON.stringify({ type: 'error', message: `Failed to start session: ${e.message}` })); } catch {}
+      try { ws.send(JSON.stringify({ type: 'error', code: e.code || null, cwd: e.cwd || null, message: `Failed to start session: ${e.message}` })); } catch {}
       try { ws.close(); } catch {}
       return;
     }

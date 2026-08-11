@@ -820,11 +820,17 @@ function _showAutomationContextMenu(e, auto, automations, section) {
   runItem.onclick = async () => {
     menu.remove();
     try {
-      await fetch('/api/start-automation', {
+      const resp = await fetch('/api/start-automation', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ automationId: auto.id }),
       });
+      // A refusal (#632: the automation's repo is gone) is a 400 with a reason, and
+      // this used to be discarded — the Run item just did nothing, silently.
+      if (!resp.ok) {
+        const body = await resp.json().catch(() => ({}));
+        alert('Failed to start automation: ' + (body.error || `HTTP ${resp.status}`));
+      }
     } catch (err) {
       alert('Failed to start automation: ' + err.message);
     }
@@ -1028,11 +1034,15 @@ function _showAutomationEditModal(existing, automations, section) {
     runBtn.addEventListener('click', async () => {
       overlay.remove();
       try {
-        await fetch('/api/start-automation', {
+        const resp = await fetch('/api/start-automation', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ automationId: existing.id }),
         });
+        if (!resp.ok) {
+          const body = await resp.json().catch(() => ({}));
+          alert('Failed to start automation: ' + (body.error || `HTTP ${resp.status}`));
+        }
       } catch (err) {
         alert('Failed to start automation: ' + err.message);
       }

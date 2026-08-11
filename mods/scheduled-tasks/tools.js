@@ -13,7 +13,7 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { stateDir, expandTilde } = require('../../paths');
+const { stateDir, expandTilde, spawnCwdProblem } = require('../../paths');
 const { runBinary } = require('../../bin-path');
 const { randomUUID } = require('crypto');
 const { z } = require('zod');
@@ -353,7 +353,41 @@ function runTask(task, reason, { foreground = false } = {}) {
   // restart. cleanModel/cleanEffort never return '', so `||` is the whole chain.
   const model = cleanModel(task.model) || defaultModel();
   const effort = cleanEffort(task.effort) || defaultEffort();
-  const cwd = task.project && fs.existsSync(task.project) ? task.project : os.homedir();
+  // #632: a task whose project directory is gone is REFUSED, not quietly rehomed.
+  // The old `: os.homedir()` fallback was the worst instance of that bug in the tree:
+  // unattended, so nobody was watching; and the `cwd === task.project` guard below
+  // then also disabled #565 worktree isolation — so the run happened in $HOME, with
+  // no isolation, while the panel still showed the project's name.
+  //
+  // Deliberately not a throw. runTask is called from tick(), whose single try/catch
+  // would abandon every other task due in that tick AND skip the `if (changed)`
+  // save — so the task would re-fire and re-throw every tick, forever.
+  const cwdProblem = task.project ? spawnCwdProblem(task.project) : null;
+  if (cwdProblem) {
+    log_(`"${task.title}" (${task.id}) NOT run — ${cwdProblem.message}`);
+    task.runs = task.runs || [];
+    // A terminal row ('ended' is outside ACTIVE_STATUSES), so the timeout sweep skips
+    // it and the panel can answer "why didn't my task run". sessionId stays null:
+    // nothing spawned, and every consumer keys off shells.has()/ACTIVE_STATUSES.
+    const at = Date.now();
+    task.lastRun = at;
+    task.runs.unshift({
+      startedAt: at, sessionId: null, status: 'ended', endedAt: at, agentStartedAt: null,
+      success: false, summary: cwdProblem.message, worktree: null,
+      model: null, effort: null, configDir: null,
+    });
+    trimRuns(task);
+    // Retire a one-shot in place rather than retrying a directory that is gone —
+    // tick()'s `task.once && task.firedAt` guard does the rest. Recurring tasks keep
+    // their normal schedule, in case the directory comes back.
+    if (task.once) task.firedAt = at;
+    // Persist here: we return null, and runCatchUp() only sets `changed` when a run
+    // actually started, so otherwise neither the row nor firedAt would survive.
+    saveTasks();
+    broadcastTasks();
+    return null;  // the existing "did not start" contract — both callers handle it
+  }
+  const cwd = task.project || os.homedir();
   const id = randomUUID().slice(0, 8);
   const claudeSessionId = agentType === 'codex' ? null : randomUUID();
   const codexHomeId = agentType === 'codex' ? id : null;
@@ -362,8 +396,9 @@ function runTask(task, reason, { foreground = false } = {}) {
   // run can never collide with or block the next fire) and links run <-> worktree
   // for cleanup. Claude creates .claude/worktrees/<name> + branch worktree-<name>
   // itself; the PTY still spawns in the repo root (entry.cwd stays the repo root,
-  // sessionPaths/sessionEnv resolve the subdir). `cwd === task.project` excludes
-  // the homedir fallback above.
+  // sessionPaths/sessionEnv resolve the subdir). `cwd === task.project` used to be
+  // what excluded the old missing-project homedir fallback; since #632 refuses that
+  // case outright it is simply "the task named a project", kept as-is.
   let worktree = null;
   if (task.isolateWorktree !== false && agentConfig.supportsWorktree
       && task.project && cwd === task.project && isGitRepo(cwd)) {

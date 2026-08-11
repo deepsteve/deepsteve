@@ -69,6 +69,44 @@ test('defaultSelection on empty data is empty', async () => {
   assert.strictEqual(defaultSelection(data()).size, 0);
 });
 
+// --------------------------------------- cwdMissing (#632)
+
+test('defaultSelection leaves a row whose directory is gone unchecked', async () => {
+  // The server will refuse it, so pre-checking it only buys the user a pile of
+  // refusal banners from one Restore All.
+  const { defaultSelection } = await load();
+  const checked = defaultSelection(data({
+    windows: [win('w1', [sess('a'), sess('b', { cwdMissing: true })])],
+    ungrouped: [sess('c', { cwdMissing: true })],
+  }));
+  assert.deepStrictEqual([...checked].sort(), ['a']);
+});
+
+test('a tier where EVERY row is missing still wins its tier — no fallthrough', async () => {
+  // The subtraction must happen after the tier is picked, never as a filter on tier
+  // membership: otherwise a window of dead sessions silently falls through and checks
+  // every closed tombstone the user never asked for.
+  const { defaultSelection } = await load();
+  const checked = defaultSelection(data({
+    windows: [win('w1', [sess('a', { cwdMissing: true })])],
+    closed: [sess('d'), sess('e')],
+    recents: [recent('r1')],
+  }));
+  assert.strictEqual(checked.size, 0, 'tier 1 won and contributed nothing — not a fallthrough to closed');
+});
+
+test('closed and recent tiers honour cwdMissing too', async () => {
+  const { defaultSelection } = await load();
+  assert.deepStrictEqual(
+    [...defaultSelection(data({ closed: [sess('d'), sess('e', { cwdMissing: true })] }))].sort(),
+    ['d'],
+  );
+  assert.deepStrictEqual(
+    [...defaultSelection(data({ recents: [recent('r1'), recent('r2', { cwdMissing: true })] }))].sort(),
+    ['recent:r1'],
+  );
+});
+
 // --------------------------------------------------------------- primaryLabel
 
 test('primaryLabel: Restore All when everything is checked', async () => {

@@ -63,10 +63,28 @@ export function defaultSelection(data) {
   const tier1 = [];
   for (const w of data.windows || []) for (const s of w.sessions) tier1.push(s.id);
   for (const s of data.ungrouped || []) tier1.push(s.id);
-  if (tier1.length) return new Set(tier1);
+  if (tier1.length) return withoutMissingCwd(tier1, data);
   const tier2 = (data.closed || []).map(s => s.id);
-  if (tier2.length) return new Set(tier2);
-  return new Set((data.recents || []).map(recentRowKey));
+  if (tier2.length) return withoutMissingCwd(tier2, data);
+  return withoutMissingCwd((data.recents || []).map(recentRowKey), data);
+}
+
+// #632: a row whose directory is gone will be refused by the server, so don't
+// pre-check it — a Restore All over a deleted repo would otherwise fire off N
+// refusals. The rows stay visible and selectable (the volume may have just been
+// remounted); we only decline to choose them on the user's behalf.
+//
+// Deliberately applied AFTER the tier is chosen, never as a filter on tier
+// membership: a tier that is entirely missing must still win, or a window full of
+// dead sessions would silently fall through and check every closed tombstone the
+// user never asked for.
+function withoutMissingCwd(keys, data) {
+  const missing = new Set();
+  for (const w of data.windows || []) for (const s of w.sessions) if (s.cwdMissing) missing.add(s.id);
+  for (const s of data.ungrouped || []) if (s.cwdMissing) missing.add(s.id);
+  for (const s of data.closed || []) if (s.cwdMissing) missing.add(s.id);
+  for (const r of data.recents || []) if (r.cwdMissing) missing.add(recentRowKey(r));
+  return new Set(keys.filter(k => !missing.has(k)));
 }
 
 export function primaryLabel(checkedCount, total) {
@@ -159,6 +177,9 @@ export function showSessionRestoreModal(initialData, { secondaryLabel = 'Start F
     function sessionRow(s, { closed = false } = {}) {
       const meta = [];
       if (s.cwd) meta.push(getDefaultTabName(s.cwd));
+      // #632: restoring this would be refused — the row's directory is gone. Said
+      // right after the directory name, since that name is now the misleading part.
+      if (s.cwdMissing) meta.push('⚠ directory missing');
       if (s.worktree) meta.push(`⎇ ${s.worktree}`);
       if (s.agentType && s.agentType !== 'claude') meta.push(s.agentType);
       if (closed) {
@@ -178,6 +199,7 @@ export function showSessionRestoreModal(initialData, { secondaryLabel = 'Start F
     function recentRow(r) {
       const meta = [];
       if (r.cwd) meta.push(getDefaultTabName(r.cwd));
+      if (r.cwdMissing) meta.push('⚠ directory missing');
       if (r.worktree) meta.push(`⎇ ${r.worktree}`);
       if (r.agentType && r.agentType !== 'claude') meta.push(r.agentType);
       if (r.updatedAt) meta.push(formatTimeAgo(new Date(r.updatedAt)));

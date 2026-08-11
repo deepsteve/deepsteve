@@ -121,6 +121,7 @@ Rules a change anywhere in the tree could violate. Each one has a page that expl
 **Sessions and state** ([docs/sessions.md](docs/sessions.md))
 
 - **Never write `delete savedState[id]` in a close path.** Every close/kill/wipe writes a `closed: true` tombstone instead, so a conversation can always be resurrected via `--resume`. Use `tombstoneSession()` (explicit closes) or `handleShellGone()` (engine `onExit` epilogue). The only sanctioned purges are `DELETE /api/shells/:id?forget=1` and the retention sweep `pruneClosedSessions()`.
+- **A session's spawn cwd must exist.** `spawnSession` refuses a missing or non-directory cwd instead of letting tmux silently relocate the pane to `$HOME`, and a refused restore keeps its record. Validate the *spawn* cwd only — a Claude `--worktree` subdir legitimately does not exist yet.
 - **The first writer of a close reason wins.** A server-initiated close makes the browser echo a `close-session` back; that echo must not overwrite `closeReason`, or every unattended auto-close reads as user-closed. Any new close path preserves the rule.
 - **Ink only sees Enter as its own stdin read** — `shell.write("text\r")` does not submit. Use `submitToShell()`, which writes the text and the `\r` separately and echo-confirms the gap.
 - **Queue prompts through `deliverPromptWhenReady`. Never arm `e.pendingDelivery` directly.** The per-shell FIFO is what sequences an inherited `/rc` ahead of the issue prompt.
