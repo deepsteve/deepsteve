@@ -25,6 +25,7 @@ import { initFileDrop } from './file-drop.js';
 import { init as initCmdHoldMode, setEnabled as setCmdHoldModeEnabled, setHoldMs as setCmdHoldModeHoldMs } from './cmd-tab-switch.js';
 import { init as initCommandPalette, setEnabled as setCommandPaletteEnabled, setShortcut as setCommandPaletteShortcut } from './command-palette.js';
 import { init as initShortcutsHelp, setEnabled as setShortcutsHelpEnabled, setShortcut as setShortcutsHelpShortcut, open as openShortcutsHelp } from './shortcuts-help.js';
+import { init as initScheduledHistory, open as openScheduledHistory, refresh as refreshScheduledHistory } from './scheduled-history.js';
 import { init as initProgressBar, start as progressStart, done as progressDone } from './progress-bar.js';
 import { init as initHashCommands, beforeSend as hashCommandsBeforeSend, setWaitingForInput as setHashCommandsWaiting, setEnabled as setHashCommandsEnabled } from './hash-commands.js';
 import { init as initOverviewMode, setEnabled as setOverviewModeEnabled, setShortcut as setOverviewModeShortcut, setDefaultLayout as setOverviewDefaultLayout, toggle as toggleOverviewMode, isOverviewActive, updateFocus as updateOverviewFocus, onTabsReordered as onOverviewTabsReordered, syncToContext as syncOverviewToContext } from './overview-mode.js';
@@ -1876,10 +1877,14 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
         ModManager.notifyTasksChanged(msg.tasks);
       } else if (msg.type === 'scheduled-tasks') {
         ModManager.notifyScheduledTasksChanged();
+        refreshScheduledHistory();
       } else if (msg.type === 'contexts') {
         // Unified groups (#526): update the tab-strip rail and any panel subscribers.
         applyServerContexts(msg.contexts);
         ModManager.notifyContextsChanged(msg.contexts);
+        // A rename/archive/reorder changes the run-history grid's row hierarchy,
+        // not just its cells — so it needs this branch too (#633).
+        refreshScheduledHistory();
       } else if (msg.type === 'project-mods') {
         // Payload-less ping (#618) — refetch and re-derive all three surfaces.
         ProjectMods.refresh();
@@ -4267,6 +4272,9 @@ async function init() {
     },
     showAutoCycleToast,
     hideAutoCycleToast,
+    // The Scheduled panel's history button opens a page that lives in the TOP
+    // document (#633) — it needs theme variables, which no mod iframe receives.
+    openScheduledHistory: () => openScheduledHistory(),
     // Unified groups/contexts (#526): let a panel read + drive the active context.
     getActiveContextId: () => getActiveContextId(),
     setActiveContext: (id) => setActiveContextFromPanel(id),
@@ -4502,6 +4510,20 @@ async function init() {
         if (s?.term) s.term.focus();
       }
     },
+  });
+
+  // Scheduled task run history (#633). No key binding — it is opened from the
+  // Scheduled panel's header button, through the bridge hook above.
+  initScheduledHistory({
+    focusTerminal: () => {
+      if (activeId) {
+        const s = sessions.get(activeId);
+        if (s?.term) s.term.focus();
+      }
+    },
+    // This window's OWN tabs, deliberately — not the server's live session set.
+    getSessions: getSessionList,
+    focusSession: focusTab,
   });
 
   // Initialize Overview Mode (Cmd+O by default)

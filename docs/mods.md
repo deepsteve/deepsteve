@@ -199,6 +199,9 @@ Registers a callback for `browser_console` MCP tool calls. Receives `{ requestId
 ### `onScreenshotCaptureRequest(cb)`
 Registers a callback for `screenshot_capture` MCP tool calls. Receives `{ requestId, selector }`. Returns an unsubscribe function.
 
+### `openScheduledHistory()`
+Opens the cross-project scheduled-run history page (#633). Like `showAutoCycleToast`, this is a host hook a single mod uses rather than a general capability — the Scheduled Tasks panel calls it from its header button. The page deliberately renders in the **top document**, not in the calling iframe, because mod iframes receive no theme variables; see [scheduled-tasks.md](scheduled-tasks.md).
+
 ## MCP Tools (`tools.js`)
 
 Mods can expose tools to Claude Code sessions via the MCP protocol. Tools are defined in a `tools.js` file using CommonJS exports.

@@ -249,6 +249,18 @@ function TaskCard({ task, onEdit }) {
   );
 }
 
+// Counterclockwise arrow over a clock — the app's icon convention (inline SVG,
+// 16-unit viewBox, currentColor) so it picks up the button's own color.
+function HistoryIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M2.5 8a5.5 5.5 0 1 0 1.7-4" />
+      <path d="M2 2v3.2h3.2" />
+      <path d="M8 5v3.2l2.2 1.3" />
+    </svg>
+  );
+}
+
 function btn(color) {
   return { background: 'transparent', color: color || C.text, border: `1px solid ${color || C.border}`, borderRadius: 4, padding: '3px 8px', fontSize: 12, cursor: 'pointer' };
 }
@@ -626,6 +638,17 @@ function App() {
         <div style={{ fontWeight: 700, fontSize: 15, flex: 1 }}>⏰ Scheduled</div>
         <button onClick={() => { pinRef.current = { toTop: true }; setEditing({ mode: 'new' }); setShowGroups(false); }} style={btn(C.accent)}>+ New</button>
         <button onClick={() => { setShowGroups(!showGroups); setEditing(null); }} style={btn()}>Projects</button>
+        {/* Cross-project run history (#633). The page itself renders in the host
+            document, not here — this panel is 380px wide, and a mod iframe gets
+            no theme variables at all. */}
+        <button
+          onClick={() => window.deepsteve?.openScheduledHistory?.()}
+          title="Run history across all projects"
+          aria-label="Run history across all projects"
+          style={{ ...btn(), padding: '3px 6px', lineHeight: 0 }}
+        >
+          <HistoryIcon />
+        </button>
       </div>
 
       {!data.enabled && (
