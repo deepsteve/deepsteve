@@ -134,6 +134,22 @@ function statePath(...segments) {
 }
 
 /**
+ * Where a REPO keeps its project mods (#638).
+ *
+ * The same `.deepsteve` dirname as the state dir, but rooted at a git repo instead of
+ * $HOME — a project mod belongs to the project, so it is a committed file in it. This is
+ * the one function that knows that, for the same reason stateDir() is: `mods/*\/tools.js`
+ * may not build a `.deepsteve` path inline (test/unit/paths.test.js's GUARDED list).
+ *
+ * Deliberately NOT derived from stateDir(): DEEPSTEVE_HOME relocates the daemon's own
+ * state for tests and second instances, and must never move where a user's repo keeps
+ * its mods. A test daemon and the real one looking at the same checkout must agree.
+ */
+function projectModsDir(repoRoot) {
+  return path.join(repoRoot, DEFAULT_STATE_DIRNAME, 'mods');
+}
+
+/**
  * deepsteve's OWN tmux server socket (#625).
  *
  * Before this, the tmux engine passed no socket flag and inherited tmux's default —
@@ -202,6 +218,6 @@ function logDir({ platform = process.platform, env = process.env, homedir = os.h
 
 module.exports = {
   expandTilde, spawnCwdProblem, assertSpawnCwd,
-  stateDir, statePath, tmuxSocketPath, defaultTmuxSocketPath, logDir,
+  stateDir, statePath, projectModsDir, tmuxSocketPath, defaultTmuxSocketPath, logDir,
   DEFAULT_STATE_DIRNAME,
 };

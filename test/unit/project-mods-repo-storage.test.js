@@ -1,0 +1,102 @@
+// Guard: a project mod is stored IN ITS REPO and must stay committable (#638).
+//
+// Since #638 a project mod lives at <repoRoot>/.deepsteve/mods/<name>/, and the entire point
+// is that the directory is under source control — that is how a mod is reviewable and how it
+// travels to another checkout or another person. Adding `.deepsteve` to a .gitignore, or
+// having an install script quietly create/remove a repo-relative one, would undo the feature
+// silently: the mod would keep working on the machine that made it and exist nowhere else.
+//
+// So this file is not testing behavior, it is pinning a decision that a change elsewhere
+// could reverse by accident.
+//
+// Run: node --test test/unit/project-mods-repo-storage.test.js
+
+const { test } = require('node:test');
+const assert = require('node:assert');
+const fs = require('fs');
+const path = require('path');
+
+const REPO = path.join(__dirname, '..', '..');
+const { projectModsDir, DEFAULT_STATE_DIRNAME } = require('../../paths');
+
+/** Non-comment, non-empty lines of an ignore file. */
+function ignorePatterns(file) {
+  const full = path.join(REPO, file);
+  if (!fs.existsSync(full)) return [];
+  return fs.readFileSync(full, 'utf8')
+    .split('\n')
+    .map(l => l.trim())
+    .filter(l => l && !l.startsWith('#'));
+}
+
+test('the repo path is built by paths.js, and is the state dirname rooted at a repo', () => {
+  assert.strictEqual(
+    projectModsDir('/repo/alpha'),
+    path.join('/repo/alpha', DEFAULT_STATE_DIRNAME, 'mods'),
+  );
+  // Not derived from stateDir(): DEEPSTEVE_HOME relocates the daemon's own state for tests
+  // and second instances, and must never move where a user's repo keeps its mods.
+  const before = process.env.DEEPSTEVE_HOME;
+  process.env.DEEPSTEVE_HOME = '/tmp/somewhere-else';
+  try {
+    assert.strictEqual(projectModsDir('/repo/alpha'), path.join('/repo/alpha', '.deepsteve', 'mods'));
+  } finally {
+    if (before === undefined) delete process.env.DEEPSTEVE_HOME;
+    else process.env.DEEPSTEVE_HOME = before;
+  }
+});
+
+test('.gitignore never ignores .deepsteve — committing it IS the feature', () => {
+  for (const file of ['.gitignore', '.dockerignore']) {
+    for (const pattern of ignorePatterns(file)) {
+      assert.ok(
+        !pattern.replace(/^!/, '').split('/').includes(DEFAULT_STATE_DIRNAME),
+        `${file} has "${pattern}", which would keep project mods out of source control (#638). ` +
+        'A project mod is meant to be committed; do not ignore .deepsteve.',
+      );
+    }
+  }
+});
+
+test('this repo really would track a project mod', () => {
+  // The rule above is about patterns; this is about the outcome, spelled out for the next
+  // person: none of the ignore patterns may match the path a mod is actually written to.
+  const rel = path.relative(REPO, path.join(projectModsDir(REPO), 'example', 'mod.json'));
+  assert.strictEqual(rel, path.join('.deepsteve', 'mods', 'example', 'mod.json'));
+
+  // The one pattern shape that could match without naming the directory outright.
+  for (const file of ['.gitignore', '.dockerignore']) {
+    for (const pattern of ignorePatterns(file)) {
+      const bare = pattern.replace(/^!/, '').replace(/\/$/, '');
+      assert.ok(
+        !(bare.startsWith('.deep') || bare === '.*'),
+        `${file} pattern "${pattern}" could swallow ${rel}`,
+      );
+    }
+  }
+});
+
+test('no shell script builds a repo-relative .deepsteve path', () => {
+  // Every legitimate mention in a script is the INSTALL dir, which is home-rooted. A
+  // relative one would mean a script writing into (or deleting from) whatever repo it
+  // happened to be run in.
+  const scripts = fs.readdirSync(REPO).filter(f => f.endsWith('.sh'));
+  assert.ok(scripts.length >= 4, `expected the root scripts, found ${scripts.length}`);
+
+  // Identifiers that merely contain the string and name no path at all.
+  const NOT_A_PATH = /com\.deepsteve|mcp\.deepsteve|deepsteve\.localhost|deepsteve\.com/g;
+  const HOME_ANCHORED = /\$HOME|~\/|homedir\(\)|\$\{HOME\}|INSTALL_DIR/;
+
+  for (const script of scripts) {
+    const lines = fs.readFileSync(path.join(REPO, script), 'utf8').split('\n');
+    lines.forEach((line, i) => {
+      const stripped = line.replace(NOT_A_PATH, '');
+      if (!stripped.includes(DEFAULT_STATE_DIRNAME)) return;
+      assert.ok(
+        HOME_ANCHORED.test(stripped),
+        `${script}:${i + 1} names .deepsteve without anchoring it to $HOME — a repo-relative ` +
+        `state dir would collide with a project's own mods (#638):\n  ${line.trim()}`,
+      );
+    });
+  }
+});

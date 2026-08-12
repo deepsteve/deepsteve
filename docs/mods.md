@@ -3,7 +3,7 @@
 There are two kinds of mod, and they are not the same thing:
 
 - **DeepSteve Mods** — mods on the UI of the DeepSteve platform itself. They live in `mods/`, are **global to the install** (every session loads every mod's `tools.js`), are enabled per browser, and can be published to the marketplace. This guide is about these.
-- **Project Mods** — custom behaviour, like a dashboard, that an agent implements **for one project**. One page, registered to one git repo root, stored outside the repo in `~/.deepsteve/`, visible only when you are looking at that project, and **never shared** — no store, no publishing, no other project. See [Project Mods](#project-mods) at the end.
+- **Project Mods** — custom behaviour, like a dashboard, that an agent implements **for one project**. A directory of files, registered to one git repo root and **stored in that repo** at `.deepsteve/mods/<name>/`, visible only when you are looking at that project. It is committed, so it travels with the checkout. See [Project Mods](#project-mods) at the end.
 
 A rule of thumb: if the thing belongs to *deepsteve*, it's a DeepSteve Mod. If it belongs to *what you're building*, it's a Project Mod.
 
@@ -351,7 +351,7 @@ Panel mods are auto-enabled on first visit (when no mod preferences have been sa
 
 A **Project Mod** is a page an agent writes for **one project** and nowhere else. Where a display tab is a one-shot snapshot that disappears with the session, a project mod is durable: it stays registered to the project and is reachable every session. The intended use is a dashboard or live tooling the project carries with it, rather than something you re-create each time.
 
-It is **entirely local**: the registry and the page live in `~/.deepsteve/`, never in the repo, never uploaded, never visible from another project.
+It lives **in the repo**, at `.deepsteve/mods/<name>/`, and is meant to be committed — that is how it survives a re-clone and reaches anyone else working on the project. It is still only ever visible when you are looking at *that* project.
 
 ### Launcher surfaces
 
@@ -408,9 +408,13 @@ create_project_mod({
 })
 ```
 
-Then `update_project_mod` (page and/or metadata — `name`, `icon`, `surfaces`, `open_mode`, `enabled`), `edit_project_mod` (exact-substring patch, like the Edit tool), `list_project_mods` (`scope: "project" | "all"`), and `delete_project_mod`. Exactly one of `html` / `file_path` — the same `resolveHtml()` display tabs use.
+`name` also seeds the directory name (kebab-cased, uniquified within the repo), and the result comes back as `path` alongside the id, with a `commitReminder`.
 
-The page is served same-origin from `GET /api/project-mods/:id/page`, so it calls back into deepsteve with relative `/api/...` URLs (never a hard-coded port), and the host injects `window.deepsteve` into its iframe — the same bridge documented above — so a project mod can drive tabs, not just render.
+Then `update_project_mod` (page and/or metadata — `name`, `icon`, `surfaces`, `open_mode`, `enabled`), `edit_project_mod` (exact-substring patch, like the Edit tool), `list_project_mods` (`scope: "project" | "all"`, each result carrying its `path`), and `delete_project_mod` — which removes the whole directory. Exactly one of `html` / `file_path` — the same `resolveHtml()` display tabs use.
+
+Since #638 the tools are a convenience, not the only door: the mod is a directory of ordinary files, so editing `index.html` with your own Edit tool works and the daemon notices (`updatedAt` is the directory's newest mtime). The tools still earn their place for *creating* one — they pick the directory name, write the manifest and tell the browser immediately.
+
+The page is served same-origin from `GET /api/project-mods/:id/page`, so it calls back into deepsteve with relative `/api/...` URLs (never a hard-coded port), and the host injects `window.deepsteve` into its iframe — the same bridge documented above — so a project mod can drive tabs, not just render. Sibling files in the mod's directory are served from `GET /api/project-mods/:id/<file>`, which is what a relative `./style.css` in the page resolves to — so a mod can be a small site rather than one document. Nothing outside its own directory is reachable.
 
 ### Managing one
 
@@ -418,16 +422,50 @@ Right-click its rail row or its strip button: Open, Rename, Set icon, toggle eac
 
 ### Disk layout
 
+One directory per mod, inside the repo:
+
 ```
-~/.deepsteve/project-mods.json        # [{id, project, name, icon, surfaces, openMode, enabled, …}]
-~/.deepsteve/project-mods/<id>.html   # one page per mod
+<repoRoot>/.deepsteve/mods/<name>/mod.json     # the manifest
+<repoRoot>/.deepsteve/mods/<name>/index.html   # the entry page (override with "entry")
+<repoRoot>/.deepsteve/mods/<name>/…            # anything else the page loads
 ```
 
-Deliberately outside the repo, so "not shared" is a guarantee rather than a gitignore convention. Unlike `display-tabs/`, these are **not** swept for staleness.
+```jsonc
+{
+  "scope": "project",   // REQUIRED — the marker that says this directory is a project mod
+  "name": "Pulse",
+  "icon": "💓",
+  "surfaces": ["rail", "button"],
+  "openMode": "view",
+  "enabled": true,
+  "entry": "index.html",
+  "createdAt": 1786565041879
+}
+```
+
+Four things follow from this that didn't before:
+
+- **`scope: "project"` is what marks the directory as ours.** A repo may perfectly well ship a regular DeepSteve Mod under `.deepsteve/mods/`; without the marker the daemon skips it rather than adopting it, and never writes to it.
+- **`.deepsteve/` is never gitignored.** Committing it is the entire point, so don't add it to a `.gitignore` — not this repo's, not a template, not an install script. `test/unit/project-mods-repo-storage.test.js` is the guard. The corollary is that an *uncommitted* mod leaves the working tree dirty, which is enough to make `merge_worktree` refuse a merge into that checkout — the same trap `.claude/` has in [sessions.md](sessions.md), with the opposite fix: commit the mod. `create_project_mod` returns a `commitReminder` saying so.
+- **There is no id and no registry on disk.** A mod's id is derived as `sha1(repoRoot + "\0" + dirname).slice(0,8)` at scan time, which keeps it stable across restarts (the browser persists it in a pinned tab's session entry) while two checkouts of the same repo still get distinct ids. `updatedAt` is derived too — the newest mtime in the mod's directory — so a page you edit *as a file* reloads an open tab exactly like one written through `update_project_mod`.
+- **`enabled` is committed**, because it is in the manifest. Disabling a mod is a change to the project, not a per-user preference.
+
+Unlike `display-tabs/`, these are **not** swept for staleness, and nothing outside a mod's own directory is ever deleted.
+
+### Discovery
+
+The daemon does not walk your disk. It looks in exactly the repos named by your **registered projects** (`contexts.json`) — for each project dir, its git root, then that root's `.deepsteve/mods/`. The scan is re-run behind a short TTL, so a mod arriving by `git pull` or a branch switch appears on the browser's next refresh.
+
+Two consequences worth knowing:
+
+- A fresh clone lights up as soon as the repo is part of a project. Nothing has to be re-registered.
+- `create_project_mod` **refuses** a repo that isn't part of a registered project, rather than writing a directory nobody would ever scan.
 
 ### Trust
 
 A project mod's page is agent-authored HTML served same-origin, in an iframe with `allow-same-origin` (required for the bridge). That is the same authority an agent-authored display tab already has — a continuation of the existing model, not a new one. The server-authoritative kill switch is the `projectModsEnabled` setting: off hides every surface and refuses every write (MCP `isError`, REST 403), while reads stay open so existing mods remain inspectable.
+
+Storing the mod in the repo (#638) *improves* this rather than widening it. The page used to appear in a home directory where nothing would ever show it to you; now it arrives in a diff, is reviewed like any other code, and its history is `git log`. The thing to be careful about is the other direction — a project mod is code that runs with the host's authority as soon as you look at its project, so **a mod that arrives in a repo you pulled is a mod you should read before opening the project**. That is the same judgement you already make about a repo's build scripts, and the reason it is worth stating is that a `.deepsteve/` directory is easy to skim past in a diff.
 
 ### Implementation notes (#618, #628)
 
@@ -435,14 +473,18 @@ Everything above is what a project mod *is*; this is what you need before changi
 works.
 
 - **Naming:** the rail this hangs off is **Projects**, not Contexts — user-facing strings only (`renderRail`'s header, `+ New project`, the editor, the ⌘? descriptions, the settings section). Every internal identifier is unchanged: `contextViewsEnabled`, `/api/contexts`, `contexts.json`, `{type:'contexts'}`, `.context-*` CSS and `window.deepsteve.onContextsChanged` — so no settings/disk migration and no broken third-party mods. The **Scheduled Tasks panel** had the collision (it called contexts "Groups" and a single repo root "Project"); its vocabulary was fixed *inside the panel* — groups→**Projects**, repo root→**Repo** — with no REST/MCP field renamed. Rail header text is duplicated in `autoSizeRail`'s measurement list (`context-views.js`) — change both or double-click-to-auto-fit sizes against the wrong string.
-- **Storage:** load-on-start / write-through with tmp+rename, the `mods/scheduled-tasks` shape; an orphan sweep at `init()` drops pages with no registry row.
-- **Server:** `mods/project-mods/tools.js` — `create/update/edit/list/delete_project_mod` plus `GET /api/project-mods`, `GET /api/project-mods/:id/page`, `PUT`/`DELETE /api/project-mods/:id`. The project is resolved exactly as a scheduled task's is (explicit path → `findGitRoot`, else the caller's `sessionPaths().repoRoot`); unlike a task there is **no homedir fallback** — a project mod with no project is meaningless, so it's an `isError`. `resolveHtml()` (html | file_path | replacements) lives in root `html-source.js` and is shared with display-tab. The `:id` is only ever concatenated into a path *after* matching a registry row, which is what keeps a crafted id inside `PAGES_DIR`.
+- **Storage is a scan, not a registry (#638).** There is no file of our own anywhere: `scan()` walks `scanRoots()` — the git roots of every registered project's dirs — reads each `.deepsteve/mods/*/mod.json`, keeps only `scope: "project"`, and rebuilds the whole in-memory list. Total, so a renamed or deleted directory needs no bookkeeping. Cached behind a ~2s TTL and force-rescanned after every write. `scan()` **no-ops until `init()` supplies a context**: with no way to ask which projects are registered, an empty result is not a fact and caching it would hide the first real one. The repo path is built by `projectModsDir()` in root `paths.js`, never inline — `test/unit/paths.test.js`'s `GUARDED` list covers every `mods/*/tools.js`.
+- **Canonicalize both sides of "which repo is this".** `resolveProject()` now runs the *session* branch through `findGitRoot` too, not just the explicit-path branch. `findGitRoot` realpaths, and the resolved project is compared against `scanRoots()` for membership — so without this a repo reached through a symlink (`/var/…` → `/private/var/…` on macOS) never matches the same repo registered as a project, and every create is refused. `canonicalRoot()` is the one helper both sides call.
+- **Server:** `mods/project-mods/tools.js` — `create/update/edit/list/delete_project_mod` plus `GET /api/project-mods`, `GET /api/project-mods/:id/page`, `GET /api/project-mods/:id/*` (sibling assets), `PUT`/`DELETE /api/project-mods/:id`. The project is resolved as a scheduled task's is (explicit path → `findGitRoot`, else the caller's `sessionPaths().repoRoot`); unlike a task there is **no homedir fallback** — a project mod with no project is meaningless — and unlike #618 there is a second refusal, for a repo outside every registered project, because writing there would produce a mod nothing could ever find. `resolveHtml()` (html | file_path | replacements) lives in root `html-source.js` and is shared with display-tab.
+- **Two containment checks, and both are load-bearing** now that these are paths inside a user's repo. The `:id` is never concatenated into a path before it has matched a *scanned* mod, so the directory is always one we found rather than one the request named. On top of that, `resolveInMod()` resolves the asset route's wildcard against the mod directory and requires the result to still be under it — a resolved-prefix test, so `..%2f`, `a/../../b` and an absolute path all collapse before it compares. `removeMod()` re-derives the directory from the repo root and dirname and refuses anything outside, because a recursive delete is the wrong place to trust a cached row; it then prunes empty parents with `rmdir`, whose failure on a non-empty directory is exactly the guard wanted.
+- **The asset route is declared after `/page`**, which must keep winning the match. An extensionless or unknown file falls back to `application/octet-stream` via `sendFile`.
 - **Client:** `public/js/project-mods.js` owns the three surfaces, all of which are host chrome no mod iframe can reach. The rail row is drawn by `context-views.js`'s `renderRail` (the one-way import); the square button is inserted into `#tabs` before `#tabs-list-wrapper`, with `.nav-btn.is-glyph` supplying the shape and the collapsed-rail treatment.
 - **`openMode` and `surfaces` are cross-validated in ONE place**, `cleanPlacement()` (called from `normalize`/create/update/REST-PUT, with `applyPlacement()` sharing the partial-update rule between the last two): `'view'` and the `'tab'` surface are mutually exclusive, and **whichever field the caller explicitly passed wins** — which is what lets the right-click checklist flip either way with a single-field PUT. `normalize()` cleaning an absent `openMode` to `'tab'` *is* the migration; there is no other one.
 - **One takeover mechanism, not two.** `mod-manager.js`'s single fullscreen slot was generalized from a bare mod id (`activeViewId`) to a descriptor (`activeView = {id, name, src, sandbox, allow, persist, dismissOnLeave}`) with `showView`/`hideView`/`getActiveViewId`; `_showMod()` is now just its first caller. A project-mod view occupies that slot under the id **`project-mod:<modId>`** — the same string its bridge is already injected under, which is precisely what makes `_hideMod()`'s per-view callback sweeps, the toolbar `.active` sweep and `handleModChanged()`'s cache-bust correct for it, while every DeepSteve-mod comparison (`activeView?.id === modId`) correctly never matches. A second container would have raced `switchTo()`'s `isModViewVisible()` delegation (`app.js`) and `_showPanel()`'s `!modViewVisible` guard. The takeover is a flex-sibling `display` swap, not an overlay, so `activeId` / `.terminal-container.active` are never touched and "back to where you were" is free. Two deliberate differences from a DeepSteve Mod view: **`dismissOnLeave`** — clicking a tab tears a project-mod view down rather than parking it behind a `←` button, because its launcher is already in the strip and a back button would be the second thing representing one mod; and **`persist: false`** — it is not restored across a page reload, which could only ever be racy (`restoreSessions()`'s trailing `focusTab()` goes through `switchTo()`, which leaves any front view). While in there, `_forgetViewCallbacks()` fixed a pre-existing leak: switching straight from one view to another destroyed the iframe but swept none of its callbacks.
 - **Reconciliation is one rule**, `syncModView()`: the slot may only hold a mod that `visibleMods()` still returns *in view mode*. Deleted, disabled, `projectModsEnabled` off, flipped back to `'tab'`, and "you switched project" all collapse into it — so a view can never outlive the chrome that opens it. It must stay **idempotent**, because hiding fires `onViewChanged` → `render()` and only the existing re-entrancy guard plus an immediate second-pass return makes that terminate. **There is no Escape binding**: `showModView()` focuses the iframe, so a host-level keydown would fire only when chrome happens to hold focus — unpredictable is worse than absent, and injecting into the same-origin iframe would steal Escape from the page. Hence `test/unit/shortcuts-registry.test.js`'s exact-id set is untouched.
 - **Two invariants the first build got wrong, both now pinned by tests.** (1) **`render()` must never call back into the rail.** `cb.renderRail()` runs `applyFilter()`, whose `onContextViewApplied` hook calls `render()` — so only `refresh()` may call it, and `render()` additionally carries a re-entrancy guard, because opening a pinned tab runs `notifyTabsChanged()` → `applyFilter()` → `render()`. Without both, the first pinned mod recursed ~1600 deep and no surface finished rendering. `renameProjectModTab` notifies **only when a name actually changed** for the same reason. (2) **The tab id is derived, not minted** — `tabIdFor(modId)` = `pm-<modId>`. A pinned mod is opened from three directions (restore, auto-open, click) and with random ids each was a separate tab that accumulated across reloads; deriving makes a duplicate impossible by construction. `viewIdFor(modId)` = `project-mod:<modId>` follows the same rule for the view slot. `tabNameFor(mod)` prefixes the icon into the **label** because `tabIcon()` reads the chip off the label — otherwise a 📊 mod is a "B" in the vertical rail, where the chip is the whole tab; it is idempotent for the icon-less stub the restore path passes.
-- Tests: `test/unit/project-mods.test.js` (registry, tools, REST, gate, the `cleanPlacement` truth table) and `test/unit/project-mods-client.test.js` (scoping, the three surfaces, derived identity, the re-entrancy invariant, and view mode — whose `setup()` carries a **simulated view slot** rather than bare recorders, because `openMod`'s toggle and `syncModView` both read the slot back).
+- **The client did not change for #638.** The wire shape is identical (`serialize()` keeps `root`/`dirname`/`dir`/`entry` off it, which is what that function was always for) and `/api/project-mods/:id/page` kept its URL, so `app.js`, `project-mods.js` and `context-views.js` are untouched — which is the check that the storage move really is only a storage move.
+- Tests: `test/unit/project-mods.test.js` (the scan, derived ids, the `scope` filter, tools, REST, assets and traversal, the gate, the `cleanPlacement` truth table), `test/unit/project-mods-repo-storage.test.js` (`.deepsteve` is never gitignored and no script writes a repo-relative one) and `test/unit/project-mods-client.test.js` (scoping, the three surfaces, derived identity, the re-entrancy invariant, and view mode — whose `setup()` carries a **simulated view slot** rather than bare recorders, because `openMod`'s toggle and `syncModView` both read the slot back).
 
 ## Display tabs
 
