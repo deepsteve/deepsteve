@@ -22,19 +22,35 @@
 //   unset, daemon is remote    → throw, rather than hand back a path that will fail
 //                                an assertion four lines later with no hint why.
 //
-// Run: node --test test/unit/integration-scratch-guard.test.js
+// Run: node --test test/unit/server-dir.test.js test/unit/integration-scratch-guard.test.js
+//      (the first exercises this decision; the second is the static ban on bypassing it)
 
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
-/** Hostnames that mean "the daemon is this machine, so os.tmpdir() is shared". */
+/** The whole 127.0.0.0/8 block is loopback, not just 127.0.0.1. */
+const LOOPBACK_V4 = /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/;
+
+/**
+ * Hostnames that mean "the daemon is this machine, so os.tmpdir() is shared".
+ *
+ * Errs toward `false`: a wrong `true` hands back a path the daemon cannot see and we are
+ * back to #637, while a wrong `false` throws an explanation the reader can act on.
+ */
 function daemonIsLocal() {
   const raw = process.env.DEEPSTEVE_URL;
   if (!raw) return true; // no target yet — run-integration.sh provisions one locally
   let host;
-  try { host = new URL(raw).hostname; } catch { return false; }
-  return host === 'localhost' || host === '127.0.0.1' || host === '::1' || host === '[::1]';
+  try { host = new URL(raw).hostname.toLowerCase(); } catch { return false; }
+  // RFC 6761 §6.3 reserves the .localhost TLD to loopback, and deepsteve.localhost is this
+  // project's canonical browser host — matching only the bare name told a developer who
+  // used it that their daemon was "not this machine", sending them after a mount problem
+  // they did not have.
+  if (host === 'localhost' || host.endsWith('.localhost')) return true;
+  // `[::1]` is what WHATWG URL.hostname returns for IPv6 loopback (brackets retained);
+  // the bare form is kept for a caller that passes a hostname rather than a URL.
+  return LOOPBACK_V4.test(host) || host === '[::1]' || host === '::1';
 }
 
 /**

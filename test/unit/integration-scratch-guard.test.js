@@ -1,5 +1,6 @@
 // The build guard for #637: nothing under test/integration/** may invent a filesystem
-// path for the daemon out of os.tmpdir(). It goes through test/helpers/server-dir.js.
+// path for the daemon — not out of os.tmpdir(), and not out of a hardcoded /tmp subpath,
+// which is the same defect in different clothes. It goes through test/helpers/server-dir.js.
 //
 // Why this needs a guard rather than a comment. `test/integration/**` talks to a daemon
 // over DEEPSTEVE_URL, and that daemon is NOT necessarily on this filesystem — in CI it is
@@ -64,20 +65,48 @@ test('stripComments does not eat code, and does eat comments', () => {
   assert.match(stripComments('const u = "http://x";\n'), /http:\/\/x/);
   assert.doesNotMatch(stripComments('// os.tmpdir() is banned here\n'), /tmpdir/);
   assert.doesNotMatch(stripComments('/* os.tmpdir() */\n'), /tmpdir/);
+  // A URL survives the // eater, and the /tmp ban must not fire on one.
+  assert.match(stripComments("const u = 'http://server:3000';\n"), /server:3000/);
+  assert.doesNotMatch(stripComments("const u = 'http://server:3000';\n"), /(['"`])\/tmp\//);
 });
 
-test('no integration suite reaches for os.tmpdir() or mkdtemp', () => {
+// The ban above is only worth anything if its patterns actually separate the legal
+// spelling from the illegal one. Asserting that here means a future loosening shows up
+// as a failure in THIS file, rather than as a guard that silently stops catching things.
+test('the /tmp patterns reject subpaths and spare a bare /tmp cwd', () => {
+  const subpath = /(['"`])\/tmp\//;
+  const joined = /path\s*\.\s*(?:join|resolve)\s*\(\s*['"`]\/tmp/;
+
+  assert.match("fs.mkdirSync('/tmp/ds-probe')", subpath);
+  assert.match('fs.mkdirSync(`/tmp/${name}`)', subpath);
+  assert.match("path.join('/tmp', 'ds-probe')", joined);
+  assert.match("path.resolve( '/tmp', x)", joined);
+
+  assert.doesNotMatch("client.connect({ cwd: '/tmp' })", subpath);
+  assert.doesNotMatch("output.includes('/tmp')", subpath);
+  assert.doesNotMatch('await client.waitForOutput(/\\/tmp/, 10000)', subpath);
+  assert.doesNotMatch("client.connect({ cwd: '/tmp' })", joined);
+});
+
+test('no integration suite invents a path the daemon cannot see', () => {
   const offenders = [];
   for (const rel of FILES) {
     const src = stripComments(fs.readFileSync(path.join(REPO_ROOT, rel), 'utf8'));
     if (/\bos\s*\.\s*tmpdir\s*\(/.test(src)) offenders.push(`${rel}: os.tmpdir()`);
     if (/\bmkdtemp(Sync)?\s*\(/.test(src)) offenders.push(`${rel}: mkdtemp`);
     if (/\bprocess\s*\.\s*env\s*\.\s*TMPDIR\b/.test(src)) offenders.push(`${rel}: process.env.TMPDIR`);
+    // The same defect spelled without os.tmpdir(). A bare '/tmp' is fine and stays legal —
+    // it exists in both containers and ~30 spawns use it as a cwd. A SUBPATH is not: it
+    // exists only once someone creates it, and the someone is this process.
+    if (/(['"`])\/tmp\//.test(src)) offenders.push(`${rel}: a hardcoded /tmp subpath`);
+    if (/path\s*\.\s*(?:join|resolve)\s*\(\s*['"`]\/tmp/.test(src)) offenders.push(`${rel}: path.join('/tmp', …)`);
   }
   assert.deepStrictEqual(offenders, [],
-    'A path made from os.tmpdir() exists for the TEST process, not necessarily for the daemon '
-    + `under test — in CI they are separate containers, and since #632 the server refuses a cwd `
-    + `it cannot see. Use makeServerDir()/reserveMissingServerPath() from ${HELPER_REL}. `
+    'A path this process makes under /tmp exists for the TEST process, not necessarily for the '
+    + 'daemon under test — in CI they are separate containers, and since #632 the server refuses '
+    + `a cwd it cannot see. Use makeServerDir()/reserveMissingServerPath() from ${HELPER_REL}. `
+    + "(Passing a bare '/tmp' as a cwd is still fine: it exists on both sides because neither "
+    + 'side had to create it.) '
     + `Offenders:\n  ${offenders.join('\n  ')}`);
 });
 
