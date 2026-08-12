@@ -42,7 +42,7 @@ const parse = (res) => JSON.parse(res.content[0].text);
  * along by pushing lines onto it. `finish(code)` appends the marker the wrapper would
  * have printed — the daemon learns the exit status from that line and nowhere else.
  */
-function makeContext({ linger = 20000 } = {}) {
+function makeContext({ linger = 20000, arm = 'wired' } = {}) {
   const shells = new Map([['caller', { cwd: CALLER_CWD, windowId: 'w1', configDir: null }]]);
   const spawns = [];
   const armCalls = [];
@@ -70,11 +70,21 @@ function makeContext({ linger = 20000 } = {}) {
     saveState: () => {},
     deliverToWindow: (msg) => opened.push(msg),
     handleShellGone: (id, reason) => { shells.delete(id); closes.push({ id, reason, via: 'exit' }); },
-    closeSession: (id, reason) => { shells.delete(id); closes.push({ id, reason, via: 'closeSession' }); return true; },
-    armSessionAutoClose: (id, opts) => {
-      armCalls.push({ id, opts });
-      return linger > 0 ? { closeAt: Date.now() + linger } : null;
+    // Returns false without recording anything when the session is already gone, exactly
+    // as server.js:5015 does — otherwise the belt-and-braces close on the shell_gone path
+    // would look like a real second teardown.
+    closeSession: (id, reason) => {
+      if (!shells.has(id)) return false;
+      shells.delete(id); closes.push({ id, reason, via: 'closeSession' }); return true;
     },
+    // `arm: null` omits the hook entirely rather than stubbing it — tools.js destructures
+    // whatever it is given, so that is exactly the shape of a ctx that never wired it.
+    ...(arm === null ? {} : {
+      armSessionAutoClose: (id, opts) => {
+        armCalls.push({ id, opts });
+        return linger > 0 ? { closeAt: Date.now() + linger } : null;
+      },
+    }),
     readTerminalScreen: async (entry, lines) => screen.slice(-lines),
     stripEscapeSequences: (s) => s,
     isShuttingDown: () => false,
@@ -116,7 +126,13 @@ test('a finished run returns the output and the exit code, and closes its own ta
 
   assert.deepStrictEqual(c.armCalls.map((a) => a.opts), [{ reason: 'terminal-run-finished', policy: 'terminal-run' }],
     'the mod names the situation; the server owns the duration');
+  assert.strictEqual(p.auto_close, 'armed');
   assert.ok(p.auto_close_in_seconds > 0);
+
+  // #635: the outcome is persisted, not just returned. Until it was, terminal-runs.jsonl
+  // could not answer "why is this tab still open" for a run that had already finished.
+  const record = readLog().pop();
+  assert.strictEqual(record.auto_close, 'armed');
 });
 
 test('a non-zero exit is reported as a value, not an error', async () => {
@@ -134,15 +150,57 @@ test('typing in the tab keeps it — the daemon does not close it', async () => 
   const call = c.tools.run_in_terminal.handler({ command: 'sleep 1' }, callerExtra('caller'));
   await new Promise((r) => setImmediate(r));
   const id = c.spawns[0].id;
-  // Only real input reaches lastInputTime; nothing else writes to this PTY (the command
-  // arrived in argv and no prompt is ever delivered here). Same rule as after a merge.
+  // Only real input reaches lastInputTime. Nothing else writes to this PTY (the command
+  // arrived in argv and no prompt is ever delivered here), and since #635 the terminal's
+  // own replies to tmux's capability probes are filtered out server-side before they can
+  // stamp it — it was those, not a person, that took this branch on every run.
   c.shells.get(id).lastInputTime = Date.now();
   c.finish(0);
-  await call;
+  const p = parse(await call);
 
+  assert.strictEqual(p.auto_close, 'user_typed');
+  assert.strictEqual(p.auto_close_in_seconds, null);
   assert.deepStrictEqual(c.armCalls, []);
   assert.deepStrictEqual(c.closes, []);
   assert.ok(c.shells.has(id), 'the tab is the user\'s now');
+});
+
+test('a shell already gone at finalize reports it instead of leaking silently', async () => {
+  // #635's acceptance criterion: this branch used to neither arm nor close and returned
+  // the same bare null as every other outcome, so a genuinely leaked tab was invisible.
+  const c = makeContext();
+  const call = c.tools.run_in_terminal.handler({ command: 'echo hi' }, callerExtra('caller'));
+  await new Promise((r) => setImmediate(r));
+  const id = c.spawns[0].id;
+
+  // The command ran to completion — its marker is in the transcript — but the pane was
+  // reaped before the poller could finalize, so handleShellGone has already tombstoned
+  // the session and told the browser to close the tab. The tool reads the run off the
+  // exit snapshot and must still report what became of the tab.
+  c.shells.get(id).scrollback = [`hi\n${MARKER_PREFIX}${c.nonce} exited 0\n`];
+  c.spawns[0].onExit();
+  const p = parse(await call);
+
+  assert.strictEqual(p.status, 'finished', 'the marker survived in the exit snapshot');
+  assert.strictEqual(p.exit_code, 0);
+  assert.strictEqual(p.auto_close, 'shell_gone');
+  assert.deepStrictEqual(c.armCalls, [], 'nothing to arm — the session is gone');
+  assert.deepStrictEqual(c.closes, [{ id, reason: 'terminal-run-ended', via: 'exit' }],
+    'the belt-and-braces close is a no-op, not a second teardown');
+  assert.strictEqual(readLog().pop().auto_close, 'shell_gone');
+});
+
+test('a run with no auto-close hook wired still closes its tab', async () => {
+  // The issue named this as a candidate cause. It is not what happened, but a ctx
+  // missing the hook must not be a silent leak either.
+  const c = makeContext({ arm: null });
+  const call = c.tools.run_in_terminal.handler({ command: 'echo hi' }, callerExtra('caller'));
+  await new Promise((r) => setImmediate(r));
+  c.finish(0);
+  const p = parse(await call);
+
+  assert.strictEqual(p.auto_close, 'closed_immediately');
+  assert.deepStrictEqual(c.closes, [{ id: c.spawns[0].id, reason: 'terminal-run-finished', via: 'closeSession' }]);
 });
 
 test('with the linger set to 0 the tab closes immediately instead of leaking', async () => {
@@ -156,6 +214,7 @@ test('with the linger set to 0 the tab closes immediately instead of leaking', a
   const p = parse(await call);
 
   assert.strictEqual(p.auto_close_in_seconds, null);
+  assert.strictEqual(p.auto_close, 'closed_immediately');
   assert.deepStrictEqual(c.closes, [{ id: c.spawns[0].id, reason: 'terminal-run-finished', via: 'closeSession' }]);
 });
 
@@ -175,6 +234,7 @@ test('a command that exits the shell reports unknown rather than guessing a code
   assert.strictEqual(p.exit_code, null, 'unknown, never assumed');
   assert.strictEqual(p.output, 'hi');
   assert.deepStrictEqual(c.armCalls, [], 'the session is already gone — nothing to arm');
+  assert.strictEqual(p.auto_close, 'shell_gone');
 });
 
 test('a timeout returns partial output and leaves the run cleaning up after itself', async () => {

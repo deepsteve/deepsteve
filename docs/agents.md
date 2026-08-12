@@ -344,8 +344,20 @@ kind of tab: the pane's process **is** the command rather than a shell you type 
   (`terminalRunLingerSeconds`, default 20) and stays usable — **typing in it cancels the
   close** and the tab is yours, exactly as after a merge (#627). That reuses
   `session-auto-close.js` wholesale, including its entry-identity re-check;
+- **the terminal answering a program is not a person typing** (#635, `terminal-input.js`).
+  The browser forwards everything xterm's `onData` emits, which includes its replies to
+  the capability probes tmux fires at every attaching client — so until the daemon
+  learned to tell the two apart, *every* run took the "the user typed in it" branch
+  within ~200 ms of the tab opening and no tab was ever closed. The classifier recognizes
+  a closed set of report sequences (DA1/DA2, DSR, CPR, DECRPM, DCS and OSC replies),
+  passes them to the PTY without stamping `lastInputTime`, and treats everything else as
+  a keystroke — the safe direction, since a missed report only leaves a tab open;
 - otherwise the daemon closes it with `closeReason: 'terminal-run-finished'`, which is
-  what makes "did an agent clean up after itself?" answerable from `state.json` at all;
+  what makes "did an agent clean up after itself?" answerable from `state.json` at all.
+  The result's `auto_close` names which of those happened — `armed` (with
+  `auto_close_in_seconds`), `closed_immediately`, `user_typed`, `shell_gone`, or `pending`
+  on a timed-out call — and is stored on the run record too. It exists because collapsing
+  all of them to a bare `null` is what hid #635 for as long as it did;
 - capture polls the *interpreted* screen (`readTerminalScreen`), which resolves tmux's
   repaints where raw scrollback does not. When the shell dies without reaching the marker
   the tool's `onExit` hook snapshots `entry.scrollback` synchronously first, because

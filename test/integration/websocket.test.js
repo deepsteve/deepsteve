@@ -129,6 +129,34 @@ describe('WebSocket Protocol', () => {
     assert.match(session.id, /^[0-9a-f]{8}$/, 'server minted an id as before');
   });
 
+  it('a terminal report does not count as user input (#635)', async () => {
+    // The whole leak in #635: xterm answers the capability probes tmux fires at an
+    // attaching client, the browser forwards those answers down this socket, and the
+    // daemon stamped lastInputTime — so every run_in_terminal tab was "claimed by the
+    // user" before the command had even finished. lastInputTime is what finalize() reads.
+    const client = createClient();
+    const session = await client.connect({ new: '1', agentType: 'terminal', cwd: '/tmp' });
+    await client.waitForOutput(/[#$%>]/, 15000);
+
+    const lastInput = async () => {
+      const { shells } = await httpGet('/api/shells');
+      // The endpoint concatenates live entries with savedState tombstones; only the
+      // live one carries lastInputTime.
+      return shells.find(s => s.id === session.id && s.status === 'active')?.lastInputTime ?? null;
+    };
+    assert.strictEqual(await lastInput(), null, 'nothing has typed in it yet');
+
+    // A DA1 reply, byte for byte what xterm 6 sends back for `ESC[c`.
+    client.sendInput('\x1b[?1;2c');
+    await new Promise(r => setTimeout(r, 500));
+    assert.strictEqual(await lastInput(), null, 'the terminal answering a probe is not a keystroke');
+
+    // A real keystroke still registers, or the fix would have broken the feature it protects.
+    client.sendInput('x');
+    await new Promise(r => setTimeout(r, 500));
+    assert.ok(await lastInput(), 'a typed character is still input');
+  });
+
   it('multiple clients receive output from same session', async () => {
     const client1 = createClient();
     const session = await client1.connect({ new: '1', agentType: 'terminal', cwd: '/tmp' });
