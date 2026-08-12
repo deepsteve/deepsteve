@@ -1,5 +1,12 @@
 # Releasing DeepSteve
 
+The `/deepsteve:release` skill runs all of this for you, but it is **maintainer-only** and
+you have to turn it on first. `skills/release.md` carries `maintainer: true` in its
+frontmatter, so `release.sh` leaves it out of the generated `install.sh` — nobody who
+installed DeepSteve normally has it, and an upgrade deletes it if an older build put it
+there. It exists only in a git clone of this repo, and even there it ships disabled like
+every other skill: enable it once in **Mods → Skills** before invoking it.
+
 1. **Bump the version** in `package.json` (minor bump for features, patch for bugfix-only)
 2. **Commit the version bump** — e.g. `git commit -m "Bump version to X.Y.Z"`
 3. **Push to main** — `git push`

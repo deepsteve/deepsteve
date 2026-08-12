@@ -215,8 +215,22 @@ for moddir in mods/*/; do
   done
 done
 
-# Skill files
+# Skill files. A skill whose frontmatter carries `maintainer: true` drives this repo's
+# own maintenance rather than the user's project, so it is deliberately left out of the
+# installed build: it exists only in a git clone, and even there it ships disabled until
+# someone enables it in Mods. The match is scoped to the frontmatter block so a skill
+# that merely mentions the key in its prose does not vanish from the installer.
+#
+# A withheld skill is also deleted on upgrade. An install made before it was withheld
+# still has the file, and the server lists whatever is in skills/ — so without this it
+# would keep showing up in Mods forever. Once the file is gone, reconcileSkills() drops
+# it from enabledSkills and unlinks the copies it made in ~/.claude and ~/.agents.
 for skill in skills/*.md; do
+  if sed -n '2,/^---$/p' "$skill" | grep -q '^maintainer: *true'; then
+    echo "rm -f \"\$INSTALL_DIR/$skill\"" >> "$OUT"
+    echo "" >> "$OUT"
+    continue
+  fi
   embed_text "$skill" "$skill"
 done
 

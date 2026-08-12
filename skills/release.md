@@ -2,6 +2,7 @@
 name: release
 description: Bump the version, run the integration suites on GitHub, and publish a DeepSteve release
 argument-hint: [version | major|minor|patch]
+maintainer: true
 ---
 
 Cut a DeepSteve release end to end. The argument is either an explicit version (`0.18.2`)
