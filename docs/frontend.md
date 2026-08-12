@@ -16,6 +16,41 @@ Cmd+K opens a command palette for keyboard-driven access to tabs, settings, and 
 - **API**: `GET /api/commands` returns built-in + custom commands. `POST /api/commands/execute` runs a custom command by ID.
 - **Client**: `command-palette.js` is a self-contained ES module (like `cmd-tab-switch.js`) with `init()`, `setEnabled()`, `setShortcut()` exports.
 
+## Hash Commands (`public/js/hash-commands.js`)
+
+`#` typed at the start of an empty input line opens a client-side palette (`#terminal`, `#tab`,
+`#close`, `#settings`, `#mods`) that runs in the browser with no PTY round-trip. Setting:
+`hashCommandsEnabled` (default `true`). It hooks `term.onData` through `beforeSend`, so the
+keystroke is consumed rather than forwarded — which is why getting the "is the line empty?"
+question right matters: a wrong yes makes a literal `#` untypeable.
+
+**Activation ANDs two signals, and neither can be dropped (#634).**
+
+- `public/js/composer-caret.js` reads the **live xterm buffer** and returns `empty` / `busy` /
+  `unknown`. In an agent tab it reads the composer box's contents (`readComposerDraft`, a port of
+  root `composer-state.js` — pinned to the original by an agreement test in
+  `test/unit/composer-caret.test.js` that runs every fixture through both copies). It deliberately
+  does **not** anchor on the caret there: Claude draws its own inverse-video cursor, so the
+  hardware cursor is parked wherever Ink's last frame write ended, and an empty box implies the
+  caret is at its front anyway. In a **shell** tab there is no box, but readline does park the real
+  cursor at the input position, so the caret row decides — and that path may only ever answer
+  `busy` or `unknown`, never `empty`, because a shell prompt is arbitrary text (`echo foo > ` ends
+  in a sigil and would otherwise read as an empty prompt).
+- A **per-terminal keystroke mirror** covers the window between a keystroke and its echo, during
+  which the screen still shows an empty composer. It was module-global before #634, so text typed
+  in one tab blocked `#` in every other.
+
+`unknown` — a full-screen TUI, a startup banner, a permission dialog, an idle shell prompt — falls
+back to the mirror alone, i.e. the pre-#634 behavior. That fallback is why the mirror cannot be
+deleted, and it means the screen read can only ever *veto* an activation, never cause one.
+
+A stale mirror (something cleared the composer that we never saw — `/clear`, a server-injected
+prompt) is resynced from the screen at `#`-press time, but only once a repaint has landed **and**
+a short grace has elapsed; a repaint alone is not proof, because a working turn repaints on every
+spinner frame. `setWaitingForInput()` no longer wipes it: that blind wipe *was* #634, since the
+screen classifier reports a composed-but-unsent message as "waiting" by design and `app.js` also
+calls it unconditionally on tab switch and on reconnect.
+
 ## Keyboard Shortcuts (`public/js/shortcuts.js`)
 
 **Every global key binding is declared in the `shortcuts.js` registry, and the ⌘? overlay (`shortcuts-help.js`) renders `getAll()`. The list is never hand-maintained** — that's the whole point of #549, and before it there were four independent capture-phase listeners with `parseShortcut`/`matchesShortcut` copy-pasted verbatim into two of them.

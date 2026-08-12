@@ -1,17 +1,35 @@
 /**
  * Hash Commands — instant browser-side actions via # prefix.
  *
- * When Claude is waiting for input (BEL state), typing # activates an
- * autocomplete popup. Commands execute client-side (API calls or DOM)
- * without any PTY round-trip.
+ * Typing # at the start of an empty input line activates an autocomplete popup.
+ * Commands execute client-side (API calls or DOM) without any PTY round-trip.
  *
  * Integration: provides a `beforeSend(data)` function that terminal.js
  * calls before forwarding keystrokes to the server. Returns true to
  * consume the input.
+ *
+ * THE ACTIVATION GATE (#634). Two signals, ANDed:
+ *
+ *   1. `readInputState(term)` reads the live xterm buffer — the agent's composer
+ *      box, or the caret row in a shell tab. Only a positively-read 'busy' blocks;
+ *      'unknown' (a full-screen TUI, a startup banner, an idle shell prompt) falls
+ *      through to the mirror below, which is why that mirror cannot be deleted.
+ *   2. A per-terminal keystroke mirror, which covers the window between a
+ *      keystroke and its echo — during which the screen still shows an empty
+ *      composer even though the line is no longer empty.
+ *
+ * The mirror is per-terminal because a module-global one leaked across tabs: text
+ * typed in one tab blocked # in every other. It is re-derived from the screen when
+ * the screen says 'empty' and the echo has settled — never blind-wiped.
+ * `setWaitingForInput(true)` used to do that wipe, and it is what made a # typed
+ * mid-message open the palette: the screen classifier reports a composed-but-unsent
+ * message as "waiting" by design, and a tab switch or reconnect fires the same call
+ * unconditionally.
  */
 
+import { readInputState } from './composer-caret.js';
+
 let enabled = true;
-let lineText = ''; // mirrors the current input line; '' means empty, which is what gates # activation
 let callbacks = {};
 let active = false;
 let buffer = '';         // characters typed after #
@@ -22,6 +40,48 @@ let popup = null;
 let inputDisplay = null;
 let listEl = null;
 let containerEl = null;  // terminal container to anchor popup to
+
+// A just-typed character that has not round-tripped yet leaves an empty composer on
+// screen, so "the screen says empty" only becomes trustworthy once the echo has had
+// its chance. The causal half is a repaint since the keystroke — the browser twin of
+// the server's outputSeq rule ("output after our write proves the child read it").
+// It needs the time floor because a working turn repaints on every spinner frame,
+// and the stale escape because a frozen or disconnected PTY never repaints at all
+// and #close is exactly what a user wants to type there.
+const ECHO_GRACE_MS = 400;
+const ECHO_STALE_MS = 3000;
+
+// Per-terminal mirror state. Keyed on the xterm Terminal so it dies with the tab.
+const termState = new WeakMap();
+let orphanState = null;   // for callers that pass no term (tests, future call sites)
+
+function newState() {
+  // lastKeyAt 0 means a fresh terminal reads as already settled, so # works on the
+  // very first keystroke of a session.
+  return { lineText: '', lastKeyAt: 0, writeSeq: 0, writeSeqAtKey: 0 };
+}
+
+function stateFor(term) {
+  if (!term) {
+    if (!orphanState) orphanState = newState();
+    return orphanState;
+  }
+  let st = termState.get(term);
+  if (!st) {
+    st = newState();
+    termState.set(term, st);
+    // xterm fires this after every parsed write; the listener is disposed with the
+    // terminal. Guarded because a caller may hand us a stand-in without the event.
+    try { term.onWriteParsed?.(() => { st.writeSeq++; }); } catch { /* no repaint signal */ }
+  }
+  return st;
+}
+
+function echoSettled(st) {
+  const dt = Date.now() - st.lastKeyAt;
+  if (dt >= ECHO_STALE_MS) return true;
+  return dt >= ECHO_GRACE_MS && st.writeSeq !== st.writeSeqAtKey;
+}
 
 const HASH_COMMANDS = [
   { id: 'terminal', name: 'terminal', description: 'Open a plain shell tab' },
@@ -262,8 +322,12 @@ function handleBackspace() {
 /**
  * Called by terminal.js before sending data to WebSocket.
  * Returns true if the data was consumed (should not be forwarded).
+ *
+ * terminal.js passes only `data`; `container` (to parent the popup) and `term` (the
+ * gate's screen and its per-tab mirror) arrive from app.js's closure. Omitting
+ * `term` is supported and degrades to the mirror alone.
  */
-export function beforeSend(data, container) {
+export function beforeSend(data, container, term) {
   // If hash mode is active, consume all input
   if (active) {
     // Option+Delete (word delete): \x1b\x7f
@@ -354,52 +418,83 @@ export function beforeSend(data, container) {
     return true;
   }
 
-  // Mirror the current input line so the gate below can tell whether it is truly
-  // empty. Keys that clear the line (Enter, Ctrl+C, Ctrl+U, Escape) reset it;
-  // backspace drops the last char; word-kill strips the trailing word; printable
-  // chars append — except '#', the trigger itself, which must never count or it
-  // could never fire on an empty line.
-  if (data === '\r' || data === '\n' || data === '\x03' || data === '\x15' || data === '\x1b') {
-    lineText = '';
-  } else if (data === '\x7f' || data === '\b') {
-    lineText = lineText.slice(0, -1);
-  } else if (data === '\x17' || data === '\x1b\x7f') {   // Ctrl+W, Option+Delete
-    const trimmed = lineText.replace(/\s+$/, '');
-    const lastSpace = trimmed.lastIndexOf(' ');
-    lineText = lastSpace >= 0 ? lineText.slice(0, lastSpace + 1) : '';
-  } else if (data.length === 1 && data.charCodeAt(0) >= 32 && data !== '#') {
-    lineText += data;
-  }
+  const st = stateFor(term);
+  // Read before the stamp below, or this very keystroke would reset the clock the
+  // echo grace is measured against and the resync could never fire.
+  const settled = echoSettled(st);
 
-  // Not active — only intercept # at the start of a line (no prior content)
-  if (enabled && lineText === '' && data.startsWith('#')) {
-    if (data === '#') {
-      activate(container);
-      return true;
-    }
-    // Pasted or batched input like "#terminal" or "#terminal\r"
-    // Left-trim so a pasted/batched `# terminal` matches like `#terminal` does.
-    const text = (data.endsWith('\r') ? data.slice(1, -1) : data.slice(1)).replace(/^\s+/, '');
-    const spaceIdx = text.indexOf(' ');
-    const cmdName = (spaceIdx >= 0 ? text.slice(0, spaceIdx) : text).toLowerCase();
-    const arg = spaceIdx >= 0 ? text.slice(spaceIdx + 1) : '';
-    const cmd = HASH_COMMANDS.find(c => c.name === cmdName);
-    if (cmd) {
-      executeCommand(cmd, arg);
-      return true;
+  // Mirror the current input line so the gate below has an answer even when the
+  // screen is unreadable, and so a character that has not echoed yet still counts.
+  // Keys that clear the line (Enter, Ctrl+C, Ctrl+U, Escape) reset it; backspace
+  // drops the last char; word-kill strips the trailing word; printable chars
+  // append — except '#', the trigger itself, which must never count or it could
+  // never fire on an empty line.
+  if (data === '\r' || data === '\n' || data === '\x03' || data === '\x15' || data === '\x1b') {
+    st.lineText = '';
+  } else if (data === '\x7f' || data === '\b') {
+    st.lineText = st.lineText.slice(0, -1);
+  } else if (data === '\x17' || data === '\x1b\x7f') {   // Ctrl+W, Option+Delete
+    const trimmed = st.lineText.replace(/\s+$/, '');
+    const lastSpace = trimmed.lastIndexOf(' ');
+    st.lineText = lastSpace >= 0 ? st.lineText.slice(0, lastSpace + 1) : '';
+  } else if (data.length === 1 && data.charCodeAt(0) >= 32 && data !== '#') {
+    st.lineText += data;
+  }
+  st.lastKeyAt = Date.now();
+  st.writeSeqAtKey = st.writeSeq;
+
+  // Not active — only intercept # at the start of a genuinely empty input line.
+  if (enabled && data.startsWith('#')) {
+    const inputState = readInputState(term);
+    // Re-derive the mirror from the screen rather than blind-wiping it the way
+    // setWaitingForInput used to: something we never saw may have cleared the
+    // composer (/clear, a server-injected prompt, Claude's own @-picker), and #
+    // has to re-arm for that — but only once our own typing has had time to echo,
+    // or the wipe just returns under a new name.
+    if (inputState === 'empty' && settled) st.lineText = '';
+    if (inputState !== 'busy' && st.lineText === '') {
+      if (data === '#') {
+        activate(container);
+        return true;
+      }
+      // Pasted or batched input like "#terminal" or "#terminal\r"
+      // Left-trim so a pasted/batched `# terminal` matches like `#terminal` does.
+      const text = (data.endsWith('\r') ? data.slice(1, -1) : data.slice(1)).replace(/^\s+/, '');
+      const spaceIdx = text.indexOf(' ');
+      const cmdName = (spaceIdx >= 0 ? text.slice(0, spaceIdx) : text).toLowerCase();
+      const arg = spaceIdx >= 0 ? text.slice(spaceIdx + 1) : '';
+      const cmd = HASH_COMMANDS.find(c => c.name === cmdName);
+      if (cmd) {
+        executeCommand(cmd, arg);
+        return true;
+      }
     }
   }
 
   return false;
 }
 
+/**
+ * The agent's turn started — the popup can't stay up over a running turn.
+ *
+ * Deliberately does NOT touch the keystroke mirror on the waiting edge. That wipe
+ * was #634: the screen classifier reports a composed-but-unsent message as
+ * "waiting" by design, and app.js calls this unconditionally on tab switch and on
+ * reconnect too, so staged text was routinely forgotten and the next # opened the
+ * palette mid-message. Whether # may activate is now decided by the live screen
+ * read in beforeSend.
+ */
 export function setWaitingForInput(w) {
-  if (w) {
-    // Fresh prompt — input line is empty, allow # to activate again.
-    lineText = '';
-  } else if (active) {
-    deactivate();
-  }
+  if (!w && active) deactivate();
+}
+
+/**
+ * Close the popup, whatever state it is in. The popup is parented to one tab's
+ * container while `active` is module-global, so a tab switch that leaves it up
+ * swallows every keystroke in the new tab with no visible UI.
+ */
+export function dismiss() {
+  if (active) deactivate();
 }
 
 export function setEnabled(val) {

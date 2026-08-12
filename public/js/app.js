@@ -27,7 +27,7 @@ import { init as initCommandPalette, setEnabled as setCommandPaletteEnabled, set
 import { init as initShortcutsHelp, setEnabled as setShortcutsHelpEnabled, setShortcut as setShortcutsHelpShortcut, open as openShortcutsHelp } from './shortcuts-help.js';
 import { init as initScheduledHistory, open as openScheduledHistory, refresh as refreshScheduledHistory } from './scheduled-history.js';
 import { init as initProgressBar, start as progressStart, done as progressDone } from './progress-bar.js';
-import { init as initHashCommands, beforeSend as hashCommandsBeforeSend, setWaitingForInput as setHashCommandsWaiting, setEnabled as setHashCommandsEnabled } from './hash-commands.js';
+import { init as initHashCommands, beforeSend as hashCommandsBeforeSend, setWaitingForInput as setHashCommandsWaiting, setEnabled as setHashCommandsEnabled, dismiss as dismissHashCommands } from './hash-commands.js';
 import { init as initOverviewMode, setEnabled as setOverviewModeEnabled, setShortcut as setOverviewModeShortcut, setDefaultLayout as setOverviewDefaultLayout, toggle as toggleOverviewMode, isOverviewActive, updateFocus as updateOverviewFocus, onTabsReordered as onOverviewTabsReordered, syncToContext as syncOverviewToContext } from './overview-mode.js';
 import { init as initTerminalSearch, attachSearchAddon, closeIfOpen as closeTerminalSearch } from './terminal-search.js';
 import { init as initContextViews, setEnabled as setContextViewsEnabled, applyFilter as refreshContextFilter, requestNewTabInContext, resolveContextRepo, chooseContextDir, setContexts as applyServerContexts, setActiveContext as setActiveContextFromPanel, getActiveContextId, getActiveContextInfo, orderRecentDirsByContext, activeContextIsEmpty, noteActiveTab, revealTabContext, showToast } from './context-views.js';
@@ -2208,7 +2208,7 @@ function initTerminal(id, ws, cwd, initialName, { hasScrollback = false, pending
       ModManager.notifyUserActivity(id);
     },
     container,
-    beforeSend: (data) => hashCommandsBeforeSend(data, container)
+    beforeSend: (data) => hashCommandsBeforeSend(data, container, term)
   });
 
   // Get saved name or generate default
@@ -2655,6 +2655,9 @@ function switchTo(id) {
   }
 
   closeTerminalSearch();
+  // The popup is parented to the outgoing tab's container; leaving it up would
+  // swallow every keystroke in the incoming one with nothing on screen.
+  dismissHashCommands();
 
   // Deactivate current
   if (activeId) {

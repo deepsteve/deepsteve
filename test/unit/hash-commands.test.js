@@ -1,21 +1,33 @@
-// Headless unit test for public/js/hash-commands.js — the # activation gate (#589).
+// Headless unit test for public/js/hash-commands.js — the # activation gate.
 //
-// The gate used to hang off a sticky `lineHasContent` boolean that only ever
+// #589: the gate used to hang off a sticky `lineHasContent` boolean that only ever
 // reset on Enter or a busy→waiting transition, so clearing the input line any
 // other way (backspace, Ctrl+C, Ctrl+U, Escape, word-kill) left it stuck true
 // and # went dead until some later state change happened to reset it. That is
-// the "# works inconsistently" report. It now mirrors the line as `lineText`
-// and gates on `lineText === ''`.
+// the "# works inconsistently" report. It became a mirror of the line, `lineText`,
+// gated on `lineText === ''`.
 //
-// No browser, no Docker: hash-commands.js has no imports and touches only
-// document.createElement, so a tiny fake element is the whole stub. Each test
-// re-imports the module with a unique ?query so its module-level state
-// (lineText, active, buffer, lockedCommand) starts fresh.
+// #634: that mirror was the wrong authority. It was module-global (so it leaked
+// across tabs), it had no concept of the caret, and setWaitingForInput(true) wiped
+// it unconditionally — on every tab switch and reconnect, and on any working→waiting
+// edge, even though the screen classifier reports a composed-but-unsent message as
+// "waiting" by design. A # typed mid-message therefore opened the palette and
+// swallowed the keystroke. The gate now ANDs the mirror (per terminal, and only a
+// guard for the un-echoed window) with a live read of the xterm buffer, so most of
+// what follows is driven by a fake terminal showing a real composer fixture.
+//
+// No browser, no Docker: hash-commands.js touches only document.createElement, so a
+// tiny fake element is the whole DOM stub, and the terminal is test/helpers/fake-xterm.
+// Each test re-imports the module with a unique ?query so its module-level state
+// (active, buffer, lockedCommand) starts fresh.
 //
 // Run: node --test test/unit/hash-commands.test.js
 
 const { test } = require('node:test');
 const assert = require('node:assert');
+
+const { fakeTerm } = require('../helpers/fake-xterm');
+const SCREENS = require('./fixtures/composer-screens');
 
 // ---------------------------------------------------------------- fake globals
 
@@ -38,10 +50,24 @@ function fakeElement() {
 
 globalThis.document = { createElement: () => fakeElement() };
 
+// A controllable clock for the echo grace. Offsetting the real clock rather than
+// replacing it keeps Date.now monotonic for anything else that reads it.
+const realNow = Date.now;
+let clockOffset = 0;
+Date.now = () => realNow() + clockOffset;
+
 let importCount = 0;
 
-async function setup() {
+/**
+ * @param {object}   [opts]
+ * @param {string[]} [opts.screen]  Composer fixture the fake terminal shows. Default
+ *                                  is a blank buffer, which reads 'unknown' — the
+ *                                  shell-tab / unreadable-TUI case, where the gate
+ *                                  falls back to the keystroke mirror alone.
+ */
+async function setup({ screen = [] } = {}) {
   const calls = [];  // [id, arg?] per executed hash command
+  clockOffset = 0;
 
   const url = new URL('../../public/js/hash-commands.js', `file://${__filename}`);
   url.search = `?t=${++importCount}`;
@@ -57,13 +83,17 @@ async function setup() {
   });
 
   const container = fakeElement();
+  const term = fakeTerm(screen);
   // One data chunk, exactly as terminal.js hands it over. Returns true when
   // hash-commands consumed the keystroke (so it never reaches the PTY).
-  const key = (data) => mod.beforeSend(data, container);
+  const key = (data) => mod.beforeSend(data, container, term);
   // A run of individual keystrokes.
   const type = (str) => { for (const ch of str) key(ch); };
+  // Let a keystroke's echo land: a repaint, then past the grace window. Only after
+  // this may a screen that reads 'empty' overrule a non-empty mirror.
+  const settle = () => { term.writeParsed(); clockOffset += 1000; };
 
-  return { mod, calls, key, type };
+  return { mod, calls, key, type, term, settle };
 }
 
 // ------------------------------------------------------- baseline: still works
@@ -187,10 +217,11 @@ test('# activates after Option+Delete kills the only word', async () => {
   assert.strictEqual(key('#'), true);
 });
 
-test('# activates after a busy→waiting transition (#371 regression)', async () => {
-  const { mod, key, type } = await setup();
+test('# re-arms on a busy→waiting transition when the composer reads empty (#371, #634)', async () => {
+  const { mod, key, type, settle } = await setup({ screen: SCREENS.EMPTY_COMPOSER });
   type('x');
   mod.setWaitingForInput(true);
+  settle();
   assert.strictEqual(key('#'), true);
 });
 
@@ -209,5 +240,134 @@ test('arrow keys do not disturb the empty-line gate', async () => {
   const { key } = await setup();
   key('\x1b[A');
   key('\x1b[B');
+  assert.strictEqual(key('#'), true);
+});
+
+// ------------------------------------------------ #634: the screen is the authority
+//
+// Every case below is one the keystroke mirror alone gets wrong, because the mirror
+// is empty: the text was staged before this tab existed, or the wipe forgot it, or
+// the caret moved with keys the mirror never tracked.
+
+test('# is NOT intercepted when the composer holds a staged draft (#634)', async () => {
+  const { key } = await setup({ screen: SCREENS.STAGED_DRAFT });
+  // No keystrokes at all — exactly the case an untracked arrow key or a wiped
+  // mirror produces. Only the screen read can catch it.
+  assert.strictEqual(key('#'), false);
+});
+
+test('setWaitingForInput no longer forgets a staged draft (#634)', async () => {
+  const { mod, key, type, settle } = await setup({ screen: SCREENS.STAGED_DRAFT });
+  type('x');
+  mod.setWaitingForInput(true);   // tab switch, reconnect, or a working→waiting edge
+  settle();
+  assert.strictEqual(key('#'), false);
+});
+
+test('# is NOT intercepted mid-draft even in a batched paste (#634)', async () => {
+  const { calls, key } = await setup({ screen: SCREENS.STAGED_DRAFT });
+  assert.strictEqual(key('#terminal\r'), false);
+  assert.deepStrictEqual(calls, []);
+});
+
+test('# activates on an empty composer', async () => {
+  const { key } = await setup({ screen: SCREENS.EMPTY_COMPOSER });
+  assert.strictEqual(key('#'), true);
+});
+
+test('# activates on an empty composer showing its placeholder hint', async () => {
+  const { key } = await setup({ screen: SCREENS.PLACEHOLDER_COMPOSER });
+  assert.strictEqual(key('#'), true);
+});
+
+test('a submitted prompt still on screen does not block # (#634)', async () => {
+  // The transcript echo below an empty composer must not read as staged text —
+  // otherwise # would go dead for the rest of the session.
+  const { key } = await setup({ screen: SCREENS.SUBMITTED_TRANSCRIPT_ECHO });
+  assert.strictEqual(key('#'), true);
+});
+
+test('an unreadable screen falls back to the mirror', async () => {
+  // A full-screen TUI or a startup banner: the read says nothing, so the mirror
+  // decides — i.e. the pre-#634 behavior, which is what keeps # working in shells.
+  const { key, type } = await setup({ screen: SCREENS.STARTUP_BANNER });
+  assert.strictEqual(key('#'), true);
+  const second = await setup({ screen: SCREENS.STARTUP_BANNER });
+  second.type('abc');
+  assert.strictEqual(second.key('#'), false);
+});
+
+// --------------------------------------------------- #634: the echo-race guard
+
+test('a character typed but not yet echoed still blocks # ', async () => {
+  // The composer reads empty only because the keystroke has not round-tripped.
+  const { key, type } = await setup({ screen: SCREENS.EMPTY_COMPOSER });
+  type('x');
+  assert.strictEqual(key('#'), false);
+});
+
+test('a repaint inside the grace window is not enough to clear the mirror', async () => {
+  const { key, type, term } = await setup({ screen: SCREENS.EMPTY_COMPOSER });
+  type('x');
+  term.writeParsed();
+  clockOffset += 100;                  // still under ECHO_GRACE_MS
+  assert.strictEqual(key('#'), false);
+});
+
+test('the grace window alone is not enough — a repaint is required too', async () => {
+  const { key, type } = await setup({ screen: SCREENS.EMPTY_COMPOSER });
+  type('x');
+  clockOffset += 1000;                 // past the grace, but nothing came back
+  assert.strictEqual(key('#'), false);
+});
+
+test('a stale mirror is resynced once the echo has settled', async () => {
+  // Something we never saw cleared the composer (/clear, a server-injected prompt).
+  // Without this resync, # would stay dead for the rest of the session.
+  const { key, type, settle } = await setup({ screen: SCREENS.EMPTY_COMPOSER });
+  type('x');
+  settle();
+  assert.strictEqual(key('#'), true);
+});
+
+test('a dead PTY still lets # through after the stale escape', async () => {
+  const { key, type } = await setup({ screen: SCREENS.EMPTY_COMPOSER });
+  type('x');
+  clockOffset += 5000;                 // no repaint will ever come
+  assert.strictEqual(key('#'), true);
+});
+
+// ------------------------------------------------ #634: the mirror is per-terminal
+
+test('text typed in one tab does not block # in another', async () => {
+  const { mod } = await setup();
+  const [cA, cB] = [fakeElement(), fakeElement()];
+  const [tA, tB] = [fakeTerm(), fakeTerm()];
+  mod.beforeSend('x', cA, tA);
+  assert.strictEqual(mod.beforeSend('#', cB, tB), true);
+});
+
+test('a tab switch does not carry one tab’s draft into another', async () => {
+  const { mod } = await setup();
+  const [cA, cB] = [fakeElement(), fakeElement()];
+  const tA = fakeTerm(SCREENS.STAGED_DRAFT);
+  const tB = fakeTerm(SCREENS.EMPTY_COMPOSER);
+  assert.strictEqual(mod.beforeSend('#', cA, tA), false);   // staged in A
+  assert.strictEqual(mod.beforeSend('#', cB, tB), true);    // empty in B
+});
+
+// ------------------------------------------------------------- dismiss() (#634)
+
+test('dismiss closes an open palette', async () => {
+  const { mod, key } = await setup();
+  assert.strictEqual(key('#'), true);
+  assert.strictEqual(key('t'), true);       // consumed while active
+  mod.dismiss();
+  assert.strictEqual(key('t'), false);      // no longer consumed
+});
+
+test('dismiss on a closed palette is a no-op', async () => {
+  const { mod, key } = await setup();
+  mod.dismiss();
   assert.strictEqual(key('#'), true);
 });
