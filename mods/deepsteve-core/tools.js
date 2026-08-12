@@ -680,7 +680,9 @@ function init(context) {
         + 'The default working directory is the caller\'s `cwd`, which for a worktree session is the MAIN CHECKOUT. '
         + 'Runs in a login shell, so it has the same PATH a terminal tab does. '
         + 'Blocks until the command exits or `timeout_seconds` elapses; on timeout you get the output so far and '
-        + 'the tab still tears itself down on its own. Every run is recorded to ~/.deepsteve/terminal-runs.jsonl.',
+        + 'the tab still tears itself down on its own. The result\'s `auto_close` says which way that went — '
+        + '`armed` (closing in `auto_close_in_seconds`), `closed_immediately`, `user_typed` (someone claimed the tab, so it stays), '
+        + 'or `shell_gone`. Every run is recorded to ~/.deepsteve/terminal-runs.jsonl.',
       schema: {
         command: z.string().describe('The shell command to run. One command (it may be a pipeline or a `&&` chain); it is not typed at a prompt, it IS the tab\'s process.'),
         cwd: z.string().optional().describe('Working directory. Defaults to the caller\'s cwd — the main checkout for a worktree session.'),
@@ -777,31 +779,52 @@ function init(context) {
           const { output, exitCode, found } = splitAtMarker(await capture(), nonce);
           const status = found ? 'finished' : 'gone';
 
+          // What happened to the TAB, named (#635). These five outcomes used to collapse
+          // into a bare `auto_close_in_seconds: null`, which is how the leak stayed
+          // invisible for so long: a tab left open on purpose, a tab closed on the spot,
+          // and a tab nothing closed at all were the same answer to the caller and the
+          // same line in terminal-runs.jsonl.
+          let autoClose;
           let autoCloseInSeconds = null;
           const live = shells.get(id);
-          if (live) {
-            if (live.lastInputTime) {
-              // Someone typed in this tab, so it is theirs now — the same rule the merge
-              // auto-close follows (#627). Nothing else writes to this PTY: the command
-              // arrived in argv, not as input, and no prompt is ever delivered here.
-              log(`[MCP] run_in_terminal: leaving ${id} open — the user typed in it`);
+          if (!live) {
+            // The pane died before the marker was seen, so handleShellGone has already
+            // tombstoned it and sent the tab its close-tab. The close call is belt and
+            // braces — it no-ops and returns false when there is no entry — so this
+            // branch can no longer fall through having neither armed nor closed.
+            autoClose = 'shell_gone';
+            if (closeSession) closeSession(id, 'terminal-run-finished');
+          } else if (live.lastInputTime) {
+            // Someone typed in this tab, so it is theirs now — the same rule the merge
+            // auto-close follows (#627). This is only true input: since #635 the
+            // terminal's own replies to the capability probes tmux fires at an attaching
+            // client no longer reach lastInputTime, and it was those replies — not a
+            // person — that took this branch on every single run.
+            autoClose = 'user_typed';
+            log(`[MCP] run_in_terminal: leaving ${id} open — the user typed in it`);
+          } else {
+            const armed = armSessionAutoClose
+              ? armSessionAutoClose(id, { reason: 'terminal-run-finished', policy: 'terminal-run' })
+              : null;
+            if (armed) {
+              autoClose = 'armed';
+              autoCloseInSeconds = Math.max(0, Math.round((armed.closeAt - Date.now()) / 1000));
             } else {
-              const armed = armSessionAutoClose
-                ? armSessionAutoClose(id, { reason: 'terminal-run-finished', policy: 'terminal-run' })
-                : null;
-              if (armed) autoCloseInSeconds = Math.max(0, Math.round((armed.closeAt - Date.now()) / 1000));
-              // arm() returns null here only when the configured linger is 0 (the
-              // session is live — we just read it) — i.e. "close it now".
-              else if (closeSession) closeSession(id, 'terminal-run-finished');
+              // arm() returns null on a session we just read as live only when the
+              // configured linger is 0 — i.e. "close it now". A ctx wired without the
+              // hook at all lands here too and wants the same outcome, but is worth
+              // saying out loud rather than reporting as a deliberate zero linger.
+              if (!armSessionAutoClose) log(`[MCP] run_in_terminal: ${id} has no auto-close hook — closing outright`);
+              autoClose = closeSession && closeSession(id, 'terminal-run-finished') ? 'closed_immediately' : 'leaked';
             }
           }
 
           state.record = getRunLog().append({
             ts: Date.now(), status, session_id: id, caller: callerId || null,
             cwd: effectiveCwd, command: rawCommand, exit_code: exitCode,
-            duration_ms: Date.now() - startedAt, output,
+            duration_ms: Date.now() - startedAt, output, auto_close: autoClose,
           });
-          log(`[MCP] run_in_terminal: ${id} ${status} exit=${exitCode ?? '?'} in ${state.record.duration_ms}ms`);
+          log(`[MCP] run_in_terminal: ${id} ${status} exit=${exitCode ?? '?'} in ${state.record.duration_ms}ms (tab: ${autoClose})`);
           return { ...state.record, auto_close_in_seconds: autoCloseInSeconds };
         }
 
@@ -847,6 +870,7 @@ function init(context) {
             run_id: done.id, session_id: id, status: done.status,
             exit_code: done.exit_code, output: done.output, truncated: done.truncated,
             cwd: effectiveCwd, command: rawCommand, duration_ms: done.duration_ms,
+            auto_close: done.auto_close ?? null,
             auto_close_in_seconds: done.auto_close_in_seconds ?? null,
             log_path: getRunLog().file,
           }, null, 2) }] };
@@ -863,6 +887,9 @@ function init(context) {
           output: partial.output, truncated: partial.truncated,
           cwd: effectiveCwd, command: rawCommand,
           duration_ms: Date.now() - startedAt,
+          // Not "no auto-close" — "not decided yet". The watcher outlives this call and
+          // arms or closes when the marker lands; the log record gets the real answer.
+          auto_close: 'pending',
           log_path: getRunLog().file,
           note: `Still running after ${timeoutSec}s — this is the output so far. The tab closes itself when the command finishes and the full run is written to the log; do not close it yourself. Use read_session_screen with session_id "${id}" to check on it.`,
         }, null, 2) }] };

@@ -24,6 +24,7 @@ const { TerminalScreen } = require('./terminal-screen');
 const { terminalEnv } = require('./terminal-env');
 const { readComposerDraft, isPromptStaged, isPromptOnScreen } = require('./composer-state');
 const { wrapRunCommand } = require('./terminal-run');
+const { isTerminalReport } = require('./terminal-input');
 const NodePtyEngine = require('./engines/node-pty');
 const TmuxEngine = require('./engines/tmux');
 
@@ -6611,6 +6612,24 @@ function handleWsConnection(ws, req) {
       }
       }
     } catch {}
+    // The terminal answering a program is not a person typing (#635). xterm replies to
+    // the capability probes tmux fires at every attaching client, and the browser sends
+    // those replies down this same socket — so without this, EVERY freshly opened tab
+    // recorded a keystroke within milliseconds and `run_in_terminal` never closed one.
+    // It still has to reach the PTY (tmux is waiting on the answer), and deliberately
+    // ahead of the inputBlocked drop below: #512 blocks *keystrokes*, and this is not
+    // one, so a prompt injection in flight must not leave tmux's probe unanswered.
+    if (isTerminalReport(str)) {
+      // Once per session, not per report: this is the diagnostic the old comment below
+      // asked for ("the only way to diagnose it"), and reports arrive on every attach.
+      if (!entry.reportSeen) {
+        entry.reportSeen = true;
+        log(`[WS] ${id}: terminal report ${JSON.stringify(str)} — passed to the PTY, not counted as input`);
+      }
+      getEngine(id).write(id, str);
+      return;
+    }
+
     // Drop user keystrokes while an auto-injected prompt is being submitted, so
     // typing can't interleave with the injected text (#512). Control messages
     // (resize/rename/unblock-input/close-session) already returned above, so they
@@ -6626,10 +6645,10 @@ function handleWsConnection(ws, req) {
     entry.lastInputTime = Date.now();
     // #627: a user typing in a tab after its merge keeps the tab. Only real input
     // reaches here — resize/rename/ping/close-session and the other control messages
-    // all returned above — so merely HAVING the tab open never cancels, and neither
-    // does a reconnect. The byte count is logged because that is the only way to
-    // diagnose it if some future TUI turns on a reporting mode (focus tracking, say)
-    // that would otherwise disarm every pending close invisibly.
+    // all returned above, and terminal reports returned just above that (#635) — so
+    // merely HAVING the tab open never cancels, and neither does a reconnect. The byte
+    // count is logged because that is the only way to diagnose it if some future TUI
+    // turns on a reporting mode this classifier does not yet know about.
     sessionAutoClose.cancel(id, `user input, ${str.length} byte(s)`);
     // #558 audit: keystroke-resolution ordering, debounced to 1/s per shell
     // (typing bursts collapse into a `burst` suppressed-count). clearedWaiting is
