@@ -137,6 +137,7 @@ Rules a change anywhere in the tree could violate. Each one has a page that expl
 **Tests** ([docs/testing.md](docs/testing.md))
 
 - **Never set `DEEPSTEVE_TEST_MODE=1` on a real install**, and do not weaken any of the three safety layers that keep a suite off the production daemon (`DEEPSTEVE_URL` required, `testMode` verified, `killall` refused outside test mode).
+- **An integration test's filesystem is not the daemon's.** Under `test/docker-compose.yml` they are two containers, so `test/integration/**` gets scratch cwds from `test/helpers/server-dir.js`, never `os.tmpdir()`. A guard test enforces it; local runs share a filesystem and will not catch a violation.
 - **Only `test/helpers/tmux-sandbox.js` may run `tmux`.** `TMUX_TMPDIR` and `kill-server` are banned under `test/**` — an unaimed `kill-server` once destroyed every live agent on the machine, three times in twenty minutes.
 - **Nothing under `test/unit/` may import `engines/node-pty`** — the CI unit job runs `--ignore-scripts`, so the native binding does not exist there.
 - **Don't add a `node-pty` engine pin to make a red test green** without confirming it's the same "this path is structurally absent under tmux" reason the existing pins have.

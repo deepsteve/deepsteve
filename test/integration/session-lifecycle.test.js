@@ -1,9 +1,8 @@
 const { describe, it, afterEach } = require('node:test');
 const assert = require('node:assert');
-const fs = require('fs');
-const os = require('os');
-const path = require('path');
 const { WsClient, httpGet, httpPost, httpDelete, cleanupSessions } = require('../helpers/ws-client');
+// Never os.tmpdir() for a path handed to the server — it is not necessarily our filesystem (#637).
+const { makeServerDir, reserveMissingServerPath, removeServerDir } = require('../helpers/server-dir');
 
 describe('Session Lifecycle', () => {
   const clients = [];
@@ -196,8 +195,7 @@ describe('Session Lifecycle', () => {
   // throughout, so no agent binary is needed.
 
   it('refuses a new session in a directory that does not exist (#632)', async () => {
-    const gone = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-632-new-'));
-    fs.rmSync(gone, { recursive: true, force: true });
+    const gone = reserveMissingServerPath('ds-632-new-');
 
     const client = createClient();
     const msg = await client.connect({ new: '1', agentType: 'terminal', cwd: gone });
@@ -212,7 +210,9 @@ describe('Session Lifecycle', () => {
   });
 
   it('a refused restore keeps the saved record — retryable, not destroyed (#632)', async () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-632-restore-'));
+    // Must be a directory the SERVER can see, not merely one this process can (#637) —
+    // in CI those are two containers, and since #632 a cwd the server cannot see is refused.
+    const dir = makeServerDir('ds-632-restore-');
     const client = createClient();
     const session = await client.connect({ new: '1', agentType: 'terminal', cwd: dir });
     assert.strictEqual(session.type, 'session', 'the directory exists, so this must start normally');
@@ -223,7 +223,7 @@ describe('Session Lifecycle', () => {
     client.close();
     await new Promise(r => setTimeout(r, 300));
     await httpDelete(`/api/shells/${id}?force=1`);
-    fs.rmSync(dir, { recursive: true, force: true });
+    removeServerDir(dir);
 
     // An explicit restore: no noRestore, so this is the real restore path.
     const restorer = createClient();

@@ -27,6 +27,11 @@ services:
       # Share the auto-generated ~/.deepsteve/auth-token so the test container authenticates with the
       # REAL token (no override). The app lives in /app here, so /root/.deepsteve is data-only.
       - ds_home:/root/.deepsteve
+      # Scratch cwds the test container creates and this one must be able to spawn into (#637).
+      # These are two containers: before this mount, a test's os.tmpdir() path existed only in
+      # `test`, and since #632 the server REFUSES a spawn into a cwd it cannot see. Deliberately
+      # not ds_home — that is daemon state, not a place for tests to make directories.
+      - ds_scratch:/scratch
     healthcheck:
       # /healthz is the public, unauthenticated readiness endpoint; /api/version is now auth-gated.
       test: ["CMD", "curl", "-sf", "http://localhost:3000/healthz"]
@@ -44,11 +49,17 @@ services:
         condition: service_healthy
     environment:
       - DEEPSTEVE_URL=http://server:3000
+      # Where test/helpers/server-dir.js makes scratch cwds, so they exist for the server too
+      # (#637). Unset, that helper falls back to os.tmpdir() — correct only when the daemon is
+      # this machine, which here it is not.
+      - DEEPSTEVE_TEST_SCRATCH=/scratch
     volumes:
       - ds_home:/root/.deepsteve   # read the server's real auth token (#536)
+      - ds_scratch:/scratch        # same mount as the server, see above (#637)
     # Run files serially (one process each); tmux IS installed here, so run all.
     # See test/run-integration.sh for why --test-concurrency=1 isn't enough.
     command: ["sh", "test/run-integration.sh"]
 
 volumes:
   ds_home:
+  ds_scratch:
