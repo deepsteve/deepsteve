@@ -92,6 +92,23 @@ test('release.sh still deletes a withheld skill on upgrade', () => {
     '  already has skills/release.md keeps showing /deepsteve:release in Mods after upgrading.');
 });
 
+test('the npm allowlist excludes every maintainer-only skill', () => {
+  // The second distribution channel needs the same withholding (#636). release.sh's
+  // frontmatter filter only governs install.sh; `npm publish` reads package.json's
+  // `files`, and an entry naming `skills/` ships the whole directory — so the
+  // exclusion has to be stated there too, or `npm install -g deepsteve` hands every
+  // user a command that publishes releases of THIS repo. Worse than the curl case:
+  // an npm version cannot be corrected in place once published.
+  const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
+  const files = pkg.files || [];
+  assert.ok(files.length > 0, 'package.json has no "files" allowlist — every skill would ship');
+  for (const id of maintainerOnly) {
+    assert.ok(files.includes(`!skills/${id}.md`),
+      `package.json "files" must carry "!skills/${id}.md". Without it, npm ships the\n` +
+      `  maintainer-only skill that release.sh deliberately withholds from install.sh.`);
+  }
+});
+
 test('RELEASING.md tells the maintainer the skill ships disabled', () => {
   // The skill is the documented way to cut a release, and it is off by default in a fresh
   // clone. Without this line the first step of a release is an unexplained missing command.

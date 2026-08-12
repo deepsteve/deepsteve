@@ -1,6 +1,10 @@
 node_modules
 .claude
 .git
+# A tarball from a host `npm pack` must not ride into the build context:
+# test/Dockerfile.npm packs the tree itself, and an older tarball sitting next to the
+# fresh one makes `ls deepsteve-*.tgz` ambiguous.
+deepsteve-*.tgz
 scratch
 .DS_Store
 screenshots

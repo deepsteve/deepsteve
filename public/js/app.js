@@ -1340,6 +1340,7 @@ settingsBtn?.addEventListener('click', async () => {
     const srcLabel =
       src.type === 'git' ? `git checkout${src.sourcePath ? ` (${escapeHtml(src.sourcePath)})` : ''}` :
       src.type === 'curl' ? 'curl install' :
+      src.type === 'npm' ? 'npm (global)' :
       'unknown';
     const statusPill =
       s.checkError ? `<span class="version-status version-failed">Check failed: ${escapeHtml(s.checkError)}</span>` :
@@ -1387,6 +1388,15 @@ settingsBtn?.addEventListener('click', async () => {
       } else if (src.type === 'curl') {
         updatesActionBtn.style.display = '';
         updatesActionBtn.textContent = 'Update now';
+      } else if (src.type === 'npm') {
+        // An npm install updates through npm, not through us (#636): the package
+        // lives in a prefix we may not own, and `deepsteve start` is what re-deploys
+        // it into ~/.deepsteve afterwards. So say the command instead of offering a
+        // button that cannot work.
+        updatesActionBtn.style.display = '';
+        updatesActionBtn.textContent = 'Update with npm';
+        updatesActionBtn.disabled = true;
+        updatesActionBtn.title = 'npm install -g deepsteve@latest && deepsteve start';
       } else {
         updatesActionBtn.style.display = '';
         updatesActionBtn.textContent = 'Update unavailable';

@@ -79,7 +79,7 @@ line below is a trigger: if you are about to do that thing, read that page first
 | [docs/sessions.md](docs/sessions.md) | changing session persistence, tombstones, the restore surface, prompt delivery/submission, the waiting classifier, sleep handling, or worktree/merge behavior |
 | [docs/scheduled-tasks.md](docs/scheduled-tasks.md) | touching `mods/scheduled-tasks/`, or assuming an unattended run behaves like an interactive tab |
 | [docs/testing.md](docs/testing.md) | adding a suite, a daemon fixture, or anything that runs tmux from a test |
-| [docs/platform.md](docs/platform.md) | touching `service.sh`, the launchd plist / systemd unit, `paths.js`, `bin-path.js`, auth, or HTTPS |
+| [docs/platform.md](docs/platform.md) | touching `service.sh`, the launchd plist / systemd unit, `paths.js`, `bin-path.js`, auth, HTTPS, or the npm package (`bin/deepsteve.js`, `package.json`'s `files`) |
 | [docs/frontend.md](docs/frontend.md) | adding a keyboard shortcut, a palette command, or touching client-side session storage |
 | [docs/agents.md](docs/agents.md) | assuming a feature works for a given agent, adding an agent, or using a core MCP session tool |
 | [docs/mods.md](docs/mods.md) | writing or changing a DeepSteve Mod, a Project Mod, or a display tab |

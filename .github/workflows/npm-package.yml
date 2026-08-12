@@ -1,0 +1,101 @@
+name: npm package
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+permissions:
+  contents: read
+
+jobs:
+  # Does `npm install -g` actually work, on every Node this package claims to support?
+  #
+  # That question is #636's blocker 5 and it has exactly one honest answer: install the
+  # real tarball on a real machine and load the native module. node-pty ships N-API
+  # prebuilds for darwin-arm64/darwin-x64 but NONE for linux, so the two arms of this
+  # matrix test two different mechanisms — macOS must resolve a prebuild (and one
+  # prebuild has to serve every Node here, which is the whole point of N-API), while
+  # Linux must fall through to a node-gyp build.
+  #
+  # Deliberately stops short of `deepsteve start`. On a macOS runner that writes a
+  # LaunchAgent under the label com.deepsteve, which is global to the user session —
+  # the full start/stop path is covered by test/docker-compose.npm.yml, in a container
+  # where the service manager is a stub.
+  install:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        node: ['18', '20', '22']
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        with:
+          node-version: ${{ matrix.node }}
+
+      - name: Pack the tarball
+        run: npm pack
+
+      - name: The tarball ships only what runs
+        # v0.23.0 packed 324 files, 123 of them tests. This is that regression, checked
+        # against the real pack output rather than against the allowlist's intent.
+        run: |
+          TARBALL="$(ls deepsteve-*.tgz)"
+          echo "packed $TARBALL"
+          tar tzf "$TARBALL" | sed -n 's|^package/\([^/]*\)/.*|\1|p' | sort -u
+          for forbidden in test docs screenshots mod-tutorials; do
+            if tar tzf "$TARBALL" | grep -q "^package/$forbidden/"; then
+              echo "ERROR: the tarball ships $forbidden/ — it is not read at runtime" >&2
+              exit 1
+            fi
+          done
+          # release.sh withholds maintainer-only skills from install.sh; the npm
+          # allowlist has to withhold them too (test/unit/maintainer-skills.test.js).
+          if tar tzf "$TARBALL" | grep -q '^package/skills/release.md$'; then
+            echo "ERROR: the tarball ships the maintainer-only release skill" >&2
+            exit 1
+          fi
+
+      - name: Install globally
+        run: npm install -g ./$(ls deepsteve-*.tgz)
+
+      - name: The CLI is on PATH and runs
+        run: |
+          deepsteve --version
+          deepsteve --help
+
+      - name: The native module resolves from the global install
+        # A `deepsteve start` would copy this node_modules into ~/.deepsteve, so if
+        # node-pty cannot load here it cannot load there either. tmux is the default
+        # engine, but node-pty remains the macOS fallback and server.js requires
+        # engines/node-pty at load time — an unloadable binding is a crash-loop.
+        run: |
+          ROOT="$(npm root -g)/deepsteve"
+          test -d "$ROOT" || { echo "global install not found at $ROOT" >&2; exit 1; }
+          cd "$ROOT"
+          node -e "const pty = require('node-pty'); if (typeof pty.spawn !== 'function') { throw new Error('node-pty loaded without spawn()'); } console.log('node-pty ok on', process.version, process.platform, process.arch);"
+
+      - name: Every root module in the tree reached the install
+        # The failure the `files` allowlist produces is MODULE_NOT_FOUND at daemon
+        # startup on a user's machine — a new require() in server.js that the allowlist
+        # does not cover. Compared file-by-file against the checkout rather than by
+        # requiring each module, because requiring has side effects (validate-mods.js is
+        # a script, not a library) and presence is the property that actually matters.
+        run: |
+          ROOT="$(npm root -g)/deepsteve"
+          MISSING=0
+          for f in *.js; do
+            test -s "$ROOT/$f" || { echo "ERROR: $f did not ship" >&2; MISSING=1; }
+          done
+          for d in engines public mods skills themes; do
+            test -d "$ROOT/$d" || { echo "ERROR: $d/ did not ship" >&2; MISSING=1; }
+          done
+          test "$MISSING" = 0 || exit 1
+          echo "every root module and runtime dir is present"

@@ -71,12 +71,13 @@ don't panic.
 
 ## 4. Wait for green — and read the logs, don't trust the checkmark
 
-All three must pass on the bump commit's SHA:
+All four must pass on the bump commit's SHA:
 
 | Workflow | Trigger |
 |---|---|
 | Check installer | push (runs `./release.sh`, diffs embedded `package.json` vs source) |
 | Integration Tests | push (Docker, `npm ci` + node test runner) |
+| npm package | push (`npm pack` + `npm install -g` on Node 18/20/22 × linux/macOS) |
 | Public Install Integration Tests | manual dispatch |
 
 ```bash
@@ -143,3 +144,53 @@ shasum -a 256 /tmp/dl.sh install.sh    # both hashes must match
 
 Confirm `isDraft=false`, the tag points at the bump commit, and the published asset's
 SHA-256 matches the local build. Report the release URL to the user.
+
+## 8. Publish to npm — optional, and only after the tag exists
+
+**Ask the user first.** This step is skippable and every release does not need it. What makes it
+different from step 7: **npm versions are immutable.** A version cannot be republished, even after
+an unpublish, and whatever you upload is what `npm install -g deepsteve` serves until a later
+version supersedes it. A GitHub release can be deleted and recut; this cannot.
+
+`"private": true` in `package.json` is the guard that stops an accidental publish, so removing it
+is the last thing you do and restoring it is not optional.
+
+First, look at what would actually ship:
+
+```bash
+npm pack --dry-run 2>&1 | tail -8
+```
+
+Confirm the file count is in the low hundreds, not 300+, and that nothing under `test/`, `docs/`,
+or `screenshots/` is listed. Then prove the tarball installs and boots:
+
+```bash
+npm run test:npm
+```
+
+That packs this tree, `npm install -g`s the tarball in a container, runs `deepsteve start`, and
+then runs the whole integration suite against the daemon it deployed. **Do not publish without
+it** — a broken tarball burns the version number permanently.
+
+Then the publish itself, as a bracket around one command:
+
+```bash
+npm whoami                           # confirm you're the deepsteve maintainer
+npm pkg delete private
+npm publish
+git checkout -- package.json         # restore the guard, byte-for-byte
+git diff --exit-code package.json    # must print nothing
+```
+
+Restore with `git checkout`, **not** `npm pkg set private=true` — `npm pkg set` appends the key at
+the end of the object rather than putting it back where it was, so the guard returns but the file
+is reformatted and the next `check-installer.yml` diff is noise.
+
+Verify, then report the URL:
+
+```bash
+npm view deepsteve version dist.fileCount dist.unpackedSize
+```
+
+The version must equal the tag from step 7. If the published tarball turns out to be broken, the
+only fix is a new patch release — never a re-push.
