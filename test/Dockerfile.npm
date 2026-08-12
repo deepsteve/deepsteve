@@ -1,0 +1,73 @@
+# Installs from a locally-packed npm tarball, the way `npm install -g deepsteve` will (#636).
+#
+# This is the third install path under test, and it is the only one that exercises the
+# `files` allowlist and bin/deepsteve.js. Dockerfile (repo source) skips packaging
+# entirely; Dockerfile.install runs release.sh's install.sh, which embeds heredocs.
+#
+# `npm pack` runs INSIDE the image on purpose: nothing on the host has to build or
+# clean up a tarball, and the thing installed is byte-for-byte what `npm publish`
+# would upload from this tree.
+FROM node:22-bookworm
+
+# tmux: a DECLARED dependency off macOS since #621, so `deepsteve start` refuses to run
+#   without it here — satisfying it in the image is the point.
+# NO zsh, deliberately (#621): root's passwd shell here is /bin/bash, exactly the
+#   fallback a real Linux box takes, which makes this image a regression test for the
+#   login-shell resolver.
+# curl: used by the docker-compose healthcheck.
+RUN apt-get update && apt-get install -y --no-install-recommends curl tmux && rm -rf /var/lib/apt/lists/*
+
+# Pack and globally install. node:22-bookworm carries a full toolchain, which matters:
+# node-pty ships N-API prebuilds for darwin and win32 but NOT for linux, so this step
+# is also the test that its node-gyp fallback still works for a global install.
+COPY . /src
+WORKDIR /src
+RUN npm pack --pack-destination /tmp \
+ && TARBALL="$(ls /tmp/deepsteve-*.tgz)" \
+ && echo "packed $TARBALL" \
+ && test "$(tar tzf "$TARBALL" | grep -c '^package/test/' || true)" = 0 \
+ && test "$(tar tzf "$TARBALL" | grep -c '^package/docs/' || true)" = 0 \
+ && test "$(tar tzf "$TARBALL" | grep -c '^package/skills/release.md' || true)" = 0 \
+ && test "$(tar tzf "$TARBALL" | grep -c '^package/restart.sh' || true)" = 0 \
+ && npm install -g "$TARBALL"
+
+# Prove the daemon does not depend on the source tree it was packed from: a real
+# `npm install -g deepsteve` has no checkout anywhere on the machine.
+WORKDIR /
+RUN rm -rf /src
+
+# `deepsteve start`, then assert what it produced.
+#
+# launchctl/systemctl are stubs, and systemctl is a RECORDING one (#621): with a silent
+# stub, a CLI that wrote no unit and started nothing looks exactly like one that
+# worked. Nothing actually runs here — docker-compose.npm.yml's server service is what
+# boots the deployed daemon.
+RUN printf '#!/bin/sh\nexit 0\n' > /usr/local/bin/launchctl && chmod +x /usr/local/bin/launchctl \
+ && printf '#!/bin/sh\necho "systemctl $*" >> /tmp/systemctl.log\nexit 0\n' > /usr/local/bin/systemctl \
+ && chmod +x /usr/local/bin/systemctl \
+ && deepsteve start --no-mcp \
+ && test -s /root/.deepsteve/server.js \
+ && test -s /root/.deepsteve/public/index.html \
+ && test -s /root/.deepsteve/mods/deepsteve-core/tools.js \
+ && test -s /root/.deepsteve/node_modules/express/package.json \
+ && test -s /root/.deepsteve/node_modules/node-pty/package.json \
+ && test -s /root/.config/systemd/user/deepsteve.service \
+ && grep -q 'KillMode=process' /root/.config/systemd/user/deepsteve.service \
+ && grep -q 'daemon-reload' /tmp/systemctl.log \
+ && grep -q 'enable --now deepsteve' /tmp/systemctl.log \
+ && grep -q '"type": "npm"' /root/.deepsteve/.install-source.json \
+ && test -s /root/.deepsteve/service.sh \
+ && test -x /root/.deepsteve/status.sh \
+ && test ! -x /root/.deepsteve/service.sh \
+ && test ! -e /root/.deepsteve/skills/release.md \
+ && test ! -e /root/.deepsteve/test \
+ && test ! -e /root/.deepsteve/bin \
+ && test ! -e /root/.deepsteve/restart.sh
+
+# The deployed install dir is the daemon's working directory — server.js mounts
+# express.static('public') and express.static('mods') cwd-relative.
+WORKDIR /root/.deepsteve
+
+EXPOSE 3000
+
+CMD ["node", "server.js"]

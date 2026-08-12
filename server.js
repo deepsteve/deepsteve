@@ -3428,11 +3428,18 @@ let updateTimer = null;
 let updateInProgress = false;
 let pendingAutoApply = null; // { tag, deadline, timer }
 
+// The three channels that can produce an install, and the only values the marker may
+// carry. `npm` (#636) is stamped by bin/deepsteve.js and is deliberately NOT an
+// auto-updatable type: applyGitPull and applyCurlReinstall each refuse a mismatched
+// type, so naming npm here is what stops an in-app "Update now" from overwriting an
+// npm-managed install with a curl payload. Anything else collapses to `unknown`.
+const INSTALL_SOURCE_TYPES = ['git', 'curl', 'npm'];
+
 function loadInstallSource() {
   try {
     if (fs.existsSync(INSTALL_SOURCE_FILE)) {
       const data = JSON.parse(fs.readFileSync(INSTALL_SOURCE_FILE, 'utf8'));
-      if (data && (data.type === 'git' || data.type === 'curl')) {
+      if (data && INSTALL_SOURCE_TYPES.includes(data.type)) {
         versionStatus.installSource = data;
         return;
       }

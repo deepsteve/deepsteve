@@ -3,5 +3,6 @@ node_modules/
 .claude/*
 !.claude/commands/
 install.sh
+deepsteve-*.tgz
 .DS_Store
 scratch/

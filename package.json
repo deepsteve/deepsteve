@@ -10,6 +10,29 @@
     "url": "git+https://github.com/deepsteve/deepsteve.git"
   },
   "main": "server.js",
+  "bin": {
+    "deepsteve": "bin/deepsteve.js"
+  },
+  "keywords": [
+    "claude",
+    "claude-code",
+    "pty",
+    "terminal",
+    "agents"
+  ],
+  "files": [
+    "/*.js",
+    "bin/",
+    "engines/",
+    "public/",
+    "mods/",
+    "skills/",
+    "!skills/release.md",
+    "themes/",
+    "service.sh",
+    "status.sh",
+    "uninstall.sh"
+  ],
   "scripts": {
     "test": "sh test/run-integration.sh",
     "test:unit": "node --test test/unit/*.test.js",
@@ -18,6 +41,8 @@
     "test:docker:clean": "docker compose -f test/docker-compose.yml down -v --rmi local",
     "test:install": "bash release.sh && docker compose -f test/docker-compose.install.yml up --build --abort-on-container-exit --exit-code-from test",
     "test:install:clean": "docker compose -f test/docker-compose.install.yml down -v --rmi local",
+    "test:npm": "docker compose -f test/docker-compose.npm.yml up --build --abort-on-container-exit --exit-code-from test",
+    "test:npm:clean": "docker compose -f test/docker-compose.npm.yml down -v --rmi local",
     "test:docker:public": "docker compose -f test/docker-compose.public.yml up --build --abort-on-container-exit --exit-code-from test",
     "test:docker:public:clean": "docker compose -f test/docker-compose.public.yml down -v --rmi local"
   },
