@@ -392,11 +392,37 @@ function paintTabIcon(tabEl, name) {
   el.classList.toggle('is-emoji', isEmoji);
 }
 
-/** Inline markup for a fresh tab's icon, matching what paintTabIcon() would produce. */
-function tabIconHTML(name) {
-  const { glyph, isEmoji } = tabIcon(name);
-  return `<span class="tab-icon${isEmoji ? ' is-emoji' : ''}" aria-hidden="true">${glyph}</span>`;
+/**
+ * Apply everything a tab derives from its name: the visible label, the rail icon, and the hover
+ * tooltip. Single owner on purpose — #640 was a construction path (the placeholder upgrade)
+ * that set two of the three, so every restored tab lost its tooltip until it was renamed.
+ *
+ * The tooltip is load-bearing, not decoration: `.tab-label` ellipsizes when the strip is
+ * crowded, and the collapsed icon rail hides it outright.
+ */
+function applyTabName(tabEl, name) {
+  const label = tabEl.querySelector('.tab-label');
+  if (label) label.textContent = name;
+  // Collapsed, this glyph is the whole tab — a rename that left it stale would be invisible
+  // in the sidebar but wrong in the rail.
+  paintTabIcon(tabEl, name);
+  tabEl.title = name;
 }
+
+/**
+ * The static skeleton of a tab. Every name-derived slot starts empty and is filled in by
+ * applyTabName(), so a tab's markup has exactly one definition regardless of which path built
+ * it. The speaker icon deliberately has no `title` of its own: it is aria-hidden, and a child
+ * title shadows the tab's — which cost you the name in the icon rail, where the speaker stays
+ * visible but the label does not.
+ */
+const TAB_INNER_HTML = `
+      <span class="badge"></span>
+      <span class="tab-icon" aria-hidden="true"></span>
+      <span class="speaker-icon" aria-hidden="true">${SPEAKER_SVG}</span>
+      <span class="tab-label"></span>
+      <span class="close">&#10005;</span>
+    `;
 
 export const TabManager = {
   /**
@@ -406,14 +432,8 @@ export const TabManager = {
     const tab = document.createElement('div');
     tab.className = 'tab';
     tab.id = 'tab-' + sessionId;
-    tab.title = name;
-    tab.innerHTML = `
-      <span class="badge"></span>
-      ${tabIconHTML(name)}
-      <span class="speaker-icon" aria-hidden="true" title="Emitting audio">${SPEAKER_SVG}</span>
-      <span class="tab-label">${name}</span>
-      <span class="close">&#10005;</span>
-    `;
+    tab.innerHTML = TAB_INNER_HTML;
+    applyTabName(tab, name);
 
     this._wireTabEvents(tab, sessionId, callbacks);
     return tab;
@@ -489,13 +509,8 @@ export const TabManager = {
     const tab = document.createElement('div');
     tab.className = 'tab placeholder';
     tab.id = 'tab-' + sessionId;
-    tab.innerHTML = `
-      <span class="badge"></span>
-      ${tabIconHTML(name)}
-      <span class="speaker-icon" aria-hidden="true" title="Emitting audio">${SPEAKER_SVG}</span>
-      <span class="tab-label">${name}</span>
-      <span class="close">&#10005;</span>
-    `;
+    tab.innerHTML = TAB_INNER_HTML;
+    applyTabName(tab, name);
     document.getElementById('tabs-list').appendChild(tab);
     updateTabArrows();
     return tab;
@@ -509,8 +524,7 @@ export const TabManager = {
     const existing = document.getElementById('tab-' + sessionId);
     if (existing && existing.classList.contains('placeholder')) {
       existing.classList.remove('placeholder');
-      existing.querySelector('.tab-label').textContent = name;
-      paintTabIcon(existing, name);
+      applyTabName(existing, name);
       this._wireTabEvents(existing, sessionId, callbacks);
       existing.scrollIntoView({ block: 'nearest', inline: 'nearest' });
       updateTabArrows();
@@ -536,13 +550,7 @@ export const TabManager = {
    */
   updateLabel(sessionId, name) {
     const tab = document.getElementById('tab-' + sessionId);
-    if (tab) {
-      tab.querySelector('.tab-label').textContent = name;
-      // Collapsed, this glyph is the whole tab — a rename that left it stale would be invisible
-      // in the sidebar but wrong in the rail.
-      paintTabIcon(tab, name);
-      tab.title = name;
-    }
+    if (tab) applyTabName(tab, name);
   },
 
   /**
