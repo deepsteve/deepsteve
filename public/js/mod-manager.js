@@ -11,7 +11,7 @@
  */
 
 import { nsKey } from './storage-namespace.js';
-import { tabIcon } from './tab-manager.js';
+import { tabIcon, TabManager } from './tab-manager.js';
 
 const STORAGE_KEY = nsKey('deepsteve-enabled-mods'); // Set of enabled mod IDs
 const KNOWN_MODS_KEY = nsKey('deepsteve-known-mods'); // All mod IDs known at last save
@@ -1793,6 +1793,25 @@ function getActiveViewId() {
 }
 
 /**
+ * Whether the slot is on screen — and, inseparably, whether any tab may read as selected (#639).
+ *
+ * A tab is styled selected because its terminal is what you are looking at. While the slot is up
+ * none of them is, so the strip must show nothing selected; when the slot comes down the active
+ * session's tab is again what's on screen. Before this, entering the slot left the outgoing tab
+ * marked and the selected styling simply lied about which view was live.
+ *
+ * Every write to `modViewVisible` goes through here, which is what makes the two unable to drift —
+ * the same "derive it on every flip, never bookkeep it" shape as showView()'s toolbar sweep and
+ * project-mods.js's paintRailRows(). It is the ONLY selection state the slot touches: `activeId`
+ * and `.terminal-container.active` stay exactly as they were, which is what keeps "back to where
+ * you were" free.
+ */
+function _setModViewVisible(on) {
+  modViewVisible = on;
+  TabManager.setActive(on ? null : (getActiveSessionIdFn?.() ?? null));
+}
+
+/**
  * Show a DeepSteve Mod's iframe view — the original caller of the slot. The two early
  * returns are mod-manifest concepts and deliberately stay here rather than in showView().
  */
@@ -1844,7 +1863,7 @@ function _hideMod() {
   document.getElementById('content-row').style.display = '';
   modContainer.style.display = 'none';
   backBtn.style.display = 'none';
-  modViewVisible = false;
+  _setModViewVisible(false);
 
   // Restore panel if it was logically visible while fullscreen mod was active
   if (visiblePanelId) {
@@ -1883,7 +1902,7 @@ function showModView() {
   document.getElementById('content-row').style.display = 'none';
   modContainer.style.display = 'flex';
   backBtn.style.display = 'none';
-  modViewVisible = true;
+  _setModViewVisible(true);
   _focusIframe(iframe);
 }
 
@@ -1903,7 +1922,10 @@ function showTerminalForSession(id) {
 
   modContainer.style.display = 'none';
   document.getElementById('content-row').style.display = '';
-  modViewVisible = false;
+  // Re-selects the OUTGOING tab for the moment it takes hooks.focusSession() below to select
+  // the incoming one. Deliberate: the rule is "the slot is down, so a tab is on screen again",
+  // and letting this path skip it is exactly how the two would drift apart.
+  _setModViewVisible(false);
 
   // Restore panel if it was logically visible
   if (visiblePanelId) {

@@ -2696,7 +2696,10 @@ function switchTo(id) {
     updateTitle();
     updateAppBadge();
 
-    if (session.type === 'mod-tab' || session.type === 'display-tab') return;
+    // Everything below is terminal machinery. All three iframe-backed tab types have a null
+    // term/fit/ws/scrollControl, so falling through throws inside the rAF — see the same
+    // three-way list in killSession() and confirmCloseSession().
+    if (session.type === 'mod-tab' || session.type === 'display-tab' || session.type === 'project-mod') return;
 
     setHashCommandsWaiting(!!session.waitingForInput);
     requestAnimationFrame(() => {
