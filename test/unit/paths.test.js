@@ -11,7 +11,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
-const { expandTilde, stateDir, statePath, tmuxSocketPath, logDir, DEFAULT_STATE_DIRNAME } = require('../../paths');
+const { expandTilde, stateDir, statePath, agentHomeDir, tmuxSocketPath, logDir, DEFAULT_STATE_DIRNAME } = require('../../paths');
 
 const REPO = path.join(__dirname, '..', '..');
 const HOME = '/home/tester';
@@ -71,6 +71,33 @@ test('tmuxSocketPath tracks the state dir, so HOME isolation is socket isolation
   // And it is short. A Unix socket's sun_path is 104 bytes including the NUL, and the
   // old `$TMPDIR/tmux-<uid>/default` regularly came within a couple of bytes of it.
   assert.ok(Buffer.byteLength(tmuxSocketPath()) < 100, tmuxSocketPath());
+});
+
+// --- agentHomeDir ---------------------------------------------------------
+
+test('agentHomeDir is os.homedir() when nothing is overridden (#641)', () => {
+  // The property that makes the #641 fix a provable no-op for a real install and for
+  // every test daemon that isolates with a scratch HOME: with no override the derived
+  // home and the real one are the SAME string, so ~/.claude/commands/deepsteve and
+  // ~/.agents/skills resolve exactly where they always did.
+  assert.strictEqual(agentHomeDir({ env: {}, homedir: HOME }), HOME);
+  assert.strictEqual(agentHomeDir(), os.homedir());
+});
+
+test('agentHomeDir tracks DEEPSTEVE_HOME, so state isolation is skill isolation (#641)', () => {
+  // The bug: stateDir() honored DEEPSTEVE_HOME while the skill destinations hung off
+  // os.homedir(), so a second instance started for isolated verification loaded empty
+  // scratch settings, concluded nothing was enabled, and deleted every managed skill
+  // out of the developer's REAL ~/.claude/commands/deepsteve and ~/.agents/skills.
+  assert.strictEqual(agentHomeDir({ env: { DEEPSTEVE_HOME: '/scratch/iso/.deepsteve' }, homedir: HOME }), '/scratch/iso');
+  assert.strictEqual(agentHomeDir({ env: { DEEPSTEVE_HOME: '~/alt/.deepsteve' }, homedir: HOME }), '/home/tester/alt');
+  // Never the real home, whatever the override is named.
+  assert.notStrictEqual(agentHomeDir({ env: { DEEPSTEVE_HOME: '/scratch/iso/.deepsteve' }, homedir: HOME }), HOME);
+  // And it is always the state dir's parent, on every platform.
+  for (const platform of ['darwin', 'linux']) {
+    const opts = { env: { DEEPSTEVE_HOME: '/srv/ds' }, homedir: HOME, platform };
+    assert.strictEqual(agentHomeDir(opts), path.dirname(stateDir(opts)));
+  }
 });
 
 // --- logDir ---------------------------------------------------------------
@@ -162,6 +189,35 @@ test('nobody builds the state dir inline any more — use paths.stateDir() (#621
       !/homedir\(\)\s*,\s*['"]\.deepsteve['"]/.test(src),
       `${rel} still builds the state dir inline — use stateDir()/statePath() from paths.js`,
     );
+  }
+});
+
+test('the dirs the daemon OWNS never hang off os.homedir() — use agentHomeDir() (#641)', () => {
+  // ~/.claude/commands and ~/.agents are the only dirs the daemon installs its own
+  // artifacts into, and therefore the only ones it DELETES from. Built on os.homedir()
+  // they ignored DEEPSTEVE_HOME, so a second instance started for isolated verification
+  // loaded empty scratch settings, concluded nothing was enabled, and pruned every
+  // managed skill out of a home it did not own — silently, and leaving the real
+  // settings.json still saying all six were enabled.
+  //
+  // Deliberately NOT a blanket ban on os.homedir() + a dotdir. The daemon also READS
+  // ~/.claude/projects (the fork watcher) and ~/.codex (the source of the per-session
+  // symlink farm), and both are correct on os.homedir(): they must name where the
+  // SPAWNED agent reads and writes, and a child inherits the daemon's real HOME
+  // whatever DEEPSTEVE_HOME says. Ownership is the line, not the dotdir.
+  const OWNED = [
+    { label: '~/.claude/commands', re: /homedir\(\)\s*,\s*['"]\.claude['"]\s*,\s*['"]commands['"]/ },
+    { label: '~/.agents', re: /homedir\(\)\s*,\s*['"]\.agents['"]/ },
+  ];
+  for (const rel of GUARDED) {
+    const src = fs.readFileSync(path.join(REPO, rel), 'utf8');
+    for (const { label, re } of OWNED) {
+      assert.ok(
+        !re.test(src),
+        `${rel} builds ${label} from os.homedir() — use agentHomeDir() from paths.js, or a daemon `
+        + `isolated with DEEPSTEVE_HOME will install into, and delete from, the real user's home (#641)`,
+      );
+    }
   }
 });
 

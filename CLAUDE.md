@@ -133,6 +133,7 @@ Rules a change anywhere in the tree could violate. Each one has a page that expl
 - **Use `spawnSession`'s return value** to record `engineType`. A tmux spawn can fail at runtime and fall back to node-pty; recording what was *requested* makes the entry lie.
 - **Every tmux invocation carries `-S <stateDir()>/tmux.sock`** and runs via `execFileSync` on a resolved absolute path — never through a shell, never on tmux's default per-UID socket.
 - **Destroy only what this daemon can positively identify as its own and finished.** A `ds-*` session absent from our state.json is logged and left strictly alone.
+- **Artifacts the daemon installs and removes outside its state dir hang off `agentHomeDir()`, never `os.homedir()`** — `~/.claude/commands`, `~/.agents`. Otherwise a second instance isolated with `DEEPSTEVE_HOME` prunes the real user's home. `os.homedir()` stays right for paths naming where a *spawned agent* reads (`~/.claude/projects`, `~/.codex`); ownership is the line, not the dotdir.
 
 **Tests** ([docs/testing.md](docs/testing.md))
 

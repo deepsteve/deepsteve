@@ -25,6 +25,13 @@
  * `{file:~/.deepsteve/auth-token}` (release.sh). Point it somewhere else and
  * the daemon follows; nothing around it does.
  *
+ * It also moves the AGENT-CONFIG dirs the daemon manages (~/.claude/commands,
+ * ~/.agents/skills), via agentHomeDir() below. That is not a convenience: those
+ * two used to hang off os.homedir() while state hung off DEEPSTEVE_HOME, so an
+ * isolated second instance deleted the real user's installed skills (#641).
+ * Anything the daemon writes OUTSIDE its own state dir belongs on agentHomeDir(),
+ * or the override isolates only half of it.
+ *
  * Injectable platform/env/homedir, same shape as logging.js's defaultLogPaths
  * and power-assertion.js — so the CI unit job (bare ubuntu) can assert the
  * darwin answers, which is the whole point given the bug class here is "works
@@ -150,6 +157,32 @@ function projectModsDir(repoRoot) {
 }
 
 /**
+ * The home whose AGENT-CONFIG dirs (~/.claude, ~/.agents) this daemon manages (#641).
+ *
+ * Derived from stateDir(), never from os.homedir(). With no override the two are the
+ * same string — stateDir() is `<homedir>/.deepsteve`, so its dirname IS the homedir —
+ * which is what makes this a provable no-op for a real install and for every test that
+ * isolates with a scratch HOME.
+ *
+ * It exists because DEEPSTEVE_HOME used not to reach here, and the asymmetry had teeth:
+ * a second instance started `DEEPSTEVE_HOME=<scratch> node server.js` isolated its state
+ * but still wrote — and DELETED — inside the developer's real ~/.claude/commands/deepsteve
+ * and ~/.agents/skills. Its scratch settings.json had no enabledSkills, so the boot
+ * reconcile removed every managed skill from a home it did not own, logged nothing, and
+ * left the real settings.json untouched saying they were all still enabled (#641).
+ *
+ * The line is OWNERSHIP, not the dotdir. Use this for artifacts the daemon installs and
+ * removes. Keep os.homedir() for paths that name where a SPAWNED AGENT reads and writes —
+ * ~/.claude/projects (the fork watcher) and ~/.codex (the per-session symlink farm) — because
+ * a child process inherits the daemon's real HOME whatever DEEPSTEVE_HOME says, so pointing
+ * those at a sandbox would just watch an empty directory. test/unit/paths.test.js pins both
+ * halves of that distinction.
+ */
+function agentHomeDir(opts = {}) {
+  return path.dirname(stateDir(opts));
+}
+
+/**
  * deepsteve's OWN tmux server socket (#625).
  *
  * Before this, the tmux engine passed no socket flag and inherited tmux's default —
@@ -218,6 +251,6 @@ function logDir({ platform = process.platform, env = process.env, homedir = os.h
 
 module.exports = {
   expandTilde, spawnCwdProblem, assertSpawnCwd,
-  stateDir, statePath, projectModsDir, tmuxSocketPath, defaultTmuxSocketPath, logDir,
+  stateDir, statePath, projectModsDir, agentHomeDir, tmuxSocketPath, defaultTmuxSocketPath, logDir,
   DEFAULT_STATE_DIRNAME,
 };

@@ -14,7 +14,7 @@ const { createPowerAssertion } = require('./power-assertion');
 const { resolveForkTip } = require('./fork-resolve');
 const { formatLogTimestamp, createLogRotator, defaultLogPaths } = require('./logging');
 const { findGitRoot } = require('./git-root');
-const { stateDir, expandTilde, spawnCwdProblem, assertSpawnCwd, tmuxSocketPath, defaultTmuxSocketPath } = require('./paths');
+const { stateDir, agentHomeDir, expandTilde, spawnCwdProblem, assertSpawnCwd, tmuxSocketPath, defaultTmuxSocketPath } = require('./paths');
 const { resolveBinary, runBinary, resolveUrlOpener, resolveLoginShell } = require('./bin-path');
 const { createPendingOpens } = require('./pending-opens');
 const { reattachSurvivingTmuxSessions } = require('./tmux-reattach');
@@ -4031,19 +4031,27 @@ const MODS_DIR = path.join(__dirname, 'mods');
 const BUILTIN_MODS = new Set(['browser-console', 'tasks', 'screenshots', 'go-karts', 'tower', 'deepsteve-core', 'agent-dna']);
 
 // --- Skills system ---
+// The two agent-config dirs hang off agentHomeDir(), NOT os.homedir() (#641). They are
+// the only dirs the daemon writes outside DS_DIR, and while they used os.homedir() a
+// second instance isolated with DEEPSTEVE_HOME deleted the real user's installed skills:
+// scratch settings meant nothing was enabled, and the boot reconcile pruned a home it
+// did not own. With no override agentHomeDir() *is* os.homedir(), so this is a no-op for
+// a real install. test/unit/paths.test.js keeps it that way.
 const SKILLS_DIR = path.join(__dirname, 'skills');
-const CLAUDE_COMMANDS_DIR = path.join(os.homedir(), '.claude', 'commands');
-const CODEX_SKILLS_DIR = path.join(os.homedir(), '.agents', 'skills');
+const AGENT_HOME = agentHomeDir();
+const CLAUDE_COMMANDS_DIR = path.join(AGENT_HOME, '.claude', 'commands');
+const CODEX_SKILLS_DIR = path.join(AGENT_HOME, '.agents', 'skills');
 const CODEX_SKILL_STORE_DIR = path.join(DS_DIR, 'codex-skills');
 const SKILL_ID_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/;
 
 // Install a skill file: copy source .md to ~/.claude/commands/deepsteve/{id}.md
 // The deepsteve subdirectory namespaces the Claude command as /deepsteve:{id}.
+// Returns true when the copy actually changed on disk, so a reconcile that finds
+// everything already in place stays silent instead of logging eight no-ops.
 function installSkillFile(id) {
   const src = path.join(SKILLS_DIR, `${id}.md`);
   fs.mkdirSync(SKILL_DEST_DIR, { recursive: true });
-  const dest = skillDestPath(id);
-  fs.copyFileSync(src, dest);
+  return writeFileIfChanged(skillDestPath(id), fs.readFileSync(src, 'utf8'));
 }
 
 function parseSkillFrontmatter(content) {
@@ -4099,9 +4107,10 @@ function renderCodexSkill(id) {
 
 function writeFileIfChanged(filePath, content) {
   try {
-    if (fs.readFileSync(filePath, 'utf8') === content) return;
+    if (fs.readFileSync(filePath, 'utf8') === content) return false;
   } catch {}
   fs.writeFileSync(filePath, content);
+  return true;
 }
 
 // Codex discovers $HOME/.agents/skills/<name>/SKILL.md and follows symlinked
@@ -4111,23 +4120,27 @@ function installCodexSkill(id) {
   const store = codexSkillStorePath(id);
   const dest = codexSkillLinkPath(id);
   fs.mkdirSync(store, { recursive: true });
-  writeFileIfChanged(path.join(store, 'SKILL.md'), renderCodexSkill(id));
+  const wrote = writeFileIfChanged(path.join(store, 'SKILL.md'), renderCodexSkill(id));
   fs.mkdirSync(CODEX_SKILLS_DIR, { recursive: true });
 
   const st = pathStat(dest);
   if (st) {
     if (!st.isSymbolicLink()) {
       log(`Codex skill: ${dest} exists and is not ours — leaving it alone`);
-      return;
+      return wrote;
     }
-    if (fs.readlinkSync(dest) === store) return;
+    if (fs.readlinkSync(dest) === store) return wrote;
     fs.unlinkSync(dest);
   }
   fs.symlinkSync(store, dest);
   log(`Codex skill: linked ${dest} -> ${store}`);
+  return true;
 }
 
+// The remove* pair returns the paths it actually deleted, so removeSkill() can name
+// them in one log line and say nothing when there was nothing to delete (#641).
 function removeCodexSkill(id) {
+  const removed = [];
   const dest = codexSkillLinkPath(id);
   const st = pathStat(dest);
   if (st) {
@@ -4135,6 +4148,7 @@ function removeCodexSkill(id) {
       log(`Codex skill: ${dest} exists and is not ours — leaving it alone`);
     } else {
       fs.unlinkSync(dest);
+      removed.push(dest);
     }
   }
 
@@ -4142,30 +4156,49 @@ function removeCodexSkill(id) {
   // backing directory, rmdirSync leaves it intact rather than clobbering it.
   const store = codexSkillStorePath(id);
   const skillFile = path.join(store, 'SKILL.md');
-  if (pathStat(skillFile)?.isFile()) fs.unlinkSync(skillFile);
+  if (pathStat(skillFile)?.isFile()) {
+    fs.unlinkSync(skillFile);
+    removed.push(skillFile);
+  }
   try { fs.rmdirSync(store); } catch {}
+  return removed;
 }
 
 function removeClaudeSkill(id) {
   const dest = skillDestPath(id);
-  if (pathStat(dest)) fs.unlinkSync(dest);
+  if (!pathStat(dest)) return [];
+  fs.unlinkSync(dest);
+  return [dest];
 }
 
-function installSkill(id) {
-  installSkillFile(id);
-  installCodexSkill(id);
+// `reason` is required by convention, not by the signature: an unexplained skill
+// artifact appearing or vanishing is the thing that made #641 take a day to trace.
+function installSkill(id, reason = 'enabled') {
+  const fileChanged = installSkillFile(id);
+  const codexChanged = installCodexSkill(id);
+  const changed = fileChanged || codexChanged;
+  if (changed) log(`Skill installed: ${id} (${reason})`);
+  return changed;
 }
 
-function removeSkill(id) {
-  removeClaudeSkill(id);
-  removeCodexSkill(id);
+function removeSkill(id, reason = 'unknown') {
+  const removed = [...removeClaudeSkill(id), ...removeCodexSkill(id)];
+  if (removed.length) log(`Skill removed: ${id} (${reason}) — ${removed.join(', ')}`);
+  return removed.length > 0;
 }
 
 // Reconcile enabled skills on startup across both agent formats. Enabled skills
 // are installed, disabled known skills are absent, and invalid/missing entries
 // are removed from settings.
+//
+// It always logs a one-line summary naming the home it managed. That line is cheap
+// and it is the line whose absence made #641 invisible: a second instance pruned the
+// developer's real ~/.claude and nothing anywhere recorded that it had happened.
 function reconcileSkills() {
   try {
+    if (AGENT_HOME !== os.homedir()) {
+      log(`Skills: managing ${AGENT_HOME}, not ${os.homedir()} (DEEPSTEVE_HOME is set)`);
+    }
     const requestedSkills = Array.isArray(settings.enabledSkills) ? settings.enabledSkills : [];
     const validSkills = [];
     const enabledSet = new Set();
@@ -4182,18 +4215,23 @@ function reconcileSkills() {
         .filter(file => file.endsWith('.md') && SKILL_ID_RE.test(file.slice(0, -3)))
         .map(file => file.slice(0, -3))
       : [];
+    let installed = 0;
+    let removed = 0;
     for (const id of knownSkills) {
-      if (enabledSet.has(id)) installSkill(id);
-      else removeSkill(id);
+      if (enabledSet.has(id)) installed += installSkill(id, 'enabled in settings') ? 1 : 0;
+      else removed += removeSkill(id, 'not in enabledSkills') ? 1 : 0;
     }
     // Also clean valid settings entries whose canonical source disappeared.
     for (const id of requestedSkills) {
-      if (SKILL_ID_RE.test(id) && !enabledSet.has(id)) removeSkill(id);
+      if (SKILL_ID_RE.test(id) && !enabledSet.has(id)) {
+        removed += removeSkill(id, 'source skills/*.md is gone') ? 1 : 0;
+      }
     }
     if (validSkills.length !== requestedSkills.length) {
       settings.enabledSkills = validSkills;
       saveSettings();
     }
+    log(`Skills reconciled: ${validSkills.length} enabled, ${installed} installed, ${removed} removed (home: ${AGENT_HOME})`);
   } catch (e) {
     log('Skills reconciliation failed:', e.message);
   }
@@ -4304,7 +4342,7 @@ app.post('/api/skills/enable', (req, res) => {
   }
   if (!fs.existsSync(src)) return res.status(404).json({ error: 'Skill not found' });
   try {
-    installSkill(id);
+    installSkill(id, 'enabled via API');
     if (!settings.enabledSkills) settings.enabledSkills = [];
     if (!settings.enabledSkills.includes(id)) settings.enabledSkills.push(id);
     saveSettings();
@@ -4327,7 +4365,7 @@ app.post('/api/skills/disable', (req, res) => {
     return res.status(400).json({ error: 'Invalid skill ID' });
   }
   try {
-    removeSkill(id);
+    removeSkill(id, 'disabled via API');
     settings.enabledSkills = (settings.enabledSkills || []).filter(s => s !== id);
     saveSettings();
     log(`Skill disabled: ${id}`);

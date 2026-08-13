@@ -187,6 +187,61 @@ test('disable removes both formats and is idempotent', async () => {
   assert.strictEqual((await postSkill('disable', 'terminal')).ok, true)
 })
 
+test('a DEEPSTEVE_HOME second instance leaves the real home\'s skills alone (#641)', async () => {
+  // The incident. An agent verifying an unrelated change started a second daemon with
+  // DEEPSTEVE_HOME pointed at a scratch dir but the ambient HOME inherited. stateDir()
+  // honored the override; the skill destinations hung off os.homedir() and did not. So
+  // that instance loaded empty scratch settings, concluded nothing was enabled, and its
+  // boot reconcile deleted every managed skill out of ~/.claude/commands/deepsteve and
+  // ~/.agents/skills — a home it did not own — while the real settings.json, untouched,
+  // still listed all six as enabled.
+  //
+  // BOTH homes here are scratch dirs under this suite's mkdtemp: HOME plays the
+  // developer's real home, isoHome plays the second instance's. Nothing in this test can
+  // name an actual ~/.claude, which is the only way it is safe to write at all.
+  assert.strictEqual((await postSkill('enable', 'autoresearch')).ok, true)
+  assert.ok(fs.existsSync(claudeSkillPath('autoresearch')))
+  assert.ok(fs.lstatSync(codexLinkPath('autoresearch')).isSymbolicLink())
+
+  const isoHome = path.join(tmpRoot, 'iso')
+  // Named <isoHome>/.deepsteve so the derived agent home is isoHome and the derived tmux
+  // socket is the one TmuxSandbox.forHome(isoHome) reaps — the same "socket is a pure
+  // function of the state dir" property the main daemon relies on (#625).
+  const isoState = path.join(isoHome, '.deepsteve')
+  const isoPort = await freePort()
+  const env = { ...process.env, HOME, PORT: String(isoPort) }
+  delete env.CLAUDECODE
+  for (const key of Object.keys(env)) {
+    if (key.startsWith('DEEPSTEVE_')) delete env[key]
+  }
+  env.DEEPSTEVE_HOME = isoState // set AFTER the strip — this is the whole point of the test
+
+  let isoLog = ''
+  const iso = spawn('node', ['server.js', '--test-mode', '--bind', '127.0.0.1'], { cwd: REPO_ROOT, env })
+  iso.stdout.on('data', data => { isoLog += data.toString() })
+  iso.stderr.on('data', data => { isoLog += data.toString() })
+  try {
+    // Wait for the listen line, not the reconcile line: reconcileSkills() runs BEFORE
+    // app.listen(), so a daemon that is listening has provably finished reconciling.
+    await waitFor(async () => isoLog.includes('HTTP server listening'), 'second instance startup')
+  } finally {
+    await new Promise(resolve => { iso.on('exit', resolve); iso.kill('SIGTERM') })
+    try { TmuxSandbox.reapHome(isoHome) } catch (e) { console.error(e.message) }
+  }
+
+  // The artifacts in the home it does not own survive, in both formats.
+  assert.ok(fs.existsSync(claudeSkillPath('autoresearch')),
+    'second instance deleted the real home\'s Claude command — #641 has regressed')
+  assert.ok(fs.lstatSync(codexLinkPath('autoresearch')).isSymbolicLink(),
+    'second instance deleted the real home\'s Codex link — #641 has regressed')
+  assert.ok(fs.existsSync(codexSkillPath('autoresearch')))
+
+  // And it said, in its own log, which home it was managing and that it removed nothing.
+  assert.ok(isoLog.includes(`Skills: managing ${isoHome}`), isoLog.slice(-2000))
+  assert.match(isoLog, new RegExp(`Skills reconciled: 0 enabled, 0 installed, 0 removed \\(home: ${isoHome}\\)`))
+  assert.ok(!isoLog.includes('Skill removed:'), isoLog.slice(-2000))
+})
+
 test('a user-owned non-symlink path is logged and never clobbered', async () => {
   const conflict = codexLinkPath('fork')
   fs.mkdirSync(conflict, { recursive: true })
