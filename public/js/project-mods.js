@@ -30,6 +30,7 @@
  */
 
 import { tabIcon } from './tab-manager.js';
+import { nsKey } from './storage-namespace.js';
 
 let mods = [];            // every project mod, all projects — the server sends the lot
 let featureEnabled = true; // projectModsEnabled; false hides every surface
@@ -37,6 +38,40 @@ let cb = {};              // callbacks injected by app.js
 const buttons = new Map(); // modId → button element currently in #tabs
 const railRows = new Map(); // modId → the rail row context-views last drew for it (#628)
 const lastSeen = new Map(); // modId → updatedAt, so a page rewrite can reload open tabs
+
+// ----------------------------------------------------------- compact rail (#646)
+
+/**
+ * Compact view: lay the rail rows out left-to-right in a wrapping grid instead of one
+ * per line, so a project with half a dozen mods costs two rail lines rather than six.
+ *
+ * localStorage, not sessionStorage. The rail's other prefs (width, archived-open) are
+ * per-window VIEW state and live in sessionStorage deliberately; this is a display
+ * preference, so it should hold across windows and reloads — the same call
+ * mod-manager.js makes for its enabled-mods set. nsKey keeps it isolated per Baby
+ * Browser recursion level like every other client key.
+ *
+ * It is not a setting: it never reaches the server, so there is no SETTINGS_SCHEMA
+ * entry. The server-authoritative switch in this feature is projectModsEnabled, which
+ * gates whether an agent may write a mod at all; how tall the rows are is nobody's
+ * business but this browser's.
+ */
+const COMPACT_KEY = nsKey('deepsteve-project-mods-compact');
+let compactRail = readCompact();
+
+function readCompact() {
+  try { return localStorage.getItem(COMPACT_KEY) === '1'; } catch { return false; }
+}
+
+export const isCompactRail = () => compactRail;
+
+export function setCompactRail(val) {
+  compactRail = !!val;
+  try { localStorage.setItem(COMPACT_KEY, compactRail ? '1' : '0'); } catch { /* private mode */ }
+  // The rail is context-views' render pass, so ask it to redraw — appendRailRows reads
+  // the new value back out. Same one-way dependency refresh() relies on.
+  cb.renderRail?.();
+}
 
 // ------------------------------------------------------------------- scoping
 
@@ -330,6 +365,24 @@ export function openMod(id) {
 // ------------------------------------------------------------------ rail rows
 
 /**
+ * Draw a project's rail mods into `list` — the one place that decides between the two
+ * layouts, so context-views never has to know a compact mode exists (#646).
+ *
+ * Off, the rows go straight into the .context-list column and the DOM is identical to
+ * what it was before compact view existed: no wrapper, no extra class, nothing for the
+ * default path to regress against. On, they go into a single .project-mod-flow, which
+ * is the grid CSS keys off — a wrapper rather than a class on the list because the list
+ * also holds the project rows, which must keep stacking.
+ */
+export function appendRailRows(list, railMods) {
+  if (!list || !railMods?.length) return;  // no mods → no empty wrapper
+  const target = compactRail ? document.createElement('div') : list;
+  if (target !== list) target.className = 'project-mod-flow';
+  for (const mod of railMods) target.appendChild(makeRailRow(mod));
+  if (target !== list) list.appendChild(target);
+}
+
+/**
  * Build one rail row. Shaped exactly like a context row (.context-row + icon/label
  * children) so the collapsed icon rail's existing rules apply unchanged — it hides
  * .context-row-label and shows .context-row-icon, and these degrade to squares for
@@ -460,6 +513,14 @@ function showModMenu(x, y, mod) {
   // surface, and ticking "Pin as a background tab" above flips this back off.
   addMenuItem(menu, `${opensAsView(mod) ? '✓ ' : '   '}Open as a full view (no tab)`, () => {
     patchMod(mod.id, { openMode: opensAsView(mod) ? 'tab' : 'view' });
+  });
+
+  addMenuSeparator(menu);
+  // The one item here that is NOT about the mod you right-clicked (#646) — hence the
+  // parenthetical, and hence a separator of its own. It is also the only item that
+  // doesn't PUT: it's a per-browser display preference, not registry state.
+  addMenuItem(menu, `${compactRail ? '✓ ' : '   '}Compact view (all project mods)`, () => {
+    setCompactRail(!compactRail);
   });
 
   addMenuSeparator(menu);

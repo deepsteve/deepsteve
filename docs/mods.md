@@ -424,6 +424,8 @@ The page is served same-origin from `GET /api/project-mods/:id/page`, so it call
 
 Right-click its rail row or its strip button: Open, Rename, Set icon, toggle each of the three launcher surfaces, toggle "Open as a full view (no tab)", Disable, Delete. Renaming its tab renames the mod. Closing its tab does **not** delete it — a pinned mod returns the next time its project is active.
 
+**Compact view** (#646) is the odd one out in that menu, and also appears on the *project* row's right-click menu whenever the project has rail mods. It lays every project mod's rail row out left-to-right in a wrapping grid instead of one per line, so half a dozen mods cost two rail lines rather than six. It applies to **all** project mods, not the one you right-clicked — hence the parenthetical in the label. It is a per-browser display preference in `localStorage` (`deepsteve-project-mods-compact`), not a setting: it never reaches the server and has no `SETTINGS_SCHEMA` entry, because how tall the rows are is nobody's business but this browser's. Off by default, and off renders exactly the DOM it did before the option existed — `appendRailRows()` in `public/js/project-mods.js` only emits the `.project-mod-flow` wrapper when it is on. The grid is `auto-fill`/`minmax`, so a rail dragged wider earns a third column and the collapsed 48px icon rail falls back to the single column of squares.
+
 ### Disk layout
 
 One directory per mod, inside the repo:

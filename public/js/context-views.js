@@ -46,7 +46,7 @@ import { tabIcon } from './tab-manager.js';
 // Project Mods (#618) register an entry beneath their project's row. One-way import:
 // project-mods.js learns about the active view through callbacks app.js injects, never
 // by importing this module back.
-import { railModsFor, makeRailRow } from './project-mods.js';
+import { railModsFor, appendRailRows, isCompactRail, setCompactRail } from './project-mods.js';
 
 // Context definitions are server-owned (#526): they are the same entity as the
 // Scheduled Tasks "project groups", loaded from /api/contexts and kept fresh by
@@ -421,10 +421,13 @@ function renderRail() {
  * dozen projects into a wall — and the row you just clicked is the one whose tooling
  * you want. Everything else about a mod (its strip button, its pinned tab) is scoped
  * the same way, so this matches rather than adds a rule.
+ *
+ * How they're laid out (one per line, or the compact wrapping grid, #646) is
+ * project-mods' call, not ours — appendRailRows owns that branch.
  */
 function appendProjectModRows(list, ctx) {
   if (!ctx || ctx.id !== activeContextId) return;
-  for (const mod of railModsFor(ctx)) list.appendChild(makeRailRow(mod));
+  appendRailRows(list, railModsFor(ctx));
 }
 
 function makeRow(id, name, active, ctx) {
@@ -514,6 +517,11 @@ function addRowMenuItem(menu, label, onPick, color) {
   menu.appendChild(item);
   return item;
 }
+function addRowMenuSeparator(menu) {
+  const sep = document.createElement('div');
+  sep.className = 'context-menu-separator';
+  menu.appendChild(sep);
+}
 
 // ctx null = the "All" row, which has nothing to edit or delete — it gets the one
 // action that makes sense there, reusing the same call as the rail's "+ New
@@ -536,6 +544,18 @@ function showRowMenu(x, y, ctx) {
     // Archive (#601) — the non-destructive alternative to Delete: the context keeps
     // its dirs/icon/position but leaves the list until it's unarchived.
     addRowMenuItem(menu, ctx.archived ? 'Unarchive' : 'Archive', () => archiveContext(ctx, !ctx.archived));
+    // Compact view (#646) — the same per-browser toggle the mod rows' own right-click
+    // menu carries, offered here too because the row you right-click when the rail has
+    // grown too tall is as likely to be the project as one of its mods. Only shown when
+    // there is something for it to compact; projectModsEnabled:false empties
+    // railModsFor, so the item disappears with the feature for free.
+    if (railModsFor(ctx).length) {
+      addRowMenuSeparator(menu);
+      const compact = isCompactRail();
+      addRowMenuItem(menu, `${compact ? '✓ ' : '   '}Compact view (all project mods)`,
+        () => setCompactRail(!compact));
+      addRowMenuSeparator(menu);
+    }
     addRowMenuItem(menu, 'Delete', () => {
       if (confirm(`Delete project "${ctx.name}"?`)) deleteContext(ctx);
     }, 'var(--ds-accent-red)');

@@ -1366,6 +1366,43 @@ kbd {
 .context-row.project-mod-row { padding-left: 26px; font-size: 12px; }
 .context-row.project-mod-row .context-row-icon { opacity: 0.85; }
 #context-rail.collapsed .context-row.project-mod-row { padding-left: 12px; }
+
+/* Compact view (#646) — the same rows, flowing left-to-right and wrapping down instead
+   of one per line, so half a dozen mods cost two rail lines rather than six. Off by
+   default and per browser (localStorage, not a server setting); project-mods.js only
+   emits this wrapper when it's on, so the default path's DOM is untouched.
+
+   auto-fill/minmax rather than a hard-coded two columns, because the rail is
+   user-resizable (#569): two at the default 200px, three when it's dragged wider, one
+   when it's narrow — instead of clipping at a fixed count. Truncation comes free from
+   .context-row-label's existing ellipsis, and makeRailRow already puts the full name in
+   the row's title, so hover recovers it.
+
+   The 3px .context-row border-left is deliberately NOT zeroed: it is the accent that
+   marks the chip owning the view slot, and without it .active and :hover both paint
+   --ds-bg-tertiary and stop being distinguishable. */
+.project-mod-flow {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(80px, 1fr));
+  gap: 2px;
+  /* Left: the indent that marks these as children of the project row above. Right: a
+     chip's hover/active background would otherwise run flush to the bezel, which is
+     the bleed #577 fixed for the rows — a chip is a paint edge the rounded themes'
+     corner arc doesn't reliably clip. The 80px floor is set so 200px (the default
+     --ds-context-width, minus these two) still fits two columns. */
+  padding: 0 6px 0 14px;
+}
+.project-mod-flow .context-row.project-mod-row {
+  padding: 5px 8px;
+  gap: 4px;
+  min-width: 0;         /* a grid item defaults to min-width:auto and would refuse to shrink */
+}
+.project-mod-flow .context-row-icon { width: 16px; height: 16px; font-size: 10px; }
+.project-mod-flow .context-row-icon.is-emoji { font-size: 12px; }
+/* The 48px icon rail has no hierarchy to show and no room to wrap — and two 22px squares
+   per line would sit off the project rows' centre line. Fall back to the single column. */
+#context-rail.collapsed .project-mod-flow { display: flex; flex-direction: column; padding: 0; }
+
 /* Tab-count badge (#529). --ds-border (not --ds-bg-tertiary) so the pill stays
    legible on active/hover rows, which use --ds-bg-tertiary as their background. */
 .context-row-count {

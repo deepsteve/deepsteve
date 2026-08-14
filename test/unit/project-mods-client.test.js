@@ -551,3 +551,96 @@ test('render() never calls back into the rail — only refresh() does', async ()
   await mod.refresh();
   assert.strictEqual(state.railRenders, afterInit + 1);
 });
+
+// -------------------------------------------------------------- compact view (#646)
+// The layout branch and the per-browser preference behind it. `storeMap` is shared
+// across imports (it IS the fake localStorage), so each test seeds the key explicitly
+// and clears it afterwards rather than relying on setup() — which never wipes it.
+
+const COMPACT_KEY = 'deepsteve-project-mods-compact';   // depth 0, so nsKey adds no prefix
+const seedCompact = (on) => { storeMap.set(COMPACT_KEY, on ? '1' : '0'); };
+const clearCompact = () => { storeMap.delete(COMPACT_KEY); };
+const flowChildren = (list) => list.children.filter(c => c.className === 'project-mod-flow');
+const menuLabels = () => bodyChildren.at(-1).children.map(c => c.textContent);
+const findMenuItem = (needle) => bodyChildren.at(-1).children.find(c => c.textContent?.includes(needle));
+
+test('compact is off by default, and off means the rows go straight into the list', async () => {
+  clearCompact();
+  const { mod } = await setup({ mods: [modA, viewA], activeContext: CTX_A });
+  assert.strictEqual(mod.isCompactRail(), false);
+
+  const list = fakeElement();
+  mod.appendRailRows(list, mod.railModsFor(CTX_A));
+  assert.strictEqual(flowChildren(list).length, 0, 'no wrapper — the DOM is what it was pre-#646');
+  assert.deepStrictEqual(list.children.map(c => c.dataset.projectModId), ['ma', 'va']);
+});
+
+test('compact on wraps every row in exactly one .project-mod-flow', async () => {
+  seedCompact(true);
+  const { mod } = await setup({ mods: [modA, viewA], activeContext: CTX_A });
+  assert.strictEqual(mod.isCompactRail(), true, 'the stored preference is read at import');
+
+  const list = fakeElement();
+  mod.appendRailRows(list, mod.railModsFor(CTX_A));
+  const flows = flowChildren(list);
+  assert.strictEqual(flows.length, 1, 'one wrapper for the whole group, not one per row');
+  assert.strictEqual(list.children.length, 1, 'and no loose rows beside it');
+  assert.deepStrictEqual(flows[0].children.map(c => c.dataset.projectModId), ['ma', 'va']);
+  clearCompact();
+});
+
+test('a project with no rail mods never grows an empty wrapper', async () => {
+  seedCompact(true);
+  const { mod } = await setup({ mods: [modA], activeContext: CTX_A });
+  const list = fakeElement();
+  mod.appendRailRows(list, mod.railModsFor(CTX_B));   // modA belongs to project A
+  assert.strictEqual(list.children.length, 0);
+  clearCompact();
+});
+
+test('setCompactRail persists the preference and redraws the rail', async () => {
+  clearCompact();
+  const { mod, state } = await setup({ activeContext: CTX_A });
+  const before = state.railRenders;
+
+  mod.setCompactRail(true);
+  assert.strictEqual(mod.isCompactRail(), true);
+  assert.strictEqual(storeMap.get(COMPACT_KEY), '1');
+  assert.strictEqual(state.railRenders, before + 1, "the rail is context-views' pass — ask it to redraw");
+
+  mod.setCompactRail(false);
+  assert.strictEqual(storeMap.get(COMPACT_KEY), '0');
+  assert.strictEqual(state.railRenders, before + 2);
+  clearCompact();
+});
+
+test('the preference survives a reload — a fresh import reads it back', async () => {
+  clearCompact();
+  const first = await setup({ activeContext: CTX_A });
+  first.mod.setCompactRail(true);
+
+  const second = await setup({ activeContext: CTX_A });   // a new module instance = a reload
+  assert.strictEqual(second.mod.isCompactRail(), true);
+  clearCompact();
+});
+
+test('the mod menu carries the toggle, ticked to match, and flipping it redraws', async () => {
+  clearCompact();
+  const { mod, state } = await setup({ mods: [modA], activeContext: CTX_A });
+  const row = mod.makeRailRow(modA);
+
+  row.listeners.contextmenu({ preventDefault: () => {}, clientX: 10, clientY: 10 });
+  const off = findMenuItem('Compact view');
+  assert.ok(off, `the menu offers it: ${JSON.stringify(menuLabels())}`);
+  assert.ok(!off.textContent.startsWith('✓'), 'unticked while off');
+  assert.ok(off.textContent.includes('(all project mods)'), 'says it is not about this one mod');
+
+  const before = state.railRenders;
+  off.onclick();
+  assert.strictEqual(mod.isCompactRail(), true);
+  assert.strictEqual(state.railRenders, before + 1);
+
+  row.listeners.contextmenu({ preventDefault: () => {}, clientX: 10, clientY: 10 });
+  assert.ok(findMenuItem('Compact view').textContent.startsWith('✓ '), 'ticked while on');
+  clearCompact();
+});
