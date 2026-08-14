@@ -406,9 +406,13 @@ export function openMod(id, { fromContextId = null } = {}) {
  *
  * Off, the rows go straight into the .context-list column and the DOM is identical to
  * what it was before compact view existed: no wrapper, no extra class, nothing for the
- * default path to regress against. On, they go into a single .project-mod-flow, which
- * is the grid CSS keys off — a wrapper rather than a class on the list because the list
- * also holds the project rows, which must keep stacking.
+ * default path to regress against. On, they go into a single .project-mod-flow, which is
+ * what the wrapping icon-square CSS keys off — a wrapper rather than a class on the list
+ * because the list also holds the project rows, which must keep stacking.
+ *
+ * Both modes build the SAME row, labels included; compact hides them in CSS. So the
+ * toggle is a pure display preference with no second DOM shape to keep correct, and the
+ * name a square drops is still on the row's title attribute.
  */
 export function appendRailRows(list, railMods, ownerContextId = null) {
   if (!list || !railMods?.length) return;  // no mods → no empty wrapper

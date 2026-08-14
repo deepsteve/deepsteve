@@ -1367,41 +1367,71 @@ kbd {
 .context-row.project-mod-row .context-row-icon { opacity: 0.85; }
 #context-rail.collapsed .context-row.project-mod-row { padding-left: 12px; }
 
-/* Compact view (#646) — the same rows, flowing left-to-right and wrapping down instead
-   of one per line, so half a dozen mods cost two rail lines rather than six. Off by
-   default and per browser (localStorage, not a server setting); project-mods.js only
-   emits this wrapper when it's on, so the default path's DOM is untouched.
+/* Compact view (#646, reshaped in #647) — the mods as bare icon squares, flowing
+   left-to-right and wrapping down, so a project's tooling costs one rail line instead of
+   one line per mod. Off by default and per browser (localStorage, not a server setting);
+   project-mods.js only emits this wrapper when it's on, so the default path's DOM is
+   untouched and still renders a labelled row per mod.
 
-   auto-fill/minmax rather than a hard-coded two columns, because the rail is
-   user-resizable (#569): two at the default 200px, three when it's dragged wider, one
-   when it's narrow — instead of clipping at a fixed count. Truncation comes free from
-   .context-row-label's existing ellipsis, and makeRailRow already puts the full name in
-   the row's title, so hover recovers it.
+   Names off is what makes it compact. A labelled chip is ~90px, so a 200px rail fitted
+   two and a name of any length truncated to nothing useful; an icon chip fits three, and
+   the name is still one hover away — makeRailRow puts it in the row's title.
 
-   The 3px .context-row border-left is deliberately NOT zeroed: it is the accent that
-   marks the chip owning the view slot, and without it .active and :hover both paint
-   --ds-bg-tertiary and stop being distinguishable. */
+   Compact means SHORTER, not SMALLER: the chips still divide the full rail width between
+   them (flex-grow below), so losing the label costs vertical space and nothing else. A row
+   of icon-sized squares with dead rail either side of them would trade six easy targets
+   for six hard ones, which is not a trade worth making at any density.
+
+   The label is hidden rather than left unrendered so the DOM is identical in both modes
+   and the toggle stays a pure display preference — no re-render, nothing to get wrong. */
 .project-mod-flow {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(80px, 1fr));
-  gap: 2px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
   /* Left: the indent that marks these as children of the project row above. Right: a
      chip's hover/active background would otherwise run flush to the bezel, which is
      the bleed #577 fixed for the rows — a chip is a paint edge the rounded themes'
-     corner arc doesn't reliably clip. The 80px floor is set so 200px (the default
-     --ds-context-width, minus these two) still fits two columns. */
-  padding: 0 6px 0 14px;
+     corner arc doesn't reliably clip. */
+  padding: 2px 6px 4px 14px;
 }
 .project-mod-flow .context-row.project-mod-row {
-  padding: 5px 8px;
-  gap: 4px;
-  min-width: 0;         /* a grid item defaults to min-width:auto and would refuse to shrink */
+  /* Chips GROW to share the line rather than sitting at icon size: one mod fills the rail
+     width, two take half each, three a third. Dropping the label must not shrink the hit
+     target — the icon is what the row shows, not what it is worth touching. The 56px basis
+     is only the wrap threshold (how many fit before the next line), never the final width;
+     flex-grow always spends the leftover. */
+  flex: 1 1 56px;
+  min-width: 0;         /* a flex item defaults to min-width:auto and would refuse to shrink */
+  min-height: 32px;     /* a comfortable target even for the shortest chip */
+  padding: 5px 4px;
+  gap: 0;
+  justify-content: center;
+  /* The 3px accent border would knock every square off its own centre — the same reason
+     the collapsed icon rail zeroes it. The .active signal moves to the outline below. */
+  border-left-width: 0;
 }
-.project-mod-flow .context-row-icon { width: 16px; height: 16px; font-size: 10px; }
-.project-mod-flow .context-row-icon.is-emoji { font-size: 12px; }
-/* The 48px icon rail has no hierarchy to show and no room to wrap — and two 22px squares
-   per line would sit off the project rows' centre line. Fall back to the single column. */
-#context-rail.collapsed .project-mod-flow { display: flex; flex-direction: column; padding: 0; }
+/* The whole point of the mode. Hidden, not removed — see the note above. */
+.project-mod-flow .context-row-label { display: none; }
+/* A square for every mod, chosen icon or derived monogram. Same rule the collapsed icon
+   rail applies, for the same reason: .has-icon gates the chip in the expanded rail, and
+   without this an icon-less mod compacts down to an empty box. */
+.project-mod-flow .context-row-icon { display: inline-flex; width: 22px; height: 22px; font-size: 11px; }
+.project-mod-flow .context-row-icon.is-emoji { font-size: 15px; }
+/* Which chip owns the view slot. An outline rather than the row background .active
+   already paints: with the label gone, .active and :hover are both --ds-bg-tertiary and
+   would be indistinguishable — and unlike a border it costs no layout, so a chip doesn't
+   move when it becomes active. */
+.project-mod-flow .context-row.project-mod-row.active {
+  outline: 1px solid var(--ds-accent-blue);
+  outline-offset: -1px;
+}
+/* The 48px icon rail has no hierarchy to show and no room to wrap — and two squares per
+   line would sit off the project rows' centre line. Fall back to the single column, at the
+   same 22px every other collapsed row draws, so the whole rail stays one column of squares
+   whether or not compact view is on. */
+#context-rail.collapsed .project-mod-flow { flex-direction: column; padding: 0; }
+#context-rail.collapsed .project-mod-flow .context-row-icon { width: 22px; height: 22px; font-size: 12px; }
+#context-rail.collapsed .project-mod-flow .context-row-icon.is-emoji { font-size: 15px; }
 
 /* Tab-count badge (#529). --ds-border (not --ds-bg-tertiary) so the pill stays
    legible on active/hover rows, which use --ds-bg-tertiary as their background. */
