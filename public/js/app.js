@@ -2485,11 +2485,18 @@ function createDisplayTab(id, name, opts = {}) {
  *
  * cwd is set to the mod's project so the existing Projects filter scopes this tab to
  * the project it belongs to, exactly the way display tabs are scoped (#530).
+ *
+ * `opts.pinned` records the tab's ORIGIN: true only when autoOpenPinned() opened it
+ * because the mod carries the 'tab' surface. It is the one thing that distinguishes
+ * that tab from one the user opened by clicking, so un-pinning can close the first and
+ * leave the second (#645) — and it is persisted, because the restore path is the only
+ * thing that survives a reload and would otherwise bring the tab back forever.
  */
 function createProjectModTab(mod, opts = {}) {
   const id = projectModTabId(mod.id);
   if (sessions.has(id)) return id;
   const background = !!opts.background;
+  const pinned = !!opts.pinned;
 
   const container = document.createElement('div');
   container.className = 'terminal-container';
@@ -2513,10 +2520,10 @@ function createProjectModTab(mod, opts = {}) {
   sessions.set(id, {
     term: null, fit: null, ws: null, container, cwd: mod.project,
     name: tabName, waitingForInput: false, hasUnseenActivity: false, scrollControl: null,
-    type: 'project-mod', projectModId: mod.id,
+    type: 'project-mod', projectModId: mod.id, pinned,
   });
 
-  SessionStores.add(getWindowId(), { id, name: tabName, type: 'project-mod', projectModId: mod.id, cwd: mod.project });
+  SessionStores.add(getWindowId(), { id, name: tabName, type: 'project-mod', projectModId: mod.id, cwd: mod.project, pinned });
 
   const tabCallbacks = {
     onSwitch: (sessionId) => switchTo(sessionId),
@@ -2574,14 +2581,21 @@ function projectModTabIds(modId) {
   return sessions.has(id) ? [id] : [];
 }
 
-/** Open this mod's tab, or focus it if it's already open. */
-function ensureProjectModTab(mod, { background = false, restoreActive = false } = {}) {
+/**
+ * Open this mod's tab, or focus it if it's already open.
+ *
+ * The already-open branch deliberately does NOT stamp `pinned` onto the existing
+ * session. Origin is decided once, when the tab is created: a tab you opened by
+ * clicking does not become the pin's just because the mod was pinned afterwards, so
+ * removing that pin later leaves your tab alone (#645).
+ */
+function ensureProjectModTab(mod, { background = false, restoreActive = false, pinned = false } = {}) {
   const id = projectModTabId(mod.id);
   if (sessions.has(id)) {
     if (!background && !restoreActive) focusTab(id);
     return id;
   }
-  return createProjectModTab(mod, { background, restoreActive });
+  return createProjectModTab(mod, { background, restoreActive, pinned });
 }
 
 /**
@@ -2641,9 +2655,18 @@ function renameProjectModTab(mod) {
   if (changed) notifyTabsChanged();
 }
 
-/** The mod was deleted or disabled — close its tabs without a confirm prompt. */
-function closeProjectModTabs(modId) {
-  for (const id of projectModTabIds(modId)) killSession(id);
+/**
+ * The mod was deleted or disabled — close its tabs without a confirm prompt.
+ *
+ * `pinnedOnly` is the weaker, un-pin form (#645): it closes only a tab autoOpenPinned()
+ * opened, so removing the 'tab' surface takes away the tab the pin was responsible for
+ * and leaves one the user opened by clicking a tab-mode mod.
+ */
+function closeProjectModTabs(modId, { pinnedOnly = false } = {}) {
+  for (const id of projectModTabIds(modId)) {
+    if (pinnedOnly && !sessions.get(id)?.pinned) continue;
+    killSession(id);
+  }
 }
 
 // Display tabs post {type:'ds-audio-state', tabId, emitting} from the detector script
@@ -2774,15 +2797,24 @@ async function restoreSessions(sessionList, opts = {}) {
       return fetch(`/api/project-mods/${entry.projectModId}/page`, { method: 'HEAD' })
         .then(resp => {
           if (!resp.ok) return null;
+          const known = ProjectMods.getMod(entry.projectModId);
           // A mod flipped to openMode:'view' can still carry a persisted tab entry from
           // before the flip. Reject it here — when the registry fetch has already landed —
           // so the existing null-result cleanup drops it without the tab ever appearing.
           // If the registry is still in flight, syncOpenTabs() closes it on the first
           // render instead, so the entry is reclaimed either way.
-          if (ProjectMods.getMod(entry.projectModId)?.openMode === 'view') return null;
+          if (known?.openMode === 'view') return null;
+          // Same shape for the pin (#645): this entry exists only because the mod used to
+          // be pinned, and it isn't any more. The `known &&` guard is what makes the
+          // in-flight case safe — with no registry yet we must not reject a legitimate
+          // tab, and carrying `pinned` onto the restored session below is what lets
+          // syncOpenTabs() be the backstop.
+          if (entry.pinned && known && !known.surfaces.includes('tab')) return null;
           return ensureProjectModTab(
             { id: entry.projectModId, name: entry.name, project: entry.cwd },
-            { restoreActive: true },
+            // ?? migrates an entry persisted before the flag existed: a mod that is pinned
+            // right now almost certainly opened that tab itself.
+            { restoreActive: true, pinned: entry.pinned ?? !!known?.surfaces?.includes('tab') },
           );
         })
         .catch(() => null);
@@ -4412,6 +4444,11 @@ async function init() {
     reloadModTab: (mod) => reloadProjectModTab(mod),
     renameModTab: (mod) => renameProjectModTab(mod),
     closeModTabs: (modId) => closeProjectModTabs(modId),
+    // Un-pinning (#645). A separate callback rather than an option on closeModTabs: the
+    // two are different guarantees — "this mod must own no tab" vs "the pin's tab goes,
+    // yours stays" — and a caller that forgot the option would silently get the
+    // destructive one.
+    closePinnedModTab: (modId) => closeProjectModTabs(modId, { pinnedOnly: true }),
     renderRail: () => refreshContextFilter(),
     // openMode:'view' (#628). One snapshot rather than three getters, so openMod()'s toggle
     // and syncModView()'s teardown always see the occupant and the front/back state agree

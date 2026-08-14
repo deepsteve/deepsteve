@@ -232,6 +232,13 @@ export function render() {
  * disabled mod's tab closes, a renamed one's tab is renamed, and a mod whose page was
  * rewritten gets its iframe reloaded (the broadcast is payload-less, so updatedAt is
  * what tells us the bytes changed).
+ *
+ * Un-pinning is the fourth reason (#645), and the only one that is selective: the tab
+ * autoOpenPinned() opened goes away, but a tab you opened yourself by clicking a
+ * tab-mode mod stays. Without the distinction one of the two is always wrong —
+ * closing everything makes a click on a `surfaces:['rail'], openMode:'tab'` mod
+ * impossible (the next render would shut the tab it just opened), and closing nothing
+ * is the bug: the pin's tab outlived the pin, and came back on every reload.
  */
 function syncOpenTabs() {
   const seen = new Set();
@@ -246,7 +253,11 @@ function syncOpenTabs() {
       // written before the flip — leaves one behind, and closing it here is the guarantee
       // that it goes away. Cheap and idempotent: the callback is a no-op for a mod with no
       // open tab, which is every view-mode mod after the first pass.
+      //
+      // `else if`, not a second `if`: the view branch already closed everything this mod
+      // owns, and the selective close after it would only ever be a weaker no-op.
       if (opensAsView(mod)) cb.closeModTabs?.(mod.id);
+      else if (!mod.surfaces.includes('tab')) cb.closePinnedModTab?.(mod.id);
       cb.renameModTab?.(mod);
     }
   }
@@ -334,13 +345,18 @@ function renderButtons() {
  * in the BACKGROUND (#600's rule: unattended work must not steal focus). Its iframe
  * stays mounted when you switch away, which is what "always on in the background"
  * means here — no server-side worker is involved.
+ *
+ * `pinned` travels with `background` because this is the only place either is set: it
+ * stamps the tab's ORIGIN, which is what syncOpenTabs() reads back when the pin is
+ * removed. A tab opened from openMod() carries neither and is therefore the user's.
  */
 function autoOpenPinned() {
   for (const mod of visibleMods()) {
-    // The server can't persist openMode:'view' together with the 'tab' surface, but the
-    // client can hold a list mid-flight — and pinning a view would mean auto-taking over
-    // the screen, so re-check rather than trust.
-    if (!opensAsView(mod) && mod.surfaces.includes('tab')) cb.ensureModTab?.(mod, { background: true });
+    // A view is never pinned (the pin overrides view mode for as long as it is set, so a
+    // pinned mod reads as openMode:'tab' — see cleanPlacement in the server tools), but the
+    // client can hold a stale list mid-flight, and auto-taking over the screen would be the
+    // worst possible way to find out. Re-check rather than trust.
+    if (!opensAsView(mod) && mod.surfaces.includes('tab')) cb.ensureModTab?.(mod, { background: true, pinned: true });
   }
 }
 
@@ -508,12 +524,19 @@ function showModMenu(x, y, mod) {
 
   addMenuSeparator(menu);
   // The second axis (#628): the three above say WHERE the launchers go, this says what one
-  // DOES. Each direction is a single-field PUT, and the server's cross-field rule resolves
-  // the conflict in favour of whichever field was passed — so ticking this drops the "tab"
-  // surface, and ticking "Pin as a background tab" above flips this back off.
-  addMenuItem(menu, `${opensAsView(mod) ? '✓ ' : '   '}Open as a full view (no tab)`, () => {
-    patchMod(mod.id, { openMode: opensAsView(mod) ? 'tab' : 'view' });
-  });
+  // DOES. Each direction is a single-field PUT. Ticking this drops the "tab" surface, while
+  // the pin only OVERRIDES this one for as long as it is set (#645) — so the tick stays,
+  // marked paused, and un-pinning brings the view back. `storedOpenMode` is the standing
+  // choice, `openMode` the effective one; they differ exactly while a pin is overriding.
+  const viewChosen = (mod.storedOpenMode ?? mod.openMode) === 'view';
+  const viewPaused = viewChosen && !opensAsView(mod);
+  addMenuItem(
+    menu,
+    `${viewChosen ? '✓ ' : '   '}Open as a full view (no tab)${viewPaused ? ' — paused while pinned' : ''}`,
+    // Picking it while paused means "I want the view back now": openMode:'view' is the
+    // explicit write that drops the pin, so one click undoes both halves.
+    () => patchMod(mod.id, { openMode: viewChosen && !viewPaused ? 'tab' : 'view' }),
+  );
 
   addMenuSeparator(menu);
   // The one item here that is NOT about the mod you right-clicked (#646) — hence the

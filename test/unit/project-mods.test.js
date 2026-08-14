@@ -22,7 +22,7 @@ process.env.HOME = HOME;
 const mod = require('../../mods/project-mods/tools.js');
 const {
   init, registerRoutes, normalize, cleanSurfaces, cleanIcon, cleanName, cleanEntry,
-  cleanOpenMode, cleanPlacement, scan, modId, slugify, resolveInMod, serialize,
+  cleanOpenMode, cleanPlacement, effectiveOpenMode, scan, modId, slugify, resolveInMod, serialize,
   PROJECT_SCOPE, MANIFEST_FILE, DEFAULT_ENTRY, FEATURE_OFF_MSG,
 } = mod;
 
@@ -120,24 +120,34 @@ test('cleanOpenMode defaults to "tab" for anything it does not recognize', () =>
   assert.strictEqual(cleanOpenMode(['view']), 'tab', 'a non-string is not coerced');
 });
 
-test('cleanPlacement makes openMode:"view" and the "tab" surface mutually exclusive', () => {
+test('cleanPlacement keeps openMode:"view" and the "tab" surface from both being in force', () => {
   // Nothing to resolve: tab mode keeps every surface it was given.
   assert.deepStrictEqual(cleanPlacement(['rail', 'tab'], 'tab'), { surfaces: ['rail', 'tab'], openMode: 'tab' });
-  // A view cannot also be a pinned background tab — the surface goes.
+  // A view cannot also be a pinned background tab — with openMode the deliberate field
+  // (or both of them, which is create), the surface goes.
   assert.deepStrictEqual(cleanPlacement(['rail', 'tab'], 'view'), { surfaces: ['rail'], openMode: 'view' });
   // …and the list is still never emptied.
   assert.deepStrictEqual(cleanPlacement(['tab'], 'view'), { surfaces: ['rail'], openMode: 'view' });
-  // Whichever field the caller explicitly passed wins, so a single-field PUT is an
-  // instruction rather than a contradiction. Ticking "Pin as a background tab" on a view:
-  assert.deepStrictEqual(
-    cleanPlacement(['rail', 'tab'], 'view', 'surfaces'),
-    { surfaces: ['rail', 'tab'], openMode: 'tab' },
-  );
-  // Ticking "Open as a full view" on a pinned mod:
+  // Ticking "Open as a full view" on a pinned mod is that same deliberate write:
   assert.deepStrictEqual(
     cleanPlacement(['rail', 'tab'], 'view', 'openMode'),
     { surfaces: ['rail'], openMode: 'view' },
   );
+  // A surfaces-only write is the one that does NOT resolve the pair (#645). Ticking "Pin as
+  // a background tab" on a view stores both: the pin overrides the mode rather than
+  // overwriting it, which is the only reason un-ticking can put the view back.
+  assert.deepStrictEqual(
+    cleanPlacement(['rail', 'tab'], 'view', 'surfaces'),
+    { surfaces: ['rail', 'tab'], openMode: 'view' },
+  );
+});
+
+test('effectiveOpenMode: the pin wins while it is set, and only while (#645)', () => {
+  assert.strictEqual(effectiveOpenMode({ surfaces: ['rail', 'tab'], openMode: 'view' }), 'tab');
+  assert.strictEqual(effectiveOpenMode({ surfaces: ['rail'], openMode: 'view' }), 'view',
+    'un-pinning restores the stored mode with nothing to undo');
+  assert.strictEqual(effectiveOpenMode({ surfaces: ['rail', 'tab'], openMode: 'tab' }), 'tab');
+  assert.strictEqual(effectiveOpenMode({ surfaces: ['rail'], openMode: 'tab' }), 'tab');
 });
 
 test('normalize: scope:"project" is what makes a directory ours (#638)', () => {
@@ -170,12 +180,14 @@ test('a pre-#628 manifest loads as openMode:"tab" — the whole migration', () =
   assert.strictEqual(row.openMode, 'tab');
   assert.deepStrictEqual(row.surfaces, ['rail', 'tab'], 'and the pin it already had survives');
 
-  // A hand-edited manifest can't smuggle the illegal combination past the loader either.
-  const smuggled = normalize(
+  // A pinned view is a legal thing to find on disk since #645 — the loader must keep the
+  // pair verbatim, or the very next scan would undo the override the user just set.
+  const pinnedView = normalize(
     { scope: PROJECT_SCOPE, surfaces: ['rail', 'tab'], openMode: 'view' }, '/repo/alpha', 'dash');
-  assert.strictEqual(smuggled.openMode, 'view');
-  assert.deepStrictEqual(smuggled.surfaces, ['rail']);
-  assert.strictEqual(smuggled.name, 'dash', 'a nameless manifest falls back to its directory name');
+  assert.strictEqual(pinnedView.openMode, 'view', 'the stored mode survives the scan');
+  assert.deepStrictEqual(pinnedView.surfaces, ['rail', 'tab'], 'and so does the pin overriding it');
+  assert.strictEqual(effectiveOpenMode(pinnedView), 'tab', 'while behaving as a tab');
+  assert.strictEqual(pinnedView.name, 'dash', 'a nameless manifest falls back to its directory name');
 });
 
 test('cleanName / cleanIcon strip control characters and cap length', () => {
@@ -437,7 +449,7 @@ test('a page edited directly on disk moves updatedAt, so an open tab reloads', a
   await deleteAll();
 });
 
-test('update_project_mod resolves the surfaces/openMode conflict in favour of the field passed', async () => {
+test('update_project_mod: an openMode write drops the pin, a surfaces write only overrides', async () => {
   const { id, dirname } = await create({
     name: 'Dash', session_id: 'sess-a', html: '<p>x</p>', surfaces: ['rail', 'button', 'tab'],
   });
@@ -448,10 +460,18 @@ test('update_project_mod resolves the surfaces/openMode conflict in favour of th
   assert.strictEqual(manifest().openMode, 'view');
   assert.deepStrictEqual(manifest().surfaces, ['rail', 'button']);
 
-  // surfaces alone, re-adding the pin to a view-mode mod: the open mode is what gives.
+  // surfaces alone, re-adding the pin to a view-mode mod: the pin OVERRIDES the mode
+  // instead of overwriting it (#645), so the manifest keeps both …
   await tools.update_project_mod.handler({ mod_id: id, surfaces: ['rail', 'tab'] }, {});
-  assert.strictEqual(manifest().openMode, 'tab');
+  assert.strictEqual(manifest().openMode, 'view', 'the stored mode is untouched');
   assert.deepStrictEqual(manifest().surfaces, ['rail', 'tab']);
+  assert.strictEqual(effectiveOpenMode(manifest()), 'tab', 'and the mod behaves as a tab meanwhile');
+
+  // … which is what makes un-ticking the pin put the view back, with no second gesture.
+  await tools.update_project_mod.handler({ mod_id: id, surfaces: ['rail'] }, {});
+  assert.strictEqual(effectiveOpenMode(manifest()), 'view');
+
+  await tools.update_project_mod.handler({ mod_id: id, surfaces: ['rail', 'tab'] }, {});
 
   // Both at once and contradictory: open_mode is the more specific statement.
   await tools.update_project_mod.handler({ mod_id: id, surfaces: ['rail', 'tab'], open_mode: 'view' }, {});
@@ -655,7 +675,7 @@ test('REST exposes the list, the page, sibling assets, a metadata PUT and a DELE
   assert.deepStrictEqual(list.body.mods.map(m => m.id), [id]);
   // The wire shape must not leak where the mod lives on disk.
   assert.deepStrictEqual(Object.keys(list.body.mods[0]).sort(),
-    ['createdAt', 'enabled', 'icon', 'id', 'name', 'openMode', 'project', 'surfaces', 'updatedAt']);
+    ['createdAt', 'enabled', 'icon', 'id', 'name', 'openMode', 'project', 'storedOpenMode', 'surfaces', 'updatedAt']);
 
   const page = app.call('GET /api/project-mods/:id/page', { params: { id } });
   assert.strictEqual(page.body, '<p>x</p>');
@@ -694,8 +714,17 @@ test('REST exposes the list, the page, sibling assets, a metadata PUT and a DELE
   assert.strictEqual(toView.body.mod.openMode, 'view');
   assert.deepStrictEqual(toView.body.mod.surfaces, ['rail'], 'the pin is dropped and the list is floored');
 
-  const backToTab = app.call('PUT /api/project-mods/:id', { params: { id }, body: { surfaces: ['rail', 'tab'] } });
-  assert.strictEqual(backToTab.body.mod.openMode, 'tab', 'asking for the pin flips the open mode back');
+  // Asking for the pin makes it open as a tab, but only by overriding — the wire shape
+  // carries both, and the manifest still records the view (#645).
+  const pinned = app.call('PUT /api/project-mods/:id', { params: { id }, body: { surfaces: ['rail', 'tab'] } });
+  assert.strictEqual(pinned.body.mod.openMode, 'tab');
+  assert.strictEqual(pinned.body.mod.storedOpenMode, 'view');
+  assert.strictEqual(manifestOf(REPO_A, dirname).openMode, 'view');
+
+  // …so un-ticking it is a full undo, which is the whole point of #645.
+  const unpinned = app.call('PUT /api/project-mods/:id', { params: { id }, body: { surfaces: ['rail'] } });
+  assert.strictEqual(unpinned.body.mod.openMode, 'view', 'un-pinning restores the view');
+  assert.strictEqual(unpinned.body.mod.storedOpenMode, 'view');
 
   const del = app.call('DELETE /api/project-mods/:id', { params: { id } });
   assert.strictEqual(del.body.deleted, true);

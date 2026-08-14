@@ -114,10 +114,11 @@ async function setup({ mods = [modA, modB], enabled = true, activeContext = null
 
   const state = {
     view: { activeContext, activeTabCwd },
-    ensured: [],    // [{ modId, background }]
+    ensured: [],    // [{ modId, background, pinned }]
     reloaded: [],
     renamed: [],
     closed: [],
+    closedPinned: [],  // the selective un-pin teardown (#645), kept apart from `closed`
     railRenders: 0,
     fetches: [],
     // A simulated ModManager view slot (#628). Recorders alone are not enough: openMod()'s
@@ -142,10 +143,13 @@ async function setup({ mods = [modA, modB], enabled = true, activeContext = null
   mod.init({
     getActiveContext: () => state.view.activeContext,
     getActiveTabCwd: () => state.view.activeTabCwd,
-    ensureModTab: (m, opts) => state.ensured.push({ modId: m.id, background: !!opts?.background }),
+    ensureModTab: (m, opts) => state.ensured.push({ modId: m.id, background: !!opts?.background, pinned: !!opts?.pinned }),
     reloadModTab: (m) => state.reloaded.push(m.id),
     renameModTab: (m) => state.renamed.push(m.id),
     closeModTabs: (id) => state.closed.push(id),
+    // The hook lets a test stand in for killSession's real epilogue, which re-enters
+    // render() through notifyTabsChanged → applyFilter → onContextViewApplied.
+    closePinnedModTab: (id) => { state.closedPinned.push(id); state.onClosePinned?.(); },
     renderRail: () => { state.railRenders++; },
     showModView: (m) => {
       state.shown.push(m.id);
@@ -166,6 +170,17 @@ async function setup({ mods = [modA, modB], enabled = true, activeContext = null
 const flush = () => new Promise(r => setImmediate(r));
 
 const stripButtonIds = (tabs) => tabs.children.filter(c => c.className?.includes('project-mod-btn')).map(c => c.dataset.projectModId);
+
+/** Right-click a launcher and hand back the menu items showModMenu() built. */
+function openMenuOn(row) {
+  row.listeners.contextmenu({ preventDefault: () => {}, clientX: 10, clientY: 10 });
+  return bodyChildren.at(-1).children.filter(c => c.className === 'context-menu-item');
+}
+
+/** A fresh /api/project-mods answer, the way a 'project-mods' broadcast delivers one. */
+const serveMods = (mods, enabled = true) => {
+  globalThis.fetch = () => Promise.resolve({ json: () => Promise.resolve({ mods, enabled }) });
+};
 
 // -------------------------------------------------------------------- pathInside
 
@@ -298,8 +313,8 @@ test('a mod with no icon falls back to the same derivation tabs use', async () =
 test('clicking a rail row opens the mod', async () => {
   const { mod, state } = await setup({ activeContext: CTX_A });
   mod.makeRailRow(modA).onclick();
-  assert.deepStrictEqual(state.ensured.at(-1), { modId: 'ma', background: false },
-    'a click is a deliberate open — it takes focus');
+  assert.deepStrictEqual(state.ensured.at(-1), { modId: 'ma', background: false, pinned: false },
+    'a click is a deliberate open — it takes focus, and it is never the pin\'s tab (#645)');
 });
 
 // ---------------------------------------------------------- surface 2: button
@@ -338,15 +353,15 @@ test('clicking a strip button opens the mod focused', async () => {
   const { state, tabs } = await setup({ activeContext: CTX_A });
   const [btn] = tabs.children.filter(c => c.className?.includes('project-mod-btn'));
   btn.listeners.click();
-  assert.deepStrictEqual(state.ensured.at(-1), { modId: 'ma', background: false });
+  assert.deepStrictEqual(state.ensured.at(-1), { modId: 'ma', background: false, pinned: false });
 });
 
 // ------------------------------------------------------------- surface 3: tab
 
 test('a tab-surface mod auto-opens in the BACKGROUND when its project is in view', async () => {
   const { state } = await setup({ activeContext: CTX_A });
-  assert.deepStrictEqual(state.ensured, [{ modId: 'ma', background: true }],
-    'unattended opens must not steal focus (#600)');
+  assert.deepStrictEqual(state.ensured, [{ modId: 'ma', background: true, pinned: true }],
+    'unattended opens must not steal focus (#600), and the tab is stamped as the pin\'s (#645)');
 });
 
 test('a tab-surface mod does not open while a different project is in view', async () => {
@@ -354,7 +369,7 @@ test('a tab-surface mod does not open while a different project is in view', asy
   assert.deepStrictEqual(state.ensured, []);
   state.view.activeContext = CTX_A;
   mod.render();
-  assert.deepStrictEqual(state.ensured, [{ modId: 'ma', background: true }]);
+  assert.deepStrictEqual(state.ensured, [{ modId: 'ma', background: true, pinned: true }]);
 });
 
 // ------------------------------------------------------------- tab reconciliation
@@ -385,6 +400,76 @@ test('a deleted or disabled mod closes its open tabs', async () => {
   assert.deepStrictEqual(state.closed, ['ma'], 'deleted closes it too');
 });
 
+// ------------------------------------------------------- un-pinning (#645)
+// Ticking a placement toggle has to be undoable by un-ticking it. The pin auto-opens a
+// background tab on every render, so the tab it opened must go when the pin does — while a
+// tab the USER opened by clicking a tab-mode mod stays, which is why the teardown is a
+// separate, weaker callback.
+
+test('un-pinning closes the tab the pin opened, and does not use the delete/disable close', async () => {
+  const { mod, state } = await setup({ mods: [modA], activeContext: CTX_A });
+  assert.deepStrictEqual(state.ensured, [{ modId: 'ma', background: true, pinned: true }]);
+
+  serveMods([{ ...modA, surfaces: ['rail', 'button'] }]);
+  await mod.refresh();
+  assert.deepStrictEqual(state.closedPinned, ['ma'], 'the pin went, so its tab goes');
+  assert.deepStrictEqual(state.closed, [], 'the mod is still registered and enabled — nothing may close it outright');
+});
+
+test('a still-pinned mod is never torn down, however often we re-render', async () => {
+  const { mod, state } = await setup({ mods: [modA], activeContext: CTX_A });
+  mod.render();
+  mod.render();
+  assert.deepStrictEqual(state.closedPinned, [], 'the branch keys on the surface, not on the render');
+});
+
+test('a mod that never had the pin is left alone — a click-opened tab is the user\'s', async () => {
+  // modB is surfaces:['rail'], openMode:'tab': clicking it opens a real tab that no pin is
+  // responsible for. Every render sees "no tab surface", and every render must do nothing.
+  const { mod, state } = await setup({ mods: [modB], activeContext: CTX_B });
+  mod.makeRailRow(modB).onclick();
+  mod.render();
+  assert.deepStrictEqual(state.ensured.at(-1), { modId: 'mb', background: false, pinned: false },
+    'a click never claims pin origin — which is what spares this tab');
+  // The selective callback still fires (the surface IS absent); app.js is where the tab's
+  // own `pinned` flag decides, and this one has none. It is never the outright close.
+  assert.ok(state.closedPinned.every(id => id === 'mb'));
+  assert.deepStrictEqual(state.closed, []);
+});
+
+test('un-pinning tears the tab down even while another project is in view', async () => {
+  // syncOpenTabs() walks the whole registry, not visibleMods(): a pinned tab legitimately
+  // outlives a project switch, so its teardown has to reach it there too.
+  const { mod, state } = await setup({ mods: [modA], activeContext: CTX_B });
+  assert.deepStrictEqual(state.ensured, [], 'nothing auto-opened while looking elsewhere');
+
+  serveMods([{ ...modA, surfaces: ['rail'] }]);
+  await mod.refresh();
+  assert.deepStrictEqual(state.closedPinned, ['ma']);
+});
+
+test('flipping to view uses the outright close, not the un-pin one', async () => {
+  // Both conditions hold at once for a view-mode mod that lost the pin; the `else if` is
+  // what keeps the stronger branch from being shadowed by the weaker.
+  const { mod, state } = await setup({ mods: [modA], activeContext: CTX_A });
+
+  serveMods([{ ...modA, surfaces: ['rail', 'button'], openMode: 'view' }]);
+  await mod.refresh();
+  assert.ok(state.closed.includes('ma'), 'a view never owns a tab at all');
+  assert.deepStrictEqual(state.closedPinned, [], 'so the selective close never runs');
+});
+
+test('the un-pin teardown settles when closing re-enters render()', async () => {
+  const { mod, state } = await setup({ mods: [modA], activeContext: CTX_A });
+  // killSession → notifyTabsChanged → applyFilter → onContextViewApplied → render().
+  state.onClosePinned = () => mod.render();
+
+  serveMods([{ ...modA, surfaces: ['rail'] }]);
+  await mod.refresh();   // returning at all is the assertion: the guard must absorb the loop
+  assert.ok(state.closedPinned.length >= 1);
+  assert.ok(state.closedPinned.every(id => id === 'ma'));
+});
+
 // ------------------------------------------------------------ openMode: view (#628)
 
 test('a view-mode mod opens as a view from every launcher, and never as a tab', async () => {
@@ -408,13 +493,14 @@ test('an absent openMode still means "tab" on the client, matching the server de
   const { state, tabs } = await setup({ mods: [legacy], activeContext: CTX_A });
   const [btn] = tabs.children.filter(c => c.className?.includes('project-mod-btn'));
   btn.listeners.click();
-  assert.deepStrictEqual(state.ensured.at(-1), { modId: 'ma', background: false });
+  assert.deepStrictEqual(state.ensured.at(-1), { modId: 'ma', background: false, pinned: false });
   assert.deepStrictEqual(state.shown, [], 'no openMode is not "view"');
 });
 
 test('a view-mode mod is never auto-opened as a pinned tab, even if the list says so', async () => {
-  // The server can't persist this combination, but a client can hold a list mid-flight —
-  // and pinning a view would mean auto-taking over the screen.
+  // The server never sends this — it ships the EFFECTIVE mode, and a pin makes that 'tab'
+  // (#645) — but a client can hold a stale list mid-flight, and auto-taking over the screen
+  // would be the worst possible way to find out.
   const contradictory = { ...viewA, surfaces: ['rail', 'button', 'tab'] };
   const { state } = await setup({ mods: [contradictory], activeContext: CTX_A });
   assert.deepStrictEqual(state.ensured, []);
@@ -643,4 +729,53 @@ test('the mod menu carries the toggle, ticked to match, and flipping it redraws'
   row.listeners.contextmenu({ preventDefault: () => {}, clientX: 10, clientY: 10 });
   assert.ok(findMenuItem('Compact view').textContent.startsWith('✓ '), 'ticked while on');
   clearCompact();
+});
+
+// ------------------------------------------------- the right-click menu (#645)
+
+test('the view toggle stays ticked while a pin overrides it, and one click brings it back', async () => {
+  // What the server ships for a view-mode mod that has just been pinned: openMode is the
+  // EFFECTIVE one, storedOpenMode the standing choice the pin is overriding.
+  const pinnedView = { ...viewA, surfaces: ['rail', 'button', 'tab'], openMode: 'tab', storedOpenMode: 'view' };
+  const { mod, state } = await setup({ mods: [pinnedView], activeContext: CTX_A });
+
+  const items = openMenuOn(mod.makeRailRow(pinnedView));
+  const viewItem = items.find(i => i.textContent.includes('Open as a full view'));
+  assert.ok(viewItem.textContent.startsWith('✓ '), 'the standing choice is still ticked');
+  assert.ok(viewItem.textContent.endsWith('— paused while pinned'), 'and says why it is not in force');
+
+  state.fetches.length = 0;
+  viewItem.onclick();
+  const put = state.fetches.at(-1);
+  assert.strictEqual(put.opts.method, 'PUT');
+  assert.deepStrictEqual(JSON.parse(put.opts.body), { openMode: 'view' },
+    'picking it while paused means "the view, now" — the explicit write that also drops the pin');
+});
+
+test('an un-pinned view toggles the other way, and a tab-mode mod is simply unticked', async () => {
+  const { mod, state } = await setup({ mods: [viewA, modA], activeContext: CTX_A });
+
+  const viewItem = openMenuOn(mod.makeRailRow(viewA)).find(i => i.textContent.includes('Open as a full view'));
+  assert.strictEqual(viewItem.textContent, '✓ Open as a full view (no tab)', 'no pin, no suffix');
+  state.fetches.length = 0;
+  viewItem.onclick();
+  assert.deepStrictEqual(JSON.parse(state.fetches.at(-1).opts.body), { openMode: 'tab' });
+
+  const tabItem = openMenuOn(mod.makeRailRow(modA)).find(i => i.textContent.includes('Open as a full view'));
+  assert.ok(!tabItem.textContent.startsWith('✓'));
+  state.fetches.length = 0;
+  tabItem.onclick();
+  assert.deepStrictEqual(JSON.parse(state.fetches.at(-1).opts.body), { openMode: 'view' });
+});
+
+test('a surface toggle sends surfaces alone — that is what preserves the stored open mode', async () => {
+  // If un-ticking the pin also wrote openMode, there would be nothing left to restore.
+  const pinnedView = { ...viewA, surfaces: ['rail', 'button', 'tab'], openMode: 'tab', storedOpenMode: 'view' };
+  const { mod, state } = await setup({ mods: [pinnedView], activeContext: CTX_A });
+
+  const pin = openMenuOn(mod.makeRailRow(pinnedView)).find(i => i.textContent.includes('Pin as a background tab'));
+  assert.ok(pin.textContent.startsWith('✓ '));
+  state.fetches.length = 0;
+  pin.onclick();
+  assert.deepStrictEqual(JSON.parse(state.fetches.at(-1).opts.body), { surfaces: ['rail', 'button'] });
 });

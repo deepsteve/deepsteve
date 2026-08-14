@@ -247,33 +247,39 @@ function cleanOpenMode(raw) {
 }
 
 /**
- * The one cross-field rule (#628): openMode 'view' and the 'tab' surface are mutually
- * exclusive. A view takes over the content area and consumes no tab, so it cannot also be a
- * pinned background tab — that combination is the very duplicate the view mode exists to
- * remove.
+ * The one cross-field rule (#628, reshaped by #645): openMode 'view' and the 'tab' surface
+ * cannot both be in force. A view takes over the content area and consumes no tab, so it
+ * cannot also be a pinned background tab — that combination is the very duplicate the view
+ * mode exists to remove.
  *
- * `explicit` names which of the two fields the caller actually passed, and that one wins. A
- * partial update then reads as an instruction rather than a contradiction: ticking "Pin as a
- * background tab" on a view flips it back to a tab, ticking "Open as a full view" drops the
- * pin — so the right-click checklist can go either way with a single-field PUT. With both
- * passed (or neither), openMode wins, since it is the more specific statement.
+ * The pin is an OVERRIDE, not a rewrite. Adding the 'tab' surface to a view-mode mod leaves
+ * the stored openMode alone and simply wins for as long as the pin is set — see
+ * effectiveOpenMode(), which is what every reader gets. That is what makes the right-click
+ * checklist reversible: un-ticking the pin restores the view the mod was in, instead of
+ * stranding it as a tab with nothing to flip it back (#645).
  *
- * Every writer goes through here — normalize(), create, update, REST PUT — so the illegal
- * combination cannot reach disk from any direction.
+ * Only a deliberate openMode write still resolves the pair destructively, and in that
+ * direction it must: "Open as a full view" would look like it did nothing if the pin kept
+ * overriding it, so setting 'view' drops the pin. `explicit` names the field the caller
+ * actually passed; with both passed (or neither — create and load) openMode wins, since it
+ * is the more specific statement.
  */
 function cleanPlacement(rawSurfaces, rawOpenMode, explicit = null) {
   let surfaces = cleanSurfaces(rawSurfaces);
-  let openMode = cleanOpenMode(rawOpenMode);
-  if (openMode === 'view' && surfaces.includes('tab')) {
-    if (explicit === 'surfaces') {
-      openMode = 'tab';
-    } else {
-      surfaces = surfaces.filter(s => s !== 'tab');
-      if (!surfaces.length) surfaces = [...DEFAULT_SURFACES];
-    }
+  const openMode = cleanOpenMode(rawOpenMode);
+  if (openMode === 'view' && surfaces.includes('tab') && explicit !== 'surfaces') {
+    surfaces = surfaces.filter(s => s !== 'tab');
+    if (!surfaces.length) surfaces = [...DEFAULT_SURFACES];
   }
   return { surfaces, openMode };
 }
+
+/**
+ * How a mod actually opens right now: the pin wins over view mode while it is set, and only
+ * while (#645). The stored openMode is the user's standing choice; this is the effective
+ * one, and it is what serialize() puts on the wire so no client has to know the rule.
+ */
+const effectiveOpenMode = (m) => (m.openMode === 'view' && m.surfaces.includes('tab') ? 'tab' : m.openMode);
 
 /**
  * Apply a partial placement edit to a stored row. Shared by update_project_mod and the REST
@@ -336,8 +342,12 @@ function normalize(m, root, dirname) {
   if (!m || typeof m !== 'object') return null;
   if (m.scope !== PROJECT_SCOPE) return null;
   if (!root || !dirname || !DIRNAME_RE.test(dirname)) return null;
-  // A pre-#628 manifest has no openMode at all, which cleans to 'tab' — that IS the migration.
-  const { surfaces, openMode } = cleanPlacement(m.surfaces, m.openMode);
+  // Each field on its own, NOT through cleanPlacement: a pinned view is a legal thing to
+  // find on disk since #645 (the pin overrides the stored mode rather than overwriting it),
+  // and resolving the pair here would undo that on the very next scan. A pre-#628 manifest
+  // has no openMode at all, which cleans to 'tab' — that IS the migration.
+  const surfaces = cleanSurfaces(m.surfaces);
+  const openMode = cleanOpenMode(m.openMode);
   const dir = path.join(projectModsDir(root), dirname);
   return {
     id: modId(root, dirname),
@@ -492,10 +502,15 @@ const callerShellId = (extra) => extra?.requestInfo?.url?.searchParams?.get('she
 
 // The wire shape the client sees. Kept separate from the in-memory row so the server-only
 // fields (root, dirname, dir, entry) don't leak into the browser.
+//
+// `openMode` is the EFFECTIVE one, so every consumer keeps reading a single field and none
+// of them has to know about the pin override. `storedOpenMode` is the standing choice
+// underneath it, and exists for one reason: the right-click menu shows "Open as a full
+// view" still ticked, marked paused, while a pin is overriding it (#645).
 const serialize = (m) => ({
   id: m.id, project: m.project, name: m.name, icon: m.icon,
-  surfaces: m.surfaces, openMode: m.openMode, enabled: m.enabled,
-  createdAt: m.createdAt, updatedAt: m.updatedAt,
+  surfaces: m.surfaces, openMode: effectiveOpenMode(m), storedOpenMode: m.openMode,
+  enabled: m.enabled, createdAt: m.createdAt, updatedAt: m.updatedAt,
 });
 
 // What an AGENT sees. Same fields plus where the mod actually lives — the point of #638 is
@@ -633,7 +648,7 @@ function init(context) {
         replacements: z.record(z.string()).optional().describe('Literal find→replace pairs applied server-side'),
         name: z.string().optional().describe('New display name. Does not rename the directory'),
         icon: z.string().optional().describe('New emoji icon; pass "" to clear it back to a derived monogram'),
-        surfaces: z.array(z.enum(['rail', 'button', 'tab'])).optional().describe('New launcher placements. Passing "tab" on a view-mode mod flips it back to open_mode:"tab"'),
+        surfaces: z.array(z.enum(['rail', 'button', 'tab'])).optional().describe('New launcher placements. Adding "tab" to a view-mode mod makes it open as a tab for as long as the pin is there; removing "tab" again restores the view'),
         open_mode: z.enum(['tab', 'view']).optional().describe('New open mode: "tab" opens a real tab, "view" takes over the content area and consumes no tab. Passing "view" drops the "tab" surface'),
         enabled: z.boolean().optional().describe('false hides the mod from every surface without deleting it'),
       },
@@ -861,7 +876,7 @@ function registerRoutes(app, context) {
 module.exports = {
   init, registerRoutes,
   resolveProject, canonicalRoot, normalize, cleanSurfaces, cleanIcon, cleanName, cleanEntry,
-  cleanOpenMode, cleanPlacement, applyPlacement,
+  cleanOpenMode, cleanPlacement, applyPlacement, effectiveOpenMode,
   // scan() is the force-rescan a test needs after writing into a repo behind our back —
   // every in-process write already forces one, but a direct fs write does not.
   scan, scanRoots, modId, slugify, resolveInMod, serialize, serializeForAgent,
