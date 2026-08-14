@@ -282,6 +282,34 @@ test('railModsFor returns a project\'s rail-surface mods, and skips the others',
   assert.deepStrictEqual(mod.railModsFor({ id: 'x', name: 'x' }), [], 'a context with no dirs contains nothing');
 });
 
+test('modsForProject ignores surfaces — the project menu lists every mod (#647)', async () => {
+  // The right-click menu on a project row is a FOURTH launcher, always present, so it
+  // is not scoped by `surfaces` the way the rail/button/tab launchers are. A mod that
+  // only asked for a background tab is still reachable from there.
+  const tabOnly = { ...modA, id: 'mc', name: 'C', surfaces: ['tab'] };
+  const { mod } = await setup({ mods: [modA, tabOnly, modB] });
+  assert.deepStrictEqual(mod.modsForProject(CTX_A).map(m => m.id), ['ma', 'mc']);
+  assert.deepStrictEqual(mod.railModsFor(CTX_A).map(m => m.id), ['ma'], 'the rail still filters on surfaces');
+  assert.deepStrictEqual(mod.modsForProject(CTX_B).map(m => m.id), ['mb']);
+  assert.deepStrictEqual(mod.modsForProject(null), []);
+  assert.deepStrictEqual(mod.modsForProject({ id: 'x', name: 'x' }), [], 'a context with no dirs contains nothing');
+});
+
+test('modsForProject is empty for a disabled mod and when the feature is off (#647)', async () => {
+  const off = await setup({ enabled: false, activeContext: CTX_A });
+  assert.deepStrictEqual(off.mod.modsForProject(CTX_A), []);
+  const disabled = await setup({ mods: [{ ...modA, enabled: false }] });
+  assert.deepStrictEqual(disabled.mod.modsForProject(CTX_A), []);
+});
+
+test('modsForProject is not scoped to the ACTIVE project — that is the point (#647)', async () => {
+  // visibleMods() answers "what am I looking at"; modsForProject answers "what does THIS
+  // project own", which is what lets B's menu list B's mods while A is selected.
+  const { mod } = await setup({ activeContext: CTX_A });
+  assert.deepStrictEqual(mod.visibleMods().map(m => m.id), ['ma']);
+  assert.deepStrictEqual(mod.modsForProject(CTX_B).map(m => m.id), ['mb']);
+});
+
 test('a rail row is shaped like a context row, so the collapsed icon rail styles it for free', async () => {
   const { mod } = await setup();
   const row = mod.makeRailRow(modA);

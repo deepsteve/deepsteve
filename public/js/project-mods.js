@@ -86,11 +86,22 @@ export function pathInside(p, dir) {
   return p === base || p.startsWith(base + '/');
 }
 
+/**
+ * Every enabled mod registered to one specific project (context), in registration order —
+ * regardless of which launcher surfaces it asked for.
+ *
+ * `surfaces` says where a mod's launchers go among the three surfaces THIS module owns; the
+ * project row's right-click menu (#647) is a fourth launcher that is always present, so it
+ * lists the lot. Surface-scoped callers filter this further.
+ */
+export function modsForProject(ctx) {
+  if (!featureEnabled || !ctx || !Array.isArray(ctx.dirs)) return [];
+  return mods.filter(m => m.enabled && ctx.dirs.some(d => pathInside(m.project, d)));
+}
+
 /** The mods registered to one specific project (context), in registration order. */
 export function railModsFor(ctx) {
-  if (!featureEnabled || !ctx || !Array.isArray(ctx.dirs)) return [];
-  return mods.filter(m => m.enabled && m.surfaces.includes('rail')
-    && ctx.dirs.some(d => pathInside(m.project, d)));
+  return modsForProject(ctx).filter(m => m.surfaces.includes('rail'));
 }
 
 /**

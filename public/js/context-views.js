@@ -46,7 +46,7 @@ import { tabIcon } from './tab-manager.js';
 // Project Mods (#618) register an entry beneath their project's row. One-way import:
 // project-mods.js learns about the active view through callbacks app.js injects, never
 // by importing this module back.
-import { railModsFor, appendRailRows, isCompactRail, setCompactRail } from './project-mods.js';
+import { railModsFor, appendRailRows, isCompactRail, setCompactRail, modsForProject, openMod, modIcon } from './project-mods.js';
 
 // Context definitions are server-owned (#526): they are the same entity as the
 // Scheduled Tasks "project groups", loaded from /api/contexts and kept fresh by
@@ -533,6 +533,29 @@ function showRowMenu(x, y, ctx) {
   menu.className = 'context-menu context-row-menu';
 
   if (ctx) {
+    // The project's mods, as things you PRESS (#647). Before #647 a mod was only
+    // reachable once you had clicked into its project — the rail row is drawn for the
+    // active project only, and so are the strip button and the pinned tab. Listing them
+    // here makes every project's mods one right-click away from anywhere, without
+    // putting another project's chrome in the strip.
+    //
+    // Every mod, not just the ones carrying the 'rail' surface: `surfaces` scopes the
+    // three launchers project-mods.js owns, and this menu is a fourth that is always on.
+    const projectMods = modsForProject(ctx);
+    for (const mod of projectMods) {
+      const { glyph } = modIcon(mod);
+      addRowMenuItem(menu, `${glyph}  ${mod.name}`, () => {
+        // Select the project first. A project mod's tab carries cwd = mod.project, so
+        // applyFilter() hides it while another project is selected, and syncModView()
+        // tears down a view whose mod isn't in visibleMods() on the very next render
+        // pass — opening without selecting would appear to do nothing. This still costs
+        // the user a single press, which is the whole point of the item.
+        selectContext(ctx.id);
+        openMod(mod.id);
+      });
+    }
+    if (projectMods.length) addRowMenuSeparator(menu);
+
     addRowMenuItem(menu, 'Edit', () => openContextEditor(ctx));
     // Set icon: emoji or an uploaded PNG/SVG image (#569/#579). Right-click (not
     // double-click-the-square) so it works at any rail width and reuses this menu's

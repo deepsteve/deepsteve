@@ -431,6 +431,12 @@ Right-click its rail row or its strip button: Open, Rename, Set icon, toggle eac
 
 **Compact view** (#646) is the odd one out in that menu, and also appears on the *project* row's right-click menu whenever the project has rail mods. It lays every project mod's rail row out left-to-right in a wrapping grid instead of one per line, so half a dozen mods cost two rail lines rather than six. It applies to **all** project mods, not the one you right-clicked — hence the parenthetical in the label. It is a per-browser display preference in `localStorage` (`deepsteve-project-mods-compact`), not a setting: it never reaches the server and has no `SETTINGS_SCHEMA` entry, because how tall the rows are is nobody's business but this browser's. Off by default, and off renders exactly the DOM it did before the option existed — `appendRailRows()` in `public/js/project-mods.js` only emits the `.project-mod-flow` wrapper when it is on. The grid is `auto-fill`/`minmax`, so a rail dragged wider earns a third column and the collapsed 48px icon rail falls back to the single column of squares.
 
+### Opening one from another project (#647)
+
+The three surfaces above all require you to be looking at the mod's project, so reaching another project's dashboard used to mean clicking into that project and then clicking the mod. Right-clicking a **project row** in the rail now lists that project's mods at the top of its menu, above Edit/Archive/Delete — press one and it opens.
+
+That list ignores `surfaces` (a mod pinned only as a background tab is in it too): `surfaces` scopes the three launchers `project-mods.js` owns, and the project menu is a fourth that is always present. Pressing an item also *selects* that project, which is what makes the mod visible at all — a project mod's tab carries `cwd = <its repo root>`, so the tab filter hides it while another project is selected, and a `openMode: "view"` mod is torn down by the next `syncModView()` pass. `modsForProject(ctx)` in `public/js/project-mods.js` is the list; `railModsFor` is now that filtered by surface.
+
 ### Disk layout
 
 One directory per mod, inside the repo:

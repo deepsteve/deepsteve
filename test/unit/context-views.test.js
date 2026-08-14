@@ -804,3 +804,84 @@ test('the row menu offers "Compact view" only for a project that has rail mods (
     await reset();
   }
 });
+
+// ------------------------------------- project mods in the project menu (#647)
+// Right-clicking a project lists that project's mods as items you press to open one,
+// above the Edit/Archive/Delete it already had. Same shared-registry caution as the
+// #646 tests above, so these reuse seedProjectMods and reset when they are done.
+
+const MOD_TAB_ONLY = { id: 'mc', project: '/repo/a', name: 'C Pinned', icon: '',
+  surfaces: ['tab'], openMode: 'tab', enabled: true, updatedAt: 1 };
+const MOD_B = { id: 'mb', project: '/repo/b', name: 'B Dash', icon: '🔧',
+  surfaces: ['rail'], openMode: 'tab', enabled: true, updatedAt: 1 };
+
+// Literals, not the shared CTX_A/CTX_B — archiveContext() mutated CTX_B in place above.
+const menuContexts = () => [
+  { id: 'ctxa', name: 'Alpha', dirs: ['/repo/a'] },
+  { id: 'ctxb', name: 'Beta', dirs: ['/repo/b'] },
+];
+
+// Right-click the rail row carrying this label; hand back the menu it appended.
+function rowMenuFor(rail, label) {
+  const row = railChildren(rail, 'context-list')[0].children
+    .find(r => r.children.find(c => c.className === 'context-row-label')?.textContent === label);
+  assert.ok(row, `rail row "${label}" present`);
+  row.listeners.contextmenu({ preventDefault: () => {}, clientX: 0, clientY: 0 });
+  return createdEls.filter(el => el.className.includes('context-row-menu')).pop();
+}
+
+test('a project\'s menu lists its mods above Edit, whatever their surfaces (#647)', async () => {
+  const reset = await seedProjectMods([MOD_A, MOD_TAB_ONLY, MOD_B]);
+  try {
+    const { rail, toggle } = await setup({ contexts: menuContexts() });
+    toggle.listeners.click();   // open the rail so the rows exist
+
+    const menu = rowMenuFor(rail, 'Alpha');   // Alpha owns /repo/a
+    const labels = menu.children.map(i => i.textContent);
+    assert.deepStrictEqual(labels.slice(0, 2), ['📊  A Dash', 'C  C Pinned'],
+      'both of Alpha\'s mods, including the tab-only one the rail never draws');
+    assert.strictEqual(menu.children[2].className, 'context-menu-separator');
+    assert.strictEqual(labels[3], 'Edit', 'the existing items still follow');
+    assert.ok(labels.includes('Archive') && labels.includes('Delete'));
+    assert.ok(!labels.includes('🔧  B Dash'), 'another project\'s mod stays out');
+  } finally {
+    await reset();
+  }
+});
+
+test('a project menu is unchanged when the project owns no mods (#647)', async () => {
+  const reset = await seedProjectMods([MOD_A]);
+  try {
+    const { rail, toggle } = await setup({ contexts: menuContexts() });
+    toggle.listeners.click();
+
+    const menu = rowMenuFor(rail, 'Beta');   // /repo/b — owns no mods
+    assert.strictEqual(menu.children[0].textContent, 'Edit', 'no leading items');
+    assert.ok(!menu.children.some(i => i.className === 'context-menu-separator'), 'and no separator');
+  } finally {
+    await reset();
+  }
+});
+
+test('pressing a mod selects its project, so the mod is actually shown (#647)', async () => {
+  const reset = await seedProjectMods([MOD_A]);
+  try {
+    const pm = await import(new URL('../../public/js/project-mods.js', `file://${__filename}`).href);
+    const opened = [];
+    // Re-init for the one callback this test reads back. init() re-fetches, but the
+    // harness fetch rejects by now, so the seeded registry survives.
+    pm.init({ renderRail: () => {}, ensureModTab: (m) => opened.push(m.id) });
+
+    const { mod, rail, toggle } = await setup({ contexts: menuContexts() });
+    mod.setActiveContext('ctxb');   // looking at Beta
+    toggle.listeners.click();
+
+    rowMenuFor(rail, 'Alpha').children[0].onclick();   // "📊  A Dash"
+
+    assert.strictEqual(mod.getActiveContextId(), 'ctxa',
+      'a project-mod tab carries cwd = its repo, so it stays filtered out until its project is selected');
+    assert.deepStrictEqual(opened, ['ma']);
+  } finally {
+    await reset();
+  }
+});
