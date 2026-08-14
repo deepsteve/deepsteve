@@ -40,8 +40,10 @@ npm version <X.Y.Z> --no-git-tag-version --allow-same-version
 git diff --stat        # expect exactly package.json + package-lock.json, 2 lines each
 ```
 
-`release.sh` hard-fails if the lock has drifted, and `check-installer.yml` runs
-`release.sh` on every push to main — so drift breaks CI. Don't work around it; fix the lock.
+`test/unit/version-lock-sync.test.js` fails on drift, so `npm run test:unit` catches it
+before the push. `release.sh` hard-fails too, and `check-installer.yml` runs `release.sh` on
+every push to main — so drift that gets past the unit suite breaks CI on the bump commit
+itself. Don't work around it; fix the lock.
 
 Commit (match repo convention, including the trailer):
 

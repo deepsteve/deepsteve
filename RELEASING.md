@@ -7,7 +7,11 @@ installed DeepSteve normally has it, and an upgrade deletes it if an older build
 there. It exists only in a git clone of this repo, and even there it ships disabled like
 every other skill: enable it once in **Mods → Skills** before invoking it.
 
-1. **Bump the version** in `package.json` (minor bump for features, patch for bugfix-only)
+1. **Bump the version** with `npm version X.Y.Z --no-git-tag-version --allow-same-version`
+   (minor bump for features, patch for bugfix-only). Never hand-edit `package.json`: the
+   version lives in `package-lock.json` too, `npm install`/`npm ci` tolerate the mismatch,
+   and the drift only surfaces when `release.sh` hard-fails in CI on the bump commit.
+   `npm run test:unit` catches it before the push.
 2. **Commit the version bump** — e.g. `git commit -m "Bump version to X.Y.Z"`
 3. **Push to main** — `git push`
 4. **Generate the installer** — `./release.sh` (validates mods, embeds all source into `install.sh`)
