@@ -42,8 +42,16 @@ RUN rm -rf /src
 # stub, a CLI that wrote no unit and started nothing looks exactly like one that
 # worked. Nothing actually runs here — docker-compose.npm.yml's server service is what
 # boots the deployed daemon.
+#
+# The QUERY verbs must answer honestly, and that is not a detail. A stub that exit 0s for
+# everything answers `systemctl --user is-active --quiet deepsteve` — which is exactly
+# what service.sh's ds_is_running() asks — with "yes", so `deepsteve start` concluded a
+# daemon was already up, took its restart branch instead of its install branch, and died
+# on the confirmation handshake ("Restart cancelled.") with the build one line in. A real
+# machine returns 3 here. Anything mutating still exits 0 and is still recorded, so the
+# daemon-reload / enable --now assertions below are unaffected.
 RUN printf '#!/bin/sh\nexit 0\n' > /usr/local/bin/launchctl && chmod +x /usr/local/bin/launchctl \
- && printf '#!/bin/sh\necho "systemctl $*" >> /tmp/systemctl.log\nexit 0\n' > /usr/local/bin/systemctl \
+ && printf '#!/bin/sh\necho "systemctl $*" >> /tmp/systemctl.log\ncase " $* " in *" is-active "*|*" is-enabled "*|*" is-failed "*) exit 1 ;; esac\nexit 0\n' > /usr/local/bin/systemctl \
  && chmod +x /usr/local/bin/systemctl \
  && deepsteve start --no-mcp \
  && test -s /root/.deepsteve/server.js \

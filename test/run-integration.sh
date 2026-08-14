@@ -33,14 +33,20 @@
 # no overlap regardless of Node version, because each process fully exits — including
 # its afterEach cleanup — before the next one starts.
 #
-# Usage: run-integration.sh [SKIP_PATTERN]
-#   SKIP_PATTERN  optional grep pattern of files to skip (e.g. "tmux-engine" when
-#                 the machine or server under test has no tmux installed).
+# There is deliberately NO way to skip a file. This used to take an optional grep
+# pattern, for the one case that justified it: neither install image had tmux, so
+# tmux-engine.test.js could not run. #621 and v0.22.0 made tmux a declared dependency
+# and both images install it, which removed the last legitimate skip — and left behind
+# a parameter whose only remaining use was hiding a failure. The rule "never skip a
+# test for a feature the server under test predates" (#588 removed that mitigation:
+# the public suite runs each release's OWN tests, so version skew cannot arise) is
+# worth more as an impossibility than as a rule, so the parameter is gone.
+# test/unit/tmux-required.test.js keeps it gone.
+#
+# Usage: run-integration.sh
 set -e
 
 cd "$(dirname "$0")/.."
-
-skip="${1:-}"
 
 if [ -z "$DEEPSTEVE_URL" ]; then
   # Don't leak the invoking environment into the daemon or the tests: CLAUDECODE
@@ -116,15 +122,6 @@ fi
 # on every run.
 failed=""
 for f in test/integration/*.test.js; do
-  # -E so SKIP_PATTERN can be an alternation, e.g. "security-auth|tmux-engine". A single-word
-  # pattern behaves identically under -E, so existing callers are unaffected. The only skip in
-  # use is the public-install suite's "tmux-engine" (that image installs just zsh + curl); do
-  # NOT add entries here for features the server under test predates — the public suite runs
-  # each release's own tests against that release, so version skew can't arise (#588).
-  if [ -n "$skip" ] && echo "$f" | grep -Eq "$skip"; then
-    echo "--- skipping $f ---"
-    continue
-  fi
   echo "--- running $f ---"
   # --test-concurrency=1 here only serializes suites WITHIN this one file (cheap
   # insurance if a file ever holds two session-using describes); cross-file

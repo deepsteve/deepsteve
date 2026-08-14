@@ -138,11 +138,11 @@ Rules a change anywhere in the tree could violate. Each one has a page that expl
 **Tests** ([docs/testing.md](docs/testing.md))
 
 - **Never set `DEEPSTEVE_TEST_MODE=1` on a real install**, and do not weaken any of the three safety layers that keep a suite off the production daemon (`DEEPSTEVE_URL` required, `testMode` verified, `killall` refused outside test mode).
-- **An integration test's filesystem is not the daemon's.** Under `test/docker-compose.yml` they are two containers, so `test/integration/**` gets scratch cwds from `test/helpers/server-dir.js`, never `os.tmpdir()`. A guard test enforces it; local runs share a filesystem and will not catch a violation.
+- **An integration test's filesystem is not the daemon's.** Under every docker suite they are two containers, so `test/integration/**` gets scratch cwds from `test/helpers/server-dir.js`, never `os.tmpdir()`. Guard tests enforce both halves — the helper's use, and the shared mount every compose must give its two containers; local runs share a filesystem and will not catch a violation.
 - **Only `test/helpers/tmux-sandbox.js` may run `tmux`.** `TMUX_TMPDIR` and `kill-server` are banned under `test/**` — an unaimed `kill-server` once destroyed every live agent on the machine, three times in twenty minutes.
 - **Nothing under `test/unit/` may import `engines/node-pty`** — the CI unit job runs `--ignore-scripts`, so the native binding does not exist there.
 - **Don't add a `node-pty` engine pin to make a red test green** without confirming it's the same "this path is structurally absent under tmux" reason the existing pins have.
-- **Never add `SKIP_PATTERN` entries to a compose file** for features the released server predates. There are none left; keep it that way.
+- **A suite cannot skip a test file, and the three installed-server composes share one definition.** `run-integration.sh` takes no arguments and `test/docker-compose.{install,npm,public}.yml` extend `docker-compose.base.yml`; don't reintroduce either as per-file copies.
 
 **Platform and security** ([docs/platform.md](docs/platform.md))
 

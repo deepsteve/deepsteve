@@ -1,76 +1,36 @@
 # Runs the test suite against an install produced by `npm install -g <packed tarball>`
-# (test/Dockerfile.npm packs this tree and runs `deepsteve start`), so it catches
-# packaging bugs — a module missing from the `files` allowlist, a CLI that deploys the
-# wrong tree — before a version is published. npm versions are immutable, so "fix it in
-# the next publish" is the only correction available.
+# (test/Dockerfile.npm packs this tree and runs `deepsteve start`), so it catches packaging bugs
+# — a module missing from the `files` allowlist, a CLI that deploys the wrong tree — before a
+# version is published. npm versions are immutable, so "fix it in the next publish" is the only
+# correction available.
 #
-# Explicit project name (#616/#588): compose otherwise derives it from this file's
-# parent directory — "test" — which is the SAME project as docker-compose.yml and its
-# siblings, whose services are also named server/test. A `down -v` would then reach
-# into a concurrently running sibling suite and delete its volumes.
+# Everything but the image under test comes from docker-compose.base.yml — read that file for
+# why there is no host port, how the auth token is seeded, and what /scratch is for.
+#
+# Explicit project name (#616/#588): compose otherwise derives it from this file's parent
+# directory — "test" — which is the SAME project as its siblings, whose services are also named
+# server/test. A `down -v` would then reach into a concurrently running sibling suite and delete
+# its volumes.
 name: deepsteve-npm
 
 services:
   server:
+    extends:
+      file: docker-compose.base.yml
+      service: server
     build:
-      context: ..
       dockerfile: test/Dockerfile.npm
-    # No host port publish (#616): the test container reaches us as server:3000 on the
-    # compose network and the healthcheck runs in-container, so nothing needs one — and
-    # 3000:3000 collides with the developer's own daemon.
-    environment:
-      - PORT=3000
-      - DEEPSTEVE_BIND=0.0.0.0
-      # Auth (#536): the test container reaches us as http://server:3000.
-      - DEEPSTEVE_ALLOW_HOST=server
-      # Test mode (#562): marks this disposable instance so /api/version reports
-      # testMode:true — the helpers refuse destructive calls without it.
-      - DEEPSTEVE_TEST_MODE=1
-    volumes:
-      # Token-only volume (#539): the app lives IN /root/.deepsteve here, so sharing
-      # that whole dir would risk running stale deployed code from a persisted volume.
-      - ds_token:/auth
-    # Seed a fresh random token before the server starts: loadOrCreateToken() reuses a
-    # non-empty ~/.deepsteve/auth-token verbatim, so this is the token the server
-    # serves. The healthcheck only passes after listen, so the test container always
-    # sees the final token.
-    command:
-      - sh
-      - -c
-      - |
-        set -e
-        node -e 'process.stdout.write(require("crypto").randomBytes(32).toString("hex"))' > /auth/token
-        install -m 600 /auth/token /root/.deepsteve/auth-token
-        exec node server.js
-    healthcheck:
-      # /healthz is the public readiness endpoint; /api/version is auth-gated (#536).
-      test: ["CMD", "curl", "-sf", "http://localhost:3000/healthz"]
-      interval: 2s
-      timeout: 5s
-      retries: 15
-      start_period: 10s
 
   test:
-    build:
-      context: ..
-      dockerfile: test/Dockerfile
+    extends:
+      file: docker-compose.base.yml
+      service: test
+    # `extends` never copies depends_on, so this cannot live in the base.
     depends_on:
       server:
         condition: service_healthy
-    environment:
-      - DEEPSTEVE_URL=http://server:3000
-    volumes:
-      - ds_token:/auth   # read the server-seeded auth token (#539)
-    # Copy the token where the test helper reads it, then run files serially (one
-    # process each). No skip pattern, ever — see docs/testing.md.
-    # See test/run-integration.sh for why --test-concurrency=1 isn't enough.
-    command:
-      - sh
-      - -c
-      - |
-        set -e
-        cp /auth/token /root/.deepsteve/auth-token
-        exec sh test/run-integration.sh
 
+# Nor does it copy top-level keys, so the volumes the base mounts are declared here.
 volumes:
   ds_token:
+  ds_scratch:

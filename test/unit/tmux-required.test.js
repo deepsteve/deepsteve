@@ -113,10 +113,6 @@ test('the local-install docker image satisfies the dependency it now declares', 
   // Otherwise `npm run test:install` goes red at image build: install.sh would refuse.
   const df = fs.readFileSync(path.join(REPO, 'test', 'Dockerfile.install'), 'utf8');
   assert.match(df, /apt-get install[^\n]*\btmux\b/, 'Dockerfile.install must install tmux');
-  // And with tmux present the suite no longer needs to skip the tmux-engine tests.
-  const compose = fs.readFileSync(path.join(REPO, 'test', 'docker-compose.install.yml'), 'utf8');
-  assert.ok(!/run-integration\.sh\s+tmux-engine/.test(compose),
-    'with tmux installed, the tmux-engine skip is dead weight and hides real coverage');
 });
 
 test('the PUBLIC install image satisfies the dependency the released install.sh declares', () => {
@@ -136,7 +132,37 @@ test('the PUBLIC install image satisfies the dependency the released install.sh 
   const df = fs.readFileSync(path.join(REPO, 'test', 'Dockerfile.public'), 'utf8');
   assert.match(df, /apt-get install[^\n]*\btmux\b/,
     'the released install.sh refuses on Linux without tmux — without it the image cannot build');
-  const compose = fs.readFileSync(path.join(REPO, 'test', 'docker-compose.public.yml'), 'utf8');
-  assert.ok(!/run-integration\.sh\s+'?tmux-engine'?/.test(compose),
-    'with tmux installed the skip is dead weight, and it hid the default engine from this suite');
+});
+
+test('no suite can skip a test file at all', () => {
+  // The successor to the two `!/run-integration\.sh\s+tmux-engine/` greps that used to sit in
+  // the tests above, one per compose file. `tmux-engine` was the one legitimate permanent
+  // skip — neither install image had tmux — and #621/v0.22.0 removed its justification from
+  // both. What was left was a parameter whose only remaining use was hiding a failure, and a
+  // pair of per-file greps that would have gone quietly vacuous the moment the command moved
+  // (it since has: docker-compose.base.yml holds it for all three installed suites).
+  //
+  // So assert the property at its source instead. The runner takes no argument, and no caller
+  // passes one — which makes "never skip a test the server under test predates" (#588: the
+  // public suite runs each release's OWN tests, so version skew cannot arise) an impossibility
+  // rather than a rule someone has to remember.
+  const runner = fs.readFileSync(path.join(REPO, 'test', 'run-integration.sh'), 'utf8')
+    .split('\n').filter((l) => !/^\s*#/.test(l)).join('\n');
+  // Deliberately not a bare /\$1/: the env-stripping loop runs `awk '{print $1}'`, which is
+  // awk's field, not the shell's argument. These are the spellings a parameter actually takes.
+  assert.ok(!/\$\{1|"\$1"|\$@|\$\*/.test(runner),
+    'test/run-integration.sh reads a positional argument again. It runs every file in '
+    + 'test/integration/, unconditionally; a skip parameter has no remaining legitimate use.');
+  assert.ok(!/\bskip\b/.test(runner),
+    'test/run-integration.sh has skip logic again — see the comment above.');
+
+  const composeDir = path.join(REPO, 'test');
+  const composes = fs.readdirSync(composeDir).filter((f) => /^docker-compose.*\.ya?ml$/.test(f));
+  assert.ok(composes.length >= 4, `expected the compose suites, found [${composes.join(', ')}]`);
+  for (const f of composes) {
+    const text = fs.readFileSync(path.join(composeDir, f), 'utf8')
+      .split('\n').filter((l) => !/^\s*#/.test(l)).join('\n');
+    assert.ok(!/run-integration\.sh\s+\S/.test(text),
+      `test/${f} passes an argument to run-integration.sh; the runner takes none.`);
+  }
 });
