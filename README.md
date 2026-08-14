@@ -200,7 +200,7 @@ login session ends and does not start at boot.)
 
 ## Security
 
-- Binds to `localhost:3000` only by default — not accessible from the network
+- Serves `http://deepsteve.localhost:3000` on loopback only by default — not accessible from the network. `--bind <address>` widens that, and logs a warning banner when it does.
 - **Token-authenticated** on every surface (WebSocket, MCP, REST): a Host allowlist + Origin allowlist + a per-install secret at `~/.deepsteve/auth-token` (`0600`) close the cross-origin / DNS-rebinding hole. The browser gets the token as an HttpOnly cookie; other clients send it as `Authorization: Bearer <token>`. Widen access with `--allow-origin` / `--allow-host`.
 - The UI lives on **`http://deepsteve.localhost:3000`** — still loopback-only (RFC 6761), but with its own browser cookie jar so the auth cookie can't be evicted when other local dev apps fill the shared `localhost` jar. Browser navigations to `localhost:3000` get a 302 there; disable with `--no-canonical-redirect` (or `DEEPSTEVE_NO_CANONICAL_REDIRECT=1`) if `*.localhost` doesn't resolve on your system.
 - Each agent session runs with the permissions of the user who installed deepsteve
