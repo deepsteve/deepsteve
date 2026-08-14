@@ -27,16 +27,20 @@ Mods have three display modes:
 
 ### Built-in Mods
 
-| Mod | Display | Default | Description | MCP Tools |
-|---|---|---|---|---|
-| **Action Required** | panel | on | Auto-cycle through tabs needing input | — |
-| **Agent Chat** | panel | off | Shared message bus for agent-to-agent communication | `send_message`, `read_messages`, `list_channels` |
-| **Console** | panel | off | Browser console passthrough for Agents | `browser_eval`, `browser_console` |
-| **Go Karts** | fullscreen | off | 3D go-kart racing with your Claude sessions | — |
-| **Screenshots** | panel | off | Capture terminal screenshots as PNG | `screenshot_capture` |
-| **Session Info** | tools-only | on | Sessions discover their own identity and tab name | `get_my_session_id`, `get_session_info` |
-| **Tasks** | panel | on | Task list populated by Agent sessions | `add_task`, `update_task`, `complete_task`, `list_tasks` |
-| **Tower** | fullscreen | off | Pixel art skyscraper view of sessions | — |
+| Mod | Display | Default | Description |
+|---|---|---|---|
+| **Action Required** | panel | on | Auto-cycle through tabs needing input |
+| **Agent Chat** | panel | off | Shared message bus for agent-to-agent communication |
+| **Console** | panel | off | Browser console passthrough for Agents |
+| **Go Karts** | fullscreen | off | 3D go-kart racing with your Claude sessions |
+| **Screenshots** | panel | off | Capture terminal screenshots as PNG |
+| **Session Info** | tools-only | on | Sessions discover their own identity and tab name |
+| **Tasks** | panel | on | Task list populated by Agent sessions |
+| **Tower** | fullscreen | off | Pixel art skyscraper view of sessions |
+
+This is a highlights list, not an inventory — it names neither every mod nor the tools each one
+registers. Those are declared in the mod's `tools.js` and reported by `GET /api/mods`, which derives
+the list at runtime (#644); the Mods dropdown is the live version of this table.
 
 ## Creating a Mod
 
@@ -65,7 +69,9 @@ mods/<name>/
 | `panel.minWidth` | number | no | Minimum panel width when resizing |
 | `toolbar.label` | string | no | Label shown in the toolbar button (fullscreen mods) or panel tab (panel mods) |
 | `settings` | array | no | Per-mod settings (see below) |
-| `tools` | array | no | MCP tool declarations (see [MCP Tools](#mcp-tools-toolsjs)) |
+
+There is no `tools` field. A mod's MCP tools are declared only in `tools.js` — see
+[MCP Tools](#mcp-tools-toolsjs). `validate-mods.js` fails a manifest that declares one.
 
 **Settings entries:**
 
@@ -80,12 +86,6 @@ mods/<name>/
 ```
 
 Supported types: `"boolean"` (rendered as a checkbox) and `"number"` (rendered as a number input).
-
-**Tool entries:**
-
-```json
-{ "name": "add_task", "description": "Add a task for the human" }
-```
 
 ### Example: Fullscreen Mod (Tower)
 
@@ -124,12 +124,6 @@ Supported types: `"boolean"` (rendered as a checkbox) and `"number"` (rendered a
   "display": "panel",
   "panel": { "position": "right", "defaultWidth": 360, "minWidth": 200 },
   "toolbar": { "label": "Tasks" },
-  "tools": [
-    { "name": "add_task", "description": "Add a task for the human" },
-    { "name": "update_task", "description": "Update a task" },
-    { "name": "complete_task", "description": "Mark a task as done" },
-    { "name": "list_tasks", "description": "List current tasks" }
-  ],
   "settings": [
     { "key": "panelPosition", "type": "boolean", "label": "Panel on left", "description": "Show panel on left side instead of right", "default": false }
   ]
@@ -144,13 +138,12 @@ Supported types: `"boolean"` (rendered as a checkbox) and `"number"` (rendered a
   "version": "0.4.0",
   "minDeepsteveVersion": "0.3.0",
   "enabledByDefault": true,
-  "description": "MCP tool for sessions to discover their own identity and tab name",
-  "tools": [
-    { "name": "get_my_session_id", "description": "Get this session's deepsteve ID (no params needed)" },
-    { "name": "get_session_info", "description": "Get session metadata by deepsteve session ID" }
-  ]
+  "description": "MCP tool for sessions to discover their own identity and tab name"
 }
 ```
+
+A tools-only mod is one with no `display` and no `entry`. The manifest says nothing about the tools
+themselves — they live in `tools.js`.
 
 ## Bridge API (`deepsteve.*`)
 
@@ -206,6 +199,17 @@ Opens the cross-project scheduled-run history page (#633). Like `showAutoCycleTo
 
 Mods can expose tools to Claude Code sessions via the MCP protocol. Tools are defined in a `tools.js` file using CommonJS exports.
 
+**`tools.js` is the only place a mod's MCP tools are declared.** `mod.json` used to carry a parallel
+array of `{ name, description }` objects, and it rotted the way a second copy always does: 48 names
+declared across 15 manifests against 55 actually registered, with three of Agent Chat's tools,
+Display Tabs' edit tool and three of Screenshots' four missing outright — plus short human-written
+descriptions that no longer resembled the long model-facing ones. `GET /api/mods` now derives each
+mod's `tools` array from the object that mod's `init()` returns, so the inventory is generated and
+cannot go stale. The response also carries `mcpReady`, which is `false` for the brief window after
+boot while the ESM-only MCP SDK is still being imported and the index is empty — that is what
+separates "this mod registers no tools" from "nothing has been scanned yet". `validate-mods.js`
+fails a manifest that declares `tools` (#644).
+
 ### `exports.init(context)`
 
 Called once at server startup. Returns an object mapping tool names to definitions:
@@ -233,7 +237,7 @@ function init(context) {
 ```
 
 Each tool has:
-- **`description`** — shown to Claude in the MCP tool listing
+- **`description`** — shown to Claude in the MCP tool listing, and the exact text `GET /api/mods` reports for this tool. Write it for the model, not as a UI caption.
 - **`schema`** — Zod shape object defining input parameters
 - **`handler`** — async function that receives validated params and returns an MCP content response
 

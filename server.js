@@ -7,7 +7,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const net = require('net');
-const { initMCP } = require('./mcp-server');
+const { initMCP, getModTools, isMcpReady } = require('./mcp-server');
 const { createSecurity, UI_HOST } = require('./security');
 const { createSleepWatch } = require('./sleep-watch');
 const { createPowerAssertion } = require('./power-assertion');
@@ -4286,7 +4286,7 @@ function compareSemver(a, b) {
 
 app.get('/api/mods', (req, res) => {
   try {
-    if (!fs.existsSync(MODS_DIR)) return res.json({ mods: [], deepsteveVersion: pkg.version });
+    if (!fs.existsSync(MODS_DIR)) return res.json({ mods: [], deepsteveVersion: pkg.version, mcpReady: isMcpReady() });
     const entries = fs.readdirSync(MODS_DIR, { withFileTypes: true });
     const mods = [];
     for (const entry of entries) {
@@ -4297,7 +4297,12 @@ app.get('/api/mods', (req, res) => {
         if (!manifest.version) continue; // version is required
         const compatible = !manifest.minDeepsteveVersion || compareSemver(pkg.version, manifest.minDeepsteveVersion) >= 0;
         const source = BUILTIN_MODS.has(entry.name) ? 'built-in' : 'official';
-        mods.push({ id: entry.name, source, compatible, ...manifest });
+        // `tools` is DERIVED from the mod's tools.js at MCP init and is never read from
+        // the manifest (#644). It sits after the spread deliberately — later key wins, so
+        // a third-party mod installed via POST /api/mods/install, whose manifest we do not
+        // control and which may still ship a stale tools array, cannot override the real
+        // answer. A mod with no tools.js reports [].
+        mods.push({ id: entry.name, source, compatible, ...manifest, tools: getModTools(entry.name) });
       } catch { /* skip dirs without valid mod.json */ }
     }
     // Append skills
@@ -4327,9 +4332,12 @@ app.get('/api/mods', (req, res) => {
     } catch { /* skip if skills dir missing */ }
 
     mods.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
-    res.json({ mods, deepsteveVersion: pkg.version });
+    // mcpReady is false for the brief window after boot in which initMCP is still awaiting
+    // the ESM SDK import and the tool index is empty — it lets a consumer tell "this mod
+    // registers no tools" apart from "nothing has been scanned yet" (#644).
+    res.json({ mods, deepsteveVersion: pkg.version, mcpReady: isMcpReady() });
   } catch (e) {
-    res.json({ mods: [], deepsteveVersion: pkg.version });
+    res.json({ mods: [], deepsteveVersion: pkg.version, mcpReady: isMcpReady() });
   }
 });
 

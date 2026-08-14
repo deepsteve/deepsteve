@@ -8,11 +8,6 @@
   "display": "panel",
   "panel": { "position": "right", "defaultWidth": 360, "minWidth": 200 },
   "toolbar": { "label": "Chat" },
-  "tools": [
-    { "name": "send_message", "description": "Send a message to a chat channel" },
-    { "name": "read_messages", "description": "Read messages from a chat channel" },
-    { "name": "list_channels", "description": "List available chat channels" }
-  ],
   "permissions": ["microphone"],
   "settings": [
     {

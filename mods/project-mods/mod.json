@@ -2,12 +2,5 @@
   "name": "Project Mods",
   "version": "1.0.0",
   "enabledByDefault": true,
-  "description": "MCP tools for registering per-project mods — a page an agent writes for ONE project and commits to it at .deepsteve/mods/, surfaced in that project's rail entry, tab-strip button, or a pinned background tab",
-  "tools": [
-    { "name": "create_project_mod", "description": "Register a page as a mod for the caller's project, stored in its repo" },
-    { "name": "update_project_mod", "description": "Replace a project mod's page and/or its metadata" },
-    { "name": "edit_project_mod", "description": "Edit a project mod's page by exact substring replacement" },
-    { "name": "list_project_mods", "description": "List the project mods for this project (or all of them)" },
-    { "name": "delete_project_mod", "description": "Delete a project mod, removing its directory from the repo" }
-  ]
+  "description": "MCP tools for registering per-project mods — a page an agent writes for ONE project and commits to it at .deepsteve/mods/, surfaced in that project's rail entry, tab-strip button, or a pinned background tab"
 }

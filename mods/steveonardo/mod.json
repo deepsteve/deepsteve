@@ -5,6 +5,5 @@
   "enabledByDefault": false,
   "entry": "index.html",
   "display": "tab",
-  "tabOption": { "label": "Steveonardo" },
-  "tools": []
+  "tabOption": { "label": "Steveonardo" }
 }

@@ -9,9 +9,5 @@
   "requires": ["agent-chat"],
   "toolbar": {
     "label": "Poker"
-  },
-  "tools": [
-    { "name": "get_poker_state", "description": "Get current poker game state from your perspective" },
-    { "name": "poker_action", "description": "Take a poker action (fold, check, call, raise, all_in)" }
-  ]
+  }
 }

@@ -329,5 +329,10 @@ test('skills and docs still name run_in_terminal', () => {
   assert.ok(merge.indexOf('8b.') < merge.indexOf('9. **Report and close this session'),
     'the cleanup step must come before the self-close step');
   assert.match(read('docs/agents.md'), /run_in_terminal/);
-  assert.match(read('mods/deepsteve-core/mod.json'), /run_in_terminal/);
+  // mods/deepsteve-core/mod.json used to carry a second declaration of this tool with a
+  // short description of its own. #644 made tools.js the only declaration, so the manifest
+  // now names no tool at all — the live definition is asserted above, and GET /api/mods
+  // derives the inventory from it.
+  assert.ok(!('tools' in JSON.parse(read('mods/deepsteve-core/mod.json'))),
+    'the manifest must not re-declare tools — tools.js is the source of truth (#644)');
 });

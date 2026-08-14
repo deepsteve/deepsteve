@@ -2,6 +2,34 @@ const fs = require('fs');
 const path = require('path');
 const { randomUUID } = require('crypto');
 
+// The single source of truth for "which MCP tools exist, and what does each one say".
+// Populated by initMCP() as each mod's tools.js is loaded, and read back by server.js's
+// GET /api/mods (#644) — which used to ship a hand-maintained second copy out of every
+// mod.json. Being hand-maintained, that copy rotted: 48 names declared against 55 really
+// registered, with descriptions rewritten independently on each side.
+//
+// Module scope rather than a closure inside initMCP: mcp-server.js is required exactly
+// once (server.js:10), so this IS a singleton, and the accessor stays correct if initMCP
+// is ever made re-runnable. Arrays are handed out uncopied — GET /api/mods spreads them
+// straight into JSON and never mutates them.
+const modToolIndex = new Map();   // modId (directory name) → [{ name, description }]
+let mcpReady = false;
+
+/**
+ * The tools a mod's tools.js registered, in registration order. Total: returns [] for a
+ * mod with no tools.js, for an unknown mod, and for EVERY mod until initMCP() has
+ * finished — it is async (dynamic import of the ESM-only SDK), so ask isMcpReady() when
+ * the difference between "no tools" and "not scanned yet" matters.
+ */
+function getModTools(modId) {
+  return modToolIndex.get(modId) || [];
+}
+
+/** False until initMCP() has finished scanning mods and the index is complete. */
+function isMcpReady() {
+  return mcpReady;
+}
+
 /**
  * Initialize MCP server with Streamable HTTP transport.
  * Dynamically imports the ESM-only @modelcontextprotocol/sdk,
@@ -16,6 +44,12 @@ async function initMCP(context) {
 
   // Collect tool definitions from mods that have a tools.js file
   const modTools = {};  // { toolName: { description, schema, handler } }
+  const toolOwner = new Map();  // toolName → modId, for the collision warning below
+
+  // Cheap insurance if initMCP is ever called twice: a mod deleted since the last scan
+  // must not linger in the index.
+  modToolIndex.clear();
+  mcpReady = false;
 
   if (fs.existsSync(MODS_DIR)) {
     const entries = fs.readdirSync(MODS_DIR, { withFileTypes: true });
@@ -28,10 +62,22 @@ async function initMCP(context) {
         const mod = require(toolsPath);
         if (typeof mod.init === 'function') {
           const tools = mod.init(context);
+          const declared = [];
           for (const [name, def] of Object.entries(tools)) {
+            // A collision used to be invisible-but-consistent. Now that /api/mods reports
+            // per-mod ownership it would list one name under two mods while only one is
+            // reachable, so say so. Log, never throw: the catch below is per-mod, so a
+            // throw here would silently drop the whole mod — far worse than a warning.
+            if (toolOwner.has(name)) {
+              log(`MCP: WARNING mod "${entry.name}" registers tool "${name}", already registered by mod "${toolOwner.get(name)}" — the later load wins, and mods load in readdir order, so which one is live is not stable`);
+            }
             modTools[name] = def;
+            toolOwner.set(name, entry.name);
+            declared.push({ name, description: def.description || '' });
             log(`MCP: registered tool "${name}" from mod "${entry.name}"`);
           }
+          // Set even when empty, so "has tools.js but exports nothing" is recorded.
+          modToolIndex.set(entry.name, declared);
         }
         if (typeof mod.registerRoutes === 'function') {
           mod.registerRoutes(app, context);
@@ -42,6 +88,9 @@ async function initMCP(context) {
       }
     }
   }
+
+  // The index is complete here — registerRoutes adds REST routes, never tools.
+  mcpReady = true;
 
   if (Object.keys(modTools).length === 0) {
     log('MCP: no mod tools found, MCP endpoint will have no tools');
@@ -144,4 +193,4 @@ async function initMCP(context) {
   log(`MCP: server initialized with ${Object.keys(modTools).length} tools`);
 }
 
-module.exports = { initMCP };
+module.exports = { initMCP, getModTools, isMcpReady };
