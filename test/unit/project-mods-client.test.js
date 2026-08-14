@@ -120,6 +120,7 @@ async function setup({ mods = [modA, modB], enabled = true, activeContext = null
     closed: [],
     closedPinned: [],  // the selective un-pin teardown (#645), kept apart from `closed`
     railRenders: 0,
+    selected: [],   // selectProject(ctxId) — the always-show cross-project open (#647)
     fetches: [],
     // A simulated ModManager view slot (#628). Recorders alone are not enough: openMod()'s
     // toggle and syncModView()'s teardown both READ the slot back, so it has to hold state.
@@ -151,6 +152,7 @@ async function setup({ mods = [modA, modB], enabled = true, activeContext = null
     // render() through notifyTabsChanged → applyFilter → onContextViewApplied.
     closePinnedModTab: (id) => { state.closedPinned.push(id); state.onClosePinned?.(); },
     renderRail: () => { state.railRenders++; },
+    selectProject: (id) => { state.selected.push(id); },
     showModView: (m) => {
       state.shown.push(m.id);
       state.slot = mod.viewIdFor(m.id);
@@ -343,6 +345,49 @@ test('clicking a rail row opens the mod', async () => {
   mod.makeRailRow(modA).onclick();
   assert.deepStrictEqual(state.ensured.at(-1), { modId: 'ma', background: false, pinned: false },
     'a click is a deliberate open — it takes focus, and it is never the pin\'s tab (#645)');
+});
+
+// An always-show project (#647) draws its rail rows while you are somewhere else, so a
+// row now has to carry the project it was drawn under and select it before opening —
+// a mod tab's cwd is its repo root, so it would otherwise open straight into the filter.
+
+test('a rail row drawn under another project selects that project before opening (#647)', async () => {
+  const { mod, state } = await setup({ activeContext: CTX_B });
+  mod.makeRailRow(modA, 'ctxa').onclick();
+  assert.deepStrictEqual(state.selected, ['ctxa'], 'the owner is selected');
+  assert.deepStrictEqual(state.ensured.map(e => e.modId), ['ma'], 'and then the mod opens');
+});
+
+test('a rail row under the project already in view does not re-select it (#647)', async () => {
+  const { mod, state } = await setup({ activeContext: CTX_A });
+  mod.makeRailRow(modA, 'ctxa').onclick();
+  assert.deepStrictEqual(state.selected, [], 'no pointless filter churn on the common path');
+  assert.deepStrictEqual(state.ensured.at(-1).modId, 'ma');
+});
+
+test('a view-mode mod opened from another project is selected into view too (#647)', async () => {
+  // The teardown rule is stricter for a view than for a tab: syncModView() drops any view
+  // whose mod is not in visibleMods(), so without the select the view would open and be
+  // reclaimed on the very next render pass.
+  const { mod, state } = await setup({ mods: [viewA], activeContext: CTX_B });
+  mod.makeRailRow(viewA, 'ctxa').onclick();
+  assert.deepStrictEqual(state.selected, ['ctxa']);
+  assert.deepStrictEqual(state.shown, ['va']);
+});
+
+test('appendRailRows hands its project id to every row it draws (#647)', async () => {
+  const { mod, state } = await setup({ activeContext: CTX_B });
+  const list = fakeElement();
+  mod.appendRailRows(list, [modA, { ...modB, project: REPO_A }], 'ctxa');
+  assert.strictEqual(list.children.length, 2);
+  for (const row of list.children) row.onclick();
+  assert.deepStrictEqual(state.selected, ['ctxa', 'ctxa']);
+});
+
+test('a rail row with no owner id never selects — the pre-#647 call still means "here"', async () => {
+  const { mod, state } = await setup({ activeContext: CTX_B });
+  mod.makeRailRow(modA).onclick();
+  assert.deepStrictEqual(state.selected, []);
 });
 
 // ---------------------------------------------------------- surface 2: button

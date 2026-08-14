@@ -4440,6 +4440,10 @@ async function init() {
   ProjectMods.init({
     getActiveContext: () => getActiveContextInfo(),
     getActiveTabCwd: () => (activeId ? sessions.get(activeId)?.cwd || null : null),
+    // An always-show project's rail rows can be pressed from another project (#647), and
+    // a mod tab carries cwd = its repo, so opening one has to select its project first.
+    // Same entry point the Scheduled panel drives the rail through.
+    selectProject: (id) => setActiveContextFromPanel(id),
     ensureModTab: (mod, opts) => ensureProjectModTab(mod, opts),
     reloadModTab: (mod) => reloadProjectModTab(mod),
     renameModTab: (mod) => renameProjectModTab(mod),

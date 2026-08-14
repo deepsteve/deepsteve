@@ -355,7 +355,7 @@ Panel mods are auto-enabled on first visit (when no mod preferences have been sa
 
 A **Project Mod** is a page an agent writes for **one project** and nowhere else. Where a display tab is a one-shot snapshot that disappears with the session, a project mod is durable: it stays registered to the project and is reachable every session. The intended use is a dashboard or live tooling the project carries with it, rather than something you re-create each time.
 
-It lives **in the repo**, at `.deepsteve/mods/<name>/`, and is meant to be committed — that is how it survives a re-clone and reaches anyone else working on the project. It is still only ever visible when you are looking at *that* project.
+It lives **in the repo**, at `.deepsteve/mods/<name>/`, and is meant to be committed — that is how it survives a re-clone and reaches anyone else working on the project. Its chrome belongs to *that* project — and since #647 a project can keep its rail rows on screen from anywhere.
 
 ### Launcher surfaces
 
@@ -365,7 +365,7 @@ A mod declares which of three launcher placements it wants, via `surfaces`:
 
 | Surface | Where it appears |
 |---|---|
-| `rail` (default) | An entry beneath its project in the projects rail. Rendered for the **active** project only. |
+| `rail` (default) | An entry beneath its project in the projects rail. Rendered for the **active** project, and for any project set to always show its mods (#647) — the one surface that can appear while you are elsewhere. |
 | `button` | A square button in the tab strip — the **top** of the strip in vertical tab layout, the **left** of it in horizontal. |
 | `tab` | A pinned tab that **auto-opens in the background** whenever its project is the active one, and keeps running while you work elsewhere. Removing the surface closes the tab the pin opened; a tab *you* opened by clicking stays. |
 
@@ -431,11 +431,17 @@ Right-click its rail row or its strip button: Open, Rename, Set icon, toggle eac
 
 **Compact view** (#646) is the odd one out in that menu, and also appears on the *project* row's right-click menu whenever the project has rail mods. It lays every project mod's rail row out left-to-right in a wrapping grid instead of one per line, so half a dozen mods cost two rail lines rather than six. It applies to **all** project mods, not the one you right-clicked — hence the parenthetical in the label. It is a per-browser display preference in `localStorage` (`deepsteve-project-mods-compact`), not a setting: it never reaches the server and has no `SETTINGS_SCHEMA` entry, because how tall the rows are is nobody's business but this browser's. Off by default, and off renders exactly the DOM it did before the option existed — `appendRailRows()` in `public/js/project-mods.js` only emits the `.project-mod-flow` wrapper when it is on. The grid is `auto-fill`/`minmax`, so a rail dragged wider earns a third column and the collapsed 48px icon rail falls back to the single column of squares.
 
-### Opening one from another project (#647)
+### Always show a project's mods (#647)
 
-The three surfaces above all require you to be looking at the mod's project, so reaching another project's dashboard used to mean clicking into that project and then clicking the mod. Right-clicking a **project row** in the rail now lists that project's mods at the top of its menu, above Edit/Archive/Delete — press one and it opens.
+The three surfaces above are all scoped to the project you are looking at, so a dashboard was only ever on screen once you had navigated to it — which is the opposite of what a dashboard is for. **Always show this project's mods** lifts that for the rail: a project with the flag set draws its mod rows beneath its row *whatever* project is selected.
 
-That list ignores `surfaces` (a mod pinned only as a background tab is in it too): `surfaces` scopes the three launchers `project-mods.js` owns, and the project menu is a fourth that is always present. Pressing an item also *selects* that project, which is what makes the mod visible at all — a project mod's tab carries `cwd = <its repo root>`, so the tab filter hides it while another project is selected, and a `openMode: "view"` mod is torn down by the next `syncModView()` pass. `modsForProject(ctx)` in `public/js/project-mods.js` is the list; `railModsFor` is now that filtered by surface.
+- **Per-project and persisted**, on `contexts.json` beside `archived`, and **on by default** — including for every project written before the flag existed (`loadContexts()` normalizes an absent field to `true`, which is the whole migration). Toggled from the **project row's** right-click menu, offered whenever the project has rail mods, right above Compact view.
+- Its own route, `POST /api/contexts/:id/always-show-mods`, for the same reason `archived` has one: a name/dirs edit from the project editor must not reset a display choice.
+- Deliberately **not** a browser-local preference the way compact view is. Which projects are worth watching is a property of the projects, and should follow you to another window and another machine.
+- **Rail rows only.** The strip button and the pinned background tab stay scoped to the active project: they are chrome for the project you are *working in*, and a dozen projects' buttons in the strip is the wall this option is careful not to build.
+- Pressing a row drawn under another project **selects that project first** — a project mod's tab carries `cwd = <its repo root>`, so the tab filter would hide it, and an `openMode: "view"` mod would be torn down by the next `syncModView()` pass. That is why a rail row now carries the project it was drawn under (`appendRailRows(list, mods, ctxId)` → `makeRailRow(mod, ownerContextId)` → `openMod(id, { fromContextId })`), and why `app.js` injects a `selectProject` callback: `project-mods.js` still never imports `context-views.js`.
+
+Right-clicking a project row also **lists that project's mods** at the top of its menu, above Edit/Archive/Delete — press one and it opens. That list ignores `surfaces` (a mod pinned only as a background tab is in it too): `surfaces` scopes the three launchers `project-mods.js` owns, and the project menu is a fourth that is always present. `modsForProject(ctx)` is that list; `railModsFor` is it filtered by surface.
 
 ### Disk layout
 

@@ -782,8 +782,9 @@ test('the row menu offers "Compact view" only for a project that has rail mods (
     mod.setActiveContext('ctxa');
     toggle.listeners.click();   // open the rail so the rows exist
 
-    // [All, Alpha, <Alpha's mod row>, Beta] — the mod row only appears under the ACTIVE
-    // project, which is what makes Beta the row with nothing to compact.
+    // [All, Alpha, <Alpha's mod row>, Beta] — Beta owns no mods at all, which is what
+    // makes it the row with nothing to compact. (Since #647 a mod row can also appear
+    // under a NON-active project; what it can never do is appear under the wrong one.)
     const rows = railChildren(rail, 'context-list')[0].children;
     const labelOf = (row) => row.children.find(c => c.className === 'context-row-label')?.textContent;
     const alpha = rows.find(r => labelOf(r) === 'Alpha');
@@ -880,6 +881,140 @@ test('pressing a mod selects its project, so the mod is actually shown (#647)', 
 
     assert.strictEqual(mod.getActiveContextId(), 'ctxa',
       'a project-mod tab carries cwd = its repo, so it stays filtered out until its project is selected');
+    assert.deepStrictEqual(opened, ['ma']);
+  } finally {
+    await reset();
+  }
+});
+
+// ------------------------------------------ always show a project's mods (#647)
+// The rail rows are the ONE project-mod surface that can be drawn for a project you
+// are not in. Per-project, persisted server-side, and ON unless the project says
+// otherwise — so every project written before the flag existed shows its mods.
+
+// Labels of the rows in the rail's main list, mod rows included, in DOM order.
+const railRowLabels = (rail) => railChildren(rail, 'context-list')[0].children
+  .map(r => r.children.find(c => c.className === 'context-row-label')?.textContent);
+
+test('an always-show project draws its mod rows while another project is selected (#647)', async () => {
+  const reset = await seedProjectMods([MOD_A, MOD_B]);
+  try {
+    const { mod, rail, toggle } = await setup({ contexts: menuContexts() });
+    mod.setActiveContext('ctxb');   // looking at Beta
+    toggle.listeners.click();
+
+    // Both projects' mods, each under its own row — this is the whole feature: Alpha's
+    // dashboard is on screen without Alpha being the project you are in.
+    assert.deepStrictEqual(railRowLabels(rail), ['All', 'Alpha', 'A Dash', 'Beta', 'B Dash']);
+  } finally {
+    await reset();
+  }
+});
+
+test('alwaysShowMods:false falls back to the active-project-only rule (#647)', async () => {
+  const reset = await seedProjectMods([MOD_A, MOD_B]);
+  try {
+    const contexts = menuContexts();
+    contexts[0].alwaysShowMods = false;             // Alpha opts out
+    const { mod, rail, toggle } = await setup({ contexts });
+    mod.setActiveContext('ctxb');
+    toggle.listeners.click();
+
+    assert.deepStrictEqual(railRowLabels(rail), ['All', 'Alpha', 'Beta', 'B Dash'],
+      'Alpha keeps its mods to itself');
+  } finally {
+    await reset();
+  }
+});
+
+test('an opted-out project still shows its mods when it IS the active one (#647)', async () => {
+  const reset = await seedProjectMods([MOD_A]);
+  try {
+    const contexts = menuContexts();
+    contexts[0].alwaysShowMods = false;
+    const { mod, rail, toggle } = await setup({ contexts });
+    mod.setActiveContext('ctxa');
+    toggle.listeners.click();
+
+    assert.deepStrictEqual(railRowLabels(rail), ['All', 'Alpha', 'A Dash', 'Beta'],
+      'the flag only governs the OTHER-project case; it can never hide a project\'s own tooling');
+  } finally {
+    await reset();
+  }
+});
+
+test('the menu toggle flips the flag, redraws, and persists it per project (#647)', async () => {
+  const reset = await seedProjectMods([MOD_A]);
+  try {
+    const posts = [];
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (url, opts) => {
+      posts.push({ url, body: opts?.body ? JSON.parse(opts.body) : null });
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
+    };
+    try {
+      const { mod, rail, toggle } = await setup({ contexts: menuContexts() });
+      mod.setActiveContext('ctxb');
+      toggle.listeners.click();
+
+      const itemFor = (label) => rowMenuFor(rail, 'Alpha').children
+        .find(i => i.textContent?.includes(label));
+      const on = itemFor('Always show');
+      assert.ok(on.textContent.startsWith('✓'), 'ticked by default');
+
+      on.onclick();
+      assert.deepStrictEqual(posts.at(-1), {
+        url: '/api/contexts/ctxa/always-show-mods',
+        body: { alwaysShowMods: false },
+      }, 'its own route, so a name/dirs edit can never flip it');
+      assert.ok(!railRowLabels(rail).includes('A Dash'), 'the rail responds to the press');
+      assert.ok(!itemFor('Always show').textContent.startsWith('✓'), 'and the tick follows');
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  } finally {
+    await reset();
+  }
+});
+
+test('the always-show toggle is offered only where there are rail mods to show (#647)', async () => {
+  const reset = await seedProjectMods([MOD_A, MOD_TAB_ONLY]);
+  try {
+    const { rail, toggle } = await setup({ contexts: menuContexts() });
+    toggle.listeners.click();
+    const has = (name) => rowMenuFor(rail, name).children.some(i => i.textContent?.includes('Always show'));
+    assert.ok(has('Alpha'), 'Alpha has a rail mod');
+    // Beta owns nothing, and Alpha's tab-only mod is not a rail row either — the item
+    // gates on the same railModsFor() the rows themselves come from.
+    assert.ok(!has('Beta'));
+  } finally {
+    await reset();
+  }
+});
+
+test('pressing an always-shown rail row selects its project, then opens (#647)', async () => {
+  const reset = await seedProjectMods([MOD_A]);
+  try {
+    const pm = await import(new URL('../../public/js/project-mods.js', `file://${__filename}`).href);
+    const opened = [];
+    const { mod, rail, toggle } = await setup({ contexts: menuContexts() });
+    // Re-init with the two callbacks this test reads back, including the selectProject
+    // app.js injects — the row is drawn under Alpha while Beta is what we are in.
+    pm.init({
+      renderRail: () => {},
+      ensureModTab: (m) => opened.push(m.id),
+      getActiveContext: () => mod.getActiveContextInfo(),
+      selectProject: (id) => mod.setActiveContext(id),
+    });
+    mod.setActiveContext('ctxb');
+    toggle.listeners.click();
+
+    const row = railChildren(rail, 'context-list')[0].children
+      .find(r => r.dataset.projectModId === 'ma');
+    assert.ok(row, 'Alpha\'s mod row is on screen from Beta');
+    row.onclick();
+
+    assert.strictEqual(mod.getActiveContextId(), 'ctxa');
     assert.deepStrictEqual(opened, ['ma']);
   } finally {
     await reset();

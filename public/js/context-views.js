@@ -417,17 +417,39 @@ function renderRail() {
 /**
  * Project Mods registered to `ctx` (#618), rendered directly beneath its row.
  *
- * Only for the ACTIVE project. Listing every project's mods would turn a rail of a
- * dozen projects into a wall — and the row you just clicked is the one whose tooling
- * you want. Everything else about a mod (its strip button, its pinned tab) is scoped
- * the same way, so this matches rather than adds a rule.
+ * Drawn for the ACTIVE project, and for any project that asked to always show them
+ * (#647) — a per-project, persisted flag, default ON, toggled from the row's right-click
+ * menu. That is the whole feature: a project mod is usually a dashboard, and a dashboard
+ * you have to navigate to is one you don't look at. The other two surfaces (strip button,
+ * pinned tab) stay scoped to the active project deliberately — they are chrome for the
+ * project you are working in, and duplicating a dozen projects' buttons into the strip is
+ * the wall this option is careful not to build.
+ *
+ * The project's id goes down with the rows because they can now be pressed from another
+ * project: openMod() selects the owner first, or the mod's tab lands filtered out.
  *
  * How they're laid out (one per line, or the compact wrapping grid, #646) is
  * project-mods' call, not ours — appendRailRows owns that branch.
  */
 function appendProjectModRows(list, ctx) {
-  if (!ctx || ctx.id !== activeContextId) return;
-  appendRailRows(list, railModsFor(ctx));
+  if (!ctx) return;
+  if (ctx.id !== activeContextId && !alwaysShowsMods(ctx)) return;
+  appendRailRows(list, railModsFor(ctx), ctx.id);
+}
+
+/** Default ON — an absent flag (every context written before #647) means "show them". */
+const alwaysShowsMods = (ctx) => ctx?.alwaysShowMods !== false;
+
+// Flip the flag (#647). Optimistic local write + re-render so the rail responds to the
+// press, then the POST; the server's broadcast reconciles this and every other window.
+function setAlwaysShowMods(ctx, val) {
+  ctx.alwaysShowMods = val;
+  renderRail();
+  fetch(`/api/contexts/${encodeURIComponent(ctx.id)}/always-show-mods`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ alwaysShowMods: val }),
+  }).catch(() => {});
 }
 
 function makeRow(id, name, active, ctx) {
@@ -574,6 +596,12 @@ function showRowMenu(x, y, ctx) {
     // railModsFor, so the item disappears with the feature for free.
     if (railModsFor(ctx).length) {
       addRowMenuSeparator(menu);
+      // The option this menu exists for (#647). Per-project and persisted, unlike the
+      // per-browser compact toggle below it — hence the two live in one group but read
+      // differently: this one names THIS project, that one says "all project mods".
+      const always = alwaysShowsMods(ctx);
+      addRowMenuItem(menu, `${always ? '✓ ' : '   '}Always show this project's mods`,
+        () => setAlwaysShowMods(ctx, !always));
       const compact = isCompactRail();
       addRowMenuItem(menu, `${compact ? '✓ ' : '   '}Compact view (all project mods)`,
         () => setCompactRail(!compact));

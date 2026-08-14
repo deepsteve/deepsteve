@@ -2985,7 +2985,7 @@ function loadContexts() {
       const v = JSON.parse(fs.readFileSync(CONTEXTS_FILE, 'utf8'));
       contexts = (Array.isArray(v) ? v : [])
         .filter(c => c && typeof c.name === 'string')
-        .map(c => ({ id: c.id || genContextId(), name: c.name, dirs: Array.isArray(c.dirs) ? c.dirs.filter(Boolean) : [], icon: typeof c.icon === 'string' ? c.icon : '', iconImage: (c.iconImage === 'png' || c.iconImage === 'svg') ? c.iconImage : '', archived: c.archived === true }));
+        .map(c => ({ id: c.id || genContextId(), name: c.name, dirs: Array.isArray(c.dirs) ? c.dirs.filter(Boolean) : [], icon: typeof c.icon === 'string' ? c.icon : '', iconImage: (c.iconImage === 'png' || c.iconImage === 'svg') ? c.iconImage : '', archived: c.archived === true, alwaysShowMods: c.alwaysShowMods !== false }));
       return;
     }
   } catch (e) {
@@ -2998,7 +2998,7 @@ function loadContexts() {
       if (Array.isArray(groups) && groups.length) {
         contexts = groups
           .filter(g => g && typeof g.name === 'string')
-          .map(g => ({ id: genContextId(), name: g.name, dirs: Array.isArray(g.projects) ? g.projects.filter(Boolean) : [] }));
+          .map(g => ({ id: genContextId(), name: g.name, dirs: Array.isArray(g.projects) ? g.projects.filter(Boolean) : [], alwaysShowMods: true }));
         saveContexts();
         log(`Migrated ${contexts.length} project group(s) from project-groups.json into contexts.json`);
       }
@@ -5277,8 +5277,12 @@ app.post('/api/contexts', (req, res) => {
   // `archived` (#601) is owned solely by POST /api/contexts/:id/archive — a name/dirs
   // edit from the editor modal must never resurrect an archived context (same reason
   // the icon is preserved above).
+  // `alwaysShowMods` (#647) is owned solely by POST /api/contexts/:id/always-show-mods,
+  // for the same reason `archived` is: a name/dirs edit must not reset a display choice.
+  // New projects start with it ON — a project mod is a dashboard, and the whole point of
+  // the option is that you don't have to navigate to one to see it.
   if (existing) { existing.name = name; existing.dirs = dirs; existing.icon = icon; existing.iconImage = iconImage; }
-  else contexts.push({ id, name, dirs, icon, iconImage, archived: false });
+  else contexts.push({ id, name, dirs, icon, iconImage, archived: false, alwaysShowMods: true });
   saveContexts();
   broadcastContexts();
   res.json({ contexts });
@@ -5377,6 +5381,25 @@ app.post('/api/contexts/:id/archive', (req, res) => {
   const ctx = contexts.find(c => c.id === req.params.id);
   if (!ctx) return res.status(404).json({ error: 'Project not found' });
   ctx.archived = req.body?.archived === true;
+  saveContexts();
+  broadcastContexts();
+  res.json({ contexts });
+});
+
+// Always show this project's mods (#647). Off, a project's mod rows are drawn in the
+// rail only while that project is the active one — the rule every other project-mod
+// launcher follows. On (the default), they are drawn under its row whatever is
+// selected, so a dashboard is visible at a glance instead of two clicks away.
+//
+// Per-project and persisted, so it rides contexts.json like `archived` — and like
+// `archived` it gets its own route rather than a field on the upsert, so an edit from
+// the project editor can't flip it. It is deliberately NOT a browser-local preference
+// (the way compact view is): which projects are worth watching is a property of the
+// projects, and should follow the user to another window and another machine.
+app.post('/api/contexts/:id/always-show-mods', (req, res) => {
+  const ctx = contexts.find(c => c.id === req.params.id);
+  if (!ctx) return res.status(404).json({ error: 'Project not found' });
+  ctx.alwaysShowMods = req.body?.alwaysShowMods !== false;
   saveContexts();
   broadcastContexts();
   res.json({ contexts });

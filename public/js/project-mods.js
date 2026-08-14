@@ -6,7 +6,9 @@
  * can register itself, all of which are host chrome that no mod iframe could reach:
  *
  *   1. rail   — an entry beneath its project in the projects rail (context-views.js
- *               calls railModsFor() while rendering)
+ *               calls railModsFor() while rendering). The only surface that can be
+ *               drawn for a project you are NOT in: a project with `alwaysShowMods`
+ *               keeps its rows on screen whatever is selected (#647).
  *   2. button — a square button in #tabs, which is the TOP of the strip in vertical
  *               tab layout and the LEFT of it in horizontal (same insertion point
  *               mod-manager.js uses for a DeepSteve Mod's toolbar button)
@@ -380,9 +382,16 @@ function autoOpenPinned() {
  * behaves. While the view is merely BACKGROUNDED, a click brings it back rather than
  * dismissing it — otherwise the launcher would appear to do nothing.
  */
-export function openMod(id) {
+export function openMod(id, { fromContextId = null } = {}) {
   const mod = getMod(id);
   if (!mod) return;
+  // Opening a mod that belongs to a project you are NOT looking at (#647): select that
+  // project first, or the open appears to do nothing. A mod's tab carries cwd = its repo
+  // root, so applyFilter() hides it while another project is selected, and syncModView()
+  // tears a view down on the very next pass for the same reason. Only the always-show rail
+  // rows and the project menu pass this — the surfaces scoped to the active project can't
+  // be pressed from anywhere else, and would only re-select what is already selected.
+  if (fromContextId && cb.getActiveContext?.()?.id !== fromContextId) cb.selectProject?.(fromContextId);
   if (!opensAsView(mod)) { cb.ensureModTab?.(mod, { background: false }); return; }
   const { id: openId, front } = cb.getViewInfo?.() || {};
   if (openId === viewIdFor(mod.id) && front) cb.hideModView?.(mod.id);
@@ -401,11 +410,11 @@ export function openMod(id) {
  * is the grid CSS keys off — a wrapper rather than a class on the list because the list
  * also holds the project rows, which must keep stacking.
  */
-export function appendRailRows(list, railMods) {
+export function appendRailRows(list, railMods, ownerContextId = null) {
   if (!list || !railMods?.length) return;  // no mods → no empty wrapper
   const target = compactRail ? document.createElement('div') : list;
   if (target !== list) target.className = 'project-mod-flow';
-  for (const mod of railMods) target.appendChild(makeRailRow(mod));
+  for (const mod of railMods) target.appendChild(makeRailRow(mod, ownerContextId));
   if (target !== list) list.appendChild(target);
 }
 
@@ -414,8 +423,12 @@ export function appendRailRows(list, railMods) {
  * children) so the collapsed icon rail's existing rules apply unchanged — it hides
  * .context-row-label and shows .context-row-icon, and these degrade to squares for
  * free. `.project-mod-row` only adds the indent and a muted weight.
+ *
+ * `ownerContextId` is the project the row was drawn under. Since #647 that need not be
+ * the active one — an always-show project draws its rows wherever you are — so the row
+ * has to carry the project it belongs to in order to select it on press.
  */
-export function makeRailRow(mod) {
+export function makeRailRow(mod, ownerContextId = null) {
   const row = document.createElement('div');
   railRows.set(mod.id, row);
   // `has-icon` follows the same rule project rows follow (#569): the expanded rail shows
@@ -437,7 +450,7 @@ export function makeRailRow(mod) {
   label.textContent = mod.name;
   row.appendChild(label);
 
-  row.onclick = () => openMod(mod.id);
+  row.onclick = () => openMod(mod.id, { fromContextId: ownerContextId });
   row.addEventListener('contextmenu', (e) => {
     e.preventDefault();
     showModMenu(e.clientX, e.clientY, mod);
