@@ -46,13 +46,16 @@ function deriveTabName(cmd) {
  * from under the very session now asking for a terminal. Telling the agent to pass an
  * explicit cwd is the actionable half.
  */
-function refuseMissingCwd(cwd) {
-  const problem = spawnCwdProblem(cwd);
-  if (!problem) return null;
+function refuseCwdProblem(problem) {
   return {
     content: [{ type: 'text', text: `${problem.message} — pass an explicit \`cwd\` that exists.` }],
     isError: true,
   };
+}
+
+function refuseMissingCwd(cwd) {
+  const problem = spawnCwdProblem(cwd);
+  return problem ? refuseCwdProblem(problem) : null;
 }
 
 // Control keys meta_type can send (#519). Values are the raw bytes written to the
@@ -105,7 +108,7 @@ function init(context) {
     shells, closeSession, handleShellGone, spawnSession, sessionEnv, getSpawnArgs, mcpConfigArgs, getAgentConfig, wireShellOutput, getDefaultEngine, getForegroundCommand,
     watchClaudeSessionDir, unwatchClaudeSessionDir, resolveForkParentSession, saveState,
     validateWorktree, ensureWorktree, sessionPaths, submitToShell,
-    fetchIssueFromGitHub, deliverPromptWhenReady,
+    deliverPromptWhenReady, startIssueSession,
     reloadClients, deliverToWindow, settings, log, isShuttingDown,
     emitSessionOpen,
     stripEscapeSequences, readTerminalScreen, sessionInputState, maybeInheritRemoteControl, requestMetaControlsConsent,
@@ -331,101 +334,17 @@ function init(context) {
         if (!caller) {
           return { content: [{ type: 'text', text: `Session "${callerId || 'unknown'}" not found.` }] };
         }
-
-        // Inherit from caller, allow overrides
-        const effectiveCwd = cwd || caller.cwd;
-        const refusal = refuseMissingCwd(effectiveCwd);
-        if (refusal) return refusal;
-        const effectiveAgentType = agent_type || caller.agentType || 'claude';
-        // Custom config profiles are a Claude-only surface (#537). An explicit
-        // override to Codex/another agent must not leak CLAUDE_CONFIG_DIR.
-        const effectiveConfigDir = effectiveAgentType === 'claude' ? (caller.configDir || null) : null;
-        const windowId = caller.windowId || null;
-
-        // Build prompt helper
-        function buildPrompt(issueBody, issueLabels, issueUrl) {
-          const vars = {
-            number,
-            title,
-            labels: issueLabels || 'none',
-            url: issueUrl || '',
-            body: issueBody ? String(issueBody).slice(0, 2000) : '(no description)',
-          };
-          return settings.wandPromptTemplate.replace(/\{\{(\w+)\}\}/g, (_, key) => vars[key] ?? '');
-        }
-
-        // When body is provided inline, build prompt synchronously
-        const prompt = body ? buildPrompt(body, labels, url) : null;
-
-        const worktree = validateWorktree('github-issue-' + number);
-        const id = randomUUID().slice(0, 8);
-        const claudeSessionId = effectiveAgentType === 'codex' ? null : randomUUID();
-        const codexHomeId = effectiveAgentType === 'codex' ? id : null;
-        const agentConfig = getAgentConfig(effectiveAgentType);
-
-        // For agents that don't support --worktree natively: manually create worktree
-        let spawnCwd = effectiveCwd;
-        if (worktree && !agentConfig.supportsWorktree) {
-          spawnCwd = ensureWorktree(effectiveCwd, worktree);
-        }
-
-        const spawnArgs = getSpawnArgs(effectiveAgentType, {
-          sessionId: claudeSessionId,
-          planMode: settings.wandPlanMode,
-          worktree,
-          shellId: id,
+        // Everything past the caller lookup — inheritance, worktree, spawn, /rc
+        // inheritance, prompt delivery — is startIssueSession's job (#642). This
+        // tool used to carry its own copy of all of it, and the copy had drifted.
+        const result = startIssueSession({
+          number, title, body, labels, url,
+          cwd: cwd || null,
+          agentType: agent_type || null,
+          callerId,
         });
-
-        const maxLen = settings.maxIssueTitleLength || 25;
-        const tabTitle = `#${number} ${title}`;
-        const name = tabTitle.length <= maxLen ? tabTitle : tabTitle.slice(0, maxLen) + '\u2026';
-
-        const sessionEngine = getDefaultEngine();
-        const engineType = sessionEngine.constructor.name === 'TmuxEngine' ? 'tmux' : 'node-pty';
-        log(`[MCP] start_issue #${number}: id=${id}, agent=${effectiveAgentType}, engine=${engineType}, worktree=${worktree || 'none'}, cwd=${spawnCwd}`);
-        spawnSession(sessionEngine, id, effectiveAgentType, spawnArgs, spawnCwd, { cols: 120, rows: 40, env: sessionEnv(id, { name, worktree, windowId, cwd: spawnCwd, agentType: effectiveAgentType, configDir: effectiveConfigDir, codexHomeId }) });
-        shells.set(id, {
-          clients: new Set(), cwd: spawnCwd,
-          claudeSessionId, agentType: effectiveAgentType,
-          codexHomeId,
-          configDir: effectiveConfigDir,
-          engine: sessionEngine, engineType,
-          worktree: worktree || null, windowId,
-          name, initialPrompt: null,
-          planMode: !!settings.wandPlanMode,
-          waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now(),
-          loading: true,
-        });
-        wireShellOutput(id);
-        emitSessionOpen(id);
-
-        if (agentConfig.supportsSessionWatch) watchClaudeSessionDir(id);
-        sessionEngine.onExit(id, () => {
-          if (agentConfig.supportsSessionWatch) unwatchClaudeSessionDir(id);
-          handleShellGone(id);
-        });
-        saveState();
-
-        // Inherit Remote Control from the caller (#519) — queued BEFORE the issue
-        // prompt so `/rc` submits first; deliverPromptWhenReady sequences the two.
-        maybeInheritRemoteControl({ newId: id, agentType: effectiveAgentType, isFork: false, parentId: callerId });
-
-        // Deliver prompt: sync if body provided, async fetch from GitHub otherwise
-        if (prompt) {
-          deliverPromptWhenReady(id, prompt);
-        } else {
-          fetchIssueFromGitHub(number, effectiveCwd).then(gh => {
-            const issueBody = gh ? gh.body : null;
-            const issueLabels = gh ? (labels || (Array.isArray(gh.labels) ? gh.labels.map(l => typeof l === 'string' ? l : l.name).join(', ') : null)) : labels;
-            const issueUrl = gh ? (url || gh.url) : url;
-            const asyncPrompt = buildPrompt(issueBody, issueLabels, issueUrl);
-            deliverPromptWhenReady(id, asyncPrompt);
-          });
-        }
-
-        deliverToWindow({ type: 'open-session', id, cwd: spawnCwd, name, windowId, loading: true }, windowId);
-
-        return { content: [{ type: 'text', text: JSON.stringify({ id, name, cwd: spawnCwd, worktree: worktree || null }) }] };
+        if (result.error) return refuseCwdProblem(result.error);
+        return { content: [{ type: 'text', text: JSON.stringify({ id: result.id, name: result.name, cwd: result.cwd, worktree: result.worktree }) }] };
       },
     },
     merge_worktree: {

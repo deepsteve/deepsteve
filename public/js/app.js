@@ -1810,6 +1810,10 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
             // (blocks input + emits prompt-submitted to dismiss the banner) for the
             // client-initiated issue-start path, mirroring /api/start-issue (#495).
             ws.sendJSON({ type: 'initialPrompt', text: opts.initialPrompt, loading: opts.loading });
+          } else if (opts.issue) {
+            // Wand picker (#642): the server renders wandPromptTemplate from these
+            // fields. Same `loading` contract as initialPrompt above.
+            ws.sendJSON({ type: 'issue', issue: opts.issue, loading: opts.loading });
           }
           // Apply persisted waiting state from the server. This restores the
           // busy/idle flag after a reconnect so close-confirm and the hash
@@ -4063,7 +4067,7 @@ async function showIssuePicker() {
   let issueObserver = null;  // infinite-scroll IntersectionObserver; hoisted so teardown is centralized here
   new MutationObserver((_, obs) => { if (!overlay.parentNode) { document.removeEventListener('keydown', onEscIssuePicker); issueObserver?.disconnect(); obs.disconnect(); } }).observe(document.body, { childList: true });
 
-  let issues, wandPlanMode, wandPromptTemplate, hasMore;
+  let issues, wandPlanMode, hasMore;
   let selectedIssue = null;
   let currentPage = 1;
   let loadingMore = false;
@@ -4146,20 +4150,18 @@ async function showIssuePicker() {
     if (!selectedIssue) return;
     overlay.remove();
 
-    const body = selectedIssue.body ? selectedIssue.body.slice(0, 2000) : '(no description)';
-    const labels = selectedIssue.labels?.map(l => l.name).join(', ') || 'none';
-    const vars = {
-      number: selectedIssue.number,
-      title: selectedIssue.title,
-      labels,
-      url: selectedIssue.url,
-      body,
-    };
-    const prompt = wandPromptTemplate.replace(/\{\{(\w+)\}\}/g, (_, key) => vars[key] ?? '');
-
+    // Send the issue fields, not a rendered prompt (#642): the server owns
+    // wandPromptTemplate, so a user-edited template has exactly one reader and
+    // this path can't drift from /api/start-issue or MCP start_issue.
     createSession(gitRoot, null, true, {
       worktree: 'github-issue-' + selectedIssue.number,
-      initialPrompt: prompt,
+      issue: {
+        number: selectedIssue.number,
+        title: selectedIssue.title,
+        labels: selectedIssue.labels,
+        url: selectedIssue.url,
+        body: selectedIssue.body,
+      },
       planMode: wandPlanMode,
       name: truncateTitle(`#${selectedIssue.number} ${selectedIssue.title}`),
       agentType: getDefaultAgentType(),
@@ -4185,7 +4187,6 @@ async function showIssuePicker() {
       issues = issuesData.issues;
       hasMore = issuesData.hasMore;
       wandPlanMode = settingsData.wandPlanMode !== undefined ? settingsData.wandPlanMode : true;
-      wandPromptTemplate = settingsData.wandPromptTemplate || '';
       if (settingsData.maxIssueTitleLength) maxIssueTitleLength = settingsData.maxIssueTitleLength;
 
       // Modal may have been dismissed while loading

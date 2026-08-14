@@ -25,6 +25,7 @@ const { terminalEnv } = require('./terminal-env');
 const { readComposerDraft, isPromptStaged, isPromptOnScreen } = require('./composer-state');
 const { wrapRunCommand } = require('./terminal-run');
 const { isTerminalReport } = require('./terminal-input');
+const { renderIssuePrompt, issueWorktreeName, issueTabName } = require('./issue-prompt');
 const NodePtyEngine = require('./engines/node-pty');
 const TmuxEngine = require('./engines/tmux');
 
@@ -5472,65 +5473,56 @@ app.get('/api/issues', (req, res) => {
     });
 });
 
-app.post('/api/start-issue', (req, res) => {
-  const { number, title, body, labels, url, cwd: rawCwd, windowId: rawWindowId, sessionId, agentType: rawAgentType } = req.body;
-  if (!number || !title) return res.status(400).json({ error: 'number and title are required' });
-
-  // Resolve windowId, agentType, and cwd: explicit value, or look up from caller's session
-  let windowId = rawWindowId;
-  let agentType = rawAgentType;
-  let configDir = null;  // custom config profile (#537)
-  let cwd = rawCwd;
-  // A profile selected as the default agent arrives as agentType='config:<pid>' (or an
-  // explicit configProfile field). Resolve it to a concrete dir; the runtime agentType
-  // stays 'claude'. Resolve BEFORE caller inheritance so it takes precedence.
-  let configProfile = req.body.configProfile || null;
-  if (agentType && agentType.startsWith('config:')) { configProfile = agentType.slice('config:'.length); agentType = 'claude'; }
-  if (configProfile) configDir = resolveConfigDir(configProfile);
-  if (sessionId) {
-    const callerEntry = shells.get(sessionId);
-    if (callerEntry) {
-      if (!windowId && callerEntry.windowId) windowId = callerEntry.windowId;
-      if (!agentType && callerEntry.agentType) agentType = callerEntry.agentType;
-      if (!configDir && callerEntry.configDir) configDir = callerEntry.configDir;
-      if (!cwd && callerEntry.cwd) cwd = callerEntry.cwd;
-    }
+/**
+ * Start a session for a GitHub issue. THE implementation (#642) — POST
+ * /api/start-issue and the MCP start_issue tool both come through here, and the
+ * wand picker's WS path shares the prompt rendering with it.
+ *
+ * This existed three times before, and the copies had drifted in six ways: only
+ * two of them inherited the caller's `/rc`, only two called recordRecentSession,
+ * one recorded an `engineType` guessed from getDefaultEngine() rather than taken
+ * from what spawnSession actually returned, and the two server paths disagreed
+ * about which cwd to report to the browser, which cwd pre-flight to run, and
+ * whether a start with no browser window open should open one.
+ *
+ * Returns `{ error: <spawnCwdProblem> }` for a bad cwd — the caller formats it,
+ * because an HTTP 400 body and an MCP isError result are not the same shape.
+ */
+function startIssueSession({ number, title, body, labels, url, cwd, agentType, configDir, windowId, callerId, openBrowser = false }) {
+  // Inherit whatever the caller didn't specify from the calling session.
+  const caller = callerId ? shells.get(callerId) : null;
+  if (caller) {
+    if (!windowId && caller.windowId) windowId = caller.windowId;
+    if (!agentType && caller.agentType) agentType = caller.agentType;
+    if (!configDir && caller.configDir) configDir = caller.configDir;
+    if (!cwd && caller.cwd) cwd = caller.cwd;
   }
   agentType = agentType || 'claude';
+  // Custom config profiles are a Claude-only surface (#537): an explicit override
+  // to Codex or another agent must not leak CLAUDE_CONFIG_DIR from the caller.
+  if (agentType !== 'claude') configDir = null;
 
-  cwd = cwd || process.env.HOME;
-  cwd = expandTilde(cwd);
+  cwd = expandTilde(cwd || process.env.HOME);
 
   // #632: refuse before ensureWorktree() and before the async issue fetch. Without
   // this the spawn throw becomes a 500 HTML body (there is no try/catch around the
   // spawn below), which tells the caller nothing about which directory is gone.
-  const cwdProblem = spawnCwdProblem(cwd);
-  if (cwdProblem) {
-    log(`[API] start-issue #${number} refused: ${cwdProblem.message}`);
-    return res.status(400).json({ error: cwdProblem.message, code: cwdProblem.code, cwd: cwdProblem.cwd });
+  const problem = spawnCwdProblem(cwd);
+  if (problem) {
+    log(`[issue] #${number} refused: ${problem.message}`);
+    return { error: problem };
   }
 
-  // Build prompt helper (shared between sync and async paths)
-  function buildPrompt(issueBody, issueLabels, issueUrl) {
-    const vars = {
-      number,
-      title,
-      labels: Array.isArray(issueLabels) ? issueLabels.map(l => typeof l === 'string' ? l : l.name).join(', ') : (issueLabels || 'none'),
-      url: issueUrl || '',
-      body: issueBody ? String(issueBody).slice(0, 2000) : '(no description)',
-    };
-    return settings.wandPromptTemplate.replace(/\{\{(\w+)\}\}/g, (_, key) => vars[key] ?? '');
-  }
-
-  const worktree = validateWorktree('github-issue-' + number);
+  const worktree = validateWorktree(issueWorktreeName(number));
   const id = randomUUID().slice(0, 8);
   const claudeSessionId = agentType === 'codex' ? null : randomUUID();
+  const codexHomeId = agentType === 'codex' ? id : null;
   const agentConfig = getAgentConfig(agentType);
 
   // For agents that don't support --worktree natively: manually create worktree
-  let worktreeCwd = cwd;
+  let spawnCwd = cwd;
   if (worktree && !agentConfig.supportsWorktree) {
-    worktreeCwd = ensureWorktree(cwd, worktree);
+    spawnCwd = ensureWorktree(cwd, worktree);
   }
 
   const spawnArgs = getSpawnArgs(agentType, {
@@ -5540,32 +5532,17 @@ app.post('/api/start-issue', (req, res) => {
     shellId: id
   });
 
-  const maxLen = settings.maxIssueTitleLength || 25;
-  const tabTitle = `#${number} ${title}`;
-  const name = tabTitle.length <= maxLen ? tabTitle : tabTitle.slice(0, maxLen) + '\u2026';
-
-  // Pre-flight: ensure we can deliver to a browser before spawning
-  const readyClients = [...reloadClients].filter(c => c.readyState === 1);
-  if (!windowId && readyClients.length > 1) {
-    log(`[API] start-issue: multiple browser windows open but no windowId resolved`);
-    return res.status(400).json({ error: 'Multiple browser windows open. Pass sessionId or windowId to target one.' });
-  }
-
-  // When body is provided inline, build prompt synchronously
-  const prompt = body ? buildPrompt(body, labels, url) : null;
+  const name = issueTabName(number, title, settings.maxIssueTitleLength);
 
   // spawnSession returns the engine that actually spawned — it can fall back from
   // tmux to node-pty (#620), and engineType must record what happened.
-  const sessionEngine = spawnSession(getDefaultEngine(), id, agentType, spawnArgs, worktreeCwd, { cols: 120, rows: 40, env: sessionEnv(id, { name, worktree, windowId: windowId || null, cwd: worktreeCwd, agentType, configDir }) });
+  const sessionEngine = spawnSession(getDefaultEngine(), id, agentType, spawnArgs, spawnCwd, { cols: 120, rows: 40, env: sessionEnv(id, { name, worktree, windowId: windowId || null, cwd: spawnCwd, agentType, configDir, codexHomeId }) });
   const engineType = sessionEngine === tmuxEngine ? 'tmux' : 'node-pty';
-  log(`[API] start-issue #${number}: id=${id}, agent=${agentType}, engine=${engineType}, worktree=${worktree || 'none'}, cwd=${worktreeCwd}`);
-  shells.set(id, { clients: new Set(), cwd: worktreeCwd, claudeSessionId: claudeSessionId, agentType, codexHomeId: agentType === 'codex' ? id : null, configDir: configDir || null, engine: sessionEngine, engineType, worktree: worktree || null, windowId: windowId || null, name, planMode: !!settings.wandPlanMode, waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now(), loading: true });
+  log(`[issue] #${number}: id=${id}, agent=${agentType}, engine=${engineType}, worktree=${worktree || 'none'}, cwd=${spawnCwd}`);
+  shells.set(id, { clients: new Set(), cwd: spawnCwd, claudeSessionId, agentType, codexHomeId, configDir: configDir || null, engine: sessionEngine, engineType, worktree: worktree || null, windowId: windowId || null, name, planMode: !!settings.wandPlanMode, waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now(), loading: true });
   wireShellOutput(id);
   emitSessionOpen(id);
   recordRecentSession(id);
-  // Route any synchronous prompt through deliverPromptWhenReady so agents
-  // get a level-triggered readiness wait or their configured delay.
-  if (prompt) deliverPromptWhenReady(id, prompt);
   if (agentConfig.supportsSessionWatch) watchClaudeSessionDir(id);
   sessionEngine.onExit(id, () => {
     if (agentConfig.supportsSessionWatch) unwatchClaudeSessionDir(id);
@@ -5573,21 +5550,63 @@ app.post('/api/start-issue', (req, res) => {
   });
   saveState();
 
-  // When body was NOT provided, fetch async and deliver prompt when ready
-  if (!body) {
+  // Inherit Remote Control from the caller (#519) — queued BEFORE the issue prompt
+  // so `/rc` submits first; deliverPromptWhenReady sequences the two. A null
+  // callerId is a no-op inside, so this is safe on every path.
+  maybeInheritRemoteControl({ newId: id, agentType, isFork: false, parentId: callerId || null });
+
+  // Route prompts through deliverPromptWhenReady so agents get a level-triggered
+  // readiness wait or their configured delay. An inline body renders now; without
+  // one, fetch from GitHub and render when it lands.
+  if (body) {
+    deliverPromptWhenReady(id, renderIssuePrompt(settings.wandPromptTemplate, { number, title, labels, url, body }));
+  } else {
     fetchIssueFromGitHub(number, cwd).then(gh => {
-      const issueBody = gh ? gh.body : null;
-      const issueLabels = gh ? (labels || (Array.isArray(gh.labels) ? gh.labels.map(l => typeof l === 'string' ? l : l.name).join(', ') : null)) : labels;
-      const issueUrl = gh ? (url || gh.url) : url;
-      const asyncPrompt = buildPrompt(issueBody, issueLabels, issueUrl);
-      deliverPromptWhenReady(id, asyncPrompt);
+      deliverPromptWhenReady(id, renderIssuePrompt(settings.wandPromptTemplate, {
+        number,
+        title,
+        labels: labels || (gh ? gh.labels : null),
+        url: url || (gh ? gh.url : null),
+        body: gh ? gh.body : null,
+      }));
     });
   }
 
-  // Notify browser to open the new session
-  log(`[API] start-issue: windowId=${windowId}, sessionId=${id}, readyClients=${readyClients.length}, clientWindowIds=[${readyClients.map(c => c.windowId).join(',')}]`);
-  deliverToWindow({ type: 'open-session', id, cwd, name, windowId, loading: true }, windowId, { openBrowser: true });
-  res.json({ id, name, url: UI_URL });
+  deliverToWindow({ type: 'open-session', id, cwd: spawnCwd, name, windowId, loading: true }, windowId, { openBrowser });
+  return { id, name, cwd: spawnCwd, worktree: worktree || null, engineType };
+}
+
+app.post('/api/start-issue', (req, res) => {
+  const { number, title, body, labels, url, cwd, windowId: rawWindowId, sessionId, agentType: rawAgentType } = req.body;
+  if (!number || !title) return res.status(400).json({ error: 'number and title are required' });
+
+  // A profile selected as the default agent arrives as agentType='config:<pid>' (or an
+  // explicit configProfile field). Resolve it to a concrete dir; the runtime agentType
+  // stays 'claude'. Resolve BEFORE caller inheritance so it takes precedence.
+  let agentType = rawAgentType;
+  let configProfile = req.body.configProfile || null;
+  if (agentType && agentType.startsWith('config:')) { configProfile = agentType.slice('config:'.length); agentType = 'claude'; }
+  const configDir = configProfile ? resolveConfigDir(configProfile) : null;
+
+  // Pre-flight: ensure we can deliver to a browser before spawning. HTTP-only —
+  // an MCP caller always has a session to inherit a windowId from.
+  const windowId = rawWindowId || (sessionId && shells.get(sessionId)?.windowId) || null;
+  const readyClients = [...reloadClients].filter(c => c.readyState === 1);
+  if (!windowId && readyClients.length > 1) {
+    log(`[API] start-issue: multiple browser windows open but no windowId resolved`);
+    return res.status(400).json({ error: 'Multiple browser windows open. Pass sessionId or windowId to target one.' });
+  }
+
+  const result = startIssueSession({
+    number, title, body, labels, url, cwd, agentType, configDir, windowId,
+    callerId: sessionId || null,
+    openBrowser: true,
+  });
+  if (result.error) {
+    return res.status(400).json({ error: result.error.message, code: result.error.code, cwd: result.error.cwd });
+  }
+  log(`[API] start-issue: windowId=${windowId}, sessionId=${result.id}, readyClients=${readyClients.length}, clientWindowIds=[${readyClients.map(c => c.windowId).join(',')}]`);
+  res.json({ id: result.id, name: result.name, url: UI_URL });
 });
 
 // restart.sh calls this before restarting. Server asks browser(s) for
@@ -6626,6 +6645,17 @@ function handleWsConnection(ws, req) {
         deliverPromptWhenReady(id, parsed.text);
         return;
       }
+      if (parsed.type === 'issue') {
+        // The wand picker's own start path (#642). It used to render
+        // wandPromptTemplate in the *browser*, from a copy fetched over
+        // /api/settings — so a user-edited template had two readers that could
+        // disagree. The picker now sends the issue fields and the server renders,
+        // exactly as it does for /api/start-issue and MCP start_issue. `loading`
+        // means the same thing it does for initialPrompt above.
+        if (parsed.loading) entry.loading = true;
+        deliverPromptWhenReady(id, renderIssuePrompt(settings.wandPromptTemplate, parsed.issue || {}));
+        return;
+      }
       if (parsed.type === 'rename') { entry.name = parsed.name || null; return; }
       if (parsed.type === 'unblock-input') {
         // Manual override from the loading banner's "Enable input" button (#512).
@@ -6785,7 +6815,7 @@ function broadcastToWindow(windowId, msg) {
 }
 
 // Initialize MCP server (async, ~100ms for dynamic import)
-initMCP({ app, security, shells, wss, broadcast, broadcastToWindow, log, MODS_DIR, closeSession, tombstoneSession, handleShellGone, spawnSession, sessionEnv, getSpawnArgs, mcpConfigArgs, getAgentConfig, resolveConfigDir, validateModel, validateEffort, wireShellOutput, watchClaudeSessionDir, unwatchClaudeSessionDir, resolveForkParentSession, saveState, validateWorktree, ensureWorktree, sessionPaths, submitToShell, fetchIssueFromGitHub, deliverPromptWhenReady, reloadClients, deliverToWindow, settings, isShuttingDown: () => shuttingDown, displayTabs, setDisplayTab, deleteDisplayTab, screenshots, setScreenshot, deleteScreenshot, getScreenshotPath, getDefaultEngine, getForegroundCommand, sessionLog, emitSessionOpen, getContexts: () => contexts, pathInside, getSavedSession: (id) => savedState[id] || null, stripEscapeSequences, readTerminalScreen, sessionInputState, maybeInheritRemoteControl, requestMetaControlsConsent, registerRestartBlocker, armSessionAutoClose }).catch(e => log('MCP init failed:', e.message));
+initMCP({ app, security, shells, wss, broadcast, broadcastToWindow, log, MODS_DIR, closeSession, tombstoneSession, handleShellGone, spawnSession, sessionEnv, getSpawnArgs, mcpConfigArgs, getAgentConfig, resolveConfigDir, validateModel, validateEffort, wireShellOutput, watchClaudeSessionDir, unwatchClaudeSessionDir, resolveForkParentSession, saveState, validateWorktree, ensureWorktree, sessionPaths, submitToShell, fetchIssueFromGitHub, deliverPromptWhenReady, startIssueSession, reloadClients, deliverToWindow, settings, isShuttingDown: () => shuttingDown, displayTabs, setDisplayTab, deleteDisplayTab, screenshots, setScreenshot, deleteScreenshot, getScreenshotPath, getDefaultEngine, getForegroundCommand, sessionLog, emitSessionOpen, getContexts: () => contexts, pathInside, getSavedSession: (id) => savedState[id] || null, stripEscapeSequences, readTerminalScreen, sessionInputState, maybeInheritRemoteControl, requestMetaControlsConsent, registerRestartBlocker, armSessionAutoClose }).catch(e => log('MCP init failed:', e.message));
 
 // Watch themes directory for changes and broadcast to clients
 let themeWatchDebounce = null;
