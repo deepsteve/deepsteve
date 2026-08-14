@@ -1,6 +1,6 @@
 // Headless unit test for public/js/context-views.js — revealTabContext (#547),
-// new-tab context guards (#581), the closed-rail indicator + icon chip (#585), and
-// archive/unarchive (#601).
+// new-tab context guards (#581), the closed-rail indicator + icon chip (#585),
+// archive/unarchive (#601), and the project-mod compact toggle on the row menu (#646).
 //
 // No browser, no Docker: stub the handful of globals the module touches
 // (window/document/sessionStorage/fetch) BEFORE importing it, then drive the
@@ -744,4 +744,63 @@ test('archiving the active context → POSTs and falls back to All (#601)', asyn
   assert.strictEqual(post.opts.method, 'POST');
   assert.deepStrictEqual(JSON.parse(post.opts.body), { archived: true });
   assert.strictEqual(mod.getActiveContextId(), null); // active context archived → All
+});
+
+// ------------------------------------------------- project-mod compact toggle (#646)
+// These go LAST and reset the mod registry when they're done. context-views.js imports
+// './project-mods.js' with no ?query, so every re-imported context-views shares ONE
+// project-mods instance — seeded mods would otherwise leak forward and shift the row
+// indices the tests above count on.
+
+// Drive the shared project-mods module the way app.js does: init() + a stubbed
+// /api/project-mods. Returns a reset function.
+async function seedProjectMods(mods) {
+  const pm = await import(new URL('../../public/js/project-mods.js', `file://${__filename}`).href);
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (url) => (url === '/api/project-mods'
+    ? Promise.resolve({ json: () => Promise.resolve({ mods, enabled: true }) })
+    : Promise.resolve({ ok: true, json: () => Promise.resolve({}) }));
+  pm.init({ renderRail: () => {} });
+  await new Promise(r => setImmediate(r));   // init → refresh is fetch + two .then hops
+  globalThis.fetch = realFetch;
+  return async () => { await seedProjectMods([]); };
+}
+
+const MOD_A = { id: 'ma', project: '/repo/a', name: 'A Dash', icon: '📊',
+  surfaces: ['rail'], openMode: 'tab', enabled: true, updatedAt: 1 };
+
+test('the row menu offers "Compact view" only for a project that has rail mods (#646)', async () => {
+  const reset = await seedProjectMods([MOD_A]);
+  try {
+    // Literals, not the shared CTX_A/CTX_B: archiveContext() mutates the context object
+    // it is handed, so by this point in the file CTX_B carries archived:true and would
+    // never render a row (spreading it copies the mutation too).
+    const { mod, rail, toggle } = await setup({ contexts: [
+      { id: 'ctxa', name: 'Alpha', dirs: ['/repo/a'] },
+      { id: 'ctxb', name: 'Beta', dirs: ['/repo/b'] },
+    ] });
+    mod.setActiveContext('ctxa');
+    toggle.listeners.click();   // open the rail so the rows exist
+
+    // [All, Alpha, <Alpha's mod row>, Beta] — the mod row only appears under the ACTIVE
+    // project, which is what makes Beta the row with nothing to compact.
+    const rows = railChildren(rail, 'context-list')[0].children;
+    const labelOf = (row) => row.children.find(c => c.className === 'context-row-label')?.textContent;
+    const alpha = rows.find(r => labelOf(r) === 'Alpha');
+    const beta = rows.find(r => labelOf(r) === 'Beta');
+
+    const menuFor = (row) => {
+      row.listeners.contextmenu({ preventDefault: () => {}, clientX: 0, clientY: 0 });
+      return createdEls.filter(el => el.className.includes('context-row-menu')).pop();
+    };
+    const item = menuFor(alpha).children.find(i => i.textContent?.includes('Compact view'));
+    assert.ok(item, 'Alpha has a rail mod, so it gets the toggle');
+    assert.ok(item.textContent.includes('(all project mods)'), 'says it is not scoped to this project');
+    assert.ok(!item.textContent.startsWith('✓'), 'unticked while compact is off');
+
+    assert.ok(!menuFor(beta).children.some(i => i.textContent?.includes('Compact view')),
+      'Beta has no rail mods — nothing to compact, so no item');
+  } finally {
+    await reset();
+  }
 });
