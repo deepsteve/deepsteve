@@ -528,7 +528,7 @@ function cmdUninstall() {
 }
 
 function cmdHelp() {
-  say(`deepsteve ${pkg.version} — run multiple AI agent sessions in your browser
+  say(`deepsteve ${pkg.version} — a web UI for your Claude Code and Codex agents
 
 Usage: deepsteve <command> [options]
 
