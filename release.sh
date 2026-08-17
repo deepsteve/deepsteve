@@ -36,7 +36,22 @@ echo "Version: $PKG_VERSION (latest tag: ${LATEST_TAG:-none}, lock in sync)"
 DEMO_TAG=$(curl -fsSL --max-time 5 https://deepsteve.com/demo/VERSION 2>/dev/null || true)
 if [ -n "$DEMO_TAG" ] && [ -n "$LATEST_TAG" ] && [ "$DEMO_TAG" != "$LATEST_TAG" ]; then
   echo "WARNING: deepsteve.com demo is vendored at $DEMO_TAG but the latest release is $LATEST_TAG." >&2
-  echo "         After this release: run tools/revendor-demo.sh in the site repo (RELEASING.md step 7)." >&2
+  echo "         After this release: run tools/revendor-demo.sh in the site repo (RELEASING.md step 8)." >&2
+fi
+
+# Same shape, for the npm channel (#518). `npm install -g deepsteve` is the install path
+# the README leads with, and it has no in-app updater to paper over a missed publish — an
+# npm user just sits on the old version indefinitely. So the check that matters is whether
+# the PREVIOUS release reached the registry, asked here because this is the one moment in
+# the process where someone is already thinking about releases.
+#
+# Warn-only and bounded for the same reason as the demo check above: check-installer.yml
+# runs this script on every push to main, and a registry outage must not turn CI red or
+# hang it. `npm view` needs no auth.
+NPM_VERSION=$(npm view deepsteve version --fetch-timeout=5000 --fetch-retries=0 2>/dev/null || true)
+if [ -n "$NPM_VERSION" ] && [ -n "$LATEST_TAG" ] && [ "v$NPM_VERSION" != "$LATEST_TAG" ]; then
+  echo "WARNING: npm serves deepsteve@$NPM_VERSION but the latest release is $LATEST_TAG." >&2
+  echo "         The previous release never reached npm — don't skip step 7 again (RELEASING.md)." >&2
 fi
 
 NODE_VERSION="22.14.0"

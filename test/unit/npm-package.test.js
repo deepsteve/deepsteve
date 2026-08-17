@@ -64,6 +64,18 @@ test('package.json declares a files allowlist and a bin entrypoint', () => {
     'package.json has no bin.deepsteve — `npm install -g deepsteve` would provide no command');
 });
 
+test('the package page has somewhere to send people (#518)', () => {
+  // npmjs.com renders `homepage` and `bugs` as the only two links out of the package page
+  // besides the repo. #518's complaint is that deepsteve is undiscoverable — a listing that
+  // dead-ends is the same problem one hop further in.
+  assert.strictEqual(pkg.homepage, 'https://deepsteve.com',
+    'package.json has no homepage — the npm page would not link to the site');
+  assert.ok(pkg.bugs && pkg.bugs.url,
+    'package.json has no bugs.url — the npm page would not link to the issue tracker');
+  assert.ok(pkg.description && pkg.description.length > 20,
+    'the npm listing shows `description` under the package name; it must say what this is');
+});
+
 test('"private": true is still the publish guard', () => {
   // Removing it is the LAST step of publishing, done deliberately by a maintainer
   // following RELEASING.md — not something that should drift in unnoticed, because

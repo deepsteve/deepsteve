@@ -147,17 +147,31 @@ shasum -a 256 /tmp/dl.sh install.sh    # both hashes must match
 Confirm `isDraft=false`, the tag points at the bump commit, and the published asset's
 SHA-256 matches the local build. Report the release URL to the user.
 
-## 8. Publish to npm — optional, and only after the tag exists
+## 8. Publish to npm — every release, and only after the tag exists
 
-**Ask the user first.** This step is skippable and every release does not need it. What makes it
-different from step 7: **npm versions are immutable.** A version cannot be republished, even after
-an unpublish, and whatever you upload is what `npm install -g deepsteve` serves until a later
-version supersedes it. A GitHub release can be deleted and recut; this cannot.
+This step is not optional. `npm install -g deepsteve` is the install path the README leads with,
+so a release that stops at step 7 leaves every npm user stalled on the previous version while
+GitHub has moved on — and they get no in-app update button to tell them, by design.
+
+What makes it different from step 7: **npm versions are immutable.** A version cannot be
+republished, even after an unpublish, and whatever you upload is what `npm install -g deepsteve`
+serves until a later version supersedes it. A GitHub release can be deleted and recut; this
+cannot. That is why it runs last, after the tag it must match already exists.
 
 `"private": true` in `package.json` is the guard that stops an accidental publish, so removing it
 is the last thing you do and restoring it is not optional.
 
-First, look at what would actually ship:
+Check you can publish at all before doing any of the work:
+
+```bash
+npm whoami
+```
+
+It must print the deepsteve maintainer account. If it 401s, **stop and ask the user to run
+`npm login`** — you cannot authenticate on their behalf, and everything below is wasted without
+it.
+
+Then look at what would actually ship:
 
 ```bash
 npm pack --dry-run 2>&1 | tail -8
@@ -177,7 +191,6 @@ it** — a broken tarball burns the version number permanently.
 Then the publish itself, as a bracket around one command:
 
 ```bash
-npm whoami                           # confirm you're the deepsteve maintainer
 npm pkg delete private
 npm publish
 git checkout -- package.json         # restore the guard, byte-for-byte

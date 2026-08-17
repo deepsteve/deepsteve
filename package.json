@@ -9,6 +9,10 @@
     "type": "git",
     "url": "git+https://github.com/deepsteve/deepsteve.git"
   },
+  "homepage": "https://deepsteve.com",
+  "bugs": {
+    "url": "https://github.com/deepsteve/deepsteve/issues"
+  },
   "main": "server.js",
   "bin": {
     "deepsteve": "bin/deepsteve.js"

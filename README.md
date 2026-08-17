@@ -45,14 +45,23 @@ Without tmux, deepsteve falls back to **node-pty**, which runs each session as a
 ## Quick Install
 
 ```bash
+npm install -g deepsteve
+deepsteve start
+```
+
+Or without npm — this one bundles its own Node if you don't have one:
+
+```bash
 curl -fsSL deepsteve.com/install.sh | bash
 ```
+
+Both land the same tree in `~/.deepsteve` and register the same LaunchAgent (macOS) or systemd user unit (Linux); they differ only in where the files come from. `deepsteve start` is also the upgrade step — see [Installation (npm)](#installation-npm) for the rest of the CLI.
 
 ## Requirements
 
 - macOS, or Linux with a systemd user instance
-- Node.js
-- tmux — **required on Linux** (the installer refuses without it), optional on macOS,
+- Node.js — needed for `npm install -g`; the curl installer downloads its own if you have none
+- tmux — **required on Linux** (both installers refuse without it), optional on macOS,
   where node-pty is a supported fallback
 - [Claude Code](https://docs.anthropic.com/en/docs/claude-code) or [Codex CLI](https://developers.openai.com/codex/cli/) installed — these are the two supported agents. OpenCode, Pi, and Hermes work too, but get no deepsteve MCP tools and no skills; see [docs/agents.md](docs/agents.md).
 
@@ -69,12 +78,7 @@ If you've cloned the repo:
 
 ## Installation (npm)
 
-```bash
-npm install -g deepsteve
-deepsteve start
-```
-
-`deepsteve start` does what `install.sh` does: it deploys the runtime into `~/.deepsteve`, registers the LaunchAgent or systemd user unit, starts the daemon, and prints the URL. The daemon runs from `~/.deepsteve` rather than from the npm package, because that directory is also where it writes — mods you install, themes, sessions and settings all live there.
+`npm install -g deepsteve` puts the package in npm's global prefix; `deepsteve start` is what turns it into a running install. It does what `install.sh` does: deploys the runtime into `~/.deepsteve`, registers the LaunchAgent or systemd user unit, starts the daemon, and prints the URL. The daemon runs from `~/.deepsteve` rather than from the npm package, because that directory is also where it writes — mods you install, themes, sessions and settings all live there.
 
 | | |
 |---|---|

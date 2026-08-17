@@ -17,7 +17,9 @@ every other skill: enable it once in **Mods → Skills** before invoking it.
 4. **Generate the installer** — `./release.sh` (validates mods, embeds all source into `install.sh`)
 5. **Gather the changelog** — `git log <last-tag>..HEAD --oneline`
 6. **Create the GitHub release** — `gh release create vX.Y.Z install.sh --title "vX.Y.Z" --notes "..."` with sections for "What's new", "Bug fixes", "Other"
-7. **Publish to npm** (#636) — optional, and only ever *after* the tag exists, because
+7. **Publish to npm** (#636/#518) — part of every release, and only ever *after* the tag exists.
+   npm is the install path the README leads with, so a release that stops at step 6 leaves every
+   npm user stalled on the previous version while GitHub has moved on. It comes last because
    **npm versions are immutable**: a version cannot be republished even after an unpublish, and
    whatever is uploaded is what `npm install -g deepsteve` serves until a later version supersedes
    it. `"private": true` in `package.json` is the guard that makes this a deliberate act, so the
@@ -25,6 +27,7 @@ every other skill: enable it once in **Mods → Skills** before invoking it.
    ```bash
    npm pack --dry-run          # sanity-check the file list: no test/, no skills/release.md
    npm run test:npm            # installs the packed tarball globally in a container and boots it
+   npm whoami                  # must be the deepsteve maintainer; `npm login` if it 401s
    npm pkg delete private
    npm publish
    git checkout -- package.json         # restore the guard, byte-for-byte

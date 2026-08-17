@@ -1317,6 +1317,11 @@ settingsBtn?.addEventListener('click', async () => {
   };
 
   // --- Updates section ---
+  // Both halves in one string so they can't drift apart: `npm install -g` only replaces the
+  // package in npm's prefix, and `deepsteve start` is what deploys it into ~/.deepsteve and
+  // restarts the daemon. Running the first without the second leaves the daemon on the old
+  // version with a new package sitting unused.
+  const NPM_UPDATE_COMMAND = 'npm install -g deepsteve@latest && deepsteve start';
   const updatesBody = overlay.querySelector('#updates-body');
   const updatesCheckBtn = overlay.querySelector('#updates-check-now');
   const updatesActionBtn = overlay.querySelector('#updates-action-btn');
@@ -1359,6 +1364,20 @@ settingsBtn?.addEventListener('click', async () => {
 
     const checkedLabel = s.checkedAt ? ` &middot; checked ${new Date(s.checkedAt).toLocaleString()}` : '';
 
+    // An npm install updates through npm, not through us (#636/#518): the package lives in
+    // a prefix we may not own, and `deepsteve start` is what re-deploys it into ~/.deepsteve
+    // afterwards. So the command IS the update affordance here — it belongs in the body as
+    // selectable text, not on the `title` of a disabled button, which no touch device can
+    // reach and nobody can copy from.
+    let commandBlock = '';
+    if (s.updateAvailable && src.type === 'npm') {
+      commandBlock = `
+        <div style="margin-top: 8px;">
+          <div style="font-size: 11px; color: var(--ds-text-secondary); margin-bottom: 4px;">Update with:</div>
+          <code style="display: block; user-select: all; font-size: 11px; color: var(--ds-text-primary); background: var(--ds-bg-primary); border: 1px solid var(--ds-border); border-radius: 4px; padding: 6px 8px; overflow-x: auto; white-space: nowrap;">${escapeHtml(NPM_UPDATE_COMMAND)}</code>
+        </div>`;
+    }
+
     updatesBody.innerHTML = `
       <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
         <span style="font-size: 13px;">Version <strong>${escapeHtml(s.current || '?')}</strong></span>
@@ -1368,6 +1387,7 @@ settingsBtn?.addEventListener('click', async () => {
       <div style="font-size: 11px; color: var(--ds-text-secondary); margin-top: 4px;">Installed via: ${srcLabel}${checkedLabel}</div>
       ${s.updateAvailable && s.releaseUrl ? `<div style="font-size: 11px; margin-top: 4px;"><a href="${escapeHtml(s.releaseUrl)}" target="_blank" style="color: var(--ds-accent-blue);">View on GitHub</a></div>` : ''}
       ${notesBlock}
+      ${commandBlock}
     `;
 
     // Action button — only shown when an update is available
@@ -1389,14 +1409,9 @@ settingsBtn?.addEventListener('click', async () => {
         updatesActionBtn.style.display = '';
         updatesActionBtn.textContent = 'Update now';
       } else if (src.type === 'npm') {
-        // An npm install updates through npm, not through us (#636): the package
-        // lives in a prefix we may not own, and `deepsteve start` is what re-deploys
-        // it into ~/.deepsteve afterwards. So say the command instead of offering a
-        // button that cannot work.
-        updatesActionBtn.style.display = '';
-        updatesActionBtn.textContent = 'Update with npm';
-        updatesActionBtn.disabled = true;
-        updatesActionBtn.title = 'npm install -g deepsteve@latest && deepsteve start';
+        // No button at all: commandBlock above carries the whole affordance, and a
+        // permanently-disabled one beside it reads as something that broke rather than
+        // as something we deliberately don't do.
       } else {
         updatesActionBtn.style.display = '';
         updatesActionBtn.textContent = 'Update unavailable';
