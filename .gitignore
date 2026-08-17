@@ -6,3 +6,4 @@ install.sh
 deepsteve-*.tgz
 .DS_Store
 scratch/
+.token
