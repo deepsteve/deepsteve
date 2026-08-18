@@ -6,7 +6,7 @@
 
 https://deepsteve.com
 
-A web UI for your **Claude Code** and **Codex** agents. It runs on your machine, and it's plain HTML, CSS and JavaScript — so your agents can build you a Developer Productivity Suite for each project.
+A hackable web UI for your **Claude Code** and **Codex** agents. It runs on your machine, and your agents can build your dev tools right into it.
 
 Run agent sessions side-by-side in browser tabs, each a real PTY with full terminal capabilities and persistent conversation history. OpenCode, Pi, and Hermes also run, as experimental integrations — [docs/agents.md](docs/agents.md) is the per-agent breakdown of what each one actually gets.
 
