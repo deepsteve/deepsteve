@@ -398,7 +398,8 @@ echo "deepsteve installed and running at http://deepsteve.localhost:3000"
 echo "To uninstall: ~/.deepsteve/uninstall.sh"
 echo ""
 echo "⚠️  Security: DeepSteve is localhost-only and token-authenticated (~/.deepsteve/auth-token)."
-echo "   Binding to a network address (--bind) still exposes control to anyone who can reach it."
+echo "   Binding to a network address (--bind) requires those clients to send the token themselves;"
+echo "   it is one shared secret, not a per-user login, so anyone holding it has full control."
 POSTAMBLE
 
 chmod +x "$OUT"

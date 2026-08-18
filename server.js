@@ -107,14 +107,33 @@ if (!net.isIP(BIND)) {
 }
 
 if (BIND !== '127.0.0.1' && BIND !== '::1') {
+  // This used to read "There is NO authentication", which stopped being true when auth landed
+  // (#536) and had to go. What replaced it states the tradeoff that actually applies now:
+  // setAuthCookie issues the token on LOOPBACK page loads only, so widening the bind no longer
+  // hands the token to the network — but it does mean a LAN browser can't just open the UI, and
+  // the token remains one shared per-install secret rather than a per-user login.
+  const W = 62;
+  const lines = [
+    `WARNING: Binding to ${BIND}`,
+    '',
+    'deepsteve will be reachable from other machines on your',
+    'network. Auth is required, and the per-install token is',
+    'never handed to a non-loopback client - so a browser on',
+    'the LAN cannot simply load the UI. Such a client must',
+    'send the token itself:',
+    '  Authorization: Bearer <~/.deepsteve/auth-token>',
+    '',
+    'That token is one shared per-install secret, not a',
+    'per-user login: anyone who obtains it has full control',
+    'of your agent sessions.',
+    '',
+    'Prefer the default loopback bind, plus a tunnel:',
+    '  ssh -L 3000:localhost:3000 <host>',
+  ];
   console.error('');
-  console.error('  ╔══════════════════════════════════════════════════════════════╗');
-  console.error('  ║  WARNING: Binding to ' + BIND.padEnd(39) + '║');
-  console.error('  ║                                                              ║');
-  console.error('  ║  deepsteve will be accessible from other machines on your    ║');
-  console.error('  ║  network. There is NO authentication — anyone who can reach  ║');
-  console.error('  ║  this address can control your Claude Code sessions.         ║');
-  console.error('  ╚══════════════════════════════════════════════════════════════╝');
+  console.error('  ╔' + '═'.repeat(W) + '╗');
+  for (const line of lines) console.error('  ║  ' + line.padEnd(W - 2) + '║');
+  console.error('  ╚' + '═'.repeat(W) + '╝');
   console.error('');
 }
 const SCROLLBACK_DEFAULT_KB = 100; // default scrollback buffer size in KB

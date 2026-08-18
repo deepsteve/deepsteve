@@ -413,7 +413,8 @@ async function cmdStart(flags) {
   say('To uninstall: deepsteve uninstall');
   say('');
   say(`⚠️  Security: DeepSteve is localhost-only and token-authenticated (${path.join(DS_DIR, 'auth-token')}).`);
-  say('   Binding to a network address (--bind) still exposes control to anyone who can reach it.');
+  say('   Binding to a network address (--bind) requires those clients to send the token themselves;');
+  say('   it is one shared secret, not a per-user login, so anyone holding it has full control.');
 }
 
 function cmdStop() {
@@ -528,7 +529,7 @@ function cmdUninstall() {
 }
 
 function cmdHelp() {
-  say(`deepsteve ${pkg.version} — a web UI for your Claude Code and Codex agents
+  say(`deepsteve ${pkg.version} — a hackable web UI for your Claude Code and Codex agents
 
 Usage: deepsteve <command> [options]
 

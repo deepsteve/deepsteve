@@ -9,8 +9,9 @@
 //   2. Origin allowlist       — stops cross-site WS hijack + CSRF (checked on the WS upgrade and on
 //                               any cookie-authed HTTP request that carries an Origin).
 //   3. Per-install token      — required on every surface. The browser gets it as an HttpOnly
-//                               cookie set on the page we serve; non-browser/MCP/CLI clients send it
-//                               as `Authorization: Bearer <token>`.
+//                               cookie set on the page we serve, but only on a LOOPBACK host —
+//                               otherwise widening the allowlist hands the token to the whole LAN.
+//                               Non-browser/MCP/CLI clients send it as `Authorization: Bearer`.
 //   4. Failure rate limiting  — throttles auth *failures* only; valid credentials never throttle.
 //
 // Token transport is cookie (browser) or bearer (everything else). We deliberately do NOT accept a
@@ -251,8 +252,18 @@ function createSecurity(cfg) {
   //    hosts ever receive the cookie (a rebinding victim gets a 403 first) — and after
   //    canonicalHostRedirect, so a bounced navigation never deposits a cookie into the localhost
   //    jar (that jar's pollution is the bug this fixes).
+  // Loopback names ONLY — deliberately not lanHosts or --allow-host. Reaching us over loopback
+  // already proves you are the local user, so handing the token to that page costs nothing. A
+  // LAN-reachable host is different: this handout runs ahead of authGate, so before this check
+  // any unauthenticated client that asked an allowlisted non-loopback host for an HTML page was
+  // given the real per-install token in a Set-Cookie and could then drive the whole API. That
+  // made --https / --allow-host a full auth bypass for anyone who could reach the address.
+  // Non-loopback clients must now supply the token out of band (Authorization: Bearer).
+  const LOOPBACK_HOST_SET = new Set(LOOPBACK_HOSTS);
   function setAuthCookie(req, res, next) {
-    if (req.method === 'GET' && String(req.headers.accept || '').includes('text/html')) {
+    if (req.method === 'GET'
+        && String(req.headers.accept || '').includes('text/html')
+        && LOOPBACK_HOST_SET.has(hostnameOf(req.headers.host))) {
       res.cookie(COOKIE_NAME, token, {
         httpOnly: true, sameSite: 'strict', path: '/', secure: !!req.secure,
         maxAge: COOKIE_MAX_AGE_MS,
