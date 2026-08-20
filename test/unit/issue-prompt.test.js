@@ -14,6 +14,7 @@ const path = require('path');
 
 const {
   renderIssuePrompt, normalizeLabels, issueWorktreeName, issueTabName, ISSUE_BODY_LIMIT,
+  ISSUE_COMPLETE_INSTRUCTION,
 } = require('../../issue-prompt.js');
 
 const ROOT = path.join(__dirname, '..', '..');
@@ -21,8 +22,20 @@ const read = (p) => fs.readFileSync(path.join(ROOT, p), 'utf8');
 
 const TEMPLATE = 'issue #{{number}}: "{{title}}"\nLabels: {{labels}}\nURL: {{url}}\n\n{{body}}';
 
+// Since #643 every rendered prompt also carries the issue_complete instruction.
+// The substitution cases below are about the {{var}} half, so they assert against
+// the part before that suffix — and renderBody throws if the suffix is missing,
+// which quietly makes every one of them a check that it is still appended.
+const SUFFIX = `\n\n${ISSUE_COMPLETE_INSTRUCTION}`;
+function renderBody(template, fields) {
+  const out = renderIssuePrompt(template, fields);
+  assert.ok(out.endsWith(SUFFIX),
+    'every rendered prompt must end with the issue_complete instruction (#643)');
+  return out.slice(0, -SUFFIX.length);
+}
+
 test('renders every documented variable', () => {
-  const out = renderIssuePrompt(TEMPLATE, {
+  const out = renderBody(TEMPLATE, {
     number: 642, title: 'Unify start-issue', labels: 'bug, chore',
     url: 'https://example.test/642', body: 'do the thing',
   });
@@ -32,21 +45,21 @@ test('renders every documented variable', () => {
 test('an unknown variable renders empty, never a literal {{typo}}', () => {
   // A user-edited template must not leak its own typo into a prompt an agent
   // is about to act on.
-  assert.equal(renderIssuePrompt('a{{nope}}b', { number: 1, title: 't' }), 'ab');
+  assert.equal(renderBody('a{{nope}}b', { number: 1, title: 't' }), 'ab');
 });
 
 test('a missing body becomes (no description), not an empty gap', () => {
-  assert.equal(renderIssuePrompt('{{body}}', { number: 1, title: 't' }), '(no description)');
-  assert.equal(renderIssuePrompt('{{body}}', { number: 1, title: 't', body: '' }), '(no description)');
+  assert.equal(renderBody('{{body}}', { number: 1, title: 't' }), '(no description)');
+  assert.equal(renderBody('{{body}}', { number: 1, title: 't', body: '' }), '(no description)');
 });
 
 test('body is clipped to the composer limit', () => {
   const long = 'x'.repeat(ISSUE_BODY_LIMIT + 500);
-  assert.equal(renderIssuePrompt('{{body}}', { number: 1, title: 't', body: long }).length, ISSUE_BODY_LIMIT);
+  assert.equal(renderBody('{{body}}', { number: 1, title: 't', body: long }).length, ISSUE_BODY_LIMIT);
 });
 
 test('a missing url renders empty rather than undefined', () => {
-  assert.equal(renderIssuePrompt('[{{url}}]', { number: 1, title: 't' }), '[]');
+  assert.equal(renderBody('[{{url}}]', { number: 1, title: 't' }), '[]');
 });
 
 test('labels normalize from all three shapes callers actually send', () => {
@@ -78,6 +91,43 @@ test('tab name falls back to 25 when the setting is missing or nonsense', () => 
 test('worktree name is the branch convention the merge skill matches on', () => {
   // skills/merge.md keys "close the GitHub issue" off *github-issue-<n>*.
   assert.equal(issueWorktreeName(642), 'github-issue-642');
+});
+
+// --- autopilot: the completion instruction (#643) ---------------------------
+
+test('the completion instruction is appended to every prompt, whatever the template', () => {
+  // The flag changes what issue_complete ANSWERS, never whether the instruction
+  // was delivered — so there is no state in which this line is absent.
+  for (const template of ['', 'no variables at all', TEMPLATE, '{{body}}']) {
+    assert.ok(renderIssuePrompt(template, { number: 1, title: 't' }).endsWith(SUFFIX),
+      `template ${JSON.stringify(template)} lost the issue_complete instruction`);
+  }
+  assert.match(ISSUE_COMPLETE_INSTRUCTION, /issue_complete/);
+});
+
+test('the instruction is NOT in the shipped default template', () => {
+  // The settings modal POSTs wandPromptTemplate on every save, so any install
+  // where the user has ever hit Save has the old default materialized. A token
+  // added to the shipped default would silently never appear there — which is
+  // why renderIssuePrompt appends it instead.
+  const server = read('server.js');
+  const start = server.indexOf('const WAND_DEFAULT_TEMPLATE');
+  const template = server.slice(start, server.indexOf('`;', start));
+  assert.ok(start > 0 && !template.includes('issue_complete'),
+    'WAND_DEFAULT_TEMPLATE must not carry the issue_complete line — append it in renderIssuePrompt (#643)');
+});
+
+test('autopilot is persisted, not just held in memory', () => {
+  // serializeShellEntry is the one place that decides what survives a restart:
+  // the shutdown-final snapshot wins the merge, so a field only a call site
+  // writes is wiped for every live shell on a graceful restart.
+  const server = read('server.js');
+  const ser = server.slice(server.indexOf('function serializeShellEntry('));
+  assert.ok(/autopilot: !!entry\.autopilot/.test(ser.slice(0, ser.indexOf('\n}'))),
+    'serializeShellEntry must carry autopilot (#643)');
+  // ...and the WS restore path hand-lists its fields, so it has to read it back.
+  assert.ok(/autopilot: !!restored\.autopilot/.test(server),
+    'the WS restore path must restore autopilot onto the live entry (#643)');
 });
 
 // --- drift guards: one implementation, one reader ---------------------------

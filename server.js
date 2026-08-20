@@ -3094,6 +3094,28 @@ function broadcastRecentSessions() {
   }
 }
 
+// Tell every window a session's autopilot value changed (#643). The server owns the
+// value, so it announces it rather than letting each switch guess: the wand picker's
+// `{type:'issue'}` arrives AFTER the `{type:'session'}` message that reports the
+// session's fields, so that message always says false on a picker start — and a flip
+// from one window has to reach the tab strip in the others.
+function broadcastAutopilot(id) {
+  const entry = shells.get(id);
+  if (!entry) return;
+  const msg = JSON.stringify({ type: 'autopilot', id, autopilot: !!entry.autopilot });
+  for (const client of wss.clients) {
+    if (client.readyState === 1) client.send(msg);
+  }
+  if (httpsWss) {
+    for (const client of httpsWss.clients) {
+      if (client.readyState === 1) client.send(msg);
+    }
+  }
+  for (const client of reloadClients) {
+    if (client.readyState === 1) client.send(msg);
+  }
+}
+
 // Truncate the buffer to the current limit (called when the setting is lowered).
 function trimRecentSessions() {
   const N = settings.recentSessionsLimit || 0;
@@ -3148,7 +3170,7 @@ let stateFrozen = false;  // Set during shutdown to prevent onExit handlers from
 // field it omits is silently wiped for every live shell on a graceful restart
 // (configDir was lost this way, breaking #537 profile resumes — #542).
 function serializeShellEntry(entry) {
-  return { cwd: entry.cwd, claudeSessionId: entry.claudeSessionId, agentType: entry.agentType || 'claude', codexHomeId: entry.codexHomeId || null, configDir: entry.configDir || null, engineType: entry.engineType || 'node-pty', worktree: entry.worktree || null, name: entry.name || null, planMode: !!entry.planMode, model: entry.model || null, effort: entry.effort || null, allowedTools: Array.isArray(entry.allowedTools) && entry.allowedTools.length ? entry.allowedTools : null, forkParent: entry.forkParent || null, lastActivity: entry.lastActivity || null, createdAt: entry.createdAt || null, windowId: entry.windowId || null, scheduled: !!entry.scheduled };
+  return { cwd: entry.cwd, claudeSessionId: entry.claudeSessionId, agentType: entry.agentType || 'claude', codexHomeId: entry.codexHomeId || null, configDir: entry.configDir || null, engineType: entry.engineType || 'node-pty', worktree: entry.worktree || null, name: entry.name || null, planMode: !!entry.planMode, model: entry.model || null, effort: entry.effort || null, allowedTools: Array.isArray(entry.allowedTools) && entry.allowedTools.length ? entry.allowedTools : null, forkParent: entry.forkParent || null, lastActivity: entry.lastActivity || null, createdAt: entry.createdAt || null, windowId: entry.windowId || null, scheduled: !!entry.scheduled, autopilot: !!entry.autopilot };
 }
 
 // #561: a session record is never hard-deleted by any runtime path. Every close
@@ -5112,6 +5134,20 @@ app.post('/api/shells/:id/close', (req, res) => {
   res.json({ closed: req.params.id });
 });
 
+// Autopilot (#643): flip a live session's variable. The tab context menu is the
+// only caller today. It is a plain server-side write with no delivery of any kind —
+// turning it off cancels autopilot at any point before the agent calls
+// issue_complete, and turning it on arms nothing until that call either.
+app.post('/api/shells/:id/autopilot', (req, res) => {
+  const entry = shells.get(req.params.id);
+  if (!entry) return res.status(404).json({ error: 'Shell not found' });
+  entry.autopilot = !!req.body?.autopilot;
+  saveState();
+  broadcastAutopilot(req.params.id);
+  log(`[API] autopilot ${entry.autopilot ? 'on' : 'off'} for ${req.params.id}`);
+  res.json({ id: req.params.id, autopilot: entry.autopilot });
+});
+
 app.get('/api/shells/:id/state', (req, res) => {
   const id = req.params.id;
   const entry = shells.get(id);
@@ -5538,7 +5574,7 @@ app.get('/api/issues', (req, res) => {
  * Returns `{ error: <spawnCwdProblem> }` for a bad cwd — the caller formats it,
  * because an HTTP 400 body and an MCP isError result are not the same shape.
  */
-function startIssueSession({ number, title, body, labels, url, cwd, agentType, configDir, windowId, callerId, openBrowser = false }) {
+function startIssueSession({ number, title, body, labels, url, cwd, agentType, configDir, windowId, callerId, openBrowser = false, autopilot = false }) {
   // Inherit whatever the caller didn't specify from the calling session.
   const caller = callerId ? shells.get(callerId) : null;
   if (caller) {
@@ -5589,7 +5625,7 @@ function startIssueSession({ number, title, body, labels, url, cwd, agentType, c
   const sessionEngine = spawnSession(getDefaultEngine(), id, agentType, spawnArgs, spawnCwd, { cols: 120, rows: 40, env: sessionEnv(id, { name, worktree, windowId: windowId || null, cwd: spawnCwd, agentType, configDir, codexHomeId }) });
   const engineType = sessionEngine === tmuxEngine ? 'tmux' : 'node-pty';
   log(`[issue] #${number}: id=${id}, agent=${agentType}, engine=${engineType}, worktree=${worktree || 'none'}, cwd=${spawnCwd}`);
-  shells.set(id, { clients: new Set(), cwd: spawnCwd, claudeSessionId, agentType, codexHomeId, configDir: configDir || null, engine: sessionEngine, engineType, worktree: worktree || null, windowId: windowId || null, name, planMode: !!settings.wandPlanMode, waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now(), loading: true });
+  shells.set(id, { clients: new Set(), cwd: spawnCwd, claudeSessionId, agentType, codexHomeId, configDir: configDir || null, engine: sessionEngine, engineType, worktree: worktree || null, windowId: windowId || null, name, planMode: !!settings.wandPlanMode, autopilot: !!autopilot, waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now(), loading: true });
   wireShellOutput(id);
   emitSessionOpen(id);
   recordRecentSession(id);
@@ -5623,11 +5659,11 @@ function startIssueSession({ number, title, body, labels, url, cwd, agentType, c
   }
 
   deliverToWindow({ type: 'open-session', id, cwd: spawnCwd, name, windowId, loading: true }, windowId, { openBrowser });
-  return { id, name, cwd: spawnCwd, worktree: worktree || null, engineType };
+  return { id, name, cwd: spawnCwd, worktree: worktree || null, engineType, autopilot: !!autopilot };
 }
 
 app.post('/api/start-issue', (req, res) => {
-  const { number, title, body, labels, url, cwd, windowId: rawWindowId, sessionId, agentType: rawAgentType } = req.body;
+  const { number, title, body, labels, url, cwd, windowId: rawWindowId, sessionId, agentType: rawAgentType, autopilot } = req.body;
   if (!number || !title) return res.status(400).json({ error: 'number and title are required' });
 
   // A profile selected as the default agent arrives as agentType='config:<pid>' (or an
@@ -5651,6 +5687,7 @@ app.post('/api/start-issue', (req, res) => {
     number, title, body, labels, url, cwd, agentType, configDir, windowId,
     callerId: sessionId || null,
     openBrowser: true,
+    autopilot: !!autopilot,
   });
   if (result.error) {
     return res.status(400).json({ error: result.error.message, code: result.error.code, cwd: result.error.cwd });
@@ -6459,7 +6496,7 @@ function handleWsConnection(ws, req) {
       }
       sessionEngine = spawnedEngine;
       restoredEngineType = spawnedEngine === tmuxEngine ? 'tmux' : 'node-pty';
-      shells.set(id, { clients: new Set(), cwd, claudeSessionId, agentType: savedAgentType, codexHomeId, configDir: restored.configDir || null, engine: sessionEngine, engineType: restoredEngineType, worktree: savedWorktree, name: restoredName, planMode: savedPlanMode, model: restored.model || null, effort: restored.effort || null, allowedTools: restored.allowedTools || null, forkParent: restored.forkParent || null, restored: true, scheduled: !!restored.scheduled, waitingForInput: false, lastActivity: Date.now(), createdAt: restored.createdAt || Date.now(), windowId: restoredWindowId });
+      shells.set(id, { clients: new Set(), cwd, claudeSessionId, agentType: savedAgentType, codexHomeId, configDir: restored.configDir || null, engine: sessionEngine, engineType: restoredEngineType, worktree: savedWorktree, name: restoredName, planMode: savedPlanMode, model: restored.model || null, effort: restored.effort || null, allowedTools: restored.allowedTools || null, forkParent: restored.forkParent || null, restored: true, scheduled: !!restored.scheduled, autopilot: !!restored.autopilot, waitingForInput: false, lastActivity: Date.now(), createdAt: restored.createdAt || Date.now(), windowId: restoredWindowId });
       wireShellOutput(id, initialCols, initialRows);
       recordRecentSession(id);  // bump recency on same-browser reconnect + cross-browser restore
       if (agentConfig.supportsSessionWatch) watchClaudeSessionDir(id);
@@ -6664,7 +6701,7 @@ function handleWsConnection(ws, req) {
   // pingPong: capability flag (#563) — clients only send {type:'ping'} probes when
   // the server advertises it, because an older server would type the raw JSON into
   // the PTY (unknown control messages fall through to the input write).
-  ws.send(JSON.stringify({ type: 'session', id, restored: entry.restored || false, cwd: entry.cwd, name: entry.name || null, agentType: entry.agentType || 'claude', configDir: entry.configDir || null, engineType: entry.engineType || 'node-pty', claudeSessionId: entry.claudeSessionId || null, scrollback: hasScrollback, existingClients, waitingForInput: entry.waitingForInput || false, pingPong: true }));
+  ws.send(JSON.stringify({ type: 'session', id, restored: entry.restored || false, cwd: entry.cwd, name: entry.name || null, agentType: entry.agentType || 'claude', configDir: entry.configDir || null, engineType: entry.engineType || 'node-pty', claudeSessionId: entry.claudeSessionId || null, worktree: entry.worktree || null, autopilot: !!entry.autopilot, scrollback: hasScrollback, existingClients, waitingForInput: entry.waitingForInput || false, pingPong: true }));
 
   // Send buffered scrollback so the client can render the terminal immediately
   if (hasScrollback) {
@@ -6703,6 +6740,13 @@ function handleWsConnection(ws, req) {
         // exactly as it does for /api/start-issue and MCP start_issue. `loading`
         // means the same thing it does for initialPrompt above.
         if (parsed.loading) entry.loading = true;
+        // Autopilot (#643) rides the issue message rather than the WS create query,
+        // because this path builds its entry before the picker's choice is known.
+        // saveState() is what makes the flag survive a restart of a picker-started
+        // session — the create path already saved an entry without it.
+        entry.autopilot = !!parsed.autopilot;
+        saveState();
+        broadcastAutopilot(id);
         deliverPromptWhenReady(id, renderIssuePrompt(settings.wandPromptTemplate, parsed.issue || {}));
         return;
       }

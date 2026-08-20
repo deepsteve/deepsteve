@@ -327,8 +327,9 @@ function init(context) {
         url: z.string().optional().describe('Issue URL'),
         cwd: z.string().optional().describe('Working directory (defaults to caller\'s cwd)'),
         agent_type: z.string().optional().describe('Agent type (defaults to caller\'s). Supported: "claude", "codex". Experimental: "opencode", "pi", "hermes" — these run, but get no deepsteve MCP tools and no skills, so the new session cannot call back into deepsteve. See docs/agents.md.'),
+        autopilot: z.boolean().optional().describe('Start the session with Autopilot on (default off): when it calls issue_complete at the end of the work, it will be told to merge itself instead of leaving the tab for review.'),
       },
-      handler: async ({ session_id, number, title, body, labels, url, cwd, agent_type }, extra) => {
+      handler: async ({ session_id, number, title, body, labels, url, cwd, agent_type, autopilot }, extra) => {
         const callerId = session_id || extra?.requestInfo?.url?.searchParams?.get('shellId');
         const caller = callerId ? shells.get(callerId) : null;
         if (!caller) {
@@ -342,9 +343,75 @@ function init(context) {
           cwd: cwd || null,
           agentType: agent_type || null,
           callerId,
+          autopilot: !!autopilot,
         });
         if (result.error) return refuseCwdProblem(result.error);
-        return { content: [{ type: 'text', text: JSON.stringify({ id: result.id, name: result.name, cwd: result.cwd, worktree: result.worktree }) }] };
+        return { content: [{ type: 'text', text: JSON.stringify({ id: result.id, name: result.name, cwd: result.cwd, worktree: result.worktree, autopilot: result.autopilot }) }] };
+      },
+    },
+    issue_complete: {
+      description: 'Report that the work you were given is finished, and find out what to do next. '
+        + 'Call this when you believe the task is complete, BEFORE writing your final summary — the answer '
+        + 'may tell you to merge, which has to happen while you are still working. '
+        + 'The answer depends on Autopilot, a per-session setting the USER controls (from the issue picker '
+        + 'and the tab context menu); it is not yours to decide. With Autopilot off you are told to stop and '
+        + 'leave the tab for review; with it on you are told how to merge this session yourself. '
+        + 'Every issue session is asked to call this, in both states.',
+      schema: {
+        session_id: z.string().optional().describe('Caller session ID (auto-detected if omitted).'),
+      },
+      handler: async ({ session_id }, extra) => {
+        const callerId = session_id || extra?.requestInfo?.url?.searchParams?.get('shellId');
+        const caller = callerId ? shells.get(callerId) : null;
+        if (!caller) {
+          return { content: [{ type: 'text', text: `Session "${callerId || 'unknown'}" not found.` }], isError: true };
+        }
+
+        // Read at COMPLETION time, not at toggle time (#643). That is what makes
+        // turning autopilot off a real cancel: nothing was ever queued, so there is
+        // nothing to unwind, and the flag's value right now is the whole answer.
+        const on = !!caller.autopilot;
+        let payload;
+        if (!on) {
+          payload = {
+            autopilot: false,
+            next: 'stop',
+            instruction: 'Autopilot is off for this session. Stop here: write your report of what you did '
+              + 'and leave this tab open. Do NOT merge and do NOT close the session — a human will review '
+              + 'the worktree and merge it.',
+          };
+        } else if ((settings.enabledSkills || []).includes('merge')) {
+          // Codex reaches the same skill under a different name — server.js rewrites
+          // /deepsteve:<id> to $deepsteve-<id> when it generates the Codex copy, so
+          // handing a Codex session the Claude form would name a command it does not have.
+          const invocation = caller.agentType === 'codex' ? '$deepsteve-merge' : '/deepsteve:merge';
+          payload = {
+            autopilot: true,
+            next: 'merge',
+            instruction: `Autopilot is on for this session: when you complete, run ${invocation}. `
+              + 'That skill commits this worktree, merges it, closes the GitHub issue and closes this tab.',
+          };
+        } else {
+          // The merge skill is disabled on this install, so naming it would send the
+          // agent after a command that does not exist — and a stuck agent improvises
+          // `git push origin <branch>:main`, which moves the remote and leaves the
+          // local checkout behind (docs/sessions.md).
+          payload = {
+            autopilot: true,
+            next: 'merge',
+            instruction: 'Autopilot is on for this session, but the deepsteve "merge" skill is not enabled here, '
+              + 'so there is no merge command to run. Do it directly instead: commit everything in this worktree '
+              + '(`git add -A` then `git commit`, as separate Bash calls), then call mcp__deepsteve__merge_worktree, '
+              + 'and once it reports status "merged", call mcp__deepsteve__close_session. Never push the branch over '
+              + 'the target with `git push origin <branch>:<target>` — that moves the remote and leaves the local '
+              + 'checkout behind.',
+          };
+        }
+        // Logged on every call (#643). The feature rests on the agent actually calling
+        // this, and this line is the only evidence of the call rate — which is what a
+        // daemon-side backstop would have to be justified by.
+        log(`[MCP] issue_complete: ${callerId} autopilot=${on ? 'on' : 'off'} -> ${payload.next}`);
+        return { content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }] };
       },
     },
     merge_worktree: {

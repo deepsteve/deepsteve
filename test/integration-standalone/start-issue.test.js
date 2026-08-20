@@ -14,6 +14,10 @@
  * proves the two server entry points produce the same session, and that the HTTP
  * path picked up the two behaviours it was missing.
  *
+ * It also covers autopilot (#643) end to end: the flag reaching a real session entry
+ * from all three start paths, the live flip changing what the issue_complete MCP tool
+ * answers, and the value surviving a daemon restart.
+ *
  * Run directly (not picked up by test/run-integration.sh):
  *   node --test --test-timeout=180000 test/integration-standalone/start-issue.test.js
  */
@@ -101,6 +105,9 @@ class ReloadWindow {
   await(type, timeoutMs = 20000) {
     return waitFor(() => this.messages.find(m => m.type === type), `reload message ${type}`, timeoutMs);
   }
+  awaitWhere(pred, what, timeoutMs = 20000) {
+    return waitFor(() => this.messages.find(pred), `reload message ${what}`, timeoutMs);
+  }
   close() { try { this.ws?.close(); } catch {} }
 }
 
@@ -149,6 +156,23 @@ async function startDaemon() {
   }, 'daemon to become ready');
 }
 
+// Only the last test restarts; the helper is the one from session-restore.test.js.
+function stopDaemon() {
+  if (!daemon) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const proc = daemon;
+    daemon = null;
+    const timer = setTimeout(() => reject(new Error('daemon did not exit within 30s of SIGTERM')), 30000);
+    proc.on('exit', () => { clearTimeout(timer); resolve(); });
+    proc.kill('SIGTERM');
+  });
+}
+
+async function restartDaemon() {
+  await stopDaemon();
+  await startDaemon();
+}
+
 async function mcpConnect() {
   const { Client: McpClient } = await import('@modelcontextprotocol/sdk/client/index.js');
   const { StreamableHTTPClientTransport } = await import('@modelcontextprotocol/sdk/client/streamableHttp.js');
@@ -176,9 +200,21 @@ async function startIssueHttp(bodyObj) {
   return { status: r.status, json: await r.json() };
 }
 
+async function setAutopilot(id, autopilot) {
+  const r = await fetch(`${BASE}/api/shells/${id}/autopilot`, {
+    method: 'POST',
+    headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+    body: JSON.stringify({ autopilot }),
+  });
+  return { status: r.status, json: await r.json() };
+}
+
+const issueComplete = async (sessionId) =>
+  parseTool(await mcp.callTool({ name: 'issue_complete', arguments: { session_id: sessionId } }));
+
 // The fields that identify HOW a session was started. Deliberately excludes the
 // volatile ones (id, claudeSessionId, timestamps) and the window it landed in.
-const SHAPE = ['cwd', 'agentType', 'worktree', 'name', 'planMode', 'engineType', 'configDir'];
+const SHAPE = ['cwd', 'agentType', 'worktree', 'name', 'planMode', 'engineType', 'configDir', 'autopilot'];
 const shapeOf = (rec) => Object.fromEntries(SHAPE.map(k => [k, rec[k] ?? null]));
 
 const win = new ReloadWindow('win-1');
@@ -326,4 +362,140 @@ test('a missing cwd is refused with 400 and a code, not a 500', async () => {
   const res = await startIssueHttp({ number: 1, title: 'gone', cwd: path.join(tmpRoot, 'no-such-dir') });
   assert.equal(res.status, 400);
   assert.equal(res.json.code, 'cwd-missing');
+});
+
+// --- autopilot (#643) ------------------------------------------------------
+
+test('the issue prompt carries the issue_complete instruction, autopilot or not', async () => {
+  // The flag changes what the TOOL answers, never whether the instruction was
+  // delivered — so it is in the prompt of a plain, autopilot-off session too.
+  const res = await startIssueHttp({
+    number: 6430, title: 'prompt carries the instruction', body: 'NO-AUTOPILOT-6430',
+    cwd: projDir, windowId: 'win-1',
+  });
+  assert.equal(res.status, 200, `expected 200, got ${res.status}: ${JSON.stringify(res.json)}`);
+  opened.push(res.json.id);
+  assert.equal(readState()[res.json.id].autopilot, false, 'autopilot is off unless asked for');
+
+  const client = new SessionClient();
+  await client.connect({ id: res.json.id, cwd: projDir });
+  await waitFor(() => client.screen().includes('issue_complete'),
+    'the completion instruction to reach the PTY', 30000, 250);
+  client.close();
+});
+
+test('the flag round-trips through POST /api/start-issue and MCP start_issue', async () => {
+  const http = await startIssueHttp({
+    number: 6431, title: 'autopilot over http', body: 'AUTOPILOT-HTTP-6431',
+    cwd: projDir, windowId: 'win-1', autopilot: true,
+  });
+  assert.equal(http.status, 200, `expected 200, got ${http.status}: ${JSON.stringify(http.json)}`);
+  opened.push(http.json.id);
+  await waitFor(() => readState()[http.json.id] || null, 'the session to reach state.json');
+  assert.equal(readState()[http.json.id].autopilot, true, 'HTTP must persist autopilot on the entry');
+
+  const caller = new SessionClient();
+  await caller.connect({ new: '1', cwd: projDir, windowId: 'win-1', agentType: 'claude' });
+  const started = parseTool(await mcp.callTool({
+    name: 'start_issue',
+    arguments: {
+      session_id: caller.session.id, number: 6431, title: 'autopilot over mcp',
+      body: 'AUTOPILOT-MCP-6431', autopilot: true,
+    },
+  }));
+  opened.push(started.id);
+  assert.equal(started.autopilot, true, 'the MCP result echoes the flag back');
+  assert.equal(readState()[started.id].autopilot, true, 'MCP must persist autopilot on the entry');
+  caller.close();
+});
+
+test("the wand picker's issue message carries the checkbox", async () => {
+  // The picker creates its own tab over the WS and never calls startIssueSession,
+  // so the flag rides the {type:'issue'} message rather than the create query.
+  const tab = new SessionClient();
+  await tab.connect({ new: '1', cwd: projDir, windowId: 'win-1', agentType: 'claude', worktree: 'github-issue-6432' });
+  opened.push(tab.session.id);
+  assert.equal(tab.session.autopilot, false, 'the session message reports the flag to the browser');
+  tab.ws.send(JSON.stringify({
+    type: 'issue', loading: true, autopilot: true,
+    issue: { number: 6432, title: 'picker autopilot', body: 'PICKER-AUTOPILOT-6432' },
+  }));
+  await waitFor(() => readState()[tab.session.id]?.autopilot === true,
+    'the picker flag to land on the entry and be persisted', 20000, 250);
+  tab.close();
+});
+
+test('flipping the flag on a live session changes what issue_complete answers', async () => {
+  // The acceptance criterion for "off fully cancels autopilot": nothing is delivered
+  // to the session in either direction, and the answer follows the current value.
+  const res = await startIssueHttp({
+    number: 6433, title: 'live flip', body: 'FLIP-6433',
+    cwd: projDir, windowId: 'win-1', autopilot: true,
+  });
+  assert.equal(res.status, 200, `expected 200, got ${res.status}: ${JSON.stringify(res.json)}`);
+  const id = res.json.id;
+  opened.push(id);
+
+  assert.deepEqual(
+    { autopilot: true, next: 'merge' },
+    (({ autopilot, next }) => ({ autopilot, next }))(await issueComplete(id)),
+    'autopilot on: the tool tells the session to merge itself');
+
+  const off = await setAutopilot(id, false);
+  assert.equal(off.status, 200);
+  assert.equal(off.json.autopilot, false);
+  const stopped = await issueComplete(id);
+  assert.equal(stopped.autopilot, false);
+  assert.equal(stopped.next, 'stop', 'flipping off before the call must change the answer');
+
+  await setAutopilot(id, true);
+  assert.equal((await issueComplete(id)).next, 'merge', 'and back on again');
+
+  const missing = await setAutopilot('nosuchid', true);
+  assert.equal(missing.status, 404, 'an unknown session is a 404, not a silent write');
+});
+
+test('the server announces the value rather than letting each window guess', async () => {
+  // Two reasons this is a broadcast and not a local write. The picker's
+  // {type:'issue'} reaches the server AFTER the {type:'session'} message that
+  // reports the session's fields, so that message always says false on a picker
+  // start; and a flip made in one window has to reach the tab strip in the others.
+  const tab = new SessionClient();
+  await tab.connect({ new: '1', cwd: projDir, windowId: 'win-1', agentType: 'claude', worktree: 'github-issue-6435' });
+  const id = tab.session.id;
+  opened.push(id);
+  assert.equal(tab.session.autopilot, false, 'the session message can only report what is known at connect time');
+
+  tab.ws.send(JSON.stringify({
+    type: 'issue', loading: true, autopilot: true,
+    issue: { number: 6435, title: 'broadcast on picker start', body: 'BROADCAST-6435' },
+  }));
+  const announced = await win.awaitWhere(m => m.type === 'autopilot' && m.id === id, `autopilot for ${id}`);
+  assert.equal(announced.autopilot, true, 'the picker start must be announced back');
+
+  await setAutopilot(id, false);
+  const off = await win.awaitWhere(m => m.type === 'autopilot' && m.id === id && m.autopilot === false,
+    `autopilot off for ${id}`);
+  assert.equal(off.autopilot, false, 'a live flip must be announced to every window');
+  tab.close();
+});
+
+// LAST in the file: the restart leaves this suite's MCP client and reload window
+// dead, so nothing after it could use them.
+test('autopilot survives a daemon restart', async () => {
+  const res = await startIssueHttp({
+    number: 6434, title: 'survives restart', body: 'RESTART-6434',
+    cwd: projDir, windowId: 'win-1', autopilot: true,
+  });
+  assert.equal(res.status, 200, `expected 200, got ${res.status}: ${JSON.stringify(res.json)}`);
+  const id = res.json.id;
+  opened.push(id);
+  await waitFor(() => readState()[id]?.autopilot === true, 'the flag to reach state.json');
+
+  await restartDaemon();
+
+  // Whether the pane was reattached (tmux) or is waiting to be restored (node-pty),
+  // the value came back through serializeShellEntry either way.
+  const rec = await waitFor(() => readState()[id] || null, 'the record after restart');
+  assert.equal(rec.autopilot, true, 'autopilot must survive a restart (serializeShellEntry)');
 });

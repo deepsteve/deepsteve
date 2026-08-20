@@ -134,6 +134,20 @@ const ActiveTab = {
   clear() { sessionStorage.removeItem(this.KEY); }
 };
 
+/**
+ * The issue picker's Autopilot checkbox position (#643). This is a per-BROWSER
+ * preference — "what I usually want" — and is deliberately not a setting: it never
+ * reaches the server. What the server stores is a different thing, the per-session
+ * `autopilot` value that this only seeds at spawn.
+ */
+const AUTOPILOT_PREF_KEY = nsKey('deepsteve-issue-autopilot');
+function getAutopilotPref() {
+  try { return localStorage.getItem(AUTOPILOT_PREF_KEY) === '1'; } catch { return false; }
+}
+function setAutopilotPref(val) {
+  try { localStorage.setItem(AUTOPILOT_PREF_KEY, val ? '1' : '0'); } catch { /* private mode */ }
+}
+
 // Prevent accidental browser navigation (back/forward)
 window.addEventListener('popstate', (e) => {
   // Push state back to prevent navigation
@@ -1828,7 +1842,7 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
           } else if (opts.issue) {
             // Wand picker (#642): the server renders wandPromptTemplate from these
             // fields. Same `loading` contract as initialPrompt above.
-            ws.sendJSON({ type: 'issue', issue: opts.issue, loading: opts.loading });
+            ws.sendJSON({ type: 'issue', issue: opts.issue, loading: opts.loading, autopilot: !!opts.autopilot });
           }
           // Apply persisted waiting state from the server. This restores the
           // busy/idle flag after a reconnect so close-confirm and the hash
@@ -1849,6 +1863,15 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
         // or the connection-lost banner would be pinned forever.
         const connSess = sessions.get(msg.id);
         if (connSess) connSess.connHandle = connHandle;
+        // The server re-sends these on every (re)connect, so a page reload restores
+        // what the tab context menu needs to render the Autopilot item (#643).
+        {
+          const sess = sessions.get(msg.id);
+          if (sess) {
+            sess.worktree = msg.worktree || null;
+            sess.autopilot = !!msg.autopilot;
+          }
+        }
         // Track engineType and claudeSessionId for session verification (after initTerminal
         // so SessionStores.add has already created the entry)
         if (msg.engineType) {
@@ -2279,6 +2302,13 @@ function initTerminal(id, ws, cwd, initialName, { hasScrollback = false, pending
       createSession(sessionCwd, null, true, { fork: sessionId, name: session?.name });
     },
     getSessionType: () => 'terminal',
+    // null means "don't render the item". Autopilot is offered on any worktree
+    // session, since running the merge skill is meaningful for all of them.
+    getAutopilot: () => {
+      const s = sessions.get(id);
+      return s && s.worktree ? !!s.autopilot : null;
+    },
+    onToggleAutopilot: (sessionId, next) => setSessionAutopilot(sessionId, next),
     getModMenuItems: () => {
       return ModManager.getContextMenuItems().map(item => ({
         label: item.label,
@@ -2402,6 +2432,7 @@ function createModTab(modId, opts = {}) {
     onSendToWindow: () => {},
     onFork: () => {},
     getSessionType: () => 'mod-tab',
+    getAutopilot: () => null,
     getModMenuItems: () => [],
   };
 
@@ -2470,6 +2501,7 @@ function createDisplayTab(id, name, opts = {}) {
     onSendToWindow: (sessionId, targetWindowId) => sendToWindow(sessionId, targetWindowId),
     onFork: () => {},
     getSessionType: () => 'display-tab',
+    getAutopilot: () => null,
     getModMenuItems: () => [],
   };
 
@@ -2558,6 +2590,7 @@ function createProjectModTab(mod, opts = {}) {
     onSendToWindow: () => {},
     onFork: () => {},
     getSessionType: () => 'project-mod',
+    getAutopilot: () => null,
     getModMenuItems: () => [],
   };
 
@@ -4027,6 +4060,20 @@ async function resolveGitRootLoud(cwd) {
   }
 }
 
+/**
+ * Ask the server to flip a live session's Autopilot value (#643). Nothing is
+ * updated locally: the server writes the value and announces it back over the
+ * `autopilot` broadcast, which is what moves the menu's tick — in every window,
+ * not just this one.
+ */
+function setSessionAutopilot(sessionId, next) {
+  fetch(`/api/shells/${encodeURIComponent(sessionId)}/autopilot`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ autopilot: !!next }),
+  }).catch(() => { /* offline: the tick stays where it was, which is the truth */ });
+}
+
 // Guards the user-length prompts below: without it, repeated clicks stack N
 // directory pickers and then N issue modals.
 let issuePickerOpening = false;
@@ -4101,6 +4148,10 @@ async function showIssuePicker() {
         </div>
       </div>
       <div class="modal-buttons">
+        <label for="issue-autopilot" style="display:flex; align-items:center; gap:6px; margin:0 auto 0 0; font-size:12px; cursor:pointer;">
+          <input type="checkbox" id="issue-autopilot" ${getAutopilotPref() ? 'checked' : ''} style="accent-color: var(--ds-accent-green);">
+          Autopilot
+        </label>
         <button class="btn-secondary" id="issue-cancel">Cancel</button>
       </div>
     </div>
@@ -4108,6 +4159,9 @@ async function showIssuePicker() {
   document.body.appendChild(overlay);
   const closeIssuePicker = () => overlay.remove();
   overlay.querySelector('#issue-cancel').onclick = closeIssuePicker;
+  // Remembered even if the picker is then cancelled — it is a preference, not part
+  // of this start.
+  overlay.querySelector('#issue-autopilot').onchange = (e) => setAutopilotPref(e.target.checked);
   overlay.onclick = (e) => { if (e.target === overlay) closeIssuePicker(); };
   const onEscIssuePicker = (e) => { if (e.key === 'Escape') { e.preventDefault(); closeIssuePicker(); } };
   document.addEventListener('keydown', onEscIssuePicker);
@@ -4195,6 +4249,9 @@ async function showIssuePicker() {
 
   function startIssue() {
     if (!selectedIssue) return;
+    // Read BEFORE the overlay is torn down, and here rather than off the Start
+    // button — double-clicking a row calls this directly.
+    const autopilot = !!overlay.querySelector('#issue-autopilot')?.checked;
     overlay.remove();
 
     // Send the issue fields, not a rendered prompt (#642): the server owns
@@ -4212,6 +4269,9 @@ async function showIssuePicker() {
       planMode: wandPlanMode,
       name: truncateTitle(`#${selectedIssue.number} ${selectedIssue.title}`),
       agentType: getDefaultAgentType(),
+      // Seeds the session's server-side autopilot value (#643); the tab context
+      // menu is what changes it afterwards.
+      autopilot,
       // Show the loading banner + block input while the issue prompt auto-submits,
       // matching the server-initiated /api/start-issue path (#495, #512).
       loading: true
@@ -4542,6 +4602,13 @@ async function init() {
         if (session?.ws) {
           session.ws.sendJSON({ type: 'initialPrompt', text: msg.initialPrompt });
         }
+      }
+      if (msg.type === 'autopilot') {
+        // The server is the only writer of this value (#643); the tab context menu
+        // renders whatever lands here, so a flip from another window is reflected
+        // too, and a picker start doesn't have to guess ahead of the server.
+        const session = sessions.get(msg.id);
+        if (session) session.autopilot = !!msg.autopilot;
       }
       if (msg.type === 'prompt-submitted') {
         dismissLoadingBanner(msg.id);

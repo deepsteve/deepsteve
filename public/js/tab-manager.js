@@ -92,6 +92,29 @@ function showContextMenu(x, y, sessionId, callbacks) {
   sep1.className = 'context-menu-separator';
   menu.appendChild(sep1);
 
+  // Autopilot (#643) — a per-session server-side value: with it on, the session
+  // merges itself once it reports the work done, instead of leaving a finished
+  // worktree tab for a human to close out. `null` means "not applicable to this
+  // tab" (no worktree, or not a PTY session at all), and the item is omitted
+  // rather than disabled — there is nothing the user could do to make it apply.
+  const autopilot = callbacks.getAutopilot ? callbacks.getAutopilot() : null;
+  if (autopilot !== null && autopilot !== undefined) {
+    const autoEl = document.createElement('div');
+    autoEl.className = 'context-menu-item';
+    // Same tick convention as the agent submenu: the unchecked state keeps the
+    // label's indent so the two states don't jitter.
+    autoEl.innerHTML = `${autopilot ? '&#10003; ' : '&nbsp;&nbsp; '}Autopilot`;
+    autoEl.onclick = () => {
+      hideContextMenu();
+      callbacks.onToggleAutopilot?.(sessionId, !autopilot);
+    };
+    menu.appendChild(autoEl);
+
+    const sepAuto = document.createElement('div');
+    sepAuto.className = 'context-menu-separator';
+    menu.appendChild(sepAuto);
+  }
+
   // Fork tab
   const forkEl = document.createElement('div');
   forkEl.className = 'context-menu-item';
