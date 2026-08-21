@@ -3,6 +3,7 @@
  */
 
 import { registerInfo } from './shortcuts.js';
+import { installClipboardOsc } from './osc-clipboard.js';
 
 function getTerminalBackground() {
   return getComputedStyle(document.documentElement).getPropertyValue('--ds-bg-primary').trim() || '#0d1117';
@@ -33,6 +34,12 @@ export function createTerminal(container, { cols, rows } = {}) {
   const opts = {
     fontSize: 14,
     cursorBlink: false,  // Disable - Claude has its own cursor
+    // #650: with tmux's mouse on, xterm hands a drag to the application instead of
+    // starting a browser selection — so ⌥+drag becomes the way to select terminal text
+    // with the mouse on macOS, and xterm gates that on this option, which defaults to
+    // false. (`shouldForceSelection` is `altKey && macOptionClickForcesSelection` on
+    // darwin and plain `shiftKey` everywhere else, so ⇧+drag already works elsewhere.)
+    macOptionClickForcesSelection: true,
     theme: themeObj
   };
   // Open the terminal at the measured grid size (#566). On page refresh the
@@ -45,6 +52,10 @@ export function createTerminal(container, { cols, rows } = {}) {
     opts.rows = rows;
   }
   const term = new Terminal(opts);
+
+  // #650: OSC 52 in. Registered before term.open() and before app.js flushes any
+  // pending data, so a scrollback replay cannot outrun it.
+  installClipboardOsc(term, container);
 
   const fit = new FitAddon.FitAddon();
   term.loadAddon(fit);

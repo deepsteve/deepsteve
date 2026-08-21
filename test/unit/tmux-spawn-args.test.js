@@ -468,3 +468,95 @@ test('the engine never issues a whole-server verb (#625)', () => {
   assert.doesNotMatch(code, /kill-server/,
     'engines/tmux.js must only ever destroy one named session at a time');
 });
+
+// ---------------------------------------------------------------------------
+// #650: the session options that make the wheel scroll the terminal.
+//
+// With `mouse off` tmux never turns mouse reporting on for its client, so xterm.js saw
+// no mouse protocol at all, fell into its "alternate buffer, no scrollback" branch, and
+// translated every wheel notch into ESC[A / ESC[B — scrolling an agent tab walked its
+// prompt history. These assertions are about WHERE the options are applied as much as
+// what they are: the tmux server outlives the daemon, so a spawn-only call would never
+// reach any session that already exists.
+// ---------------------------------------------------------------------------
+
+/** Every `set-option` argv issued, socket prefix stripped. */
+function setOptions(calls) {
+  return calls.filter((c) => c.argv.includes('set-option')).map((c) => afterSocket(c.argv));
+}
+
+test('#650: spawn() sets status, mouse and clipboard on the session it creates', () => {
+  const { eng, calls } = makeEngine();
+  eng.spawn('abc12345', '/bin/zsh', ['-l'], '/repo', { shellCommand: null });
+
+  assert.deepStrictEqual(setOptions(calls), [
+    ['set-option', '-t', 'ds-abc12345', 'status', 'off'],
+    ['set-option', '-t', 'ds-abc12345', 'mouse', 'on'],
+    ['set-option', '-s', 'set-clipboard', 'on'],
+  ]);
+});
+
+test('#650: a bare reattach() sets them too — the upgrade path for existing sessions', () => {
+  // THE assertion of this section. A session created by a pre-#650 daemon is still
+  // running after the upgrade, inside a tmux server that outlived the restart, and
+  // spawn() will never run for it again. If the options moved back into spawn(), every
+  // session anyone already had would keep scrolling its history forever.
+  const { eng, calls } = makeEngine();
+  assert.strictEqual(eng.reattach('abc12345', 100, 30), true);
+
+  assert.deepStrictEqual(setOptions(calls), [
+    ['set-option', '-t', 'ds-abc12345', 'status', 'off'],
+    ['set-option', '-t', 'ds-abc12345', 'mouse', 'on'],
+    ['set-option', '-s', 'set-clipboard', 'on'],
+  ]);
+});
+
+test('#650: mouse is session-scoped and clipboard is server-scoped, never the reverse', () => {
+  // `-t` is the narrowest scope `mouse` has. `set-clipboard` has NO session scope — `-s`
+  // is its only one — which is safe only because #625 made this socket ours alone. A
+  // `-g` on either would widen the blast radius past what that guarantee covers.
+  const { eng, calls } = makeEngine();
+  eng.spawn('abc12345', '/bin/zsh', ['-l'], '/repo', { shellCommand: null });
+
+  for (const argv of setOptions(calls)) {
+    assert.ok(!argv.includes('-g'), `set-option must never be global: ${argv.join(' ')}`);
+  }
+  const mouse = setOptions(calls).find((a) => a.includes('mouse'));
+  assert.deepStrictEqual(mouse.slice(1, 3), ['-t', 'ds-abc12345']);
+  const clip = setOptions(calls).find((a) => a.includes('set-clipboard'));
+  assert.deepStrictEqual(clip.slice(1, 2), ['-s']);
+});
+
+test('#650: tmux < 2.1 has no `mouse` option, and loses only that', () => {
+  // 2.1 collapsed mode-mouse and friends into one flag. An older tmux answers "unknown
+  // option", which the try/catch swallows — so this gate buys clarity, not safety, and
+  // the other two options must still land.
+  const { eng, calls } = makeEngine({ version: '2.0' });
+  eng.spawn('abc12345', '/bin/zsh', ['-l'], '/repo', { shellCommand: null });
+
+  assert.deepStrictEqual(setOptions(calls), [
+    ['set-option', '-t', 'ds-abc12345', 'status', 'off'],
+    ['set-option', '-s', 'set-clipboard', 'on'],
+  ]);
+});
+
+test('#650: a socket-less engine (userTmux) reconfigures nothing', () => {
+  // `socket: null` is the deliberate "tmux's own per-UID socket" engine (#625), used by
+  // server.js's tmux-attach path against sessions deepsteve did not create. set-clipboard
+  // is a SERVER option, so one call there would change every tmux session on the box.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-tmuxargs-'));
+  const bin = path.join(dir, 'tmux');
+  fs.writeFileSync(bin, '#!/bin/sh\nexit 0\n');
+  fs.chmodSync(bin, 0o755);
+  const calls = [];
+  const exec = (file, argv) => {
+    calls.push({ file, argv });
+    return argv[0] === '-V' ? 'tmux 3.5a' : '';
+  };
+  const spawnPty = () => ({ onData() {}, onExit() {}, write() {}, resize() {}, kill() {}, pid: 1 });
+  const eng = new TmuxEngine({ binary: bin, socket: null, env: { PATH: dir }, exec, spawnPty });
+  assert.strictEqual(eng.socket, null, 'otherwise this test asserts nothing');
+
+  eng.reattach('abc12345', 100, 30);
+  assert.deepStrictEqual(calls.filter((c) => c.argv.includes('set-option')), []);
+});

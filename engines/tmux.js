@@ -212,6 +212,20 @@ class TmuxEngine extends Engine {
     return this._atLeast(3, 2);
   }
 
+  /**
+   * Can the mouse be turned on with the single `mouse` session option (>= 2.1)?
+   *
+   * tmux 2.1 collapsed mode-mouse / mouse-select-pane / mouse-select-window /
+   * mouse-resize-pane into one flag. An older tmux answers "unknown option", which the
+   * try/catch at the call site swallows — so unlike `_supportsFeaturesFlag`, whose bad
+   * flag would kill the attach PTY, this gate protects nothing at runtime. It is here
+   * so a 2.0 box reads as a decision rather than as a command silently failing on every
+   * attach.
+   */
+  get _supportsMouseOption() {
+    return this._atLeast(2, 1);
+  }
+
   _tmuxSessionName(id) {
     return SESSION_PREFIX + id;
   }
@@ -327,14 +341,70 @@ class TmuxEngine extends Engine {
       throw new Error(`Failed to create tmux session ${sessionName}: ${e.message}`);
     }
 
+    // Options (status bar, mouse, clipboard) are applied by _attach() — see
+    // _applySessionOptions(). Attach to the tmux session via a PTY for I/O.
+    this._attach(id, cols, rows);
+  }
+
+  /**
+   * The tmux options a deepsteve pane needs, applied to ONE session we own.
+   *
+   * Called from _attach() rather than from spawn(), and that placement is the point:
+   * the tmux SERVER outlives the daemon (#620), so a session created by an older
+   * daemon is still running after an upgrade and spawn() will never run for it again.
+   * _attach() is the one place every live session passes through — new (spawn),
+   * surviving (reattach at startup, tmux-reattach.js) and repaired (the #626 silent
+   * re-attach) — so applying them here is what makes a new option reach an old session
+   * on the next restart, with no migration step to remember.
+   *
+   * Never the user's own tmux server. `socket === null` is the deliberate "tmux's
+   * default per-UID socket" engine (userTmux(), #625); `set-clipboard` in particular is
+   * a SERVER option, so applying it there would change every tmux session on the box.
+   * That engine reaches only hasSession/listAllSessions/attachSpawnArgs today, so this
+   * is a guard against a future caller rather than a live bug — which is why it is a
+   * guard and not a comment.
+   *
+   * One option per invocation: tmux has no multi-option form, and chaining with `;`
+   * would put a shell-ish parsing layer back into an argv that #630 spent an issue
+   * deleting. Individually caught so one unknown option on an old tmux cannot cost the
+   * others.
+   */
+  _applySessionOptions(sessionName) {
+    if (!this._socket) return;
+
     // Disable status bar — it steals a row from the pane, causing dimension
     // mismatch between what xterm.js reports and what programs inside see.
-    try {
-      this._exec(['set-option', '-t', sessionName, 'status', 'off']);
-    } catch {}
+    const options = [['-t', sessionName, 'status', 'off']];
 
-    // Attach to the tmux session via a PTY for I/O
-    this._attach(id, cols, rows);
+    // #650: the wheel. Since #620 every PTY is a tmux pane, and tmux with `mouse off`
+    // never turns mouse reporting on for its client — so xterm.js saw no mouse protocol
+    // at all, fell into its "alternate buffer, no scrollback" branch, and translated
+    // every wheel notch into ESC[A / ESC[B. Those are Up and Down arrows: scrolling an
+    // agent tab walked Claude's prompt history instead of the terminal. With `mouse on`
+    // tmux's own default root binding decides instead — `send-keys -M` into a pane that
+    // owns the alternate screen or asked for the mouse (Claude, vim, less), `copy-mode
+    // -e` into a plain shell pane — and xterm sends real SGR mouse reports.
+    //
+    // `-t <session>`, never `-g`: this is the narrowest scope the option has.
+    if (this._supportsMouseOption) options.push(['-t', sessionName, 'mouse', 'on']);
+
+    // #650, the other half. With the mouse on, a drag-select belongs to tmux or to the
+    // pane's program rather than to the browser, so a copy comes back to us as OSC 52
+    // instead of landing in the system clipboard by itself. public/js/osc-clipboard.js
+    // catches it; this is what makes tmux emit it for its own copy-mode copies (the
+    // default, `external`, only forwards one a program inside the pane sent).
+    //
+    // `-s` because set-clipboard is a SERVER option — it has no narrower scope to ask
+    // for. That is only safe because #625 made this socket ours alone, which is also
+    // what the `!this._socket` guard above is protecting. Ungated: the option predates
+    // the tmux 2.0 multi-arg shell-command this engine already requires.
+    options.push(['-s', 'set-clipboard', 'on']);
+
+    for (const opt of options) {
+      try {
+        this._exec(['set-option', ...opt]);
+      } catch {}
+    }
   }
 
   /**
@@ -399,6 +469,9 @@ class TmuxEngine extends Engine {
    */
   _attach(id, cols, rows, carry) {
     const sessionName = this._tmuxSessionName(id);
+    // Before the PTY, so the client comes up already in mouse mode rather than being
+    // switched a beat after it has drawn.
+    this._applySessionOptions(sessionName);
     const { file, argv, opts } = this.attachSpawnArgs(sessionName, cols, rows);
     const attachPty = this._spawnPty(file, argv, opts);
 

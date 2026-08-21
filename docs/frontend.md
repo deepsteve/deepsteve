@@ -1,8 +1,8 @@
 # Frontend
 
 The browser side: the shortcut registry every global key binding must go through, the command
-palette, and the storage layers that make tabs survive a refresh, a second window, and being
-nested inside deepsteve's own Baby Browser.
+palette, what the terminal does with a wheel and a selection, and the storage layers that make
+tabs survive a refresh, a second window, and being nested inside deepsteve's own Baby Browser.
 
 The frontend is vanilla ES modules with no build step — see `AGENTS.md` for the style rules.
 
@@ -50,6 +50,22 @@ a short grace has elapsed; a repaint alone is not proof, because a working turn 
 spinner frame. `setWaitingForInput()` no longer wipes it: that blind wipe *was* #634, since the
 screen classifier reports a composed-but-unsent message as "waiting" by design and `app.js` also
 calls it unconditionally on tab switch and on reconnect.
+
+## Terminal wheel, selection and clipboard
+
+Three facts about the terminal that are expensive to re-derive, and one of them was a bug for a release.
+
+**xterm 6 turns a wheel into arrow keys when it has no scrollback and no mouse protocol.** Its wheel listener runs only when no wheel-carrying mouse protocol is bound; then, if `buffer.hasScrollback` is false, it emits `ESC[A` / `ESC[B` and sends them as input. Under tmux the client owns the outer alternate screen, so `hasScrollback` is permanently false — which is why scrolling any tab walked the agent's prompt history until #650 turned tmux's `mouse` on. The fix is server-side (see [terminal-engines.md](terminal-engines.md)); what matters here is the shape of the dependency: **the browser stops producing arrow keys because tmux enables mouse reporting, not because of anything in `public/js/`.** If scrolling ever regresses to history-walking, check `term.modes.mouseTrackingMode` first — `'none'` means the mode-set never arrived and the bug is on the tmux side.
+
+**The ctrl-wheel guard must never `preventDefault` (#583).** macOS pinch-zoom arrives as a wheel with `ctrlKey: true`, and xterm cancels every wheel it sees — its mouse-report path unconditionally, its scrollable-element path whenever the wheel moved anything. `handleTerminalWheelCapture` in `terminal.js` is a **capture-phase, passive** listener on `#terminals` that `stopPropagation()`s ctrl-wheels so they never reach xterm's own listeners; passive is what leaves the browser's zoom default to proceed. Capture on an ancestor is the only reliable interception, because xterm's handlers stop propagation themselves and `attachCustomWheelEventHandler` covers only one of the two paths.
+
+**Selection and copy changed shape with mouse reporting on.** A drag over the terminal is now reported to tmux or to the pane's program, so it is *their* selection, not the browser's. Browser-native selection is still available as the force-selection gesture — **⌥+drag on macOS, ⇧+drag elsewhere** — and on macOS xterm gates that on `macOptionClickForcesSelection`, which defaults to false, so `createTerminal()` sets it. Copies made on the other side come back as **OSC 52**, which xterm 6.0.0 has no handler for (it registers 0, 1, 2, 4, 8, 10, 11, 12, 104, 110, 111, 112). `public/js/osc-clipboard.js` supplies one. Three things about it are not optional:
+
+- **A `?` payload is a clipboard *read* request and is never answered.** Replying would let anything in any pane exfiltrate the user's clipboard over the PTY.
+- **The handler must stay synchronous.** xterm pauses its parser on a thenable OSC result, so awaiting the clipboard would stall the terminal behind a permission prompt. It always returns `true`, so a `?` or an undecodable payload cannot fall through.
+- **It stays inert until the tab has seen a gesture.** The daemon replays a session's whole scrollback on every WebSocket connect, so every OSC 52 the pane ever emitted is re-delivered on a page refresh; writing the clipboard from a page load nobody asked for would eat whatever the user had copied elsewhere. A real copy is always downstream of a pointerdown or a keydown in the tab. (Residual, accepted: a mid-page reconnect can re-fire the session's most recent OSC 52 once. If that ever bites, strip OSC 52 from the replay server-side rather than adding client heuristics.)
+
+Base64 is decoded through `TextDecoder`, not straight off `atob` — `atob` yields bytes, and handing those to the clipboard mojibakes every accent and box-drawing glyph. `navigator.clipboard` is absent outside a secure context (the canonical `deepsteve.localhost` origin is one; a plain-HTTP LAN address is not), so there is a hidden-textarea `execCommand('copy')` fallback that restores focus afterwards. Tests: `test/unit/terminal-wheel-guard.test.js`, `test/unit/osc-clipboard.test.js`.
 
 ## Keyboard Shortcuts (`public/js/shortcuts.js`)
 

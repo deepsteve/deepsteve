@@ -37,6 +37,7 @@ const INPUT = {
   'F1 (SS3)':                     '\x1bOP',
   'F3 (SS3)':                     '\x1bOR',
   'SGR mouse press':              '\x1b[<0;12;5M',
+  'SGR mouse wheel (#650)':       '\x1b[<64;12;5M',
   'dropped file paths':           ' /tmp/a /tmp/b',
   'a lone ESC':                   '\x1b',
   'nothing at all':               '',
