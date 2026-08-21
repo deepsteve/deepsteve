@@ -130,6 +130,31 @@ test('autopilot is persisted, not just held in memory', () => {
     'the WS restore path must restore autopilot onto the live entry (#643)');
 });
 
+test('an omitted autopilot seeds from the remembered preference, not from off (#651)', () => {
+  // The bug this guards: `autopilot = false` in the signature (and `!!autopilot`
+  // at the call sites) made "not specified" indistinguishable from "off", so every
+  // MCP / skill / autonomous start ignored the user's choice — and those are the
+  // paths most runs take.
+  const server = read('server.js');
+  const sig = server.slice(server.indexOf('function startIssueSession('));
+  const head = sig.slice(0, sig.indexOf(') {'));
+  assert.ok(!/autopilot\s*=/.test(head),
+    'startIssueSession must not hard-default autopilot in its signature (#651)');
+  assert.ok(/autopilot == null \? !!settings\.issueAutopilot/.test(sig.slice(0, sig.indexOf('\n}'))),
+    'startIssueSession must fall back to settings.issueAutopilot (#651)');
+
+  // Both server entry points have to pass the field through un-coerced, or the
+  // fallback above never sees an undefined.
+  assert.ok(!/autopilot: !!autopilot/.test(server),
+    'POST /api/start-issue must pass autopilot through raw, not !!-ed (#651)');
+  assert.ok(!/autopilot: !!autopilot/.test(read('mods/deepsteve-core/tools.js')),
+    'MCP start_issue must pass autopilot through raw, not !!-ed (#651)');
+
+  // And it is a real setting, so it is persisted and validated like every other one.
+  assert.ok(/name: 'issueAutopilot',\s+type: 'boolean'/.test(server),
+    'issueAutopilot must be a SETTINGS_SCHEMA entry (#651)');
+});
+
 // --- drift guards: one implementation, one reader ---------------------------
 
 test('the wand template has exactly one reader, and it is issue-prompt.js', () => {

@@ -510,6 +510,15 @@ const SETTINGS_SCHEMA = [
   { name: 'shellProfile',               type: 'string',  default: '~/.zshrc' },
   { name: 'maxIssueTitleLength',        type: 'number',  default: 25, clamp: [10, 200] },
   { name: 'wandPlanMode',               type: 'boolean', default: true, broadcast: false },
+  // The remembered Autopilot choice for new issue sessions (#651). It used to be a
+  // per-browser localStorage flag that only the picker checkbox read, so every other
+  // spawn path — MCP start_issue, /api/start-issue, /deepsteve:github-issue, an
+  // autonomous agent — started with Autopilot off no matter what the user last chose.
+  // Read inside startIssueSession() whenever the caller omits `autopilot`; an explicit
+  // argument still wins. Unlike wandPlanMode this IS broadcast: the picker paints its
+  // checkbox synchronously, before its own /api/settings fetch resolves, and a change
+  // made in one window has to reach the picker in the others.
+  { name: 'issueAutopilot',             type: 'boolean', default: false },
   { name: 'wandPromptTemplate',         type: 'string',  default: WAND_DEFAULT_TEMPLATE, broadcast: false,
     logValue: v => `(${v.length} chars)` },
   { name: 'cmdTabSwitch',               type: 'boolean', default: false },
@@ -5574,7 +5583,14 @@ app.get('/api/issues', (req, res) => {
  * Returns `{ error: <spawnCwdProblem> }` for a bad cwd — the caller formats it,
  * because an HTTP 400 body and an MCP isError result are not the same shape.
  */
-function startIssueSession({ number, title, body, labels, url, cwd, agentType, configDir, windowId, callerId, openBrowser = false, autopilot = false }) {
+function startIssueSession({ number, title, body, labels, url, cwd, agentType, configDir, windowId, callerId, openBrowser = false, autopilot }) {
+  // #651: an omitted `autopilot` means "whatever the user usually wants", not "off".
+  // A hard default here is what made every MCP / skill / autonomous start ignore the
+  // remembered choice — and those are the paths most runs take. Read live off the
+  // settings object so a Settings change applies with no restart; an explicit boolean
+  // from a caller that means it still wins.
+  const autopilotOn = autopilot == null ? !!settings.issueAutopilot : !!autopilot;
+
   // Inherit whatever the caller didn't specify from the calling session.
   const caller = callerId ? shells.get(callerId) : null;
   if (caller) {
@@ -5625,7 +5641,7 @@ function startIssueSession({ number, title, body, labels, url, cwd, agentType, c
   const sessionEngine = spawnSession(getDefaultEngine(), id, agentType, spawnArgs, spawnCwd, { cols: 120, rows: 40, env: sessionEnv(id, { name, worktree, windowId: windowId || null, cwd: spawnCwd, agentType, configDir, codexHomeId }) });
   const engineType = sessionEngine === tmuxEngine ? 'tmux' : 'node-pty';
   log(`[issue] #${number}: id=${id}, agent=${agentType}, engine=${engineType}, worktree=${worktree || 'none'}, cwd=${spawnCwd}`);
-  shells.set(id, { clients: new Set(), cwd: spawnCwd, claudeSessionId, agentType, codexHomeId, configDir: configDir || null, engine: sessionEngine, engineType, worktree: worktree || null, windowId: windowId || null, name, planMode: !!settings.wandPlanMode, autopilot: !!autopilot, waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now(), loading: true });
+  shells.set(id, { clients: new Set(), cwd: spawnCwd, claudeSessionId, agentType, codexHomeId, configDir: configDir || null, engine: sessionEngine, engineType, worktree: worktree || null, windowId: windowId || null, name, planMode: !!settings.wandPlanMode, autopilot: autopilotOn, waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now(), loading: true });
   wireShellOutput(id);
   emitSessionOpen(id);
   recordRecentSession(id);
@@ -5659,7 +5675,7 @@ function startIssueSession({ number, title, body, labels, url, cwd, agentType, c
   }
 
   deliverToWindow({ type: 'open-session', id, cwd: spawnCwd, name, windowId, loading: true }, windowId, { openBrowser });
-  return { id, name, cwd: spawnCwd, worktree: worktree || null, engineType, autopilot: !!autopilot };
+  return { id, name, cwd: spawnCwd, worktree: worktree || null, engineType, autopilot: autopilotOn };
 }
 
 app.post('/api/start-issue', (req, res) => {
@@ -5687,7 +5703,9 @@ app.post('/api/start-issue', (req, res) => {
     number, title, body, labels, url, cwd, agentType, configDir, windowId,
     callerId: sessionId || null,
     openBrowser: true,
-    autopilot: !!autopilot,
+    // Raw, not `!!autopilot` (#651): the coercion is what collapsed an absent field
+    // to false before startIssueSession could tell "off" from "not specified".
+    autopilot,
   });
   if (result.error) {
     return res.status(400).json({ error: result.error.message, code: result.error.code, cwd: result.error.cwd });
@@ -6743,8 +6761,11 @@ function handleWsConnection(ws, req) {
         // Autopilot (#643) rides the issue message rather than the WS create query,
         // because this path builds its entry before the picker's choice is known.
         // saveState() is what makes the flag survive a restart of a picker-started
-        // session — the create path already saved an entry without it.
-        entry.autopilot = !!parsed.autopilot;
+        // session — the create path already saved an entry without it. An absent key
+        // falls back to the remembered preference, same rule as startIssueSession (#651);
+        // the picker itself always sends an explicit boolean, so this is for any other
+        // client that skips it.
+        entry.autopilot = parsed.autopilot == null ? !!settings.issueAutopilot : !!parsed.autopilot;
         saveState();
         broadcastAutopilot(id);
         deliverPromptWhenReady(id, renderIssuePrompt(settings.wandPromptTemplate, parsed.issue || {}));

@@ -209,6 +209,16 @@ async function setAutopilot(id, autopilot) {
   return { status: r.status, json: await r.json() };
 }
 
+async function setIssueAutopilotDefault(issueAutopilot) {
+  const r = await fetch(`${BASE}/api/settings`, {
+    method: 'POST',
+    headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+    body: JSON.stringify({ issueAutopilot }),
+  });
+  assert.equal(r.status, 200, 'POST /api/settings must accept issueAutopilot');
+  assert.equal((await r.json()).issueAutopilot, issueAutopilot, 'the setting must echo back as posted');
+}
+
 const issueComplete = async (sessionId) =>
   parseTool(await mcp.callTool({ name: 'issue_complete', arguments: { session_id: sessionId } }));
 
@@ -478,6 +488,108 @@ test('the server announces the value rather than letting each window guess', asy
     `autopilot off for ${id}`);
   assert.equal(off.autopilot, false, 'a live flip must be announced to every window');
   tab.close();
+});
+
+// --- the remembered preference (#651) ---------------------------------------
+// Autopilot used to be remembered only in the browser's localStorage, so it seeded
+// exactly one of the four spawn paths. These four assert the other three now read
+// the same server-owned value — and that an explicit argument still overrides it.
+
+test('an omitted autopilot seeds from the issueAutopilot setting, on every path', async () => {
+  await setIssueAutopilotDefault(true);
+  try {
+    // MCP start_issue, no `autopilot` argument at all — the path a skill or an
+    // autonomous agent takes, and the one that used to always come up off.
+    const caller = new SessionClient();
+    await caller.connect({ new: '1', cwd: projDir, windowId: 'win-1', agentType: 'claude' });
+    const started = parseTool(await mcp.callTool({
+      name: 'start_issue',
+      arguments: {
+        session_id: caller.session.id, number: 6510, title: 'mcp inherits the preference',
+        body: 'PREF-MCP-6510',
+      },
+    }));
+    opened.push(started.id);
+    assert.equal(started.autopilot, true, 'the MCP result must echo the inherited value');
+    assert.equal(readState()[started.id].autopilot, true, 'MCP must persist the inherited value');
+    caller.close();
+
+    // POST /api/start-issue with no autopilot field.
+    const http = await startIssueHttp({
+      number: 6511, title: 'http inherits the preference', body: 'PREF-HTTP-6511',
+      cwd: projDir, windowId: 'win-1',
+    });
+    assert.equal(http.status, 200, `expected 200, got ${http.status}: ${JSON.stringify(http.json)}`);
+    opened.push(http.json.id);
+    await waitFor(() => readState()[http.json.id] || null, 'the session to reach state.json');
+    assert.equal(readState()[http.json.id].autopilot, true, 'HTTP must persist the inherited value');
+  } finally {
+    await setIssueAutopilotDefault(false);
+  }
+});
+
+test('an explicit autopilot still wins over the setting', async () => {
+  await setIssueAutopilotDefault(true);
+  try {
+    // The regression a naive `settings.issueAutopilot || autopilot` would introduce:
+    // a caller that means "off for this one" can no longer say so.
+    const res = await startIssueHttp({
+      number: 6512, title: 'explicit off beats the preference', body: 'PREF-EXPLICIT-6512',
+      cwd: projDir, windowId: 'win-1', autopilot: false,
+    });
+    assert.equal(res.status, 200, `expected 200, got ${res.status}: ${JSON.stringify(res.json)}`);
+    opened.push(res.json.id);
+    await waitFor(() => readState()[res.json.id] || null, 'the session to reach state.json');
+    assert.equal(readState()[res.json.id].autopilot, false, 'an explicit false must not be overridden');
+
+    const caller = new SessionClient();
+    await caller.connect({ new: '1', cwd: projDir, windowId: 'win-1', agentType: 'claude' });
+    const started = parseTool(await mcp.callTool({
+      name: 'start_issue',
+      arguments: {
+        session_id: caller.session.id, number: 6513, title: 'mcp explicit off',
+        body: 'PREF-EXPLICIT-MCP-6513', autopilot: false,
+      },
+    }));
+    opened.push(started.id);
+    assert.equal(started.autopilot, false, 'MCP: an explicit false must not be overridden');
+    assert.equal(readState()[started.id].autopilot, false, 'MCP: the entry must record the explicit false');
+    caller.close();
+  } finally {
+    await setIssueAutopilotDefault(false);
+  }
+});
+
+test("the picker's issue message inherits the preference when it omits the key", async () => {
+  // The picker itself always sends an explicit boolean; this covers any other client
+  // of the {type:'issue'} message, and keeps that path on the same rule as the rest.
+  await setIssueAutopilotDefault(true);
+  try {
+    const tab = new SessionClient();
+    await tab.connect({ new: '1', cwd: projDir, windowId: 'win-1', agentType: 'claude', worktree: 'github-issue-6514' });
+    opened.push(tab.session.id);
+    tab.ws.send(JSON.stringify({
+      type: 'issue', loading: true,
+      issue: { number: 6514, title: 'picker inherits', body: 'PREF-PICKER-6514' },
+    }));
+    await waitFor(() => readState()[tab.session.id]?.autopilot === true,
+      'the inherited flag to land on the entry and be persisted', 20000, 250);
+    tab.close();
+  } finally {
+    await setIssueAutopilotDefault(false);
+  }
+});
+
+test('with the setting off, an omitted autopilot is still off', async () => {
+  // The default has to stay fail-closed: nothing merges itself unless asked.
+  const res = await startIssueHttp({
+    number: 6515, title: 'default stays off', body: 'PREF-DEFAULT-OFF-6515',
+    cwd: projDir, windowId: 'win-1',
+  });
+  assert.equal(res.status, 200, `expected 200, got ${res.status}: ${JSON.stringify(res.json)}`);
+  opened.push(res.json.id);
+  await waitFor(() => readState()[res.json.id] || null, 'the session to reach state.json');
+  assert.equal(readState()[res.json.id].autopilot, false, 'the preference defaults to off');
 });
 
 // LAST in the file: the restart leaves this suite's MCP client and reload window
