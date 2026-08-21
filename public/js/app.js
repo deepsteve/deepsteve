@@ -135,17 +135,27 @@ const ActiveTab = {
 };
 
 /**
- * The issue picker's Autopilot checkbox position (#643). This is a per-BROWSER
- * preference — "what I usually want" — and is deliberately not a setting: it never
- * reaches the server. What the server stores is a different thing, the per-session
- * `autopilot` value that this only seeds at spawn.
+ * The remembered Autopilot choice for new issue sessions (#651). This used to be a
+ * per-BROWSER localStorage flag, which meant only the picker checkbox could read it —
+ * an issue started by MCP `start_issue`, a skill or an autonomous agent always came up
+ * with Autopilot off. It is now the server setting `issueAutopilot`, and this is only a
+ * cache of the last value the server announced, so the picker can paint its checkbox
+ * synchronously. `applySettings()` is the sole writer, exactly as with the per-session
+ * `autopilot` value: the browser renders what the server said, it never decides.
  */
-const AUTOPILOT_PREF_KEY = nsKey('deepsteve-issue-autopilot');
-function getAutopilotPref() {
-  try { return localStorage.getItem(AUTOPILOT_PREF_KEY) === '1'; } catch { return false; }
-}
-function setAutopilotPref(val) {
-  try { localStorage.setItem(AUTOPILOT_PREF_KEY, val ? '1' : '0'); } catch { /* private mode */ }
+let issueAutopilotDefault = false;
+
+/**
+ * Persist the picker checkbox as that preference. POST /api/settings only touches keys
+ * present in the body, and its broadcast is what updates `issueAutopilotDefault` here
+ * and in every other window — so nothing is written locally.
+ */
+function saveIssueAutopilotDefault(next) {
+  fetch('/api/settings', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ issueAutopilot: !!next }),
+  }).catch(() => { /* the checkbox already shows the choice; the next open re-seeds */ });
 }
 
 // Prevent accidental browser navigation (back/forward)
@@ -240,6 +250,9 @@ function applyTheme(css) {
 function applySettings(settings) {
   if (settings.maxIssueTitleLength !== undefined) {
     maxIssueTitleLength = settings.maxIssueTitleLength;
+  }
+  if (settings.issueAutopilot !== undefined) {
+    issueAutopilotDefault = !!settings.issueAutopilot;
   }
   if (settings.cmdTabSwitch !== undefined) {
     setCmdHoldModeEnabled(settings.cmdTabSwitch);
@@ -804,6 +817,7 @@ settingsBtn?.addEventListener('click', async () => {
   const currentProfile = settingsData.shellProfile || '~/.zshrc';
   const currentMaxTitle = settingsData.maxIssueTitleLength || 25;
   const currentWandPlanMode = settingsData.wandPlanMode !== undefined ? settingsData.wandPlanMode : true;
+  const currentIssueAutopilot = !!settingsData.issueAutopilot;
   const currentWandTemplate = settingsData.wandPromptTemplate || defaultsData.wandPromptTemplate || '';
   const currentSymlinkWorktreeSettings = !!settingsData.symlinkWorktreeSettings;
   const currentCmdTabSwitch = !!settingsData.cmdTabSwitch;
@@ -1197,10 +1211,18 @@ settingsBtn?.addEventListener('click', async () => {
       </div>
       <div class="settings-section">
         <h3>Magic Wand</h3>
-        <label style="font-size: 13px; color: var(--ds-text-primary); cursor: pointer; display: flex; align-items: center; gap: 8px; margin-bottom: 12px;">
+        <label style="font-size: 13px; color: var(--ds-text-primary); cursor: pointer; display: flex; align-items: center; gap: 8px; margin-bottom: 8px;">
           <input type="checkbox" id="wand-plan-mode" ${currentWandPlanMode ? 'checked' : ''} style="accent-color: var(--ds-accent-green);">
           Start issues in plan mode
         </label>
+        <label style="font-size: 13px; color: var(--ds-text-primary); cursor: pointer; display: flex; align-items: center; gap: 8px; margin-bottom: 4px;">
+          <input type="checkbox" id="wand-autopilot" ${currentIssueAutopilot ? 'checked' : ''} style="accent-color: var(--ds-accent-green);">
+          Start issues with Autopilot on
+        </label>
+        <p style="font-size: 12px; color: var(--ds-text-secondary); margin: 0 0 12px 24px;">
+          An issue session that finishes its work merges itself instead of leaving the tab for review.
+          The issue picker's Autopilot checkbox writes this too; every start path uses it.
+        </p>
         <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px;">
           <span style="font-size: 13px; color: var(--ds-text-primary);">Prompt template</span>
           <button class="btn-secondary" id="wand-template-reset" style="padding: 2px 8px; font-size: 11px;">Reset</button>
@@ -1534,6 +1556,7 @@ settingsBtn?.addEventListener('click', async () => {
     const shellProfile = selected === 'custom' ? customInput.value : selected;
     const newMaxTitle = Number(overlay.querySelector('#max-issue-title-length').value) || 25;
     const wandPlanMode = overlay.querySelector('#wand-plan-mode').checked;
+    const issueAutopilot = overlay.querySelector('#wand-autopilot').checked;
     const wandPromptTemplate = overlay.querySelector('#wand-prompt-template').value;
     const symlinkWorktreeSettings = overlay.querySelector('#symlink-worktree-settings').checked;
     const cmdTabSwitch = overlay.querySelector('#cmd-tab-switch').checked;
@@ -1610,7 +1633,7 @@ settingsBtn?.addEventListener('click', async () => {
     const preventSleepWhileActive = overlay.querySelector('#prevent-sleep-while-active').checked;
     const inheritRemoteControl = overlay.querySelector('#inherit-rc-newtab').checked;
     const inheritRemoteControlOnFork = overlay.querySelector('#inherit-rc-fork').checked;
-    const settingsPayload = { shellProfile, maxIssueTitleLength: newMaxTitle, wandPlanMode, wandPromptTemplate, symlinkWorktreeSettings, cmdTabSwitch, cmdTabSwitchHoldMs, commandPaletteEnabled, commandPaletteShortcut, shortcutsHelpEnabled, shortcutsHelpShortcut, hashCommandsEnabled, contextViewsEnabled, projectModsEnabled, metaControlsEnabled, inheritRemoteControl, inheritRemoteControlOnFork, overviewDefaultLayout, enabledAgents, ...agentBinaries, ...(selectedEngine ? { engine: selectedEngine } : {}), scrollbackKB, recentSessionsLimit, autoUpdateCheckEnabled, autoUpdateCheckIntervalHours, autoUpdateApply, sessionLogEnabled, scheduledTasksEnabled, scheduledTasksOpenInBackground, scheduledDefaultModel, scheduledDefaultEffort, preventSleepWhileActive, customAgentConfigs };
+    const settingsPayload = { shellProfile, maxIssueTitleLength: newMaxTitle, wandPlanMode, issueAutopilot, wandPromptTemplate, symlinkWorktreeSettings, cmdTabSwitch, cmdTabSwitchHoldMs, commandPaletteEnabled, commandPaletteShortcut, shortcutsHelpEnabled, shortcutsHelpShortcut, hashCommandsEnabled, contextViewsEnabled, projectModsEnabled, metaControlsEnabled, inheritRemoteControl, inheritRemoteControlOnFork, overviewDefaultLayout, enabledAgents, ...agentBinaries, ...(selectedEngine ? { engine: selectedEngine } : {}), scrollbackKB, recentSessionsLimit, autoUpdateCheckEnabled, autoUpdateCheckIntervalHours, autoUpdateApply, sessionLogEnabled, scheduledTasksEnabled, scheduledTasksOpenInBackground, scheduledDefaultModel, scheduledDefaultEffort, preventSleepWhileActive, customAgentConfigs };
     let resp = await fetch('/api/settings', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -4149,7 +4172,7 @@ async function showIssuePicker() {
       </div>
       <div class="modal-buttons">
         <label for="issue-autopilot" style="display:flex; align-items:center; gap:6px; margin:0 auto 0 0; font-size:12px; cursor:pointer;">
-          <input type="checkbox" id="issue-autopilot" ${getAutopilotPref() ? 'checked' : ''} style="accent-color: var(--ds-accent-green);">
+          <input type="checkbox" id="issue-autopilot" ${issueAutopilotDefault ? 'checked' : ''} style="accent-color: var(--ds-accent-green);">
           Autopilot
         </label>
         <button class="btn-secondary" id="issue-cancel">Cancel</button>
@@ -4161,7 +4184,7 @@ async function showIssuePicker() {
   overlay.querySelector('#issue-cancel').onclick = closeIssuePicker;
   // Remembered even if the picker is then cancelled — it is a preference, not part
   // of this start.
-  overlay.querySelector('#issue-autopilot').onchange = (e) => setAutopilotPref(e.target.checked);
+  overlay.querySelector('#issue-autopilot').onchange = (e) => saveIssueAutopilotDefault(e.target.checked);
   overlay.onclick = (e) => { if (e.target === overlay) closeIssuePicker(); };
   const onEscIssuePicker = (e) => { if (e.key === 'Escape') { e.preventDefault(); closeIssuePicker(); } };
   document.addEventListener('keydown', onEscIssuePicker);

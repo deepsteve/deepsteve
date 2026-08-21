@@ -327,7 +327,7 @@ function init(context) {
         url: z.string().optional().describe('Issue URL'),
         cwd: z.string().optional().describe('Working directory (defaults to caller\'s cwd)'),
         agent_type: z.string().optional().describe('Agent type (defaults to caller\'s). Supported: "claude", "codex". Experimental: "opencode", "pi", "hermes" — these run, but get no deepsteve MCP tools and no skills, so the new session cannot call back into deepsteve. See docs/agents.md.'),
-        autopilot: z.boolean().optional().describe('Start the session with Autopilot on (default off): when it calls issue_complete at the end of the work, it will be told to merge itself instead of leaving the tab for review.'),
+        autopilot: z.boolean().optional().describe('Whether the new session runs with Autopilot: when it calls issue_complete at the end of the work, it is told to merge itself instead of leaving the tab for review. OMIT this to use the user\'s remembered preference (the Autopilot checkbox in the issue picker and in Settings) — pass a boolean only to deliberately override that choice for this one session.'),
       },
       handler: async ({ session_id, number, title, body, labels, url, cwd, agent_type, autopilot }, extra) => {
         const callerId = session_id || extra?.requestInfo?.url?.searchParams?.get('shellId');
@@ -343,7 +343,10 @@ function init(context) {
           cwd: cwd || null,
           agentType: agent_type || null,
           callerId,
-          autopilot: !!autopilot,
+          // Raw, not `!!autopilot` (#651): an omitted argument must reach
+          // startIssueSession as undefined so it can seed from settings.issueAutopilot
+          // rather than being silently forced off.
+          autopilot,
         });
         if (result.error) return refuseCwdProblem(result.error);
         return { content: [{ type: 'text', text: JSON.stringify({ id: result.id, name: result.name, cwd: result.cwd, worktree: result.worktree, autopilot: result.autopilot }) }] };
