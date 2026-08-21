@@ -113,6 +113,7 @@ test('every expected shortcut is registered, and nothing extra', async () => {
     'shortcuts-help',
     'terminal-search',
     'terminal-shift-enter',
+    'terminal-word-motion',
   ]);
 });
 
@@ -134,6 +135,7 @@ test('the default shortcuts render as expected', async () => {
   assert.deepStrictEqual(find(all, 'terminal-search').keys, ['⌘F']);
   assert.deepStrictEqual(find(all, 'context-panel').keys, ['⌘P']);
   assert.deepStrictEqual(find(all, 'terminal-shift-enter').keys, ['⇧↩']);
+  assert.deepStrictEqual(find(all, 'terminal-word-motion').keys, ['⌥←', '⌥→']);
 });
 
 test('the help overlay binds both ⌘⇧? and ⌘/ by default', async () => {

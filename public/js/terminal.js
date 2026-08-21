@@ -79,13 +79,48 @@ export function updateTerminalTheme(term) {
   term.options.theme = update;
 }
 
-// Doc-only (shortcuts.js): Shift+Enter is consumed inside xterm's
+// `navigator.platform` is deprecated but is the only thing every browser still
+// answers; `userAgentData` is Chromium-only, so it is the preference, not the source.
+export function isMacPlatform(nav = typeof navigator === 'undefined' ? null : navigator) {
+  if (!nav) return false;
+  const p = nav.userAgentData?.platform || nav.platform || '';
+  return /^mac/i.test(p) || /Mac/.test(nav.userAgent || '');
+}
+
+// #652: ⌥←/⌥→ are the mac way to walk a line you're editing by word, and
+// @xterm/xterm@5.5.0 made that work by rewriting them: on macOS its `case 37` turned
+// ESC[1;3D into ESC b (and ESC[1;3C into ESC f). 6.0.0 — the build index.html loads —
+// deleted that remap, so since #510 the wire byte has been the bare CSI form. The Claude
+// composer understands ESC[1;3D, but zsh has no binding for it, which is why the key went
+// dead at a shell prompt. ESC b / ESC f is the sequence readline, zle and the composer all
+// agree means word motion (and what iTerm2's "Natural Text Editing" preset sends).
+//
+// Modifier matching is strict, on purpose — the same rule as shortcuts.js's `modsMatch`.
+// ⌥⇧← and ⌥⌃← keep reaching xterm untouched rather than collapsing into plain word motion.
+export function optionArrowSequence(event, isMac) {
+  if (!event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return null;
+  const seq = event.key === 'ArrowLeft' ? '\x1bb'
+    : event.key === 'ArrowRight' ? '\x1bf'
+      : null;
+  // Platform last: this runs on every keydown and sniffing it is the expensive half.
+  return seq && (isMac ?? isMacPlatform()) ? seq : null;
+}
+
+// Doc-only (shortcuts.js): both of these are consumed inside xterm's
 // attachCustomKeyEventHandler below, not by a document-level matcher.
 registerInfo({
   id: 'terminal-shift-enter',
   group: 'Terminal',
   description: 'Insert a newline without submitting (multi-line agent input)',
   keys: ['⇧↩'],
+});
+
+registerInfo({
+  id: 'terminal-word-motion',
+  group: 'Terminal',
+  description: 'Move the cursor one word left / right',
+  keys: ['⌥←', '⌥→'],
+  isEnabled: () => isMacPlatform(),
 });
 
 export function setupTerminalIO(term, ws, { onUserInput, container, beforeSend } = {}) {
@@ -96,26 +131,44 @@ export function setupTerminalIO(term, ws, { onUserInput, container, beforeSend }
   // but onData still fires with \r. Use a flag to suppress the leaked \r.
   let suppressNextEnter = false;
 
+  // Everything we put on the wire goes through here, so an interceptor gets the same
+  // look at a key we synthesise as at one xterm emitted. Allow hash-commands (or other
+  // interceptors) to consume input.
+  function sendInput(data) {
+    if (beforeSend && beforeSend(data)) return;
+    ws.send(data);
+    if (onUserInput) onUserInput();
+  }
+
   term.onData((data) => {
     if (suppressNextEnter && data === '\r') {
       suppressNextEnter = false;
       return;
     }
     suppressNextEnter = false;
-    // Allow hash-commands (or other interceptors) to consume input
-    if (beforeSend && beforeSend(data)) return;
-    ws.send(data);
-    if (onUserInput) onUserInput();
+    sendInput(data);
   });
 
-  // Handle Shift+Enter for multi-line input.
-  // Listed in the shortcuts overlay via registerInfo('terminal-shift-enter') above.
+  // Handle Shift+Enter for multi-line input, and macOS ⌥←/⌥→ word motion (#652).
+  // Both are listed in the shortcuts overlay via the registerInfo() calls above.
   term.attachCustomKeyEventHandler((event) => {
     if (event.shiftKey && event.key === 'Enter') {
       if (event.type === 'keydown') {
         // Send CSI u escape sequence for Shift+Enter (like iTerm2)
         ws.send('\x1b[13;2u');
         suppressNextEnter = true;
+      }
+      return false;
+    }
+    const wordMotion = optionArrowSequence(event);
+    if (wordMotion) {
+      if (event.type === 'keydown') {
+        sendInput(wordMotion);
+        // Returning false makes xterm's _keyDown bail *before* its own cancel(), so the
+        // browser default survives unless we cancel it here. No suppressNextEnter twin is
+        // needed: that flag exists because a blocked Enter still reaches the hidden
+        // textarea and comes back as an `input` event, and an arrow key produces none.
+        event.preventDefault();
       }
       return false;
     }

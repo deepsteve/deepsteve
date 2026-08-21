@@ -1,11 +1,17 @@
 /**
  * A minimal stand-in for an xterm Terminal, for unit tests that read the buffer.
  *
- * Covers exactly what `public/js/composer-caret.js` (and therefore the #
- * activation gate in `public/js/hash-commands.js`) asks of a terminal:
- * `buffer.active` with `baseY` / `length` / `cursorX` / `cursorY` / `getLine`,
+ * Covers what `public/js/composer-caret.js` (and therefore the # activation gate in
+ * `public/js/hash-commands.js`) asks of a terminal: `buffer.active` with `baseY` /
+ * `length` / `cursorX` / `cursorY` / `getLine`,
  * `IBufferLine.translateToString(trimRight, startColumn, endColumn)`, and
  * `onWriteParsed`.
+ *
+ * It also covers the input surface `public/js/terminal.js`'s `setupTerminalIO()` binds:
+ * `onData` and `attachCustomKeyEventHandler`, plus the viewport methods its returned
+ * helpers call. `emitData(str)` and `keyEvent(props)` are the test controls that drive
+ * them — `keyEvent` returns what the handler returned, so a test can assert that a key
+ * was blocked from reaching xterm's own encoder.
  *
  * Rows are padded to `cols` the way a real buffer is, so a translateToString whose
  * endColumn runs past the text returns the padding rather than a short string —
@@ -27,6 +33,9 @@
 function fakeTerm(rows = [], { cursorX = 0, cursorY = 0, scrollback = [], trailingBlanks = 0, cols = 100 } = {}) {
   const state = { rows: [...rows], scrollback: [...scrollback], trailingBlanks, cursorX, cursorY };
   const listeners = [];
+  const dataListeners = [];
+  const calls = { preventDefault: 0, scrollToBottom: 0, scrollLines: [], refresh: [] };
+  let keyHandler = null;
   const all = () => [...state.scrollback, ...state.rows, ...Array(state.trailingBlanks).fill('')];
 
   const term = {
@@ -55,11 +64,31 @@ function fakeTerm(rows = [], { cursorX = 0, cursorY = 0, scrollback = [], traili
       return { dispose() { listeners.splice(listeners.indexOf(cb), 1); } };
     },
 
+    // ---- input surface (setupTerminalIO)
+    /** xterm's viewport height, which for this stub is the frame it was given. */
+    get rows() { return state.rows.length; },
+    onData(cb) {
+      dataListeners.push(cb);
+      return { dispose() { dataListeners.splice(dataListeners.indexOf(cb), 1); } };
+    },
+    attachCustomKeyEventHandler(cb) { keyHandler = cb; },
+    scrollToBottom() { calls.scrollToBottom++; },
+    scrollLines(n) { calls.scrollLines.push(n); },
+    refresh(from, to) { calls.refresh.push([from, to]); },
+
     // ---- test controls
     setScreen(next) { state.rows = [...next]; },
     setCursor(x, y) { state.cursorX = x; state.cursorY = y; },
     /** Simulate a repaint: what the real terminal fires after parsing a write. */
     writeParsed() { for (const cb of [...listeners]) cb(); },
+    /** Simulate xterm's own encoder emitting bytes for a keystroke. */
+    emitData(str) { for (const cb of [...dataListeners]) cb(str); },
+    /** Feed a KeyboardEvent-shaped object to the custom key handler. */
+    keyEvent(props) {
+      const event = { type: 'keydown', preventDefault() { calls.preventDefault++; }, ...props };
+      return keyHandler ? keyHandler(event) : undefined;
+    },
+    calls,
   };
   return term;
 }
