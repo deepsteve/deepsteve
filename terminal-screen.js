@@ -60,6 +60,15 @@ class TerminalScreen {
   // (interior blanks included).
   async lines(count) {
     await this.idlePromise
+    return this.linesSync(count)
+  }
+
+  // Same read, without awaiting the pending-parse promise. For callers that have
+  // to answer synchronously: sessionHasRemoteControl runs inside the spawn path,
+  // where going async would reorder the prompt queue it feeds. The cost is that a
+  // chunk still in xterm's parse queue is not reflected yet, so a caller gets the
+  // screen as of a few ms ago rather than a stale-by-minutes byte tail.
+  linesSync(count) {
     if (this.disposed) return []
     const buffer = this.terminal.buffer.active
     const read = (i) => {

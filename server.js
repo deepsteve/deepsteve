@@ -2550,17 +2550,31 @@ function servePendingDelivery(e, id, state) {
 }
 
 /**
- * True if the session's recent terminal output shows Claude Code's "/rc active"
- * footer — i.e. Remote Control is currently on. Claude redraws this footer on
- * every frame, so the latest state lives in the tail of the scrollback. We scan
- * only the last few KB (ANSI-stripped) so this is a single cheap substring test,
- * run once at child-tab creation (never on the PTY data path).
+ * True if the session's CURRENT screen shows Claude Code's "/rc active" footer —
+ * i.e. Remote Control is on right now.
+ *
+ * Reads the interpreted screen, never the raw scrollback tail. That tail is a
+ * concatenation of overlapping repaint frames — the same property that makes
+ * classifyScreenTail key on spinner *recency* rather than presence — so a footer
+ * drawn before the user toggled /rc off survived in it until 8KB of fresh output
+ * pushed it out, and a tab sitting idle at its prompt emits none. "On" was
+ * therefore sticky for as long as the tab sat there, and every child opened from
+ * it inherited a /rc the parent no longer had. A tmux reattach made it permanent:
+ * it replays the pane's history into a session that resumed with Remote Control
+ * off, since /rc does not survive --resume.
+ *
+ * Only the bottom rows are scanned, because that is where Claude Code draws the
+ * footer and reaching further up is precisely the history lookback this replaced.
+ * A footer that soft-wraps in a very narrow tab can split the marker across two
+ * rows and read as off — the safe direction for a toggle we re-issue on the
+ * user's behalf. Still O(rows) and still run once at child-tab creation, never on
+ * the PTY data path.
  */
+const RC_FOOTER_ROWS = 8;
 function sessionHasRemoteControl(id) {
   const e = shells.get(id);
-  if (!e || !e.scrollback || !e.scrollback.length) return false;
-  const tail = e.scrollback.join('').slice(-8192);
-  return stripEscapeSequences(tail).includes('/rc active');
+  if (!e || !e.terminalScreen) return false;
+  return e.terminalScreen.linesSync(RC_FOOTER_ROWS).join('\n').includes('/rc active');
 }
 
 /**
