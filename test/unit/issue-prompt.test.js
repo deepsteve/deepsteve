@@ -187,6 +187,28 @@ test('both server entry points delegate to startIssueSession', () => {
     'mods/deepsteve-core/tools.js builds an issue worktree name itself — that belongs to startIssueSession (#642)');
 });
 
+test('every startIssueSession caller names its start path (#653)', () => {
+  // The `[issue] #N:` line reports which surface started the session, and `source` is a
+  // parameter precisely so it cannot be guessed. A caller that omits it silently logs
+  // `unknown`, which is the same blind spot #642 left behind — one line for all paths.
+  for (const f of ['server.js', 'mods/deepsteve-core/tools.js']) {
+    const src = read(f);
+    let from = 0, calls = 0;
+    for (;;) {
+      const at = src.indexOf('startIssueSession({', from);
+      if (at === -1) break;
+      from = at + 1;
+      // `function startIssueSession({ ... })` matches too — it is the declaration, not a call.
+      if (src.slice(0, at).endsWith('function ')) continue;
+      calls++;
+      const call = src.slice(at, src.indexOf('});', at));
+      assert.ok(/\bsource:\s*'[a-z-]+'/.test(call),
+        `${f}: a startIssueSession call site does not pass a source — it would log source=unknown (#653)`);
+    }
+    assert.ok(calls > 0, `${f} should contain a startIssueSession call site`);
+  }
+});
+
 test('startIssueSession records the engine that actually spawned', () => {
   // The MCP copy used to derive engineType from getDefaultEngine() *before*
   // spawning, so a tmux spawn that fell back to node-pty recorded a lie.

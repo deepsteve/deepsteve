@@ -5583,6 +5583,40 @@ app.get('/api/issues', (req, res) => {
 });
 
 /**
+ * Render `autopilot=<on|off>(<why>)` for a start line (#653).
+ *
+ * The value on its own does not answer "why did this session come up with Autopilot
+ * off?" — "the caller passed false" and "the issueAutopilot setting is false" are
+ * different bugs with different fixes, and the log used to distinguish neither.
+ *
+ * The `setting=` clause is appended only when an explicit boolean CONTRADICTS the
+ * remembered preference, because that is the case that silently redefines what the
+ * user asked for: MCP start_issue exposes `autopilot` as an agent-settable argument,
+ * and a model that helpfully fills in `autopilot: false` is exactly what this makes
+ * visible. When the two agree there is nothing to explain, so the line stays terse.
+ */
+function autopilotLogLabel(on, explicit) {
+  const value = on ? 'on' : 'off';
+  if (!explicit) return `${value}(setting)`;
+  const pref = !!settings.issueAutopilot;
+  return on === pref ? `${value}(explicit)` : `${value}(explicit, setting=${pref ? 'on' : 'off'})`;
+}
+
+/**
+ * The one `[issue] #N:` start line, shared by every start path (#653).
+ *
+ * #642 unified the three implementations behind startIssueSession() and, in doing so,
+ * dropped the MCP tool's own `[MCP] start_issue #N:` line — so an issue session started
+ * by MCP, by POST /api/start-issue or by the wand picker became indistinguishable after
+ * the fact. `source` is a parameter, never guessed from the call stack; a caller that
+ * forgets it shows up as `unknown` rather than claiming a surface it isn't.
+ */
+function logIssueStart({ number, id, source, agentType, engineType, worktree, cwd, on, explicit }) {
+  log(`[issue] #${number}: id=${id}, source=${source}, agent=${agentType}, engine=${engineType}, `
+    + `worktree=${worktree || 'none'}, cwd=${cwd}, autopilot=${autopilotLogLabel(on, explicit)}`);
+}
+
+/**
  * Start a session for a GitHub issue. THE implementation (#642) — POST
  * /api/start-issue and the MCP start_issue tool both come through here, and the
  * wand picker's WS path shares the prompt rendering with it.
@@ -5597,13 +5631,17 @@ app.get('/api/issues', (req, res) => {
  * Returns `{ error: <spawnCwdProblem> }` for a bad cwd — the caller formats it,
  * because an HTTP 400 body and an MCP isError result are not the same shape.
  */
-function startIssueSession({ number, title, body, labels, url, cwd, agentType, configDir, windowId, callerId, openBrowser = false, autopilot }) {
+function startIssueSession({ number, title, body, labels, url, cwd, agentType, configDir, windowId, callerId, openBrowser = false, autopilot, source = 'unknown' }) {
   // #651: an omitted `autopilot` means "whatever the user usually wants", not "off".
   // A hard default here is what made every MCP / skill / autonomous start ignore the
   // remembered choice — and those are the paths most runs take. Read live off the
   // settings object so a Settings change applies with no restart; an explicit boolean
   // from a caller that means it still wins.
   const autopilotOn = autopilot == null ? !!settings.issueAutopilot : !!autopilot;
+  // #653: which of the two branches above answered is what the log needs — see
+  // autopilotLogLabel(). Kept as its own flag rather than re-derived at the log line,
+  // so the two can never disagree about what "explicit" meant.
+  const autopilotExplicit = autopilot != null;
 
   // Inherit whatever the caller didn't specify from the calling session.
   const caller = callerId ? shells.get(callerId) : null;
@@ -5625,7 +5663,7 @@ function startIssueSession({ number, title, body, labels, url, cwd, agentType, c
   // spawn below), which tells the caller nothing about which directory is gone.
   const problem = spawnCwdProblem(cwd);
   if (problem) {
-    log(`[issue] #${number} refused: ${problem.message}`);
+    log(`[issue] #${number} refused (${source}): ${problem.message}`);
     return { error: problem };
   }
 
@@ -5654,7 +5692,7 @@ function startIssueSession({ number, title, body, labels, url, cwd, agentType, c
   // tmux to node-pty (#620), and engineType must record what happened.
   const sessionEngine = spawnSession(getDefaultEngine(), id, agentType, spawnArgs, spawnCwd, { cols: 120, rows: 40, env: sessionEnv(id, { name, worktree, windowId: windowId || null, cwd: spawnCwd, agentType, configDir, codexHomeId }) });
   const engineType = sessionEngine === tmuxEngine ? 'tmux' : 'node-pty';
-  log(`[issue] #${number}: id=${id}, agent=${agentType}, engine=${engineType}, worktree=${worktree || 'none'}, cwd=${spawnCwd}`);
+  logIssueStart({ number, id, source, agentType, engineType, worktree, cwd: spawnCwd, on: autopilotOn, explicit: autopilotExplicit });
   shells.set(id, { clients: new Set(), cwd: spawnCwd, claudeSessionId, agentType, codexHomeId, configDir: configDir || null, engine: sessionEngine, engineType, worktree: worktree || null, windowId: windowId || null, name, planMode: !!settings.wandPlanMode, autopilot: autopilotOn, waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now(), loading: true });
   wireShellOutput(id);
   emitSessionOpen(id);
@@ -5717,6 +5755,7 @@ app.post('/api/start-issue', (req, res) => {
     number, title, body, labels, url, cwd, agentType, configDir, windowId,
     callerId: sessionId || null,
     openBrowser: true,
+    source: 'http',
     // Raw, not `!!autopilot` (#651): the coercion is what collapsed an absent field
     // to false before startIssueSession could tell "off" from "not specified".
     autopilot,
@@ -6779,9 +6818,22 @@ function handleWsConnection(ws, req) {
         // falls back to the remembered preference, same rule as startIssueSession (#651);
         // the picker itself always sends an explicit boolean, so this is for any other
         // client that skips it.
+        const autopilotExplicit = parsed.autopilot != null;
         entry.autopilot = parsed.autopilot == null ? !!settings.issueAutopilot : !!parsed.autopilot;
         saveState();
         broadcastAutopilot(id);
+        // This path never calls startIssueSession, so it logs its own start line (#653) —
+        // otherwise a picker start is the one surface with no `[issue] #N:` line at all.
+        // It lands a moment AFTER this session's `[WS] Creating NEW shell:` line, because
+        // here the tab exists before the issue is known; one grep for `[issue] #` still
+        // covers every path. The picker always sends an explicit boolean (app.js), so
+        // `ws-issue` reads `explicit` even though its checkbox was seeded from the setting.
+        logIssueStart({
+          number: parsed.issue?.number ?? '?', id, source: 'ws-issue',
+          agentType: entry.agentType, engineType: entry.engineType,
+          worktree: entry.worktree, cwd: entry.cwd,
+          on: entry.autopilot, explicit: autopilotExplicit,
+        });
         deliverPromptWhenReady(id, renderIssuePrompt(settings.wandPromptTemplate, parsed.issue || {}));
         return;
       }

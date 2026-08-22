@@ -90,6 +90,13 @@ function readRecent() {
   try { return JSON.parse(fs.readFileSync(path.join(HOME, '.deepsteve', 'recent-sessions.json'), 'utf8')); } catch { return []; }
 }
 
+// The `[issue] #N:` start line for one session (#653), off the daemon's own stdout.
+// Matched on `id=` rather than the issue number: several tests below deliberately
+// reuse #642, and the picker path logs from a different place in the file.
+const issueLogFor = (id) => waitFor(
+  () => daemonLog.split('\n').find(l => l.includes('[issue] #') && l.includes(`id=${id},`)),
+  `the [issue] start line for ${id}`);
+
 // A live-reload socket is what a browser window IS, as far as the server is
 // concerned: it is where `open-session` is delivered.
 class ReloadWindow {
@@ -286,6 +293,13 @@ test('POST /api/start-issue spawns the session, renders the template, and tells 
   const rec = readState()[res.json.id];
   assert.equal(rec.worktree, 'github-issue-642');
   assert.ok(rec.engineType, 'engineType is recorded');
+
+  // #653: the line has to name the surface and the Autopilot value it resolved,
+  // or "why did this session come up with Autopilot off?" is unanswerable later.
+  const line = await issueLogFor(res.json.id);
+  assert.match(line, /\[issue\] #642: /);
+  assert.match(line, /source=http,/, 'the HTTP path must name itself (#653)');
+  assert.match(line, /autopilot=off\(setting\)/, 'no argument + setting off reads as off(setting)');
 });
 
 test('the HTTP path records the session as recent (it used to, the MCP path did not)', async () => {
@@ -316,6 +330,10 @@ test('MCP start_issue produces the same session as POST /api/start-issue', async
   // The MCP result and the HTTP result agree on the derived values too.
   assert.equal(started.name, '#642 Unify the three star…');
   assert.equal(started.worktree, 'github-issue-642');
+
+  // Same session shape as the HTTP start above, but the log must still tell them
+  // apart — #642 unified the implementations and left one indistinguishable line.
+  assert.match(await issueLogFor(started.id), /source=mcp,/, 'the MCP path must name itself (#653)');
   caller.close();
 });
 
@@ -365,6 +383,12 @@ test('the wand picker path renders server-side from the issue fields', async () 
   const screen = tab.screen();
   assert.ok(screen.includes('GitHub issue #642'), 'the template rendered {{number}}');
   assert.ok(screen.includes('chore, ui'), 'the server flattened the gh labels shape');
+
+  // The picker never calls startIssueSession, so before #653 it was the one surface
+  // with no `[issue]` line at all — its session only ever showed up as `[WS] Creating
+  // NEW shell`, which says nothing about the issue or Autopilot.
+  assert.match(await issueLogFor(tab.session.id), /source=ws-issue,/,
+    'the picker path must log a start line of its own (#653)');
   tab.close();
 });
 
@@ -416,6 +440,13 @@ test('the flag round-trips through POST /api/start-issue and MCP start_issue', a
   opened.push(started.id);
   assert.equal(started.autopilot, true, 'the MCP result echoes the flag back');
   assert.equal(readState()[started.id].autopilot, true, 'MCP must persist autopilot on the entry');
+
+  // Explicit true while issueAutopilot is off: the log spells out the disagreement,
+  // because that is a caller redefining the user's remembered choice (#653).
+  for (const id of [http.json.id, started.id]) {
+    assert.match(await issueLogFor(id), /autopilot=on\(explicit, setting=off\)/,
+      `an explicit flag that contradicts the setting must say so (${id})`);
+  }
   caller.close();
 });
 
@@ -523,6 +554,13 @@ test('an omitted autopilot seeds from the issueAutopilot setting, on every path'
     opened.push(http.json.id);
     await waitFor(() => readState()[http.json.id] || null, 'the session to reach state.json');
     assert.equal(readState()[http.json.id].autopilot, true, 'HTTP must persist the inherited value');
+
+    // #653: seeded, not chosen — the log has to say which, since "on because the
+    // setting says so" and "on because the caller asked" are different facts.
+    for (const id of [started.id, http.json.id]) {
+      assert.match(await issueLogFor(id), /autopilot=on\(setting\)/,
+        `an omitted autopilot must log as seeded from the setting (${id})`);
+    }
   } finally {
     await setIssueAutopilotDefault(false);
   }
@@ -554,7 +592,34 @@ test('an explicit autopilot still wins over the setting', async () => {
     opened.push(started.id);
     assert.equal(started.autopilot, false, 'MCP: an explicit false must not be overridden');
     assert.equal(readState()[started.id].autopilot, false, 'MCP: the entry must record the explicit false');
+
+    // The case #653 exists for: a caller — an agent, over MCP — turned Autopilot off
+    // for a user whose remembered preference is on. The behaviour is deliberate and
+    // unchanged; what was missing is any record that it happened.
+    for (const id of [res.json.id, started.id]) {
+      assert.match(await issueLogFor(id), /autopilot=off\(explicit, setting=on\)/,
+        `an explicit off against a setting of on must be visible in the log (${id})`);
+    }
     caller.close();
+  } finally {
+    await setIssueAutopilotDefault(false);
+  }
+});
+
+test('an explicit autopilot that AGREES with the setting stays terse in the log (#653)', async () => {
+  // The `setting=` clause exists to flag a caller overriding the user, so it must not
+  // appear when there is nothing to flag — otherwise the noisy form loses its meaning.
+  await setIssueAutopilotDefault(true);
+  try {
+    const res = await startIssueHttp({
+      number: 6530, title: 'explicit agrees with the setting', body: 'AGREE-6530',
+      cwd: projDir, windowId: 'win-1', autopilot: true,
+    });
+    assert.equal(res.status, 200, `expected 200, got ${res.status}: ${JSON.stringify(res.json)}`);
+    opened.push(res.json.id);
+    const line = await issueLogFor(res.json.id);
+    assert.match(line, /autopilot=on\(explicit\)/, 'an explicit value matching the setting reads as plain explicit');
+    assert.doesNotMatch(line, /setting=/, 'no contradiction, so no setting= clause');
   } finally {
     await setIssueAutopilotDefault(false);
   }

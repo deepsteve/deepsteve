@@ -347,6 +347,10 @@ function init(context) {
           // startIssueSession as undefined so it can seed from settings.issueAutopilot
           // rather than being silently forced off.
           autopilot,
+          // #653: which surface started the session. Before this the `[issue] #N:` line
+          // was identical for MCP, HTTP and the picker, so "an agent overrode Autopilot"
+          // was invisible after the fact.
+          source: 'mcp',
         });
         if (result.error) return refuseCwdProblem(result.error);
         return { content: [{ type: 'text', text: JSON.stringify({ id: result.id, name: result.name, cwd: result.cwd, worktree: result.worktree, autopilot: result.autopilot }) }] };
