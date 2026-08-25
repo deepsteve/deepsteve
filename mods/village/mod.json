@@ -1,0 +1,36 @@
+{
+  "name": "Village",
+  "version": "0.9.0",
+  "minDeepsteveVersion": "0.4.0",
+  "description": "Walk a rainy little town where every house is one of your projects. Enter a door to reach that project's sessions.",
+  "experimental": true,
+  "enabledByDefault": false,
+  "tags": ["games"],
+  "entry": "index.html",
+  "toolbar": {
+    "label": "Village"
+  },
+  "settings": [
+    {
+      "key": "rain",
+      "type": "boolean",
+      "label": "Rain",
+      "description": "Rain streaks, puddles and an overcast sky",
+      "default": true
+    },
+    {
+      "key": "ambientAudio",
+      "type": "boolean",
+      "label": "Ambient audio",
+      "description": "Rain bed, soft pad and footsteps on the cobblestone",
+      "default": true
+    },
+    {
+      "key": "showArchived",
+      "type": "boolean",
+      "label": "Show archived projects",
+      "description": "Archived projects appear as overgrown lots on the outskirts",
+      "default": true
+    }
+  ]
+}

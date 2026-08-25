@@ -13,6 +13,23 @@
 import { nsKey } from './storage-namespace.js';
 import { tabIcon, TabManager } from './tab-manager.js';
 
+/**
+ * The sandbox every mod iframe gets, in one place so the panel path and the
+ * fullscreen path cannot drift apart.
+ *
+ * `allow-same-origin` is load-bearing and not an oversight: the `window.deepsteve`
+ * bridge is injected across the boundary and needs it. Mod iframes are same-origin
+ * and trusted by design — see docs/mods.md; this attribute is not what isolates
+ * them, and nothing should be written as though it were.
+ *
+ * `allow-pointer-lock` is what lets a 3D mod have a mouse-look camera. Without it
+ * `requestPointerLock()` throws SecurityError, `document.pointerLockElement` stays
+ * null, and every mousemove handler gated on it silently receives nothing — the
+ * camera simply never turns, with no visible error. That is how village,
+ * space-station and monkey-code all shipped.
+ */
+const MOD_SANDBOX = 'allow-scripts allow-same-origin allow-pointer-lock';
+
 const STORAGE_KEY = nsKey('deepsteve-enabled-mods'); // Set of enabled mod IDs
 const KNOWN_MODS_KEY = nsKey('deepsteve-known-mods'); // All mod IDs known at last save
 const ACTIVE_VIEW_KEY = nsKey('deepsteve-active-mod-view'); // Which mod view is currently showing
@@ -1551,7 +1568,7 @@ function _loadPanelMod(mod) {
   const entry = mod.entry || 'index.html';
   const iframeEl = document.createElement('iframe');
   iframeEl.src = `/mods/${mod.id}/${entry}`;
-  iframeEl.setAttribute('sandbox', 'allow-scripts allow-same-origin');
+  iframeEl.setAttribute('sandbox', MOD_SANDBOX);
   if (mod.permissions?.length) {
     iframeEl.setAttribute('allow', mod.permissions.join('; '));
   }
@@ -1737,7 +1754,7 @@ function _removeToolbarButton(modId) {
  *   id             unique; namespaced for non-mod views so it can't collide with a mod id
  *   name           back-button label ("← <name>")
  *   src            iframe src
- *   sandbox        sandbox attribute (default 'allow-scripts allow-same-origin')
+ *   sandbox        sandbox attribute (default MOD_SANDBOX)
  *   allow          optional allow attribute
  *   persist        false = don't remember this view across a page reload
  *   dismissOnLeave true = leaving for a tab tears the view down instead of backgrounding it
@@ -1770,7 +1787,7 @@ function showView(view) {
   if (!iframe) {
     iframe = document.createElement('iframe');
     iframe.src = view.src;
-    iframe.setAttribute('sandbox', view.sandbox || 'allow-scripts allow-same-origin');
+    iframe.setAttribute('sandbox', view.sandbox || MOD_SANDBOX);
     if (view.allow) iframe.setAttribute('allow', view.allow);
     modContainer.appendChild(iframe);
     iframe.addEventListener('load', () => {

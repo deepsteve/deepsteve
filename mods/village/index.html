@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
+  <style>
+    * { margin: 0; box-sizing: border-box; }
+    body { background: #6d7f8c; height: 100vh; overflow: hidden; }
+    #scene { width: 100%; height: 100%; display: block; }
+
+    #hud {
+      position: absolute; top: 0; left: 0; right: 0; bottom: 0;
+      pointer-events: none;
+      font-family: 'Press Start 2P', monospace;
+      -webkit-font-smoothing: none;
+    }
+    #hud > * { pointer-events: auto; }
+
+    /* ---- top-left town title ---- */
+    #title {
+      position: absolute; top: 16px; left: 18px;
+      font-size: 13px; color: #fffaf0;
+      text-shadow: 2px 2px 0 #3a2a1c, 0 0 12px rgba(0,0,0,0.35);
+      letter-spacing: 2px;
+      pointer-events: none;
+    }
+    #title .sub {
+      display: block; margin-top: 7px;
+      font-size: 8px; color: #d8e6c8; letter-spacing: 1px;
+      text-shadow: 1px 1px 0 #3a2a1c;
+    }
+
+    /* ---- bottom controls hint ---- */
+    #hint {
+      position: absolute; bottom: 16px; left: 50%; transform: translateX(-50%);
+      font-size: 8px; color: #fffaf0; letter-spacing: 1px;
+      background: rgba(40,30,22,0.62); padding: 8px 14px;
+      border: 2px solid rgba(255,250,240,0.28); border-radius: 6px;
+      text-shadow: 1px 1px 0 #2a1e14;
+      white-space: nowrap;
+      pointer-events: none;
+      transition: opacity 0.4s ease;
+    }
+    #hint.faded { opacity: 0; }
+
+    /* ---- the door card: a painted wooden sign ---- */
+    #door-card {
+      position: absolute; right: 26px; top: 50%; transform: translateY(-50%);
+      width: 310px; max-height: 74vh;
+      display: none; flex-direction: column;
+      background: linear-gradient(180deg, #8a6134 0%, #74502a 100%);
+      border: 4px solid #4a3018;
+      border-radius: 8px;
+      box-shadow: 0 8px 0 rgba(0,0,0,0.35), 0 0 26px rgba(0,0,0,0.4);
+      overflow: hidden;
+    }
+    #door-card.open { display: flex; }
+
+    #door-card .card-head {
+      display: flex; align-items: center; gap: 9px;
+      padding: 11px 12px;
+      background: rgba(0,0,0,0.22);
+      border-bottom: 3px solid #4a3018;
+    }
+    #door-card .card-icon {
+      width: 26px; height: 26px; flex-shrink: 0;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 16px; line-height: 1;
+      background: #fffaf0; color: #4a3018;
+      border: 2px solid #4a3018; border-radius: 4px;
+      overflow: hidden;
+    }
+    #door-card .card-icon img { width: 100%; height: 100%; object-fit: cover; display: block; }
+    #door-card .card-icon.mono { font-size: 11px; font-family: 'Press Start 2P', monospace; }
+    #door-card .card-name {
+      font-size: 10px; color: #fffaf0; letter-spacing: 1px; line-height: 1.5;
+      text-shadow: 1px 1px 0 #2a1e14;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+
+    #door-card .card-list { overflow-y: auto; padding: 6px; }
+    #door-card .card-list::-webkit-scrollbar { width: 8px; }
+    #door-card .card-list::-webkit-scrollbar-thumb { background: #4a3018; border-radius: 4px; }
+
+    #door-card .row {
+      display: flex; align-items: center; gap: 8px;
+      padding: 9px 9px; margin-bottom: 4px;
+      background: rgba(255,250,240,0.9);
+      border: 2px solid #4a3018; border-radius: 5px;
+      cursor: pointer;
+      font-size: 8px; color: #3a2a1c; letter-spacing: 0.5px; line-height: 1.5;
+    }
+    #door-card .row:hover { background: #fff6d8; transform: translateX(-2px); }
+    #door-card .row:last-child { margin-bottom: 0; }
+    #door-card .row .dot {
+      width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
+      background: #7ba05b; border: 1px solid #3a2a1c;
+    }
+    #door-card .row .dot.waiting { background: #e8b13a; }
+    #door-card .row .dot.idle { background: #9aa0a6; }
+    #door-card .row .label {
+      flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    #door-card .row .bang { color: #c0392b; flex-shrink: 0; }
+    #door-card .row.new { background: rgba(255,250,240,0.55); color: #4a3018; }
+    #door-card .row.new:hover { background: #fff6d8; }
+    #door-card .empty {
+      padding: 14px 10px; font-size: 8px; color: #f0e2c8; line-height: 1.9;
+      text-align: center; text-shadow: 1px 1px 0 #2a1e14;
+    }
+    #door-card .card-foot {
+      padding: 8px 12px; font-size: 7px; color: #e8d8bc; letter-spacing: 1px;
+      background: rgba(0,0,0,0.22); border-top: 3px solid #4a3018;
+      text-align: center;
+    }
+
+    /* ---- empty town ---- */
+    /* Held high in the frame: the villager stands at the centre, and text across
+       their face reads as a bug rather than as a sign. */
+    #empty-town {
+      position: absolute; top: 26%; left: 50%; transform: translate(-50%, -50%);
+      display: none; text-align: center; max-width: 440px;
+      color: #fffaf0; text-shadow: 2px 2px 0 #3a2a1c;
+    }
+    #empty-town.open { display: block; }
+    #empty-town .big { font-size: 14px; letter-spacing: 2px; margin-bottom: 16px; }
+    #empty-town .small { font-size: 8px; line-height: 2.1; color: #dfe9d4; }
+
+    /* ---- working at a board ---- */
+    /* Sits above the hint, and is the only thing on screen that says the keyboard
+       has changed hands. Deliberately thin: the board itself is the interface. */
+    #working {
+      position: absolute; bottom: 46px; left: 50%; transform: translateX(-50%);
+      display: none; align-items: center; gap: 14px;
+      background: rgba(40,30,22,0.82); border: 3px solid rgba(255,250,240,0.3);
+      border-radius: 8px; padding: 9px 14px;
+      font-size: 8px; letter-spacing: 1px; color: #f6efdc;
+      text-shadow: 1px 1px 0 #2a1e14; white-space: nowrap;
+    }
+    #working.open { display: flex; }
+    #working .who { color: #ffd98a; }
+    #working .keys { color: #cfc3ab; }
+    #working button {
+      font: inherit; letter-spacing: 1px; color: #f6efdc; cursor: pointer;
+      background: rgba(255,250,240,0.12); border: 2px solid rgba(255,250,240,0.32);
+      border-radius: 5px; padding: 5px 8px;
+    }
+    #working button:hover { background: rgba(255,250,240,0.24); }
+
+    /* ---- click-to-look veil ---- */
+    #veil {
+      position: absolute; top: 0; left: 0; right: 0; bottom: 0;
+      display: flex; align-items: center; justify-content: center;
+      background: rgba(24,20,16,0.45);
+      cursor: pointer;
+    }
+    #veil.hidden { display: none; }
+    #veil .plate {
+      font-size: 10px; color: #fffaf0; letter-spacing: 2px; line-height: 2.2;
+      text-align: center; text-shadow: 2px 2px 0 #2a1e14;
+      background: rgba(40,30,22,0.75); padding: 18px 26px;
+      border: 3px solid rgba(255,250,240,0.35); border-radius: 8px;
+    }
+    #veil .plate .small { display: block; margin-top: 10px; font-size: 8px; color: #d8e6c8; }
+  </style>
+</head>
+<body>
+  <canvas id="scene"></canvas>
+  <div id="hud">
+    <div id="title">VILLAGE<span class="sub"></span></div>
+
+    <div id="door-card">
+      <div class="card-head">
+        <div class="card-icon"></div>
+        <div class="card-name"></div>
+      </div>
+      <div class="card-list"></div>
+      <div class="card-foot">ESC TO STEP BACK</div>
+    </div>
+
+    <div id="empty-town">
+      <div class="big">NOBODY LIVES HERE YET</div>
+      <div class="small">
+        Register a project in the projects rail<br>
+        and a house appears on the lane.
+      </div>
+    </div>
+
+    <div id="working">
+      <span class="who"></span>
+      <span class="keys">YOU ARE TYPING INTO THIS SESSION &nbsp;·&nbsp; SHIFT+ESC TO STEP BACK</span>
+      <button type="button" id="working-open">OPEN AS TAB &#8599;</button>
+    </div>
+
+    <div id="hint">WASD WALK &nbsp;·&nbsp; SHIFT SPRINT &nbsp;·&nbsp; SPACE JUMP &nbsp;·&nbsp; MOUSE LOOK &nbsp;·&nbsp; E AT A DOOR &nbsp;·&nbsp; F TO WORK</div>
+
+    <div id="veil">
+      <div class="plate">
+        CLICK TO ENTER THE VILLAGE
+        <span class="small">WASD to walk &nbsp; Shift to sprint &nbsp; Space to jump<br>mouse to look &nbsp; E at a door &nbsp; Esc to release</span>
+      </div>
+    </div>
+  </div>
+
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.171.0/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.171.0/examples/jsm/"
+    }
+  }
+  </script>
+  <script type="module" src="village.js"></script>
+</body>
+</html>

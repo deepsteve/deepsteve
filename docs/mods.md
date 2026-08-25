@@ -37,6 +37,7 @@ Mods have three display modes:
 | **Session Info** | tools-only | on | Sessions discover their own identity and tab name |
 | **Tasks** | panel | on | Task list populated by Agent sessions |
 | **Tower** | fullscreen | off | Pixel art skyscraper view of sessions |
+| **Village** | fullscreen | off | Walk a rainy town where every house is a project |
 
 This is a highlights list, not an inventory — it names neither every mod nor the tools each one
 registers. Those are declared in the mod's `tools.js` and reported by `GET /api/mods`, which derives
