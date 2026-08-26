@@ -13,8 +13,26 @@
  * startIssueSession, which is the single caller of these on the spawn path.
  */
 
-// Issue bodies go into a terminal composer, so they have always been clipped.
-const ISSUE_BODY_LIMIT = 2000;
+// Issue bodies go into a terminal composer, so they have always been clipped — but
+// until #656 they were clipped SILENTLY, at 2000 characters, mid-word. Nearly every
+// issue prompt in the daemon log was ~2450 characters, i.e. the template plus a body
+// cut off at exactly 2000, and the agent was never told any of it was missing. The
+// limit is now 8000, which covers essentially every real issue body, and a clip
+// leaves a marker naming the command that fetches the rest.
+//
+// It is not unlimited: this text is typed into a TUI composer, and a pathological
+// 100KB issue should not become a 100KB paste.
+const ISSUE_BODY_LIMIT = 8000;
+
+// Appended to the BODY (not the template) when the clip actually bites, so the agent
+// knows to go and get the rest rather than acting on half an issue.
+function clipBody(body, number) {
+  const s = String(body);
+  if (s.length <= ISSUE_BODY_LIMIT) return s;
+  const ref = Number.isFinite(Number(number)) ? ` ${Number(number)}` : '';
+  return `${s.slice(0, ISSUE_BODY_LIMIT)}\n\n[Issue body truncated at ${ISSUE_BODY_LIMIT} characters. `
+    + `Run \`gh issue view${ref}\` for the full description.]`;
+}
 
 // Appended to EVERY issue prompt, in both autopilot states (#643). The flag is a
 // server-side session variable that `issue_complete` reads at completion time; it
@@ -52,7 +70,7 @@ function renderIssuePrompt(template, { number, title, labels, url, body } = {}) 
     title,
     labels: normalizeLabels(labels),
     url: url || '',
-    body: body ? String(body).slice(0, ISSUE_BODY_LIMIT) : '(no description)',
+    body: body ? clipBody(body, number) : '(no description)',
   };
   const rendered = String(template ?? '').replace(/\{\{(\w+)\}\}/g, (_, key) => vars[key] ?? '');
   // Appended AFTER substitution so a user-edited template can neither drop it nor
@@ -73,4 +91,4 @@ function issueTabName(number, title, maxLen) {
   return full.length <= limit ? full : full.slice(0, limit) + '…';
 }
 
-module.exports = { renderIssuePrompt, normalizeLabels, issueWorktreeName, issueTabName, ISSUE_BODY_LIMIT, ISSUE_COMPLETE_INSTRUCTION };
+module.exports = { renderIssuePrompt, normalizeLabels, issueWorktreeName, issueTabName, clipBody, ISSUE_BODY_LIMIT, ISSUE_COMPLETE_INSTRUCTION };

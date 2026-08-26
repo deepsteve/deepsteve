@@ -53,9 +53,27 @@ test('a missing body becomes (no description), not an empty gap', () => {
   assert.equal(renderBody('{{body}}', { number: 1, title: 't', body: '' }), '(no description)');
 });
 
-test('body is clipped to the composer limit', () => {
+test('a body inside the limit is delivered whole and unmarked', () => {
+  // #656: the limit was 2000, so nearly every real issue arrived clipped mid-word.
+  const body = 'x'.repeat(ISSUE_BODY_LIMIT);
+  const out = renderBody('{{body}}', { number: 1, title: 't', body });
+  assert.equal(out, body);
+  assert.ok(!out.includes('truncated'));
+});
+
+test('a clipped body says so, and names the command that gets the rest', () => {
+  // The clip used to be silent: the agent acted on half an issue with no way to know.
   const long = 'x'.repeat(ISSUE_BODY_LIMIT + 500);
-  assert.equal(renderBody('{{body}}', { number: 1, title: 't', body: long }).length, ISSUE_BODY_LIMIT);
+  const out = renderBody('{{body}}', { number: 656, title: 't', body: long });
+  assert.ok(out.startsWith('x'.repeat(ISSUE_BODY_LIMIT)), 'the clip itself is unchanged');
+  assert.ok(out.includes(`truncated at ${ISSUE_BODY_LIMIT} characters`), out.slice(-200));
+  assert.ok(out.includes('gh issue view 656'), out.slice(-200));
+});
+
+test('the clip marker survives a body with no usable issue number', () => {
+  const long = 'x'.repeat(ISSUE_BODY_LIMIT + 1);
+  const out = renderBody('{{body}}', { number: undefined, title: 't', body: long });
+  assert.ok(out.includes('gh issue view`'), 'no number, no dangling argument');
 });
 
 test('a missing url renders empty rather than undefined', () => {
