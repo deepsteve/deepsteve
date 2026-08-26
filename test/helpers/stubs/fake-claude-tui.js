@@ -34,6 +34,30 @@
  *   workMs         after a submit, emit spinner glyph frames for this long
  *   keepDraft      leave the submitted text in the composer while working
  *
+ * #656 knobs — a prompt that arrives PARTLY, rather than late:
+ *   readChunkBytes drain stdin with fs.readSync() in slices this big, on a timer,
+ *                  instead of letting libuv hoover the fd into the stream buffer.
+ *                  The remainder genuinely stays in the KERNEL queue, which is the
+ *                  only place the observed loss could have happened.
+ *   readGapMs      the timer for the above
+ *   dropFirstBytes discard N bytes without echoing them. The application-level
+ *                  stand-in for a tty input-queue flush, and the only deterministic
+ *                  way to manufacture the production incident: a contiguous run gone,
+ *                  nothing echoed for it, no fragment submitted for it.
+ *   pasteMarkers   honour ESC[200~ / ESC[201~: buffer until paste-end, treat a \r
+ *                  INSIDE the paste as content rather than Enter, and render the
+ *                  collapsed `[Pasted text #1 +N lines]` placeholder the real TUI
+ *                  draws — N being the NEWLINE count, as Claude Code counts it.
+ *   dropAfterBytes offset for the above: let this many bytes through before the drop
+ *                  starts (default 0, i.e. from the very front). A flush partway
+ *                  through the write is what TCSAFLUSH actually looks like once the
+ *                  application has already read some of it, and it costs the MIDDLE
+ *                  of the prompt rather than its head.
+ *   transcript     append each submitted message to the Claude Code session
+ *                  transcript the daemon reads, at the path the daemon derives from
+ *                  --session-id and the cwd. Without it the #656 delivery check has
+ *                  no oracle to consult and can only ever say "unconfirmed".
+ *
  * Logs, one JSON object per line, under $DS_STUB_LOG_DIR keyed by the session id:
  *   <id>.stdin.jsonl   every stdin chunk: {t, len, hex, text}
  *   <id>.events.jsonl  {t, event, ...}
@@ -64,6 +88,12 @@ function loadPolicy() {
     swallowEnters: num('swallowEnters', 0),
     workMs: num('workMs', 0),
     keepDraft: !!f.keepDraft,
+    readChunkBytes: num('readChunkBytes', 0),
+    readGapMs: num('readGapMs', 10),
+    dropFirstBytes: num('dropFirstBytes', 0),
+    dropAfterBytes: num('dropAfterBytes', 0),
+    pasteMarkers: !!f.pasteMarkers,
+    transcript: !!f.transcript,
   };
 }
 const CFG = loadPolicy();
@@ -85,6 +115,14 @@ let workTimer = null;
 let footerShown = false;
 let enters = 0;
 let submits = 0;
+// #656 state.
+let dropRemaining = 0;          // set from CFG at boot
+let dropGrace = 0;              // bytes to let through before dropping starts
+let pasting = false;            // between ESC[200~ and ESC[201~
+let pasteBuf = '';
+let pasteCarry = Buffer.alloc(0); // bytes held back in case a marker straddles a read
+let pasteNewlines = 0;          // what the collapsed placeholder advertises
+let draftIsPaste = false;
 
 // Raw mode may clear OPOST, so every line break is written explicitly.
 const out = (s) => { try { process.stdout.write(s); } catch {} };
@@ -97,12 +135,25 @@ function footerLines() {
   return ['⏵⏵ auto mode on (shift+tab to cycle) · ← for agents', '? for shortcuts'];
 }
 
+// The real TUI hides a pasted block behind a placeholder rather than echoing it, so
+// its characters never reach the screen and the line count is the only thing a reader
+// can check. Claude Code's own formatter, from the 2.1.246 binary:
+//   pr = (e) => (e.match(/\r\n|\r|\n/g) || []).length
+//   cr = (e, t) => t === 0 ? `[Pasted text #${e}]` : `[Pasted text #${e} +${t} lines]`
+function draftRows() {
+  if (draft === '') return [''];
+  if (draftIsPaste) {
+    return [pasteNewlines === 0 ? '[Pasted text #1]' : `[Pasted text #1 +${pasteNewlines} lines]`];
+  }
+  return draft.split('\n');
+}
+
 function render() {
   const rows = transcript.slice(-6);
   rows.push(RULE);
   // The composer box. An empty draft still draws the glyph row, exactly like the
   // real TUI, so composer-state.js reads '' (empty) rather than null (unknown).
-  for (const line of (draft === '' ? [''] : draft.split('\n'))) rows.push('❯ ' + line);
+  for (const line of draftRows()) rows.push('❯ ' + line);
   rows.push(RULE);
   if (working) {
     const secs = Math.round((Date.now() - workStart) / 1000);
@@ -136,6 +187,32 @@ function startWork() {
   }, 400);
 }
 
+// The real Claude Code records every message it accepts in its session transcript,
+// and that file is the oracle the daemon's #656 delivery check consults. Write it at
+// exactly the path the daemon derives (claudeProjectDir + `${claudeSessionId}.jsonl`),
+// or the check has nothing to compare and can only say "unconfirmed".
+function transcriptFile() {
+  const argv = process.argv.slice(2);
+  const i = argv.indexOf('--session-id');
+  const uuid = i >= 0 ? argv[i + 1] : null;
+  if (!uuid) return null;
+  const home = process.env.HOME || '/tmp';
+  const dirName = process.cwd().replace(/[^a-zA-Z0-9-]/g, '-');
+  return path.join(home, '.claude', 'projects', dirName, `${uuid}.jsonl`);
+}
+
+function recordTranscript(text) {
+  const file = transcriptFile();
+  if (!file) return;
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.appendFileSync(file, JSON.stringify({
+      type: 'user', message: { role: 'user', content: text },
+    }) + '\n');
+    ev('transcript-append', { file, len: text.length });
+  } catch (e) { ev('transcript-error', { message: e.message }); }
+}
+
 function onEnter() {
   enters++;
   if (enters <= CFG.swallowEnters) { ev('enter-swallowed', { n: enters }); return; }
@@ -144,25 +221,103 @@ function onEnter() {
   if (draft.trim() === '') { ev('enter-empty', { n: enters }); render(); return; }
 
   const text = draft;
-  if (!CFG.keepDraft) draft = '';
+  if (!CFG.keepDraft) { draft = ''; draftIsPaste = false; pasteNewlines = 0; }
   submits++;
   ev('submit', { n: submits, text });
+  if (CFG.transcript) recordTranscript(text);
   if (text.includes('/exit')) { ev('exit', { via: '/exit' }); out('\r\n'); process.exit(0); }
   transcript.push('❯ ' + text.split('\n')[0]);
   transcript.push('GOT:' + text.replace(/\n/g, ' ⏎ '));
   if (CFG.workMs > 0) startWork(); else render();
 }
 
+const PASTE_START = Buffer.from('\x1b[200~');
+const PASTE_END = Buffer.from('\x1b[201~');
+
+/** Longest suffix of `buf` that is a proper prefix of `marker`. */
+function partialMarkerLen(buf, marker) {
+  for (let n = Math.min(marker.length - 1, buf.length); n > 0; n--) {
+    if (buf.slice(buf.length - n).equals(marker.slice(0, n))) return n;
+  }
+  return 0;
+}
+
 function handleChunk(buf) {
-  const s = buf.toString('utf8');
   jsonl(STDIN_LOG, {
-    len: s.length,
-    hex: Buffer.from(s).toString('hex'),
-    text: s.replace(/\r/g, '\\r').replace(/\n/g, '\\n'),
+    len: buf.length,
+    hex: buf.toString('hex'),
+    text: buf.toString('utf8').replace(/\r/g, '\\r').replace(/\n/g, '\\n'),
   });
 
+  // #656: a queue flush eats bytes before the application ever sees them, and echoes
+  // nothing. Do the same, byte-wise — from the front, or after a grace run, which is
+  // what a flush partway through the write looks like.
+  if (dropRemaining > 0) {
+    if (dropGrace > 0) {
+      const pass = Math.min(dropGrace, buf.length);
+      dropGrace -= pass;
+      if (pass === buf.length) { handleAfterDrop(buf); return; }
+      handleAfterDrop(buf.subarray(0, pass));
+      buf = buf.subarray(pass);
+    }
+    const n = Math.min(dropRemaining, buf.length);
+    dropRemaining -= n;
+    ev('dropped', { n, remaining: dropRemaining });
+    buf = buf.subarray(n);
+    if (buf.length === 0) return;
+  }
+  handleAfterDrop(buf);
+}
+
+function handleAfterDrop(buf) {
+
+  if (!CFG.pasteMarkers) { handleKeys(buf.toString('utf8')); return; }
+
+  // Split the stream on paste markers, which a small read can straddle.
+  let data = Buffer.concat([pasteCarry, buf]);
+  pasteCarry = Buffer.alloc(0);
+  for (;;) {
+    const marker = pasting ? PASTE_END : PASTE_START;
+    const idx = data.indexOf(marker);
+    if (idx === -1) {
+      const keep = partialMarkerLen(data, marker);
+      pasteCarry = data.slice(data.length - keep);
+      const usable = data.slice(0, data.length - keep);
+      if (usable.length) consume(usable);
+      return;
+    }
+    if (idx > 0) consume(data.slice(0, idx));
+    data = data.slice(idx + marker.length);
+    if (!pasting) {
+      pasting = true;
+      pasteBuf = '';
+      ev('paste-start', {});
+    } else {
+      pasting = false;
+      draft += pasteBuf;
+      draftIsPaste = true;
+      pasteNewlines = (draft.match(/\r\n|\r|\n/g) || []).length;
+      ev('paste-end', { len: pasteBuf.length, lines: pasteNewlines });
+      render();
+    }
+    if (data.length === 0) return;
+  }
+}
+
+function consume(bytes) {
+  if (pasting) {
+    // Inside a paste, EVERYTHING is content — a \r here is a line break the user
+    // pasted, never Enter. That is the guarantee bracketing buys.
+    pasteBuf += bytes.toString('utf8').replace(/\r\n?/g, '\n');
+    return;
+  }
+  handleKeys(bytes.toString('utf8'));
+}
+
+function handleKeys(s) {
   if (s === '\x03') { ev('exit', { via: 'ctrl-c' }); process.exit(0); }
-  if (s === '\x1b') { draft = ''; render(); return; }   // Escape clears the composer
+  // Escape clears the composer
+  if (s === '\x1b') { draft = ''; draftIsPaste = false; pasteNewlines = 0; render(); return; }
 
   if (CFG.policy === 'ink') {
     if (s === '\r' || s === '\n') { ev('enter', { own_chunk: true }); onEnter(); return; }
@@ -196,12 +351,38 @@ function pump() {
 // Raw mode is set up front (it does not start reading) so ICRNL never rewrites the
 // buffered \r into \n while the hold is in effect.
 function attachStdin() {
+  if (CFG.readChunkBytes > 0) { dripStdin(); return; }
   process.stdin.on('readable', pump);
   process.stdin.on('end', () => { ev('exit', { via: 'stdin-end' }); process.exit(0); });
   pump();
 }
 
+// #656: read(2) fd 0 directly, in small slices, on a timer. Deliberately NOT
+// process.stdin.read(n) — attaching any stream listener makes libuv drain the whole
+// fd into the stream buffer at once, so the bytes leave the kernel queue immediately
+// and the very condition under test disappears (the same trap the comment above
+// describes for the coalescing case). fs.readSync leaves the remainder where it is.
+function dripStdin() {
+  const buf = Buffer.alloc(CFG.readChunkBytes);
+  ev('drip-start', { bytes: CFG.readChunkBytes, gapMs: CFG.readGapMs });
+  const tick = () => {
+    let n = 0;
+    try {
+      n = fs.readSync(0, buf, 0, CFG.readChunkBytes, null);
+    } catch (e) {
+      if (e.code === 'EOF') { ev('exit', { via: 'stdin-end' }); process.exit(0); }
+      if (e.code !== 'EAGAIN') { ev('read-error', { code: e.code }); }
+      n = 0;
+    }
+    if (n > 0) handleChunk(Buffer.from(buf.subarray(0, n)));
+    setTimeout(tick, CFG.readGapMs);
+  };
+  setTimeout(tick, CFG.readGapMs);
+}
+
 ev('boot', { session: SESSION, cfg: CFG, argv: process.argv.slice(2) });
+dropRemaining = CFG.dropFirstBytes;
+dropGrace = CFG.dropAfterBytes;
 if (process.stdin.isTTY) process.stdin.setRawMode(true);
 if (CFG.readAfterMs > 0) {
   ev('read-hold', { ms: CFG.readAfterMs });

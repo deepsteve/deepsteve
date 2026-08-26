@@ -209,7 +209,11 @@ async function shellState(id) {
 }
 
 before(async () => {
-  tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-submit607-'));
+  // realpath, because on macOS os.tmpdir() is /var/... while a child process's own
+  // cwd resolves to /private/var/... . The #656 delivery check derives the Claude
+  // transcript path from the daemon's recorded cwd, and the stub derives the same
+  // path from its own — they must agree or the check can only ever say "unconfirmed".
+  tmpRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'ds-submit607-')));
   HOME = path.join(tmpRoot, 'home');
   projDir = path.join(tmpRoot, 'proj');
   LOGS = path.join(tmpRoot, 'stub-logs');
@@ -392,6 +396,194 @@ test('a tab closed mid-submission does not crash the daemon or write after death
   await closeSession(fresh.id);
 });
 
+// --- #656: the whole prompt, or nothing -------------------------------------
+//
+// #607 was about a prompt that never got SENT. #656 is about one that got sent in
+// pieces: two live deliveries wrote 2442 and 2494 characters and the agent recorded
+// 416 and 456, losing a contiguous ~2030 off the HEAD with no fragment submitted
+// anywhere. The old echo gate could not have caught it — `readComposerDraft(view)`
+// truthy fired Enter on the first echoed character, at ~455ms, whatever the size.
+//
+// BIG_PROMPT is deliberately over one kernel input queue (1022 bytes on macOS),
+// which is both the threshold that routes it to the paste path and the amount a
+// single flush can take away.
+const HEAD_MARKER = 'HEAD-656';
+const TAIL_MARKER = 'TAIL-656';
+const BIG_PROMPT = [
+  `Work on GitHub issue #656 ${HEAD_MARKER}: the injected prompt arrives truncated`,
+  '',
+  '## Summary',
+  ...Array.from({ length: 40 }, (_, i) =>
+    `Paragraph ${i}: a line of issue body long enough that forty of them comfortably exceed one kernel input queue.`),
+  '',
+  `That is the whole issue. ${TAIL_MARKER}`,
+].join('\n');
+
+const bigSubmits = (id) => events(id).filter((e) => e.event === 'submit');
+
+test('#656: a multi-kilobyte prompt survives a slow, small-chunked child read', async () => {
+  assert.ok(Buffer.byteLength(BIG_PROMPT) > 1022,
+    'the fixture must exceed one kernel input queue or it proves nothing');
+
+  // 200-byte reads 40ms apart: the child is draining far slower than the daemon can
+  // write, so the prompt is in flight across many polls of the echo gate.
+  const { id } = await openSession({ readChunkBytes: 200, readGapMs: 40, echoDelayMs: 60 });
+  const c = clients[clients.length - 1];
+  c.sendPrompt(BIG_PROMPT);
+
+  const subs = await waitFor(() => {
+    const s = bigSubmits(id);
+    return s.length ? s : null;
+  }, 'the stub to receive a submit', 30000);
+
+  assert.strictEqual(subs.length, 1, `exactly one submit, got ${subs.length}`);
+  assert.strictEqual(subs[0].text, BIG_PROMPT,
+    `the agent must receive the WHOLE prompt, got ${subs[0].text.length}/${BIG_PROMPT.length} chars`);
+  await closeSession(id);
+});
+
+// The three loss shapes, and which layer answers each. They are different problems
+// and only one of them is answerable from the screen, which is why the transcript
+// oracle exists rather than a cleverer composer reader.
+//
+//   tail lost      the composer holds our head and not our tail. POSITIVELY
+//                  identifiable while nothing has been submitted yet, so the gate
+//                  clears the box and writes the prompt again.
+//   head lost      the composer holds only our tail — byte-identical to a healthy
+//                  long draft whose head has scrolled out of the box. Not answerable
+//                  on screen; the transcript check reports it.
+//   middle lost    both ends present, characters gone from between them. Invisible to
+//                  any edge comparison; only the recorded length gives it away.
+
+test('#656: a write that never delivers its tail is re-typed once, and never Entered as a fragment', async () => {
+  // Everything after the first 600 bytes is discarded, for good, so the composer can
+  // only ever hold our head. That is the one shape the screen can positively identify,
+  // and the delivery is unrecoverable — so what matters is that a FRAGMENT is never
+  // submitted and the failure is never silent.
+  const { id } = await openSession({ dropAfterBytes: 600, dropFirstBytes: 1e6, transcript: true });
+  const c = clients[clients.length - 1];
+  c.sendPrompt(BIG_PROMPT);
+
+  await waitFor(() => daemonLog.includes(`[submit] id=${id} composer shows a PARTIAL prompt`),
+    'the daemon to notice the partial draft and re-type', 40000);
+  // ...and the failure surfaces rather than being logged as a clean delivery.
+  await waitFor(() => daemonLog.includes(`[submit] id=${id} delivery unconfirmed`),
+    'the daemon to report that nothing matching ever reached the agent', 40000);
+
+  // Exactly once. A loop that kept clearing and re-typing would be worse than the bug.
+  const retypes = daemonLog.split('\n').filter((l) => l.includes(`id=${id} composer shows a PARTIAL prompt`));
+  assert.strictEqual(retypes.length, 1, retypes.join('\n'));
+
+  // The point of the whole change: a partial prompt is not handed to the agent.
+  for (const sub of bigSubmits(id)) {
+    assert.strictEqual(sub.text, BIG_PROMPT,
+      `a fragment reached the agent: ${sub.text.length}/${BIG_PROMPT.length} chars`);
+  }
+  assert.ok(!daemonLog.includes(`[submit] id=${id} delivered=`), 'and it is never called clean');
+  await closeSession(id);
+});
+
+test('#656: a flush partway through the write is reported, ends intact or not', async () => {
+  // What TCSAFLUSH actually costs once the child has read some of the write: a run out
+  // of the MIDDLE. Both edge comparisons pass, so only the recorded length gives it
+  // away — which is why compareDelivered reports counts rather than a boolean.
+  const { id } = await openSession({ dropAfterBytes: 600, dropFirstBytes: 2000, transcript: true });
+  const c = clients[clients.length - 1];
+  c.sendPrompt(BIG_PROMPT);
+
+  await waitFor(() => daemonLog.includes(`[submit] id=${id} TRUNCATED DELIVERY`),
+    'the daemon to report the holed delivery', 40000);
+
+  const line = daemonLog.split('\n').find((l) => l.includes(`id=${id} TRUNCATED DELIVERY`));
+  assert.ok(/characters from the middle|the HEAD|the TAIL/.test(line), line);
+  const m = /recorded (\d+)\/(\d+) chars/.exec(line);
+  assert.ok(m && Number(m[1]) < Number(m[2]), line);
+  await closeSession(id);
+});
+
+test('#656: a delivery that loses its HEAD is reported, since no screen can see it', async () => {
+  // The honest limit of the screen-side gate, and the reason the transcript oracle
+  // exists. A draft holding only the tail of an oversized prompt is INDISTINGUISHABLE
+  // on screen from a healthy long draft whose head has scrolled out of the composer —
+  // the box top is off-screen either way. Treating it as truncation would clear and
+  // re-type perfectly good prompts, so the gate lets it through, and the delivery
+  // check catches it against what the agent actually recorded.
+  const { id } = await openSession({ dropFirstBytes: 1200, transcript: true });
+  const c = clients[clients.length - 1];
+  c.sendPrompt(BIG_PROMPT);
+
+  await waitFor(() => daemonLog.includes(`[submit] id=${id} TRUNCATED DELIVERY`),
+    'the daemon to report the truncated delivery', 40000);
+
+  const line = daemonLog.split('\n').find((l) => l.includes(`id=${id} TRUNCATED DELIVERY`));
+  assert.ok(line.includes('missing the HEAD'), line);
+  assert.ok(!daemonLog.includes(`[submit] id=${id} delivered=`),
+    'a truncated delivery must never also report a clean one');
+  await closeSession(id);
+});
+
+test('#656: a clean delivery is confirmed against the transcript, not merely assumed', async () => {
+  const { id } = await openSession({ transcript: true });
+  const c = clients[clients.length - 1];
+  c.sendPrompt(BIG_PROMPT);
+
+  await waitFor(() => daemonLog.includes(`[submit] id=${id} delivered=`),
+    'the daemon to confirm the delivery', 40000);
+
+  const line = daemonLog.split('\n').find((l) => l.includes(`id=${id} delivered=`));
+  const m = /delivered=(\d+)\/(\d+) chars/.exec(line);
+  assert.ok(m, line);
+  assert.strictEqual(m[1], m[2], `every character accounted for: ${line}`);
+  assert.ok(!daemonLog.includes(`id=${id} TRUNCATED DELIVERY`));
+  await closeSession(id);
+});
+
+test('#656: a bracketed paste is delivered whole, and Enter follows paste-end', async () => {
+  // Under tmux the daemon does not emit the markers itself — paste-buffer -p does,
+  // and only when the pane has mode 2004 on. This asserts the daemon's side of the
+  // contract: whatever route the text takes, Enter is a separate write that lands
+  // after the paste is closed, never inside it.
+  const { id } = await openSession({ pasteMarkers: true, readChunkBytes: 300, readGapMs: 20 });
+  const c = clients[clients.length - 1];
+  c.sendPrompt(BIG_PROMPT);
+
+  const subs = await waitFor(() => {
+    const s = bigSubmits(id);
+    return s.length ? s : null;
+  }, 'the stub to receive a submit', 30000);
+
+  assert.strictEqual(subs.length, 1);
+  assert.strictEqual(subs[0].text, BIG_PROMPT);
+
+  const ev = events(id);
+  const end = ev.find((e) => e.event === 'paste-end');
+  if (end) {
+    // The pane negotiated bracketed paste, so the ordering guarantee applies.
+    const enter = ev.find((e) => e.event === 'enter' && e.t >= end.t);
+    assert.ok(enter, 'Enter must arrive after paste-end, as its own read');
+    assert.ok(!ev.some((e) => e.event === 'enter' && e.t < end.t),
+      'no Enter may be seen while the paste is still open');
+  }
+  await closeSession(id);
+});
+
+test('#656: an interior newline never submits a fragment on its own', async () => {
+  // paste-buffer's DEFAULT is to replace every LF with CR. Without -r this prompt
+  // would arrive as 45 separate Enters, and the agent would get 45 messages.
+  const { id } = await openSession({ readChunkBytes: 256, readGapMs: 25 });
+  const c = clients[clients.length - 1];
+  c.sendPrompt(BIG_PROMPT);
+
+  await waitFor(() => bigSubmits(id).length > 0, 'the stub to receive a submit', 30000);
+  await sleep(VERIFY_SETTLED_MS);
+
+  const subs = bigSubmits(id);
+  assert.strictEqual(subs.length, 1,
+    `a multi-line prompt must submit ONCE, got ${subs.length}: ${subs.map((s) => JSON.stringify(s.text.slice(0, 30))).join(', ')}`);
+  await closeSession(id);
+});
+
+// NOTE: everything below stops the daemon. New cases go ABOVE this line.
 test('graceful shutdown of idle sessions is not slowed by echo confirmation', async () => {
   // killShell disposes the terminal screen and drops the data handler BEFORE sending
   // /exit, so echo confirmation could never succeed there. It must stay on the timed

@@ -68,6 +68,19 @@ test('a lost TAIL is caught too', () => {
   assert.strictEqual(v.missingTail, true);
 });
 
+test('a hole in the MIDDLE is caught by the length, with both ends intact', () => {
+  // What a tcsetattr(TCSAFLUSH) costs once the child has read some of the write. Both
+  // edge comparisons pass, so only the character count gives it away — which is why
+  // compareDelivered reports lengths rather than a bare boolean.
+  const holed = PROMPT.slice(0, 600) + PROMPT.slice(1600);
+  const v = compareDelivered(PROMPT, [holed]);
+  assert.strictEqual(v.known, true);
+  assert.strictEqual(v.ok, false);
+  assert.strictEqual(v.missingHead, false);
+  assert.strictEqual(v.missingTail, false);
+  assert.ok(v.got < v.expected, `${v.got} < ${v.expected}`);
+});
+
 test('an unrelated message is "don\'t know", never a truncation report', () => {
   // The #607 rule: silence and ambiguity must never be reported as failure. A stale
   // record from an earlier turn is exactly that.

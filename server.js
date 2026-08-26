@@ -2340,9 +2340,12 @@ async function checkDeliveredPrompt(id, entry, text) {
       }
       // The alarm has to live in the plain log: auditWaiting is gated behind the
       // default-off waitingAuditEnabled setting.
-      // compareDelivered only claims `known` when an end still matches, so exactly
-      // one of these is set here; losing BOTH ends surfaces as 'unconfirmed' below.
-      const missing = verdict.missingHead ? 'the HEAD' : 'the TAIL';
+      // Three shapes, and the third is not rare: a flush partway through the write
+      // leaves BOTH ends intact and takes a run out of the middle, so the length is
+      // the only thing that gives it away. (Losing both ends surfaces as the
+      // 'unconfirmed' line below — compareDelivered cannot attribute that record.)
+      const missing = verdict.missingHead ? 'the HEAD'
+        : verdict.missingTail ? 'the TAIL' : 'characters from the middle';
       log(`[submit] id=${id} TRUNCATED DELIVERY — agent recorded ${verdict.got}/${verdict.expected} chars, missing ${missing}`);
       auditWaiting('submit-truncated', id, entry, {
         expected: verdict.expected, got: verdict.got,
