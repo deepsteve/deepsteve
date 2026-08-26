@@ -6,15 +6,12 @@
 const { test } = require('node:test');
 const assert = require('node:assert');
 
-const { readComposerDraft, isPromptStaged } = require('../../composer-state');
+const { readComposerDraft, isPromptStaged, promptDraftVerdict } = require('../../composer-state');
 const F = require('./fixtures/composer-screens');
 
-const ISSUE_PROMPT = [
-  'Work on GitHub issue #607: start_issue prompt sometimes never submits under load / many tabs',
-  '',
-  '## Summary',
-  'When a lot of tabs are open the prompt does not always get submitted.',
-].join('\n');
+// The text the STAGED_*/PASTE_* fixtures are renderings of. #656's completeness
+// checks compare against what we wrote, so the two must not drift.
+const ISSUE_PROMPT = F.DELIVERED_PROMPT;
 
 // --- readComposerDraft -----------------------------------------------------
 
@@ -128,4 +125,80 @@ test('a short prompt like /rc must match in full', () => {
 test('a one-character draft does not match a long prompt', () => {
   const rule = F.RULE;
   assert.strictEqual(isPromptStaged([rule, '❯ W', rule, '? for shortcuts'], ISSUE_PROMPT), false);
+});
+
+// --- promptDraftVerdict (#656) ---------------------------------------------
+//
+// "Has the whole of what we wrote finished arriving?" — NOT "is the draft equal to
+// what we wrote", which the 40-row screen read cannot answer for a multi-kilobyte
+// prompt. See the function's own comment for why that distinction is load-bearing.
+
+test('the end of our text in the box means the write landed', () => {
+  assert.strictEqual(promptDraftVerdict(F.STAGED_COMPLETE, ISSUE_PROMPT), 'complete');
+});
+
+test('our head without our tail is a write still arriving', () => {
+  assert.strictEqual(promptDraftVerdict(F.STAGED_PARTIAL, ISSUE_PROMPT), 'incomplete');
+  assert.strictEqual(promptDraftVerdict(F.STAGED_WRAPPED, ISSUE_PROMPT), 'incomplete');
+});
+
+test('a collapsed paste is judged on its line count, which Claude derives from NEWLINES', () => {
+  // cr(e, t) omits the clause entirely when t === 0, and t is pr(text) — the newline
+  // count — so a four-line prompt reads "+3 lines", not "+4".
+  assert.strictEqual(promptDraftVerdict(F.PASTE_COLLAPSED_MATCHING, ISSUE_PROMPT), 'complete');
+  assert.strictEqual(promptDraftVerdict(F.PASTE_COLLAPSED_SHORT, ISSUE_PROMPT), 'incomplete');
+});
+
+test('one line either way is tolerated — Claude counts what it kept after trimming', () => {
+  const near = [F.RULE, '❯ [Pasted text #1 +2 lines]', F.RULE, '? for shortcuts'];
+  assert.strictEqual(promptDraftVerdict(near, ISSUE_PROMPT), 'complete');
+});
+
+test('a paste placeholder with no count decides nothing', () => {
+  assert.strictEqual(promptDraftVerdict(F.PASTE_COLLAPSED_NO_COUNT, ISSUE_PROMPT), 'unknown');
+});
+
+test('a single-line prompt cannot be judged by a line count', () => {
+  // pr() would be 0 and the clause would be absent, so there is nothing to compare.
+  assert.strictEqual(promptDraftVerdict(F.PASTE_COLLAPSED, 'one line, no newline'), 'unknown');
+});
+
+test('an unreadable, empty or foreign composer decides nothing', () => {
+  for (const screen of [F.EMPTY_COMPOSER, F.PLACEHOLDER_COMPOSER, F.STARTUP_BANNER,
+    F.WORKING_NO_COMPOSER, F.PERMISSION_MENU, F.SELECTION_MENU, F.STAGED_DRAFT]) {
+    assert.strictEqual(promptDraftVerdict(screen, ISSUE_PROMPT), 'unknown');
+  }
+});
+
+test('a soft wrap inserting a space mid-word is not read as truncation', () => {
+  // readComposerDraft joins rows with ' ', so a hard wrap inside a long token adds a
+  // character that was never in what we wrote. The comparison strips whitespace on
+  // both sides precisely so that a healthy draft is not re-typed.
+  const text = 'please read ' + 'A'.repeat(180) + ' and then stop';
+  const wrapped = [
+    F.RULE,
+    '❯ please read ' + 'A'.repeat(90),
+    '  ' + 'A'.repeat(90) + ' and then stop',
+    F.RULE,
+    '? for shortcuts',
+  ];
+  assert.strictEqual(promptDraftVerdict(wrapped, text), 'complete');
+});
+
+test('a long draft whose head has scrolled off screen is still complete', () => {
+  // The composer scrolls to the cursor, so what is legible is the END of the draft.
+  // Calling that "incomplete" would clear and re-type perfectly good prompts.
+  const text = 'HEADMARKER ' + 'filler words here '.repeat(400) + 'TAILMARKER ends here';
+  const visible = [
+    F.RULE,
+    '❯ ' + text.slice(-160, -80),
+    '  ' + text.slice(-80),
+    F.RULE,
+    '? for shortcuts',
+  ];
+  assert.strictEqual(promptDraftVerdict(visible, text), 'complete');
+});
+
+test('an empty prompt decides nothing', () => {
+  assert.strictEqual(promptDraftVerdict(F.STAGED_COMPLETE, ''), 'unknown');
 });

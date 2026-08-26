@@ -11,7 +11,7 @@ const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
 
-const { readComposerDraft, isPromptStaged, isPromptOnScreen } = require('../../composer-state');
+const { readComposerDraft, isPromptStaged, isPromptOnScreen, promptDraftVerdict } = require('../../composer-state');
 const F = require('./fixtures/composer-screens');
 
 const serverSource = fs.readFileSync(path.join(__dirname, '..', '..', 'server.js'), 'utf8');
@@ -31,6 +31,7 @@ const ENV = {
   DEEPSTEVE_SUBMIT_ECHO_POLL_MS: '100',
   DEEPSTEVE_SUBMIT_ECHO_MAX_MS: '1000',
   DEEPSTEVE_SUBMIT_ECHO_SETTLE_MS: '50',
+  DEEPSTEVE_SUBMIT_ECHO_STALL_MS: '250',
   DEEPSTEVE_SUBMIT_SCREEN_READ_MS: '1000000',
   DEEPSTEVE_SUBMIT_VERIFY_MS: '400',
   DEEPSTEVE_SUBMIT_VERIFY_POLL_MS: '100',
@@ -38,12 +39,9 @@ const ENV = {
 };
 
 const ID = 'sh0rt1d';
-const PROMPT = [
-  'Work on GitHub issue #607: start_issue prompt sometimes never submits under load / many tabs',
-  '',
-  '## Summary',
-  'When a lot of tabs are open the prompt does not always get submitted.',
-].join('\n');
+// The exact text the STAGED_*/PASTE_* fixtures are renderings of (#656) — the echo
+// gate now compares against what we wrote, so the two must not drift.
+const PROMPT = F.DELIVERED_PROMPT;
 
 // `autoOutput` models a child that keeps repainting: every timer tick bumps
 // entry.outputSeq. The echo tests drive outputSeq by hand instead, because "no output
@@ -85,6 +83,7 @@ function makeHarness({ agentType = 'claude', screen = F.EMPTY_COMPOSER, state = 
     readComposerDraft,
     isPromptStaged,
     isPromptOnScreen,
+    promptDraftVerdict,
     Date: { now: () => now },
     clearTimeout: (t) => { if (t) t.cleared = true; },
     setTimeout: (fn, ms) => {
@@ -152,7 +151,7 @@ test('the text is written alone before anything else', async () => {
   assert.deepStrictEqual(h.writes, [PROMPT]);
 });
 
-test('Enter waits for the composer to echo, then goes out as its own write', async () => {
+test('Enter waits for the WHOLE prompt to echo, then goes out as its own write', async () => {
   const h = makeHarness({ screen: F.EMPTY_COMPOSER });
   const submitted = h.submitToShell(ID, PROMPT, h.engine, { confirmEcho: true });
 
@@ -161,15 +160,76 @@ test('Enter waits for the composer to echo, then goes out as its own write', asy
   await h.step();
   assert.deepStrictEqual(h.writes, [PROMPT], 'no Enter while the composer is empty');
 
-  // The child reads our text and repaints the composer.
+  // The child reads our text and repaints the composer with all of it.
   h.entry.outputSeq++;
-  h.view.screen = F.STAGED_WRAPPED;
+  h.view.screen = F.STAGED_COMPLETE;
 
   await h.drain();
   await submitted;
   assert.deepStrictEqual(h.writes, [PROMPT, '\r']);
   assert.ok(h.logs.some((m) => m.includes('Enter after echo')), h.logs.join('\n'));
   assert.ok(h.now >= 300, `Enter must respect the min gap, sent at ${h.now}ms`);
+});
+
+// #656. This is the case that shipped a truncated prompt to a live agent: the write
+// was still arriving, the composer held a prefix of it, and "the composer is
+// non-empty" fired Enter on the fragment at ~455ms regardless of prompt size.
+test('a composer holding only PART of the prompt does not get Enter', async () => {
+  const h = makeHarness({ screen: F.STAGED_PARTIAL });
+  h.submitToShell(ID, PROMPT, h.engine, { confirmEcho: true });
+  h.entry.outputSeq++;
+
+  await h.step();
+  await h.step();
+  await h.step();
+  assert.deepStrictEqual(h.writes, [PROMPT], 'a prefix in the box is not an echo');
+});
+
+test('a stalled partial prompt is cleared and re-typed, never Entered as a fragment', async () => {
+  const h = makeHarness({ screen: F.STAGED_PARTIAL, autoOutput: true });
+  const submitted = h.submitToShell(ID, PROMPT, h.engine, { confirmEcho: true });
+
+  // It stays partial past echoStallMs, so the composer is emptied and re-typed.
+  await h.drain();
+  await submitted;
+  assert.deepStrictEqual(h.writes, [PROMPT, '\x1b', PROMPT, '\r'],
+    'Esc clears the box before the re-type, so the agent can never receive it twice');
+  assert.ok(h.logs.some((m) => m.includes('clearing and re-typing')), h.logs.join('\n'));
+  assert.ok(h.logs.some((m) => m.includes('still shows only PART')), h.logs.join('\n'));
+});
+
+test('the re-type happens at most once', async () => {
+  const h = makeHarness({ screen: F.STAGED_PARTIAL, autoOutput: true });
+  const submitted = h.submitToShell(ID, PROMPT, h.engine, { confirmEcho: true });
+  await h.drain();
+  await submitted;
+  assert.strictEqual(h.writes.filter((w) => w === '\x1b').length, 1);
+  assert.strictEqual(h.writes.filter((w) => w === PROMPT).length, 2);
+});
+
+test('a partial draft that completes on its own is never re-typed', async () => {
+  const h = makeHarness({ screen: F.STAGED_PARTIAL });
+  const submitted = h.submitToShell(ID, PROMPT, h.engine, { confirmEcho: true });
+  h.entry.outputSeq++;
+  await h.step();
+  await h.step();
+  h.view.screen = F.STAGED_COMPLETE;   // the rest of the write lands
+  await h.drain();
+  await submitted;
+  assert.deepStrictEqual(h.writes, [PROMPT, '\r']);
+});
+
+// An unreadable screen must not cost every delivery the full cap. The weaker
+// "it stopped changing" signal covers that — and can never override 'incomplete',
+// because a still-arriving write reports that instead.
+test('a draft we cannot attribute is accepted once it stops changing', async () => {
+  const h = makeHarness({ screen: F.STAGED_DRAFT });   // someone else's text
+  const submitted = h.submitToShell(ID, PROMPT, h.engine, { confirmEcho: true });
+  h.entry.outputSeq++;
+  await h.drain();
+  await submitted;
+  assert.deepStrictEqual(h.writes, [PROMPT, '\r']);
+  assert.ok(h.logs.some((m) => m.includes('Enter after settled')), h.logs.join('\n'));
 });
 
 test('output alone is not enough — the composer must show something', async () => {
@@ -194,14 +254,24 @@ test('a composer that never echoes still gets Enter at the cap', async () => {
   assert.ok(h.now >= 1000, `should have used the full cap, stopped at ${h.now}ms`);
 });
 
-test('a collapsed paste counts as an echo', async () => {
-  const h = makeHarness({ screen: F.PASTE_COLLAPSED });
+test('a collapsed paste with a matching line count counts as a complete echo', async () => {
+  const h = makeHarness({ screen: F.PASTE_COLLAPSED_MATCHING });
   const submitted = h.submitToShell(ID, PROMPT, h.engine, { confirmEcho: true });
   h.entry.outputSeq++;
   await h.drain();
   await submitted;
   assert.deepStrictEqual(h.writes, [PROMPT, '\r']);
   assert.ok(h.logs.some((m) => m.includes('Enter after echo')));
+});
+
+// #656 — the head-loss signature, and the only completeness signal available once
+// Claude Code has collapsed the paste and hidden its characters.
+test('a collapsed paste whose line count is far short is re-typed, not Entered', async () => {
+  const h = makeHarness({ screen: F.PASTE_COLLAPSED_SHORT, autoOutput: true });
+  const submitted = h.submitToShell(ID, PROMPT, h.engine, { confirmEcho: true });
+  await h.drain();
+  await submitted;
+  assert.deepStrictEqual(h.writes, [PROMPT, '\x1b', PROMPT, '\r']);
 });
 
 test('a shell killed mid-echo-wait stops cold and still resolves', async () => {

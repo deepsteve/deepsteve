@@ -22,7 +22,7 @@ const { createSessionAutoClose } = require('./session-auto-close');
 const { classifyScreenTail, CLAUDE_SCREEN_MARKERS } = require('./screen-classifier');
 const { TerminalScreen } = require('./terminal-screen');
 const { terminalEnv } = require('./terminal-env');
-const { readComposerDraft, isPromptStaged, isPromptOnScreen } = require('./composer-state');
+const { readComposerDraft, isPromptStaged, isPromptOnScreen, promptDraftVerdict } = require('./composer-state');
 const { wrapRunCommand } = require('./terminal-run');
 const { isTerminalReport } = require('./terminal-input');
 const { renderIssuePrompt, issueWorktreeName, issueTabName } = require('./issue-prompt');
@@ -2124,22 +2124,30 @@ function submitToShell(id, text, eng, options = {}) {
 // large-paste collapsing in a way substring matching does not.
 //
 // Timing budget: these caps are sized together with PROMPT_READY_DEADLINE_MS so the
-// worst case (30s readiness + 5s echo + 16s verify = 51s) still fits inside the 60s
+// worst case (30s readiness + 8s echo + 12s verify = 50s) still fits inside the 60s
 // inputBlockTimer and the client's 60s loading banner. Raising one means re-checking
-// the others.
+// the others. #656 bought the echo phase 3 more seconds for its one re-type by
+// taking them off verifyGraceMs (4000 -> 3000; the verify worst case is
+// verifyGraceMs * (verifyRetries + 2)).
 const envMs = (name, fallback) => parseInt(process.env[name], 10) || fallback;
 const SUBMIT_TIMINGS = {
   // Floor before Enter may be sent. Keeps a false-positive echo from producing a
   // gap SHORTER than the legacy 1s and therefore more coalesce-prone, not less.
   echoMinGapMs: envMs('DEEPSTEVE_SUBMIT_ECHO_MIN_MS', 300),
   echoPollMs: envMs('DEEPSTEVE_SUBMIT_ECHO_POLL_MS', 150),
-  echoMaxWaitMs: envMs('DEEPSTEVE_SUBMIT_ECHO_MAX_MS', 5000),
+  // Covers the whole echo phase INCLUDING the one #656 re-type, which is why it is
+  // 8s and not 5s. verifyGraceMs came down to 3000 to pay for it; see the budget.
+  echoMaxWaitMs: envMs('DEEPSTEVE_SUBMIT_ECHO_MAX_MS', 8000),
   echoSettleMs: envMs('DEEPSTEVE_SUBMIT_ECHO_SETTLE_MS', 150),
+  // #656: how long the composer may sit showing our HEAD but not our TAIL before we
+  // stop waiting and re-type. Long enough that a slow repaint isn't mistaken for a
+  // lost write, short enough to leave the rest of echoMaxWaitMs for the retry.
+  echoStallMs: envMs('DEEPSTEVE_SUBMIT_ECHO_STALL_MS', 2000),
   screenLines: 40,        // one viewport is all the composer needs
   // TerminalScreen.lines() awaits an idle promise that sustained output can defer
   // indefinitely, so every read is bounded.
   screenReadMs: envMs('DEEPSTEVE_SUBMIT_SCREEN_READ_MS', 400),
-  verifyGraceMs: envMs('DEEPSTEVE_SUBMIT_VERIFY_MS', 4000),
+  verifyGraceMs: envMs('DEEPSTEVE_SUBMIT_VERIFY_MS', 3000),
   verifyPollMs: envMs('DEEPSTEVE_SUBMIT_VERIFY_POLL_MS', 500),
   verifyRetries: envMs('DEEPSTEVE_SUBMIT_VERIFY_RETRIES', 2),
   // #656 delivery check. Detached from the submission promise, so these are NOT
@@ -2183,15 +2191,31 @@ function promptSubmitConfirmEnabled(entry) {
  * Write `text`, wait for the composer to show it, then send Enter as its own write.
  * Falls back to a timed Enter at the cap — confirmPromptSubmitted is the net for
  * that case. Resolves once Enter has been written, same contract as submitToShell.
+ *
+ * #656 changed what "show it" means. The gate used to be `readComposerDraft(view)`
+ * truthy — a PRESENCE check. One echoed character satisfied it, so every delivery
+ * fired Enter at the earliest possible instant (a 4.2KB prompt and a 2.4KB prompt
+ * both confirmed at ~455ms) whether or not the write had finished arriving. It now
+ * waits for `promptDraftVerdict` to see the END of our text, and when the composer
+ * positively shows our head without our tail it re-types once rather than submitting
+ * the fragment. See composer-state.js for why "the draft equals what we wrote" is
+ * NOT a question the 40-row screen read can answer.
  */
 async function submitWithConfirmedEnter(id, entry, engine, text, options) {
-  const baseSeq = entry.outputSeq || 0;
   const startedAt = Date.now();
+  const deadline = startedAt + SUBMIT_TIMINGS.echoMaxWaitMs;
+  let baseSeq = entry.outputSeq || 0;
+  let floor = startedAt + SUBMIT_TIMINGS.echoMinGapMs;
+  let why = 'timeout';
+  // Non-null once the composer has positively shown our head without our tail.
+  let stalledSince = null;
+  let retyped = false;
+  // The "draft stopped growing" fallback, used ONLY while the verdict is 'unknown'
+  // — a screen we cannot classify must not cost every delivery the full cap.
+  let prevDraft = null;
+
   engine.write(id, text);
 
-  const deadline = startedAt + SUBMIT_TIMINGS.echoMaxWaitMs;
-  const floor = startedAt + SUBMIT_TIMINGS.echoMinGapMs;
-  let why = 'timeout';
   while (Date.now() < deadline) {
     await promptSleep(SUBMIT_TIMINGS.echoPollMs);
     if (shells.get(id) !== entry || entry.killed) return;   // tab closed mid-submit
@@ -2199,11 +2223,47 @@ async function submitWithConfirmedEnter(id, entry, engine, text, options) {
     if ((entry.outputSeq || 0) === baseSeq) continue;       // free gate: child hasn't read us
     const view = await promptScreenView(entry);
     if (view === null) { why = 'output'; break; }           // no emulator / read timed out
-    if (readComposerDraft(view)) { why = 'echo'; break; }
+
+    const verdict = promptDraftVerdict(view, text);
+    if (verdict === 'complete') { why = 'echo'; break; }
+
+    if (verdict === 'incomplete') {
+      prevDraft = null;                                     // the draft IS still growing
+      if (stalledSince === null) stalledSince = Date.now();
+      if (!retyped && Date.now() - stalledSince >= SUBMIT_TIMINGS.echoStallMs) {
+        // Nothing has been submitted yet, so this is recoverable: clear the composer
+        // and write the text again. If the read was wrong and the draft was whole,
+        // the cost is a re-type, not a duplicate prompt — Esc empties the box first.
+        retyped = true;
+        log(`[submit] id=${id} composer shows a PARTIAL prompt — clearing and re-typing (len=${text.length})`);
+        try { engine.write(id, '\x1b'); } catch { return; }
+        await promptSleep(SUBMIT_TIMINGS.echoPollMs);
+        if (shells.get(id) !== entry || entry.killed) return;
+        try { engine.write(id, text); } catch { return; }
+        baseSeq = entry.outputSeq || 0;
+        floor = Date.now() + SUBMIT_TIMINGS.echoMinGapMs;
+        stalledSince = null;
+      }
+      continue;
+    }
+
+    // 'unknown' — no composer, an empty one, or a draft we can't attribute. Fall back
+    // to the weaker "it stopped changing" signal. Safe precisely because it can never
+    // override 'incomplete': a still-arriving write reports that instead.
+    stalledSince = null;
+    const draft = readComposerDraft(view);
+    if (!draft) { prevDraft = null; continue; }
+    if (prevDraft !== null && draft === prevDraft) { why = 'settled'; break; }
+    prevDraft = draft;
   }
   if (shells.get(id) !== entry || entry.killed) return;
   if (why !== 'timeout') await promptSleep(SUBMIT_TIMINGS.echoSettleMs);
   log(`[submit] id=${id} Enter after ${why} (+${Date.now() - startedAt}ms, len=${text.length})`);
+  // Never silently: a fragment reaching the agent is the whole of #656, and the
+  // transcript check that follows is the only other place it can surface.
+  if (why === 'timeout' && stalledSince !== null) {
+    log(`[submit] id=${id} Enter on a composer that still shows only PART of the prompt (len=${text.length})`);
+  }
   if (options.retryCodexEnter) writeCodexEnterWithRetry(id, engine);
   else try { engine.write(id, '\r'); } catch {}
 }

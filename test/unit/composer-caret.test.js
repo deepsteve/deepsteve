@@ -26,8 +26,9 @@ const MODULE_URL = new URL('../../public/js/composer-caret.js', `file://${__file
 let modPromise = null;
 const load = () => (modPromise ||= import(MODULE_URL));
 
-// Screen fixtures, minus the RULE building block.
-const SCREENS = Object.keys(FIXTURES).filter(k => k !== 'RULE');
+// Screen fixtures. The module also exports plain strings (RULE, the prompt text the
+// #656 fixtures render), and those are not screens.
+const SCREENS = Object.keys(FIXTURES).filter(k => Array.isArray(FIXTURES[k]));
 
 // ------------------------------------------------------------ the anti-drift pin
 
@@ -59,6 +60,11 @@ const VERDICTS = {
   STAGED_WRAPPED: 'busy',
   STAGED_MULTILINE: 'busy',
   PASTE_COLLAPSED: 'busy',
+  PASTE_COLLAPSED_MATCHING: 'busy',
+  PASTE_COLLAPSED_SHORT: 'busy',
+  PASTE_COLLAPSED_NO_COUNT: 'busy',
+  STAGED_COMPLETE: 'busy',
+  STAGED_PARTIAL: 'busy',
   BOXED_COMPOSER: 'busy',
   PERMISSION_MENU: 'unknown',
   SELECTION_MENU: 'unknown',

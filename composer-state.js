@@ -68,6 +68,18 @@ const PLACEHOLDER_RE = /^try\s+["'“”]/i;
 // signals.
 const PASTE_PLACEHOLDER_RE = /\[?\s*pasted\s+text\b|\+\s*\d+\s+lines?\b/i;
 
+// ...but the count in that placeholder is checkable, and it is the only completeness
+// signal that works for exactly the prompts that break. Claude Code builds the label
+// with (lifted verbatim from the 2.1.246 binary):
+//
+//   pr = (e) => (e.match(/\r\n|\r|\n/g) || []).length
+//   cr = (e, t) => t === 0 ? `[Pasted text #${e}]` : `[Pasted text #${e} +${t} lines]`
+//
+// So N is the NEWLINE count of the pasted text, not its line count, and a paste with
+// no newline in it renders with no `+N lines` clause at all. A 38-newline prompt that
+// arrived without its head shows `+8 lines`, which is the tell.
+const PASTE_LINE_COUNT_RE = /\+\s*(\d+)\s+lines?\b/i;
+
 // How many leading characters of the draft and the prompt must agree. One row of
 // the composer box is ~100 columns, so a needle this short can't be split by the
 // hard wrap that would otherwise inject a space mid-word.
@@ -162,6 +174,87 @@ function isPromptStaged(lines, text) {
   return nd.slice(0, k) === nt.slice(0, k);
 }
 
+// Shortest edge that may be treated as evidence. Below this a match is coincidence.
+const MIN_EDGE_CHARS = 8;
+
+/** Every whitespace character removed — see promptDraftVerdict for why. */
+function squash(s) {
+  return String(s == null ? '' : s).replace(/\s+/g, '');
+}
+
+/** Claude Code's own newline count — see PASTE_LINE_COUNT_RE. */
+function newlineCount(s) {
+  return (String(s == null ? '' : s).match(/\r\n|\r|\n/g) || []).length;
+}
+
+/**
+ * Has the whole of `text` finished arriving in the composer? (#656)
+ *
+ * This is NOT "is the draft equal to what we wrote". It cannot be, and pretending
+ * otherwise is how you get a regression: the submission poller reads one 40-row
+ * viewport of a 120x40 emulator, so a multi-kilobyte draft rendered uncollapsed does
+ * not fit. When it overflows, the composer scrolls to the cursor and what is legible
+ * is the END of the draft — the head is simply off-screen, on a perfectly good
+ * delivery. A draft whose head is missing is therefore ambiguous between "we lost the
+ * head" and "the head scrolled away", and only the transcript can tell them apart
+ * (prompt-delivery-check.js). Guessing here would clear and re-type healthy prompts.
+ *
+ * The question this CAN answer is the one the Enter gate actually needs: is the tail
+ * of our text there yet? The tail is the last thing we wrote, so seeing it means the
+ * write landed. Seeing our head but NOT our tail is the precise signature of Enter
+ * racing a write that is still streaming in — #656's mechanism.
+ *
+ * @param {string[]} lines  Interpreted screen lines, oldest first.
+ * @param {string} text     The prompt we are trying to submit.
+ * @returns {'complete'|'incomplete'|'unknown'}
+ *   'complete'   — the end of our text is in the composer; Enter is safe.
+ *   'incomplete' — our head is there, our tail is not; the write is still arriving.
+ *   'unknown'    — no composer, an empty one, or a draft that is not ours. Callers
+ *                  must treat this as "keep waiting", never as either verdict.
+ */
+function promptDraftVerdict(lines, text) {
+  const draft = readComposerDraft(lines);
+  if (!draft) return 'unknown';                 // null (no composer) or '' (nothing echoed)
+  const nt = norm(text);
+  if (!nt.length) return 'unknown';
+
+  // A collapsed paste hides its own characters, so the count is all we have — and it
+  // is a better signal than the characters would be, because it covers the whole
+  // draft rather than the visible part of it.
+  if (PASTE_PLACEHOLDER_RE.test(draft)) {
+    const m = PASTE_LINE_COUNT_RE.exec(draft);
+    if (!m) return 'unknown';                   // `[Pasted text #1]` — no count to check
+    const want = newlineCount(text);
+    if (want === 0) return 'unknown';           // we wrote one line; nothing to compare
+    const got = Number(m[1]);
+    // Claude counts what it kept after its own trimming, so allow one either way.
+    if (got >= want - 1) return 'complete';
+    if (got * 2 < want) return 'incomplete';
+    return 'unknown';
+  }
+
+  // Compare with whitespace REMOVED, not merely collapsed. readComposerDraft joins
+  // the composer's rows with a space, so a soft wrap inside a long word inserts a
+  // space that was never in what we wrote — norm() alone would then fail to match a
+  // perfectly good draft. That is also why COMPOSER_MATCH_CHARS (40) is safe as a
+  // single-row needle but a longer prefix comparison is not.
+  const sd = squash(draft);
+  const st = squash(text);
+  if (!sd.length || !st.length) return 'unknown';
+
+  // The END of our text is in the box, so the write landed. This is the signal Enter
+  // waits for, and it holds whether or not the head is still on screen.
+  const tailK = Math.min(COMPOSER_MATCH_CHARS, st.length);
+  if (sd.length >= tailK && sd.endsWith(st.slice(-tailK))) return 'complete';
+
+  // Our head is there and our tail is not: the write is still streaming in. Sending
+  // Enter now submits a fragment, which is the failure this whole function exists for.
+  const headK = Math.min(COMPOSER_MATCH_CHARS, st.length, Math.max(sd.length, MIN_EDGE_CHARS));
+  if (headK >= Math.min(MIN_EDGE_CHARS, st.length) && sd.startsWith(st.slice(0, headK))) return 'incomplete';
+
+  return 'unknown';                             // not our draft at all
+}
+
 /**
  * True when `text` appears anywhere on the screen — composer, transcript, wherever.
  *
@@ -187,6 +280,8 @@ module.exports = {
   readComposerDraft,
   isPromptStaged,
   isPromptOnScreen,
+  promptDraftVerdict,
   PASTE_PLACEHOLDER_RE,
+  PASTE_LINE_COUNT_RE,
   COMPOSER_MATCH_CHARS,
 };

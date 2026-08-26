@@ -11,6 +11,16 @@
 
 const RULE = '─'.repeat(60);
 
+// #656 — the completeness fixtures below are all renderings of THIS text, so a test
+// can ask "has all of it arrived?" and mean something. It is the same four-line shape
+// the #607 fixtures were transcribed from.
+const DELIVERED_PROMPT = [
+  'Work on GitHub issue #607: start_issue prompt sometimes never submits under load / many tabs',
+  '',
+  '## Summary',
+  'When a lot of tabs are open the prompt does not always get submitted.',
+].join('\n');
+
 // Idle, nothing typed. The composer box is present but its body is bare.
 const EMPTY_COMPOSER = [
   '⏺ Done — analytics/results/2026-07-16_weekly-session-summary.md, committed and pushed.',
@@ -79,10 +89,63 @@ const STAGED_MULTILINE = [
   '? for shortcuts',
 ];
 
+// #656 — the WHOLE of DELIVERED_PROMPT, wrapped across the box. Its last row ends
+// with the prompt's last characters, which is what makes it safe to press Enter.
+const STAGED_COMPLETE = [
+  '⏺ ready',
+  RULE,
+  '❯ Work on GitHub issue #607: start_issue prompt sometimes never submits under',
+  '  load / many tabs',
+  '❯',
+  '❯ ## Summary',
+  '❯ When a lot of tabs are open the prompt does not always get',
+  '  submitted.',
+  RULE,
+  '? for shortcuts',
+];
+
+// #656 — the same delivery caught MID-FLIGHT: the head is in the box, the tail is
+// not. Pressing Enter here submits a fragment, which is the bug.
+const STAGED_PARTIAL = [
+  '⏺ ready',
+  RULE,
+  '❯ Work on GitHub issue #607: start_issue prompt sometimes never submits under load / many tabs',
+  '❯',
+  '❯ ## Sum',
+  RULE,
+  '? for shortcuts',
+];
+
 // Claude Code collapses a big paste instead of echoing it.
 const PASTE_COLLAPSED = [
   RULE,
   '❯ [Pasted text #1 +42 lines]',
+  RULE,
+  '? for shortcuts',
+];
+
+// #656 — a collapsed paste whose `+N lines` matches DELIVERED_PROMPT. Claude Code
+// counts NEWLINES, not lines (see PASTE_LINE_COUNT_RE), so a 4-line prompt reads +3.
+const PASTE_COLLAPSED_MATCHING = [
+  RULE,
+  '❯ [Pasted text #1 +3 lines]',
+  RULE,
+  '? for shortcuts',
+];
+
+// #656 — the head-loss signature. The same paste arriving without most of itself
+// collapses to a count far below what we wrote.
+const PASTE_COLLAPSED_SHORT = [
+  RULE,
+  '❯ [Pasted text #1 +1 lines]',
+  RULE,
+  '? for shortcuts',
+];
+
+// #656 — a single-line paste carries no count at all: `cr(e, 0)` omits the clause.
+const PASTE_COLLAPSED_NO_COUNT = [
+  RULE,
+  '❯ [Pasted text #1]',
   RULE,
   '? for shortcuts',
 ];
@@ -134,8 +197,14 @@ module.exports = {
   STAGED_DRAFT,
   STAGED_WRAPPED,
   STAGED_MULTILINE,
+  STAGED_COMPLETE,
+  STAGED_PARTIAL,
   SUBMITTED_TRANSCRIPT_ECHO,
   PASTE_COLLAPSED,
+  PASTE_COLLAPSED_MATCHING,
+  PASTE_COLLAPSED_SHORT,
+  PASTE_COLLAPSED_NO_COUNT,
+  DELIVERED_PROMPT,
   BOXED_COMPOSER,
   PERMISSION_MENU,
   SELECTION_MENU,
