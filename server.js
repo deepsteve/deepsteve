@@ -26,6 +26,7 @@ const { readComposerDraft, isPromptStaged, isPromptOnScreen } = require('./compo
 const { wrapRunCommand } = require('./terminal-run');
 const { isTerminalReport } = require('./terminal-input');
 const { renderIssuePrompt, issueWorktreeName, issueTabName } = require('./issue-prompt');
+const { readRecentUserMessages, compareDelivered } = require('./prompt-delivery-check');
 const NodePtyEngine = require('./engines/node-pty');
 const TmuxEngine = require('./engines/tmux');
 
@@ -2141,6 +2142,10 @@ const SUBMIT_TIMINGS = {
   verifyGraceMs: envMs('DEEPSTEVE_SUBMIT_VERIFY_MS', 4000),
   verifyPollMs: envMs('DEEPSTEVE_SUBMIT_VERIFY_POLL_MS', 500),
   verifyRetries: envMs('DEEPSTEVE_SUBMIT_VERIFY_RETRIES', 2),
+  // #656 delivery check. Detached from the submission promise, so these are NOT
+  // part of the 60s inputBlockTimer budget above — nothing waits on them.
+  deliveredPollMs: envMs('DEEPSTEVE_DELIVERED_POLL_MS', 1000),
+  deliveredMaxMs: envMs('DEEPSTEVE_DELIVERED_MAX_MS', 15000),
 };
 
 const promptSleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -2204,6 +2209,70 @@ async function submitWithConfirmedEnter(id, entry, engine, text, options) {
 }
 
 /**
+ * Did the agent RECEIVE what we wrote? (#656)
+ *
+ * Every other layer here reads the screen, and the screen cannot answer this. Both
+ * `isPromptStaged` and `isPromptOnScreen` compare only the first COMPOSER_MATCH_CHARS,
+ * so a delivery that lost its head reads as "not staged" (and is never retried) and a
+ * submitted fragment whose head did land reads as "submitted". Two real deliveries lost
+ * ~2030 contiguous head characters and were logged as clean.
+ *
+ * Claude Code writes the message it accepted into its session transcript, so that file
+ * is an exact oracle. This runs DETACHED — never awaited, never joined to the delivery
+ * promise, never holding `promptDelivering` or `inputBlocked` — because it is
+ * instrumentation, not a gate. Its budget sits deliberately outside the 60s
+ * inputBlockTimer arithmetic for the same reason.
+ *
+ * Fails silent in every uncertain direction: no transcript yet, an agent whose
+ * transcripts we do not understand, a session id that moved under us. "Don't know" is
+ * never reported as truncation.
+ */
+async function checkDeliveredPrompt(id, entry, text) {
+  try {
+    if (!entry || !entry.cwd || !entry.claudeSessionId || !text) return;
+    // Claude Code's transcript format. Codex et al. have nothing comparable.
+    if (!getAgentConfig(entry.agentType).supportsSessionWatch) return;
+    // A slash command is not a user message. Some leave a <command-name> record,
+    // some (an inherited /rc, which is a UI toggle) leave none at all, so there is
+    // nothing to compare against and every one of them would report 'unconfirmed'.
+    if (text.trimStart().startsWith('/')) return;
+    const deadline = Date.now() + SUBMIT_TIMINGS.deliveredMaxMs;
+    while (Date.now() < deadline) {
+      await promptSleep(SUBMIT_TIMINGS.deliveredPollMs);
+      // A fork or a close swaps the entry, and the answer would then be about a
+      // different conversation — stop rather than report it against this one.
+      if (shells.get(id) !== entry || entry.killed) return;
+      const file = path.join(
+        claudeProjectDir(entry.cwd, entry.worktree, entry.configDir),
+        `${entry.claudeSessionId}.jsonl`);
+      const verdict = compareDelivered(text, readRecentUserMessages(file));
+      if (!verdict.known) continue;              // record not written yet
+      if (verdict.ok) {
+        log(`[submit] id=${id} delivered=${verdict.got}/${verdict.expected} chars`);
+        return;
+      }
+      // The alarm has to live in the plain log: auditWaiting is gated behind the
+      // default-off waitingAuditEnabled setting.
+      // compareDelivered only claims `known` when an end still matches, so exactly
+      // one of these is set here; losing BOTH ends surfaces as 'unconfirmed' below.
+      const missing = verdict.missingHead ? 'the HEAD' : 'the TAIL';
+      log(`[submit] id=${id} TRUNCATED DELIVERY — agent recorded ${verdict.got}/${verdict.expected} chars, missing ${missing}`);
+      auditWaiting('submit-truncated', id, entry, {
+        expected: verdict.expected, got: verdict.got,
+        missingHead: verdict.missingHead, missingTail: verdict.missingTail,
+      });
+      return;
+    }
+    // Nothing in the transcript ever looked like what we wrote. Under #607's rule
+    // silence is not failure, so this is worded as the uncertainty it is — but a
+    // delivery that lost BOTH ends can only ever surface here.
+    if (shells.get(id) === entry && !entry.killed) {
+      log(`[submit] id=${id} delivery unconfirmed after ${SUBMIT_TIMINGS.deliveredMaxMs}ms (len=${text.length}) — no matching message in the transcript`);
+    }
+  } catch { /* instrumentation must never affect the data path */ }
+}
+
+/**
  * After Enter: did the prompt actually go? (#607)
  *
  * The failure signature is precise — the agent is idle AND our prompt is still
@@ -2217,8 +2286,12 @@ async function submitWithConfirmedEnter(id, entry, engine, text, options) {
  * @returns {'skipped'|'submitted'|'aborted'|'unverified'|'stuck'}
  */
 async function confirmPromptSubmitted(id, text, options = {}) {
-  if (!options.verify) return 'skipped';
   const entry = shells.get(id);
+  // #656: detached, and deliberately BEFORE the verify gate — a truncated delivery
+  // takes the state === 'working' shortcut below, and is invisible to every check
+  // after it. Never awaited.
+  checkDeliveredPrompt(id, entry, text);
+  if (!options.verify) return 'skipped';
   if (!entry) return 'aborted';
   const engine = entry.engine || getEngine(id);
   // Any write to this PTY that isn't ours invalidates the verdict: the user may
