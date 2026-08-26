@@ -26,6 +26,22 @@ class Engine extends EventEmitter {
     throw new Error('write() not implemented');
   }
 
+  /**
+   * Deliver a large block of text to a session as a PASTE rather than as keystrokes.
+   *
+   * Separate from write() because it is allowed to take a different route to the
+   * child, and the base implementation is exactly write() so no engine has to
+   * implement it. An engine that overrides this must document two things: whether
+   * the route bypasses the ordered write() stream (tmux's does), and how the child
+   * is told where the paste ends.
+   *
+   * Callers use it for multi-kilobyte prompts (#656); everything keystroke-shaped
+   * stays on write().
+   */
+  pasteText(id, text) {
+    return this.write(id, text);
+  }
+
   /** Resize a session's terminal. */
   resize(id, cols, rows) {
     throw new Error('resize() not implemented');

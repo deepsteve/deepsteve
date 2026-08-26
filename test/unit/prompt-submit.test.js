@@ -68,6 +68,8 @@ function makeHarness({ agentType = 'claude', screen = F.EMPTY_COMPOSER, state = 
 
   const context = {
     shells,
+    // deliverPromptText sizes the prompt in bytes (#656); vm globals are bare.
+    Buffer,
     log: (m) => logs.push(m),
     auditWaiting: () => {},
     // #627: submitToShell releases any pending post-merge auto-close, on the rule
@@ -78,7 +80,7 @@ function makeHarness({ agentType = 'claude', screen = F.EMPTY_COMPOSER, state = 
     getEngine: () => engine,
     process: { env: ENV },
     settings: { promptSubmitVerify },
-    getAgentConfig: (t) => ({ screenMarkers: t === 'claude' ? {} : undefined }),
+    getAgentConfig: (t) => ({ screenMarkers: t === 'claude' ? {} : undefined, supportsPaste: t === 'claude' }),
     classifyScreenState: () => view.state,
     readComposerDraft,
     isPromptStaged,
@@ -95,7 +97,7 @@ function makeHarness({ agentType = 'claude', screen = F.EMPTY_COMPOSER, state = 
 
   const code = sourceBetween('const CODEX_SUBMIT_RETRY_MS', '/**\n * Async wrapper around `gh issue view`');
   vm.runInNewContext(`${code}
-result = { submitToShell, submitWithConfirmedEnter, confirmPromptSubmitted, promptSubmitConfirmEnabled, SUBMIT_TIMINGS }`, context);
+result = { submitToShell, submitWithConfirmedEnter, confirmPromptSubmitted, promptSubmitConfirmEnabled, deliverPromptText, SUBMIT_TIMINGS }`, context);
 
   const h = {
     ...context.result,
@@ -430,4 +432,69 @@ test('timing knobs are env-overridable and stay inside the 60s input-block budge
   // real worst case (one extra window's worth of silence-extension).
   assert.ok(deadline + echoMax + verifyMs * (retries + 2) < 60000,
     'production defaults must fit inside the 60s inputBlockTimer');
+});
+
+// --- #656: large prompts take the paste route -------------------------------
+//
+// write() goes down the attach client's tty, whose kernel input queue holds 1022
+// bytes on macOS. A multi-kilobyte prompt necessarily sits in it partly unread, and
+// anything that flushes it takes a whole queue-full of our text away silently.
+
+const BIG_PROMPT = PROMPT + '\n' + 'padding line that makes this prompt exceed one kernel queue-full. '.repeat(30);
+
+function pasteHarness(opts = {}) {
+  const h = makeHarness(opts);
+  h.pastes = [];
+  h.engine.pasteText = (id, data) => { h.pastes.push(data); };
+  return h;
+}
+
+test('a prompt bigger than one queue-full is pasted, not typed', async () => {
+  const h = pasteHarness();
+  assert.ok(Buffer.byteLength(BIG_PROMPT) >= 1024, 'fixture must exceed the threshold');
+  h.submitToShell(ID, BIG_PROMPT, h.engine, { confirmEcho: true });
+  assert.deepStrictEqual(h.pastes, [BIG_PROMPT]);
+  assert.deepStrictEqual(h.writes, [], 'nothing went down the keystroke path');
+});
+
+test('a small prompt keeps the plain write path byte for byte', async () => {
+  const h = pasteHarness();
+  assert.ok(Buffer.byteLength(PROMPT) < 1024);
+  h.submitToShell(ID, PROMPT, h.engine, { confirmEcho: true });
+  assert.deepStrictEqual(h.writes, [PROMPT]);
+  assert.deepStrictEqual(h.pastes, []);
+});
+
+test('an agent without supportsPaste is never pasted to', async () => {
+  const h = pasteHarness({ agentType: 'codex' });
+  // Called directly: confirmEcho is claude-only, but the routing decision is not.
+  h.submitWithConfirmedEnter(ID, h.entry, h.engine, BIG_PROMPT, {});
+  assert.deepStrictEqual(h.pastes, []);
+  assert.deepStrictEqual(h.writes, [BIG_PROMPT]);
+});
+
+test('an engine with no pasteText falls back to write', async () => {
+  const h = makeHarness();   // plain engine, write only
+  h.submitToShell(ID, BIG_PROMPT, h.engine, { confirmEcho: true });
+  assert.deepStrictEqual(h.writes, [BIG_PROMPT]);
+});
+
+test('byte length decides, not character count', async () => {
+  const h = pasteHarness();
+  // 700 three-byte characters: comfortably under 1024 chars, well over 1024 bytes.
+  const multibyte = '★'.repeat(700);
+  assert.ok(multibyte.length < 1024 && Buffer.byteLength(multibyte) >= 1024);
+  h.submitToShell(ID, multibyte, h.engine, { confirmEcho: true });
+  assert.deepStrictEqual(h.pastes, [multibyte]);
+});
+
+test('the re-type takes the same route as the first delivery', async () => {
+  const h = pasteHarness({ screen: F.PASTE_COLLAPSED_SHORT, autoOutput: true });
+  const submitted = h.submitToShell(ID, BIG_PROMPT, h.engine, { confirmEcho: true });
+  await h.drain();
+  await submitted;
+  assert.deepStrictEqual(h.pastes, [BIG_PROMPT, BIG_PROMPT]);
+  // Esc and Enter are keystrokes and stay on write(), which is what makes Enter
+  // arrive as its own stdin read.
+  assert.deepStrictEqual(h.writes, ['\x1b', '\r']);
 });

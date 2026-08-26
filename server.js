@@ -1424,6 +1424,12 @@ const AGENT_CONFIGS = {
     supportsWorktree: true,
     supportsSessionId: true,
     supportsSessionWatch: true,
+    // #656: a multi-kilobyte prompt may be delivered as a PASTE rather than as
+    // keystrokes. Asserts that this agent's TUI handles a pasted block whole —
+    // Claude Code collapses one to `[Pasted text #N +M lines]` and never reads an
+    // interior newline as Enter. Deliberately its own flag rather than reusing
+    // screenMarkers, which happens to be claude-only today but means something else.
+    supportsPaste: true,
     emitsBel: true,              // still used by killShell's BEL exit-watch + the #558 audit
     screenMarkers: CLAUDE_SCREEN_MARKERS, // #568: drives the screen-state waiting detector
     exitMethod: 'exit-cmd', // uses /exit
@@ -2187,6 +2193,27 @@ function promptSubmitConfirmEnabled(entry) {
     && !!getAgentConfig(entry.agentType).screenMarkers;
 }
 
+// Below this, today's single write() is already one kernel queue-full or less, so
+// there is nothing for a flush to take a bite out of and no reason to change the
+// route. MAX_INPUT is 1024 on macOS and the pty accepts 1022 of it.
+const PROMPT_PASTE_MIN_BYTES = envMs('DEEPSTEVE_PROMPT_PASTE_MIN_BYTES', 1024);
+
+/**
+ * Put `text` in front of the agent — as a paste when it is big enough to be worth
+ * routing around the attach client's tty, as a plain write otherwise (#656).
+ *
+ * Byte length, not character length: the queue that loses our text counts bytes, and
+ * a prompt of 900 multi-byte characters is well over the limit.
+ */
+function deliverPromptText(engine, id, entry, text) {
+  const big = Buffer.byteLength(text) >= PROMPT_PASTE_MIN_BYTES;
+  if (big && getAgentConfig(entry.agentType).supportsPaste && typeof engine.pasteText === 'function') {
+    engine.pasteText(id, text);
+    return;
+  }
+  engine.write(id, text);
+}
+
 /**
  * Write `text`, wait for the composer to show it, then send Enter as its own write.
  * Falls back to a timed Enter at the cap — confirmPromptSubmitted is the net for
@@ -2214,7 +2241,7 @@ async function submitWithConfirmedEnter(id, entry, engine, text, options) {
   // — a screen we cannot classify must not cost every delivery the full cap.
   let prevDraft = null;
 
-  engine.write(id, text);
+  deliverPromptText(engine, id, entry, text);
 
   while (Date.now() < deadline) {
     await promptSleep(SUBMIT_TIMINGS.echoPollMs);
@@ -2239,7 +2266,7 @@ async function submitWithConfirmedEnter(id, entry, engine, text, options) {
         try { engine.write(id, '\x1b'); } catch { return; }
         await promptSleep(SUBMIT_TIMINGS.echoPollMs);
         if (shells.get(id) !== entry || entry.killed) return;
-        try { engine.write(id, text); } catch { return; }
+        try { deliverPromptText(engine, id, entry, text); } catch { return; }
         baseSeq = entry.outputSeq || 0;
         floor = Date.now() + SUBMIT_TIMINGS.echoMinGapMs;
         stalledSince = null;

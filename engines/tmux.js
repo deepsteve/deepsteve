@@ -598,6 +598,57 @@ class TmuxEngine extends Engine {
     entry.attachPty.write(data);
   }
 
+  /**
+   * Paste a block of text straight into the pane, bypassing the attach client (#656).
+   *
+   * write() sends bytes down the attach PTY — the stdin of our `tmux attach-session`
+   * client. That tty has a kernel input queue holding MAX_INPUT (1022 bytes on
+   * macOS), and a multi-kilobyte prompt necessarily sits in it partly unread while
+   * the client drains it. Anything that flushes that queue takes a whole queue-full
+   * of our text with it, silently: two live deliveries lost 2026 and 2038 contiguous
+   * characters off the HEAD of ~2.4KB prompts, and the agent recorded only the tail.
+   *
+   * load-buffer/paste-buffer removes that hop entirely. The text goes into the tmux
+   * server over the command socket and the server writes it into the pane through its
+   * own bufferevent, which handles a slow reader by waiting rather than by losing
+   * bytes. It also lets tmux, which is the only party that knows, decide about
+   * bracketing.
+   *
+   * Three flags, none of them optional:
+   *   -r  do NOT replace linefeeds. paste-buffer's DEFAULT is to turn every LF into a
+   *       CR (tmux(1): "any linefeed (LF) characters in the paste buffer are replaced
+   *       with a separator, by default carriage return"). Our prompts are multi-line,
+   *       so without -r each newline arrives as Enter and the prompt submits itself a
+   *       line at a time.
+   *   -p  insert bracketed-paste markers, but only "if the application has requested
+   *       bracketed paste mode". tmux tracks the pane's real mode 2004 state and we
+   *       cannot, so this fails safe: a pane without it gets exactly today's bytes
+   *       rather than a literal `[200~` in its composer.
+   *   -d  delete the buffer afterwards. Explicitly named buffers are NOT subject to
+   *       `buffer-limit`, so one that outlives its paste is a leak; the catch below
+   *       deletes it again for the case where paste-buffer itself failed.
+   *
+   * NOT ordered against write(). write() is one stream down the client PTY; this goes
+   * around it. Callers must not interleave the two for a single logical input.
+   *
+   * Falls back to write() on any failure — a pane sitting in copy-mode ignores
+   * paste-buffer, and an unreachable tmux server must not lose the prompt.
+   */
+  pasteText(id, text) {
+    const entry = this._sessions.get(id);
+    if (!entry) return;
+    if (!text) return;
+    const bufferName = `ds-${id}`;
+    try {
+      this._exec(['load-buffer', '-b', bufferName, '-'], { input: text });
+      this._exec(['paste-buffer', '-b', bufferName, '-t', this._tmuxSessionName(id), '-p', '-r', '-d']);
+      return;
+    } catch {
+      try { this._exec(['delete-buffer', '-b', bufferName]); } catch { /* already gone */ }
+      entry.attachPty.write(text);
+    }
+  }
+
   resize(id, cols, rows) {
     const entry = this._sessions.get(id);
     if (!entry) return;
