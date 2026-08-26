@@ -53,16 +53,11 @@ Each user prompt triggers an agentic loop:
 5. If `stop_reason: "end_turn"`: Claude stops and emits BEL (waiting for input)
 6. Context compaction happens automatically when approaching token limits
 
-### Prompt submission (`server.js:650–653`)
+### Prompt submission
 
-```javascript
-function submitToShell(shell, text) {
-  shell.write(text);
-  setTimeout(() => shell.write('\r'), 1000);
-}
-```
+Text and `\r` must be sent as separate stdin reads: Ink's input parser only recognizes Enter when `\r` arrives as its **own** read, and `"text\r"` together is treated as pasted text.
 
-Text and `\r` must be sent separately with a 1-second delay. Ink's input parser only recognizes Enter when `\r` arrives as its own stdin read — sending `"text\r"` together is treated as pasted text.
+The fixed 1s delay that used to separate them is gone — it was only ever a proxy for "Ink consumed the text", and #607 (a prompt left staged forever) and #656 (a prompt submitted before it had finished arriving) are what that proxy cost. **[sessions.md → Getting a prompt into the agent](sessions.md#getting-a-prompt-into-the-agent) is the current contract** and owns the mechanism: the completeness gate before Enter, the verify-and-retry after it, the transcript oracle, the paste route for large prompts, and the timing budget they all share.
 
 ## Stop Conditions
 
@@ -91,9 +86,17 @@ Text and `\r` must be sent separately with a 1-second delay. Ink's input parser 
 - Clears older tool outputs first, preserves recent messages and CLAUDE.md
 - Can be triggered manually with `/compact`
 
-## BEL-Based State Detection (`server.js:706–733`)
+## BEL-Based State Detection
 
-BEL (`\x07`) in PTY output is the primary signal for Claude's state:
+> **Superseded.** #568 replaced BEL-as-primary with a screen-state idle detector
+> (`screen-classifier.js`), and #558 is why: BEL missed ~78% of the transitions it was
+> supposed to catch. BEL survives only as a corroborating signal — `waitingForInput`
+> now needs ~2s of PTY silence **and** a BEL since the user last submitted. See
+> [sessions.md → BEL detection / waiting classifier](sessions.md). The rest of this
+> section describes the pre-#568 design and is kept for the shape of the state machine,
+> not as a description of the code.
+
+BEL (`\x07`) in PTY output was the primary signal for Claude's state:
 
 - **BEL detected** while not already waiting → `waitingForInput = true`
   - Broadcasts state to all connected clients

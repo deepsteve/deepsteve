@@ -123,7 +123,7 @@ Rules a change anywhere in the tree could violate. Each one has a page that expl
 - **Never write `delete savedState[id]` in a close path.** Every close/kill/wipe writes a `closed: true` tombstone instead, so a conversation can always be resurrected via `--resume`. Use `tombstoneSession()` (explicit closes) or `handleShellGone()` (engine `onExit` epilogue). The only sanctioned purges are `DELETE /api/shells/:id?forget=1` and the retention sweep `pruneClosedSessions()`.
 - **A session's spawn cwd must exist.** `spawnSession` refuses a missing or non-directory cwd instead of letting tmux silently relocate the pane to `$HOME`, and a refused restore keeps its record. Validate the *spawn* cwd only — a Claude `--worktree` subdir legitimately does not exist yet.
 - **The first writer of a close reason wins.** A server-initiated close makes the browser echo a `close-session` back; that echo must not overwrite `closeReason`, or every unattended auto-close reads as user-closed. Any new close path preserves the rule.
-- **Ink only sees Enter as its own stdin read** — `shell.write("text\r")` does not submit. Use `submitToShell()`, which writes the text and the `\r` separately and echo-confirms the gap.
+- **Ink only sees Enter as its own stdin read** — `shell.write("text\r")` does not submit. Use `submitToShell()`, which writes the text and the `\r` separately and waits for the composer to show the **end** of what we wrote, not merely something. A non-empty composer is a presence check, and presence is what delivered a truncated prompt in #656.
 - **A terminal report is not user input.** xterm's replies to tmux's capability probes arrive on the session WebSocket looking exactly like keystrokes; `isTerminalReport()` filters them before `lastInputTime` and the auto-close cancel, or every disposable tab claims itself (#635).
 - **Queue prompts through `deliverPromptWhenReady`. Never arm `e.pendingDelivery` directly.** The per-shell FIFO is what sequences an inherited `/rc` ahead of the issue prompt.
 - **node-pty**: use `.removeListener()`, never `.off()`. Delete `env.CLAUDECODE` when spawning nested Claude instances.
@@ -131,7 +131,7 @@ Rules a change anywhere in the tree could violate. Each one has a page that expl
 **Engines and tmux** ([docs/terminal-engines.md](docs/terminal-engines.md))
 
 - **Use `spawnSession`'s return value** to record `engineType`. A tmux spawn can fail at runtime and fall back to node-pty; recording what was *requested* makes the entry lie.
-- **Every tmux invocation carries `-S <stateDir()>/tmux.sock`** and runs via `execFileSync` on a resolved absolute path — never through a shell, never on tmux's default per-UID socket.
+- **Every tmux invocation carries `-S <stateDir()>/tmux.sock`** and runs via `execFileSync` on a resolved absolute path — never through a shell, never on tmux's default per-UID socket. Since #656 that covers a *data* path too (`pasteText`'s `load-buffer`/`paste-buffer`), not only control commands.
 - **Destroy only what this daemon can positively identify as its own and finished.** A `ds-*` session absent from our state.json is logged and left strictly alone.
 - **Artifacts the daemon installs and removes outside its state dir hang off `agentHomeDir()`, never `os.homedir()`** — `~/.claude/commands`, `~/.agents`. Otherwise a second instance isolated with `DEEPSTEVE_HOME` prunes the real user's home. `os.homedir()` stays right for paths naming where a *spawned agent* reads (`~/.claude/projects`, `~/.codex`); ownership is the line, not the dotdir.
 
