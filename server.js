@@ -14,6 +14,7 @@ const { createPowerAssertion } = require('./power-assertion');
 const { resolveForkTip } = require('./fork-resolve');
 const { formatLogTimestamp, createLogRotator, defaultLogPaths } = require('./logging');
 const { findGitRoot } = require('./git-root');
+const { usableWorktree } = require('./worktree-support');
 const { stateDir, agentHomeDir, expandTilde, spawnCwdProblem, assertSpawnCwd, tmuxSocketPath, defaultTmuxSocketPath } = require('./paths');
 const { resolveBinary, runBinary, resolveUrlOpener, resolveLoginShell } = require('./bin-path');
 const { createPendingOpens } = require('./pending-opens');
@@ -5830,7 +5831,9 @@ function startIssueSession({ number, title, body, labels, url, cwd, agentType, c
     return { error: problem };
   }
 
-  const worktree = validateWorktree(issueWorktreeName(number));
+  // Same guard as the WS path: an issue opened against a repo with no commits yet
+  // must not be handed --worktree, or the tab dies before it paints (#656).
+  const worktree = usableWorktree(cwd, validateWorktree(issueWorktreeName(number)), { log });
   const id = randomUUID().slice(0, 8);
   const claudeSessionId = agentType === 'codex' ? null : randomUUID();
   const codexHomeId = agentType === 'codex' ? id : null;
@@ -6607,7 +6610,7 @@ function handleWsConnection(ws, req) {
   let cwd = url.searchParams.get('cwd') || process.env.HOME;
   cwd = expandTilde(cwd);
   const createNew = url.searchParams.get('new') === '1';
-  const worktree = validateWorktree(url.searchParams.get('worktree'));
+  let worktree = validateWorktree(url.searchParams.get('worktree'));
   const planMode = url.searchParams.get('planMode') === '1';
   const name = url.searchParams.get('name');
   const windowId = url.searchParams.get('windowId') || null;
@@ -6828,6 +6831,12 @@ function handleWsConnection(ws, req) {
       try { ws.close(); } catch {}
       return;
     }
+    // A worktree this checkout cannot host is dropped here rather than passed to the
+    // agent, which would exit within a second and take the tab with it. Placed with
+    // the cwd guard above and above ensureWorktree() for the same reason it is: this
+    // is the last point where the request is still just a request. Restores are
+    // deliberately not filtered — see worktree-support.js.
+    worktree = usableWorktree(cwd, worktree, { log });
     const oldId = id;
     // #554: a create retry re-sends new=1 with the client-minted id — honor it so
     // repeated attempts converge on one shell instead of spawning one per retry.

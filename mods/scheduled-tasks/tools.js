@@ -20,6 +20,7 @@ const { z } = require('zod');
 const cron = require('./cron');
 // Resolves to ~/.deepsteve/git-root.js once deployed — mods sit at ~/.deepsteve/mods/<id>/.
 const { findGitRoot } = require('../../git-root');
+const { usableWorktree } = require('../../worktree-support');
 
 const TASKS_FILE = path.join(stateDir(), 'scheduled-tasks.json');
 const MAX_RUNS = 20;          // per-task run history is bounded
@@ -411,7 +412,12 @@ function runTask(task, reason, { foreground = false } = {}) {
   let worktree = null;
   if (task.isolateWorktree !== false && agentConfig.supportsWorktree
       && task.project && cwd === task.project && isGitRepo(cwd)) {
-    worktree = ctx.validateWorktree(`scheduled-${id}`);
+    // isGitRepo is the cheap pre-filter (a pure-fs walk); usableWorktree then spends
+    // a `git rev-parse` on the case it cannot see — a repo whose HEAD has no commit
+    // yet, where --worktree makes Claude exit on arrival (#656). An unattended run
+    // that dies a second after spawn leaves nobody to notice, so this path wants the
+    // check even more than the interactive ones do.
+    worktree = usableWorktree(cwd, ctx.validateWorktree(`scheduled-${id}`), { log });
   }
   // Does this agent get deepsteve MCP at all? Decides both the self-report contract in
   // the prompt below and — since we're the ones imposing it — whether to pre-permit the
