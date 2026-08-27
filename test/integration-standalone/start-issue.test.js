@@ -23,7 +23,7 @@
  */
 const { test, before, after } = require('node:test');
 const assert = require('node:assert');
-const { spawn } = require('node:child_process');
+const { spawn, execFileSync } = require('node:child_process');
 const fs = require('node:fs');
 const net = require('node:net');
 const os = require('node:os');
@@ -243,6 +243,17 @@ before(async () => {
   projDir = path.join(tmpRoot, 'proj');
   fs.mkdirSync(path.join(HOME, 'bin'), { recursive: true });
   fs.mkdirSync(projDir, { recursive: true });
+  // A real repo with a real commit, because every test below opens an issue session
+  // with `worktree: github-issue-<n>` and since #656 a worktree is only granted to a
+  // checkout that can actually host one. A bare mkdir is not a project any issue
+  // could be opened against — the session would (correctly) come back with no
+  // worktree, and the assertions here would fail for a reason unrelated to their
+  // subject. -c rather than `git config` because this HOME has no global identity.
+  execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: projDir, stdio: 'ignore' });
+  fs.writeFileSync(path.join(projDir, 'README.md'), '# proj\n');
+  execFileSync('git', ['add', '.'], { cwd: projDir, stdio: 'ignore' });
+  execFileSync('git', ['-c', 'user.email=t@example.com', '-c', 'user.name=T',
+    'commit', '-qm', 'first'], { cwd: projDir, stdio: 'ignore' });
   fs.writeFileSync(path.join(HOME, 'bin', 'claude'), CLAUDE_STUB, { mode: 0o755 });
   // Inert `open`: the browser auto-open on the HTTP path must never reach a real browser.
   fs.writeFileSync(path.join(HOME, 'bin', 'open'), '#!/bin/bash\necho "$*" >> "$HOME/open-invocations.log"\nexit 0\n', { mode: 0o755 });

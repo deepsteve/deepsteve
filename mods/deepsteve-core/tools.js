@@ -4,6 +4,7 @@ const path = require('path');
 const { execFileSync } = require('child_process');
 const { mergeWorktree } = require('./merge-worktree');
 const { stateDir, spawnCwdProblem } = require('../../paths');
+const { usableWorktree } = require('../../worktree-support');
 const { splitAtMarker, capOutput, createRunLog } = require('../../terminal-run');
 
 // git via execFile with an argv array — no shell, so no quoting/injection concerns
@@ -578,8 +579,12 @@ function init(context) {
 
         // Agent session
         const agentConfig = getAgentConfig(effectiveAgentType);
-        const effectiveWorktree = worktree !== undefined ? (worktree || null) : (caller.worktree || null);
-        const validatedWorktree = effectiveWorktree ? validateWorktree(effectiveWorktree) : null;
+        const requestedWorktree = worktree !== undefined ? (worktree || null) : (caller.worktree || null);
+        // A checkout that cannot host a worktree kills the agent on arrival rather
+        // than degrading, so the flag is dropped here (#656). Inheriting the caller's
+        // worktree goes through the same check: cheap, and the caller's repo is not
+        // necessarily the cwd this call was handed.
+        const validatedWorktree = usableWorktree(effectiveCwd, requestedWorktree ? validateWorktree(requestedWorktree) : null, { log });
         let spawnCwd = effectiveCwd;
         if (validatedWorktree && !agentConfig.supportsWorktree) {
           spawnCwd = ensureWorktree(effectiveCwd, validatedWorktree);

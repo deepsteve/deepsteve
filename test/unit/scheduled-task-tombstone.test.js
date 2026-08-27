@@ -235,6 +235,16 @@ test('an unreclaimed worktree keeps the tombstone alive for sweepLeakedWorktrees
   const repo = path.join(process.env.HOME, 'repo');
   fs.mkdirSync(repo, { recursive: true });
   execFileSync('git', ['init', '-q'], { cwd: repo });
+  // The commit is load-bearing, not decoration: a repo with an unborn HEAD has no
+  // base branch to fork, so since #656 it is refused a worktree outright (passing
+  // --worktree there makes the agent exit on arrival). `git init` alone would build
+  // a project no real run could ever get a worktree for, and the precondition below
+  // would fail for a reason that has nothing to do with tombstones. -c rather than
+  // `git config` because this HOME is a scratch dir with no global identity.
+  fs.writeFileSync(path.join(repo, 'README.md'), '# repo\n');
+  execFileSync('git', ['add', '.'], { cwd: repo });
+  execFileSync('git', ['-c', 'user.email=test@example.com', '-c', 'user.name=Test',
+    'commit', '-qm', 'first'], { cwd: repo });
   supportsWorktree = true;
   const id = await schedule({ project: repo, isolate_worktree: true });
   const shellId = await fire(id);
