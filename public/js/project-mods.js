@@ -154,8 +154,12 @@ export const tabIdFor = (modId) => 'pm-' + modId;
 export const VIEW_PREFIX = 'project-mod:';
 export const viewIdFor = (modId) => VIEW_PREFIX + modId;
 
-/** True when this mod opens as a view rather than a tab. Absent openMode = 'tab' (#628). */
-const opensAsView = (mod) => mod?.openMode === 'view';
+/**
+ * True when this mod opens as a view rather than a tab. The wire always carries an
+ * openMode (serialize() sends the EFFECTIVE one), so the fallback only covers a client
+ * talking to an older server — and it matches the server's default, which is 'view'.
+ */
+const opensAsView = (mod) => (mod?.openMode ?? 'view') === 'view';
 
 /**
  * A project mod's tab label. The icon is prefixed into the NAME rather than carried

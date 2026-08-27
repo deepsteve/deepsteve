@@ -79,10 +79,22 @@ const SURFACES = ['rail', 'button', 'tab'];
 const DEFAULT_SURFACES = ['rail'];
 
 // How a launcher OPENS the mod (#628) — a different axis from `surfaces`, which only says
-// WHERE the launchers go. 'tab' is what every pre-#628 mod did, so it is the default and no
-// manifest migration is needed.
+// WHERE the launchers go.
+//
+// The default was 'tab' when view mode was new, so that existing mods kept their behaviour
+// with no manifest migration. It is 'view' now, because the old default was quietly the
+// wrong one for the thing a project mod usually is. An agent that does not think about
+// open_mode gets what it did not ask for: a dashboard that takes a tab, forever, every time
+// the project is active. That is what actually happened to the Terminal Wall mod, whose
+// second commit is titled "rail-only launcher, opened as a view" — the correction, one
+// commit after it was created with the default.
+//
+// A pinned mod is unaffected: the 'tab' surface overrides the stored mode while it is set
+// (see effectiveOpenMode), so a manifest carrying `surfaces:['rail','tab']` and no openMode
+// still opens exactly as it did. What changes is the rail/button-only mod that never said
+// what it wanted — it now glances instead of accumulating a tab.
 const OPEN_MODES = ['tab', 'view'];
-const DEFAULT_OPEN_MODE = 'tab';
+const DEFAULT_OPEN_MODE = 'view';
 
 const MAX_NAME_LEN = 60;
 const MAX_ICON_LEN = 8;   // one emoji can be several code points (ZWJ sequences, skin tones)
@@ -344,8 +356,10 @@ function normalize(m, root, dirname) {
   if (!root || !dirname || !DIRNAME_RE.test(dirname)) return null;
   // Each field on its own, NOT through cleanPlacement: a pinned view is a legal thing to
   // find on disk since #645 (the pin overrides the stored mode rather than overwriting it),
-  // and resolving the pair here would undo that on the very next scan. A pre-#628 manifest
-  // has no openMode at all, which cleans to 'tab' — that IS the migration.
+  // and resolving the pair here would undo that on the very next scan. That separation is
+  // also what makes the 'view' default safe to apply to old manifests: one with no openMode
+  // at all now cleans to 'view', but if it also carries the 'tab' surface the pin still
+  // wins, so it opens the way it always did.
   const surfaces = cleanSurfaces(m.surfaces);
   const openMode = cleanOpenMode(m.openMode);
   const dir = path.join(projectModsDir(root), dirname);
@@ -559,8 +573,9 @@ function init(context) {
         'Register a PROJECT MOD: a page that belongs to ONE project (this repo) and nowhere else. ' +
         'Unlike a display tab — a one-shot snapshot that disappears with the session — a project mod is durable: ' +
         'it stays registered to the project and is reachable every session from the projects rail, a square button ' +
-        'in the tab strip, or a pinned tab that opens in the background and keeps running. For a glance-at-it ' +
-        'dashboard that should not occupy a tab at all, pass open_mode:"view". Use it for a dashboard or ' +
+        'in the tab strip, or a pinned tab that opens in the background and keeps running. By default it opens as a ' +
+        'VIEW: it takes over the content area, consumes no tab, and is dismissed back to whatever you were looking ' +
+        'at. Pass open_mode:"tab" only if it genuinely needs to sit among the work tabs. Use it for a dashboard or ' +
         'live tooling the project should carry with it. It is stored IN THE REPO, at ' +
         '.deepsteve/mods/<name>/, so COMMIT IT — that is how it travels to another checkout or another person. ' +
         'The repo must already be part of a registered project, or there would be nothing to attach it to. ' +
@@ -577,7 +592,7 @@ function init(context) {
         replacements: z.record(z.string()).optional().describe('Literal find→replace pairs applied server-side, e.g. {"%%REPO%%": "deepsteve"} — lets a file on disk stay a reusable template'),
         icon: z.string().optional().describe('An emoji shown in the rail and on the tab-strip button. Defaults to a monogram derived from the name'),
         surfaces: z.array(z.enum(['rail', 'button', 'tab'])).optional().describe('Where the LAUNCHERS go: "rail" = an entry under the project in the projects rail (default), "button" = a square button at the top/left of the tab strip, "tab" = a pinned tab that auto-opens in the background whenever this project is active. "tab" is dropped for open_mode:"view"'),
-        open_mode: z.enum(['tab', 'view']).optional().describe('What a launcher DOES. "tab" (default) opens a real, closeable tab at the end of the strip. "view" takes over the content area WITHOUT consuming a tab and is dismissed back to whatever you were looking at — use it for a glance-at-it dashboard that should not sit among the work tabs. Incompatible with the "tab" surface, which is dropped if you pass both'),
+        open_mode: z.enum(['tab', 'view']).optional().describe('What a launcher DOES. "view" (default) takes over the content area WITHOUT consuming a tab and is dismissed back to whatever you were looking at — right for a glance-at-it dashboard. "tab" opens a real, closeable tab at the end of the strip; pass it only if the page is somewhere you work rather than something you check. Stating "view" drops the "tab" surface if you pass both; asking for the "tab" surface without stating open_mode keeps it'),
         project: z.string().optional().describe('Absolute path to the project, canonicalized to its git repo root. Defaults to the calling session\'s repo root'),
       },
       handler: async ({ name, session_id, html, file_path, replacements, icon, surfaces, open_mode, project }, extra) => {
@@ -600,7 +615,11 @@ function init(context) {
         const resolved = resolveHtml({ html, file_path, replacements });
         if (resolved.error) return err(resolved.error);
 
-        const placement = cleanPlacement(surfaces, open_mode);
+        // Which field the caller actually stated. With openMode now defaulting to 'view',
+        // an unqualified `surfaces:[...,'tab']` would otherwise have its pin stripped by a
+        // mode nobody asked for — so a caller that named surfaces and not open_mode gets
+        // its surfaces honoured, and only a stated open_mode resolves the pair the other way.
+        const placement = cleanPlacement(surfaces, open_mode, open_mode !== undefined ? 'openMode' : 'surfaces');
         const mod = {
           root: proj,
           dirname: uniqueDirname(proj, slugify(cleanedName)),
@@ -624,12 +643,16 @@ function init(context) {
           try { fs.rmSync(mod.dir, { recursive: true, force: true }); } catch {}
           return err(`Failed to write the project mod into ${proj}: ${e.message}`);
         }
-        commit(`created ${mod.dirname} "${mod.name}" in ${proj} [${mod.surfaces.join(',')}] as ${mod.openMode}`);
+        commit(`created ${mod.dirname} "${mod.name}" in ${proj} [${mod.surfaces.join(',')}] as ${effectiveOpenMode(mod)}`);
 
         return ok({
           id: mod.id, name: mod.name, project: mod.project,
           path: path.relative(mod.root, mod.dir),
-          surfaces: mod.surfaces, openMode: mod.openMode,
+          // The EFFECTIVE mode, the same thing serialize() puts on the wire — telling the
+          // caller "view" for a mod its own pin will open as a tab is a lie about the only
+          // question this field answers. Reachable from create only since the default moved
+          // to 'view': `surfaces:['rail','tab']` with no open_mode now stores a pinned view.
+          surfaces: mod.surfaces, openMode: effectiveOpenMode(mod), storedOpenMode: mod.openMode,
           commitReminder: commitReminder(mod),
         });
       },

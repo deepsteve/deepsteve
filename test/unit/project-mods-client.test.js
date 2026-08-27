@@ -560,14 +560,17 @@ test('a view-mode mod opens as a view from every launcher, and never as a tab', 
   assert.deepStrictEqual(state.ensured, []);
 });
 
-test('an absent openMode still means "tab" on the client, matching the server default', async () => {
+test('an absent openMode means "view" on the client, matching the server default', async () => {
+  // The wire always carries an openMode (serialize ships the effective one), so this only
+  // covers a client talking to an older server. It still has to agree with the server's
+  // default, or the two would disagree about the same mod.
   const legacy = { ...modA, surfaces: ['rail', 'button'] };
   delete legacy.openMode;
   const { state, tabs } = await setup({ mods: [legacy], activeContext: CTX_A });
   const [btn] = tabs.children.filter(c => c.className?.includes('project-mod-btn'));
   btn.listeners.click();
-  assert.deepStrictEqual(state.ensured.at(-1), { modId: 'ma', background: false, pinned: false });
-  assert.deepStrictEqual(state.shown, [], 'no openMode is not "view"');
+  assert.deepStrictEqual(state.ensured, [], 'no openMode does not open a tab');
+  assert.deepStrictEqual(state.shown, ['ma'], 'it shows a view instead');
 });
 
 test('a view-mode mod is never auto-opened as a pinned tab, even if the list says so', async () => {

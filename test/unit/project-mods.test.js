@@ -112,12 +112,12 @@ test('cleanSurfaces keeps only known surfaces, in canonical order, and never emp
   assert.deepStrictEqual(cleanSurfaces('rail'), ['rail'], 'a non-array is not silently spread into characters');
 });
 
-test('cleanOpenMode defaults to "tab" for anything it does not recognize', () => {
+test('cleanOpenMode defaults to "view" for anything it does not recognize', () => {
   assert.strictEqual(cleanOpenMode('view'), 'view');
   assert.strictEqual(cleanOpenMode('tab'), 'tab');
-  assert.strictEqual(cleanOpenMode(undefined), 'tab', 'a pre-#628 manifest has no openMode at all');
-  assert.strictEqual(cleanOpenMode('bogus'), 'tab');
-  assert.strictEqual(cleanOpenMode(['view']), 'tab', 'a non-string is not coerced');
+  assert.strictEqual(cleanOpenMode(undefined), 'view', 'a manifest that never stated one');
+  assert.strictEqual(cleanOpenMode('bogus'), 'view');
+  assert.strictEqual(cleanOpenMode(['view']), 'view', 'a non-string is not coerced');
 });
 
 test('cleanPlacement keeps openMode:"view" and the "tab" surface from both being in force', () => {
@@ -173,12 +173,20 @@ test('normalize rejects a directory name that could escape or hide', () => {
   assert.strictEqual(ok(''), null);
 });
 
-test('a pre-#628 manifest loads as openMode:"tab" — the whole migration', () => {
+test('a manifest with no openMode loads as "view", and a pinned one still opens as a tab', () => {
   // Every manifest is read through normalize(), so this IS what happens to a repo whose
-  // mods predate the mode: no field, no migration step, no change in behavior.
+  // mods predate the mode. There is no migration step; the default simply moved to 'view'.
   const row = normalize({ scope: PROJECT_SCOPE, name: 'Dash', surfaces: ['rail', 'tab'] }, '/repo/alpha', 'dash');
-  assert.strictEqual(row.openMode, 'tab');
+  assert.strictEqual(row.openMode, 'view', 'the default the manifest never stated');
   assert.deepStrictEqual(row.surfaces, ['rail', 'tab'], 'and the pin it already had survives');
+  // The pin is what makes moving the default safe: this mod opens exactly as it always
+  // did, because effectiveOpenMode lets the surface override the mode it never chose.
+  assert.strictEqual(effectiveOpenMode(row), 'tab', 'so its behaviour is unchanged');
+
+  // A rail-only mod that never stated a mode is the case the new default is FOR: it used
+  // to take a tab nobody asked for, and now glances instead.
+  const railOnly = normalize({ scope: PROJECT_SCOPE, name: 'Dash', surfaces: ['rail'] }, '/repo/alpha', 'dash');
+  assert.strictEqual(effectiveOpenMode(railOnly), 'view');
 
   // A pinned view is a legal thing to find on disk since #645 — the loader must keep the
   // pair verbatim, or the very next scan would undo the override the user just set.
@@ -378,10 +386,21 @@ test('two mods with the same name get distinct directories', async () => {
   await deleteAll();
 });
 
-test('create_project_mod defaults to openMode:"tab", and open_mode:"view" drops the tab surface', async () => {
+test('create_project_mod defaults to openMode:"view", and open_mode:"view" drops the tab surface', async () => {
   const plain = await create({ name: 'Dash', session_id: 'sess-a', html: '<p>x</p>' });
-  assert.strictEqual(plain.openMode, 'tab', 'pre-#628 behavior is the default');
-  assert.strictEqual(manifestOf(REPO_A, plain.dirname).openMode, 'tab');
+  assert.strictEqual(plain.openMode, 'view', 'an agent that never considered open_mode gets a view');
+  assert.strictEqual(manifestOf(REPO_A, plain.dirname).openMode, 'view');
+
+  // Asking for the pin WITHOUT stating a mode must keep it. The default is not a
+  // statement, so it must not outrank the one field the caller actually named — the
+  // regression this would otherwise be is a silently unpinned mod.
+  const pinned = await create({
+    name: 'Pinned', session_id: 'sess-a', html: '<p>x</p>', surfaces: ['rail', 'tab'],
+  });
+  assert.deepStrictEqual(pinned.surfaces, ['rail', 'tab'], 'the stated surfaces win');
+  assert.strictEqual(pinned.openMode, 'tab', 'and the pin overrides the defaulted view');
+  assert.strictEqual(manifestOf(REPO_A, pinned.dirname).openMode, 'view',
+    'the manifest keeps the standing choice, so un-pinning later reveals the view');
 
   const view = await create({
     name: 'Glance', session_id: 'sess-a', html: '<p>x</p>',
