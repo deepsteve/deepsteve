@@ -77,6 +77,7 @@ function makeContext({ metaControlsEnabled = true, consentOutcome = 'confirmed',
     sessionPaths: (entry) => ({ cwd: entry.cwd, repoRoot: entry.cwd }),
     getForegroundCommand: () => null,
     maybeInheritRemoteControl: () => {},
+    logRcWrite: () => {},
   });
   return { tools, shells, settings, consentCalls, submitCalls };
 }

@@ -46,7 +46,12 @@ class NodePtyEngine extends Engine {
 
   write(id, data) {
     const entry = this._ptys.get(id);
-    if (entry) entry.pty.write(data);
+    if (!entry) return;
+    // Ground truth: the bytes this daemon puts on the pty, observed at the boundary
+    // rather than inferred from the layer that asked for them. Set by server.js; a
+    // throwing observer must never cost a keystroke.
+    if (this.onWrite) { try { this.onWrite(id, data); } catch {} }
+    entry.pty.write(data);
   }
 
   resize(id, cols, rows) {

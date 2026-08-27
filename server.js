@@ -822,6 +822,7 @@ function saveSettings() {
 const LOGIN_SHELL = resolveLoginShell();
 
 const ptyEngine = new NodePtyEngine();
+ptyEngine.onWrite = tapPtyWrite;
 log('Engine: node-pty (always enabled)');
 log(`Shell: sessions run under ${LOGIN_SHELL.path}${LOGIN_SHELL.loginFlag ? ` ${LOGIN_SHELL.loginFlag}` : ''}`);
 
@@ -892,6 +893,7 @@ function userTmux() {
       log(`tmux: attach PTY for ${id} died but its tmux session is alive — re-attached (attempt ${attempt})`));
     tmuxEngine.on('reattach-failed', (id, attempt, e) =>
       log(`tmux: attach PTY for ${id} died and re-attach ${attempt} failed (${e.message}) — reporting the session as exited`));
+    tmuxEngine.onWrite = tapPtyWrite;
   } else {
     // Say WHERE we looked (#619). A bare "tmux not available" is the failure shape
     // that hid the zsh dependency for as long as it did, and tmux is on its way to
@@ -2079,7 +2081,31 @@ function acknowledgeCodexSubmitOutput(entry, id) {
   log(`[codex-submit] id=${id} Enter acknowledged by PTY output`)
 }
 
+// Any time deepsteve itself puts `/rc` into a PTY, say so — whichever path did it.
+// Without this the only rc-shaped evidence was [rc-check], which covers the
+// inheritance DECISION and nothing else: a meta_type or a browser-delivered `/rc`
+// reached the agent logged as an anonymous `len=3`. That made "deepsteve did not send
+// it" an inference from the absence of a line, which is not the same thing as knowing.
+// Matches the command as a token so an ordinary prompt merely containing the letters
+// does not cry wolf.
+const RC_COMMAND_RE = /(^|\s)\/rc(\s|$)/;
+// The PTY boundary tap. logRcWrite says WHO asked; this says what actually went out,
+// observed inside the engine rather than inferred from the caller. Only rc-shaped
+// payloads are logged: taking every write would be a firehose and a keylogger. A user
+// TYPING /rc arrives as three separate one-character writes and matches none of them,
+// so what this catches is programmatic writes — which is exactly the question.
+function tapPtyWrite(id, data) {
+  if (typeof data !== 'string' || !RC_COMMAND_RE.test(data)) return;
+  log(`[rc-pty] id=${id} bytes=${JSON.stringify(data.slice(0, 60))}`);
+}
+
+function logRcWrite(id, text, source) {
+  if (typeof text !== 'string' || !RC_COMMAND_RE.test(text)) return;
+  log(`[rc-write] id=${id} source=${source} text=${JSON.stringify(text.slice(0, 40))}`);
+}
+
 function submitToShell(id, text, eng, options = {}) {
+  logRcWrite(id, text, options.source || 'unattributed');
   // Mark this as a submission so the idle classifier doesn't treat the agent's
   // resulting work as "waiting for input" until its next completion BEL. Covers
   // auto-submitted initialPrompts and meta_type as well as graceful /exit.
@@ -2837,6 +2863,7 @@ function maybeInheritRemoteControl({ newId, agentType, isFork, parentId }) {
   deliverPromptWhenReady(newId, '/rc', {
     skipIf: () => sessionShowsRcPill(newId),
     skipReason: 'the new session already has its own Remote Control pill',
+    source: 'rc-inherit',
     // [rc-inherit] marks the keystroke, not the intention. Before this gate it was
     // logged at queue time and therefore claimed an inheritance that the child did
     // not need and should not have received.
@@ -7255,7 +7282,7 @@ function broadcastToWindow(windowId, msg) {
 }
 
 // Initialize MCP server (async, ~100ms for dynamic import)
-initMCP({ app, security, shells, wss, broadcast, broadcastToWindow, log, MODS_DIR, closeSession, tombstoneSession, handleShellGone, spawnSession, sessionEnv, getSpawnArgs, mcpConfigArgs, getAgentConfig, resolveConfigDir, validateModel, validateEffort, wireShellOutput, watchClaudeSessionDir, unwatchClaudeSessionDir, resolveForkParentSession, saveState, validateWorktree, ensureWorktree, sessionPaths, submitToShell, fetchIssueFromGitHub, deliverPromptWhenReady, startIssueSession, reloadClients, deliverToWindow, settings, isShuttingDown: () => shuttingDown, displayTabs, setDisplayTab, deleteDisplayTab, screenshots, setScreenshot, deleteScreenshot, getScreenshotPath, getDefaultEngine, getForegroundCommand, sessionLog, emitSessionOpen, getContexts: () => contexts, pathInside, getSavedSession: (id) => savedState[id] || null, stripEscapeSequences, readTerminalScreen, sessionInputState, maybeInheritRemoteControl, requestMetaControlsConsent, registerRestartBlocker, armSessionAutoClose }).catch(e => log('MCP init failed:', e.message));
+initMCP({ app, security, shells, wss, broadcast, broadcastToWindow, log, MODS_DIR, closeSession, tombstoneSession, handleShellGone, spawnSession, sessionEnv, getSpawnArgs, mcpConfigArgs, getAgentConfig, resolveConfigDir, validateModel, validateEffort, wireShellOutput, watchClaudeSessionDir, unwatchClaudeSessionDir, resolveForkParentSession, saveState, validateWorktree, ensureWorktree, sessionPaths, submitToShell, fetchIssueFromGitHub, deliverPromptWhenReady, startIssueSession, reloadClients, deliverToWindow, settings, isShuttingDown: () => shuttingDown, displayTabs, setDisplayTab, deleteDisplayTab, screenshots, setScreenshot, deleteScreenshot, getScreenshotPath, getDefaultEngine, getForegroundCommand, sessionLog, emitSessionOpen, getContexts: () => contexts, pathInside, getSavedSession: (id) => savedState[id] || null, stripEscapeSequences, readTerminalScreen, sessionInputState, maybeInheritRemoteControl, requestMetaControlsConsent, registerRestartBlocker, armSessionAutoClose, logRcWrite }).catch(e => log('MCP init failed:', e.message));
 
 // Watch themes directory for changes and broadcast to clients
 let themeWatchDebounce = null;

@@ -581,6 +581,11 @@ class TmuxEngine extends Engine {
   write(id, data) {
     const entry = this._sessions.get(id);
     if (!entry) return;
+    // Ground truth: the bytes this daemon puts on the pane, observed at the boundary
+    // rather than inferred from the layer that asked for them. Ahead of the CSI-u
+    // branch below so a raw-hex send is seen too. Set by server.js; a throwing
+    // observer must never cost a keystroke.
+    if (this.onWrite) { try { this.onWrite(id, data); } catch {} }
 
     // CSI u sequences (e.g., \x1b[13;2u for Shift+Enter) aren't passed through
     // by tmux's input parser. Send as raw hex bytes directly to the pane.

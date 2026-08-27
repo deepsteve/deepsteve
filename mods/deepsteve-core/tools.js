@@ -112,7 +112,7 @@ function init(context) {
     deliverPromptWhenReady, startIssueSession,
     reloadClients, deliverToWindow, settings, log, isShuttingDown,
     emitSessionOpen,
-    stripEscapeSequences, readTerminalScreen, sessionInputState, maybeInheritRemoteControl, requestMetaControlsConsent,
+    stripEscapeSequences, readTerminalScreen, sessionInputState, maybeInheritRemoteControl, requestMetaControlsConsent, logRcWrite,
     armSessionAutoClose,
   } = context;
 
@@ -263,8 +263,11 @@ function init(context) {
         const doSubmit = text ? submit !== false : false;
         if (text) {
           if (doSubmit) {
-            await submitToShell(targetId, text); // writes text, then \r after 1s (Ink-safe)
+            await submitToShell(targetId, text, undefined, { source: 'meta_type' }); // writes text, then \r after 1s (Ink-safe)
           } else {
+            // The staged branch never reaches submitToShell, so attribute it here or a
+            // `/rc` parked in someone's composer by an agent has no author in the log.
+            logRcWrite(targetId, text, 'meta_type-stage');
             entry.engine.write(targetId, text);  // stage text without Enter
           }
         }
