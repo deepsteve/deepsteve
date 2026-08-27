@@ -23,9 +23,11 @@ Use `--refresh` when changes affect anything the browser loads (frontend JS/CSS/
 **`--force` skips the in-app modal (#504).** When you can't (or don't want to) confirm in the browser, `--force` moves acceptance to **Claude Code's own permission prompt** for the command instead. It is a deliberate two-step so the user sees the blast radius before accepting:
 
 ```bash
-./restart.sh --force                       # step 1: prints "Restarting - N active sessions will be interrupted" + the exact confirm command. No restart.
-./restart.sh --force --prompt "Restarting - 3 active sessions will be interrupted"   # step 2: restarts after re-checking the text
+./restart.sh --force --refresh             # step 1: prints "Restarting - N active sessions will be interrupted" + the exact confirm command. No restart.
+./restart.sh --force --prompt "Restarting - 3 active sessions will be interrupted" --refresh   # step 2: restarts after re-checking the text
 ```
+
+**Pass the flags you want in step 1, and run step 2 exactly as printed.** Step 2's command is *built* from step 1's flags (`--refresh` is appended only if step 1 had it, and it lands after `--prompt`), so a step 1 without `--refresh` prints a step 2 without it. A hand-edited variant — reordered flags, one added after the fact — is a command the script never offered and gets denied at the permission prompt. That denial is about the edit, not about policy: **`--force` exists so an agent can restart with nobody at the machine**, which is the case `--refresh` cannot serve (it waits on a browser modal and prints `Restart cancelled.` after 60s when no one answers).
 
 The server owns the wording (`GET /api/restart-prompt`, derived from the live session count); step 2 re-validates the echoed `--prompt` text against the server and aborts if it's stale or forged, so the number you approve is always the real one. The forced path still does a full graceful deploy + restart (it just skips the `/api/request-restart` POST). **Do not allowlist `./restart.sh` (especially the `--force --prompt` form)** — the guarantee that a restart can never happen unilaterally (e.g. by an agent) rests entirely on that command staying behind Claude Code's permission prompt.
 
