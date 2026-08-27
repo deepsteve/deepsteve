@@ -357,15 +357,20 @@ test('the HTTP path inherits /rc from its caller (it did not before #642)', asyn
   caller.ws.send('/rc\r');
   await waitFor(() => caller.screen().includes('/rc active'), 'the caller to enter /rc', 20000, 250);
 
-  const before = (daemonLog.match(/\[rc-inherit\]/g) || []).length;
+  // Assert the DECISION, not the keystroke. Claude Code enables Remote Control by
+  // itself at startup, so the child normally draws its own pill and the queued /rc is
+  // dropped at delivery — [rc-inherit] marks the keystroke and correctly does not
+  // appear in that case. What this test is about is that the HTTP path consults the
+  // caller at all, which is [rc-check].
+  const before = (daemonLog.match(/\[rc-check\][^\n]*queue \/rc/g) || []).length;
   const res = await startIssueHttp({
     number: 519, title: 'rc inherit over HTTP', body: 'RC-HTTP-519',
     cwd: projDir, sessionId: caller.session.id,
   });
   assert.equal(res.status, 200, `expected 200, got ${res.status}: ${JSON.stringify(res.json)}`);
   opened.push(res.json.id);
-  await waitFor(() => (daemonLog.match(/\[rc-inherit\]/g) || []).length > before,
-    'the HTTP path to inherit /rc', 20000, 250);
+  await waitFor(() => (daemonLog.match(/\[rc-check\][^\n]*queue \/rc/g) || []).length > before,
+    'the HTTP path to consult the caller for /rc', 20000, 250);
   caller.close();
 });
 

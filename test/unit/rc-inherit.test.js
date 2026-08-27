@@ -73,7 +73,7 @@ function makeHarness(parentEntry) {
     shells,
     settings: { inheritRemoteControl: true, inheritRemoteControlOnFork: true },
     log: (m) => logs.push(m),
-    deliverPromptWhenReady: (id, prompt) => delivered.push({ id, prompt }),
+    deliverPromptWhenReady: (id, prompt, options = {}) => delivered.push({ id, prompt, options }),
   };
   vm.runInNewContext(`${RC_SOURCE}
 result = { sessionHasRemoteControl, rcMarkerOnScreen, maybeInheritRemoteControl, RC_FOOTER_ROWS }`, context);
@@ -111,8 +111,12 @@ test('a parent with /rc on right now still hands it down', async () => {
 
   assert.strictEqual(h.sessionHasRemoteControl(PARENT), true);
   inherit(h);
-  assert.deepStrictEqual(h.delivered, [{ id: CHILD, prompt: '/rc' }]);
-  assert.ok(h.logs.some((l) => l.includes('[rc-inherit]')), 'the decision is logged');
+  assert.deepStrictEqual(h.delivered.map(d => ({ id: d.id, prompt: d.prompt })), [{ id: CHILD, prompt: '/rc' }]);
+  assert.ok(h.logs.some((l) => l.includes('[rc-check]') && l.includes('queue /rc')),
+    'the decision is logged at spawn');
+  h.delivered[0].options.onDeliver();
+  assert.ok(h.logs.some((l) => l.includes('[rc-inherit]')),
+    '[rc-inherit] marks the keystroke, not the intention');
 });
 
 test('a footer scrolled up into the transcript is history, not state', async () => {
@@ -176,7 +180,7 @@ test('the collapsed "/rc" pill counts as on', async () => {
 
   assert.strictEqual(h.rcMarkerOnScreen(PARENT), '/rc', 'the collapsed pill is the marker');
   inherit(h);
-  assert.deepStrictEqual(h.delivered, [{ id: CHILD, prompt: '/rc' }]);
+  assert.deepStrictEqual(h.delivered.map(d => ({ id: d.id, prompt: d.prompt })), [{ id: CHILD, prompt: '/rc' }]);
 });
 
 test('the verbose pill still reports itself as the verbose one', async () => {
@@ -210,4 +214,48 @@ test('every spawn logs its decision, including the skips', async () => {
   const noParent = makeHarness(null);
   noParent.maybeInheritRemoteControl({ newId: CHILD, agentType: 'claude', isFork: false, parentId: null });
   assert.match(noParent.logs.join('\n'), /\[rc-check\].*skip: no live parent session/);
+});
+
+
+// --- the child gets the last word -------------------------------------------
+
+test('the queued /rc is dropped when the child already has its own pill', async () => {
+  // The bug this pins, seen live: Claude Code turns Remote Control on by itself, so
+  // EVERY parent shows the pill and every new tab inherited a `/rc` — typed into a
+  // session that already had Remote Control on. `/rc` is a toggle, so the inherited
+  // keystroke was an OFF switch. Three tabs in thirteen minutes on one machine.
+  const parent = await makeSession([FOOTER_RC_COLLAPSED]);
+  const h = makeHarness(parent);
+  h.shells.set(CHILD, { agentType: 'claude', terminalScreen: (await makeSession([FOOTER_RC_COLLAPSED])).terminalScreen });
+
+  inherit(h);
+  const queued = h.delivered[0];
+  assert.ok(queued, 'it is still queued — the child has drawn nothing at queue time');
+  assert.strictEqual(typeof queued.options.skipIf, 'function', 'the decision rides to delivery time');
+  assert.strictEqual(queued.options.skipIf(), true, 'and at delivery time it drops the prompt');
+});
+
+test('a child with no Remote Control of its own still gets /rc', async () => {
+  // The feature has to keep working if the server-driven auto-on default flips off, or
+  // the user sets remoteControlAtStartup:false. Inheritance is only redundant while
+  // Claude Code is doing it for us.
+  const parent = await makeSession([FOOTER_RC_COLLAPSED]);
+  const h = makeHarness(parent);
+  h.shells.set(CHILD, { agentType: 'claude', terminalScreen: (await makeSession([FOOTER_PLAIN])).terminalScreen });
+
+  inherit(h);
+  assert.strictEqual(h.delivered[0].options.skipIf(), false, 'nothing to defer to — type it');
+});
+
+test('a child still CONNECTING is left alone', async () => {
+  // The pill is "/rc connecting…" before it is "/rc active". Matching only the active
+  // form would type `/rc` into a session that was one second from having it on, and
+  // the toggle would land as an off switch.
+  const CONNECTING = '  ⏵⏵ auto mode on (shift+tab to cycle) · /rc connecting… · ← for agents';
+  const parent = await makeSession([FOOTER_RC_COLLAPSED]);
+  const h = makeHarness(parent);
+  h.shells.set(CHILD, { agentType: 'claude', terminalScreen: (await makeSession([CONNECTING])).terminalScreen });
+
+  inherit(h);
+  assert.strictEqual(h.delivered[0].options.skipIf(), true);
 });

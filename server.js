@@ -2607,6 +2607,14 @@ function drainPromptQueue(id) {
     // seconds after the drain that scheduled it (#607).
     const live = shells.get(id);
     if (!live) return;
+    // Evaluated here rather than at queue time because the answer depends on what the
+    // agent has drawn, and at queue time it had drawn nothing.
+    if (options.skipIf && options.skipIf(id)) {
+      log(`[deliverPrompt] id=${id} dropping queued prompt: ${options.skipReason || 'skipIf'}`);
+      finishDelivery();
+      return;
+    }
+    if (options.onDeliver) options.onDeliver(id);
     const confirm = promptSubmitConfirmEnabled(live);
     // Re-enable input only after the submission has actually been VERIFIED, so the
     // banner dismiss, the unblock, and a truthful "prompt-submitted" event all
@@ -2615,26 +2623,31 @@ function drainPromptQueue(id) {
     // blocked through verification is also what makes the retry Enter safe.
     submitToShell(id, prompt, null, { ...options, confirmEcho: confirm }).then(
       () => confirmPromptSubmitted(id, prompt, { verify: confirm })
-    ).then(() => {
-      const entry = shells.get(id);
-      if (!entry) return;
-      if (entry.promptQueue && entry.promptQueue.length > 0) {
-        // More prompts pending — keep input blocked and the banner up; the next
-        // drain waits for the agent's next idle/BEL before submitting.
-        drainPromptQueue(id);
-        return;
-      }
-      entry.promptDelivering = false;
-      entry.inputBlocked = false;
-      clearTimeout(entry.inputBlockTimer);
-      entry.inputBlockTimer = null;
-      if (entry.loading || entry.prefill) {
-        const wasPrefill = !!entry.prefill;
-        entry.loading = false;
-        entry.prefill = false;
-        deliverToWindow({ type: 'prompt-submitted', id, windowId: entry.windowId || null, prefill: wasPrefill }, entry.windowId || null);
-      }
-    });
+    ).then(finishDelivery);
+  }
+
+  // Epilogue for a delivery that is OVER — submitted or skipped. A skip has to release
+  // the queue and the input block exactly like a submit, or the tab is left with
+  // keystrokes blocked and the next queued prompt never drains.
+  function finishDelivery() {
+    const entry = shells.get(id);
+    if (!entry) return;
+    if (entry.promptQueue && entry.promptQueue.length > 0) {
+      // More prompts pending — keep input blocked and the banner up; the next
+      // drain waits for the agent's next idle/BEL before submitting.
+      drainPromptQueue(id);
+      return;
+    }
+    entry.promptDelivering = false;
+    entry.inputBlocked = false;
+    clearTimeout(entry.inputBlockTimer);
+    entry.inputBlockTimer = null;
+    if (entry.loading || entry.prefill) {
+      const wasPrefill = !!entry.prefill;
+      entry.loading = false;
+      entry.prefill = false;
+      deliverToWindow({ type: 'prompt-submitted', id, windowId: entry.windowId || null, prefill: wasPrefill }, entry.windowId || null);
+    }
   }
 
   // Codex's composer is visible while MCP servers are still starting, so its
@@ -2779,6 +2792,23 @@ function rcFooterSample(id) {
   return JSON.stringify(footer.slice(-90));
 }
 
+// Any Remote Control pill, in any state. This answers a DIFFERENT question from
+// rcMarkerOnScreen: not "is Remote Control on?" but "is Claude Code already running
+// Remote Control in this session?". `/rc` is a TOGGLE, so a session that is merely
+// CONNECTING must not be typed at either — the keystroke would land as an off switch a
+// second later. Claude Code turns Remote Control on by itself at startup, so for a
+// freshly spawned child the answer is normally yes and there is nothing to inherit.
+const RC_PILL_ANY = /\/rc (active|connecting|reconnecting|failed)/;
+function sessionShowsRcPill(id) {
+  const e = shells.get(id);
+  if (!e || !e.terminalScreen) return false;
+  for (const line of e.terminalScreen.linesSync(RC_FOOTER_ROWS)) {
+    if (RC_PILL_ANY.test(line)) return true;
+    if (RC_FOOTER_SEGMENT.test(line) && RC_MARKER_COLLAPSED.test(line)) return true;
+  }
+  return false;
+}
+
 /**
  * When a new tab/fork is opened from a parent session that has Remote Control on,
  * re-issue `/rc` in the child so it inherits remote control. Gated per-path by the
@@ -2800,9 +2830,18 @@ function maybeInheritRemoteControl({ newId, agentType, isFork, parentId }) {
   if (!parentId || parentId === newId || !shells.has(parentId)) return skip('no live parent session');
   const marker = rcMarkerOnScreen(parentId);
   if (!marker) return skip(`parent shows no /rc marker; footer=${rcFooterSample(parentId)}`);
-  log(`[rc-check] new=${newId} ${kind} parent=${parentId} -> inherit: parent shows "${marker}"`);
-  log(`[rc-inherit] parent ${parentId} has /rc active -> enabling /rc in new ${kind} ${newId}`);
-  deliverPromptWhenReady(newId, '/rc');
+  log(`[rc-check] new=${newId} ${kind} parent=${parentId} -> queue /rc: parent shows "${marker}"`);
+  // Decided at DELIVERY time, not here: the child has not drawn a screen yet. By the
+  // time its composer is ready Claude Code has drawn its own pill if it is doing
+  // Remote Control itself, and then this prompt is dropped instead of toggling it off.
+  deliverPromptWhenReady(newId, '/rc', {
+    skipIf: () => sessionShowsRcPill(newId),
+    skipReason: 'the new session already has its own Remote Control pill',
+    // [rc-inherit] marks the keystroke, not the intention. Before this gate it was
+    // logged at queue time and therefore claimed an inheritance that the child did
+    // not need and should not have received.
+    onDeliver: () => log(`[rc-inherit] ${newId} has no Remote Control of its own -> typing /rc (parent ${parentId})`),
+  });
 }
 
 /**
