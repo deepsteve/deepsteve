@@ -95,7 +95,7 @@ function makeHarness({ agentType = 'claude', screen = F.EMPTY_COMPOSER, state = 
     },
   };
 
-  const code = sourceBetween('const CODEX_SUBMIT_RETRY_MS', '/**\n * Async wrapper around `gh issue view`');
+  const code = sourceBetween('const CODEX_SUBMIT_RETRY_MS', 'function fetchIssueFromGitHub');
   vm.runInNewContext(`${code}
 result = { submitToShell, submitWithConfirmedEnter, confirmPromptSubmitted, promptSubmitConfirmEnabled, deliverPromptText, SUBMIT_TIMINGS }`, context);
 

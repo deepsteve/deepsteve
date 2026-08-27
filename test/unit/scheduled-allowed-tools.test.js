@@ -51,7 +51,7 @@ function sourceBetween(start, end) {
 
 function loadArgumentHelpers(home) {
   const code = sourceBetween('const AGENT_CONFIGS', 'function validateWorktree')
-    + sourceBetween('function serializeShellEntry', '// #561:');
+    + sourceBetween('function serializeShellEntry', 'function tombstoneSession');
   const context = {
     fs, path,
     os: { homedir: () => home },

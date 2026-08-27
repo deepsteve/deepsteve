@@ -59,8 +59,8 @@ result = { AGENT_CONFIGS, getSpawnArgs, getResumeArgs, mcpConfigArgs }`, context
 }
 
 function loadReadinessHelpers() {
-  const readiness = sourceBetween('const CODEX_MCP_STATUS_RE', '/**\n * Deliver a prompt');
-  const stripping = sourceBetween('function stripEscapeSequences', '// --- Screen-state waiting detector');
+  const readiness = sourceBetween('const CODEX_MCP_STATUS_RE', 'function deliverPromptWhenReady');
+  const stripping = sourceBetween('function stripEscapeSequences', 'const SCREEN_TAIL_BYTES');
   const timers = [];
   const shells = new Map();
   const context = {
@@ -82,7 +82,7 @@ result = { observeCodexReadiness, codexLoadedPromptRendered }`, context);
 }
 
 function loadSubmitHelpers() {
-  const code = sourceBetween('const CODEX_SUBMIT_RETRY_MS', '/**\n * Async wrapper around `gh issue view`')
+  const code = sourceBetween('const CODEX_SUBMIT_RETRY_MS', 'function fetchIssueFromGitHub')
   const timers = []
   const shells = new Map()
   const context = {
@@ -371,7 +371,7 @@ test('scheduled Codex retry is cancelled by output from a turn that already star
 test('Codex recent restores converge on the isolated home identity', () => {
   const code = sourceBetween(
     'function restoreShellIdForRecentSession',
-    '// Restore a recent session'
+    "app.post('/api/recent-sessions/:key/restore'"
   );
   const context = { randomUUID: () => 'ffffffff-ffff-ffff-ffff-ffffffffffff' };
   vm.runInNewContext(`${code}
@@ -392,7 +392,7 @@ result = restoreShellIdForRecentSession`, context);
 });
 
 test('Codex home identity is included in the canonical persisted shell shape', () => {
-  const code = sourceBetween('function serializeShellEntry', '// #561: a session record');
+  const code = sourceBetween('function serializeShellEntry', 'function tombstoneSession');
   const context = {};
   vm.runInNewContext(`${code}
 result = serializeShellEntry({

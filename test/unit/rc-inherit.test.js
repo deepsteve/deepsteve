@@ -31,7 +31,7 @@ function sourceBetween(start, end) {
 
 const RC_SOURCE = sourceBetween(
   'const RC_FOOTER_ROWS = 8;',
-  '/**\n * Coarse input-state of a session',
+  'function sessionInputState',
 );
 
 const PARENT = 'parent01';
