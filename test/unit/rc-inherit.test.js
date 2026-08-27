@@ -30,7 +30,7 @@ function sourceBetween(start, end) {
 }
 
 const RC_SOURCE = sourceBetween(
-  "/**\n * True if the session's CURRENT screen shows",
+  'const RC_FOOTER_ROWS = 8;',
   '/**\n * Coarse input-state of a session',
 );
 
@@ -40,6 +40,11 @@ const CHILD = 'child001';
 // A Claude Code footer, with and without the Remote Control segment.
 const FOOTER_RC = '  ⏵⏵ auto mode on (shift+tab to cycle) · /rc active · ← for agents';
 const FOOTER_PLAIN = '  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents';
+// From the sixth session that sees the pill, Claude Code stops spelling it out and
+// right-aligns a bare "/rc" on the same footer line instead.
+const FOOTER_RC_COLLAPSED = '  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents' + ' '.repeat(40) + '/rc';
+// The same three characters, typed by the user into the composer box.
+const COMPOSER_RC = '╭──────────╮\r\n│ > /rc\r\n╰──────────╯';
 
 // Enough transcript above the composer that a scrolled-away footer is out of the
 // bottom-rows window the detector reads.
@@ -71,7 +76,7 @@ function makeHarness(parentEntry) {
     deliverPromptWhenReady: (id, prompt) => delivered.push({ id, prompt }),
   };
   vm.runInNewContext(`${RC_SOURCE}
-result = { sessionHasRemoteControl, maybeInheritRemoteControl, RC_FOOTER_ROWS }`, context);
+result = { sessionHasRemoteControl, rcMarkerOnScreen, maybeInheritRemoteControl, RC_FOOTER_ROWS }`, context);
 
   return { ...context.result, shells, logs, delivered, settings: context.settings };
 }
@@ -157,4 +162,52 @@ test('only the bottom rows of the screen are read', () => {
   const h = makeHarness(null);
   assert.ok(h.RC_FOOTER_ROWS > 0 && h.RC_FOOTER_ROWS <= 12,
     'the window must stay a footer read; widening it reintroduces the history scan');
+});
+
+
+// --- the collapsed pill -----------------------------------------------------
+
+test('the collapsed "/rc" pill counts as on', async () => {
+  // Matching only "/rc active" made this detector answer "off" for every session on
+  // a machine past the five-sighting threshold — silently, because Claude Code turns
+  // Remote Control on by itself, so nothing looked missing.
+  const parent = await makeSession([TRANSCRIPT.join('\r\n') + '\r\n', FOOTER_RC_COLLAPSED]);
+  const h = makeHarness(parent);
+
+  assert.strictEqual(h.rcMarkerOnScreen(PARENT), '/rc', 'the collapsed pill is the marker');
+  inherit(h);
+  assert.deepStrictEqual(h.delivered, [{ id: CHILD, prompt: '/rc' }]);
+});
+
+test('the verbose pill still reports itself as the verbose one', async () => {
+  const parent = await makeSession([FOOTER_RC]);
+  assert.strictEqual(makeHarness(parent).rcMarkerOnScreen(PARENT), '/rc active',
+    'the log has to be able to name which form matched, or the next drift is invisible again');
+});
+
+test('a "/rc" the user typed is not a pill', async () => {
+  // The collapsed pill is three characters long, so the composer has to be excluded
+  // by something other than its text: it carries no footer segment.
+  const parent = await makeSession([TRANSCRIPT.join('\r\n') + '\r\n', COMPOSER_RC]);
+  const h = makeHarness(parent);
+
+  assert.strictEqual(h.rcMarkerOnScreen(PARENT), null);
+  inherit(h);
+  assert.deepStrictEqual(h.delivered, [], 'nothing is typed into the child');
+});
+
+test('every spawn logs its decision, including the skips', async () => {
+  // Deep Steve passes no launch flag for Remote Control — it types `/rc`. This line is
+  // the only evidence of whether a session got it from here or from Claude Code.
+  const off = await makeSession([FOOTER_PLAIN]);
+  const h = makeHarness(off);
+  inherit(h);
+  const line = h.logs.find((l) => l.includes('[rc-check]'));
+  assert.ok(line, 'a skip is logged too');
+  assert.match(line, /skip: parent shows no \/rc marker/);
+  assert.match(line, /footer=/, 'and it quotes what the detector actually saw');
+
+  const noParent = makeHarness(null);
+  noParent.maybeInheritRemoteControl({ newId: CHILD, agentType: 'claude', isFork: false, parentId: null });
+  assert.match(noParent.logs.join('\n'), /\[rc-check\].*skip: no live parent session/);
 });

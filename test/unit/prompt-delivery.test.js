@@ -91,7 +91,7 @@ function makeHarness({ agentType = 'claude', waitingForInput = true, screen = 'u
     },
   };
 
-  const delivery = sourceBetween('function deliverPromptWhenReady', "/**\n * True if the session's CURRENT screen shows");
+  const delivery = sourceBetween('function deliverPromptWhenReady', 'const RC_FOOTER_ROWS = 8;');
   const detector = sourceBetween('function stripEscapeSequences', 'function wireShellOutput');
   vm.runInNewContext(`${delivery}
 ${detector}

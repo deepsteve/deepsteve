@@ -2713,9 +2713,30 @@ function servePendingDelivery(e, id, state) {
   setTimeout(pending.submit, 0);
 }
 
+const RC_FOOTER_ROWS = 8;
+
+// The pill reads "/rc active" only until Claude Code has shown it five times; from
+// the sixth session on it collapses to a bare "/rc" (`rc-active-badge` /
+// seenNotifications, threshold 5, in the 2.1.x bundle). BOTH mean active: the pill's
+// other states spell themselves out ("/rc connecting…", "/rc reconnecting",
+// "/rc failed"), so a bare "/rc" is never one of them. Matching only the verbose form
+// is what silently switched this detector off mid-August 2026 on a machine whose
+// counter had run out — it read every parent as Remote-Control-off and inheritance
+// stopped firing, invisibly, because Claude Code turns Remote Control on by itself.
+const RC_MARKER_VERBOSE = '/rc active';
+// The collapsed pill is right-aligned on the footer line, so it is matched at
+// end-of-line AND only on a line carrying a footer segment. A "/rc" the *user* typed
+// sits in the composer box, which carries none — without that conjunction the
+// composer would read as a live pill.
+const RC_FOOTER_SEGMENT = /⏵⏵|for agents|to cycle|to manage/;
+const RC_MARKER_COLLAPSED = /(^|\s)\/rc$/;
+
 /**
- * True if the session's CURRENT screen shows Claude Code's "/rc active" footer —
- * i.e. Remote Control is on right now.
+ * The Remote Control marker on the session's CURRENT screen, or null if it shows none
+ * — i.e. the string that says Remote Control is on right now. Returned rather than a
+ * boolean so the caller can log WHICH form matched: these markers are a TUI-version
+ * contract, and the last time one drifted there was no way to tell a parent that was
+ * genuinely off from a marker we had stopped recognizing.
  *
  * Reads the interpreted screen, never the raw scrollback tail. That tail is a
  * concatenation of overlapping repaint frames — the same property that makes
@@ -2734,11 +2755,28 @@ function servePendingDelivery(e, id, state) {
  * user's behalf. Still O(rows) and still run once at child-tab creation, never on
  * the PTY data path.
  */
-const RC_FOOTER_ROWS = 8;
-function sessionHasRemoteControl(id) {
+function rcMarkerOnScreen(id) {
   const e = shells.get(id);
-  if (!e || !e.terminalScreen) return false;
-  return e.terminalScreen.linesSync(RC_FOOTER_ROWS).join('\n').includes('/rc active');
+  if (!e || !e.terminalScreen) return null;
+  for (const line of e.terminalScreen.linesSync(RC_FOOTER_ROWS)) {
+    if (line.includes(RC_MARKER_VERBOSE)) return RC_MARKER_VERBOSE;
+    if (RC_FOOTER_SEGMENT.test(line) && RC_MARKER_COLLAPSED.test(line)) return '/rc';
+  }
+  return null;
+}
+
+function sessionHasRemoteControl(id) {
+  return rcMarkerOnScreen(id) !== null;
+}
+
+// The footer line as the detector saw it, for the [rc-check] log. Truncated: this
+// runs once per spawn, and a full 120-column row per line would bury the decision.
+function rcFooterSample(id) {
+  const e = shells.get(id);
+  if (!e || !e.terminalScreen) return 'no-screen';
+  const lines = e.terminalScreen.linesSync(RC_FOOTER_ROWS).filter(Boolean);
+  const footer = lines.reverse().find(l => RC_FOOTER_SEGMENT.test(l)) || lines[0] || '';
+  return JSON.stringify(footer.slice(-90));
 }
 
 /**
@@ -2746,14 +2784,24 @@ function sessionHasRemoteControl(id) {
  * re-issue `/rc` in the child so it inherits remote control. Gated per-path by the
  * inheritRemoteControl / inheritRemoteControlOnFork settings. Reuses the existing
  * prepopulate-and-send path (deliverPromptWhenReady) — no new infrastructure.
+ *
+ * Logs its decision on EVERY spawn, including the no-op ones. Deep Steve types `/rc`
+ * and passes no launch flag, so this line is the only evidence of whether a session's
+ * Remote Control came from here or from Claude Code turning it on by itself — and
+ * without the skip reasons, a detector that had stopped matching was indistinguishable
+ * from a parent that simply had it off.
  */
 function maybeInheritRemoteControl({ newId, agentType, isFork, parentId }) {
-  if (agentType !== 'claude') return;  // /rc is a Claude Code feature
+  const kind = isFork ? 'fork' : 'tab';
+  const skip = (reason) => log(`[rc-check] new=${newId} ${kind} parent=${parentId || 'none'} -> skip: ${reason}`);
+  if (agentType !== 'claude') return skip(`agent=${agentType} has no /rc`);  // /rc is a Claude Code feature
   const enabled = isFork ? settings.inheritRemoteControlOnFork : settings.inheritRemoteControl;
-  if (!enabled) return;
-  if (!parentId || parentId === newId || !shells.has(parentId)) return;
-  if (!sessionHasRemoteControl(parentId)) return;
-  log(`[rc-inherit] parent ${parentId} has /rc active -> enabling /rc in new ${isFork ? 'fork' : 'tab'} ${newId}`);
+  if (!enabled) return skip(`inheritRemoteControl${isFork ? 'OnFork' : ''}=false`);
+  if (!parentId || parentId === newId || !shells.has(parentId)) return skip('no live parent session');
+  const marker = rcMarkerOnScreen(parentId);
+  if (!marker) return skip(`parent shows no /rc marker; footer=${rcFooterSample(parentId)}`);
+  log(`[rc-check] new=${newId} ${kind} parent=${parentId} -> inherit: parent shows "${marker}"`);
+  log(`[rc-inherit] parent ${parentId} has /rc active -> enabling /rc in new ${kind} ${newId}`);
   deliverPromptWhenReady(newId, '/rc');
 }
 
