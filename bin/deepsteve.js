@@ -529,7 +529,7 @@ function cmdUninstall() {
 }
 
 function cmdHelp() {
-  say(`deepsteve ${pkg.version} — a hackable web UI for your Claude Code and Codex agents
+  say(`deepsteve ${pkg.version} — change your dev environment as fast as you change your code
 
 Usage: deepsteve <command> [options]
 
