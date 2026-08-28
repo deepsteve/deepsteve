@@ -2854,6 +2854,15 @@ function maybeInheritRemoteControl({ newId, agentType, isFork, parentId }) {
   const enabled = isFork ? settings.inheritRemoteControlOnFork : settings.inheritRemoteControl;
   if (!enabled) return skip(`inheritRemoteControl${isFork ? 'OnFork' : ''}=false`);
   if (!parentId || parentId === newId || !shells.has(parentId)) return skip('no live parent session');
+  // The feature seeded its own future parents. A session we typed `/rc` into shows the
+  // pill, which qualified it as a parent, so every tab opened from it was typed at too
+  // — and every tab opened from THOSE. One hand-enabled session propagated Remote
+  // Control outward through the whole tree and could not be switched off, because each
+  // new tab was seeded from some other tab that still had it. Inheritance means "from
+  // the session YOU turned it on in", so a session that got it from us is a dead end.
+  if (shells.get(parentId).rcInherited) {
+    return skip('parent got its own /rc from us — inheritance does not chain');
+  }
   const marker = rcMarkerOnScreen(parentId);
   if (!marker) return skip(`parent shows no /rc marker; footer=${rcFooterSample(parentId)}`);
   log(`[rc-check] new=${newId} ${kind} parent=${parentId} -> queue /rc: parent shows "${marker}"`);
@@ -2867,7 +2876,13 @@ function maybeInheritRemoteControl({ newId, agentType, isFork, parentId }) {
     // [rc-inherit] marks the keystroke, not the intention. Before this gate it was
     // logged at queue time and therefore claimed an inheritance that the child did
     // not need and should not have received.
-    onDeliver: () => log(`[rc-inherit] ${newId} has no Remote Control of its own -> typing /rc (parent ${parentId})`),
+    onDeliver: () => {
+      // Mark the provenance at the moment the keystroke goes out, not when it was
+      // queued: a queued prompt that gets dropped never made this session ours.
+      const child = shells.get(newId);
+      if (child) child.rcInherited = true;
+      log(`[rc-inherit] ${newId} has no Remote Control of its own -> typing /rc (parent ${parentId})`);
+    },
   });
 }
 
@@ -6268,8 +6283,27 @@ setInterval(() => {
 // self-correct without fresh bytes — the core defect #558 documented. Cheap: a
 // screen-tail slice + a few regex tests per claude session. reclassifyWaiting is
 // a no-op for unclassified agents and only broadcasts on a real transition.
+// One line per session the moment Remote Control appears or disappears, naming who
+// caused it. Everything else is per-EVENT — [rc-check] fires at spawn, [rc-write] when
+// we type — so answering "why does this session have Remote Control?" meant correlating
+// events by id and reasoning about the ones that were absent. Absence is exactly what
+// misleads: a detector that has quietly stopped matching produces the same empty grep
+// as a daemon that did nothing, and a whole day was lost to that ambiguity. This is
+// STATE, edge-logged, and it names the origin, so the answer is one line and it is
+// never inferred from silence.
+function checkRcState(id, e) {
+  const on = sessionShowsRcPill(id);
+  if (on === !!e.rcOn) return;
+  e.rcOn = on;
+  if (!on) return log(`[rc-state] id=${id} remote-control=off`);
+  log(`[rc-state] id=${id} remote-control=on origin=${e.rcInherited ? 'deepsteve-typed-/rc' : 'not-deepsteve (the agent enabled it itself)'}`);
+}
+
 setInterval(() => {
-  for (const [id, e] of shells) reclassifyWaiting(e, id, 'sweep');
+  for (const [id, e] of shells) {
+    reclassifyWaiting(e, id, 'sweep');
+    if (e.agentType === 'claude') checkRcState(id, e);
+  }
 }, 1000).unref();
 
 // Grace timer for a session whose last client socket closed. Fires only after

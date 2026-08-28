@@ -81,3 +81,52 @@ test('a non-rc write is silent on both taps', () => {
   h.logRcWrite('s1', 'do the issue', 'issue-prompt');
   assert.deepStrictEqual(h.logs, []);
 });
+
+// --- state, not events -------------------------------------------------------
+
+function stateHarness() {
+  const logs = [];
+  const shells = new Map();
+  const context = {
+    log: (m) => logs.push(m),
+    shells,
+    RC_FOOTER_ROWS: 8,
+    RC_PILL_ANY: /\/rc (active|connecting|reconnecting|failed)/,
+    RC_FOOTER_SEGMENT: /⏵⏵|for agents|to cycle|to manage/,
+    RC_MARKER_COLLAPSED: /(^|\s)\/rc$/,
+    sessionShowsRcPill: (id) => !!shells.get(id)?.pill,
+  };
+  vm.runInNewContext(
+    `${sourceBetween('function checkRcState', 'setInterval(')}
+result = { checkRcState }`,
+    context,
+  );
+  return { ...context.result, shells, logs };
+}
+
+test('the origin of a session\'s Remote Control is one line, not a correlation', () => {
+  const h = stateHarness();
+  // A session the agent enabled by itself.
+  h.shells.set('a', { pill: true });
+  h.checkRcState('a', h.shells.get('a'));
+  assert.match(h.logs[0], /\[rc-state\] id=a remote-control=on origin=not-deepsteve/);
+
+  // A session we typed /rc into.
+  h.shells.set('b', { pill: true, rcInherited: true });
+  h.checkRcState('b', h.shells.get('b'));
+  assert.match(h.logs[1], /\[rc-state\] id=b remote-control=on origin=deepsteve-typed/);
+});
+
+test('it logs edges only, so a steady session is silent', () => {
+  const h = stateHarness();
+  const e = { pill: true };
+  h.shells.set('a', e);
+  h.checkRcState('a', e);
+  h.checkRcState('a', e);
+  h.checkRcState('a', e);
+  assert.strictEqual(h.logs.length, 1, 'a once-per-second sweep must not repeat itself');
+
+  e.pill = false;
+  h.checkRcState('a', e);
+  assert.match(h.logs[1], /remote-control=off/, 'and it reports the way back down too');
+});

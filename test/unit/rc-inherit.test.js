@@ -259,3 +259,44 @@ test('a child still CONNECTING is left alone', async () => {
   inherit(h);
   assert.strictEqual(h.delivered[0].options.skipIf(), true);
 });
+
+
+// --- the chain ---------------------------------------------------------------
+
+test('a session we typed /rc into never becomes a source itself', async () => {
+  // The bug: our own keystroke made the child show the pill, which qualified IT as a
+  // parent, so its tabs were typed at too, and theirs. One hand-enabled session
+  // propagated Remote Control through the whole tree and could not be switched off,
+  // because every new tab was seeded from some other tab that still had it. That is
+  // what "it types /rc into every one of my sessions" actually was.
+  const parent = await makeSession([FOOTER_RC_COLLAPSED]);
+  const h = makeHarness(parent);
+  h.shells.set(CHILD, { agentType: 'claude', terminalScreen: (await makeSession([FOOTER_PLAIN])).terminalScreen });
+
+  inherit(h);
+  assert.strictEqual(h.delivered.length, 1, 'a hand-enabled parent still hands it down');
+  h.delivered[0].options.onDeliver();
+  assert.strictEqual(h.shells.get(CHILD).rcInherited, true, 'and the child is marked as ours');
+
+  // Now open a grandchild from that child, which by now shows the pill we caused.
+  const GRAND = 'grand001';
+  h.shells.set(GRAND, { agentType: 'claude' });
+  h.shells.get(CHILD).terminalScreen = (await makeSession([FOOTER_RC_COLLAPSED])).terminalScreen;
+  h.maybeInheritRemoteControl({ newId: GRAND, agentType: 'claude', isFork: false, parentId: CHILD });
+
+  assert.strictEqual(h.delivered.length, 1, 'the chain stops — nothing queued for the grandchild');
+  assert.ok(h.logs.some((l) => l.includes('inheritance does not chain')), 'and it says why');
+});
+
+test('provenance is recorded on the keystroke, not on the queueing', async () => {
+  // A queued /rc that gets dropped never made the session ours, so a dropped child
+  // must still be eligible to pass a hand-enabled parent's Remote Control on.
+  const parent = await makeSession([FOOTER_RC_COLLAPSED]);
+  const h = makeHarness(parent);
+  h.shells.set(CHILD, { agentType: 'claude', terminalScreen: (await makeSession([FOOTER_RC_COLLAPSED])).terminalScreen });
+
+  inherit(h);
+  assert.strictEqual(h.delivered[0].options.skipIf(), true, 'it will be dropped');
+  assert.notStrictEqual(h.shells.get(CHILD).rcInherited, true,
+    'a prompt that never went out must not mark the session as ours');
+});
