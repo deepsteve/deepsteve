@@ -13,13 +13,14 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { stateDir, expandTilde, spawnCwdProblem } = require('../../paths');
+const { stateDir, spawnCwdProblem } = require('../../paths');
 const { runBinary } = require('../../bin-path');
 const { randomUUID } = require('crypto');
 const { z } = require('zod');
 const cron = require('./cron');
 // Resolves to ~/.deepsteve/git-root.js once deployed — mods sit at ~/.deepsteve/mods/<id>/.
 const { findGitRoot } = require('../../git-root');
+const projectScope = require('../../project-scope');
 const { usableWorktree } = require('../../worktree-support');
 
 const TASKS_FILE = path.join(stateDir(), 'scheduled-tasks.json');
@@ -105,35 +106,38 @@ function liveTasks() { return tasks.filter(t => !t.deleted); }
 function findLiveTask(id) { return liveTasks().find(t => t.id === id); }
 function activeRunOf(task) { return (task.runs || []).find(r => ACTIVE_STATUSES.has(r.status)); }
 
-// The shared contexts (#526), from server core via the initMCP ctx. Empty on an
-// older core that doesn't expose them (group scope then falls back to self-only).
-function getContexts() { return (ctx && ctx.getContexts) ? ctx.getContexts() : []; }
-function pathInside(p, dir) {
-  if (ctx && ctx.pathInside) return ctx.pathInside(p, dir);
-  if (!p || !dir) return false;
-  const base = String(dir).replace(/\/+$/, '');
-  return p === base || p.startsWith(base + '/');
-}
-
 // --- Project resolution ---------------------------------------------------
-
-// Canonicalize a path to its git repo root; fall back to the path itself.
-// Pure-fs walk (#553) — this used to shell out to `zsh -l -c 'git rev-parse'`, which
-// blocks the event loop the WS upgrade handshake shares.
-function gitRoot(dir) {
-  return findGitRoot(dir) || dir;
-}
+//
+// The scoping logic itself lives in ../../project-scope (#659) — shared with
+// project mods and with list_sessions, since all three answer "which project is
+// this?" the same way. These wrappers inject `ctx` (assigned by init, so they read
+// it at call time) and the compatibility options below, leaving every call site in
+// this file spelled the way it always was.
+//
+// SCOPE_OPTS is not a preference: `task.project` is persisted to
+// scheduled-tasks.json and list_scheduled_tasks scopes with `t.project === proj`,
+// so canonicalizing the session branch (or refusing a relative/missing explicit
+// path) would make freshly-written project strings stop matching ones already on
+// disk, and existing tasks would vanish from their own project's listing. See the
+// comment on resolveProject in project-scope.js.
+const SCOPE_OPTS = { requireAbsolute: false, allowMissing: true, canonicalizeSession: false };
+const { displayName, disambiguate } = projectScope;
+const pathInside = (p, dir) => projectScope.pathInside(p, dir, ctx);
+const getContexts = () => projectScope.getContexts(ctx);
+const resolveProject = (rawProject, shellId) => projectScope.resolveProject(rawProject, shellId, ctx, SCOPE_OPTS);
+const groupScopeDirs = (project) => projectScope.groupScopeDirs(project, ctx);
 
 // True when dir is inside a git work tree — the gate for per-run worktree isolation.
-// gitRoot() can't answer this: its `|| dir` fallback makes "not a repo" and "dir IS
-// the root" the same answer. findGitRoot() can, by returning null.
+// A canonicalizing helper can't answer this: a `|| dir` fallback makes "not a repo"
+// and "dir IS the root" the same answer. findGitRoot() can, by returning null.
 //
-// Pure-fs for the same reason gitRoot() is (#553), plus one this function taught us:
-// as `zsh -l -c 'git rev-parse --is-inside-work-tree'` it made worktree isolation
-// silently conditional on zsh being installed. Where it isn't, every fire fell back
-// to the shared checkout with nothing logged, and the #614 tombstone test — which
-// drives the whole runTask path — went red on the bare CI runner while the docker
-// suites (which apt-get zsh) stayed green.
+// Pure-fs (#553) rather than shelling out to `zsh -l -c 'git rev-parse'`, which
+// blocks the event loop the WS upgrade handshake shares — plus one thing this
+// function taught us: as `zsh -l -c 'git rev-parse --is-inside-work-tree'` it made
+// worktree isolation silently conditional on zsh being installed. Where it isn't,
+// every fire fell back to the shared checkout with nothing logged, and the #614
+// tombstone test — which drives the whole runTask path — went red on the bare CI
+// runner while the docker suites (which apt-get zsh) stayed green.
 function isGitRepo(dir) {
   return findGitRoot(dir) !== null;
 }
@@ -141,7 +145,7 @@ function isGitRepo(dir) {
 // Run git, argv-style, with no shell layer at all (#621).
 //
 // This was `zsh -l -c '<cmd string>'`, for the same launchd-minimal-PATH reason
-// gitRoot/ensureWorktree had one — but a login shell to find git is a PATH lookup in
+// ensureWorktree had one — but a login shell to find git is a PATH lookup in
 // costume, and it made scheduled worktree cleanup silently conditional on zsh, the
 // exact failure #619 removed from the tmux engine. runBinary does the $PATH +
 // fallback-dirs scan and execs the absolute path directly.
@@ -194,41 +198,6 @@ function cleanupWorktree(repoRoot, name, exec = gitExec) {
   return res;
 }
 
-// The project a scheduled run should use. An explicit path wins (canonicalized);
-// otherwise inherit the calling session's repo root.
-function resolveProject(rawProject, shellId) {
-  if (rawProject && String(rawProject).trim()) {
-    const p = expandTilde(String(rawProject).trim());
-    return fs.existsSync(p) ? gitRoot(p) : p;
-  }
-  if (shellId && ctx && ctx.shells.has(shellId)) {
-    const { repoRoot } = ctx.sessionPaths(ctx.shells.get(shellId));
-    if (repoRoot) return repoRoot;
-  }
-  return '';
-}
-
-function displayName(project) {
-  return project ? path.basename(project) : 'No project';
-}
-
-// Display names for a set of repo roots: the basename, widened to `parent/base`
-// only where two roots would otherwise collide — mirrors /api/git-roots.
-// Pure and scoped to the roots handed in, so a caller that renders a *different*
-// root set (the run-history grid includes tombstoned tasks' roots, which
-// knownProjects() never sees) gets names disambiguated against what it shows.
-function disambiguate(roots) {
-  const list = [...new Set([...roots].filter(Boolean))].sort();
-  const baseCounts = {};
-  for (const r of list) { const b = path.basename(r); baseCounts[b] = (baseCounts[b] || 0) + 1; }
-  const names = new Map();
-  for (const root of list) {
-    const base = path.basename(root);
-    names.set(root, baseCounts[base] > 1 ? path.join(path.basename(path.dirname(root)), base) : base);
-  }
-  return names;
-}
-
 // Every project we know about (from tasks, groups, and live sessions).
 function knownProjects() {
   const roots = new Set();
@@ -240,19 +209,6 @@ function knownProjects() {
     }
   }
   return [...disambiguate(roots)].map(([root, name]) => ({ root, name }));
-}
-
-// Folders that define `project`'s group scope: the dirs of every context that
-// contains `project` (by folder prefix), plus `project` itself. A task is "in the
-// group" when its repo root is inside/equals one of these folders.
-function groupScopeDirs(project) {
-  const dirs = new Set(project ? [project] : []);
-  for (const c of getContexts()) {
-    if ((c.dirs || []).some(d => pathInside(project, d))) {
-      for (const d of c.dirs) dirs.add(d);
-    }
-  }
-  return [...dirs];
 }
 
 // --- Scheduling core ------------------------------------------------------

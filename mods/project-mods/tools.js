@@ -54,12 +54,11 @@
 const { z } = require('zod');
 const { createHash } = require('crypto');
 const fs = require('fs');
-const os = require('os');
 const { projectModsDir } = require('../../paths');
 const path = require('path');
 
 const { resolveHtml } = require('../../html-source.js');
-const { findGitRoot } = require('../../git-root.js');
+const projectScope = require('../../project-scope.js');
 
 // The manifest field that says "this directory is a project mod". Anything else under
 // .deepsteve/mods/ — including a regular DeepSteve Mod someone distributes in their repo —
@@ -138,8 +137,6 @@ function writeFileAtomic(file, contents) {
   fs.writeFileSync(tmp, contents);
   fs.renameSync(tmp, file);
 }
-
-const isDirectory = (p) => { try { return fs.statSync(p).isDirectory(); } catch { return false; } };
 
 // --- Discovery ---------------------------------------------------------------
 
@@ -452,38 +449,24 @@ function removeMod(mod) {
 
 /**
  * The project a mod belongs to. An explicit path wins (canonicalized to its git repo
- * root); otherwise inherit the calling session's repo root. Mirrors resolveProject()
- * in mods/scheduled-tasks/tools.js — the two features answer "which project is this"
- * the same way on purpose.
+ * root); otherwise inherit the calling session's repo root. Returns '' when neither
+ * yields a directory — unlike a scheduled task (which can run in the homedir), a
+ * project mod with no project is meaningless, so callers reject.
  *
- * Returns '' when neither yields a directory. Unlike a scheduled task (which can run
- * in the homedir), a project mod with no project is meaningless, so callers reject.
+ * The implementation moved to ../../project-scope (#659), shared with scheduled tasks
+ * and with list_sessions: all three answer "which project is this?" the same way, and
+ * a third copy is how a comment claiming they agree stops being true. The DEFAULTS
+ * there are this mod's semantics, so no options are passed.
  *
- * BOTH branches go through findGitRoot, and that matters now that a resolved project is
+ * BOTH branches go through findGitRoot (inside project-scope.js), and that matters now that a resolved project is
  * checked for membership in scanRoots() rather than merely recorded: findGitRoot realpaths,
  * so a session whose repoRoot is reached through a symlink (`/var/...` → `/private/var/...`
  * on macOS) would otherwise never match the same repo registered as a project, and every
  * create would be refused. Canonicalizing on both sides is what makes the comparison mean
  * "the same directory" instead of "the same string".
  */
-function canonicalRoot(p) {
-  if (!p) return '';
-  return findGitRoot(p) || (isDirectory(p) ? p : '');
-}
-
-function resolveProject(rawProject, shellId) {
-  if (rawProject && String(rawProject).trim()) {
-    let p = String(rawProject).trim();
-    if (p === '~' || p.startsWith('~/')) p = path.join(os.homedir(), p.slice(1));
-    if (!path.isAbsolute(p)) return '';
-    return canonicalRoot(p);
-  }
-  if (shellId && ctx && ctx.shells.has(shellId)) {
-    const { repoRoot } = ctx.sessionPaths(ctx.shells.get(shellId));
-    if (repoRoot) return canonicalRoot(repoRoot) || repoRoot;
-  }
-  return '';
-}
+const { canonicalRoot } = projectScope;
+const resolveProject = (rawProject, shellId) => projectScope.resolveProject(rawProject, shellId, ctx);
 
 /** A directory name for a new mod: readable, safe, and unused in this repo. */
 function slugify(name) {
@@ -512,7 +495,7 @@ const featureOffResult = () => ({ content: [{ type: 'text', text: FEATURE_OFF_MS
 const err = (text) => ({ content: [{ type: 'text', text }], isError: true });
 const ok = (obj) => ({ content: [{ type: 'text', text: JSON.stringify(obj) }] });
 
-const callerShellId = (extra) => extra?.requestInfo?.url?.searchParams?.get('shellId') || null;
+const { callerShellId } = projectScope;
 
 // The wire shape the client sees. Kept separate from the in-memory row so the server-only
 // fields (root, dirname, dir, entry) don't leak into the browser.

@@ -52,6 +52,7 @@ const broadcasts = [];
 const settings = { projectModsEnabled: true };
 const shells = new Map([
   ['sess-a', { cwd: REPO_A }],
+  ['sess-a-sub', { cwd: path.join(REPO_A, 'src') }],
   ['sess-b', { cwd: REPO_B }],
   ['sess-x', { cwd: REPO_UNREGISTERED }],
 ]);
@@ -560,6 +561,20 @@ test('list_project_mods scopes to the caller project by default, and scope:"all"
   assert.ok(!nowhere.isError);
   assert.deepStrictEqual(payload(nowhere).mods, []);
   assert.match(payload(nowhere).note, /scope:"all"/);
+  await deleteAll();
+});
+
+test('a session opened in a repo subdirectory still resolves to the repo (#659)', async () => {
+  // The scoping helper moved to project-scope.js and is now shared with scheduled
+  // tasks and list_sessions. This pins that this mod still passes the STRICT defaults:
+  // canonicalizing the session branch is what lets a mod created from <repo>/src land
+  // in <repo> and be found again by a session sitting at the root.
+  const sub = await create({ name: 'Sub-dash', session_id: 'sess-a-sub', html: '<p>sub</p>' });
+  assert.strictEqual(sub.project, REPO_A, 'the mod belongs to the repo, not the subdirectory');
+
+  const fromRoot = payload(await tools.list_project_mods.handler({ session_id: 'sess-a' }, {}));
+  assert.ok(fromRoot.mods.map(m => m.id).includes(sub.id),
+    'and a session at the repo root sees it');
   await deleteAll();
 });
 

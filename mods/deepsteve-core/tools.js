@@ -4,6 +4,7 @@ const path = require('path');
 const { execFileSync } = require('child_process');
 const { mergeWorktree } = require('./merge-worktree');
 const { stateDir, spawnCwdProblem } = require('../../paths');
+const projectScope = require('../../project-scope');
 const { usableWorktree } = require('../../worktree-support');
 const { splitAtMarker, capOutput, createRunLog } = require('../../terminal-run');
 
@@ -116,6 +117,14 @@ function init(context) {
     armSessionAutoClose,
   } = context;
 
+  // Project scoping for list_sessions (#659). `context` is this mod's whole ctx, so
+  // the shared helpers read getContexts/pathInside/sessionPaths/shells off it — all
+  // four are wired by server.js's initMCP call, and each has a fallback for the
+  // partial ctx a unit test hands in.
+  const { callerShellId, canonicalRoot, displayName } = projectScope;
+  const resolveProject = (raw, shellId) => projectScope.resolveProject(raw, shellId, context);
+  const inScope = (project, proj, effScope) => projectScope.inScope(project, proj, effScope, context);
+
   // Read the interpreted terminal buffer maintained at the PTY boundary. Tests
   // and third-party embedders without that context helper retain a transcript
   // fallback for compatibility.
@@ -168,6 +177,77 @@ function init(context) {
             metaControls: !!settings.metaControlsEnabled,
           }, null, 2) }]
         };
+      },
+    },
+    list_sessions: {
+      description: 'List the deepsteve sessions (tabs) running right now. Defaults to YOUR project — the git repo root of the calling session — so the answer is about the work you are in rather than every tab on the machine; scope "group" adds sibling repos in the same project group, and scope "all" lists everything. Rows use get_session_info\'s field names plus `project` (the canonical repo root the row was scoped by, which differs from `repoRoot` when a session was opened in a subdirectory) and `self` (the calling session). LIVE sessions only — closed and saved tabs are not listed. A worktree session is listed under its parent repo. `runningCommand` is deliberately omitted because it costs a process lookup per row; call get_session_info for one session.',
+      schema: {
+        scope: z.enum(['project', 'group', 'all']).optional().describe('project (default), group, or all'),
+        project: z.string().optional().describe('Override the project to scope to (defaults to the caller\'s).'),
+        session_id: z.string().optional().describe('Your DEEPSTEVE_SESSION_ID — only needed when the caller is not MCP-wired (the shellId is normally read off the MCP request).'),
+      },
+      handler: async ({ scope, project, session_id }, extra) => {
+        const effScope = scope || 'project';
+        const callerId = session_id || callerShellId(extra);
+        // 'all' is answerable without a project, so an unwired caller always has a
+        // way to get an answer — resolve only when the scope actually needs one.
+        const proj = effScope === 'all' ? '' : resolveProject(project, callerId);
+
+        if (effScope !== 'all' && !proj) {
+          // A read that cannot be scoped is a no-op, not a failure — the rule
+          // list_project_mods already follows.
+          return { content: [{ type: 'text', text: JSON.stringify({
+            scope: effScope,
+            project: null,
+            count: 0,
+            sessions: [],
+            note: 'No project could be determined for this session — pass session_id or project, or use scope:"all".',
+          }, null, 2) }] };
+        }
+
+        const rows = [];
+        for (const [id, entry] of shells) {
+          // tmux-attach panes are ephemeral views of another session, not sessions of
+          // their own — the same entries buildWindowsView() drops.
+          if (entry.agentType === 'tmux-attach') continue;
+          const { cwd, repoRoot } = sessionPaths(entry);
+          // The scoping key is canonicalized on BOTH sides (here and in
+          // resolveProject), which is what makes the comparison mean "the same
+          // directory" rather than "the same string": sessionPaths only strips a
+          // worktree suffix, so a session opened in <repo>/src reports <repo>/src.
+          const sessionProject = canonicalRoot(repoRoot) || repoRoot || '';
+          if (!inScope(sessionProject, proj, effScope)) continue;
+          rows.push({
+            id,
+            // The get_session_info fallback chain (name → cwd basename → 'root').
+            name: entry.name || (entry.cwd ? path.basename(entry.cwd) : 'shell') || 'root',
+            cwd,
+            repoRoot,
+            project: sessionProject,
+            worktree: entry.worktree || null,
+            windowId: entry.windowId || null,
+            agentType: entry.agentType || 'claude',
+            state: sessionInputState ? sessionInputState(entry) : 'unknown',
+            createdAt: entry.createdAt || null,
+            lastActivity: entry.lastActivity || null,
+            self: id === callerId,
+          });
+        }
+
+        // Your own session first, then most recently active, then by id so two calls
+        // with nothing changed return the same order.
+        rows.sort((a, b) =>
+          (b.self ? 1 : 0) - (a.self ? 1 : 0)
+          || (b.lastActivity || b.createdAt || 0) - (a.lastActivity || a.createdAt || 0)
+          || a.id.localeCompare(b.id));
+
+        return { content: [{ type: 'text', text: JSON.stringify({
+          scope: effScope,
+          project: proj || null,
+          projectName: proj ? displayName(proj) : null,
+          count: rows.length,
+          sessions: rows,
+        }, null, 2) }] };
       },
     },
     close_session: {
