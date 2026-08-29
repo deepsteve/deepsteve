@@ -27,18 +27,6 @@ const SESSION_PREFIX = 'ds-';
 const PTY_UNSAFE_ENV = ['TMUX', 'TMUX_PANE', 'STY', 'WINDOW', 'WINDOWID', 'TERMCAP', 'COLUMNS', 'LINES'];
 
 /**
- * The `terminal-overrides` entry that gives the browser its scrollbar back, and the
- * index it is written to. See _applySessionOptions() for what it does and what it
- * costs, and _supportsIndexedArrayOption for why it is addressed by index.
- *
- * Index 1 because tmux ships exactly one default entry, at [0] (`linux*:AX@`), and
- * this socket is deepsteve's alone (#625) — so [1] is ours to own, and unsetting it
- * cannot take tmux's own default with it.
- */
-const SCROLLBACK_OVERRIDE_OPTION = 'terminal-overrides[1]';
-const SCROLLBACK_OVERRIDE_VALUE = '*:smcup@:rmcup@';
-
-/**
  * How many times an attach PTY may die and be silently re-attached, in a row,
  * before we stop and report a real exit (#626).
  */
@@ -119,7 +107,7 @@ class TmuxEngine extends Engine {
    *   bind()s, it does not mkdir (it creates a directory only for its own default
    *   socket). This file stays fs-free so the bare CI unit job can construct engines.
    */
-  constructor({ binary = 'tmux', socket, env, exec, spawnPty, now, browserScrollback } = {}) {
+  constructor({ binary = 'tmux', socket, env, exec, spawnPty, now } = {}) {
     super();
     this._sessions = new Map(); // id → { attachPty, exitCallbacks }
     this._binary = binary || 'tmux';
@@ -130,16 +118,6 @@ class TmuxEngine extends Engine {
     this._spawnPty = spawnPty || defaultSpawnPty;
     // Injectable clock, for the #626 re-attach budget (see REATTACH_RESET_MS).
     this._now = now || Date.now;
-    // A GETTER, not a value: the setting is live-editable and this engine is
-    // constructed once at boot, so reading it here would freeze whatever was true then.
-    // Called on every attach — see _applySessionOptions().
-    //
-    // Absent means "don't touch it", which is NOT the same as false. False is a
-    // decision that has to be written to the tmux server (the entry a previous boot
-    // left behind has to come back off); absent is an engine that was never told about
-    // the setting — userTmux(), the legacy-socket migration engine, most tests — and
-    // has no business writing a server-scoped option on someone else's behalf.
-    this._browserScrollback = browserScrollback || null;
     // `exec` reaches _exec too, not just the version probe (#621). Without this,
     // spawn() always really shelled out, so the argv it builds — the riskiest thing
     // in this file, and the thing #621's login-shell change rewrites — could not be
@@ -246,23 +224,6 @@ class TmuxEngine extends Engine {
    */
   get _supportsMouseOption() {
     return this._atLeast(2, 1);
-  }
-
-  /**
-   * Can a single entry of an array option be set and unset by index (>= 3.0)?
-   *
-   * tmux 3.0 turned `terminal-overrides` into an array option, which is what makes
-   * `terminal-overrides[1]` addressable. Index syntax is the whole reason the
-   * scrollback override is safe to re-apply on every attach: `set -as` APPENDS, so
-   * the same entry lands again on every reattach and the array grows without bound,
-   * while `set -s terminal-overrides[1]` is idempotent and `set -su` of that index
-   * removes exactly ours and leaves tmux's own default (`linux*:AX@`) at [0].
-   *
-   * Ungated it would be worse than useless on 2.x: the unset would be a no-op and
-   * the set would clobber the whole option.
-   */
-  get _supportsIndexedArrayOption() {
-    return this._atLeast(3, 0);
   }
 
   _tmuxSessionName(id) {
@@ -438,35 +399,6 @@ class TmuxEngine extends Engine {
     // what the `!this._socket` guard above is protecting. Ungated: the option predates
     // the tmux 2.0 multi-arg shell-command this engine already requires.
     options.push(['-s', 'set-clipboard', 'on']);
-
-    // The scrollbar. tmux's attach client sends smcup (ESC[?1049h) on attach, so the
-    // browser's xterm sits on its ALTERNATE buffer forever — and a terminal with no
-    // scrollback has nothing to scroll and no scrollbar to draw. Since Claude Code
-    // 2.1.24x the pane owns an alternate screen too, so tmux's own history stays at 0
-    // lines: with both screens alternate there is no scrollback ANYWHERE in the stack.
-    // Deleting smcup/rmcup from the client's terminal description keeps the client on
-    // xterm's normal buffer, and lines that scroll off the pane land in xterm's own
-    // scrollback — which is all xterm needs to show its native scrollbar again.
-    //
-    // The client's description, not the pane's: `alternate-screen off` (a WINDOW
-    // option) fills tmux's history instead and changes nothing in the browser.
-    //
-    // Two costs, both measured. The copy is lossy — tmux coalesces redraws when output
-    // outruns the client, so a fast burst loses a few percent of its lines. And the
-    // wheel still belongs to the pane whenever the pane asked for the mouse (Claude
-    // does), so the wheel scrolls Claude's own view while the scrollbar walks xterm's
-    // history. What it does NOT cost is redraw junk: resizes and reattaches repaint
-    // within the visible screen and push nothing into scrollback.
-    //
-    // Unset when off, never merely skipped: this is a SERVER option on a tmux server
-    // that outlives the daemon (#620), so an entry written by a previous boot is still
-    // there after the setting is turned off. See _supportsIndexedArrayOption for why
-    // the index is what makes both halves idempotent.
-    if (this._browserScrollback && this._supportsIndexedArrayOption) {
-      options.push(this._browserScrollback()
-        ? ['-s', SCROLLBACK_OVERRIDE_OPTION, SCROLLBACK_OVERRIDE_VALUE]
-        : ['-su', SCROLLBACK_OVERRIDE_OPTION]);
-    }
 
     for (const opt of options) {
       try {

@@ -578,21 +578,6 @@ const SETTINGS_SCHEMA = [
   { name: 'recentSessionsLimit',        type: 'number',  default: 8, clamp: [0, 50], round: true,
     sideEffect: (val, s) => { trimRecentSessions(); } },
   { name: 'scrollbackKB',               type: 'number',  default: SCROLLBACK_DEFAULT_KB, clamp: [1, 10000], round: true },
-  // Give the browser terminal its own scrollback — and therefore its native
-  // scrollbar — by deleting smcup/rmcup from the tmux CLIENT's terminal description.
-  // This serves SHELL and TERMINAL tabs. It does not reach an agent tab's transcript:
-  // measured against the real claude binary, a 200-line answer put 0 rows into tmux's
-  // history and 0 into xterm's, because Claude repaints its viewport inside its own
-  // alternate screen and never scrolls the outer terminal.
-  // engines/tmux.js:_applySessionOptions() has the mechanism and the costs.
-  //
-  // Applies per attach, so a new tab picks it up immediately. An already-open tab
-  // needs a PAGE RELOAD, not just a daemon restart: which buffer an xterm is on is
-  // client-side and sticky, and the reattached client sends neither smcup nor rmcup —
-  // so a tab stranded on the alternate buffer by a pre-change client stays there until
-  // a fresh Terminal is constructed. tmux-only; node-pty keeps xterm on the normal
-  // buffer anyway and never needed it.
-  { name: 'browserScrollback',          type: 'boolean', default: true },
   // tmux is the default (#620): a node-pty session is a child of server.js and dies
   // with it, so a crash or a restart takes every running agent with it. This one word
   // covers all three cases correctly, because the block right after engine init
@@ -886,8 +871,7 @@ function userTmux() {
 }
 
 {
-  const tmuxCheck = new TmuxEngine({ binary: settings.tmuxBinary, socket: TMUX_SOCKET,
-    browserScrollback: () => settings.browserScrollback });
+  const tmuxCheck = new TmuxEngine({ binary: settings.tmuxBinary, socket: TMUX_SOCKET });
   if (tmuxCheck.available) {
     tmuxEngine = tmuxCheck;
     log(`Engine: tmux v${tmuxEngine.version} (available) at ${tmuxEngine.tmuxPath}`);
