@@ -580,9 +580,11 @@ const SETTINGS_SCHEMA = [
   { name: 'scrollbackKB',               type: 'number',  default: SCROLLBACK_DEFAULT_KB, clamp: [1, 10000], round: true },
   // Give the browser terminal its own scrollback — and therefore its native
   // scrollbar — by deleting smcup/rmcup from the tmux CLIENT's terminal description.
-  // Default on: without it there is no scrollback anywhere in the stack for an agent
-  // tab, because the tmux client and Claude Code's own pane are both on an alternate
-  // screen. engines/tmux.js:_applySessionOptions() has the mechanism and the costs.
+  // This serves SHELL and TERMINAL tabs. It does not reach an agent tab's transcript:
+  // measured against the real claude binary, a 200-line answer put 0 rows into tmux's
+  // history and 0 into xterm's, because Claude repaints its viewport inside its own
+  // alternate screen and never scrolls the outer terminal.
+  // engines/tmux.js:_applySessionOptions() has the mechanism and the costs.
   //
   // Applies per attach, so a new tab picks it up immediately. An already-open tab
   // needs a PAGE RELOAD, not just a daemon restart: which buffer an xterm is on is
