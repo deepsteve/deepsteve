@@ -584,9 +584,12 @@ const SETTINGS_SCHEMA = [
   // tab, because the tmux client and Claude Code's own pane are both on an alternate
   // screen. engines/tmux.js:_applySessionOptions() has the mechanism and the costs.
   //
-  // Applies per attach, so a new tab picks it up immediately and an already-attached
-  // one at its next reattach (a daemon restart). tmux-only; node-pty keeps xterm on
-  // the normal buffer anyway and never needed it.
+  // Applies per attach, so a new tab picks it up immediately. An already-open tab
+  // needs a PAGE RELOAD, not just a daemon restart: which buffer an xterm is on is
+  // client-side and sticky, and the reattached client sends neither smcup nor rmcup —
+  // so a tab stranded on the alternate buffer by a pre-change client stays there until
+  // a fresh Terminal is constructed. tmux-only; node-pty keeps xterm on the normal
+  // buffer anyway and never needed it.
   { name: 'browserScrollback',          type: 'boolean', default: true },
   // tmux is the default (#620): a node-pty session is a child of server.js and dies
   // with it, so a crash or a restart takes every running agent with it. This one word

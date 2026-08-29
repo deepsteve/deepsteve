@@ -1196,9 +1196,9 @@ settingsBtn?.addEventListener('click', async () => {
         </label>
         <p style="font-size: 12px; color: var(--ds-text-secondary); margin: 6px 0 0 24px;">
           Lets the browser terminal keep its own scrollback, so it draws a scrollbar you can
-          drag. tmux only, and it applies per attach: a new tab picks it up right away, open
-          tabs at the next daemon restart. The wheel still goes to the agent, and a fast burst
-          of output can lose a line here and there.
+          drag. tmux only. A new tab picks it up right away; an already-open tab needs a page
+          reload. The wheel still goes to the agent, and a fast burst of output can lose a
+          line here and there.
         </p>
       </div>
       <div class="settings-section">
