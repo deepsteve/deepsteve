@@ -578,6 +578,16 @@ const SETTINGS_SCHEMA = [
   { name: 'recentSessionsLimit',        type: 'number',  default: 8, clamp: [0, 50], round: true,
     sideEffect: (val, s) => { trimRecentSessions(); } },
   { name: 'scrollbackKB',               type: 'number',  default: SCROLLBACK_DEFAULT_KB, clamp: [1, 10000], round: true },
+  // Give the browser terminal its own scrollback — and therefore its native
+  // scrollbar — by deleting smcup/rmcup from the tmux CLIENT's terminal description.
+  // Default on: without it there is no scrollback anywhere in the stack for an agent
+  // tab, because the tmux client and Claude Code's own pane are both on an alternate
+  // screen. engines/tmux.js:_applySessionOptions() has the mechanism and the costs.
+  //
+  // Applies per attach, so a new tab picks it up immediately and an already-attached
+  // one at its next reattach (a daemon restart). tmux-only; node-pty keeps xterm on
+  // the normal buffer anyway and never needed it.
+  { name: 'browserScrollback',          type: 'boolean', default: true },
   // tmux is the default (#620): a node-pty session is a child of server.js and dies
   // with it, so a crash or a restart takes every running agent with it. This one word
   // covers all three cases correctly, because the block right after engine init
@@ -871,7 +881,8 @@ function userTmux() {
 }
 
 {
-  const tmuxCheck = new TmuxEngine({ binary: settings.tmuxBinary, socket: TMUX_SOCKET });
+  const tmuxCheck = new TmuxEngine({ binary: settings.tmuxBinary, socket: TMUX_SOCKET,
+    browserScrollback: () => settings.browserScrollback });
   if (tmuxCheck.available) {
     tmuxEngine = tmuxCheck;
     log(`Engine: tmux v${tmuxEngine.version} (available) at ${tmuxEngine.tmuxPath}`);

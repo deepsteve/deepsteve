@@ -46,7 +46,7 @@ const SOCKET = '/tmp/ds-fake/tmux.sock';
 // `env` stands in for the daemon's environment — since #624 the engine reads it at
 // runtime too (the spawn-time diff, and the attach client's env), not just to find
 // tmux on $PATH. Tests that care about the daemon's env add keys here.
-function makeEngine({ version = '3.5a', binaryName = 'tmux', env: extraEnv } = {}) {
+function makeEngine({ version = '3.5a', binaryName = 'tmux', env: extraEnv, browserScrollback } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-tmuxargs-'));
   const bin = path.join(dir, binaryName);
   fs.writeFileSync(bin, '#!/bin/sh\nexit 0\n');
@@ -66,7 +66,12 @@ function makeEngine({ version = '3.5a', binaryName = 'tmux', env: extraEnv } = {
   };
 
   const daemonEnv = { PATH: dir, ...extraEnv };
-  const eng = new TmuxEngine({ binary: bin, socket: SOCKET, env: daemonEnv, exec, spawnPty });
+  const eng = new TmuxEngine({
+    binary: bin, socket: SOCKET, env: daemonEnv, exec, spawnPty,
+    // Undefined unless a test asks — "the daemon never told this engine about the
+    // setting" is the default, and it must leave terminal-overrides alone.
+    ...(browserScrollback === undefined ? {} : { browserScrollback: () => browserScrollback }),
+  });
   return { eng, calls, ptys, bin, daemonEnv };
 }
 
@@ -525,6 +530,102 @@ test('#650: mouse is session-scoped and clipboard is server-scoped, never the re
   assert.deepStrictEqual(mouse.slice(1, 3), ['-t', 'ds-abc12345']);
   const clip = setOptions(calls).find((a) => a.includes('set-clipboard'));
   assert.deepStrictEqual(clip.slice(1, 2), ['-s']);
+});
+
+// ---------------------------------------------------------------------------
+// The scrollbar: `terminal-overrides[1] = *:smcup@:rmcup@`.
+//
+// tmux's attach client sends smcup, so the browser's xterm sits on its alternate
+// buffer, where there is no scrollback and therefore no scrollbar. Deleting
+// smcup/rmcup from the CLIENT's terminal description keeps it on the normal buffer.
+// These assertions are mostly about idempotence and cleanup: it is a server option on
+// a tmux server that outlives the daemon, applied on every attach.
+// ---------------------------------------------------------------------------
+
+test('scrollbar on: the override is written to its own index, server-scoped', () => {
+  const { eng, calls } = makeEngine({ browserScrollback: true });
+  eng.spawn('abc12345', '/bin/zsh', ['-l'], '/repo', { shellCommand: null });
+
+  assert.deepStrictEqual(setOptions(calls), [
+    ['set-option', '-t', 'ds-abc12345', 'status', 'off'],
+    ['set-option', '-t', 'ds-abc12345', 'mouse', 'on'],
+    ['set-option', '-s', 'set-clipboard', 'on'],
+    ['set-option', '-s', 'terminal-overrides[1]', '*:smcup@:rmcup@'],
+  ]);
+});
+
+test('scrollbar off UNSETS it — a stale entry from a previous boot has to come off', () => {
+  // THE assertion of this section. terminal-overrides is a SERVER option and the tmux
+  // server outlives the daemon (#620), so an entry written before the setting was
+  // turned off is still on that server. Skipping the write instead of unsetting would
+  // make the setting one-way: on forever, until someone found the tmux option by hand.
+  const { eng, calls } = makeEngine({ browserScrollback: false });
+  eng.spawn('abc12345', '/bin/zsh', ['-l'], '/repo', { shellCommand: null });
+
+  assert.deepStrictEqual(setOptions(calls).at(-1), ['set-option', '-su', 'terminal-overrides[1]']);
+});
+
+test('an engine never told about the setting leaves terminal-overrides alone', () => {
+  // Absent is not false. userTmux() talks to the user's OWN tmux server (#625) and the
+  // migration engine to a legacy socket; neither was handed the setting, and neither
+  // may write a server-scoped option on the daemon's behalf.
+  const { eng, calls } = makeEngine();
+  eng.spawn('abc12345', '/bin/zsh', ['-l'], '/repo', { shellCommand: null });
+
+  assert.ok(!setOptions(calls).some((a) => a.some((x) => String(x).startsWith('terminal-overrides'))),
+    'no terminal-overrides write without an explicit setting');
+});
+
+test('re-applying is idempotent: the index is set, never appended', () => {
+  // `set -as terminal-overrides` APPENDS, so the same entry would land again on every
+  // reattach and the array would grow without bound. Indexing is what makes applying
+  // it on every attach — which is what reaches sessions an older daemon created — safe.
+  const { eng, calls } = makeEngine({ browserScrollback: true });
+  eng.spawn('abc12345', '/bin/zsh', ['-l'], '/repo', { shellCommand: null });
+  eng.reattach('abc12345', 100, 30);
+
+  const writes = setOptions(calls).filter((a) => a.includes('terminal-overrides[1]'));
+  assert.strictEqual(writes.length, 2, 'applied on both attaches');
+  for (const argv of writes) {
+    assert.ok(!argv.includes('-a') && !argv.includes('-as'),
+      `append would grow the array without bound: ${argv.join(' ')}`);
+    assert.deepStrictEqual(argv.slice(0, 3), ['set-option', '-s', 'terminal-overrides[1]']);
+  }
+});
+
+test('a bare reattach() applies it too — the upgrade path for existing sessions', () => {
+  const { eng, calls } = makeEngine({ browserScrollback: true });
+  assert.strictEqual(eng.reattach('abc12345', 100, 30), true);
+
+  assert.deepStrictEqual(setOptions(calls).at(-1),
+    ['set-option', '-s', 'terminal-overrides[1]', '*:smcup@:rmcup@']);
+});
+
+test('tmux < 3.0 has no indexed array options, so neither half is attempted', () => {
+  // Ungated it would be worse than useless: the unset is a no-op and the set clobbers
+  // the whole option, taking tmux's own `linux*:AX@` default with it.
+  for (const browserScrollback of [true, false]) {
+    const { eng, calls } = makeEngine({ version: '2.9', browserScrollback });
+    eng.spawn('abc12345', '/bin/zsh', ['-l'], '/repo', { shellCommand: null });
+    assert.ok(!setOptions(calls).some((a) => a.some((x) => String(x).startsWith('terminal-overrides'))),
+      `tmux 2.9 must not be sent an indexed option (browserScrollback=${browserScrollback})`);
+  }
+});
+
+test('the setting is read at attach time, not frozen at construction', () => {
+  // The engine is built once at boot and the setting is live-editable, so a value read
+  // in the constructor would be whatever happened to be true then, forever.
+  let enabled = false;
+  const { eng, calls } = makeEngine({ browserScrollback: false });
+  // Rebind the getter the way server.js does — through a closure over live settings.
+  eng._browserScrollback = () => enabled;
+  eng.spawn('abc12345', '/bin/zsh', ['-l'], '/repo', { shellCommand: null });
+  assert.deepStrictEqual(setOptions(calls).at(-1), ['set-option', '-su', 'terminal-overrides[1]']);
+
+  enabled = true;
+  eng.reattach('abc12345', 100, 30);
+  assert.deepStrictEqual(setOptions(calls).at(-1),
+    ['set-option', '-s', 'terminal-overrides[1]', '*:smcup@:rmcup@']);
 });
 
 test('#650: tmux < 2.1 has no `mouse` option, and loses only that', () => {

@@ -852,6 +852,7 @@ settingsBtn?.addEventListener('click', async () => {
   const currentPreventSleep = settingsData.preventSleepWhileActive !== false;
   const currentDefaultAgent = settingsData.defaultAgent || 'claude';
   const currentScrollbackKB = settingsData.scrollbackKB || 100;
+  const currentBrowserScrollback = settingsData.browserScrollback !== false;
   const currentRecentSessionsLimit = settingsData.recentSessionsLimit ?? 8;
   // Custom Claude config profiles (#537): editable [name, configDir] rows.
   const currentCustomConfigs = Array.isArray(settingsData.customAgentConfigs) ? settingsData.customAgentConfigs : [];
@@ -1189,6 +1190,16 @@ settingsBtn?.addEventListener('click', async () => {
           <input type="number" id="scrollback-kb" value="${currentScrollbackKB}" min="1" max="10000" step="1" style="width: 80px; padding: 4px 6px; background: var(--ds-bg-primary); border: 1px solid var(--ds-border); border-radius: 4px; color: var(--ds-text-primary); font-size: 13px;">
           KB
         </label>
+        <label style="font-size: 13px; color: var(--ds-text-primary); cursor: pointer; display: flex; align-items: center; gap: 8px; margin-top: 12px;">
+          <input type="checkbox" id="browser-scrollback" ${currentBrowserScrollback ? 'checked' : ''} style="accent-color: var(--ds-accent-green);">
+          Scrollbar in the terminal
+        </label>
+        <p style="font-size: 12px; color: var(--ds-text-secondary); margin: 6px 0 0 24px;">
+          Lets the browser terminal keep its own scrollback, so it draws a scrollbar you can
+          drag. tmux only, and it applies per attach: a new tab picks it up right away, open
+          tabs at the next daemon restart. The wheel still goes to the agent, and a fast burst
+          of output can lose a line here and there.
+        </p>
       </div>
       <div class="settings-section">
         <h3>Recent Sessions</h3>
@@ -1559,6 +1570,7 @@ settingsBtn?.addEventListener('click', async () => {
     const issueAutopilot = overlay.querySelector('#wand-autopilot').checked;
     const wandPromptTemplate = overlay.querySelector('#wand-prompt-template').value;
     const symlinkWorktreeSettings = overlay.querySelector('#symlink-worktree-settings').checked;
+    const browserScrollback = overlay.querySelector('#browser-scrollback').checked;
     const cmdTabSwitch = overlay.querySelector('#cmd-tab-switch').checked;
     const cmdTabSwitchHoldMs = Math.max(0, Number(overlay.querySelector('#cmd-tab-switch-hold-ms').value) || 0);
     const commandPaletteEnabled = overlay.querySelector('#command-palette-enabled').checked;
@@ -1633,7 +1645,7 @@ settingsBtn?.addEventListener('click', async () => {
     const preventSleepWhileActive = overlay.querySelector('#prevent-sleep-while-active').checked;
     const inheritRemoteControl = overlay.querySelector('#inherit-rc-newtab').checked;
     const inheritRemoteControlOnFork = overlay.querySelector('#inherit-rc-fork').checked;
-    const settingsPayload = { shellProfile, maxIssueTitleLength: newMaxTitle, wandPlanMode, issueAutopilot, wandPromptTemplate, symlinkWorktreeSettings, cmdTabSwitch, cmdTabSwitchHoldMs, commandPaletteEnabled, commandPaletteShortcut, shortcutsHelpEnabled, shortcutsHelpShortcut, hashCommandsEnabled, contextViewsEnabled, projectModsEnabled, metaControlsEnabled, inheritRemoteControl, inheritRemoteControlOnFork, overviewDefaultLayout, enabledAgents, ...agentBinaries, ...(selectedEngine ? { engine: selectedEngine } : {}), scrollbackKB, recentSessionsLimit, autoUpdateCheckEnabled, autoUpdateCheckIntervalHours, autoUpdateApply, sessionLogEnabled, scheduledTasksEnabled, scheduledTasksOpenInBackground, scheduledDefaultModel, scheduledDefaultEffort, preventSleepWhileActive, customAgentConfigs };
+    const settingsPayload = { shellProfile, maxIssueTitleLength: newMaxTitle, wandPlanMode, issueAutopilot, wandPromptTemplate, symlinkWorktreeSettings, cmdTabSwitch, cmdTabSwitchHoldMs, commandPaletteEnabled, commandPaletteShortcut, shortcutsHelpEnabled, shortcutsHelpShortcut, hashCommandsEnabled, contextViewsEnabled, projectModsEnabled, metaControlsEnabled, inheritRemoteControl, inheritRemoteControlOnFork, overviewDefaultLayout, enabledAgents, ...agentBinaries, ...(selectedEngine ? { engine: selectedEngine } : {}), scrollbackKB, browserScrollback, recentSessionsLimit, autoUpdateCheckEnabled, autoUpdateCheckIntervalHours, autoUpdateApply, sessionLogEnabled, scheduledTasksEnabled, scheduledTasksOpenInBackground, scheduledDefaultModel, scheduledDefaultEffort, preventSleepWhileActive, customAgentConfigs };
     let resp = await fetch('/api/settings', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
