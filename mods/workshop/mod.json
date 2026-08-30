@@ -6,6 +6,7 @@
   "experimental": true,
   "enabledByDefault": false,
   "entry": "index.html",
+  "app": true,
   "toolbar": { "label": "Workshop" },
   "settings": [
     {

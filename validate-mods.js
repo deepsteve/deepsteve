@@ -27,6 +27,13 @@ function validateManifest(mod, manifest) {
     errors.push(`[${mod}] display="${manifest.display}" requires an "entry" field`);
   }
 
+  // #661: an App is a place you work FROM — it owns the fullscreen view slot and lends you out
+  // to sessions. A tools-only mod has no page to own it with, so the flag would buy a rail row
+  // that opens nothing.
+  if (manifest.app === true && !manifest.entry) {
+    errors.push(`[${mod}] "app": true requires an "entry" field — an app is a page, not a tool`);
+  }
+
   // #644: the tool inventory is derived from the mod's tools.js at MCP init and served by
   // GET /api/mods. A manifest copy is read by nothing and drifted the moment it existed.
   if ('tools' in manifest) {

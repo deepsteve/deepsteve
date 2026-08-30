@@ -53,6 +53,7 @@ let hooks = null;
 let sessionCallbacks = [];
 let modViewVisible = false;
 let toolbarButtons = new Map(); // modId → button element
+let appRows = new Map();        // modId → the Apps rail row, for the .active sweep (#661)
 let settingsCallbacks = [];     // [{modId, cb}] — notified on settings change
 
 // Panel mode state — multi-panel
@@ -78,6 +79,30 @@ let activeSessionCallbacks = [];     // [{modId, cb}] — callbacks for active s
 let userActivityCallbacks = [];      // [{modId, cb}] — fired when the user types into a terminal
 let contextCallbacks = [];           // [{modId, cb}] — fired when the shared contexts (#526) change
 let activeContextCallbacks = [];     // [{modId, cb}] — fired when the active context changes
+// ─── Excursions (#661) ───────────────────────────────────────────────
+// An APP — a mod with "app": true — can lend you out to a session, let you wander, and take
+// you back with one key. The stack lives HERE, next to the one view slot it describes, because
+// every consumer of it is already in this file: showView, showTerminalForSession, showModView,
+// the back button and the bridge. A separate module would have three importers and still could
+// not be asserted in isolation, since every interesting question is "did the slot background or
+// foreground correctly".
+//
+// sessionStorage, not the localStorage ACTIVE_VIEW_KEY above: WHICH app is up is a browser-wide
+// preference, WHERE you wandered is this window's business. It also has to die with the window,
+// or a second window inherits an excursion nobody started.
+const EXCURSION_KEY = nsKey('deepsteve-excursion');
+// A trail you could grow without bound is a trail nobody walks back; 20 presses of ⌘← is
+// already well past the point where the button is the answer.
+const MAX_EXCURSION_DEPTH = 20;
+let excursion = null;                // { appId, chrome, stack: [{ sessionId, label, reason, at }] }
+// One view slot means one cycle handler; an array would need sweeping and a stale entry would
+// permanently disable the fall-back to cycling projects, which is worse than leaking it.
+let excursionCycleHandler = null;    // { viewId, cb }
+let excursionChangedCallbacks = [];  // [{modId, cb}]
+// visitSession() calls hooks.focusSession() itself, and that is a user-jump path which pushes.
+// Without this the ⌘↑/⌘↓ replace would immediately push on top of itself and the stack would
+// grow one frame per queue step — the exact thing the replace rule exists to prevent.
+let suppressExcursionPush = false;
 let getActiveSessionIdFn = null;     // set from appHooks
 let getActiveContextIdFn = null;     // set from appHooks — reads the active context (#526)
 let setActiveContextFn = null;       // set from appHooks — drives the active context (#526)
@@ -201,11 +226,21 @@ function init(appHooks) {
   modContainer.id = 'mod-container';
   contentRow.parentNode.insertBefore(modContainer, contentRow.nextSibling);
 
+  // Restored before the view is, so the first paint of the back button already knows whether
+  // it is a one-hop label or an excursion trail. Reading it here rather than at module scope
+  // keeps the module import free of storage access.
+  excursion = _loadExcursion();
+
   // Create back button (in #tabs, after layout-toggle)
   backBtn = document.createElement('button');
   backBtn.className = 'mod-back-btn';
   backBtn.style.display = 'none';
-  backBtn.addEventListener('click', () => showModView());
+  // One button, two meanings: on an excursion it pops a single frame (and only an emptied
+  // stack goes home), otherwise it is the one-hop return it has always been.
+  backBtn.addEventListener('click', () => {
+    if (isExcursionActive()) popExcursion();
+    else showModView();
+  });
   const layoutToggle = document.getElementById('layout-toggle');
   layoutToggle.parentNode.insertBefore(backBtn, layoutToggle.nextSibling);
 
@@ -295,6 +330,11 @@ function _saveEnabledMods() {
   if (allMods.length > 0) {
     localStorage.setItem(KNOWN_MODS_KEY, JSON.stringify(allMods.map(m => m.id)));
   }
+  // The Apps rail section is a projection of this set (#661), and unlike the toolbar buttons —
+  // which the toggle paths add and remove by hand — its rows only exist as of the rail's last
+  // render. Without this, enabling an app while the rail is open shows nothing until something
+  // else happens to re-render it.
+  hooks?.onAppsChanged?.();
 }
 
 /**
@@ -421,6 +461,18 @@ async function loadAvailableMods() {
     const mod = allMods.find(m => m.id === savedViewId);
     if (mod) _showMod(mod);
   }
+  // Reload lands here. _showMod() above raises the slot fullscreen, which is wrong if you were
+  // out on an excursion when the page went away — so reconcile. syncExcursion() is idempotent
+  // and re-runs from notifySessionsChanged(), which matters because whether the mod list or
+  // the session restore finishes first is a race nobody may depend on. It also drops a stack
+  // whose app failed to restore at all (disabled since, or claimed by another window).
+  syncExcursion();
+
+  // The rail is built synchronously in initContextViews(), which runs long before this fetch
+  // resolves — so on a fresh load its Apps section is drawn against an empty mod list and
+  // stays empty until something unrelated happens to re-render it. Tell the host the apps are
+  // known now. (The toolbar buttons above have no such problem: they are inserted here.)
+  hooks?.onAppsChanged?.();
 
   // Load ALL enabled panel mods (not just the first one)
   const panelWasVisible = localStorage.getItem(PANEL_VISIBLE_KEY) !== 'false';
@@ -1684,6 +1736,85 @@ function _unloadPanelMod(modId) {
   }
 }
 
+// ─── Apps (#661) ───────────────────────────────────────────────────────────────────────────
+//
+// An App is a mod with `"app": true` — a place you work FROM rather than a tool you visit.
+// The flag is purely additive: validate-mods.js has no field allowlist and GET /api/mods
+// spreads the whole manifest, so it reaches the client with no server change, and a mod
+// without it behaves exactly as it does today.
+
+/** The enabled apps, in manifest order. `type` excludes the skill pseudo-mods /api/mods appends. */
+function getApps() {
+  return allMods.filter(m => m.app === true && m.type !== 'skill'
+    && m.entry && m.compatible !== false && enabledMods.has(m.id));
+}
+
+/** Open (or toggle) an app by id — the command palette's entry point. */
+function openApp(id) {
+  const mod = getApps().find(m => m.id === id);
+  if (mod) _toggleModView(mod)();
+}
+
+/**
+ * Draw the Apps section into the projects rail, above `Projects`. Mirrors project-mods.js's
+ * appendRailRows() — including the "no rows, no empty wrapper" early return, which is also
+ * what keeps this invisible to every existing rail test.
+ *
+ * The classes are context-views' own on purpose: .context-rail-header collapses for free in
+ * the 48px icon rail, and .context-row brings the hover / active / collapsed-square rules with
+ * it. Only the LIST gets a name of its own (.app-list, not .context-list) so a rail with apps
+ * in it cannot shift what `railChildren(rail, 'context-list')[0]` means.
+ */
+function appendAppRows(rail) {
+  const apps = getApps();
+  if (!rail || !apps.length) return;
+
+  const header = document.createElement('div');
+  header.className = 'context-rail-header';
+  header.textContent = 'Apps';
+  rail.appendChild(header);
+
+  const list = document.createElement('div');
+  list.className = 'app-list';
+  for (const mod of apps) {
+    const label = mod.toolbar?.label || mod.name;
+    const row = document.createElement('div');
+    // .has-icon is what reveals .context-row-icon, which is the only thing left of a row once
+    // the rail is collapsed to squares.
+    row.className = 'context-row app-row has-icon' + (activeView?.id === mod.id ? ' active' : '');
+    row.dataset.appId = mod.id;
+    row.title = mod.description || label;
+
+    const { glyph, isEmoji } = tabIcon(label);
+    const iconEl = document.createElement('span');
+    iconEl.className = 'context-row-icon' + (isEmoji ? ' is-emoji' : '');
+    iconEl.setAttribute('aria-hidden', 'true');
+    iconEl.textContent = glyph;
+    row.appendChild(iconEl);
+
+    const labelEl = document.createElement('span');
+    labelEl.className = 'context-row-label';
+    labelEl.textContent = label;
+    row.appendChild(labelEl);
+
+    row.onclick = _toggleModView(mod);
+    appRows.set(mod.id, row);
+    list.appendChild(row);
+  }
+  rail.appendChild(list);
+}
+
+/**
+ * Which app owns the slot. A sweep over the rows we kept, not a re-render — the same
+ * "derive it on every flip, never bookkeep it" shape as showView()'s toolbar sweep and
+ * project-mods.js's paintRailRows(), and deliberately not a call back into context-views:
+ * asking it to re-render the whole filter from inside a view change is a re-entrancy waiting
+ * to happen (applyFilter can snap-switch a tab, which would background the view just opened).
+ */
+function _paintAppRows() {
+  for (const [modId, row] of appRows) row.classList.toggle('active', activeView?.id === modId);
+}
+
 /**
  * Create a toolbar button for an enabled mod (left side, near wand).
  */
@@ -1715,13 +1846,7 @@ function _createToolbarButton(mod) {
   labelEl.textContent = label;
   btn.append(iconEl, labelEl);
 
-  btn.addEventListener('click', () => {
-    if (activeView?.id === mod.id) {
-      _hideMod();
-    } else {
-      _showMod(mod);
-    }
-  });
+  btn.addEventListener('click', _toggleModView(mod));
 
   // Insert at top of #tabs, right after the layout toggle button
   const tabs = document.getElementById('tabs');
@@ -1768,6 +1893,9 @@ function showView(view) {
   // are keyed by the id its bridge was injected under. Sweeping them was missing before
   // #628, so switching straight from one view to another leaked them against a dead iframe.
   if (activeView && activeView.id !== view.id) {
+    // A different page took the slot — another app's rail row, a project mod — so the app that
+    // lent you out is gone and its trail with it (#661).
+    _abandonExcursion(activeView.id);
     _forgetViewCallbacks(activeView.id);
     _destroyIframe();
   }
@@ -1783,6 +1911,7 @@ function showView(view) {
   for (const [id, btn] of toolbarButtons) {
     btn.classList.toggle('active', id === view.id);
   }
+  _paintAppRows();
 
   if (!iframe) {
     iframe = document.createElement('iframe');
@@ -1829,6 +1958,24 @@ function _setModViewVisible(on) {
 }
 
 /**
+ * The launcher toggle, shared by the toolbar button and the Apps rail row so the two can't
+ * drift. Three-way on purpose, matching project-mods.js's openMod(): a click on a
+ * BACKGROUNDED view raises it rather than dismissing it. Before #661 this was two-way, so
+ * pressing the toolbar button while out on an excursion destroyed the iframe and threw away
+ * the state you were about to come back to.
+ */
+function _toggleModView(mod) {
+  return () => {
+    if (activeView?.id !== mod.id) _showMod(mod);
+    else if (modViewVisible) _hideMod();
+    // Raising the app IS coming home, so the trail is spent — otherwise ⌘← would still be
+    // armed while you are already looking at the thing it returns to.
+    else if (isExcursionActive()) endExcursion();
+    else showModView();
+  };
+}
+
+/**
  * Show a DeepSteve Mod's iframe view — the original caller of the slot. The two early
  * returns are mod-manifest concepts and deliberately stay here rather than in showView().
  */
@@ -1858,6 +2005,11 @@ function _forgetViewCallbacks(id) {
   activeSessionCallbacks = activeSessionCallbacks.filter(e => e.modId !== id);
   userActivityCallbacks = userActivityCallbacks.filter(e => e.modId !== id);
   settingsCallbacks = settingsCallbacks.filter(e => e.modId !== id);
+  excursionChangedCallbacks = excursionChangedCallbacks.filter(e => e.modId !== id);
+  // Not merely a leak: a cycle handler left pointing at a destroyed iframe realm would keep
+  // requestExcursionCycle() reporting "handled", so ⌘↑/⌘↓ would stop falling back to cycling
+  // projects and would simply do nothing, forever.
+  if (excursionCycleHandler?.viewId === id) excursionCycleHandler = null;
 }
 
 /**
@@ -1865,6 +2017,10 @@ function _forgetViewCallbacks(id) {
  */
 function _hideMod() {
   const hiddenModId = activeView?.id ?? null;
+  // The slot's only destroyer, so this one line is every "the app went away" path at once:
+  // the toolbar button toggling it off, the mod being disabled in another browser tab, a
+  // dependency uninstall, and hideView(). There is nothing left to go back to.
+  _abandonExcursion(hiddenModId);
   activeView = null;
   localStorage.removeItem(ACTIVE_VIEW_KEY);
   _forgetViewCallbacks(hiddenModId);
@@ -1875,6 +2031,7 @@ function _hideMod() {
   for (const [, btn] of toolbarButtons) {
     btn.classList.remove('active');
   }
+  _paintAppRows();
 
   // Show content row, hide mod container and back button
   document.getElementById('content-row').style.display = '';
@@ -1919,8 +2076,227 @@ function showModView() {
   document.getElementById('content-row').style.display = 'none';
   modContainer.style.display = 'flex';
   backBtn.style.display = 'none';
+  backBtn.classList.remove('excursion');
   _setModViewVisible(true);
   _focusIframe(iframe);
+  // An app that spent the excursion in a display:none iframe has laid nothing out — its
+  // selected row cannot have been scrolled into view. Tell it it is on screen again.
+  if (excursionChangedCallbacks.length) _notifyExcursion();
+}
+
+// ─── Excursions (#661) ─────────────────────────────────────────────────────────────────────
+//
+// The stack is what turns the ONE-HOP back button into a trail you can walk:
+//
+//   visitSession() from the app              push        → depth 1
+//   ⌘↑/⌘↓ queue walk (opts.replace)          replace top → still depth 1
+//   the user clicking another tab while out  push        → depth 2
+//   ⌘← / the back button                     pop
+//
+// The replace rule is load-bearing. Without it, walking a 20-item inbox builds a 20-deep
+// stack and "back" costs 20 presses.
+
+function _loadExcursion() {
+  try {
+    const raw = JSON.parse(sessionStorage.getItem(EXCURSION_KEY));
+    // A shape check, not a schema: a half-written or hand-edited value must read as "no
+    // excursion" rather than wedge every keystroke that consults the stack.
+    if (!raw?.appId || !Array.isArray(raw.stack)) return null;
+    const stack = raw.stack.filter(f => f && f.sessionId);
+    if (!stack.length) return null;
+    return { appId: raw.appId, chrome: raw.chrome || {}, stack };
+  } catch { return null; }
+}
+
+function _saveExcursion() {
+  try {
+    if (excursion?.stack?.length) sessionStorage.setItem(EXCURSION_KEY, JSON.stringify(excursion));
+    else sessionStorage.removeItem(EXCURSION_KEY);
+  } catch {}
+}
+
+/**
+ * The one writer. Persists, repaints, tells the app and tells the host — the same
+ * "derive it on every flip, never bookkeep it" shape as _setModViewVisible().
+ */
+function _excursionChanged() {
+  _saveExcursion();
+  _paintBackBtn();
+  hooks?.onExcursionChanged?.(getExcursion());
+  _notifyExcursion();
+}
+
+function _notifyExcursion() {
+  const state = getExcursion();
+  for (const entry of excursionChangedCallbacks) {
+    try { entry.cb(state); } catch (e) { console.error('Excursion callback error:', e); }
+  }
+}
+
+/** True while the host is lent out. context-views reads this for its ⌘↑/⌘↓ takeover. */
+function isExcursionActive() {
+  return !!(excursion && excursion.stack.length);
+}
+
+function getExcursion() {
+  if (!isExcursionActive()) return { appId: null, depth: 0, stack: [], chrome: {} };
+  return {
+    appId: excursion.appId,
+    depth: excursion.stack.length,
+    stack: excursion.stack.map(f => ({ ...f })),
+    chrome: { ...excursion.chrome },
+  };
+}
+
+/** End it and come home. A no-op when there is no excursion. */
+function endExcursion({ goHome = true } = {}) {
+  if (!excursion) return;
+  excursion = null;
+  _excursionChanged();
+  if (goHome && activeView) showModView();
+}
+
+/**
+ * Drop the stack WITHOUT going home — for the paths where the app itself went away (its view
+ * was destroyed, or a different page took the slot), so there is nothing left to return to.
+ * `viewId` guards it: another view's teardown must not end this view's excursion.
+ */
+function _abandonExcursion(viewId = null) {
+  if (!excursion) return;
+  if (viewId && excursion.appId !== viewId) return;
+  excursion = null;
+  _excursionChanged();
+}
+
+/**
+ * An app lends you out. Everything after the bookkeeping is the EXISTING one-hop path, which
+ * is the point: coming home is just showModView() again, and the stack only decides which
+ * session a pop lands on.
+ */
+function visitSession(id, opts = {}) {
+  if (!id || !activeView) return;
+  const frame = { sessionId: id, label: opts.label || null, reason: opts.reason || null, at: Date.now() };
+
+  if (!excursion || excursion.appId !== activeView.id) {
+    // Defaults per the issue: the app sent you, so you are not browsing projects, and the
+    // strip is filtered to where you landed. `tabs: 'project'` costs nothing to honour —
+    // hooks.focusSession is app.js's focusTab, which already reveals the session's project.
+    excursion = {
+      appId: activeView.id,
+      chrome: { rail: 'hide', tabs: 'project', ...(opts.chrome || {}) },
+      stack: [frame],
+    };
+  } else if (opts.replace) {
+    excursion.stack[excursion.stack.length - 1] = frame;
+  } else {
+    excursion.stack.push(frame);
+    if (excursion.stack.length > MAX_EXCURSION_DEPTH) excursion.stack.shift();
+  }
+
+  _excursionChanged();
+  // showTerminalForSession → hooks.focusSession is a user-jump path, and user jumps push.
+  // Without this guard every replace would immediately push on top of itself.
+  suppressExcursionPush = true;
+  try { showTerminalForSession(id); } finally { suppressExcursionPush = false; }
+}
+
+/**
+ * A frame for everything the app did NOT initiate — a tab click, a tab arrow, the palette.
+ * Called only from app.js's user-jump wrappers. The mechanical activations (the context
+ * filter's snap-back, the close-tab fallback, session restore) stay on bare switchTo() and
+ * push nothing, because none of them is you asking to go somewhere.
+ */
+function noteExcursionDrill(id) {
+  if (suppressExcursionPush || !id || !isExcursionActive()) return;
+  if (excursion.stack[excursion.stack.length - 1].sessionId === id) return;  // already there
+  excursion.stack.push({ sessionId: id, label: null, reason: 'drill', at: Date.now() });
+  if (excursion.stack.length > MAX_EXCURSION_DEPTH) excursion.stack.shift();
+  _excursionChanged();
+}
+
+/**
+ * Back: one frame. Validated on the way out rather than pruned eagerly — one loop covers a
+ * killed session, a closed tab, a tab sent to another window and a restore that rejected a
+ * duplicate, without any of those paths having to know the stack exists.
+ */
+function popExcursion() {
+  if (!isExcursionActive()) return false;
+  const live = hooks?.hasSession;
+  while (excursion.stack.length) {
+    excursion.stack.pop();
+    const next = excursion.stack[excursion.stack.length - 1];
+    if (!next) break;
+    if (live && !live(next.sessionId)) continue;   // that one is gone; keep unwinding
+    _excursionChanged();
+    suppressExcursionPush = true;
+    try { hooks?.focusSession?.(next.sessionId); } finally { suppressExcursionPush = false; }
+    return true;
+  }
+  endExcursion();
+  return true;
+}
+
+/**
+ * ⌘↑/⌘↓ while out. The APP owns the queue — it is the only thing that knows what resolved
+ * since you left — so the host asks rather than walking a snapshot it took on the way in.
+ * Returns false when nobody is listening, which is what lets context-views fall back to
+ * cycling projects instead of leaving the key dead.
+ */
+function requestExcursionCycle(delta) {
+  if (!isExcursionActive() || !excursionCycleHandler) return false;
+  if (excursionCycleHandler.viewId !== excursion.appId) return false;
+  try {
+    excursionCycleHandler.cb({ delta });
+  } catch (e) {
+    console.error('Excursion cycle handler error:', e);
+    return false;
+  }
+  return true;
+}
+
+/**
+ * The back button, doubling as the excursion bar. It renders in the TOP document, which is the
+ * whole reason it lives here and not in the app's page: a mod iframe receives no theme
+ * variables, so anything built inside one is stuck on hardcoded fallback colours (#633).
+ */
+function _paintBackBtn() {
+  if (!backBtn || !activeView) return;
+  if (!isExcursionActive()) {
+    backBtn.classList.remove('excursion');
+    backBtn.textContent = `← ${activeView.name || 'Back'}`;
+    backBtn.title = `Back to ${activeView.name || 'the view'}`;
+    return;
+  }
+  const top = excursion.stack[excursion.stack.length - 1];
+  const crumb = hooks?.getBreadcrumb?.(top.sessionId) || {};
+  const trail = [crumb.project, crumb.tab || top.label].filter(Boolean).join(' / ');
+  const depth = excursion.stack.length;
+  backBtn.classList.add('excursion');
+  backBtn.textContent = trail ? `← ${activeView.name} · ${trail}` : `← ${activeView.name}`;
+  backBtn.title = depth > 1 ? `⌘← back (${depth} deep)` : `⌘← back to ${activeView.name}`;
+}
+
+/**
+ * Reconcile the slot with the stack. Idempotent, and called from everything that could have
+ * changed either — because on reload the view restore (inside the async loadAvailableMods)
+ * and the session restore race, and neither may be assumed to win.
+ */
+function syncExcursion() {
+  if (!isExcursionActive()) return;
+  // Re-assert the chrome even when nothing changed. On a reload the stack comes back without
+  // ever passing through _excursionChanged(), so the host has never been told to hide the rail
+  // — and the one state where that matters is exactly the one nobody would think to test.
+  hooks?.onExcursionChanged?.(getExcursion());
+  // ACTIVE_VIEW_KEY is localStorage and therefore shared by every window at this recursion
+  // depth, so another window opening Tower can leave us holding a stack for a view we do not
+  // have. This check is also what keeps an excursion from leaking into a second window.
+  if (!activeView || activeView.id !== excursion.appId) { _abandonExcursion(); return; }
+  if (!modViewVisible) { _paintBackBtn(); return; }
+  const top = excursion.stack[excursion.stack.length - 1];
+  if (hooks?.hasSession && !hooks.hasSession(top.sessionId)) return;  // its tab isn't up yet
+  _backgroundView();
+  suppressExcursionPush = true;
+  try { hooks?.focusSession?.(top.sessionId); } finally { suppressExcursionPush = false; }
 }
 
 /**
@@ -1937,11 +2313,24 @@ function showTerminalForSession(id) {
     return;
   }
 
+  _backgroundView();
+  hooks.focusSession(id);
+}
+
+/**
+ * Put the slot down and paint the back button, WITHOUT selecting a session.
+ *
+ * Split out of showTerminalForSession() for the reload path (#661), which has to land
+ * backgrounded before any session exists: calling hooks.focusSession() there would set
+ * activeId/ActiveTab for a tab that has not been created yet, and restoreSessions()' own
+ * focusTab() would overwrite it a moment later anyway.
+ */
+function _backgroundView() {
   modContainer.style.display = 'none';
   document.getElementById('content-row').style.display = '';
-  // Re-selects the OUTGOING tab for the moment it takes hooks.focusSession() below to select
-  // the incoming one. Deliberate: the rule is "the slot is down, so a tab is on screen again",
-  // and letting this path skip it is exactly how the two would drift apart.
+  // Re-selects the OUTGOING tab for the moment it takes the caller to select the incoming one.
+  // Deliberate: the rule is "the slot is down, so a tab is on screen again", and letting this
+  // path skip it is exactly how the two would drift apart.
   _setModViewVisible(false);
 
   // Restore panel if it was logically visible
@@ -1949,13 +2338,10 @@ function showTerminalForSession(id) {
     _showPanel();
   }
 
-  // Show back button with the view's name
   if (activeView) {
-    backBtn.textContent = `\u2190 ${activeView.name || 'Back'}`;
+    _paintBackBtn();
     backBtn.style.display = '';
   }
-
-  hooks.focusSession(id);
 }
 
 /**
@@ -1974,6 +2360,9 @@ function notifySessionsChanged(sessionList) {
   for (const entry of sessionCallbacks) {
     try { entry.cb(sessionList); } catch (e) { console.error('Mod callback error:', e); }
   }
+  // The retry half of the reload reconciler (#661): on a fresh page the restored excursion
+  // names a session whose tab does not exist yet, so syncExcursion() no-ops until it does.
+  syncExcursion();
 }
 
 /**
@@ -2147,6 +2536,37 @@ function _injectBridgeAPI(iframeEl, modId, tabInstanceId) {
       },
       focusSession(id) {
         showTerminalForSession(id);
+      },
+      // ── Excursions (#661). Strictly opt-in: focusSession() above keeps its one-hop
+      // semantics untouched, so no existing mod changes.
+      visitSession(id, opts) {
+        // Only the page currently in the slot may lend the user out — a panel mod calling this
+        // would start a trail back to a view that is not on screen.
+        if (activeView?.id !== modId) return;
+        visitSession(id, opts || {});
+      },
+      getExcursion() {
+        return getExcursion();
+      },
+      endExcursion() {
+        if (activeView?.id === modId) endExcursion();
+      },
+      onExcursionChanged(cb) {
+        const entry = { modId, cb };
+        excursionChangedCallbacks.push(entry);
+        try { cb(getExcursion()); } catch {}
+        return () => {
+          excursionChangedCallbacks = excursionChangedCallbacks.filter(e => e !== entry);
+        };
+      },
+      // Host → app: "move your cursor". The app owns the queue because it is the only thing
+      // that knows what resolved while you were away; a snapshot taken on the way in would
+      // send ⌘↓ to a row that no longer exists.
+      onExcursionCycle(cb) {
+        excursionCycleHandler = { viewId: modId, cb };
+        return () => {
+          if (excursionCycleHandler?.cb === cb) excursionCycleHandler = null;
+        };
       },
       onSessionsChanged(cb) {
         const entry = { modId, cb };
@@ -2480,4 +2900,18 @@ export const ModManager = {
   getContextMenuItems,
   getNewTabItems,
   showAutomationsModal: _showAutomationsModal,
+  // Apps + excursions (#661)
+  getApps,
+  openApp,
+  isExcursionActive,
+  getExcursion,
+  endExcursion,
+  popExcursion,
+  noteExcursionDrill,
+  requestExcursionCycle,
+  syncExcursion,
 };
+
+// context-views.js draws the Apps section into the rail with this, the same shape it already
+// uses for appendRailRows() from project-mods.js. One-way: nothing here imports context-views.
+export { appendAppRows, isExcursionActive };

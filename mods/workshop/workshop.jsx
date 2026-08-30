@@ -435,11 +435,25 @@ function Workshop() {
     }
   }, [view.list, picked, draft, refresh, archive]);
 
+  // Going to look at an agent is an EXCURSION (#661), not a one-hop jump: the host hides the
+  // rail, filters the strip to that session's project, and puts a ⌘← trail in the tab strip —
+  // so you can walk twenty blocked agents and still be one keystroke from the inbox. It
+  // degrades on its own: an older host has no visitSession, and focusSession is what Workshop
+  // shipped with.
+  const visit = useCallback((item, opts = {}) => {
+    if (!item || !item.sessionId || !localIds.has(item.sessionId)) return false;
+    const ds = window.deepsteve;
+    if (ds?.visitSession) {
+      ds.visitSession(item.sessionId, { label: itemSubject(item), reason: item.kind, ...opts });
+    } else {
+      ds?.focusSession?.(item.sessionId);
+    }
+    return true;
+  }, [localIds]);
+
   const openTab = useCallback(() => {
-    const item = view.list.find((i) => i.id === selectedIdRef.current);
-    if (!item || !item.sessionId || !localIds.has(item.sessionId)) return;
-    window.deepsteve?.focusSession?.(item.sessionId);
-  }, [view.list, localIds]);
+    visit(view.list.find((i) => i.id === selectedIdRef.current));
+  }, [view.list, visit]);
 
   const moveCursor = useCallback((to) => {
     const order = orderRef.current;
@@ -453,6 +467,42 @@ function Workshop() {
     }
     setSelectedId(order[index]);
   }, []);
+
+  // ── One cursor, two renderings (#661).
+  //
+  // Inside the inbox, bare ↑/↓ move the cursor and the reading pane follows. Out on an
+  // excursion the host lends ⌘↑/⌘↓ to this same cursor, in the same order, over the same
+  // queue — and the TERMINAL follows instead. So twenty blocked agents can be walked without
+  // ever coming back to the inbox, and ⌘← still lands you on the row you left off at.
+  //
+  // Refs, not deps: the host holds one handler for the life of the iframe, and `view` is
+  // rebuilt on every 2s poll.
+  const cycleRef = useRef({ list: [], visit: () => false });
+  useEffect(() => { cycleRef.current = { list: view.list, visit }; }, [view.list, visit]);
+  useEffect(() => {
+    if (!bridgeReady || !window.deepsteve.onExcursionCycle) return undefined;
+    return window.deepsteve.onExcursionCycle(({ delta }) => {
+      const order = orderRef.current;
+      const { list, visit: go } = cycleRef.current;
+      if (!order.length) return;
+      let i = order.indexOf(selectedIdRef.current);
+      if (i < 0) i = 0;
+      // Step PAST anything this window cannot show. getSessions() is window-scoped, so a
+      // scheduled run with no tab here is a legitimate inbox row with nothing to visit —
+      // stopping on one would end the walk at the first unattended agent.
+      for (let steps = 0; steps < order.length; steps++) {
+        i += delta;
+        if (i < 0 || i >= order.length) return;   // ran off the end: stay put
+        const item = list.find((it) => it.id === order[i]);
+        // `replace` is the load-bearing half: a queue walk must not deepen the stack, or
+        // "back" costs one press per agent you looked at.
+        if (item && go(item, { replace: true })) {
+          setSelectedId(order[i]);
+          return;
+        }
+      }
+    });
+  }, [bridgeReady]);
 
   // ── Keyboard. Inside the iframe: keystrokes in a mod iframe never reach the host's
   // capture-phase listeners, so this needs no shortcuts.js registry entry (the same

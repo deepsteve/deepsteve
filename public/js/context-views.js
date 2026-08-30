@@ -47,6 +47,11 @@ import { tabIcon } from './tab-manager.js';
 // project-mods.js learns about the active view through callbacks app.js injects, never
 // by importing this module back.
 import { railModsFor, appendRailRows, isCompactRail, setCompactRail, modsForProject, openMod, modIcon } from './project-mods.js';
+// Apps (#661) get a section above Projects, and an excursion takes ⌘↑/⌘↓ off the rail for as
+// long as it lasts. Same one-way shape as the project-mods import above: mod-manager.js
+// imports only storage-namespace + tab-manager, so this adds no cycle. Do not import this
+// module back from there — mod-manager reaches context-views through app.js's hooks.
+import { ModManager, appendAppRows } from './mod-manager.js';
 
 // Context definitions are server-owned (#526): they are the same entity as the
 // Scheduled Tasks "project groups", loaded from /api/contexts and kept fresh by
@@ -63,6 +68,7 @@ let contexts = [];          // [{ id, name, dirs: [] }]
 let activeContextId = null; // null = view all
 let lastTabByContext = {};  // { contextId: tabId } — last tab viewed while that context was active (#541)
 let sidebarOpen = false;
+let railSuppressed = false; // excursion chrome (#661) — deliberately NEVER persisted
 let archivedOpen = false;   // archived section expanded in the rail (#601)
 let cmdChordArmed = false;  // true between a Cmd+P press and the Cmd release — see onKeyDown
 
@@ -340,8 +346,13 @@ function updateIndicator() {
 // ----------------------------------------------------------------- rail (DOM)
 
 function renderRail() {
-  if (!rail || !sidebarOpen) return;
+  if (!rail || !railVisible()) return;
   rail.innerHTML = '';
+
+  // Apps (#661) — mods that are a place you work from rather than a tool you visit. Drawn by
+  // mod-manager, which owns the manifests and the view slot; it appends nothing when no app is
+  // enabled, so a rail without apps is byte-for-byte the rail that was here before.
+  appendAppRows(rail);
 
   const header = document.createElement('div');
   header.className = 'context-rail-header';
@@ -349,7 +360,9 @@ function renderRail() {
   rail.appendChild(header);
 
   const list = document.createElement('div');
-  list.className = 'context-list';
+  // `projects-list` names the one this function owns. The Apps block above is a sibling
+  // .app-list, so "the first .context-list in the rail" can never come to mean something else.
+  list.className = 'context-list projects-list';
   list.appendChild(makeRow(null, 'All', activeContextId === null, null));
   for (const ctx of visibleContexts()) {
     list.appendChild(makeRow(ctx.id, ctx.name, ctx.id === activeContextId, ctx));
@@ -969,7 +982,10 @@ export function revealTabContext(tabId) {
   const match = visibleContexts().find(c => tabInContext(cwd, c));
   selectContext(match ? match.id : null);
   noteActiveTab(tabId);                        // record as destination's last tab (#541); self-no-ops for All
-  showToast(match ? match.name : 'All tabs');  // explain the jump (mirrors cycleContext)
+  // Explain the jump (mirrors cycleContext) — except on an excursion, where every ⌘↓ through
+  // a queue would pop the same project's name and the excursion bar already says where you
+  // are (#661).
+  if (!ModManager.isExcursionActive()) showToast(match ? match.name : 'All tabs');
 }
 
 // Tell app.js (→ the scheduled-tasks panel) which context is active. Half of the
@@ -981,16 +997,22 @@ function notifyActive() {
 
 // -------------------------------------------------------------------- sidebar
 
-function setSidebar(open) {
-  sidebarOpen = open;
-  saveSidebar();
-  if (rail) rail.style.display = open ? 'flex' : 'none';
-  if (resizer) resizer.style.display = open ? 'block' : 'none';
+// Is the rail on screen? Two independent facts: the user's ⌘P preference, and whether an
+// excursion is currently borrowing the screen (#661). Splitting them is the point — routing
+// excursion chrome through setSidebar() would write SIDEBAR_KEY and silently overwrite a
+// preference the user never changed.
+const railVisible = () => sidebarOpen && !railSuppressed;
+
+/** Everything setSidebar() does EXCEPT persisting — so suppression can reuse it. */
+function applyRailChrome() {
+  const on = railVisible();
+  if (rail) rail.style.display = on ? 'flex' : 'none';
+  if (resizer) resizer.style.display = on ? 'block' : 'none';
   if (toggleBtn) {
-    toggleBtn.classList.toggle('active', open);
-    toggleBtn.title = open ? 'Hide projects (⌘P)' : 'Show projects (⌘P)';
+    toggleBtn.classList.toggle('active', on);
+    toggleBtn.title = on ? 'Hide projects (⌘P)' : 'Show projects (⌘P)';
   }
-  if (open) {
+  if (on) {
     renderRail();
     applyRailWidth(loadWidth()); // restore the dragged width (null → CSS/theme default)
   }
@@ -998,8 +1020,39 @@ function setSidebar(open) {
   window.dispatchEvent(new Event('resize'));
 }
 
+function setSidebar(open) {
+  sidebarOpen = open;
+  saveSidebar();
+  applyRailChrome();
+}
+
+/**
+ * Excursion chrome: hide the rail without touching the user's preference. Exported for
+ * app.js, which drives it off ModManager's excursion state — mod-manager never imports this
+ * module, the same one-way rule project-mods.js follows.
+ */
+export function setRailSuppressed(on) {
+  const next = !!on;
+  if (next === railSuppressed) return;
+  railSuppressed = next;
+  applyRailChrome();
+}
+
+/**
+ * Asking for the rail wins. Every "show the rail" affordance runs this first, so none of them
+ * can become a dead key while an excursion is suppressing it — the alternative is a half-state
+ * where the rail is on screen but ⌘↑/⌘↓ still belongs to the app.
+ */
+function unsuppressRail() {
+  if (!railSuppressed) return false;
+  railSuppressed = false;
+  ModManager.endExcursion({ goHome: false });
+  return true;
+}
+
 function toggleSidebar() {
-  setSidebar(!sidebarOpen);
+  if (unsuppressRail()) setSidebar(true);
+  else setSidebar(!sidebarOpen);
   document.activeElement?.blur();
 }
 
@@ -1096,7 +1149,8 @@ function autoSizeRail() {
     g.font = '13px system-ui';
   }
   let textW = 0;
-  for (const s of ['Projects', '+ New project', 'All', ...contexts.map(c => c.name)]) {
+  const appLabels = ModManager.getApps().map(m => m.toolbar?.label || m.name);
+  for (const s of ['Projects', 'Apps', '+ New project', 'All', ...appLabels, ...contexts.map(c => c.name)]) {
     textW = Math.max(textW, g.measureText(s || '').width);
   }
   // Allowance: row padding (12+12) + active border (3) + icon chip + gap + a
@@ -1144,6 +1198,12 @@ function cycleContext(dir) {
   showToast(activeContextId ? (getActiveContext()?.name || 'Context') : 'All tabs');
 }
 
+// The ⌘-hold tab switcher arms itself after a full second and then owns ← / → (its own
+// capture listener is on this same node, and stopPropagation does not reach siblings there —
+// so without this both would fire and ⌘← would pop the excursion AND switch tabs).
+const inTabSwitchMode = () =>
+  !!document.getElementById('tabs')?.classList.contains('tab-switch-mode');
+
 // True for real form fields where Cmd+P / Cmd+Arrow should stay native. The
 // terminal's own xterm-helper-textarea is deliberately excluded so shortcuts
 // still work while a terminal is focused.
@@ -1181,12 +1241,65 @@ registerInfo({
   group: 'Views',
   description: 'Cycle through All + your projects',
   keys: ['⌘↑', '⌘↓'],
-  isEnabled: () => enabled,
+  // Hidden while an app has borrowed the keys, so the overlay shows one meaning at a time.
+  isEnabled: () => enabled && !ModManager.isExcursionActive(),
+});
+
+// The other half of that overload (#661). During an excursion the projects rail is hidden by
+// the app's chrome, so the surface these keys drive is not on screen and lending them to the
+// app's queue is coherent rather than arbitrary — but a binding that means two things is
+// exactly what the registry exists to make legible, so both meanings are declared.
+registerInfo({
+  id: 'app-queue-cycle',
+  group: 'Views',
+  description: "Walk the app's queue, session to session",
+  keys: ['⌘↑', '⌘↓'],
+  isEnabled: () => ModManager.isExcursionActive(),
+});
+
+// ⌘← is a real binding, unlike its two neighbours: one key, one meaning, expressible by the
+// matcher. `match:'key'` is not a choice — keyToCode() maps only letters and digits, so
+// match:'code' would throw at import time for an arrow.
+//
+// It overlaps the ⌘-hold tab switcher, which claims ArrowLeft after a full second of holding
+// ⌘ (cmd-tab-switch.js TAB_KEYS). A quick ⌘← never reaches that state and lands here; a held
+// ⌘ then ← still switches tabs. onKeyDown skips this branch while the strip is in hold mode,
+// because capture-phase stopPropagation does not stop listeners on the same node.
+const matchesAppBack = register({
+  id: 'app-back',
+  group: 'Views',
+  description: 'Back to the app that sent you here',
+  shortcut: 'Meta+ArrowLeft',
+  isEnabled: () => ModManager.isExcursionActive(),
 });
 
 function onKeyDown(e) {
-  if (!enabled || !e.metaKey) return;
+  if (!e.metaKey) return;
   if (isFormField(e.target)) return;
+
+  // Deliberately ABOVE the `enabled` guard: an excursion is the app's, not the projects
+  // feature's, and turning context views off must not strand you out on one with a dead ⌘←.
+  if (ModManager.isExcursionActive() && !inTabSwitchMode()) {
+    if (matchesAppBack(e)) {
+      e.preventDefault();
+      e.stopPropagation();
+      ModManager.popExcursion();
+      return;
+    }
+    // Also above `visibleContexts().length === 0` below: with no projects defined that early
+    // return would swallow ⌘↑/⌘↓ before the app ever heard about them.
+    if ((e.code === 'ArrowUp' || e.code === 'ArrowDown') && !e.ctrlKey && !e.altKey && !e.shiftKey) {
+      // False when the app registered no cycle handler — then fall through to cycling
+      // projects, so the key is never merely dead.
+      if (ModManager.requestExcursionCycle(e.code === 'ArrowDown' ? 1 : -1)) {
+        e.preventDefault();
+        e.stopPropagation();
+        return;
+      }
+    }
+  }
+
+  if (!enabled) return;
 
   // Cmd+P — toggle the context panel. We swallow the event (preventDefault) so
   // the browser's Print dialog never opens. Unlike the old Cmd+C binding, this
@@ -1205,6 +1318,7 @@ function onKeyDown(e) {
   if (e.code === 'KeyA' && cmdChordArmed && !e.ctrlKey && !e.altKey && !e.shiftKey) {
     e.preventDefault();
     e.stopPropagation();
+    unsuppressRail();
     if (!sidebarOpen) setSidebar(true);
     selectContext(null);
     showToast('All tabs');
@@ -1494,6 +1608,9 @@ export function init(callbacks) {
   contexts = [];                    // seeded from the server by fetchContexts() below
   activeContextId = loadActive();   // restored per-window; validated once contexts arrive
   sidebarOpen = loadSidebar();
+  // Chrome, not preference: a fresh init has no excursion yet. mod-manager re-asserts it from
+  // syncExcursion() once the mod list lands, which is after this runs.
+  railSuppressed = false;
   archivedOpen = loadArchivedOpen();
   lastTabByContext = loadLastTabs(); // stale tab ids are validated at restore time (#541)
 
@@ -1507,6 +1624,7 @@ export function init(callbacks) {
     indicatorEl.id = 'context-indicator';
     indicatorEl.className = 'hidden';
     indicatorEl.addEventListener('click', () => {
+      unsuppressRail();
       setSidebar(true);
       document.activeElement?.blur();
     });
@@ -1559,6 +1677,7 @@ export function init(callbacks) {
     ruleTitleEl.id = 'context-rule-title';
     ruleTitleEl.className = 'hidden';
     ruleTitleEl.addEventListener('click', () => {
+      unsuppressRail();
       setSidebar(true);
       document.activeElement?.blur();
     });
@@ -1625,6 +1744,10 @@ export function setEnabled(val) {
   enabled = !!val;
   if (toggleBtn) toggleBtn.style.display = enabled ? '' : 'none';
   if (!enabled) {
+    // Suppression is this module's, so it goes with it — otherwise turning the feature off
+    // mid-excursion leaves a hidden rail with nothing left able to bring it back. The
+    // excursion itself survives: ⌘← is handled above the `enabled` guard on purpose.
+    railSuppressed = false;
     setSidebar(false);
     // Un-hide any filtered tabs so disabling the feature reveals everything.
     document.querySelectorAll('.tab.context-hidden').forEach(t => t.classList.remove('context-hidden'));

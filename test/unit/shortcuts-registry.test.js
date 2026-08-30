@@ -103,6 +103,8 @@ test('every expected shortcut is registered, and nothing extra', async () => {
   // that is the point. A binding that isn't here is one the ⌘? overlay won't show.
   const { registry } = await loadAll();
   assert.deepStrictEqual(registry.getAll().map(e => e.id).sort(), [
+    'app-back',
+    'app-queue-cycle',
     'cmd-hold-cycle',
     'cmd-hold-jump',
     'command-palette',
@@ -115,6 +117,28 @@ test('every expected shortcut is registered, and nothing extra', async () => {
     'terminal-shift-enter',
     'terminal-word-motion',
   ]);
+});
+
+test('the ⌘↑/⌘↓ overload declares both meanings, and only one is ever live (#661)', async () => {
+  // ⌘↑/⌘↓ cycles projects at home and walks the app's queue on an excursion. A binding that
+  // means two things is exactly what the registry exists to make legible — so both are
+  // declared, and their isEnabled closures are mutually exclusive.
+  const { registry } = await loadAll();
+  const cycle = find(registry.getAll(), 'context-cycle');
+  const queue = find(registry.getAll(), 'app-queue-cycle');
+  assert.deepStrictEqual(cycle.keys, ['⌘↑', '⌘↓']);
+  assert.deepStrictEqual(queue.keys, ['⌘↑', '⌘↓']);
+  // No excursion is active in a headless registry, so exactly the project one shows.
+  assert.strictEqual(queue.enabled, false, 'the queue walk must not advertise itself at home');
+  assert.strictEqual(find(registry.getAll(), 'app-back').enabled, false);
+});
+
+test('app-back renders as ⌘← , not ⌘ARROWLEFT (#661)', async () => {
+  // The registry formats a real binding's keys itself. Without an arrow glyph in
+  // formatShortcut this row reads ⌘ARROWLEFT in the overlay, which is why every arrow
+  // binding before this one had to be a hand-written registerInfo entry.
+  const { registry } = await loadAll();
+  assert.deepStrictEqual(find(registry.getAll(), 'app-back').keys, ['⌘←']);
 });
 
 test('every entry lands in a known group with keys and a description', async () => {

@@ -25,6 +25,35 @@ Mods have three display modes:
 - **Panel** — docked to the right side of the terminal area, with tabs if multiple panel mods are enabled. A drag handle allows resizing. Panel iframes stay alive even when hidden, so MCP tools keep working.
 - **Tools-only** — no UI, no iframe, no toolbar button. Only provides MCP tools to sessions. Omit both `display` and `entry` from `mod.json`.
 
+### Apps (#661)
+
+An **App** is a fullscreen mod that is a *place you work from* rather than a tool you visit —
+an inbox you sit in all day, not a view you glance at. Declare it with `"app": true` alongside
+an `entry`. The flag is purely additive: a mod without it behaves exactly as it always has.
+
+Declaring it buys three things:
+
+- a row in an **Apps** section at the top of the projects rail, above `Projects`,
+- a command-palette entry (`Open: <name>`) — the rail is ⌘P-toggled, so a rail-only launcher
+  would be unreachable half the time, and an app keeps its toolbar button for the same reason,
+- the **excursion** API below.
+
+**Excursions** are a navigation stack owned by the host. An app calls `visitSession()` instead
+of `focusSession()`; the host hides the projects rail, filters the tab strip to the visited
+session's project, and turns the `← <name>` back button into a trail (`← Workshop · deepsteve
+/ issue-661`). ⌘← pops one frame; an emptied stack restores the app, which was only
+*backgrounded* — its iframe stayed loaded, so you come back to the state you left.
+
+While you are out, ⌘↑/⌘↓ move the app's own cursor and the *terminal* follows, so a queue of
+twenty blocked agents can be walked without returning to the inbox. That walk **replaces** the
+top frame rather than pushing, or "back" would cost one press per agent; drilling from a
+visited session into another one *does* push. The app owns the queue and the host asks it to
+move (`onExcursionCycle`), because only the app knows what resolved while you were away.
+
+The stack lives in `sessionStorage`, so it survives a reload of the same window and does not
+leak into a second one. That is a deliberate split from which app is *open*, which is a
+browser-wide `localStorage` preference.
+
 ### Built-in Mods
 
 | Mod | Display | Default | Description |
@@ -38,7 +67,7 @@ Mods have three display modes:
 | **Tasks** | panel | on | Task list populated by Agent sessions |
 | **Tower** | fullscreen | off | Pixel art skyscraper view of sessions |
 | **Village** | fullscreen | off | Walk a rainy town where every house is a project |
-| **Workshop** | fullscreen | off | One inbox for every agent that needs you — see [Workshop](#workshop) |
+| **Workshop** | app | off | One inbox for every agent that needs you — see [Workshop](#workshop) |
 
 This is a highlights list, not an inventory — it names neither every mod nor the tools each one
 registers. Those are declared in the mod's `tools.js` and reported by `GET /api/mods`, which derives
@@ -66,6 +95,7 @@ mods/<name>/
 | `enabledByDefault` | boolean | no | If `true`, mod is enabled on first visit without user action |
 | `entry` | string | no | HTML entry point, defaults to `"index.html"`. Omit for tools-only mods. |
 | `display` | string | no | `"panel"` for docked panel. Omit for fullscreen (default) or tools-only mods. |
+| `app` | boolean | no | `true` marks a fullscreen mod as an **App** — a place you work from. Adds an Apps rail row and a palette entry, and unlocks the excursion API. Requires `entry`. See [Apps](#apps-661). |
 | `panel.position` | string | no | `"right"` (only value currently supported) |
 | `panel.defaultWidth` | number | no | Initial panel width in pixels |
 | `panel.minWidth` | number | no | Minimum panel width when resizing |
@@ -196,6 +226,25 @@ Registers a callback for `screenshot_capture` MCP tool calls. Receives `{ reques
 
 ### `openScheduledHistory()`
 Opens the cross-project scheduled-run history page (#633). Like `showAutoCycleToast`, this is a host hook a single mod uses rather than a general capability — the Scheduled Tasks panel calls it from its header button. The page deliberately renders in the **top document**, not in the calling iframe, because mod iframes receive no theme variables; see [scheduled-tasks.md](scheduled-tasks.md).
+
+### Excursions — for [Apps](#apps-661) only
+
+These four are available to any mod, but only the page currently occupying the fullscreen view slot can start an excursion — a panel mod calling `visitSession()` would begin a trail back to a view that is not on screen, so the call is ignored. `focusSession()` above keeps its one-hop semantics untouched; excursions are strictly opt-in and no existing mod changes.
+
+### `visitSession(id, opts?)`
+Like `focusSession(id)`, but the host remembers where you came from. `opts` takes `label` and `reason` (shown in the excursion bar and returned in the stack), `replace: true` to overwrite the top frame instead of pushing — which is what a queue walk must use, or "back" costs one press per item — and `chrome`, currently `{ rail: 'hide' | 'keep' }`.
+
+### `getExcursion()`
+Returns `{ appId, depth, stack, chrome }`. `depth` is `0` and `stack` empty when there is no excursion.
+
+### `onExcursionChanged(cb)`
+Registers a callback that fires whenever the stack or the view changes, including when you come home. Fires immediately with the current state. Returns an unsubscribe function.
+
+### `onExcursionCycle(cb)`
+Registers the handler for ⌘↑/⌘↓ while out. The callback receives `{ delta: 1 | -1 }` and should move the app's own cursor and then call `visitSession(next, { replace: true })`. The app owns the queue because it is the only thing that knows what resolved while you were away. There is one view slot and therefore one handler; registering again replaces it. If no app registers one, ⌘↑/⌘↓ keep cycling projects rather than going dead.
+
+### `endExcursion()`
+Pops everything and returns to the app.
 
 ## MCP Tools (`tools.js`)
 
@@ -357,6 +406,13 @@ or AskUserQuestion dialog, with the question and options parsed and rendered inl
 Everything lives in `mods/workshop/`. There is no `server.js` edit and no new bridge hook:
 `registerRoutes(app, context)` already hands every mod the full `initMCP` context, and the panel
 polls its own `GET /api/workshop/inbox`.
+
+**Workshop is the first [App](#apps-661).** Going to look at an agent is a `visitSession()`, not
+a `focusSession()`, so ⌘← brings you back; and its `onExcursionCycle` handler moves the *same*
+cursor the bare ↑/↓ keys move, so ⌘↑/⌘↓ walk the queue from inside a terminal. That walk steps
+past any item with no tab in this window — `getSessions()` is window-scoped, so a scheduled run
+is a legitimate inbox row with nothing to visit, and stopping on one would end the walk at the
+first unattended agent.
 
 **Blocked items are derived, never stored.** They are computed per request from `ctx.shells`, so
 they exist exactly as long as the dialog does — nothing to reconcile, no tombstone, and no stale

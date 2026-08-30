@@ -30,7 +30,7 @@ import { init as initProgressBar, start as progressStart, done as progressDone }
 import { init as initHashCommands, beforeSend as hashCommandsBeforeSend, setWaitingForInput as setHashCommandsWaiting, setEnabled as setHashCommandsEnabled, dismiss as dismissHashCommands } from './hash-commands.js';
 import { init as initOverviewMode, setEnabled as setOverviewModeEnabled, setShortcut as setOverviewModeShortcut, setDefaultLayout as setOverviewDefaultLayout, toggle as toggleOverviewMode, isOverviewActive, updateFocus as updateOverviewFocus, onTabsReordered as onOverviewTabsReordered, syncToContext as syncOverviewToContext } from './overview-mode.js';
 import { init as initTerminalSearch, attachSearchAddon, closeIfOpen as closeTerminalSearch } from './terminal-search.js';
-import { init as initContextViews, setEnabled as setContextViewsEnabled, applyFilter as refreshContextFilter, requestNewTabInContext, resolveContextRepo, chooseContextDir, setContexts as applyServerContexts, setActiveContext as setActiveContextFromPanel, getActiveContextId, getActiveContextInfo, orderRecentDirsByContext, activeContextIsEmpty, noteActiveTab, revealTabContext, showToast } from './context-views.js';
+import { init as initContextViews, setEnabled as setContextViewsEnabled, applyFilter as refreshContextFilter, requestNewTabInContext, resolveContextRepo, chooseContextDir, setContexts as applyServerContexts, setActiveContext as setActiveContextFromPanel, getActiveContextId, getActiveContextInfo, orderRecentDirsByContext, activeContextIsEmpty, noteActiveTab, revealTabContext, showToast, setRailSuppressed } from './context-views.js';
 import * as ProjectMods from './project-mods.js';
 import { nsKey } from './storage-namespace.js';
 import { formatShortcut } from './shortcuts.js';
@@ -2307,7 +2307,7 @@ function initTerminal(id, ws, cwd, initialName, { hasScrollback = false, pending
 
   // Add tab UI with callbacks
   const tabCallbacks = {
-    onSwitch: (sessionId) => switchTo(sessionId),
+    onSwitch: (sessionId) => onTabStripClick(sessionId),
     onClose: async (sessionId) => {
       if (await confirmCloseSession(sessionId)) killSession(sessionId);
     },
@@ -2441,7 +2441,7 @@ function createModTab(modId, opts = {}) {
   });
 
   const tabCallbacks = {
-    onSwitch: (sessionId) => switchTo(sessionId),
+    onSwitch: (sessionId) => onTabStripClick(sessionId),
     onClose: async (sessionId) => {
       if (await confirmCloseSession(sessionId)) killSession(sessionId);
     },
@@ -2510,7 +2510,7 @@ function createDisplayTab(id, name, opts = {}) {
   SessionStores.add(getWindowId(), { id, name: tabName, type: 'display-tab', cwd });
 
   const tabCallbacks = {
-    onSwitch: (sessionId) => switchTo(sessionId),
+    onSwitch: (sessionId) => onTabStripClick(sessionId),
     onClose: async (sessionId) => {
       if (await confirmCloseSession(sessionId)) killSession(sessionId);
     },
@@ -2596,7 +2596,7 @@ function createProjectModTab(mod, opts = {}) {
   SessionStores.add(getWindowId(), { id, name: tabName, type: 'project-mod', projectModId: mod.id, cwd: mod.project, pinned });
 
   const tabCallbacks = {
-    onSwitch: (sessionId) => switchTo(sessionId),
+    onSwitch: (sessionId) => onTabStripClick(sessionId),
     onClose: async (sessionId) => {
       if (await confirmCloseSession(sessionId)) killSession(sessionId);
     },
@@ -2824,6 +2824,31 @@ function switchTo(id) {
 function focusTab(id) {
   switchTo(id);
   revealTabContext(id);
+}
+
+// ── The two user-intent activations, for excursions (#661) ────────────────────────────────
+//
+// While an app has lent you out, "go look at that one instead" pushes a frame so ⌘← unwinds
+// the way you came. Which activations count is not a judgement call — app.js already draws
+// exactly this line, and draws it in a comment that says not to erase it: focusTab() is the
+// user-initiated jump, switchTo() is mechanical. So the push hangs off the user side only.
+//
+// Everything mechanical stays on bare switchTo() and pushes nothing: the context filter's
+// snap-back, the close-tab fallback, sendToWindow, and — the one that would otherwise bite —
+// restoreSessions()' final focusTab(), which on every reload would add a frame and grow the
+// stack by one for the rest of the window's life.
+
+/** A literal click on a tab. tab-manager fires onSwitch only when no drag happened. */
+function onTabStripClick(id) {
+  ModManager.noteExcursionDrill(id);
+  switchTo(id);   // NOT focusTab: a visible tab is in-context already, and revealing here is
+                  // what the comment above focusTab() forbids.
+}
+
+/** A deliberate jump named by some affordance other than the tab strip. */
+function userJumpTo(id) {
+  ModManager.noteExcursionDrill(id);
+  focusTab(id);
 }
 
 /**
@@ -4473,7 +4498,7 @@ async function init() {
   initTabArrows({
     getOrderedTabIds: getVisibleTabIds,
     getActiveTabId: () => activeId,
-    switchToTab: focusTab,
+    switchToTab: userJumpTo,
   });
 
   // Keep macOS pinch-zoom (ctrl-wheel) away from xterm so the browser can zoom
@@ -4486,8 +4511,11 @@ async function init() {
     getSessions: getSessionList,
     getActiveSessionId: () => activeId,
     // Action Required + other mods jump to a session through this bridge; focusTab
-    // (not switchTo) so the context rail follows the jump (#559).
-    focusSession: focusTab,
+    // (not switchTo) so the context rail follows the jump (#559). userJumpTo adds the
+    // excursion push (#661) — a panel mod sending you somewhere while you are out is
+    // drilling. visitSession()'s own trip through here is suppressed inside mod-manager,
+    // which is what keeps a ⌘↓ queue walk from pushing on top of itself.
+    focusSession: userJumpTo,
     createSession: (cwd, opts) => createSession(cwd, null, true, opts),
     killSession: async (id, opts) => {
       if (opts?.force || await confirmCloseSession(id)) killSession(id);
@@ -4512,6 +4540,27 @@ async function init() {
     // optional-chained — and re-entrantly from syncModView(), which render()'s guard
     // absorbs.
     onViewChanged: () => ProjectMods.render(),
+    // ── Excursions (#661) ──
+    // Does this window have a tab for that session? The stack validates on the way OUT
+    // rather than pruning: one question here covers a killed session, a closed tab, a tab
+    // sent to another window, and a reload where the tabs have not come back yet.
+    hasSession: (id) => sessions.has(id),
+    // An app was enabled or disabled: the rail's Apps section is a projection of that set,
+    // so redraw it. applyFilter() ends in renderRail(), which is the one entry point.
+    onAppsChanged: () => refreshContextFilter(),
+    // The excursion bar's trail. mod-manager owns neither the sessions map nor the project
+    // list, so it asks — the same shape as getActiveContextId above.
+    getBreadcrumb: (id) => {
+      const s = sessions.get(id);
+      return {
+        project: getActiveContextInfo()?.name || null,
+        tab: s ? (s.name || getDefaultTabName(s.cwd || '')) : null,
+      };
+    },
+    // The host's half of the chrome: the app sent you, so you are not browsing projects.
+    // The other half — filtering the strip to the visited session's project — is already
+    // free, because focusSession is focusTab and focusTab reveals the session's context.
+    onExcursionChanged: (ex) => setRailSuppressed(ex.depth > 0 && ex.chrome?.rail !== 'keep'),
   });
 
   // Initialize Context Views (folder-based tab grouping + left panel).
@@ -4711,7 +4760,7 @@ async function init() {
     // focusTab, not switchTo: reveal is a no-op under visible-scoping today, but
     // keeps "every deliberate jump reveals its context" true if this ever moves
     // to getAllTabIds (#559).
-    switchToTab: focusTab,
+    switchToTab: userJumpTo,
   });
 
   // Initialize the top-of-page progress bar (automation prefill feedback)
@@ -4727,7 +4776,10 @@ async function init() {
     },
     // focusTab, not switchTo: no-op reveal under visible-scoping today, but keeps
     // the "every deliberate jump reveals its context" invariant (#559).
-    switchToTab: focusTab,
+    switchToTab: userJumpTo,
+    // Apps (#661) — a launcher that survives the rail being hidden.
+    getApps: () => ModManager.getApps(),
+    openApp: (id) => ModManager.openApp(id),
     quickNewSession,
     quickNewTerminal,
     createSession: (cwd, opts) => createSession(cwd, null, true, opts),
@@ -4767,7 +4819,7 @@ async function init() {
     },
     // This window's OWN tabs, deliberately — not the server's live session set.
     getSessions: getSessionList,
-    focusSession: focusTab,
+    focusSession: userJumpTo,
   });
 
   // Initialize Overview Mode (Cmd+O by default)
@@ -4781,7 +4833,7 @@ async function init() {
     },
     // focusTab, not switchTo: no-op reveal under visible-scoping today, but keeps
     // the "every deliberate jump reveals its context" invariant (#559).
-    switchToTab: focusTab,
+    switchToTab: userJumpTo,
     // Non-revealing counterpart to switchToTab: used when the grid comes down as
     // part of a context switch, where focusTab's revealTabContext would bounce
     // the view back to the context being left (#590).
@@ -4942,7 +4994,7 @@ async function init() {
 
   // Handle focus-session requests from other windows
   WindowManager.onFocusSession((sessionId) => {
-    focusTab(sessionId); // reveal the focused session's context too (#559)
+    userJumpTo(sessionId); // reveal the focused session's context too (#559)
   });
 
   WindowManager.startHeartbeat();

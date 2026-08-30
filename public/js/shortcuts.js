@@ -32,6 +32,13 @@ export function parseShortcut(str) {
   return { key, mods };
 }
 
+// The named keys with a glyph everyone already reads. Without these the fallback below
+// renders 'Meta+ArrowLeft' as the literal ⌘ARROWLEFT, which is why every arrow binding used
+// to have to be a hand-written registerInfo() entry (#661).
+const KEY_GLYPHS = {
+  arrowleft: '←', arrowright: '→', arrowup: '↑', arrowdown: '↓',
+};
+
 export function formatShortcut(shortcutStr) {
   if (!shortcutStr) return '';
   const parts = shortcutStr.split('+');
@@ -41,7 +48,7 @@ export function formatShortcut(shortcutStr) {
     if (low === 'ctrl') return '⌃';
     if (low === 'alt') return '⌥';
     if (low === 'shift') return '⇧';
-    return p.toUpperCase();
+    return KEY_GLYPHS[low] || p.toUpperCase();
   }).join('');
 }
 

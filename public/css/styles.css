@@ -956,6 +956,11 @@ kbd {
 /* Mod back button */
 .mod-back-btn { padding: 4px 10px; background: var(--ds-btn-neutral); border: none; color: var(--ds-accent-blue); border-radius: 4px; cursor: pointer; font-size: 13px; user-select: none; }
 .mod-back-btn:hover { background: var(--ds-btn-neutral-hover); }
+/* The same button while an app has lent you out (#661). It carries a trail — "← Workshop ·
+   project / tab" — so it needs a width cap and an ellipsis the one-word label never did, and
+   the accent border says "you are somewhere on purpose" without relying on hue alone (themes
+   remap the accents; win-95 collapses blue and green-soft). */
+.mod-back-btn.excursion { max-width: 340px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; border-left: 3px solid var(--ds-accent-blue); border-radius: 4px; padding-left: 8px; }
 
 /* Vertical layout mod buttons. These are .nav-btn too (mod-manager.js builds them with an icon
    derived from tabIcon()), so the shape/width/fill/ellipsis all come from the .nav-btn rules and
@@ -978,6 +983,10 @@ kbd {
 #app-container.vertical-layout .project-mod-btn.active { background: var(--ds-accent-blue); color: #fff; }
 #app-container.vertical-layout .mod-back-btn { width: 100%; margin-bottom: 6px; border: none; background: transparent; border-radius: 8px; transition: background 0.15s ease; }
 #app-container.vertical-layout .mod-back-btn:hover { background: var(--ds-bg-tertiary); }
+/* The strip is a narrow rail here, so the trail cannot have the horizontal max-width — it gets
+   the rail's width and the same ellipsis. `border: none` above wins on source order, hence the
+   restated left border. */
+#app-container.vertical-layout .mod-back-btn.excursion { max-width: none; text-align: left; border-left: 3px solid var(--ds-accent-blue); }
 
 /* Mod settings button (gear icon in mods dropdown) */
 .mod-settings-btn { background: transparent; border: none; color: var(--ds-text-secondary); cursor: pointer; font-size: 24px; padding: 1px 8px; border-radius: 3px; line-height: 1; flex-shrink: 0; }
@@ -1354,6 +1363,12 @@ kbd {
    Derived from --ds-context-radius: 0 when the rail is square (default theme,
    unchanged), scaling up for any rounded theme (e.g. retro-monitor → 3px/6px). */
 .context-list { display: flex; flex-direction: column; padding: calc(var(--ds-context-radius) / 6) calc(var(--ds-context-radius) / 3); }
+/* Apps (#661) — the section above Projects. Same box as .context-list (its rows are
+   .context-row, so hover / active / the collapsed icon square all come for free); the rule is
+   separate only so "the first .context-list in the rail" keeps meaning the projects list. The
+   bottom border is what keeps Apps and Projects apart once the rail collapses to squares and
+   both headers drop out. */
+.app-list { display: flex; flex-direction: column; padding: calc(var(--ds-context-radius) / 6) calc(var(--ds-context-radius) / 3); border-bottom: 1px solid var(--ds-border); padding-bottom: 6px; }
 .context-row { display: flex; align-items: center; gap: 6px; padding: 7px 12px; cursor: pointer; color: var(--ds-text-secondary); font-size: 13px; border-left: 3px solid transparent; border-radius: calc(var(--ds-context-radius) / 2); }
 .context-row:hover { background: var(--ds-bg-tertiary); color: var(--ds-text-primary); }
 .context-row.active { color: var(--ds-text-bright); background: var(--ds-bg-tertiary); border-left-color: var(--ds-accent-blue); }

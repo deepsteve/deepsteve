@@ -168,6 +168,8 @@ async function executeCommand(cmd) {
         callbacks.restoreSessions?.();
         break;
     }
+  } else if (cmd.type === 'open-app') {
+    callbacks.openApp?.(cmd.appId);
   } else if (cmd.type === 'switch-tab') {
     callbacks.switchToTab?.(cmd.tabId);
   } else if (cmd.type === 'automation') {
@@ -236,6 +238,19 @@ async function open() {
     if (cmd.type === 'builtin') {
       items.push(cmd);
     }
+  }
+
+  // Apps (#661). The rail is ⌘P-toggled, so a rail-only launcher is unreachable half the
+  // time — and an App is a place you return to all day, which is exactly what the palette is
+  // for. Above the tabs because an app is a destination, not one of many.
+  for (const app of (callbacks.getApps?.() || [])) {
+    items.push({
+      id: `app-${app.id}`,
+      type: 'open-app',
+      appId: app.id,
+      name: `Open: ${app.name}`,
+      description: app.description || 'Open this app',
+    });
   }
 
   // Tab switching entries

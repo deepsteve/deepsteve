@@ -135,6 +135,19 @@ test('validate-mods.js rejects a manifest that declares tools (#644)', () => {
     `validate-mods.js must reject a "tools" key; got: ${JSON.stringify(errors)}`);
 });
 
+test('validate-mods.js requires an entry for "app": true (#661)', () => {
+  // An App owns the fullscreen view slot and lends you out to sessions from a page. A
+  // tools-only mod has none, so the flag would buy a rail row that opens nothing.
+  const { validateManifest } = require('../../validate-mods');
+  const base = { name: 'D', version: '1.0.0', description: 'd' };
+  assert.deepStrictEqual(validateManifest('demo', { ...base, app: true, entry: 'index.html' }), []);
+  const errors = validateManifest('demo', { ...base, app: true });
+  assert.ok(errors.some((e) => /app/.test(e) && /entry/.test(e)),
+    `an app without an entry must be rejected; got: ${JSON.stringify(errors)}`);
+  // Absent means today's behaviour exactly — the flag is purely additive.
+  assert.deepStrictEqual(validateManifest('demo', base), []);
+});
+
 test('docs/mods.md teaches the rule and stops teaching the old one (#644)', () => {
   assert.doesNotMatch(doc, /^\|\s*`tools`\s*\|/m,
     'the mod.json field reference must not list a `tools` field — there is none (#644)');

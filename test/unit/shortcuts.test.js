@@ -33,6 +33,12 @@ test('formatShortcut renders mac glyphs', async () => {
   assert.strictEqual(formatShortcut('Meta+/'), '⌘/');
   assert.strictEqual(formatShortcut('Meta+k'), '⌘K');
   assert.strictEqual(formatShortcut('Ctrl+Alt+Shift+j'), '⌃⌥⇧J');
+  // Named keys with a glyph everyone reads (#661). Without these the fallback uppercases the
+  // token and ⌘← renders as the literal ⌘ARROWLEFT.
+  assert.strictEqual(formatShortcut('Meta+ArrowLeft'), '⌘←');
+  assert.strictEqual(formatShortcut('Meta+ArrowUp'), '⌘↑');
+  assert.strictEqual(formatShortcut('Meta+ArrowDown'), '⌘↓');
+  assert.strictEqual(formatShortcut('Meta+ArrowRight'), '⌘→');
   assert.strictEqual(formatShortcut(''), '');
 });
 
