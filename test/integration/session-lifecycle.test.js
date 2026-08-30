@@ -234,7 +234,9 @@ describe('Session Lifecycle', () => {
 
     // The whole point of refusing this way: the tombstone survived, so the
     // conversation is still resurrectable if the directory comes back.
-    const recoverable = await httpGet('/api/recoverable-sessions');
+    // #658: the closed bucket is opt-in — the window picker never draws it, so the
+    // default answer withholds it rather than paying a transcript read per row.
+    const recoverable = await httpGet('/api/recoverable-sessions?include=closed');
     const row = (recoverable.closed || []).find(s => s.id === id);
     assert.ok(row, 'a refused restore must NOT purge the saved record');
     assert.strictEqual(row.cwdMissing, true, 'and the restore surface must flag why');
