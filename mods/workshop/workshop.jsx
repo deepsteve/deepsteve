@@ -511,6 +511,21 @@ function Workshop() {
     const onKey = (e) => {
       if (e.altKey) return;
 
+      // ⌘\ — quiet mode (#662). The HOST owns the state, the toggle and the chrome; this is
+      // only the key. It has to be bound in here for the reason the comment above gives: the
+      // host's listener is on the top document and never sees this keystroke, which is exactly
+      // the moment you want the chrome gone. The host registers it too, for when chrome has
+      // focus instead.
+      //
+      // Above the isTypingTarget branch on purpose — unlike every other key here it is not
+      // competing with the reply box for a letter, and going quiet while composing an answer
+      // is a reasonable thing to want.
+      if ((e.metaKey || e.ctrlKey) && e.key === '\\') {
+        e.preventDefault();
+        window.deepsteve?.toggleQuiet?.();
+        return;
+      }
+
       if (isTypingTarget(e.target)) {
         // Exactly two keys are ours in here. Everything else — `e`, `o`, digits, bare
         // Enter — belongs to the textarea. This early return IS the "the inbox ate my
@@ -848,6 +863,7 @@ function Workshop() {
               ['e', 'archive'],
               ['o', 'open the tab'],
               ['r', 'reply box'],
+              ['⌘\\', 'quiet mode'],
               ['?', 'this'],
             ].map(([k, what]) => (
               <div key={k} style={{ display: 'flex', gap: 14, alignItems: 'center', marginBottom: 6 }}>

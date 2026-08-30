@@ -47,7 +47,24 @@ test('Workshop is FULLSCREEN — no display key', () => {
     + '360px strip, and "tab" would consume a tab slot — both silently.',
   );
   assert.strictEqual(manifest.entry, 'index.html');
-  assert.ok(manifest.toolbar && manifest.toolbar.label, 'a fullscreen mod needs a toolbar label to be reachable');
+  // Still required, but no longer for a toolbar button — "app": true suppresses that (#662).
+  // `mod.toolbar?.label || mod.name` is now the label for the Apps rail row, the rail's
+  // auto-width measurement and the "← Workshop" button, so a missing one is a nameless row.
+  assert.ok(manifest.toolbar && manifest.toolbar.label, 'the Apps rail row is drawn from this label');
+});
+
+test('Workshop is an APP, and binds ⌘\\ through the bridge rather than owning quiet mode (#662)', () => {
+  assert.strictEqual(manifest.app, true, '"app": true is what buys the rail row and the palette entry');
+
+  // Quiet mode is the HOST's: an iframe cannot hide the tab strip that contains it, and a
+  // toggle built in here would be stuck on hardcoded fallback colours besides. Workshop's
+  // only share is the key, because the host's listener is on the top document and never sees
+  // a keystroke made in here.
+  assert.match(jsx, /window\.deepsteve\?\.toggleQuiet\?\.\(\)/,
+    'the ⌘\\ branch must call through the bridge');
+  for (const f of ['quiet-mode', 'app-quiet-btn']) {
+    assert.ok(!jsx.includes(f), `workshop.jsx references ${f} — quiet mode's chrome is the host's`);
+  }
 });
 
 test('the manifest declares no tools (#644)', () => {

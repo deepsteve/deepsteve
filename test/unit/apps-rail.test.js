@@ -1,8 +1,10 @@
 // Headless unit test for the Apps rail section (#661).
 //
 // An App is a mod with `"app": true` — a place you work FROM rather than a tool you visit. It
-// gets a row above `Projects` in the projects rail, and KEEPS its toolbar button, because the
-// rail is ⌘P-toggled and a rail-only launcher would be unreachable half the time.
+// gets a row above `Projects` in the projects rail and a command-palette entry, and since #662
+// it gets NO toolbar button: the flag implies that, so one flag keeps meaning one thing. The
+// palette entry is what makes dropping the button safe — it is the keyboard route to an app
+// while the ⌘P rail is closed.
 //
 // mod-manager draws the section (it owns the manifests and the view slot) and context-views
 // calls it — the same shape context-views already uses for project-mods' appendRailRows().
@@ -204,11 +206,18 @@ test('a disabled app is not listed, and neither is a skill that claims the flag'
     'GET /api/mods appends skills to the same array; they are never a place to work from');
 });
 
-test('an app keeps its toolbar button — the rail is ⌘P-toggled', async () => {
+test('an app has NO toolbar button — the rail and the palette are its two entries (#662)', async () => {
+  // "app": true IMPLIES this. There is no second manifest field, so it holds for every future
+  // app without another decision, and the palette entry stops being optional: it is the
+  // keyboard route that replaces the button when the ⌘P rail is closed.
   const { tabs } = await setup();
-  const btn = tabs.children.find(c => c.dataset?.modId === 'workshop');
-  assert.ok(btn, 'the launcher must survive the rail being hidden');
-  assert.strictEqual(btn.classList.contains('mod-toolbar-btn'), true);
+  assert.strictEqual(tabs.children.find(c => c.dataset?.modId === 'workshop'), undefined,
+    'an app is a place, and a third launcher in the strip says nothing the rail row does not');
+
+  // The suppression is the flag's, not Workshop's: an ordinary fullscreen mod still gets one.
+  const towerBtn = tabs.children.find(c => c.dataset?.modId === 'tower');
+  assert.ok(towerBtn, 'a non-app fullscreen mod keeps its button');
+  assert.strictEqual(towerBtn.classList.contains('mod-toolbar-btn'), true);
 });
 
 test('clicking the row opens the app, and marks itself active', async () => {

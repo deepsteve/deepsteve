@@ -69,6 +69,7 @@ let activeContextId = null; // null = view all
 let lastTabByContext = {};  // { contextId: tabId } — last tab viewed while that context was active (#541)
 let sidebarOpen = false;
 let railSuppressed = false; // excursion chrome (#661) — deliberately NEVER persisted
+let railQuiet = false;      // quiet mode (#662) — a MIRROR; mod-manager owns and persists it
 let archivedOpen = false;   // archived section expanded in the rail (#601)
 let cmdChordArmed = false;  // true between a Cmd+P press and the Cmd release — see onKeyDown
 
@@ -997,11 +998,13 @@ function notifyActive() {
 
 // -------------------------------------------------------------------- sidebar
 
-// Is the rail on screen? Two independent facts: the user's ⌘P preference, and whether an
-// excursion is currently borrowing the screen (#661). Splitting them is the point — routing
-// excursion chrome through setSidebar() would write SIDEBAR_KEY and silently overwrite a
-// preference the user never changed.
-const railVisible = () => sidebarOpen && !railSuppressed;
+// Is the rail on screen? Three independent facts: the user's ⌘P preference, whether an
+// excursion is currently borrowing the screen (#661), and whether an app is being sat in with
+// the chrome gone (#662). Splitting them is the point — routing either kind of chrome through
+// setSidebar() would write SIDEBAR_KEY and silently overwrite a preference the user never
+// changed. The two suppressions also cannot share one flag: onExcursionChanged writes
+// railSuppressed=false on every excursion EXIT, which would put the rail back mid-quiet-mode.
+const railVisible = () => sidebarOpen && !railSuppressed && !railQuiet;
 
 /** Everything setSidebar() does EXCEPT persisting — so suppression can reuse it. */
 function applyRailChrome() {
@@ -1039,15 +1042,37 @@ export function setRailSuppressed(on) {
 }
 
 /**
+ * Quiet mode's half of the same split (#662). mod-manager decides and persists; this only
+ * mirrors, so that railVisible() has one place to read.
+ */
+export function setRailQuiet(on) {
+  const next = !!on;
+  if (next === railQuiet) return;
+  railQuiet = next;
+  applyRailChrome();
+}
+
+/**
  * Asking for the rail wins. Every "show the rail" affordance runs this first, so none of them
- * can become a dead key while an excursion is suppressing it — the alternative is a half-state
+ * can become a dead key while something is suppressing it — the alternative is a half-state
  * where the rail is on screen but ⌘↑/⌘↓ still belongs to the app.
+ *
+ * Quiet mode has to be cleared through mod-manager rather than by dropping the mirror here:
+ * the mirror is not the state. Clearing it locally would leave localStorage still saying
+ * "quiet", the tab strip still hidden, and the next reload swallowing the rail again.
  */
 function unsuppressRail() {
-  if (!railSuppressed) return false;
-  railSuppressed = false;
-  ModManager.endExcursion({ goHome: false });
-  return true;
+  let asked = false;
+  if (railSuppressed) {
+    railSuppressed = false;
+    ModManager.endExcursion({ goHome: false });
+    asked = true;
+  }
+  if (railQuiet) {
+    ModManager.setQuietMode(false);   // calls back into setRailQuiet(false)
+    asked = true;
+  }
+  return asked;
 }
 
 function toggleSidebar() {
@@ -1273,9 +1298,38 @@ const matchesAppBack = register({
   isEnabled: () => ModManager.isExcursionActive(),
 });
 
+// ⌘\ — quiet mode (#662). Registered here, beside ⌘←, for the same reason: this module already
+// imports ModManager and already owns the app-scoped keys, so the app keys stay in one place.
+//
+// `match:'key'` is forced again, and again not as a choice — keyToCode() maps only letters and
+// digits, so match:'code' throws at import time for punctuation. The cost is that on a layout
+// where `\` is not its own key the binding follows the character rather than the position.
+//
+// This entry is HALF the story, and the smaller half. A host listener sits on the top document
+// and keystrokes inside a mod iframe never reach it — which is exactly the case quiet mode is
+// for. It fires when chrome has focus (on an excursion, say); the app binds the same key inside
+// its own page and calls deepsteve.toggleQuiet(). The toggle in the slot is what covers both.
+const matchesQuiet = register({
+  id: 'app-quiet',
+  group: 'Views',
+  description: 'Quiet mode — hide everything but the app',
+  shortcut: 'Meta+\\',
+  isEnabled: () => ModManager.isQuietAvailable(),
+});
+
 function onKeyDown(e) {
   if (!e.metaKey) return;
   if (isFormField(e.target)) return;
+
+  // Above the `enabled` guard for the same reason ⌘← is: quiet mode belongs to the app, and
+  // turning context views off must not leave you looking at an app with no chrome and no key
+  // to bring it back. isQuietAvailable() is the guard — with no app on screen ⌘\ is not ours.
+  if (matchesQuiet(e) && ModManager.isQuietAvailable()) {
+    e.preventDefault();
+    e.stopPropagation();
+    ModManager.setQuietMode(!ModManager.isQuietMode());
+    return;
+  }
 
   // Deliberately ABOVE the `enabled` guard: an excursion is the app's, not the projects
   // feature's, and turning context views off must not strand you out on one with a dead ⌘←.
@@ -1608,9 +1662,11 @@ export function init(callbacks) {
   contexts = [];                    // seeded from the server by fetchContexts() below
   activeContextId = loadActive();   // restored per-window; validated once contexts arrive
   sidebarOpen = loadSidebar();
-  // Chrome, not preference: a fresh init has no excursion yet. mod-manager re-asserts it from
-  // syncExcursion() once the mod list lands, which is after this runs.
+  // Chrome, not preference: a fresh init has no excursion and no app on screen yet.
+  // mod-manager re-asserts both once the mod list lands — syncExcursion() for the one,
+  // showModView()'s _applyQuietChrome() for the other — and both run after this does.
   railSuppressed = false;
+  railQuiet = false;
   archivedOpen = loadArchivedOpen();
   lastTabByContext = loadLastTabs(); // stale tab ids are validated at restore time (#541)
 
@@ -1747,6 +1803,11 @@ export function setEnabled(val) {
     // Suppression is this module's, so it goes with it — otherwise turning the feature off
     // mid-excursion leaves a hidden rail with nothing left able to bring it back. The
     // excursion itself survives: ⌘← is handled above the `enabled` guard on purpose.
+    //
+    // railQuiet is deliberately NOT cleared here: it is a mirror of mod-manager's state, not
+    // this module's, and setSidebar(false) below hides the rail anyway. Dropping it would only
+    // desynchronise the mirror, so that re-enabling the feature mid-quiet-mode put the rail
+    // back beside a tab strip that is still gone.
     railSuppressed = false;
     setSidebar(false);
     // Un-hide any filtered tabs so disabling the feature reveals everything.

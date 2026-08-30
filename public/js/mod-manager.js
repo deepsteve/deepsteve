@@ -35,6 +35,11 @@ const KNOWN_MODS_KEY = nsKey('deepsteve-known-mods'); // All mod IDs known at la
 const ACTIVE_VIEW_KEY = nsKey('deepsteve-active-mod-view'); // Which mod view is currently showing
 const PANEL_VISIBLE_KEY = nsKey('deepsteve-panel-visible'); // Whether the panel is shown
 const ACTIVE_PANEL_KEY = nsKey('deepsteve-active-panel'); // Which panel tab is active
+// Which apps you sit in with the chrome gone (#662). localStorage, not sessionStorage: it is a
+// display preference, so it should hold across windows and reloads — the same call
+// project-mods.js makes for its compact rail, and the same one ACTIVE_VIEW_KEY above makes for
+// which app is open. It never reaches the server, so there is no SETTINGS_SCHEMA entry.
+const QUIET_KEY = nsKey('deepsteve-app-quiet'); // JSON array of app ids you sit in quietly
 
 let allMods = [];          // [{ id, name, description, entry, toolbar }]
 let enabledMods = new Set(); // mod IDs that are enabled
@@ -49,6 +54,7 @@ let activeView = null;     // { id, name, src, sandbox, allow, persist, dismissO
 let iframe = null;
 let modContainer = null;
 let backBtn = null;
+let quietBtn = null;       // quiet mode's toggle (#662) — lives IN the slot, see _paintQuietBtn
 let hooks = null;
 let sessionCallbacks = [];
 let modViewVisible = false;
@@ -243,6 +249,16 @@ function init(appHooks) {
   });
   const layoutToggle = document.getElementById('layout-toggle');
   layoutToggle.parentNode.insertBefore(backBtn, layoutToggle.nextSibling);
+
+  // Create the quiet-mode toggle (#662). Written here, next to the back button it is the
+  // sibling of in spirit — but mounted in #mod-container, because quiet mode's whole job is to
+  // take #tabs away and a button in there would go with it. _paintQuietBtn() owns everything
+  // about how it looks; it starts hidden because no view is up yet.
+  quietBtn = document.createElement('button');
+  quietBtn.className = 'app-quiet-btn';
+  quietBtn.style.display = 'none';
+  quietBtn.addEventListener('click', () => setQuietMode(!isQuietMode()));
+  modContainer.appendChild(quietBtn);
 
   // Create panel resizer and container (inside content-row, after #terminals)
   panelResizer = document.createElement('div');
@@ -1815,11 +1831,113 @@ function _paintAppRows() {
   for (const [modId, row] of appRows) row.classList.toggle('active', activeView?.id === modId);
 }
 
+// ─── Quiet mode (#662) ──────────────────────────────────────────────────────────────
+//
+// Sitting in an app all day should not feel like sitting inside a frame of other software, so
+// quiet mode takes the host's chrome away and leaves the app alone on screen.
+//
+// It has to live here rather than in the app: an iframe cannot hide the tab strip that contains
+// it. And it is built once, against the slot, so EVERY app gets it — not just the one that
+// asked. Two things actually come down, not four: #tabs (which is the strip, the toolbar and
+// the ← button all at once) and the projects rail. The panels are already gone by then, because
+// they live in #content-row and showModView() sets that to display:none.
+//
+// The toggle must survive that — it is the only way back out — which is why it hangs off
+// #mod-container and not off #tabs beside the ← button it otherwise belongs next to.
+
+/** Is this view id one of the enabled apps? */
+const _isApp = (id) => !!id && getApps().some(m => m.id === id);
+
+function _loadQuiet() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(QUIET_KEY));
+    return new Set(Array.isArray(parsed) ? parsed : []);
+  } catch { return new Set(); }
+}
+let quietApps = _loadQuiet();
+
+/**
+ * Is the chrome down RIGHT NOW? Derived on every read, never mirrored into a variable — the
+ * same shape as _setModViewVisible() and _paintBackBtn(). The `modViewVisible` term is what
+ * makes excursions free: while you are out the slot is down and so is quiet mode, so the
+ * excursion bar is on screen; coming home re-derives it as true, with nothing persisted,
+ * suspended or restored in between.
+ */
+function isQuietMode() {
+  return !!(modViewVisible && activeView && quietApps.has(activeView.id) && _isApp(activeView.id));
+}
+
+/** Is there an app on screen for quiet mode to apply to? Drives the ⌘\ entry's isEnabled. */
+function isQuietAvailable() {
+  return !!(modViewVisible && activeView && _isApp(activeView.id));
+}
+
+/**
+ * Re-assert the chrome from the state. Idempotent, and called from every flip of either input
+ * — the slot going up or down, and the preference changing.
+ */
+function _applyQuietChrome() {
+  const on = isQuietMode();
+  // The class is on #app-container, matching layout-manager.js's .vertical-layout / .icon-rail.
+  // It reaches #tabs because #tabs is the one piece of chrome whose display is not written
+  // inline by JS; the rail's is, so the rail goes through its owner below instead.
+  document.getElementById('app-container')?.classList.toggle('quiet-mode', on);
+  // mod-manager never imports context-views — the same one-way rule project-mods.js follows —
+  // so the rail half goes out through app.js.
+  hooks?.onQuietChanged?.(on);
+  _paintQuietBtn();
+}
+
+/**
+ * The one writer. Persists first, then re-derives — so a caller can never leave localStorage
+ * and the screen disagreeing.
+ */
+function setQuietMode(on) {
+  if (!activeView) return;
+  if (on) quietApps.add(activeView.id);
+  else quietApps.delete(activeView.id);
+  try { localStorage.setItem(QUIET_KEY, JSON.stringify([...quietApps])); } catch { /* private mode */ }
+  _applyQuietChrome();
+}
+
+/**
+ * The toggle, in a gutter down the left of the slot. It renders in the TOP document for the
+ * same reason the back button does (#633): a mod iframe receives no theme variables, so
+ * anything built inside one is stuck on hardcoded fallback colours.
+ *
+ * One button, two states — glyph, title, .active and the gutter are all set here, in one place,
+ * so they cannot drift from each other. It is deliberately NOT hidden while quiet mode is on: with the
+ * strip gone it is the only way back, and ⌘\ does not reach a host listener while the app's
+ * iframe has focus.
+ */
+function _paintQuietBtn() {
+  if (!quietBtn) return;
+  const shown = isQuietAvailable();
+  quietBtn.style.display = shown ? '' : 'none';
+  // The gutter is the button's, so it comes and goes with it — a 30px inset on a slot with no
+  // toggle in it would be a margin nobody asked for. It is a class rather than an inline style
+  // so the width lives in the stylesheet next to the button it is sized for.
+  modContainer?.classList.toggle('has-quiet-btn', shown);
+  if (!shown) { quietBtn.classList.remove('active'); return; }
+  const on = isQuietMode();
+  quietBtn.classList.toggle('active', on);
+  quietBtn.textContent = on ? '⤡' : '⤢';
+  quietBtn.title = on ? 'Leave quiet mode (⌘\\)' : 'Quiet mode — hide everything but the app (⌘\\)';
+  quietBtn.setAttribute('aria-label', quietBtn.title);
+  quietBtn.setAttribute('aria-pressed', on ? 'true' : 'false');
+}
+
 /**
  * Create a toolbar button for an enabled mod (left side, near wand).
+ *
+ * An App never gets one (#662). It is a place, not a tool, and the Apps rail section plus the
+ * command-palette entry are how you reach a place — a third launcher in the strip is chrome
+ * that says nothing new. `"app": true` IMPLIES this rather than a second manifest field, so
+ * one flag keeps meaning one thing and every future app inherits the decision.
  */
 function _createToolbarButton(mod) {
   if (toolbarButtons.has(mod.id)) return;
+  if (mod.app === true) return;
 
   const label = mod.toolbar?.label || mod.name;
   const btn = document.createElement('button');
@@ -2038,6 +2156,9 @@ function _hideMod() {
   modContainer.style.display = 'none';
   backBtn.style.display = 'none';
   _setModViewVisible(false);
+  // The app is gone, so the chrome comes back. The PREFERENCE is untouched: quiet mode is
+  // remembered per app, and opening this one again should land you where you left off.
+  _applyQuietChrome();
 
   // Restore panel if it was logically visible while fullscreen mod was active
   if (visiblePanelId) {
@@ -2078,6 +2199,11 @@ function showModView() {
   backBtn.style.display = 'none';
   backBtn.classList.remove('excursion');
   _setModViewVisible(true);
+  // AFTER _setModViewVisible: isQuietMode() reads modViewVisible, so asserting the chrome
+  // before the flip would compute it against the state we just left. This is also the reload
+  // path — the restore inside loadAvailableMods() ends here — so quiet mode comes back with
+  // the page for free.
+  _applyQuietChrome();
   _focusIframe(iframe);
   // An app that spent the excursion in a display:none iframe has laid nothing out — its
   // selected row cannot have been scrolled into view. Tell it it is on screen again.
@@ -2332,6 +2458,12 @@ function _backgroundView() {
   // Deliberate: the rule is "the slot is down, so a tab is on screen again", and letting this
   // path skip it is exactly how the two would drift apart.
   _setModViewVisible(false);
+  // Quiet mode is about what you see WHILE IN the app; excursion chrome is about what you see
+  // while out. Same slot, different states — so going out lifts quiet mode and coming home
+  // (showModView) puts it back, with nothing saved or restored in between because
+  // isQuietMode() is derived from modViewVisible. This is also what keeps the excursion bar
+  // visible either way: it is the back button, and the back button is in #tabs.
+  _applyQuietChrome();
 
   // Restore panel if it was logically visible
   if (visiblePanelId) {
@@ -2550,6 +2682,17 @@ function _injectBridgeAPI(iframeEl, modId, tabInstanceId) {
       },
       endExcursion() {
         if (activeView?.id === modId) endExcursion();
+      },
+      // ── Quiet mode (#662). The host owns the state and always renders the toggle; this pair
+      // exists because a host-registered ⌘\ listens on the TOP document and keystrokes inside
+      // a mod iframe never cross that boundary — which is exactly when you want the key. So an
+      // app binds it in its OWN keydown handler and calls through here.
+      toggleQuiet() {
+        if (activeView?.id !== modId) return;
+        setQuietMode(!isQuietMode());
+      },
+      isQuiet() {
+        return activeView?.id === modId ? isQuietMode() : false;
       },
       onExcursionChanged(cb) {
         const entry = { modId, cb };
@@ -2910,6 +3053,10 @@ export const ModManager = {
   noteExcursionDrill,
   requestExcursionCycle,
   syncExcursion,
+  // Quiet mode (#662)
+  isQuietMode,
+  isQuietAvailable,
+  setQuietMode,
 };
 
 // context-views.js draws the Apps section into the rail with this, the same shape it already

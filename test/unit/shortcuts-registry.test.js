@@ -105,6 +105,7 @@ test('every expected shortcut is registered, and nothing extra', async () => {
   assert.deepStrictEqual(registry.getAll().map(e => e.id).sort(), [
     'app-back',
     'app-queue-cycle',
+    'app-quiet',
     'cmd-hold-cycle',
     'cmd-hold-jump',
     'command-palette',
@@ -131,6 +132,18 @@ test('the ⌘↑/⌘↓ overload declares both meanings, and only one is ever li
   // No excursion is active in a headless registry, so exactly the project one shows.
   assert.strictEqual(queue.enabled, false, 'the queue walk must not advertise itself at home');
   assert.strictEqual(find(registry.getAll(), 'app-back').enabled, false);
+});
+
+test('⌘\\ is quiet mode, and only offered while an app is on screen (#662)', async () => {
+  // Punctuation cannot use match:'code' (keyToCode maps only letters and digits), so this is
+  // a match:'key' binding and formatShortcut's uppercase fallback has to leave `\` alone.
+  const { registry } = await loadAll();
+  const quiet = find(registry.getAll(), 'app-quiet');
+  assert.deepStrictEqual(quiet.keys, ['⌘\\']);
+  assert.strictEqual(quiet.group, 'Views');
+  // Nothing occupies the fullscreen slot in a headless registry, so the row stays hidden —
+  // the same treatment app-back and app-queue-cycle get.
+  assert.strictEqual(quiet.enabled, false, 'quiet mode must not advertise itself with no app up');
 });
 
 test('app-back renders as ⌘← , not ⌘ARROWLEFT (#661)', async () => {

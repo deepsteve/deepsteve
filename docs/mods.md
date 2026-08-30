@@ -21,7 +21,7 @@ Mods can define settings (boolean or number). Click the gear icon next to a mod 
 
 Mods have three display modes:
 
-- **Fullscreen** — activated via a toolbar button, replaces the terminal view. Clicking a session in the mod switches back to the terminal with a back button to return. Only one fullscreen mod iframe exists at a time; it's created on show and destroyed on hide.
+- **Fullscreen** — activated via a toolbar button, replaces the terminal view. Clicking a session in the mod switches back to the terminal with a back button to return. Only one fullscreen mod iframe exists at a time; it's created on show and destroyed on hide. An [App](#apps-661) is a fullscreen mod with no toolbar button — the Apps rail section and the command palette launch it instead.
 - **Panel** — docked to the right side of the terminal area, with tabs if multiple panel mods are enabled. A drag handle allows resizing. Panel iframes stay alive even when hidden, so MCP tools keep working.
 - **Tools-only** — no UI, no iframe, no toolbar button. Only provides MCP tools to sessions. Omit both `display` and `entry` from `mod.json`.
 
@@ -31,12 +31,40 @@ An **App** is a fullscreen mod that is a *place you work from* rather than a too
 an inbox you sit in all day, not a view you glance at. Declare it with `"app": true` alongside
 an `entry`. The flag is purely additive: a mod without it behaves exactly as it always has.
 
-Declaring it buys three things:
+Declaring it buys four things:
 
 - a row in an **Apps** section at the top of the projects rail, above `Projects`,
-- a command-palette entry (`Open: <name>`) — the rail is ⌘P-toggled, so a rail-only launcher
-  would be unreachable half the time, and an app keeps its toolbar button for the same reason,
+- a command-palette entry (`Open: <name>`). This is **not optional for an app** — the rail is
+  ⌘P-toggled, so the palette is the entry that works while the rail is closed,
+- **quiet mode** below,
 - the **excursion** API below.
+
+and costs one: `"app": true` **implies no toolbar button** (#662). The Apps section is how you
+get to a place, and a third launcher in the tab strip says nothing the rail row does not. There
+is no second manifest field for this — one flag means one thing, so every future app inherits
+the decision. `toolbar.label` is still read: it names the rail row and the `← <name>` button.
+
+**Quiet mode** takes the host's chrome away and leaves the app alone on screen — the tab strip
+(which is also the toolbar and the `←` button) and the projects rail. The panels need no rule:
+they live in `#content-row`, which the fullscreen slot already hides.
+
+It belongs to the host, not to the app: an iframe cannot hide the tab strip that contains it,
+and a control built in one would be stuck on hardcoded fallback colours (mod iframes receive no
+theme variables). So it is built once against the view slot and every app gets it. The toggle
+sits at the top-left **of the slot**, not in the strip beside the `←` button, because the strip
+is exactly what it takes away — it has to survive that, or quiet mode is a state with no exit.
+
+⌘\ toggles it. That binding exists twice on purpose: the host registers it for when chrome has
+focus, and an app binds it inside its own page and calls `deepsteve.toggleQuiet()`, because a
+host listener sits on the top document and never sees a keystroke made inside a mod iframe —
+which is exactly the moment you want the chrome gone. ⌘P wins over quiet mode and leaves it, on
+the standing rule that no affordance asking for the rail may become a dead key.
+
+The state is per app id in `localStorage` (`deepsteve-app-quiet`), so it holds across reloads
+and windows; it never reaches the server, so there is no `SETTINGS_SCHEMA` entry. It is
+*derived* from the slot rather than bookkept, which is what makes an excursion free: while you
+are out the slot is down and so is quiet mode — so the excursion bar is readable — and coming
+home re-derives it with nothing saved or restored in between.
 
 **Excursions** are a navigation stack owned by the host. An app calls `visitSession()` instead
 of `focusSession()`; the host hides the projects rail, filters the tab strip to the visited
@@ -95,11 +123,11 @@ mods/<name>/
 | `enabledByDefault` | boolean | no | If `true`, mod is enabled on first visit without user action |
 | `entry` | string | no | HTML entry point, defaults to `"index.html"`. Omit for tools-only mods. |
 | `display` | string | no | `"panel"` for docked panel. Omit for fullscreen (default) or tools-only mods. |
-| `app` | boolean | no | `true` marks a fullscreen mod as an **App** — a place you work from. Adds an Apps rail row and a palette entry, and unlocks the excursion API. Requires `entry`. See [Apps](#apps-661). |
+| `app` | boolean | no | `true` marks a fullscreen mod as an **App** — a place you work from. Adds an Apps rail row and a palette entry, unlocks the excursion API and quiet mode, and **suppresses the toolbar button**. Requires `entry`. See [Apps](#apps-661). |
 | `panel.position` | string | no | `"right"` (only value currently supported) |
 | `panel.defaultWidth` | number | no | Initial panel width in pixels |
 | `panel.minWidth` | number | no | Minimum panel width when resizing |
-| `toolbar.label` | string | no | Label shown in the toolbar button (fullscreen mods) or panel tab (panel mods) |
+| `toolbar.label` | string | no | Display label: the toolbar button (fullscreen mods), the panel tab (panel mods), or the Apps rail row and `← <name>` button (apps, which have no button) |
 | `settings` | array | no | Per-mod settings (see below) |
 
 There is no `tools` field. A mod's MCP tools are declared only in `tools.js` — see
@@ -245,6 +273,16 @@ Registers the handler for ⌘↑/⌘↓ while out. The callback receives `{ delt
 
 ### `endExcursion()`
 Pops everything and returns to the app.
+
+### Quiet mode — for [Apps](#apps-661) only
+
+Both are ignored unless the caller is the page currently in the fullscreen slot. The host owns the state, renders the toggle and applies the chrome; these exist only so an app can bind ⌘\ *inside its own page*, because a host-registered shortcut listens on the top document and never sees a keystroke made in a mod iframe — which is exactly when you want the chrome gone. `mods/workshop/workshop.jsx` does this in the same keydown handler it already uses for its cursor keys.
+
+### `toggleQuiet()`
+Flips quiet mode for this app and persists it. Do **not** build a toggle in the iframe as well — the host's is always on screen, and one built in here would be stuck on hardcoded fallback colours.
+
+### `isQuiet()`
+Whether the chrome is currently down for this app. `false` for any mod that is not in the slot.
 
 ## MCP Tools (`tools.js`)
 
@@ -393,6 +431,7 @@ Mod state is stored in localStorage with the following keys:
 | `deepsteve-active-panel` | ID of the active panel tab |
 | `deepsteve-panel-width` | Panel width in pixels (persisted across resizes) |
 | `deepsteve-mod-settings-<modId>` | Per-mod settings object (one key per mod) |
+| `deepsteve-app-quiet` | JSON array of the app IDs you sit in with the chrome gone (#662) |
 
 Panel mods are auto-enabled on first visit (when no mod preferences have been saved yet).
 

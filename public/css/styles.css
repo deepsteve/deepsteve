@@ -921,9 +921,41 @@ kbd {
   box-shadow: 0 1px 0 var(--ds-border);
 }
 
-/* Mod system */
-#mod-container { flex: 1; min-height: 0; display: none; }
+/* Mod system. `position: relative` is what the quiet-mode toggle below positions against — it
+   sits in the slot's own gutter rather than in #tabs, which quiet mode takes away. */
+#mod-container { flex: 1; min-height: 0; display: none; position: relative; }
 #mod-container iframe { width: 100%; height: 100%; border: none; }
+
+/* Quiet mode (#662) — an app alone on screen.
+   The toggle lives INSIDE the slot, not in #tabs beside the ← button, because quiet mode's
+   whole job is to take #tabs away and it has to survive that: it is the only way back out.
+
+   It gets a GUTTER rather than floating over the page. An overlay in the top-left corner lands
+   on whatever the app draws there — on Workshop it sat on the "I" of "Inbox" and read as a
+   rendering fault, not a control — and every app has that corner. Thirty pixels of the ~1200
+   an app has is a cheap price for a control that never obscures anything and never has to
+   fade, and quiet mode is still +230px net once the 200px rail and the strip are gone. */
+#mod-container.has-quiet-btn { padding-left: 30px; }
+.app-quiet-btn {
+  position: absolute; top: 6px; left: 4px; z-index: 2;
+  width: 22px; height: 22px; padding: 0;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 12px; line-height: 1;
+  background: transparent; border: 1px solid transparent;
+  color: var(--ds-text-secondary); border-radius: 4px; cursor: pointer;
+  opacity: 0.45; transition: opacity 0.12s ease, background 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+}
+.app-quiet-btn:hover, .app-quiet-btn:focus-visible { opacity: 1; background: var(--ds-bg-tertiary); border-color: var(--ds-border); color: var(--ds-text-primary); }
+/* Once the chrome is gone this is the only way out, so it reads a little louder — a control you
+   have to already know about is not an exit. */
+.app-quiet-btn.active { opacity: 0.7; color: var(--ds-accent-blue); }
+.app-quiet-btn.active:hover, .app-quiet-btn.active:focus-visible { opacity: 1; color: var(--ds-text-primary); }
+/* #tabs is the strip, the toolbar AND the ← button in one element, and it is the only piece of
+   chrome whose display is not written inline by JS — so a class reaches it. The projects rail's
+   IS written inline (context-views.js applyRailChrome), so it goes through its owner instead of
+   an !important here. Panels need no rule: they live in #content-row, which showModView()
+   already hides. Works in both tab layouts — vertical sets #tabs' width, never its display. */
+#app-container.quiet-mode #tabs { display: none; }
 
 /* Panel container (side panel for panel-mode mods) */
 #panel-container { display: none; flex-shrink: 0; width: 360px; overflow: hidden; border-left: 1px solid var(--ds-border); position: relative; }
