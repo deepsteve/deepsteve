@@ -220,6 +220,48 @@ test('an app has NO toolbar button — the rail and the palette are its two entr
   assert.strictEqual(towerBtn.classList.contains('mod-toolbar-btn'), true);
 });
 
+test('an app has NO ← button in the strip either, in both states (#662)', async () => {
+  // The other half of #662's rule. The ← IS the launcher pointing the other way — same
+  // element, same strip — so an app that is a place you reach from the Apps rail is a place
+  // you RETURN to from the Apps rail. In the 48px vertical strip the button was worse than
+  // redundant: "← Workshop" has no room to wrap and rendered as a clipped "← / Works".
+  const { mod, ModManager, tabs } = await setup();
+  const backBtn = tabs.children.find(c => c.classList.contains('mod-back-btn'));
+  assert.ok(backBtn, 'init() still builds one — non-app mods are what it is for');
+
+  const rail = fakeElement();
+  mod.appendAppRows(rail);
+  rowsOf(rail)[0].onclick();
+
+  // 1. Backgrounded by a plain tab click.
+  ModManager.showTerminalForSession('sess-a');
+  assert.strictEqual(ModManager.isModViewVisible(), false, 'the slot came down');
+  assert.strictEqual(backBtn.style.display, 'none', 'and left no ← Workshop behind');
+  assert.strictEqual(rowsOf(rail)[0].classList.contains('active'), true,
+    'the rail row stays lit while you are away — that is what makes it the way back');
+
+  // 2. Out on an excursion, where the same button doubles as the trail bar.
+  const api = {};
+  ModManager.injectBridgeAPI({ contentWindow: api }, 'workshop', null);
+  api.deepsteve.visitSession('sess-b', { label: 'needs a decision' });
+  assert.strictEqual(ModManager.getExcursion().depth, 1, 'we really are out');
+  assert.strictEqual(backBtn.style.display, 'none', 'no trail bar either — ⌘← is the route home');
+});
+
+test('a non-app fullscreen mod keeps its ← — it has no rail row to be the way back', async () => {
+  // The suppression is the flag's, not the strip's: drop it for everything and Tower would
+  // background with nothing on screen pointing at it.
+  const { ModManager, tabs } = await setup();
+  const backBtn = tabs.children.find(c => c.classList.contains('mod-back-btn'));
+
+  tabs.children.find(c => c.dataset?.modId === 'tower').listeners.click();
+  assert.strictEqual(ModManager.getActiveViewId(), 'tower');
+
+  ModManager.showTerminalForSession('sess-a');
+  assert.strictEqual(backBtn.style.display, '');
+  assert.strictEqual(backBtn.textContent, '← Tower');
+});
+
 test('clicking the row opens the app, and marks itself active', async () => {
   const { mod, ModManager } = await setup();
   const rail = fakeElement();

@@ -1859,9 +1859,9 @@ let quietApps = _loadQuiet();
 /**
  * Is the chrome down RIGHT NOW? Derived on every read, never mirrored into a variable — the
  * same shape as _setModViewVisible() and _paintBackBtn(). The `modViewVisible` term is what
- * makes excursions free: while you are out the slot is down and so is quiet mode, so the
- * excursion bar is on screen; coming home re-derives it as true, with nothing persisted,
- * suspended or restored in between.
+ * makes excursions free: while you are out the slot is down and so is quiet mode, so the strip
+ * and the rail — and with them the Apps row that is your way home — are on screen; coming home
+ * re-derives it as true, with nothing persisted, suspended or restored in between.
  */
 function isQuietMode() {
   return !!(modViewVisible && activeView && quietApps.has(activeView.id) && _isApp(activeView.id));
@@ -2387,6 +2387,18 @@ function requestExcursionCycle(delta) {
  */
 function _paintBackBtn() {
   if (!backBtn || !activeView) return;
+  // An App is never chrome in the strip — the other half of #662's rule. That issue dropped an
+  // app's launcher button on the grounds that the Apps rail row is how you reach a place; this
+  // button is the same launcher pointing the other way, so it goes for the same reason, and
+  // `"app": true` keeps meaning one thing rather than gaining an exception. The row stays
+  // `.active` the whole time you are away and its three-way toggle raises a backgrounded view
+  // or ends an excursion, ⌘← is the keyboard route while the ⌘P rail is closed, and the trail
+  // this used to carry is the strip's own selected tab. Non-app mods keep theirs: they have no
+  // rail row to be the way back.
+  //
+  // This is the ONE place that decides whether there is a ← right now — _backgroundView()
+  // unhides first and then calls here, so the suppression cannot be routed around.
+  if (_isApp(activeView.id)) { backBtn.style.display = 'none'; return; }
   if (!isExcursionActive()) {
     backBtn.classList.remove('excursion');
     backBtn.textContent = `← ${activeView.name || 'Back'}`;
@@ -2461,8 +2473,9 @@ function _backgroundView() {
   // Quiet mode is about what you see WHILE IN the app; excursion chrome is about what you see
   // while out. Same slot, different states — so going out lifts quiet mode and coming home
   // (showModView) puts it back, with nothing saved or restored in between because
-  // isQuietMode() is derived from modViewVisible. This is also what keeps the excursion bar
-  // visible either way: it is the back button, and the back button is in #tabs.
+  // isQuietMode() is derived from modViewVisible. This is also what puts the way home back on
+  // screen: an App has no ← in the strip, so that way home is its rail row — and the rail is
+  // one of the two things quiet mode takes down.
   _applyQuietChrome();
 
   // Restore panel if it was logically visible
@@ -2471,8 +2484,8 @@ function _backgroundView() {
   }
 
   if (activeView) {
-    _paintBackBtn();
     backBtn.style.display = '';
+    _paintBackBtn();          // — which hides it again for an App
   }
 }
 

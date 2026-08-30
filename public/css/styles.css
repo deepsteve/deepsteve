@@ -988,10 +988,12 @@ kbd {
 /* Mod back button */
 .mod-back-btn { padding: 4px 10px; background: var(--ds-btn-neutral); border: none; color: var(--ds-accent-blue); border-radius: 4px; cursor: pointer; font-size: 13px; user-select: none; }
 .mod-back-btn:hover { background: var(--ds-btn-neutral-hover); }
-/* The same button while an app has lent you out (#661). It carries a trail — "← Workshop ·
+/* The same button while a fullscreen mod has lent you out (#661). It carries a trail — "← Tower ·
    project / tab" — so it needs a width cap and an ellipsis the one-word label never did, and
    the accent border says "you are somewhere on purpose" without relying on hue alone (themes
-   remap the accents; win-95 collapses blue and green-soft). */
+   remap the accents; win-95 collapses blue and green-soft). An App never paints this button at
+   all — its rail row is the way back — so these rules are for the mods that have no row, which
+   is why they are keyed on the class and not on the excursion. */
 .mod-back-btn.excursion { max-width: 340px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; border-left: 3px solid var(--ds-accent-blue); border-radius: 4px; padding-left: 8px; }
 
 /* Vertical layout mod buttons. These are .nav-btn too (mod-manager.js builds them with an icon

@@ -21,7 +21,7 @@ Mods can define settings (boolean or number). Click the gear icon next to a mod 
 
 Mods have three display modes:
 
-- **Fullscreen** — activated via a toolbar button, replaces the terminal view. Clicking a session in the mod switches back to the terminal with a back button to return. Only one fullscreen mod iframe exists at a time; it's created on show and destroyed on hide. An [App](#apps-661) is a fullscreen mod with no toolbar button — the Apps rail section and the command palette launch it instead.
+- **Fullscreen** — activated via a toolbar button, replaces the terminal view. Clicking a session in the mod switches back to the terminal with a back button to return. Only one fullscreen mod iframe exists at a time; it's created on show and destroyed on hide. An [App](#apps-661) has neither of those buttons — the Apps rail section and the command palette both launch it and return you to it.
 - **Panel** — docked to the right side of the terminal area, with tabs if multiple panel mods are enabled. A drag handle allows resizing. Panel iframes stay alive even when hidden, so MCP tools keep working.
 - **Tools-only** — no UI, no iframe, no toolbar button. Only provides MCP tools to sessions. Omit both `display` and `entry` from `mod.json`.
 
@@ -39,14 +39,18 @@ Declaring it buys four things:
 - **quiet mode** below,
 - the **excursion** API below.
 
-and costs one: `"app": true` **implies no toolbar button** (#662). The Apps section is how you
-get to a place, and a third launcher in the tab strip says nothing the rail row does not. There
-is no second manifest field for this — one flag means one thing, so every future app inherits
-the decision. `toolbar.label` is still read: it names the rail row and the `← <name>` button.
+and costs one: `"app": true` **implies no button of its own in the tab strip** (#662) — not the
+toolbar launcher, and not the `← <name>` back button either. The Apps section is how you get to
+a place, so it is also how you get back to one, and the `←` is only that launcher pointing the
+other way. The rail row stays lit the whole time you are away, ⌘← pops an excursion, and the
+palette entry is the route while the ⌘P rail is closed. There is no second manifest field for
+this — one flag means one thing, so every future app inherits the decision. `toolbar.label` is
+still read: it names the rail row and the palette entry. Non-app fullscreen mods keep both
+buttons; they have no rail row to carry the job.
 
 **Quiet mode** takes the host's chrome away and leaves the app alone on screen — the tab strip
-(which is also the toolbar and the `←` button) and the projects rail. The panels need no rule:
-they live in `#content-row`, which the fullscreen slot already hides.
+(which is also the toolbar) and the projects rail. The panels need no rule: they live in
+`#content-row`, which the fullscreen slot already hides.
 
 It belongs to the host, not to the app: an iframe cannot hide the tab strip that contains it,
 and a control built in one would be stuck on hardcoded fallback colours (mod iframes receive no
@@ -63,14 +67,15 @@ the standing rule that no affordance asking for the rail may become a dead key.
 The state is per app id in `localStorage` (`deepsteve-app-quiet`), so it holds across reloads
 and windows; it never reaches the server, so there is no `SETTINGS_SCHEMA` entry. It is
 *derived* from the slot rather than bookkept, which is what makes an excursion free: while you
-are out the slot is down and so is quiet mode — so the excursion bar is readable — and coming
-home re-derives it with nothing saved or restored in between.
+are out the slot is down and so is quiet mode — so the rail carrying your way home is back on
+screen — and coming home re-derives it with nothing saved or restored in between.
 
 **Excursions** are a navigation stack owned by the host. An app calls `visitSession()` instead
-of `focusSession()`; the host hides the projects rail, filters the tab strip to the visited
-session's project, and turns the `← <name>` back button into a trail (`← Workshop · deepsteve
-/ issue-661`). ⌘← pops one frame; an emptied stack restores the app, which was only
-*backgrounded* — its iframe stayed loaded, so you come back to the state you left.
+of `focusSession()`; the host hides the projects rail and filters the tab strip to the visited
+session's project. ⌘← pops one frame, as does the app's rail row, which stays lit for the whole
+errand; an emptied stack restores the app, which was only *backgrounded* — its iframe stayed
+loaded, so you come back to the state you left. (A non-app fullscreen mod may start an excursion
+too, and there the `← <name>` button becomes a trail: `← Tower · deepsteve / issue-661`.)
 
 While you are out, ⌘↑/⌘↓ move the app's own cursor and the *terminal* follows, so a queue of
 twenty blocked agents can be walked without returning to the inbox. That walk **replaces** the
@@ -123,11 +128,11 @@ mods/<name>/
 | `enabledByDefault` | boolean | no | If `true`, mod is enabled on first visit without user action |
 | `entry` | string | no | HTML entry point, defaults to `"index.html"`. Omit for tools-only mods. |
 | `display` | string | no | `"panel"` for docked panel. Omit for fullscreen (default) or tools-only mods. |
-| `app` | boolean | no | `true` marks a fullscreen mod as an **App** — a place you work from. Adds an Apps rail row and a palette entry, unlocks the excursion API and quiet mode, and **suppresses the toolbar button**. Requires `entry`. See [Apps](#apps-661). |
+| `app` | boolean | no | `true` marks a fullscreen mod as an **App** — a place you work from. Adds an Apps rail row and a palette entry, unlocks the excursion API and quiet mode, and **suppresses both tab-strip buttons** (the toolbar launcher and the `←` back button). Requires `entry`. See [Apps](#apps-661). |
 | `panel.position` | string | no | `"right"` (only value currently supported) |
 | `panel.defaultWidth` | number | no | Initial panel width in pixels |
 | `panel.minWidth` | number | no | Minimum panel width when resizing |
-| `toolbar.label` | string | no | Display label: the toolbar button (fullscreen mods), the panel tab (panel mods), or the Apps rail row and `← <name>` button (apps, which have no button) |
+| `toolbar.label` | string | no | Display label: the toolbar button (fullscreen mods), the panel tab (panel mods), or the Apps rail row and palette entry (apps, which have no tab-strip button) |
 | `settings` | array | no | Per-mod settings (see below) |
 
 There is no `tools` field. A mod's MCP tools are declared only in `tools.js` — see
@@ -216,7 +221,7 @@ Returns the deepsteve version string (e.g. `"0.3.0"`).
 Returns an array of session objects with the current state of all sessions.
 
 ### `focusSession(id)`
-Switches from the mod view to the terminal view and focuses the given session. For fullscreen mods, this hides the mod and shows a back button.
+Switches from the mod view to the terminal view and focuses the given session. The mod is only *backgrounded* — for a fullscreen mod a `←` back button returns to it, and for an [App](#apps-661) the Apps rail row does (it has no strip button).
 
 ### `onSessionsChanged(cb)`
 Registers a callback that fires whenever sessions change. Fires immediately with current sessions. Returns an unsubscribe function.
