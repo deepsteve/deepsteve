@@ -276,3 +276,72 @@ test('fingerprint is bounded, so a pasted essay of a label still compares', () =
   const long = 'x'.repeat(500);
   assert.strictEqual(dp.fingerprint(long).length, 60);
 });
+
+// ── dialogFingerprint: "is this the same question?" (#663) ───────────────────
+//
+// It answers two questions that both go wrong quietly. A fingerprint that churns
+// restarts a blocked row's age on every repaint and un-mutes a row you dismissed a
+// second ago; one that collides silences a dialog you have never seen. Neither shows
+// up as an error anywhere, so both are pinned here.
+
+test('the same dialog with the cursor somewhere else is the same question', () => {
+  assert.strictEqual(
+    dp.dialogFingerprint(fx.PERMISSION_CURSOR_MID),
+    dp.dialogFingerprint(fx.PERMISSION_CURSOR_LAST),
+    'arrowing between options is navigation, not a new question',
+  );
+});
+
+test('a different dialog fingerprints differently', () => {
+  assert.notStrictEqual(
+    dp.dialogFingerprint(fx.PERMISSION_CURSOR_MID),
+    dp.dialogFingerprint(fx.PERMISSION_WRAPPED),
+  );
+  assert.notStrictEqual(
+    dp.dialogFingerprint(fx.NINE_OPTIONS),
+    dp.dialogFingerprint(fx.SINGLE_OPTION),
+  );
+});
+
+test('no dialog on screen has no fingerprint', () => {
+  assert.strictEqual(dp.dialogFingerprint(fx.RESOLVED_DIALOG), '');
+  assert.strictEqual(dp.dialogFingerprint([]), '');
+  assert.strictEqual(dp.dialogFingerprint(null), '');
+  for (const name of NON_DIALOG_FIXTURES) {
+    assert.strictEqual(dp.dialogFingerprint(composer[name]), '', `${name} is not a dialog`);
+  }
+});
+
+test('an unreadable dialog still fingerprints, and two of them do not collide', () => {
+  // The case the whole thing exists for: parseDialog gives up, so there is no question
+  // string to hash. Falling back to '' would make every unreadable dialog on the
+  // machine one identity — one dismissal silencing all of them.
+  assert.strictEqual(dp.parseDialog(fx.RULED_OPTION_RUN), null, 'this capture is unreadable');
+  const a = dp.dialogFingerprint(fx.RULED_OPTION_RUN);
+  assert.ok(a, 'an unreadable dialog is still identifiable');
+
+  const other = fx.RULED_OPTION_RUN.map(
+    (l) => (l.startsWith('❯ 1.') ? '❯ 1. Something else entirely' : l),
+  );
+  assert.notStrictEqual(dp.dialogFingerprint(other), a);
+});
+
+test('a 30-row read and a 60-row read of one screen agree', () => {
+  // scrapeFor widens its window when a dialog is detected but not parsed. The two
+  // reads must not be two different questions, or widening alone would un-mute a row.
+  const padded = [...Array(40).fill('  older transcript'), ...fx.PERMISSION_WRAPPED];
+  const narrow = padded.slice(-30);
+  const wide = padded.slice(-60);
+  assert.strictEqual(dp.dialogFingerprint(narrow), dp.dialogFingerprint(wide));
+});
+
+test('advancing a multi-question strip is a new question', () => {
+  const next = fx.MULTI_QUESTION.map(
+    (l) => (l.includes('☐ Wiring scope') ? l.replace('☐ Wiring scope', '✔ Wiring scope') : l),
+  );
+  assert.notStrictEqual(
+    dp.dialogFingerprint(next),
+    dp.dialogFingerprint(fx.MULTI_QUESTION),
+    'answering one sub-question puts a different question on screen',
+  );
+});

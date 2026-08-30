@@ -38,6 +38,7 @@ fs.mkdirSync(PROJECT_DIR, { recursive: true });
 
 const workshop = require('../../mods/workshop/tools.js');
 const inbox = require('../../mods/workshop/inbox.js');
+const fx = require('./fixtures/workshop-dialogs.js');
 
 // ── fakes ────────────────────────────────────────────────────────────────────
 
@@ -432,13 +433,189 @@ test('free text against a live dialog is refused with a way forward', async () =
   assert.deepStrictEqual(dialog.writes, []);
 });
 
-test('a live dialog cannot be dismissed', async () => {
+// ── dismissing a live dialog: the mute (#663) ────────────────────────────────
+//
+// The one rule worth stating: a mute belongs to the QUESTION, not the tab. Every test
+// below is some version of "and it comes back when the tab asks something else",
+// because the failure this must never have is a blocked agent going quiet forever.
+
+/** A screen that never changes — a dialog nobody is touching. */
+const staticScreen = (lines) => ({
+  linesSync: (n) => lines.slice(-n),
+  lines: async (n) => lines.slice(-n),
+});
+
+const inboxIds = async (app) => {
+  const { body } = await app.call('GET', '/api/workshop/inbox');
+  return body.items.map((i) => i.id);
+};
+
+test('dismissing a live dialog drops the row and types nothing into it', async () => {
+  const { shells, app } = world();
+  const id = sid();
+  const dialog = new FakeDialog(['Yes', 'No']);
+  shells.set(id, makeEntry(id, dialog));
+
+  const { body } = await app.call('GET', '/api/workshop/inbox');
+  const row = body.items.find((i) => i.id === 'blocked:' + id);
+  assert.ok(row, 'the row must be there first');
+
+  const r = await app.call('POST', '/api/workshop/items/:id/dismiss', {
+    params: { id: 'blocked:' + id }, body: { expect: row.fingerprint },
+  });
+  assert.strictEqual(r.status, 200);
+  assert.strictEqual(r.body.muted, true);
+
+  assert.ok(!(await inboxIds(app)).includes('blocked:' + id), 'the row must be gone');
+  assert.deepStrictEqual(dialog.writes, [], 'a mute must never touch the session');
+  assert.strictEqual(dialog.selected, null, 'the dialog itself is left standing');
+});
+
+test('a muted row stays gone across polls, and through a repaint of the same dialog', async () => {
+  const { shells, app } = world();
+  const id = sid();
+  const entry = makeEntry(id, new FakeDialog(['Yes', 'No']));
+  shells.set(id, entry);
+
+  await app.call('POST', '/api/workshop/items/:id/dismiss', { params: { id: 'blocked:' + id } });
+  assert.ok(!(await inboxIds(app)).includes('blocked:' + id));
+
+  // A status-line tick bumps outputSeq without changing the question. Muting on the
+  // parsed question alone would survive this; muting on a raw screen hash would not.
+  entry.outputSeq++;
+  assert.ok(!(await inboxIds(app)).includes('blocked:' + id), 'a repaint is not a new question');
+});
+
+test('a muted tab that asks something else comes straight back', async () => {
+  const { shells, app } = world();
+  const id = sid();
+  const entry = makeEntry(id, new FakeDialog(['Yes', 'No']));
+  shells.set(id, entry);
+
+  await app.call('POST', '/api/workshop/items/:id/dismiss', { params: { id: 'blocked:' + id } });
+  assert.ok(!(await inboxIds(app)).includes('blocked:' + id));
+
+  entry._dialog = new FakeDialog(['Merge it', 'Leave it alone']);
+  entry.terminalScreen = new FakeScreen(entry._dialog);
+  entry.outputSeq++;
+
+  assert.ok(
+    (await inboxIds(app)).includes('blocked:' + id),
+    'the mute expires with the dialog that earned it — a new question is a new row',
+  );
+});
+
+test('the same question asked again after the dialog cleared is a new row', async () => {
+  const { shells, app } = world();
+  const id = sid();
+  const entry = makeEntry(id, new FakeDialog(['Yes', 'No']));
+  shells.set(id, entry);
+
+  await app.call('POST', '/api/workshop/items/:id/dismiss', { params: { id: 'blocked:' + id } });
+
+  // The dialog resolves on its own: Claude Code repaints a composer, the row goes,
+  // and with it the mute. Asking the identical question afterwards must be audible.
+  entry._dialog.selected = 0;
+  entry.outputSeq++;
+  assert.ok(!(await inboxIds(app)).includes('blocked:' + id), 'no dialog, no row');
+
+  entry._dialog = new FakeDialog(['Yes', 'No']);
+  entry.terminalScreen = new FakeScreen(entry._dialog);
+  entry.outputSeq++;
+  assert.ok(
+    (await inboxIds(app)).includes('blocked:' + id),
+    'a mute must not outlive the dialog and swallow an identical re-ask',
+  );
+});
+
+test('a dialog Workshop cannot parse is still dismissible', async () => {
+  const { shells, app } = world();
+  const id = sid();
+  // The real capture: a rule between the last option and "Chat about this" stops
+  // collectOptions dead, so the row renders as a raw preview and cannot be answered
+  // from here. Before #663 it could not be got rid of either.
+  const entry = makeEntry(id, null, { terminalScreen: staticScreen(fx.RULED_OPTION_RUN) });
+  shells.set(id, entry);
+
+  const { body } = await app.call('GET', '/api/workshop/inbox');
+  const row = body.items.find((i) => i.id === 'blocked:' + id);
+  assert.ok(row, 'an unparseable dialog is still a row');
+  assert.strictEqual(row.answerable, false);
+
+  const r = await app.call('POST', '/api/workshop/items/:id/dismiss', {
+    params: { id: 'blocked:' + id },
+  });
+  assert.strictEqual(r.status, 200);
+  assert.ok(!(await inboxIds(app)).includes('blocked:' + id));
+});
+
+test('two unparseable dialogs do not share one mute', async () => {
+  const { shells, app } = world();
+  const footer = 'Enter to select · Tab/Arrow keys to navigate · Esc to cancel';
+  const rule = '─'.repeat(60);
+  const screenOf = (q) => [q, '❯ 1. One', '  2. Type something.', rule, '  3. Chat about this', footer];
+
+  const a = sid();
+  const b = sid();
+  shells.set(a, makeEntry(a, null, { terminalScreen: staticScreen(screenOf('Ship it?')) }));
+  shells.set(b, makeEntry(b, null, { terminalScreen: staticScreen(screenOf('Delete it?')) }));
+
+  await app.call('POST', '/api/workshop/items/:id/dismiss', { params: { id: 'blocked:' + a } });
+
+  const ids = await inboxIds(app);
+  assert.ok(!ids.includes('blocked:' + a));
+  assert.ok(ids.includes('blocked:' + b), 'muting one unreadable dialog must not silence the rest');
+});
+
+test('dismissing a dialog that already resolved says so instead of muting blind', async () => {
+  const { shells, app } = world();
+  const id = sid();
+  const entry = makeEntry(id, new FakeDialog(['Yes', 'No']));
+  shells.set(id, entry);
+  await app.call('GET', '/api/workshop/inbox');
+
+  entry._dialog.selected = 0;      // answered in the tab between the poll and the click
+  entry.outputSeq++;
+
+  const r = await app.call('POST', '/api/workshop/items/:id/dismiss', {
+    params: { id: 'blocked:' + id },
+  });
+  assert.strictEqual(r.status, 409);
+  assert.strictEqual(r.body.error, 'no-dialog');
+  assert.match(r.body.hint, /already gone/i);
+});
+
+test('dismissing a row whose dialog was swapped underneath it refuses', async () => {
+  const { shells, app } = world();
+  const id = sid();
+  const entry = makeEntry(id, new FakeDialog(['Yes', 'No']));
+  shells.set(id, entry);
+
+  const { body } = await app.call('GET', '/api/workshop/inbox');
+  const drawn = body.items.find((i) => i.id === 'blocked:' + id).fingerprint;
+  assert.ok(drawn, 'a blocked row must carry the fingerprint it was drawn with');
+
+  // The agent replaced the dialog between the poll and the click. Muting whatever is
+  // on screen now would silence a question the human has never seen.
+  entry._dialog = new FakeDialog(['Delete everything', 'Cancel']);
+  entry.terminalScreen = new FakeScreen(entry._dialog);
+  entry.outputSeq++;
+
+  const r = await app.call('POST', '/api/workshop/items/:id/dismiss', {
+    params: { id: 'blocked:' + id }, body: { expect: drawn },
+  });
+  assert.strictEqual(r.status, 409);
+  assert.strictEqual(r.body.error, 'dialog-changed');
+  assert.ok((await inboxIds(app)).includes('blocked:' + id), 'the new question stays audible');
+});
+
+test('dismissing a session that is already gone is a 404', async () => {
   const { app } = world();
   const r = await app.call('POST', '/api/workshop/items/:id/dismiss', {
-    params: { id: 'blocked:whatever' },
+    params: { id: 'blocked:vanished' },
   });
-  assert.strictEqual(r.status, 400);
-  assert.strictEqual(r.body.error, 'not-dismissible');
+  assert.strictEqual(r.status, 404);
+  assert.strictEqual(r.body.error, 'session-gone');
 });
 
 test('answering a session that is already gone is a 404, not a crash', async () => {

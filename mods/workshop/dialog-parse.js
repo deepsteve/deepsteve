@@ -62,6 +62,10 @@ const OPTION_RE = /^[\s│┃|]*([❯›>])?[ \t]*(\d{1,2})[.)][ \t]+(.*\S)[ \t]
 // composer, and telling them apart is what stops an idle session reading as blocked.
 const COMPOSER_ROW_RE = /^[\s│┃|]*[❯›>](\s|$)(?!\s*\d+[.)])/;
 
+// The menu cursor, once borders are off. Stripped before fingerprinting so that
+// moving between options is not mistaken for a different dialog.
+const CURSOR_GLYPH_RE = /^[❯›>]\s*/;
+
 const RULE_RE = /^[\s│┃|╭╮╰╯┌┐└┘├┤]*[─━═_-]{6,}[\s│┃|╭╮╰╯┌┐└┘├┤]*$/;
 
 // `←  ☐ Wiring scope  ☐ Notif click  ✔ Submit  →` — a multi-question AskUserQuestion.
@@ -90,6 +94,19 @@ function stripBorders(line) {
  */
 function fingerprint(label) {
   return str(label).replace(/\s+/g, ' ').trim().toLowerCase().slice(0, 60);
+}
+
+/**
+ * FNV-1a, inline because this file has zero requires (see the header) and the hash
+ * is never a security or storage decision — only "are these the same screen rows?".
+ */
+function hash32(s) {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return (h >>> 0).toString(36);
 }
 
 function tailOf(lines) {
@@ -318,8 +335,45 @@ function parseDialog(lines) {
   };
 }
 
+/**
+ * A stable identity for the dialog on screen right now — the answer to "is this the
+ * SAME question I was looking at a moment ago?" Empty string when no dialog is up.
+ *
+ * Two callers, and both need it to survive a repaint while changing the instant the
+ * question does: the age clock a blocked row carries, and the dismiss registry, which
+ * silences a row only for as long as that particular question is the one being asked.
+ *
+ * Deliberately NOT `fingerprint(parsed.question)`. parseDialog returns null on any
+ * dialog whose option run it cannot walk, so every unreadable dialog on the machine
+ * would share the empty fingerprint: one dismissal would silence all of them, and
+ * each would inherit the last one's age.
+ *
+ * The cursor glyph is stripped, so arrowing between options is not a new question.
+ * The window is the same one detectDialog itself calls the dialog block, which is
+ * what keeps a 30-row read and a 60-row read of one screen agreeing: both are counted
+ * back from the footer, and both tails end on the same screen row.
+ */
+function dialogFingerprint(lines) {
+  const tail = tailOf(lines);
+  const detected = detectDialog(lines);
+  if (!tail || !detected) return '';
+
+  const body = [];
+  const stop = Math.max(0, detected.footerIndex - BLOCK_ROWS);
+  for (let i = stop; i <= detected.footerIndex; i++) {
+    const row = str(tail[i]);
+    // Scanning downward, so a composer row is detectDialog's upward `break` seen
+    // from the other side: whatever we collected above it is transcript, not dialog.
+    if (COMPOSER_ROW_RE.test(row)) { body.length = 0; continue; }
+    const line = stripBorders(row).replace(CURSOR_GLYPH_RE, '').replace(/\s+/g, ' ').trim();
+    if (line) body.push(line);
+  }
+  return detected.kind + ':' + hash32(body.join('\n'));
+}
+
 module.exports = {
   detectDialog,
+  dialogFingerprint,
   parseDialog,
   fingerprint,
   stripBorders,

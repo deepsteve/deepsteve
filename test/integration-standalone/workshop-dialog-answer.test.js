@@ -346,3 +346,41 @@ test('a stale expect fingerprint is refused before a single key is sent', async 
   );
   assert.ok(await blockedRow(id), 'and the row stays, so it can be answered properly');
 });
+
+test('dismissing a live dialog clears the row without touching the session', async () => {
+  // The other half of "a row leaves the inbox" (#663). Every other exit needs the
+  // human to answer or the session to die; this one is for the row nobody will ever
+  // act on — and it must be provable that the agent never noticed.
+  const { id } = await openBlockedSession();
+  const row = await waitFor(() => blockedRow(id), 'the blocked row');
+  assert.ok(row.fingerprint, 'the row must carry the fingerprint it was drawn with');
+
+  const r = await fetch(`${BASE}/api/workshop/items/${encodeURIComponent(row.id)}/dismiss`, {
+    method: 'POST', headers: jsonHeaders(),
+    body: JSON.stringify({ reason: 'archived', expect: row.fingerprint }),
+  });
+  const body = await r.json();
+  assert.strictEqual(r.status, 200, `dismiss failed: ${JSON.stringify(body)}`);
+  assert.strictEqual(body.muted, true);
+
+  await waitFor(async () => (await blockedRow(id)) === null, 'the muted row to leave the inbox');
+
+  // Nothing was typed, and the dialog is still standing in the real session: a mute is
+  // not an Escape, and Escape is a decision Workshop does not get to make.
+  assert.strictEqual(
+    events(id).filter((e) => e.event === 'menu-select' || e.event === 'menu-move').length, 0,
+    'a mute must never reach the PTY',
+  );
+  const screen = await fetch(
+    `${BASE}/api/workshop/items/${encodeURIComponent(row.id)}/screen?lines=30`,
+    { headers: authHeaders() },
+  ).then((x) => x.json());
+  assert.ok(
+    screen.lines.some((l) => String(l).includes(QUESTION)),
+    'the dialog itself must be left exactly as it was',
+  );
+
+  // And it stays gone rather than flickering back on the next poll.
+  await new Promise((r2) => setTimeout(r2, 1200));
+  assert.strictEqual(await blockedRow(id), null, 'a mute must survive repaints');
+});

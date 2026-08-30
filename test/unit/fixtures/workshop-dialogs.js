@@ -159,6 +159,27 @@ const NINE_OPTIONS = [
   'Enter to select · Esc to cancel',
 ];
 
+// A real AskUserQuestion, captured 2026-08-30 from the #662 worktree. Claude Code
+// draws a rule between the last real option and the "Chat about this" escape hatch,
+// which stops collectOptions dead: option 4 is taken, the rule ends the run before
+// option 1 is reached, and parseDialog returns null. The row therefore renders as a
+// raw preview and cannot be answered from the panel — the exact shape that made a
+// dismissible blocked row necessary (#663).
+const RULED_OPTION_RUN = [
+  '⏺ All three reports are in. I have two genuine design forks to settle.',
+  '←  ☐ Scope  ☐ ⌘P  ☐ Toggle look  ✔ Submit  →',
+  '│ Who gets the quiet-mode toggle? #661 shipped `"app": true` on Workshop only.',
+  '❯ 1. Apps only (`app: true`)',
+  '     Keeps one flag meaning one thing. Cleanest, but ships to exactly one mod today.',
+  '  2. Every fullscreen mod view',
+  '     Broader payoff now, but it decouples quiet mode from the App concept.',
+  '  3. Type something.',
+  RULE,
+  '  4. Chat about this',
+  '',
+  'Enter to select · Tab/Arrow keys to navigate · Esc to cancel',
+];
+
 module.exports = {
   RULE,
   PERMISSION_WRAPPED,
@@ -174,4 +195,5 @@ module.exports = {
   BOXED_DIALOG,
   LABEL_WITH_NUMBER,
   NINE_OPTIONS,
+  RULED_OPTION_RUN,
 };

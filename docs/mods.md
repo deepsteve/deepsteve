@@ -466,6 +466,49 @@ an inbox row. The listing reads `entry.terminalScreen.linesSync(n)` and never
 `readTerminalScreen`, which would replay the whole scrollback into a fresh emulator and `await`
 a parse queue one chatty session can defer indefinitely.
 
+### How an item leaves the inbox
+
+Every row is an obligation, so nothing is dropped silently — but a row nobody will ever act on is
+its own failure, and before #663 the inbox had no way to shed one.
+
+| Kind | Leaves when |
+|---|---|
+| Question (`workshop_ask`) | answered, archived with `e`, or its session has been absent from `ctx.shells` for `EXPIRY_GRACE_MS` (5 min) |
+| Briefing (`workshop_brief`) | archived with `e` — `⏎` archives it too, since there is nothing to answer |
+| Blocked (derived) | the dialog resolves, the session goes, or **`e` mutes it** |
+
+The dead-session sweep is two-phase and never eager: the first pass only stamps `missingSince`,
+and a session that comes back inside the grace clears it. `ctx.shells` is briefly *empty* during
+the daemon's own boot, before sessions are restored, so an eager sweep would dismiss the whole
+inbox on every restart. `BOOT_GRACE_MS` in `tools.js` skips the sweep entirely until either a
+session shows up or a minute has passed.
+
+**`e` on a blocked row is a mute, not a dismissal.** Nothing is written, no tombstone is minted,
+and the dialog is left exactly as it stands — Escape *is* a decision and Workshop still never makes
+it for you. The mute is keyed on `dialogParse.dialogFingerprint()`, the dialog itself rather than
+the session: the row stays gone while that question is on screen and returns unprompted the moment
+the tab asks a different one. That is the whole moved-on rule — a tab that moves on either paints a
+different dialog or none, and both stop the mute applying. It lives in memory and dies with the
+daemon, for the reason the `wait_seconds` holds do: losing one costs a row you already read coming
+back once, and persisting one costs a second store to reconcile against sessions that are gone.
+
+The fingerprint is the whole dialog block, not the parsed question, because `parseDialog()` returns
+`null` on any dialog whose option run it cannot walk — a real AskUserQuestion draws a rule between
+the last option and "Chat about this", which stops the walk dead. Those all shared one empty
+fingerprint, so hashing the question alone would let a single dismissal silence every unreadable
+dialog on the machine, and give each of them one inherited age. The cursor glyph is stripped, so
+arrowing between options is navigation rather than a new question.
+
+A blocked row carries the `fingerprint` it was drawn with, and the panel echoes it back as
+`expect` — the same confirmed-not-assumed check `sendChoice` makes before pressing a button. A
+dialog can be replaced between the poll and the click, and muting whatever is on screen *now*
+would silence a question nobody has seen; a mismatch is a `409 dialog-changed` and the row
+redraws.
+
+Only `POST /api/workshop/items/blocked:<id>/dismiss` writes a mute, and no MCP tool calls it. **An
+agent must never be able to silence a human's inbox** — same line as the meta-controls reasoning
+below.
+
 ### The three answer paths, and why they differ
 
 | Situation | What happens | PTY write |

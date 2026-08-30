@@ -77,6 +77,23 @@ const scrapeCache = new Map();
 // `${cwd}\0${worktree}` -> { project, projectName }
 const projectCache = new Map();
 const PROJECT_CACHE_MAX = 200;
+// sessionId -> the dialog fingerprint a human dismissed from the panel.
+//
+// A derived row has no store and no tombstone by design, so "I have dealt with this"
+// cannot be a status on an item. It is a MUTE, and it is keyed on the DIALOG rather
+// than the session: the row stays gone while that question is the one on screen and
+// comes straight back the moment the tab asks something else. That is the whole
+// moved-on rule in one map — a tab that moves on either paints a different dialog or
+// none, and both stop the mute applying.
+//
+// In memory and dies with the daemon, for the reason the waits registry gives: losing
+// one costs a row you already read coming back once, and persisting one costs a second
+// store to reconcile against sessions that no longer exist.
+//
+// Written only from POST /api/workshop/items/blocked:<id>/dismiss, which no MCP tool
+// calls — see the header. An agent must never be able to silence a human's inbox.
+const mutedDialogs = new Map();
+
 // Sessions with a key dance in flight. A second concurrent answer would interleave
 // two key streams into one dialog.
 const inFlightChoices = new Set();
@@ -224,9 +241,11 @@ function scrapeFor(id, entry, now) {
     }
   }
 
-  const questionFp = parsed
-    ? dialogParse.fingerprint(parsed.question || parsed.headline)
-    : '';
+  // The whole dialog block, not the parsed question: parseDialog returns null on a
+  // dialog whose option run it cannot walk, and those all shared one empty
+  // fingerprint — every unreadable dialog on the machine inheriting one age, and
+  // (since the mute below is keyed on this) one dismissal.
+  const questionFp = dialogParse.dialogFingerprint(lines);
   // Carry the clock forward across a repaint: a status-line tick or a resize bumps
   // outputSeq without changing the question, and resetting the age there would make
   // the wait colouring meaningless.
@@ -258,6 +277,14 @@ function derivedItems(now) {
     const scrape = scrapeFor(id, entry, now);
     if (!scrape.detected) continue;
 
+    // Dismissed, and still the same question — stay quiet. A different fingerprint
+    // means the tab moved on, so the mute expires with the dialog that earned it.
+    const muted = mutedDialogs.get(id);
+    if (muted !== undefined) {
+      if (muted === scrape.questionFp) continue;
+      mutedDialogs.delete(id);
+    }
+
     const { project, projectName } = projectFor(entry);
     const parsed = scrape.parsed;
     out.push({
@@ -271,6 +298,9 @@ function derivedItems(now) {
       projectName,
       worktree: entry.worktree || null,
       dialogKind: scrape.detected.kind,
+      // Opaque to the panel — it only ever echoes it back to /dismiss, so that muting
+      // a row can refuse when the tab has started asking something else since the poll.
+      fingerprint: scrape.questionFp,
       headline: parsed ? parsed.headline : 'Waiting on a dialog',
       question: parsed ? parsed.question : '',
       context: parsed ? parsed.context.join('\n') : '',
@@ -297,6 +327,14 @@ function derivedItems(now) {
 
   for (const id of [...scrapeCache.keys()]) {
     if (!live.has(id)) scrapeCache.delete(id);
+  }
+  // A mute outlives its dialog for no one's benefit. Keyed off the CACHED scrape
+  // rather than this pass's filters on purpose: waitingForInput flickering false
+  // during a repaint skips the re-scrape, and dropping the mute there would flash a
+  // dismissed row back for one poll.
+  for (const id of [...mutedDialogs.keys()]) {
+    const scrape = scrapeCache.get(id);
+    if (!live.has(id) || !scrape || !scrape.detected) mutedDialogs.delete(id);
   }
   return out;
 }
@@ -568,14 +606,8 @@ function registerRoutes(app, context) {
   });
 
   app.post('/api/workshop/items/:id/dismiss', (req, res) => {
-    if (inbox.parseBlockedId(req.params.id)) {
-      // A live dialog is not dismissible from an inbox: Escape IS a decision, and a
-      // snooze would need exactly the derived-item state this design removes.
-      return res.status(400).json({
-        error: 'not-dismissible',
-        hint: 'This is a live dialog, not a stored item. Answer it, or open the tab and deal with it there.',
-      });
-    }
+    const blockedSession = inbox.parseBlockedId(req.params.id);
+    if (blockedSession) return dismissBlocked(res, blockedSession, req.body || {});
     const item = inbox.byId(req.params.id);
     if (!item) return res.status(404).json({ error: 'not-found' });
     const status = inbox.applyDismiss(item, (req.body && req.body.reason) || 'archived');
@@ -685,6 +717,50 @@ async function answerBlocked(res, sessionId, body) {
   } finally {
     inFlightChoices.delete(sessionId);
   }
+}
+
+/**
+ * Dismissing a live dialog (#663).
+ *
+ * The original design refused this outright — Escape IS a decision, and a snooze
+ * would need exactly the per-row state deriving blocked items removes. What that
+ * missed is the row nobody will ever act on: a worktree whose issue shipped from
+ * somewhere else, an abandoned tab, a dialog Workshop cannot even parse well enough
+ * to answer. Those pin a permanent BLOCKING row nothing in the system can clear,
+ * because every other removal path here waits on a human answering or on the session
+ * disappearing altogether.
+ *
+ * So this is a mute, not a dismissal: nothing is written, no tombstone is minted, and
+ * the dialog is left exactly as it was. It says "not this question", and the row
+ * returns unprompted the moment the tab asks a different one.
+ *
+ * `expect` is the fingerprint the row carried when it was drawn, echoed back — the
+ * same confirmed-not-assumed check sendChoice makes before it presses a button, and
+ * for the same reason. A dialog can be replaced between the poll and the click, and
+ * muting whatever happens to be on screen NOW would silence a question the human has
+ * never seen. That is the one failure a mute must not have, so a mismatch refuses.
+ */
+function dismissBlocked(res, sessionId, body) {
+  const entry = ctx.shells.get(sessionId);
+  if (!entry) return res.status(404).json({ error: 'session-gone' });
+
+  const scrape = scrapeFor(sessionId, entry, Date.now());
+  if (!scrape.detected) {
+    return res.status(409).json({
+      error: 'no-dialog',
+      hint: 'That dialog is already gone — the row drops on the next refresh.',
+    });
+  }
+  if (body.expect && body.expect !== scrape.questionFp) {
+    return res.status(409).json({
+      error: 'dialog-changed',
+      hint: 'That tab is asking something else now — the row will redraw with the new question.',
+    });
+  }
+
+  mutedDialogs.set(sessionId, scrape.questionFp);
+  ctx.log(`[workshop] mute blocked:${sessionId} fp=${scrape.questionFp}`);
+  res.json({ ok: true, muted: true, sessionId, fingerprint: scrape.questionFp });
 }
 
 module.exports = { init, registerRoutes };

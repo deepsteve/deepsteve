@@ -372,24 +372,31 @@ function Workshop() {
     } catch { /* the poll will pick it up */ }
   }, []);
 
+  // One key for two things that both mean "I'm done looking at this": a stored item is
+  // archived, a live dialog is MUTED — nothing is typed into it and nothing is written,
+  // it just stops occupying the inbox until that tab asks something else (#663).
   const archive = useCallback(async () => {
     const item = view.list.find((i) => i.id === selectedIdRef.current);
     if (!item || sendingRef.current) return;
-    if (item.kind === 'blocked') {
-      setError('A live dialog can’t be archived — answer it, or press o to open the tab.');
-      return;
-    }
+    const verb = item.kind === 'blocked' ? 'dismiss' : 'archive';
     setSending(true);
     sendingRef.current = true;
     try {
       const r = await fetch(`/api/workshop/items/${encodeURIComponent(item.id)}/dismiss`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ reason: 'archived' }),
+        // The fingerprint the row was drawn with, echoed back so the server can refuse
+        // if this tab has started asking something else since the last poll.
+        body: JSON.stringify({ reason: 'archived', expect: item.fingerprint }),
       });
-      if (!r.ok) setError('Couldn’t archive that.');
+      if (!r.ok) {
+        const data = await r.json().catch(() => ({}));
+        setError(data.hint || `Couldn’t ${verb} that.`);
+      } else {
+        setError(null);
+      }
     } catch (e) {
-      setError(`Couldn’t archive that — ${e.message}`);
+      setError(`Couldn’t ${verb} that — ${e.message}`);
     } finally {
       setSending(false);
       sendingRef.current = false;
@@ -767,7 +774,8 @@ function Workshop() {
                 {selected.kind === 'blocked' && !selected.answerable && (
                   <div style={{ font: `13px/1.6 ${SANS}`, color: C.orange, marginTop: 18 }}>
                     This dialog couldn’t be read well enough to answer from here — the screen is
-                    below. Press <Key>o</Key> to open the tab and deal with it there.
+                    below. Press <Key>o</Key> to open the tab and deal with it there, or
+                    <Key>e</Key> to drop the row and leave the dialog alone.
                   </div>
                 )}
 
@@ -818,16 +826,19 @@ function Workshop() {
               </button>
               {selected.kind !== 'briefing' && (
                 <button
-                  type="button" onClick={archive} disabled={selected.kind === 'blocked' || sending}
+                  type="button" onClick={archive} disabled={sending}
+                  title={selected.kind === 'blocked'
+                    ? 'Drop this row. The dialog is left alone, and comes back if the tab asks something else.'
+                    : 'Archive this item without answering it.'}
                   style={{
                     display: 'inline-flex', alignItems: 'center', gap: 8,
                     border: `1px solid ${C.border}`, borderRadius: 5, padding: '6px 12px',
                     background: 'transparent',
-                    color: selected.kind === 'blocked' ? C.faint : C.text,
+                    color: C.text,
                     font: `13px ${SANS}`,
-                    cursor: selected.kind === 'blocked' ? 'default' : 'pointer',
+                    cursor: sending ? 'default' : 'pointer',
                   }}
-                ><Key>e</Key> Archive</button>
+                ><Key>e</Key> {selected.kind === 'blocked' ? 'Dismiss' : 'Archive'}</button>
               )}
               <span style={{ flex: 1 }} />
               <span style={{ font: `11px ${SANS}`, color: C.dimmer, textAlign: 'right' }}>
@@ -860,7 +871,7 @@ function Workshop() {
               ['1–9', 'stage an option'],
               ['⏎', 'send'],
               ['⌘⏎', 'send while typing'],
-              ['e', 'archive'],
+              ['e', 'archive / dismiss a dialog'],
               ['o', 'open the tab'],
               ['r', 'reply box'],
               ['⌘\\', 'quiet mode'],
