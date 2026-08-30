@@ -68,6 +68,7 @@ Claude is the one agent never probed, because it is the default and the fallback
 | Fork a session | yes | — | — | — | — | — |
 | Plan mode | yes | — | — | yes | — | — |
 | Idle / waiting classification | yes | — | — | — | — | — |
+| Workshop dialog answering | yes | — | — | — | — | — |
 | Prompt readiness | screen state | rendered MCP boot | 3s timer | 3s timer | 3s timer | 30s deadline |
 | Echo-confirmed submit | yes | own Enter retry | — | — | — | — |
 | Session pinned by | `--session-id` | per-tab `CODEX_HOME` | nothing | `--session` | `--session-dir` | nothing |

@@ -1,0 +1,40 @@
+{
+  "name": "Workshop",
+  "version": "0.9.0",
+  "minDeepsteveVersion": "0.4.0",
+  "description": "One inbox for every agent that needs you — blocked dialogs, questions and briefings in one place",
+  "experimental": true,
+  "enabledByDefault": false,
+  "entry": "index.html",
+  "toolbar": { "label": "Workshop" },
+  "settings": [
+    {
+      "key": "pollSeconds",
+      "type": "number",
+      "label": "Refresh interval (s)",
+      "description": "How often the inbox re-reads the server. Lower is snappier and costs more screen scrapes.",
+      "default": 2
+    },
+    {
+      "key": "showBriefings",
+      "type": "boolean",
+      "label": "Show briefings",
+      "description": "Include the read-only notes agents post with workshop_brief",
+      "default": true
+    },
+    {
+      "key": "groupByProject",
+      "type": "boolean",
+      "label": "Group by project",
+      "description": "Bucket the list under project headings instead of one flat run",
+      "default": false
+    },
+    {
+      "key": "compactRows",
+      "type": "boolean",
+      "label": "Compact rows",
+      "description": "One line per item — hides the session and project line",
+      "default": false
+    }
+  ]
+}

@@ -1,0 +1,329 @@
+/**
+ * Reads what a blocked Claude Code session is actually asking (#660).
+ *
+ * Pure, with ZERO requires, for the same reason screen-classifier.js is: it has to
+ * run in the bare `unit` CI job, which installs with --ignore-scripts and has no
+ * daemon, no PTY and no zsh.
+ *
+ * Input is INTERPRETED screen lines — TerminalScreen.lines()/linesSync(), where the
+ * emulator has already resolved cursor addressing. NOT the ANSI-stripped scrollback
+ * tail the waiting classifier reads: that is a concatenation of overlapping partial
+ * frames, so the same option appears three times at three stages of repaint and any
+ * positional reasoning over it is fiction.
+ *
+ * TWO entry points, not one, and the split is load-bearing:
+ *
+ *   detectDialog() answers "is a modal on screen at all?" — the MEMBERSHIP gate.
+ *   parseDialog()  answers "and what exactly does it say?" — null when a dialog is
+ *                  up but unreadable, which is the raw-preview fallback.
+ *
+ * Collapsing those into one nullable return breaks the inbox. sessionInputState()
+ * maps 'waiting' -> 'idle', and 'waiting' covers BOTH a permission dialog AND a
+ * session sitting at an empty composer. Without a positive dialog gate, every agent
+ * that merely finished its turn becomes an inbox row and Workshop is Action Required
+ * with more scrolling.
+ *
+ * Known limitation, deliberately not guessed around: the AskUserQuestion cursor is
+ * sometimes drawn as reverse video rather than a glyph, and linesSync() returns text
+ * with no attributes. When no glyph is found we report cursorIndex: null and the
+ * answer path refuses rather than assuming "probably option 1" — an assumption that
+ * costs a wrong button press in someone's live session.
+ */
+
+// How far up we ever look. Generous rather than tight: the real bound on "is this
+// dialog current?" is FOOTER_TAIL_ROWS below, and a caller that widens its read to
+// recover a truncated option run must not be re-truncated here.
+const TAIL_ROWS = 60;
+
+// The dialog's hint line must be within this many NON-EMPTY rows of the bottom.
+// This is what makes a resolved dialog stop matching: Claude Code repaints the
+// transcript and composer below it, pushing any remnant out of the live region.
+const FOOTER_TAIL_ROWS = 4;
+
+const BLOCK_ROWS = 24;      // how far above the footer a dialog body may extend
+const CONTEXT_LINES = 4;    // rows above the question carried along as context
+const MAX_BLANK_GAP = 1;    // blank rows tolerated inside the option run
+const MAX_CONT_ROWS = 3;    // wrapped rows tolerated per option
+const MULTI_LOOKBACK = 8;   // rows above the question scanned for a tab strip
+
+// The same marker family screen-classifier.js's CLAUDE_SCREEN_MARKERS.permission
+// already validates against real captures. Kept as one regex here because we need
+// the INDEX of the match, not merely that one exists.
+const DIALOG_FOOTER_RE =
+  /Esc to (cancel|go back)\b|Enter to select\b|Tab to (amend|switch questions)\b|Tab\/Arrow keys/i;
+
+const PERMISSION_Q_RE = /^Do you want to\b/i;
+
+// `  2. Yes, and don't ask again…` / `❯ 1. Yes` / `❯1. Uniform (recommended)`
+const OPTION_RE = /^[\s│┃|]*([❯›>])?[ \t]*(\d{1,2})[.)][ \t]+(.*\S)[ \t]*$/;
+
+// A COMPOSER glyph row, which is emphatically not a menu cursor. The negative
+// lookahead is the whole trick: `❯ 1. Yes` is a dialog cursor, `❯ Try "…"` is the
+// composer, and telling them apart is what stops an idle session reading as blocked.
+const COMPOSER_ROW_RE = /^[\s│┃|]*[❯›>](\s|$)(?!\s*\d+[.)])/;
+
+const RULE_RE = /^[\s│┃|╭╮╰╯┌┐└┘├┤]*[─━═_-]{6,}[\s│┃|╭╮╰╯┌┐└┘├┤]*$/;
+
+// `←  ☐ Wiring scope  ☐ Notif click  ✔ Submit  →` — a multi-question AskUserQuestion.
+const MULTI_TAB_RE = /[☐☑✔✓]\s*\S/;
+const MULTI_LABEL_RE = /[☐☑✔✓]\s*([^☐☑✔✓]+)/g;
+
+const LEAD_BORDER_RE = /^[\s│┃|╭╮╰╯┌┐└┘├┤]+/;
+const TAIL_BORDER_RE = /[\s│┃|╭╮╰╯┌┐└┘├┤]+$/;
+
+function str(v) {
+  return typeof v === 'string' ? v : (v == null ? '' : String(v));
+}
+
+/** Drop box-drawing borders and surrounding whitespace from one rendered row. */
+function stripBorders(line) {
+  return str(line).replace(LEAD_BORDER_RE, '').replace(TAIL_BORDER_RE, '');
+}
+
+/**
+ * The one normalization both sides of the verify step use.
+ *
+ * The answer path compares "the label the human clicked" against "the label under
+ * the cursor right now". If the two sides normalize differently the comparison
+ * silently never matches and every answer is refused, so there is exactly one
+ * implementation and both import it.
+ */
+function fingerprint(label) {
+  return str(label).replace(/\s+/g, ' ').trim().toLowerCase().slice(0, 60);
+}
+
+function tailOf(lines) {
+  if (!Array.isArray(lines) || lines.length === 0) return null;
+  return lines.length > TAIL_ROWS ? lines.slice(-TAIL_ROWS) : lines.slice();
+}
+
+/**
+ * Is a modal dialog on screen right now?
+ *
+ * Returns { kind, footerIndex } (the index is into the internal tail slice, not into
+ * the caller's array — parseDialog is the only consumer that needs it) or null.
+ */
+function detectDialog(lines) {
+  const tail = tailOf(lines);
+  if (!tail) return null;
+
+  let footerIndex = -1;
+  for (let i = tail.length - 1; i >= 0; i--) {
+    if (DIALOG_FOOTER_RE.test(str(tail[i]))) { footerIndex = i; break; }
+  }
+  if (footerIndex < 0) return null;
+
+  // Below the footer: a composer means the dialog already resolved and Claude Code
+  // has repainted underneath it; too much content means the footer is a leftover
+  // that scrolled up into the transcript.
+  let below = 0;
+  for (let i = footerIndex + 1; i < tail.length; i++) {
+    const line = str(tail[i]);
+    if (COMPOSER_ROW_RE.test(line)) return null;
+    if (line.trim()) below++;
+  }
+  if (below > FOOTER_TAIL_ROWS) return null;
+
+  // Above the footer: at least one numbered option, or this is prose that merely
+  // happens to contain a hint phrase.
+  let sawOption = false;
+  let kind = 'question';
+  const stop = Math.max(0, footerIndex - BLOCK_ROWS);
+  for (let i = footerIndex - 1; i >= stop; i--) {
+    const line = str(tail[i]);
+    if (COMPOSER_ROW_RE.test(line)) break;
+    if (OPTION_RE.test(line)) { sawOption = true; continue; }
+    if (PERMISSION_Q_RE.test(stripBorders(line))) { kind = 'permission'; break; }
+  }
+  if (!sawOption) return null;
+
+  return { kind, footerIndex };
+}
+
+/**
+ * Walk UP from the footer collecting the option run.
+ *
+ * The issue's stated algorithm — "the trailing run of lines matching the option
+ * regex" — fails on the single most common dialog in this repo. The real capture in
+ * test/unit/fixtures/screen-tails.js has option 2 wrapping onto a second row:
+ *
+ *     ❯ 1. Yes
+ *       2. Yes, and don't ask again for deepsteve - read_session_screen commands in
+ *          /Users/michael/github/deepsteve-experimental/.claude/worktrees/…
+ *       3. No
+ *
+ * The trailing run there is `3. No` alone — one option, unparseable, and every
+ * deepsteve MCP permission prompt falls back to a raw screen preview, which is the
+ * entire value this feature exists to deliver.
+ *
+ * So: anchor on the CONTIGUOUS DESCENDING run down to `1.`, and fold non-numbered
+ * rows in as continuations. Walking upward, a continuation is encountered BEFORE
+ * the option it belongs to, so it is buffered and prepended to the next option
+ * taken. Taking option 1 stops the walk immediately, which is what keeps the
+ * question line above it from being swallowed as a continuation.
+ */
+function collectOptions(tail, footerIndex) {
+  const desc = [];          // options in descending order
+  let expected = null;
+  let pending = [];         // buffered continuation rows, in screen order
+  let blanks = 0;
+  let rules = 0;            // box borders crossed before the run starts
+  let firstIndex = -1;      // tail index of option 1
+
+  for (let i = footerIndex - 1; i >= 0; i--) {
+    const line = str(tail[i]);
+    const m = OPTION_RE.exec(line);
+
+    if (m) {
+      const n = Number(m[2]);
+      if (expected === null) {
+        if (n < 1) break;
+        expected = n;
+      } else if (n !== expected) {
+        break;              // the run is not contiguous — stop, never guess
+      }
+      const label = [stripBorders(m[3]), ...pending].filter(Boolean).join(' ');
+      desc.push({ n, label, selected: !!m[1] });
+      pending = [];
+      blanks = 0;
+      expected = n - 1;
+      if (expected === 0) { firstIndex = i; break; }
+      continue;
+    }
+
+    if (RULE_RE.test(line)) {
+      // A rule INSIDE the run ends it. Before the run starts it is normally a box's
+      // bottom border sitting between the options and the footer, which is what a
+      // rounded-box dialog looks like — breaking there loses the whole dialog.
+      if (desc.length) break;
+      if (++rules > 2) break;
+      continue;
+    }
+
+    if (COMPOSER_ROW_RE.test(line)) break;
+
+    if (!line.trim()) {
+      blanks++;
+      if (blanks > MAX_BLANK_GAP) break;
+      continue;
+    }
+
+    const cont = stripBorders(line);
+    if (!cont) continue;
+    if (pending.length >= MAX_CONT_ROWS) break;
+    pending.unshift(cont);
+    blanks = 0;
+  }
+
+  if (firstIndex < 0) return null;   // never reached option 1
+  return { options: desc.reverse(), firstIndex };
+}
+
+function readQuestion(tail, firstIndex) {
+  for (let i = firstIndex - 1; i >= 0; i--) {
+    const raw = str(tail[i]);
+    if (RULE_RE.test(raw)) continue;
+    const line = stripBorders(raw);
+    if (!line) continue;
+    if (MULTI_TAB_RE.test(line)) continue;
+    return { question: line, index: i };
+  }
+  return { question: '', index: firstIndex };
+}
+
+function readContext(tail, questionIndex) {
+  const out = [];
+  let blanks = 0;
+  for (let i = questionIndex - 1; i >= 0 && out.length < CONTEXT_LINES; i--) {
+    const raw = str(tail[i]);
+    if (RULE_RE.test(raw)) break;
+    const line = stripBorders(raw);
+    if (!line) { if (++blanks >= 2) break; continue; }
+    if (MULTI_TAB_RE.test(line)) continue;
+    blanks = 0;
+    out.unshift(line);
+  }
+  return out;
+}
+
+function readMulti(tail, questionIndex, footerLine) {
+  const stop = Math.max(0, questionIndex - MULTI_LOOKBACK);
+  for (let i = questionIndex; i >= stop; i--) {
+    const line = stripBorders(tail[i]);
+    if (!MULTI_TAB_RE.test(line)) continue;
+    const labels = [];
+    let m;
+    MULTI_LABEL_RE.lastIndex = 0;
+    while ((m = MULTI_LABEL_RE.exec(line)) !== null) {
+      const label = m[1].replace(/[←→]/g, '').replace(/\s+/g, ' ').trim();
+      if (label) labels.push(label);
+    }
+    if (labels.length >= 2) return { count: labels.length, labels };
+  }
+  // The footer can say so even when the tab strip is off-screen or undrawn. Report
+  // the fact without a count rather than pretending there is only one question:
+  // WHICH tab is current is conveyed by highlight, which linesSync cannot see, so
+  // there is deliberately no index here at all.
+  if (/Tab to switch questions\b/i.test(str(footerLine))) return { count: null, labels: [] };
+  return null;
+}
+
+/**
+ * The full read. null means "a dialog is up but its options could not be read" —
+ * the caller keeps the row and renders a raw screen preview instead.
+ */
+function parseDialog(lines) {
+  const detected = detectDialog(lines);
+  if (!detected) return null;
+
+  const tail = tailOf(lines);
+  const collected = collectOptions(tail, detected.footerIndex);
+  if (!collected) return null;
+
+  const { options, firstIndex } = collected;
+  if (options.length < 2) return null;
+  for (let i = 0; i < options.length; i++) {
+    if (options[i].n !== i + 1) return null;   // must be exactly 1..N
+  }
+
+  // Two cursors means we misread something. A mis-parse must never look like a
+  // confident answer, so drop the flag entirely rather than pick the first.
+  const marked = options.filter((o) => o.selected);
+  let cursorIndex = null;
+  if (marked.length === 1) {
+    cursorIndex = options.findIndex((o) => o.selected);
+  } else if (marked.length > 1) {
+    for (const o of options) o.selected = false;
+  }
+
+  const { question, index: questionIndex } = readQuestion(tail, firstIndex);
+  const context = readContext(tail, questionIndex);
+
+  // "Do you want to proceed?" is identical across every session and every tool, so
+  // it is useless as a subject. The line above it — "deepsteve - read_session_screen
+  // (MCP)", "Bash(rm -rf …)" — is the actual message.
+  const headline = detected.kind === 'permission'
+    ? (context.length ? context[context.length - 1] : question)
+    : (question || (context.length ? context[context.length - 1] : ''));
+
+  return {
+    kind: detected.kind,
+    headline,
+    question,
+    context,
+    options: options.map((o) => ({ n: o.n, label: o.label, selected: !!o.selected })),
+    cursorIndex,
+    multi: readMulti(tail, questionIndex, tail[detected.footerIndex]),
+    footer: stripBorders(tail[detected.footerIndex]),
+  };
+}
+
+module.exports = {
+  detectDialog,
+  parseDialog,
+  fingerprint,
+  stripBorders,
+  TAIL_ROWS,
+  FOOTER_TAIL_ROWS,
+  CONTEXT_LINES,
+};

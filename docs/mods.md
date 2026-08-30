@@ -38,6 +38,7 @@ Mods have three display modes:
 | **Tasks** | panel | on | Task list populated by Agent sessions |
 | **Tower** | fullscreen | off | Pixel art skyscraper view of sessions |
 | **Village** | fullscreen | off | Walk a rainy town where every house is a project |
+| **Workshop** | fullscreen | off | One inbox for every agent that needs you — see [Workshop](#workshop) |
 
 This is a highlights list, not an inventory — it names neither every mod nor the tools each one
 registers. Those are declared in the mod's `tools.js` and reported by `GET /api/mods`, which derives
@@ -345,6 +346,78 @@ Mod state is stored in localStorage with the following keys:
 | `deepsteve-mod-settings-<modId>` | Per-mod settings object (one key per mod) |
 
 Panel mods are auto-enabled on first visit (when no mod preferences have been saved yet).
+
+## Workshop
+
+One fullscreen inbox merging **blocked sessions** — anything sitting on a Claude Code permission
+or AskUserQuestion dialog, with the question and options parsed and rendered inline — and the
+**questions and briefings agents post deliberately** through `workshop_ask`, `workshop_brief` and
+`workshop_check`. You answer from the inbox instead of switching to the tab.
+
+Everything lives in `mods/workshop/`. There is no `server.js` edit and no new bridge hook:
+`registerRoutes(app, context)` already hands every mod the full `initMCP` context, and the panel
+polls its own `GET /api/workshop/inbox`.
+
+**Blocked items are derived, never stored.** They are computed per request from `ctx.shells`, so
+they exist exactly as long as the dialog does — nothing to reconcile, no tombstone, and no stale
+row when a dialog resolves itself in its own terminal. Questions and briefings are stored at
+`stateDir()/workshop.json`.
+
+**Membership is `detectDialog()`, not `waitingForInput`.** `sessionInputState()` maps `'waiting'`
+to `'idle'`, and `'idle'` covers a session sitting at an empty composer just as much as one
+showing a modal. `waitingForInput` is only a cheap pre-filter; the positive dialog signal in
+`mods/workshop/dialog-parse.js` is what stops every agent that merely finished its turn becoming
+an inbox row. The listing reads `entry.terminalScreen.linesSync(n)` and never
+`readTerminalScreen`, which would replay the whole scrollback into a fresh emulator and `await`
+a parse queue one chatty session can defer indefinitely.
+
+### The three answer paths, and why they differ
+
+| Situation | What happens | PTY write |
+|---|---|---|
+| The agent is holding inside `workshop_ask` (`wait_seconds`) | resolve its pending promise | **none** |
+| The agent's turn ended and it is idle at its composer | `deliverPromptWhenReady(…, { source: 'workshop' })` | via the prompt FIFO |
+| The agent is showing a live dialog | raw key writes, 250 ms apart | arrows + `\r` |
+
+The third is **not** `submitToShell`: its `confirmEcho` waits for the composer to echo the text,
+and a modal has no composer, so every answer would burn the full cap waiting for an echo that can
+never arrive. Instead Workshop moves the cursor **relative to where it already is**, re-reads the
+screen to confirm `❯` landed on the intended option, and only then sends Enter — #607's
+"confirmed, not assumed" applied to a menu. **A failed verification sends no Enter**, and does not
+send Escape either: Escape cancels the dialog, which is a decision the human did not make.
+
+Each control byte is its own `engine.write` separated by 250 ms, because Ink recognizes a control
+byte only when it arrives as its own stdin read. `test/integration-standalone/workshop-dialog-answer.test.js`
+proves this through a real PTY using the `menu` policy in `test/helpers/stubs/fake-claude-tui.js`.
+
+A blocked item is answered **by option only**. Free text is refused with a 400 and a hint to open
+the tab: a permission prompt has no text field, and Escape-then-type would cancel the tool call
+the agent was asking about.
+
+### It deliberately skips the meta-controls consent gate
+
+That gate prices one risk: an *agent* typing into another agent's session (#519). Every PTY write
+in Workshop originates from a human pressing a key in the host UI, behind the same auth cookie
+that already authorizes closing the session. Routing it through the modal would ask the user to
+approve their own click, and a decline there starts a 60 s cooldown that would block the next
+unrelated `meta_type`. The three MCP tools write nothing to any PTY. **If an agent ever gains a
+way to answer another agent's item, revisit this** — at that point Workshop becomes exactly what
+#519 guards. The reasoning is repeated in the header of `mods/workshop/tools.js`.
+
+`logRcWrite` only logs text matching `/(^|\s)\/rc(\s|$)/` — deliberately not a keylogger — and
+arrow keys plus `\r` can never match it, so the explicit `[workshop] answer …` log line is the
+only record that a human moved a cursor in someone else's session.
+
+### Coexisting with Action Required
+
+Both surfaces are untouched by each other, and Action Required's auto-cycle **will switch tabs out
+from under Workshop**. Workshop cannot detect that — `getSettings()` is scoped to the calling mod
+— so it shows a one-time dismissible note instead. Turn auto-cycle off while sitting in the inbox.
+
+Two known gaps, both needing the platform work in #661: a fullscreen mod has no way to show an
+unread count while it is off screen (`setPanelBadge` returns early when there is no panel tab), and
+`o` (open the tab) only works for sessions that have a tab in *this* browser window — the bridge's
+`focusSession` cannot attach one that does not.
 
 ## Tutorials
 

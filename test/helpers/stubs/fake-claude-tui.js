@@ -94,6 +94,12 @@ function loadPolicy() {
     dropAfterBytes: num('dropAfterBytes', 0),
     pasteMarkers: !!f.pasteMarkers,
     transcript: !!f.transcript,
+    // #660 — a permission dialog that really responds to arrow keys. `menu` is
+    // { banner, question, options[], footer }; `menuOnBoot` puts it up immediately,
+    // otherwise a submitted prompt containing `menuTrigger` raises it.
+    menu: (f.menu && typeof f.menu === 'object') ? f.menu : null,
+    menuOnBoot: !!f.menuOnBoot,
+    menuTrigger: String(f.menuTrigger || 'SHOW-MENU'),
   };
 }
 const CFG = loadPolicy();
@@ -123,6 +129,10 @@ let pasteBuf = '';
 let pasteCarry = Buffer.alloc(0); // bytes held back in case a marker straddles a read
 let pasteNewlines = 0;          // what the collapsed placeholder advertises
 let draftIsPaste = false;
+// #660 menu state. `menuUp` swaps the whole frame for a permission dialog, so the
+// composer is gone exactly as it is in the real TUI while a modal is open.
+let menuUp = false;
+let menuCursor = 0;
 
 // Raw mode may clear OPOST, so every line break is written explicitly.
 const out = (s) => { try { process.stdout.write(s); } catch {} };
@@ -148,7 +158,35 @@ function draftRows() {
   return draft.split('\n');
 }
 
+// #660 — the permission-dialog frame. Deliberately replaces the composer entirely,
+// like the real modal does: that absence is why Workshop cannot answer one with
+// submitToShell (its confirmEcho would wait forever for a composer echo) and has to
+// move the cursor with raw keys instead.
+function menuLines() {
+  const m = CFG.menu || {};
+  const options = Array.isArray(m.options) ? m.options : ['Yes', 'No'];
+  const rows = [];
+  if (m.banner) rows.push(m.banner);
+  rows.push(m.question || 'Do you want to proceed?');
+  options.forEach((label, i) => {
+    rows.push(`${i === menuCursor ? '❯' : ' '} ${i + 1}. ${label}`);
+  });
+  rows.push(m.footer || 'Esc to cancel · Tab to amend');
+  return rows;
+}
+
+function openMenu() {
+  menuUp = true;
+  menuCursor = Number(CFG.menu && CFG.menu.cursor) || 0;
+  ev('menu-open', { cursor: menuCursor });
+  render();
+}
+
 function render() {
+  if (menuUp) {
+    out('\x1b[H\x1b[2J' + menuLines().join('\r\n') + '\r\n');
+    return;
+  }
   const rows = transcript.slice(-6);
   rows.push(RULE);
   // The composer box. An empty draft still draws the glyph row, exactly like the
@@ -228,6 +266,9 @@ function onEnter() {
   if (text.includes('/exit')) { ev('exit', { via: '/exit' }); out('\r\n'); process.exit(0); }
   transcript.push('❯ ' + text.split('\n')[0]);
   transcript.push('GOT:' + text.replace(/\n/g, ' ⏎ '));
+  // #660 — a prompt can raise the permission dialog, so a test can drive a session
+  // into "blocked" the same way a real tool call does.
+  if (CFG.menu && text.includes(CFG.menuTrigger)) { openMenu(); return; }
   if (CFG.workMs > 0) startWork(); else render();
 }
 
@@ -316,6 +357,26 @@ function consume(bytes) {
 
 function handleKeys(s) {
   if (s === '\x03') { ev('exit', { via: 'ctrl-c' }); process.exit(0); }
+
+  // #660 — while the modal is up it owns every key, and it obeys Ink's rule: an arrow
+  // counts only when its escape sequence arrives as its OWN read, which is precisely
+  // what Workshop's 250ms-per-byte loop produces.
+  if (menuUp) {
+    const options = (CFG.menu && CFG.menu.options) || ['Yes', 'No'];
+    if (s === '\x1b[B') { menuCursor = Math.min(options.length - 1, menuCursor + 1); ev('menu-move', { cursor: menuCursor }); render(); return; }
+    if (s === '\x1b[A') { menuCursor = Math.max(0, menuCursor - 1); ev('menu-move', { cursor: menuCursor }); render(); return; }
+    if (s === '\r' || s === '\n') {
+      menuUp = false;
+      ev('menu-select', { index: menuCursor, label: options[menuCursor] });
+      transcript.push('SELECTED:' + (menuCursor + 1));
+      render();
+      return;
+    }
+    if (s === '\x1b') { menuUp = false; ev('menu-cancel', {}); transcript.push('SELECTED:cancel'); render(); return; }
+    ev('menu-ignored', { bytes: s.length });
+    return;
+  }
+
   // Escape clears the composer
   if (s === '\x1b') { draft = ''; draftIsPaste = false; pasteNewlines = 0; render(); return; }
 
@@ -394,4 +455,7 @@ process.on('SIGTERM', () => { ev('exit', { via: 'sigterm' }); process.exit(0); }
 // A real TUI repaints on its own schedule; this stub only repaints on input, so
 // footer:'late' needs one scheduled frame or the footer would never appear.
 if (CFG.footer === 'late') setTimeout(render, CFG.footerLateMs + 50).unref?.();
+// #660 — menuOnBoot puts the session straight into "blocked" with no prompt round
+// trip, which is all a Workshop inbox test needs.
+if (CFG.menu && CFG.menuOnBoot) { menuUp = true; menuCursor = Number(CFG.menu.cursor) || 0; }
 render();

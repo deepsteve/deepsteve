@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    /* Mod iframes receive NO theme variables from the host, so every var() here MUST
+       carry a fallback — the fallback is what you actually see. An unfallbacked var()
+       renders transparent-on-transparent, which reads as a broken build.
+       test/unit/workshop-mod-shape.test.js enforces this. */
+    * { margin: 0; box-sizing: border-box; }
+    html, body { height: 100%; }
+    body {
+      background: var(--ds-bg-primary, #0d1117);
+      color: var(--ds-text-primary, #c9d1d9);
+      font-family: system-ui, -apple-system, sans-serif;
+      /* The two panes own their own scroll; the page itself never does. */
+      overflow: hidden;
+      -webkit-font-smoothing: antialiased;
+    }
+    #workshop-root { height: 100%; }
+
+    button { font-family: inherit; }
+    :focus-visible { outline: 2px solid var(--ds-accent, #58a6ff); outline-offset: 2px; }
+
+    /* Match the host's terminal panes rather than shipping a web page's scrollbars. */
+    ::-webkit-scrollbar { width: 10px; height: 10px; }
+    ::-webkit-scrollbar-thumb {
+      background: #30363d; border-radius: 5px;
+      border: 2px solid transparent; background-clip: padding-box;
+    }
+    ::-webkit-scrollbar-thumb:hover { background: #484f58; background-clip: padding-box; }
+    ::-webkit-scrollbar-track { background: transparent; }
+
+    @keyframes ws-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+    @keyframes ws-flash { 0% { background: #3fb950; } 100% { background: transparent; } }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { animation: none !important; transition: none !important; }
+    }
+  </style>
+</head>
+<body>
+  <div id="workshop-root"></div>
+  <script type="importmap">{ "imports": {
+    "react": "https://esm.sh/react@18.3.1",
+    "react/jsx-runtime": "https://esm.sh/react@18.3.1/jsx-runtime",
+    "react-dom/client": "https://esm.sh/react-dom@18.3.1/client"
+  }}</script>
+  <script src="https://cdn.jsdelivr.net/npm/@babel/standalone@8.0.3/babel.min.js"></script>
+  <script type="text/babel" data-type="module" src="workshop.jsx"></script>
+</body>
+</html>
