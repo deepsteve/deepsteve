@@ -71,12 +71,16 @@ function rollCall() {
  * throwing, so a failed request or a nested Baby Browser falls back to the
  * localStorage-only behavior instead of losing the restore modal.
  */
-async function fetchRecoverable() {
+async function fetchRecoverable({ includeClosed = false } = {}) {
   // Nested instances are ephemeral and share the parent's origin; their windows
   // stay client-only so they can't offer to restore the top-level window's tabs.
   if (recursionDepth > 0) return null;
   try {
-    const res = await fetch('/api/recoverable-sessions');
+    // #658: the closed/recents buckets cost the daemon a synchronous transcript read
+    // per unnamed tombstone (~448ms cold at 1100 rows, blocking every live PTY), and
+    // the window picker never draws them. Ask only when the archive fallback is open.
+    const url = '/api/recoverable-sessions' + (includeClosed ? '?include=closed' : '');
+    const res = await fetch(url);
     if (!res.ok) return null;
     const data = await res.json();
     if (!data || !Array.isArray(data.windows)) return null;
@@ -86,6 +90,9 @@ async function fetchRecoverable() {
       ungrouped: data.ungrouped || [],
       closed: data.closed || [],
       recents: data.recents || [],
+      // Always present, even when the buckets above are withheld — it is what tells
+      // the caller whether asking again with includeClosed would return anything.
+      closedCount: typeof data.closedCount === 'number' ? data.closedCount : (data.closed || []).length,
     };
   } catch {
     return null;
@@ -193,10 +200,14 @@ export const WindowManager = {
   },
 
   /**
-   * The recover-everything picture (#560): orphaned window groups (merged with
-   * localStorage, exactly like the old listOrphanedWindows), plus the buckets
-   * only the server knows — ungrouped sessions, closed tombstones (#561), and
-   * recent-history lineages. Returns { windows, ungrouped, closed, recents }.
+   * What the window picker offers (#560, narrowed by #658): orphaned window groups
+   * (merged with localStorage, exactly like the old listOrphanedWindows) plus the
+   * server-only `ungrouped` bucket. Returns
+   * { windows, ungrouped, closed, recents, closedCount }.
+   *
+   * `closed` and `recents` always come back EMPTY here — the archive is opt-in and
+   * this is not the path that asks for it; `closedCount` is how you learn whether
+   * there is one. Use listArchive() when you actually want those rows.
    *
    * Deliberately does NOT bail when localStorage has no windows: that is exactly
    * the state after an origin change, and bailing early is what left 72 live
@@ -206,7 +217,7 @@ export const WindowManager = {
     const myWindowId = this.getWindowId();
     const local = SessionStore.getAllWindows();
     const server = await fetchRecoverable();
-    const empty = { windows: [], ungrouped: [], closed: [], recents: [] };
+    const empty = { windows: [], ungrouped: [], closed: [], recents: [], closedCount: 0 };
 
     // No server opinion (request failed, nested Baby Browser) — trust
     // localStorage alone, like the pre-#551 modal did.
@@ -220,8 +231,12 @@ export const WindowManager = {
     // roll-call rather than stalling startup for ORPHAN_DETECTION_TIMEOUT. This is
     // the fast path the old localStorage-only check gave us; it just has to consult
     // the server before concluding there are no candidates.
+    // closedCount, not server.closed.length: the archive is withheld by default, so
+    // its length is 0 even when a thousand tombstones exist. Using the length here
+    // would report "nothing to restore" on an install whose only survivors are
+    // tombstones — the exact wipe case the archive fallback exists for.
     if (Object.keys(local).length === 0 && server.windows.length === 0
-        && server.ungrouped.length === 0 && server.closed.length === 0
+        && server.ungrouped.length === 0 && server.closedCount === 0
         && server.recents.length === 0) {
       return empty;
     }
@@ -253,7 +268,36 @@ export const WindowManager = {
       }),
     }));
 
-    return { windows, ungrouped: server.ungrouped, closed: server.closed, recents: server.recents };
+    return {
+      windows,
+      ungrouped: server.ungrouped,
+      closed: server.closed,
+      recents: server.recents,
+      closedCount: server.closedCount,
+    };
+  },
+
+  /**
+   * The per-session archive on its own (#658) — closed tombstones and recents.
+   *
+   * Deliberately NOT listRecoverable({ includeClosed: true }): these two buckets come
+   * straight from the server and are never touched by mergeWindows, so the window
+   * reconciliation that call performs would buy nothing here — while costing a second
+   * ORPHAN_DETECTION_TIMEOUT roll-call on a path that has already paid for one.
+   *
+   * Returns empty buckets rather than null when the server has no opinion; the caller
+   * treats that the same as an empty archive.
+   */
+  async listArchive() {
+    const server = await fetchRecoverable({ includeClosed: true });
+    if (!server) return { windows: [], ungrouped: [], closed: [], recents: [], closedCount: 0 };
+    return {
+      windows: [],
+      ungrouped: [],
+      closed: server.closed,
+      recents: server.recents,
+      closedCount: server.closedCount,
+    };
   },
 
   /**

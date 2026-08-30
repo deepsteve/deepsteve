@@ -70,14 +70,32 @@ test('an ordinary session is never mistaken for a scheduled run', () => {
 
 test('both recoverable buckets filter through the same predicate', () => {
   // The bug was two buckets with two rules. Assert the closed bucket and the
-  // ungrouped check both call isScheduledRun — not that one of them reimplements it.
-  const closedFilter = serverSource.match(/const closed = Object\.entries\(savedState\)\s*\n\s*\.filter\(([^\n]*)\)/);
+  // ungrouped check both reach isScheduledRun — not that one of them reimplements it.
+  //
+  // #658 put a named predicate between the closed bucket and isScheduledRun, so this
+  // follows one hop: the bucket filters through isArchived, and isArchived is what
+  // calls isScheduledRun.
+  const isArchived = serverSource.match(/const isArchived = \(e\) => ([^\n]*);/);
+  assert.ok(isArchived, 'could not find the isArchived predicate');
+  assert.match(isArchived[1], /isScheduledRun/);
+
+  const closedFilter = serverSource.match(/const closed = [^\n]*Object\.entries\(savedState\)\s*\n\s*\.filter\(([^\n]*)\)/);
   assert.ok(closedFilter, 'could not find the closed bucket filter');
-  assert.match(closedFilter[1], /isScheduledRun/);
+  assert.match(closedFilter[1], /isArchived/);
 
   const ungrouped = serverSource.match(/if \(collectUngrouped &&[^\n]*\)/);
   assert.ok(ungrouped, 'could not find the ungrouped collect check');
   assert.match(ungrouped[0], /isScheduledRun/);
+});
+
+test('closedCount is computed from the same predicate as the closed bucket', () => {
+  // #658 withholds the closed rows by default and returns only their count, so the
+  // count is the client's sole basis for deciding whether asking for the archive is
+  // worth it. A second, drifting membership rule would make the modal offer an
+  // archive that comes back empty — or hide one that has rows in it.
+  const count = serverSource.match(/const closedCount = [^\n]*;/);
+  assert.ok(count, 'could not find closedCount');
+  assert.match(count[0], /isArchived/);
 });
 
 test('the fallback shapes still match what scheduled-tasks actually mints', () => {

@@ -5263,8 +5263,30 @@ app.get('/api/windows', (req, res) => {
 // knows (hard-deleted pre-#561, or forgotten). Label derivation reads transcript
 // files, so it lives here and NOT in /api/windows, which is on the hot startup
 // path of every browser window.
+//
+// #658: the closed + recents buckets are now opt-in via ?include=closed, and the
+// default answer omits them. Two reasons, and the second is the load-bearing one:
+//
+//   1. The restore modal is a WINDOW picker. It offers "you had a tab open with 7
+//      sessions in it" — an abstraction that lives entirely in `windows` and
+//      `ungrouped`. It never draws the per-session archive, so fetching it is waste.
+//   2. Cost. `closed` is every tombstone inside the retention window — 1100 rows on a
+//      real install — and each unnamed one costs a `deriveSessionLabel` transcript
+//      read. Measured cold: ~448ms of SYNCHRONOUS fs.readSync on the event loop, which
+//      stalls every live PTY on the daemon for that window. Paying it for rows nobody
+//      renders is the bug; paying it only when someone deliberately opens the archive
+//      is the fix.
+//
+// `closedCount` is always returned because it is free (no file I/O) and it is how the
+// client knows whether the archive fallback has anything in it worth asking for.
 app.get('/api/recoverable-sessions', (req, res) => {
+  const includeClosed = String(req.query.include || '').split(',').includes('closed');
   const { windows, knownSessionIds, ungrouped } = buildWindowsView({ collectUngrouped: true });
+
+  // The archive's membership test, shared by the count and (when asked) the rows
+  // themselves, so the number can never disagree with the list.
+  const isArchived = (e) => !!e && e.closed && e.agentType !== 'tmux-attach' && !isScheduledRun(e);
+  const closedCount = Object.values(savedState).filter(isArchived).length;
 
   // #632: does restoring this row still have somewhere to go? Restore spawns in the
   // recorded `cwd` verbatim, so stat exactly that — NOT sessionPaths(e).cwd. One rule
@@ -5293,8 +5315,8 @@ app.get('/api/recoverable-sessions', (req, res) => {
     };
   };
 
-  const closed = Object.entries(savedState)
-    .filter(([, e]) => e && e.closed && e.agentType !== 'tmux-attach' && !isScheduledRun(e))
+  const closed = !includeClosed ? [] : Object.entries(savedState)
+    .filter(([, e]) => isArchived(e))
     .map(([id, e]) => ({
       id,
       name: e.name || null,
@@ -5316,9 +5338,11 @@ app.get('/api/recoverable-sessions', (req, res) => {
   // savedState wins the dedupe: if the lineage is still in state.json (open,
   // saved, or tombstoned), the row above already covers it.
   const knownClaudeIds = new Set();
-  for (const [, e] of shells) if (e.claudeSessionId) knownClaudeIds.add(e.claudeSessionId);
-  for (const e of Object.values(savedState)) if (e && e.claudeSessionId) knownClaudeIds.add(e.claudeSessionId);
-  const recents = recentSessions
+  if (includeClosed) {
+    for (const [, e] of shells) if (e.claudeSessionId) knownClaudeIds.add(e.claudeSessionId);
+    for (const e of Object.values(savedState)) if (e && e.claudeSessionId) knownClaudeIds.add(e.claudeSessionId);
+  }
+  const recents = !includeClosed ? [] : recentSessions
     .filter(r => !(r.claudeSessionId && knownClaudeIds.has(r.claudeSessionId))
               && !shells.has(r.shellId) && !savedState[r.shellId])
     .map(r => ({
@@ -5338,6 +5362,7 @@ app.get('/api/recoverable-sessions', (req, res) => {
     ungrouped: ungrouped.map(enrich),
     closed,
     recents,
+    closedCount,
   });
 });
 

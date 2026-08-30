@@ -133,8 +133,12 @@ function readState() {
   return JSON.parse(fs.readFileSync(path.join(HOME, '.deepsteve', 'state.json'), 'utf8'));
 }
 
-async function getRecoverable() {
-  const r = await fetch(`${BASE}/api/recoverable-sessions`, { headers: authHeaders() });
+async function getRecoverable({ includeClosed = true } = {}) {
+  // #658: the closed + recents buckets are opt-in. This file is mostly ABOUT those
+  // buckets, so it asks for them by default; the withheld shape has its own test
+  // ('the archive is withheld unless asked for').
+  const q = includeClosed ? '?include=closed' : '';
+  const r = await fetch(`${BASE}/api/recoverable-sessions${q}`, { headers: authHeaders() });
   assert.ok(r.ok, `GET /api/recoverable-sessions -> ${r.status}`);
   return r.json();
 }
@@ -274,6 +278,33 @@ test('buckets: windows, ungrouped, closed, and recents each capture their case',
   assert.ok(forgottenClaudeId, 'recents row keyed by claudeSessionId');
   assert.ok(!payload.recents.some(rr => rr.key === readState()[tombstoned.id].claudeSessionId),
     'tombstoned lineage is deduped out of recents — savedState wins');
+});
+
+test('the archive is withheld unless asked for, but its size is always reported', async () => {
+  // #658: the restore modal is a window picker and never draws the per-session
+  // archive, so the default answer must not build it. Building it costs a
+  // synchronous transcript read per unnamed tombstone — ~448ms on a real install
+  // with 1100 of them, blocking every live PTY on the daemon for that window.
+  //
+  // closedCount still comes back, because it is free and it is the only thing that
+  // tells the client whether asking again would return anything. Without it, an
+  // install whose sole survivors are tombstones (the wipe case #561 exists for)
+  // would read as "nothing to restore".
+  const withheld = await getRecoverable({ includeClosed: false });
+  assert.deepStrictEqual(withheld.closed, [], 'closed bucket withheld by default');
+  assert.deepStrictEqual(withheld.recents, [], 'recents bucket withheld by default');
+  assert.ok(withheld.closedCount > 0, 'closedCount still reports the archive size');
+
+  // The live tier is unaffected — that is the whole point of the split.
+  assert.ok(withheld.windows.length > 0, 'window groups still offered');
+  assert.ok(withheld.knownSessionIds.length > 0, 'existence oracle still complete');
+
+  const asked = await getRecoverable();
+  assert.ok(asked.closed.length > 0, 'the archive comes back when asked for');
+  assert.strictEqual(asked.closedCount, withheld.closedCount,
+    'the count does not depend on whether the rows were requested');
+  assert.strictEqual(asked.closed.length, asked.closedCount,
+    'count and rows agree — they share one membership predicate');
 });
 
 test('unnamed sessions get transcript-derived labels; ai-title wins over the first user message', async () => {

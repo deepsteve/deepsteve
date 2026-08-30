@@ -725,26 +725,34 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
 .window-item .window-sessions { font-size: 12px; color: var(--ds-text-secondary); }
 .window-item .session-name { display: inline-block; background: var(--ds-bg-tertiary); padding: 2px 6px; border-radius: 3px; margin-right: 4px; margin-top: 4px; }
 
-/* Recover-everything restore modal (#560) */
-.modal.modal-wide { width: 560px; max-width: calc(100vw - 40px); }
-.modal-wide .restore-list { max-height: 60vh; }
-.restore-subtitle { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; font-size: 13px; color: var(--ds-text-secondary); margin-bottom: 12px; }
-.restore-select-links { white-space: nowrap; }
-.restore-select-links a { color: var(--ds-accent-blue); cursor: pointer; }
-.restore-select-links a:hover { text-decoration: underline; }
-.restore-section { border-bottom: 1px solid var(--ds-border); }
-.restore-section:last-child { border-bottom: none; }
-.modal .restore-section-header { display: flex; align-items: center; gap: 8px; margin: 0; padding: 8px 12px; cursor: pointer; background: var(--ds-bg-secondary); position: sticky; top: 0; z-index: 1; }
-.restore-section-header .restore-section-title { font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--ds-text-bright); }
-.restore-section-header .restore-section-meta { font-size: 11px; color: var(--ds-text-secondary); opacity: 0.8; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Restore modal: window picker (#560, reshaped by #658) */
+/* Rows are windows now, not agent sessions, so there are a handful rather than a
+   thousand — the list no longer needs sticky section headers or its own scroll
+   region, and the panel gets narrower because there is far less to say. */
+.modal.modal-wide { width: 480px; max-width: calc(100vw - 40px); }
+.modal-wide .restore-list { max-height: 52vh; }
+.restore-subtitle { font-size: 13px; color: var(--ds-text-secondary); margin-bottom: 12px; }
 .modal .window-item { display: flex; align-items: flex-start; gap: 10px; margin: 0; padding: 10px 12px; font-size: 13px; }
 .modal .window-item input[type="checkbox"] { margin-top: 2px; flex-shrink: 0; }
 .window-item.checked { background: var(--ds-bg-tertiary); }
 .restore-row-body { min-width: 0; }
 .restore-row-title { font-size: 13px; color: var(--ds-text-bright); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.restore-row-title.restore-row-derived { font-style: italic; color: var(--ds-text-primary); }
-.window-item.session-closed { opacity: 0.55; }
-.window-item.session-closed.checked { opacity: 0.85; }
+.modal .window-item.restore-win { padding: 12px; align-items: center; }
+.restore-win .restore-row-title { font-size: 14px; }
+.restore-win-projects { font-size: 12px; color: var(--ds-text-primary); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.restore-win .window-sessions { margin-top: 2px; }
+/* A window whose directories are all gone: still shown, so it is clear why it is
+   not on offer, but the checkbox is disabled rather than promising a refusal. */
+.window-item.restore-win-dead { opacity: 0.5; cursor: default; }
+.window-item.restore-win-dead:hover { background: none; }
+.restore-reassure { font-size: 12px; color: var(--ds-text-secondary); margin: 12px 0 16px; }
+/* Archive mode — the per-session mass-loss surface (#561), deliberately plain. */
+.window-item.session-closed { opacity: 0.75; }
+/* "We have no title for this one" — italic earns its meaning here, unlike the old
+   restore-row-derived, which italicised ~450 rows to encode a provenance with no
+   legend anywhere. */
+.restore-row-title.restore-row-untitled { font-style: italic; color: var(--ds-text-secondary); }
+.window-item.session-closed.checked { opacity: 1; }
 .restore-show-more { display: block; width: 100%; padding: 8px 12px; border: none; background: none; text-align: left; font: inherit; font-size: 12px; color: var(--ds-accent-blue); cursor: pointer; }
 .restore-show-more:hover { background: var(--ds-bg-tertiary); text-decoration: underline; }
 

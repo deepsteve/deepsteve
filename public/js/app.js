@@ -2928,26 +2928,42 @@ async function restoreSessions(sessionList, opts = {}) {
 }
 
 /**
- * The recover-everything restore flow (#560), shared by the startup offer, the
- * command palette, the ▾ new-tab menu, and the empty-state button.
+ * The restore flow (#560), shared by the startup offer, the command palette, the
+ * ▾ new-tab menu, and the empty-state button.
  * Returns 'restored' | 'fresh' (declined / nothing usable) | 'none' (nothing
  * to offer at all).
+ *
+ * #658: two shapes, and which one you get is decided here rather than in the modal.
+ * The normal one is a WINDOW picker, and it deliberately fetches without the closed
+ * archive — the daemon spends a synchronous transcript read per unnamed tombstone
+ * building that bucket, and nothing in this shape draws it.
+ *
+ * The archive is the fallback for the wipe case (#561): a deliberate re-entry that
+ * found no windows at all, where the per-session list is the only thing that could
+ * help. That second fetch is why `closedCount` exists — the first response withholds
+ * the rows but still says whether asking again is worth it.
  */
 let restoreOfferOpen = false;
 async function offerSessionRestore({ secondaryLabel, onlyIfOrphans = false } = {}) {
   if (restoreOfferOpen) return 'fresh';
   restoreOfferOpen = true;
   try {
-    const data = await WindowManager.listRecoverable();
-    if (data.windows.length + data.ungrouped.length + data.closed.length + data.recents.length === 0) {
-      return 'none';
+    let data = await WindowManager.listRecoverable();
+    let mode = 'windows';
+    const offerable = data.windows.length + data.ungrouped.length;
+
+    // Startup auto-show gate: a brand-new window is only worth interrupting for
+    // windows or ungrouped sessions someone actually lost.
+    if (onlyIfOrphans && offerable === 0) return 'none';
+
+    if (offerable === 0) {
+      if (!data.closedCount) return 'none';
+      data = await WindowManager.listArchive();
+      if (data.closed.length + data.recents.length === 0) return 'none';
+      mode = 'archive';
     }
-    // Startup auto-show gate: closed tombstones / recents alone don't warrant
-    // interrupting a brand-new window (see the init call site).
-    if (onlyIfOrphans && data.windows.length + data.ungrouped.length === 0) {
-      return 'none';
-    }
-    const result = await showSessionRestoreModal(data, { secondaryLabel });
+
+    const result = await showSessionRestoreModal(data, { secondaryLabel, mode });
     if (result.action !== 'restore') return 'fresh';
 
     const myWindowId = getWindowId();
@@ -3001,7 +3017,7 @@ async function offerSessionRestore({ secondaryLabel, onlyIfOrphans = false } = {
  */
 async function reopenSessionRestore() {
   const outcome = await offerSessionRestore({ secondaryLabel: 'Cancel' });
-  if (outcome === 'none') showToast('No sessions to restore');
+  if (outcome === 'none') showToast('Nothing to reopen');
 }
 
 /**
@@ -4960,12 +4976,13 @@ async function init() {
       }
       restoreSessions(legacySessions);
     } else {
-      // Startup restore offer (#560). Auto-shows only when there are orphaned
-      // window groups or ungrouped sessions to reclaim — closed tombstones
-      // exist almost always (#561 tombstones every deliberate close), so they
-      // alone must not pop a modal on every new window. They stay one click
-      // away behind the empty state, the ▾ menu, and the command palette.
-      const outcome = await offerSessionRestore({ onlyIfOrphans: true });
+      // Startup restore offer (#560, reshaped by #658). Auto-shows only when there
+      // are orphaned window groups or ungrouped sessions to reclaim — closed
+      // tombstones exist almost always (#561 tombstones every deliberate close), so
+      // they alone must not pop a modal on every new window, and since #658 they are
+      // not even fetched here. The per-session archive stays behind a deliberate
+      // re-entry: the empty state, the ▾ menu, and the command palette.
+      const outcome = await offerSessionRestore({ onlyIfOrphans: true, secondaryLabel: 'Not now' });
       if (outcome !== 'restored') {
         // Declined, nothing to offer, or another window claimed everything —
         // land on the empty state either way. `declined` suppresses the directory
