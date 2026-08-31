@@ -670,6 +670,19 @@ export const TabManager = {
   },
 
   /**
+   * Mark a tab whose connection is being REFUSED rather than merely dropped (#677) —
+   * the server is up and has told us over HTTP that it will reject our cookie, so the
+   * gate never emitted a handshake. Same badge slot as updateReconnecting, different
+   * colour, because the two need different responses from the user: one resolves itself
+   * by waiting, the other never will. The page-level banner (#676) says auth is broken;
+   * this says which tabs went quiet because of it.
+   */
+  updateAuthBlocked(sessionId, on) {
+    const tab = document.getElementById('tab-' + sessionId);
+    if (tab) tab.classList.toggle('auth-blocked', !!on);
+  },
+
+  /**
    * Get the adjacent tab's session ID (left neighbor preferred, then right).
    * Returns null if no adjacent tab exists.
    */

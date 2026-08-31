@@ -166,3 +166,41 @@ test("client-log's realm wrapper reports the status, and skips /api/proxy", asyn
   await realm.fetch('/api/settings');
   assert.strictEqual(heal.isAuthLost(), 0);
 });
+
+// ---------------------------------------------------------------- #677
+
+test('the heal probe itself sets the page-level state, not only the fetch watch', async () => {
+  // #676 fed onAuthLost from api.js's fetch watch alone. But ws-open.js's gate calls
+  // maybeHealAuth() directly, so a tab whose SOCKETS were being refused recorded nothing
+  // page-level and showed nothing until some unrelated /api call happened to fail too —
+  // and a tab that has gone quiet is exactly the one that stops making requests.
+  const heal = await loadHeal();
+  window.__deepsteveReloadPending = false; // let the probe actually run
+  heal._reset();
+  heal.noteAuthStatus(200);
+  assert.strictEqual(heal.isAuthLost(), 0);
+
+  globalThis.fetch = async () => response(401, 'Unauthorized');
+  // The one-reload-per-60s guard is already spent, so this exercises the state the issue
+  // is about: still refused, no reload coming, and the UI is all that is left.
+  sessionStorage.setItem('deepsteve-auth-healed', String(Date.now()));
+
+  const verdict = await heal.maybeHealAuth();
+  assert.strictEqual(verdict, 'unauthed');
+  assert.strictEqual(heal.isAuthLost(), 401, 'the probe is evidence, whoever asked for it');
+});
+
+test('forcePageReload announces itself, and takes it back if it does not navigate', async () => {
+  const heal = await loadHeal();
+  heal._reset();
+  heal.noteAuthStatus(401);           // the state a heal reload starts from
+  const seen = [];
+  heal.onAuthLost((s) => seen.push(s));
+  assert.deepStrictEqual(seen, [401], 'late subscriber gets the current edge');
+
+  heal.forcePageReload();
+  // A page that navigates itself away with no explanation is its own small mystery: the
+  // user sees their terminals vanish and reappear with no way to tie that to auth.
+  assert.strictEqual(heal.isAuthLost(), heal.AUTH_RELOADING);
+  assert.deepStrictEqual(seen, [401, heal.AUTH_RELOADING]);
+});

@@ -18,15 +18,17 @@ const AFTER_GRACE = 80;
 
 function makeTracker(overrides = {}) {
   const indicatorCalls = []; // [tabId, on]
+  const blockedCalls = [];   // [tabId, on] — the refused paint (#677)
   const bannerCalls = [];    // count per render
   const { createConnectionTracker } = overrides.mod;
   const tracker = createConnectionTracker({
     setTabIndicator: (tabId, on) => indicatorCalls.push([tabId, on]),
+    setTabBlocked: (tabId, on) => blockedCalls.push([tabId, on]),
     renderBanner: (count) => bannerCalls.push(count),
     graceMs: GRACE,
     isReloadPending: overrides.isReloadPending || (() => false),
   });
-  return { tracker, indicatorCalls, bannerCalls };
+  return { tracker, indicatorCalls, blockedCalls, bannerCalls };
 }
 
 test('connection-status tracker', async (t) => {
@@ -123,6 +125,71 @@ test('connection-status tracker', async (t) => {
     assert.deepStrictEqual(indicatorCalls,
       [['requested', true], ['requested', false], ['assigned', true]]);
   });
+
+  // ---- #677: blocked (the gate refused to emit a handshake) ----
+
+
+  await t.test('blocked paints the refused colour and stays out of the banner', async () => {
+    const { tracker, indicatorCalls, blockedCalls, bannerCalls } = makeTracker({ mod });
+    const h = tracker.track({ tabId: 'a' });
+    h.noteBlocked();
+    assert.deepStrictEqual(blockedCalls, [['a', true]], 'refused paint, immediately');
+    await sleep(AFTER_GRACE);
+    // "Connection lost — reconnecting…" would be wrong here: the server is answering,
+    // and waiting will never fix it. The auth banner owns this state instead.
+    assert.deepStrictEqual(bannerCalls, [], 'blocked connections are not "reconnecting"');
+    assert.deepStrictEqual(indicatorCalls, [['a', false]], 'and not the orange dot');
+  });
+
+  await t.test('a handshake that actually goes out hands the slot back', async () => {
+    const { tracker, indicatorCalls, blockedCalls } = makeTracker({ mod });
+    const h = tracker.track({ tabId: 'a' });
+    h.noteBlocked();
+    h.noteReconnecting();
+    assert.deepStrictEqual(blockedCalls, [['a', true], ['a', false]]);
+    assert.deepStrictEqual(indicatorCalls, [['a', false], ['a', true]],
+      'ordinary reconnecting paint takes over');
+  });
+
+  await t.test('recovery clears both paints', async () => {
+    const { tracker, indicatorCalls, blockedCalls } = makeTracker({ mod });
+    const h = tracker.track({ tabId: 'a' });
+    h.noteBlocked();
+    h.noteReconnected();
+    assert.deepStrictEqual(blockedCalls, [['a', true], ['a', false]]);
+    assert.strictEqual(indicatorCalls.at(-1)[1], false);
+    assert.strictEqual(tracker.reconnectingCount(), 0);
+  });
+
+  await t.test('untrack mid-block clears the refused paint', async () => {
+    const { tracker, blockedCalls, bannerCalls } = makeTracker({ mod });
+    const h = tracker.track({ tabId: 'a' });
+    h.noteBlocked();
+    h.untrack();
+    assert.deepStrictEqual(blockedCalls, [['a', true], ['a', false]],
+      'closing a blocked tab must not leave a red badge behind');
+    await sleep(AFTER_GRACE);
+    assert.deepStrictEqual(bannerCalls, []);
+  });
+
+  await t.test('a blocked handle still moves with setSessionId', async () => {
+    const { tracker, blockedCalls } = makeTracker({ mod });
+    const h = tracker.track({ tabId: 'requested' });
+    h.noteBlocked();
+    h.setSessionId('assigned');
+    assert.deepStrictEqual(blockedCalls,
+      [['requested', true], ['requested', false], ['assigned', true]]);
+  });
+
+  await t.test('one blocked connection does not hide another reconnect banner', async () => {
+    const { tracker, bannerCalls } = makeTracker({ mod });
+    const blocked = tracker.track({ tabId: 'a' });
+    const dropped = tracker.track({ tabId: 'b' });
+    blocked.noteBlocked();
+    dropped.noteReconnecting();
+    await sleep(AFTER_GRACE);
+    assert.deepStrictEqual(bannerCalls, [1], 'counts b only, and still shows');
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -166,9 +233,11 @@ test('first connect that never lands a session still raises dot + banner (#556)'
   globalThis.location = { protocol: 'http:', host: `127.0.0.1:${server.address().port}` };
 
   const indicatorCalls = [];
+  const blockedCalls = [];
   const bannerCalls = [];
   const tracker = createConnectionTracker({
     setTabIndicator: (tabId, on) => indicatorCalls.push([tabId, on]),
+    setTabBlocked: (tabId, on) => blockedCalls.push([tabId, on]),
     renderBanner: (count) => bannerCalls.push(count),
     graceMs: GRACE,
     isReloadPending: () => false,

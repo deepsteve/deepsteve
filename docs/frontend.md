@@ -136,3 +136,91 @@ Two failures this replaced, both of which looked correct when written:
 Mods are not scanned by the guard (they are user- and agent-authored), but the rule applies to them: a mod runs in a nested realm that shares the same entry. A mod that needs a socket should import `openGatedSocket`.
 
 Three beacons from `ws-trace.js` report what the daemon cannot see, over the `client-log.js` channel: `ws-failed` (closed before ever opening — the arming event), `ws-slow-open` (opened after ≥3s with no error — a parked handshake), and `ws-abandoned` (still `CONNECTING` at `pagehide`).
+
+## Saying so: connection and auth status (#556, #676, #677)
+
+Everything above is about recovering quietly. This section is about the cases where quiet
+recovery is the wrong answer, because the user is sitting in front of a tab that looks
+normal and is not.
+
+That was #677: a clobbered cookie meant every fetch 401'd and no fresh handshake could be
+accepted, for two minutes, with **no banner, no badge, no toast**. The sockets that were
+already open had authenticated at handshake time and stayed up, so nothing repainted.
+Typing went nowhere. The only way to find out was to read the daemon log.
+
+### The page-level banners
+
+Four of them, all at `top: 12px` centred, deliberately sharing one spot so two cannot both
+claim to be the headline. They are ordered by how much they outrank each other as an
+*explanation*:
+
+| Banner | Class / z-index | Shown when |
+|---|---|---|
+| Pending create | `.pending-session-banner` / 2600 | a brand-new session's first connect is slow (#563) |
+| Connection lost | `.reconnect-banner` / 2600 | ≥1 socket reconnecting for longer than `graceMs` (#556) |
+| Refused session | `.session-error-banner` / 2601 | the server declined to spawn — persistent, dismissible (#632) |
+| Auth broken | `.auth-banner` / 2602 | the daemon is answering and refusing our credentials (#676) |
+
+The reconnect banner is **suppressed** while either of the other two states holds.
+`syncBannerSuppression()` in `app.js` is the single choke point — it reads both
+`pendingCreates.size` and `isAuthLost()`, so the two suppressors cannot clear each other.
+During an auth outage "Connection lost — reconnecting…" is not merely redundant, it is
+**wrong**: the server is answering and no amount of waiting will help.
+
+### The auth state lives in `auth-heal.js`
+
+`authLostStatus` is `0` when credentials are known good, else the status that condemned
+them. `onAuthLost(cb)` subscribes to the **transition** — a 401 storm is hundreds of
+responses and must not be hundreds of banner renders — and fires immediately for a late
+subscriber so a mod panel or modal doesn't miss the edge. `isAuthLost()` reads it.
+
+| State | What the user sees |
+|---|---|
+| `401` / `429` | the reload-fixable wording plus a **Reload** button |
+| `403` | the Origin/Host explanation and **no** button — a valid cookie against a disallowed origin, which reloading cannot fix |
+| `AUTH_RELOADING` | "Re-authenticating — refreshing the page…", no button — `forcePageReload()` announces itself before navigating (#677), instead of the page just vanishing unexplained. Reverts if the meta-refresh watchdog trips |
+| `0` | banner cleared, suppression released |
+
+Two feeds, and both are needed. `api.js`'s fetch watch reports every same-origin `/api`
+status to `noteAuthStatus()`. And `maybeHealAuth()` records its own probe verdict directly
+(#677) — `ws-open.js`'s gate calls it without going through any fetch watch, so a tab whose
+*sockets* were being refused used to set nothing page-level and stay silent until some
+unrelated `/api` call happened to fail too. A tab that has gone quiet is exactly the one
+that stops making requests.
+
+A server that isn't answering (`down`, `unknown`) deliberately produces **nothing** here.
+A daemon restart is not an auth failure, and a banner that cried "signed out" on every
+bounce would be ignored by the time it mattered.
+
+### Per-tab indicators
+
+Both live on the tab's `.badge` slot, which works for background and placeholder tabs (the
+terminal container is `display:none`, and pre-session there is no container at all):
+
+- `TabManager.updateReconnecting` → `.tab.reconnecting`, orange — a socket that dropped.
+- `TabManager.updateAuthBlocked` → `.tab.auth-blocked`, red — a socket the gate *refused to
+  emit* (#677). Must stay **after** the orange rule in `styles.css`: equal specificity, and
+  a blocked connection is also marked reconnecting.
+
+The two need different responses from the user: orange resolves itself by waiting, red
+never will. The same split applies to the container overlay —
+`.terminal-container.auth-blocked::after` overrides "Reconnecting..." with "Signed out —
+reload to reconnect", for the same reason the reconnect banner is suppressed.
+
+`connection-status.js` drives both from one handle, so a connection cannot be in an
+inconsistent pair of states. `noteBlocked()` is the #677 addition; blocked handles are
+excluded from the reconnect banner's count, since they are not reconnecting in any sense
+that banner's wording would survive.
+
+### Two silences closed with it
+
+A socket parked in the `/healthz` gate never reaches `attemptConnect()`, so
+`onreconnecting` — which fires off a socket's *close* — structurally could not describe the
+tab a user is most likely staring at. `ws-client.js` arms a `GATE_STALL_MS` (1.5s, matched
+to `graceMs`) timer around the gate and reports a stall as a reconnect.
+
+And `wrapper.send()` / `sendJSON()` return whether the write went out. Being inert while
+the socket is down is correct — replaying keystrokes into a live PTY minutes later would be
+worse — but it was *silently* inert, which is how the tabs swallowed input.
+`setupTerminalIO`'s `onInputDropped` turns the first dropped keystroke into a throttled
+toast and a `clientLog` entry.

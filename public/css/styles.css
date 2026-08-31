@@ -144,6 +144,13 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
    unseen-activity dot while the socket is down; blue returns on reconnect
    since the .visible class is untouched underneath. */
 .tab.reconnecting .badge { visibility: visible; background: var(--ds-reconnect-dot); animation: pulse 1.5s ease-in-out infinite; }
+/* Connection refused (#677): the server is up and has told us over HTTP that it will
+   reject this tab's cookie, so no handshake was ever emitted. Same slot, red rather
+   than orange, because the user's move is different — orange resolves itself by
+   waiting, this one never will. #676's banner says auth is broken; this says which
+   tabs went quiet because of it. MUST follow .tab.reconnecting (equal specificity):
+   a blocked connection is also marked reconnecting, and refused is the truer word. */
+.tab.auth-blocked .badge { visibility: visible; background: var(--ds-accent-red); animation: pulse 1.5s ease-in-out infinite; }
 .tab.dragging { opacity: 0.3; }
 .tab-drag-ghost { opacity: 0.9; box-shadow: 0 4px 12px rgba(0,0,0,0.5); }
 #tabs-list.tab-drag-active { user-select: none; }
@@ -649,6 +656,16 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
   box-shadow: 0 0 20px var(--ds-reconnect-glow);
   animation: pulse 1.5s ease-in-out infinite;
   pointer-events: none;
+}
+/* Refused, not dropped (#677). The socket is technically reconnecting, so the overlay
+   above is doing its job — but "Reconnecting..." promises that waiting will work, and
+   here it never will. Same reason app.js suppresses the "Connection lost" banner while
+   auth is lost: during an auth outage that wording is the misleading part. Must follow
+   the rule above (equal specificity) to win the `content`. */
+.terminal-container.auth-blocked::after {
+  content: 'Signed out — reload to reconnect';
+  border-color: var(--ds-accent-red);
+  box-shadow: 0 0 20px var(--ds-accent-red);
 }
 @keyframes pulse {
   0%, 100% { opacity: 1; }

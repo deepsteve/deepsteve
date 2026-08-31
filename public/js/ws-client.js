@@ -24,6 +24,15 @@ import { openGatedSocket, backoffDelay, WS_STABLE_MS } from './ws-open.js';
 // comes back, and kick loops that are sitting in a reconnect backoff so they
 // retry immediately instead of waiting out the delay.
 const PROBE_TIMEOUT_MS = 5000;
+
+// #677: how long the gate may take before the tab admits something is wrong. A socket
+// parked in waitForServer() never reaches attemptConnect(), so onreconnecting — which
+// fires off a socket's CLOSE — could not describe the one state a user is most likely to
+// be staring at: a tab that renders its last painted frame and swallows keystrokes.
+// Matched to connection-status.js's own graceMs so the tab dot and the page banner appear
+// together rather than 1.5s apart.
+const GATE_STALL_MS = 1500;
+
 const liveWrappers = new Set();
 
 onWake(() => {
@@ -118,16 +127,24 @@ export function createWebSocket(options = {}) {
     // support — never send probes to a server that would type them into the PTY.
     serverSupportsPing: false,
 
+    // Both return whether the write actually went out. Being inert while the socket is
+    // down is correct — buffering keystrokes to replay into a PTY minutes later would be
+    // worse — but it used to be SILENT, which is how #677's tabs swallowed input while
+    // looking fine. Callers that represent user intent check the result and say so.
     send(data) {
       if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(data);
+        return true;
       }
+      return false;
     },
 
     sendJSON(obj) {
       if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify(obj));
+        return true;
       }
+      return false;
     },
 
     close() {
@@ -182,6 +199,11 @@ export function createWebSocket(options = {}) {
     onopen: null,
     onreconnecting: null,  // Called when reconnect starts
     onreconnected: null,   // Called when reconnect succeeds
+    // #677: the gate refused to emit a handshake — the server is up and has told us over
+    // HTTP it will reject our cookie. Distinct from onreconnecting because waiting does
+    // not fix it; a reload does. auth-heal already owns the page-level story (#676); this
+    // is what lets the TAB say it was one of the casualties.
+    onunauthed: null,
   };
 
   // Interruptible sleep for the loop's backoff: _onWake()/close() resolve it early via
@@ -253,10 +275,21 @@ export function createWebSocket(options = {}) {
       // The gate. No WebSocket exists until the server has answered /healthz AND told us
       // over HTTP that it will accept our cookie, so a restart or an outage costs zero
       // failed handshakes and never arms the browser-global delay.
+      // If the gate is still deciding after GATE_STALL_MS, the tab says so. Cleared the
+      // moment it resolves, so the healthy path (one localhost fetch, ~1-2ms) never
+      // flashes anything.
+      let stallTimer = setTimeout(() => {
+        stallTimer = null;
+        if (closed || isReconnecting) return;
+        isReconnecting = true;
+        if (wrapper.onreconnecting) wrapper.onreconnecting();
+      }, GATE_STALL_MS);
+
       const { socket, reason } = await openGatedSocket(url, {
         shouldStop: () => closed || !!window.__deepsteveReloadPending,
         label: options.action || 'session',
       });
+      if (stallTimer) { clearTimeout(stallTimer); stallTimer = null; }
       if (closed) {
         // close() can land inside the gate's awaits. Nothing else owns this socket, so
         // leaving it open would hold a server-side session client forever — and for an
@@ -269,7 +302,13 @@ export function createWebSocket(options = {}) {
         // Retrying it immediately is the hot loop that pins FailDelay at its cap, so pace
         // it — the heal reload usually resolves this within a couple of seconds anyway.
         // 'stopped' needs no delay: the top of the loop parks on the reload flag.
-        if (reason === 'unauthed') await wait(backoffDelay(wsFailures++));
+        if (reason === 'unauthed') {
+          // Mark the tab before sitting out the backoff. auth-heal has already recorded
+          // the page-level state from the same probe, so this adds only "and this tab is
+          // one of the ones that went quiet".
+          if (wrapper.onunauthed) wrapper.onunauthed();
+          await wait(backoffDelay(wsFailures++));
+        }
         continue;
       }
 

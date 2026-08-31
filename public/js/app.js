@@ -14,7 +14,7 @@ initClientLog();
 initWsTrace();
 
 import { fetchJSON, authMessage } from './api.js';
-import { onAuthLost, isAuthLost, forcePageReload } from './auth-heal.js';
+import { onAuthLost, isAuthLost, forcePageReload, AUTH_RELOADING } from './auth-heal.js';
 import { SessionStore } from './session-store.js';
 import { SessionStores, getTabSessions } from './session-stores.js';
 import { WindowManager } from './window-manager.js';
@@ -1852,13 +1852,28 @@ function createTmuxAttachSession(tmuxSessionName) {
   ws.onreconnecting = () => {
     connHandle.noteReconnecting();
     const session = assignedId ? sessions.get(assignedId) : null;
-    if (session) session.container.classList.add('reconnecting');
+    // A handshake actually went out, so this is an ordinary outage again — drop the
+    // refused label, the same handover connection-status.js does for the tab badge.
+    if (session) {
+      session.container.classList.remove('auth-blocked');
+      session.container.classList.add('reconnecting');
+    }
+  };
+
+  // #677: the gate refused to emit a handshake — server up, our cookie rejected. The
+  // container gets both classes: `reconnecting` draws the dimming overlay, `auth-blocked`
+  // overrides its "Reconnecting..." label, which would otherwise promise that waiting
+  // fixes this. It doesn't; a reload does, and #676's banner offers that button.
+  ws.onunauthed = () => {
+    connHandle.noteBlocked();
+    const session = assignedId ? sessions.get(assignedId) : null;
+    if (session) session.container.classList.add('reconnecting', 'auth-blocked');
   };
 
   ws.onreconnected = () => {
     connHandle.noteReconnected();
     const session = assignedId ? sessions.get(assignedId) : null;
-    if (session) session.container.classList.remove('reconnecting');
+    if (session) session.container.classList.remove('reconnecting', 'auth-blocked');
   };
 }
 
@@ -2171,14 +2186,26 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
     // Full-container overlay for an established session (active tab only —
     // the tab dot and banner via connHandle cover everything else).
     const session = assignedId ? sessions.get(assignedId) : null;
-    if (session) session.container.classList.add('reconnecting');
+    // See the twin in createTmuxAttachSession: a real handshake means this is no longer
+    // a refusal, so the "Signed out" label hands back to "Reconnecting...".
+    if (session) {
+      session.container.classList.remove('auth-blocked');
+      session.container.classList.add('reconnecting');
+    }
+  };
+
+  // #677: refused, not merely dropped. See the twin in createTmuxAttachSession.
+  ws.onunauthed = () => {
+    connHandle.noteBlocked();
+    const session = assignedId ? sessions.get(assignedId) : null;
+    if (session) session.container.classList.add('reconnecting', 'auth-blocked');
   };
 
   ws.onreconnected = () => {
     connHandle.noteReconnected();
     const session = assignedId ? sessions.get(assignedId) : null;
     if (session) {
-      session.container.classList.remove('reconnecting');
+      session.container.classList.remove('reconnecting', 'auth-blocked');
       // ResizeObserver handles fit; just request redraw from server
       ws.send(JSON.stringify({ type: 'redraw' }));
       // After a daemon restart the PTY is respawned at the cols/rows frozen into
@@ -2346,6 +2373,7 @@ function renderReconnectBanner(count) {
 // when the old container-class overlay could not fire.
 const ConnectionStatus = createConnectionTracker({
   setTabIndicator: (tabId, on) => TabManager.updateReconnecting(tabId, on),
+  setTabBlocked: (tabId, on) => TabManager.updateAuthBlocked(tabId, on),
   renderBanner: renderReconnectBanner,
 });
 
@@ -2380,21 +2408,50 @@ function renderAuthBanner(status) {
     const label = document.createElement('span');
     label.className = 'auth-banner-label';
     authBannerEl.appendChild(label);
-    // A 403 is a Host/Origin misconfiguration; reloading cannot fix it, so the
-    // button only appears for the statuses where it is the actual remedy.
-    if (status !== 403) {
-      const btn = document.createElement('button');
-      btn.className = 'auth-banner-reload';
-      btn.textContent = 'Reload';
-      btn.addEventListener('click', () => forcePageReload());
-      authBannerEl.appendChild(btn);
-    }
     document.body.appendChild(authBannerEl);
   }
   authBannerEl.querySelector('.auth-banner-label').textContent = authMessage(status);
+  // Rebuilt per render rather than only on create, because the status can change under
+  // a live banner: 401 → AUTH_RELOADING when the heal fires, and back again if its
+  // watchdog trips (#677). A button left over from the previous status offers a remedy
+  // that no longer applies.
+  //
+  // Absent for 403 — a Host/Origin misconfiguration reloading cannot fix — and for
+  // AUTH_RELOADING, where the reload is already happening and a button would just invite
+  // the user to race it.
+  authBannerEl.querySelector('.auth-banner-reload')?.remove();
+  if (status !== 403 && status !== AUTH_RELOADING) {
+    const btn = document.createElement('button');
+    btn.className = 'auth-banner-reload';
+    btn.textContent = 'Reload';
+    btn.addEventListener('click', () => forcePageReload());
+    authBannerEl.appendChild(btn);
+  }
 }
 
 onAuthLost(renderAuthBanner);
+
+/**
+ * A keystroke went nowhere because the socket wasn't OPEN (#677).
+ *
+ * Throttled hard: a user who has noticed nothing is happening keeps typing, and one toast
+ * per character would be its own kind of broken. The tab badge and the banner are the
+ * durable signals — this is only here so the FIRST dropped keystroke gets an immediate
+ * answer instead of the silence that made this a two-minute mystery.
+ *
+ * showToast rather than a banner on purpose: it is transient, and so is the fact it
+ * reports. The state behind it is already on screen in a form that persists.
+ */
+const INPUT_DROP_TOAST_MS = 3000;
+let lastInputDropToast = 0;
+
+function noteInputDropped(sessionId) {
+  const now = Date.now();
+  if (now - lastInputDropToast < INPUT_DROP_TOAST_MS) return;
+  lastInputDropToast = now;
+  showToast('Not connected — that keystroke was not sent');
+  clientLog('input-dropped', `session ${sessionId}`);
+}
 
 /**
  * Show a loading banner at the top of a terminal container.
@@ -2449,7 +2506,8 @@ function initTerminal(id, ws, cwd, initialName, { hasScrollback = false, pending
       ModManager.notifyUserActivity(id);
     },
     container,
-    beforeSend: (data) => hashCommandsBeforeSend(data, container, term)
+    beforeSend: (data) => hashCommandsBeforeSend(data, container, term),
+    onInputDropped: () => noteInputDropped(id),
   });
 
   // Get saved name or generate default

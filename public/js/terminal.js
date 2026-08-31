@@ -123,7 +123,7 @@ registerInfo({
   isEnabled: () => isMacPlatform(),
 });
 
-export function setupTerminalIO(term, ws, { onUserInput, container, beforeSend } = {}) {
+export function setupTerminalIO(term, ws, { onUserInput, container, beforeSend, onInputDropped } = {}) {
   // Note: ws.onmessage is set in app.js to handle JSON control messages
   // and route terminal data here via term.write()
 
@@ -136,7 +136,14 @@ export function setupTerminalIO(term, ws, { onUserInput, container, beforeSend }
   // interceptors) to consume input.
   function sendInput(data) {
     if (beforeSend && beforeSend(data)) return;
-    ws.send(data);
+    // #677: the wrapper is deliberately inert while the socket is down — buffering
+    // keystrokes to replay into a live PTY minutes later would be worse. But it used to be
+    // SILENTLY inert, which is how a tab with a rejected cookie went on looking normal
+    // while everything typed into it went nowhere. Report the drop; don't change it.
+    if (!ws.send(data)) {
+      if (onInputDropped) onInputDropped();
+      return;
+    }
     if (onUserInput) onUserInput();
   }
 
