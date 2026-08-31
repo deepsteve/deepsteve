@@ -86,6 +86,7 @@ line below is a trigger: if you are about to do that thing, read that page first
 | [docs/agents.md](docs/agents.md) | assuming a feature works for a given agent, adding an agent, or using a core MCP session tool |
 | [docs/mods.md](docs/mods.md) | writing or changing a DeepSteve Mod, a Project Mod, or a display tab |
 | [docs/themes.md](docs/themes.md) | adding or changing a theme |
+| [docs/timecard.md](docs/timecard.md) | touching `mods/timecard/`, `timecard-store.js`, or the presence beacon |
 | [docs/claude-code-prompt-lifecycle.md](docs/claude-code-prompt-lifecycle.md) | reasoning about what Claude Code sees, when, and what a compaction does to it |
 
 `AGENTS.md` is the sibling of this file for Codex sessions; it carries the code-style rules.

@@ -26,6 +26,7 @@ import { init as initCmdHoldMode, setEnabled as setCmdHoldModeEnabled, setHoldMs
 import { init as initCommandPalette, setEnabled as setCommandPaletteEnabled, setShortcut as setCommandPaletteShortcut } from './command-palette.js';
 import { init as initShortcutsHelp, setEnabled as setShortcutsHelpEnabled, setShortcut as setShortcutsHelpShortcut, open as openShortcutsHelp } from './shortcuts-help.js';
 import { init as initScheduledHistory, open as openScheduledHistory, refresh as refreshScheduledHistory } from './scheduled-history.js';
+import { init as initTimecardPresence, setEnabled as setTimecardPresenceEnabled } from './timecard-presence.js';
 import { init as initProgressBar, start as progressStart, done as progressDone } from './progress-bar.js';
 import { init as initHashCommands, beforeSend as hashCommandsBeforeSend, setWaitingForInput as setHashCommandsWaiting, setEnabled as setHashCommandsEnabled, dismiss as dismissHashCommands } from './hash-commands.js';
 import { init as initOverviewMode, setEnabled as setOverviewModeEnabled, setShortcut as setOverviewModeShortcut, setDefaultLayout as setOverviewDefaultLayout, toggle as toggleOverviewMode, isOverviewActive, updateFocus as updateOverviewFocus, onTabsReordered as onOverviewTabsReordered, syncToContext as syncOverviewToContext } from './overview-mode.js';
@@ -299,6 +300,17 @@ function applySettings(settings) {
   if (settings.recentSessionsLimit !== undefined) {
     const el = document.querySelector('#recent-sessions-limit');
     if (el) el.value = settings.recentSessionsLimit;
+  }
+  // Timecard (#666). The beacon is armed from the server's own flag, not from a mod
+  // toggle, so turning sampling off in one window silences every window's beacon.
+  if (settings.timecardEnabled !== undefined) {
+    setTimecardPresenceEnabled(settings.timecardEnabled);
+    const el = document.querySelector('#timecard-enabled');
+    if (el) el.checked = settings.timecardEnabled;
+  }
+  if (settings.timecardSampleMinutes !== undefined) {
+    const el = document.querySelector('#timecard-sample-minutes');
+    if (el) el.value = String(settings.timecardSampleMinutes);
   }
   // Enabled agents + custom config profiles (#537) aren't in the broadcast payload
   // (broadcast:false), so re-fetch /api/agents to pick up changes made in another window
@@ -839,6 +851,11 @@ settingsBtn?.addEventListener('click', async () => {
   const currentAutoUpdateCheckIntervalHours = settingsData.autoUpdateCheckIntervalHours || 6;
   const currentAutoUpdateApply = settingsData.autoUpdateApply !== undefined ? settingsData.autoUpdateApply : true;
   const currentSessionLogEnabled = !!settingsData.sessionLogEnabled;
+  // Timecard (#666). `!== false` rather than `!!`, so the modal paints the real default
+  // (on) during the tick before /api/settings has resolved.
+  const currentTimecardEnabled = settingsData.timecardEnabled !== false;
+  const currentTimecardSampleMinutes = [1, 5, 15].includes(settingsData.timecardSampleMinutes)
+    ? settingsData.timecardSampleMinutes : 5;
   const currentScheduledTasksEnabled = settingsData.scheduledTasksEnabled !== false;
   const currentScheduledTasksOpenInBackground = settingsData.scheduledTasksOpenInBackground !== false;
   // #604: system-wide fallback model/effort for scheduled runs. '' = inherit Claude
@@ -1076,6 +1093,24 @@ settingsBtn?.addEventListener('click', async () => {
         <p style="font-size: 11px; color: var(--ds-text-secondary); margin-top: 4px;">
           Record an append-only log of session opens and closes to ~/.deepsteve/session-lifecycle.jsonl. Agents can read it (read_session_log) or fetch /api/session-lifecycle to recap what happened. Off by default.
         </p>
+      </div>
+      <div class="settings-section">
+        <h3>Timecard</h3>
+        <label style="font-size: 13px; color: var(--ds-text-primary); cursor: pointer; display: flex; align-items: center; gap: 8px;">
+          <input type="checkbox" id="timecard-enabled" ${currentTimecardEnabled ? 'checked' : ''} style="accent-color: var(--ds-accent-green);">
+          Sample my activity
+        </label>
+        <p style="font-size: 11px; color: var(--ds-text-secondary); margin-top: 4px;">
+          Record whether you're working in Deep Steve to ~/.deepsteve/timecard.jsonl, and chart it in the Timecard app. A sample counts when you've typed or clicked here, or when a window is focused while a session is running. Local to this machine. On by default.
+        </p>
+        <label style="font-size: 13px; color: var(--ds-text-primary); display: flex; align-items: center; gap: 8px; margin-top: 10px;">
+          Sample every:
+          <select id="timecard-sample-minutes" style="padding: 4px 6px; background: var(--ds-bg-primary); border: 1px solid var(--ds-border); border-radius: 4px; color: var(--ds-text-primary); font-size: 13px;">
+            <option value="1" ${currentTimecardSampleMinutes === 1 ? 'selected' : ''}>1 minute</option>
+            <option value="5" ${currentTimecardSampleMinutes === 5 ? 'selected' : ''}>5 minutes</option>
+            <option value="15" ${currentTimecardSampleMinutes === 15 ? 'selected' : ''}>15 minutes</option>
+          </select>
+        </label>
       </div>
       <div class="settings-section">
         <h3>Scheduled Tasks</h3>
@@ -1623,6 +1658,10 @@ settingsBtn?.addEventListener('click', async () => {
     const autoUpdateCheckIntervalHours = Math.max(1, Math.min(168, Number(overlay.querySelector('#auto-update-check-interval-hours').value) || 6));
     const autoUpdateApply = overlay.querySelector('#auto-update-apply').checked;
     const sessionLogEnabled = overlay.querySelector('#session-log-enabled').checked;
+    const timecardEnabled = overlay.querySelector('#timecard-enabled').checked;
+    // The server rejects anything outside {1,5,15} into `warnings` rather than silently
+    // defaulting, so send what the select says and let it be the judge.
+    const timecardSampleMinutes = Number(overlay.querySelector('#timecard-sample-minutes').value);
     const scheduledTasksEnabled = overlay.querySelector('#scheduled-tasks-enabled').checked;
     const scheduledTasksOpenInBackground = overlay.querySelector('#scheduled-tasks-open-in-background').checked;
     const scheduledModelChoice = overlay.querySelector('#scheduled-default-model').value;
@@ -1633,7 +1672,7 @@ settingsBtn?.addEventListener('click', async () => {
     const preventSleepWhileActive = overlay.querySelector('#prevent-sleep-while-active').checked;
     const inheritRemoteControl = overlay.querySelector('#inherit-rc-newtab').checked;
     const inheritRemoteControlOnFork = overlay.querySelector('#inherit-rc-fork').checked;
-    const settingsPayload = { shellProfile, maxIssueTitleLength: newMaxTitle, wandPlanMode, issueAutopilot, wandPromptTemplate, symlinkWorktreeSettings, cmdTabSwitch, cmdTabSwitchHoldMs, commandPaletteEnabled, commandPaletteShortcut, shortcutsHelpEnabled, shortcutsHelpShortcut, hashCommandsEnabled, contextViewsEnabled, projectModsEnabled, metaControlsEnabled, inheritRemoteControl, inheritRemoteControlOnFork, overviewDefaultLayout, enabledAgents, ...agentBinaries, ...(selectedEngine ? { engine: selectedEngine } : {}), scrollbackKB, recentSessionsLimit, autoUpdateCheckEnabled, autoUpdateCheckIntervalHours, autoUpdateApply, sessionLogEnabled, scheduledTasksEnabled, scheduledTasksOpenInBackground, scheduledDefaultModel, scheduledDefaultEffort, preventSleepWhileActive, customAgentConfigs };
+    const settingsPayload = { shellProfile, maxIssueTitleLength: newMaxTitle, wandPlanMode, issueAutopilot, wandPromptTemplate, symlinkWorktreeSettings, cmdTabSwitch, cmdTabSwitchHoldMs, commandPaletteEnabled, commandPaletteShortcut, shortcutsHelpEnabled, shortcutsHelpShortcut, hashCommandsEnabled, contextViewsEnabled, projectModsEnabled, metaControlsEnabled, inheritRemoteControl, inheritRemoteControlOnFork, overviewDefaultLayout, enabledAgents, ...agentBinaries, ...(selectedEngine ? { engine: selectedEngine } : {}), scrollbackKB, recentSessionsLimit, autoUpdateCheckEnabled, autoUpdateCheckIntervalHours, autoUpdateApply, sessionLogEnabled, timecardEnabled, timecardSampleMinutes, scheduledTasksEnabled, scheduledTasksOpenInBackground, scheduledDefaultModel, scheduledDefaultEffort, preventSleepWhileActive, customAgentConfigs };
     let resp = await fetch('/api/settings', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -4864,6 +4903,11 @@ async function init() {
     getSessions: getSessionList,
     focusSession: userJumpTo,
   });
+
+  // Timecard presence (#666). init() only installs listeners; setEnabled from
+  // applySettings is what actually starts the beacon, so a daemon with sampling off
+  // never sees a request.
+  initTimecardPresence({ windowId: getWindowId() });
 
   // Initialize Overview Mode (Cmd+O by default)
   initOverviewMode({
