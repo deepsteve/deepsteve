@@ -34,6 +34,13 @@ function record(kind, msg) {
 /** Explicit breadcrumb for modules that want to report a failure directly. */
 export function clientLog(kind, msg) { record(kind, msg); }
 
+/**
+ * Send whatever is queued right now, instead of waiting out the interval. For the one
+ * caller that has no next interval to wait for: ws-trace.js's pagehide sweep (#674), whose
+ * whole subject is a page that is about to stop existing.
+ */
+export function flushClientLog() { flush(); }
+
 function flush() {
   if (!getSocket || queue.length === 0) return;
   const ws = getSocket();

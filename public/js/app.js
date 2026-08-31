@@ -3,11 +3,15 @@
  */
 
 import { initClientLog, clientLog } from './client-log.js';
+import { initWsTrace } from './ws-trace.js';
 // Before anything initializes: wrap fetch + install global error handlers so
 // failures are beaconed to the server log. (Imports are hoisted, so this runs
 // after module-scope code but before every init call and fetch below —
 // 2026-07-15: hours of silent fetch failures were invisible in every log.)
 initClientLog();
+// Arms the pagehide sweep that reports sockets abandoned mid-handshake (#674). Must run
+// before the first socket is asked for, which is initLiveReload() far below.
+initWsTrace();
 
 import { SessionStore } from './session-store.js';
 import { SessionStores, getTabSessions } from './session-stores.js';

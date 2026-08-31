@@ -1,34 +1,22 @@
 /**
  * WebSocket client wrapper with auto-reconnect.
  *
- * Reconnect is gated on an HTTP /healthz probe (#553). The old loop was a flat 1Hz
- * setInterval that fired `new WebSocket(url)` blindly, per socket, per tab, per nesting
- * level. Every failed handshake ramps Firefox's RFC 6455 FailDelay (x1.5, capped at 60s)
- * — and that entry is shared by EVERY DeepSteve socket in the browser, because it's keyed
- * on a path that excludes the query string and all our URLs are ws://host/?params. Once
- * ramped, new sockets are parked in CONNECTING_DELAYED: no traffic, no error event, just
- * silence for up to a minute. That is the "upgrades hang ~4s under scale" bug.
+ * Every connect — including the first — goes through openGatedSocket() in ws-open.js,
+ * which is the only place in the client that constructs a WebSocket (#553, #674). Read
+ * that module's header for why: a handshake we don't expect to succeed arms a
+ * browser-global FailDelay entry that silences every other socket in the browser for up to
+ * a minute, and no backoff schedule can undo it. The old loop here was a flat 1Hz
+ * setInterval firing `new WebSocket(url)` blindly, per socket, per tab, per nesting level.
  *
- * The entry outlives any usable retry interval (60s + delay past the last failure), so no
- * backoff schedule can dig us out — see server-probe.js. We simply never emit a handshake
- * we don't expect to succeed.
+ * What stays this module's own job is the *shape* of one socket's life: minting an id so a
+ * create retry is idempotent, rewriting the URL once the server assigns a session, the
+ * wake probe, and deciding whether a close deserves a retry at all.
  */
 
-import { maybeHealAuth, noteAuthOk } from './auth-heal.js';
+import { noteAuthOk } from './auth-heal.js';
 import { onWake } from './wake-watch.js';
-import { waitForServer, jitter, sleep } from './server-probe.js';
-
-// Backoff for an attempt that got PAST the /healthz gate and still failed — i.e. the
-// server is up but rejected the upgrade (auth). Without this, the gate would turn that
-// case into a *tighter* ramping loop than the 1Hz one it replaced. maybeHealAuth()
-// normally resolves it within a couple of seconds by reloading to re-acquire the cookie.
-const WS_BACKOFF_BASE_MS = 1_000;
-const WS_BACKOFF_MAX_MS = 30_000;
-// A socket that stayed open at least this long was a real connection — its drop gets an
-// immediate, backoff-free retry (the gate still re-checks /healthz first). One that died
-// sooner is treated as a failed attempt: a server that accepts upgrades and instantly
-// kills them would otherwise spin a hot connect loop the old 1Hz interval never allowed.
-const WS_STABLE_MS = 2_000;
+import { sleep } from './server-probe.js';
+import { openGatedSocket, backoffDelay, WS_STABLE_MS } from './ws-open.js';
 
 // After a system sleep a socket can be dead-but-OPEN: the browser hasn't fired
 // onclose yet, so the reconnect loop never starts (#563). On a wake signal we
@@ -208,17 +196,19 @@ export function createWebSocket(options = {}) {
   }
 
   /**
-   * One socket, start to finish. Resolves when it closes — so a single loop iteration
-   * below spans the socket's whole life and the initial connect is not a special case.
+   * One socket, start to finish. Takes the socket the gate handed us and resolves when it
+   * closes — so a single loop iteration below spans the socket's whole life and the
+   * initial connect is not a special case.
+   *
    * Deliberately never aborts a CONNECTING socket: a stall means either the server's event
    * loop is briefly blocked (the handshake is about to succeed) or Firefox has us queued
    * behind another tab, and aborting would discard a nearly-live connection and re-enter
    * the admission queue at the back. At most one socket in flight, never stacked.
    */
-  function attemptConnect() {
+  function attemptConnect(sock) {
     return new Promise((resolve) => {
       let openedAt = 0;
-      ws = new WebSocket(url);
+      ws = sock;
 
       ws.onopen = () => {
         openedAt = Date.now();
@@ -260,18 +250,30 @@ export function createWebSocket(options = {}) {
       while (window.__deepsteveReloadPending && !closed) await sleep(500);
       if (closed) return;
 
-      // The gate. No WebSocket exists until the server actually answers, so a restart or
-      // an outage costs zero failed handshakes and never arms the browser-global delay.
-      const up = await waitForServer(() => closed || !!window.__deepsteveReloadPending);
-      if (closed) return;
-      if (!up) continue; // a reload got flagged — go back and wait it out
+      // The gate. No WebSocket exists until the server has answered /healthz AND told us
+      // over HTTP that it will accept our cookie, so a restart or an outage costs zero
+      // failed handshakes and never arms the browser-global delay.
+      const { socket, reason } = await openGatedSocket(url, {
+        shouldStop: () => closed || !!window.__deepsteveReloadPending,
+        label: options.action || 'session',
+      });
+      if (closed) {
+        // close() can land inside the gate's awaits. Nothing else owns this socket, so
+        // leaving it open would hold a server-side session client forever — and for an
+        // isNew wrapper, spawn a shell for a create the caller just cancelled.
+        try { socket?.close(); } catch {}
+        return;
+      }
+      if (!socket) {
+        // 'unauthed' means the server is up and we KNOW the upgrade would be rejected.
+        // Retrying it immediately is the hot loop that pins FailDelay at its cap, so pace
+        // it — the heal reload usually resolves this within a couple of seconds anyway.
+        // 'stopped' needs no delay: the top of the loop parks on the reload flag.
+        if (reason === 'unauthed') await wait(backoffDelay(wsFailures++));
+        continue;
+      }
 
-      // /healthz is unauthenticated, so "server up" says nothing about our cookie. The
-      // browser never exposes an upgrade's HTTP status (always 1006), so probe over HTTP:
-      // a no-op unless the server is up but rejecting us, then one guarded reload.
-      maybeHealAuth();
-
-      const { openMs, wasClean } = await attemptConnect();
+      const { openMs, wasClean } = await attemptConnect(socket);
       if (closed) return;
 
       // A clean close is somebody's decision (server said goodbye, session is gone).
@@ -289,9 +291,7 @@ export function createWebSocket(options = {}) {
       if (openMs >= WS_STABLE_MS) {
         wsFailures = 0;
       } else {
-        const delay = Math.min(WS_BACKOFF_BASE_MS * 2 ** wsFailures, WS_BACKOFF_MAX_MS);
-        wsFailures++;
-        await wait(jitter(delay));
+        await wait(backoffDelay(wsFailures++));
       }
     }
   }
