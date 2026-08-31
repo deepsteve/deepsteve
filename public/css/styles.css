@@ -733,7 +733,7 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
 .modal-wide .restore-list { max-height: 52vh; }
 .restore-subtitle { font-size: 13px; color: var(--ds-text-secondary); margin-bottom: 12px; }
 .modal .window-item { display: flex; align-items: flex-start; gap: 10px; margin: 0; padding: 10px 12px; font-size: 13px; }
-.modal .window-item input[type="checkbox"] { margin-top: 2px; flex-shrink: 0; }
+.modal .window-item input[type="checkbox"], .modal .window-item input[type="radio"] { margin-top: 2px; flex-shrink: 0; accent-color: var(--ds-accent-green); }
 .window-item.checked { background: var(--ds-bg-tertiary); }
 .restore-row-body { min-width: 0; }
 .restore-row-title { font-size: 13px; color: var(--ds-text-bright); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

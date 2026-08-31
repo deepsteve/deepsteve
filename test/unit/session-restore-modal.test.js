@@ -126,26 +126,38 @@ test('windowRows counts sessions whose directory is gone', async () => {
   assert.strictEqual(rows[0].restorable, 1);
 });
 
-test('defaultWindowSelection checks every window that can still reopen', async () => {
-  const { windowRows, defaultWindowSelection } = await load();
-  const rows = windowRows(data({
-    windows: [win('w1', [sess('a')]), win('w2', [sess('b')])],
-    ungrouped: [sess('c')],
-  }));
-  assert.deepStrictEqual([...defaultWindowSelection(rows)].sort(), ['ungrouped', 'win:w1', 'win:w2']);
-});
-
-test('defaultWindowSelection skips a window with nothing restorable left', async () => {
-  // Checking it would promise a reopen the server is going to refuse (#632).
+test('defaultWindowSelection picks the newest window and nothing else', async () => {
+  // The picker is a radio group: one window, the one you just lost. Pre-checking
+  // every row reopened a month of browsing history into a single tab.
   const { windowRows, defaultWindowSelection } = await load();
   const rows = windowRows(data({
     windows: [
-      win('alive', [sess('a'), sess('b', { cwdMissing: true })]),
-      win('dead', [sess('c', { cwdMissing: true })]),
+      win('older', [sess('a')], { lastActive: 1000 }),
+      win('newest', [sess('b')], { lastActive: 9000 }),
+    ],
+    ungrouped: [sess('c')],
+  }));
+  assert.deepStrictEqual([...defaultWindowSelection(rows)], ['win:newest']);
+});
+
+test('defaultWindowSelection falls through to the newest window that can still reopen', async () => {
+  // Selecting it would promise a reopen the server is going to refuse (#632), so
+  // a wholly-missing newest window hands the default to the next one down.
+  const { windowRows, defaultWindowSelection } = await load();
+  const rows = windowRows(data({
+    windows: [
+      win('dead', [sess('c', { cwdMissing: true })], { lastActive: 9000 }),
+      win('alive', [sess('a'), sess('b', { cwdMissing: true })], { lastActive: 1000 }),
     ],
   }));
   assert.deepStrictEqual([...defaultWindowSelection(rows)], ['win:alive'],
     'a partially-missing window still counts; a wholly-missing one does not');
+});
+
+test('defaultWindowSelection can land on the ungrouped row when it is all there is', async () => {
+  const { windowRows, defaultWindowSelection } = await load();
+  const rows = windowRows(data({ ungrouped: [sess('a')] }));
+  assert.deepStrictEqual([...defaultWindowSelection(rows)], ['ungrouped']);
 });
 
 test('defaultWindowSelection on no rows is empty', async () => {

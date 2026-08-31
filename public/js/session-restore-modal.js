@@ -15,10 +15,12 @@
  * worktrees auto-closed after a merge. The handful of genuine orphans sat on top of
  * that pile, and the header called the whole thing "1100 recoverable sessions".
  *
- * So the modal offers windows, and takes a window whole. The per-session list still
- * exists, as `mode: 'archive'` — but only as the disaster-recovery surface #561 added
- * it for, reached only when a deliberate re-entry finds no windows to offer. It is
- * never drawn at startup and never drawn beside windows.
+ * So the modal offers windows, and takes a window whole — one of them, as a radio
+ * group defaulted to the most recent. The per-session list still exists, as
+ * `mode: 'archive'` — but only as the disaster-recovery surface #561 added it for,
+ * reached only when a deliberate re-entry finds no windows to offer. It is never
+ * drawn at startup and never drawn beside windows. Multi-select lives only there,
+ * where picking through a month of history is the whole point.
  *
  * Explicit buttons only: no outside-click or Escape dismissal (a silent decline is
  * how sessions got lost in the 2026-07-15 wipe).
@@ -163,12 +165,17 @@ export function windowRowMeta(row, now = Date.now()) {
 }
 
 /**
- * Everything offerable starts checked — the modal exists because you lost these.
- * A window with nothing restorable left is the one exception: checking it would
- * promise a reopen the server is going to refuse.
+ * The newest window you can still reopen, and only that one.
+ *
+ * Rows arrive sorted newest-first, so the first restorable row is the window you
+ * just lost — the one the modal opened for. Everything older is a previous life of
+ * this browser, and pre-selecting those turned one lost window into a tab full of
+ * every window the machine had ever had. A wholly-missing window is skipped, here
+ * and in the markup: selecting it would promise a reopen the server will refuse.
  */
 export function defaultWindowSelection(rows) {
-  return new Set(rows.filter(r => r.restorable > 0).map(r => r.key));
+  const newest = rows.find(r => r.restorable > 0);
+  return new Set(newest ? [newest.key] : []);
 }
 
 /** How many agent sessions the checked windows would actually reopen. */
@@ -320,6 +327,10 @@ export function showSessionRestoreModal(initialData, { secondaryLabel = 'Not now
         dismiss({ action: 'fresh', reason: 'claimed' });
       } else {
         rows = archive ? [] : windowRows(data);
+        // The claimed window may have been the selected one. A radio group with
+        // nothing chosen is a dead Reopen button, so fall back to the newest
+        // survivor rather than making the user notice and re-click.
+        if (!archive && checked.size === 0) checked = defaultWindowSelection(rows);
         render();
       }
     };
@@ -353,7 +364,7 @@ export function showSessionRestoreModal(initialData, { secondaryLabel = 'Not now
       listEl.innerHTML = rows.map(row => `
         <label class="window-item restore-win${row.restorable === 0 ? ' restore-win-dead' : ''}"
                data-row="${esc(row.key)}">
-          <input type="checkbox" data-key="${esc(row.key)}"${row.restorable === 0 ? ' disabled' : ''}>
+          <input type="radio" name="restore-window" data-key="${esc(row.key)}"${row.restorable === 0 ? ' disabled' : ''}>
           <div class="restore-row-body">
             <div class="restore-row-title">${esc(windowRowTitle(row))}</div>
             ${row.projects.length ? `<div class="restore-win-projects">${esc(windowRowProjects(row))}</div>` : ''}
@@ -411,8 +422,15 @@ export function showSessionRestoreModal(initialData, { secondaryLabel = 'Not now
     listEl.addEventListener('change', (e) => {
       const key = e.target.dataset && e.target.dataset.key;
       if (!key) return;
-      if (e.target.checked) checked.add(key);
-      else checked.delete(key);
+      if (archive) {
+        if (e.target.checked) checked.add(key);
+        else checked.delete(key);
+      } else {
+        // A radio group only fires `change` on the row being turned ON — the one
+        // being turned off reports nothing — so the previous pick has to be dropped
+        // by replacing the set, not by waiting for an event that never arrives.
+        checked = new Set([key]);
+      }
       syncUI();
     });
 
