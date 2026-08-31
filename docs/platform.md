@@ -116,6 +116,23 @@ DeepSteve is **localhost-first with token authentication** (#536). The server bi
 
 **The beacon has an HTTP fallback: `POST /api/client-log`.** Its primary transport is still the live-reload WebSocket, but a realm can be in exactly the state worth reporting with no socket at all. It is mounted **above** `authGate` — it reports "our cookie is broken", so it cannot require the cookie — and is gated instead by `hostGuard` plus a **mandatory** allowlisted `Origin` (`requireAllowedOrigin`), an 8 KB body, ≤25 entries, control characters stripped, and its own rate limiter. Origin is not authentication; it is what keeps other origins and other local ports out. `test/unit/auth-exempt-routes.test.js` pins the exempt set to exactly this route plus `GET /healthz` and the static handlers.
 
+**The user is told, not just the log (#676, #677).** All of the above is recovery, and it is
+mostly silent by design — which is its own failure when it doesn't work. In the incident
+that opened #677 the cookie was clobbered for two minutes and the UI showed nothing at all:
+the sockets that were already open had authenticated at handshake time and stayed up, so
+nothing repainted while every fetch 401'd and typing went nowhere. The auth-lost state in
+`public/js/auth-heal.js` now drives a page banner, a red per-tab badge, and a matching
+container overlay. It is fed from both directions — `api.js`'s fetch watch and
+`maybeHealAuth()`'s own probe, the latter because `ws-open.js`'s gate calls straight into
+the heal, so a tab whose *sockets* were refused would otherwise stay silent until an
+unrelated `/api` call also failed. The cases the heal deliberately does not fix are covered
+too: a 403 from a disallowed Origin/Host is not reload-fixable and says so instead of
+offering a Reload button, and `forcePageReload()` announces itself before navigating rather
+than making the page vanish unexplained. A server that isn't answering stays silent on
+purpose; a daemon restart is not an auth failure, and a banner that cried "signed out" on
+every restart would be ignored by the time it mattered. See
+[docs/frontend.md](frontend.md) for the banner precedence and the tab indicators.
+
 **Repeated rejections collapse by cause.** `logAuthReject` keys on method + path + reason, with query strings and id-shaped path segments folded away, logs a cause's first sighting immediately, and emits one `… ×N in 60s` rollup per key per window off an `unref()`d timer. The previous throttle spent a single global budget of 5 lines per 10s, which a 2s poller never exhausted — hence 541 identical lines. Host and Origin rejections, and WebSocket upgrade rejections, all share the `Auth: rejected` prefix now: they used to read `Rejected WS upgrade: …`, so a grep for `Auth: rejected` found every HTTP rejection and no WS one, which is how #675 read the log as having zero rejected upgrades when one is what ended the storm.
 
 Auth is **always on** with no off switch — the only escape hatches *widen* the allowlists (`--allow-origin`, `--allow-host`, or `DEEPSTEVE_ALLOW_ORIGIN`/`DEEPSTEVE_ALLOW_HOST`). Binding to a non-loopback address (`--bind`) no longer hands the token out: `setAuthCookie` issues the cookie on **loopback page loads only**, so a LAN browser cannot just open the UI and must send `Authorization: Bearer` itself (before that scope existed, any unauthenticated client on an allowlisted non-loopback host was given the real token and could drive the whole API). The token is still one shared per-install secret rather than a per-user credential, so anyone who obtains it has full control. **The deploy that first turns auth on must use `./restart.sh --refresh`** so already-open tabs reload and acquire the cookie (a silent WebSocket reconnect has none yet). Tabs running post-#540 frontend also **self-heal**: when a WS upgrade is rejected for auth, the reconnect loops probe `/api/version` (`public/js/auth-heal.js`) and, on a 401/429, force one guarded page reload to re-acquire the cookie — but tabs still running pre-#540 JS can't, so that first deploy still needs `--refresh`.

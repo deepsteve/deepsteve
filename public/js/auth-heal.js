@@ -75,6 +75,13 @@ export function noteAuthOk() {
 // `authLostStatus` is 0 when our credentials are known good, else the status
 // that condemned them. Subscribers fire on the TRANSITION only: a 401 storm is
 // hundreds of responses and must not be hundreds of banner renders.
+//
+// AUTH_RELOADING (#677) is the one non-numeric member: not a status the server
+// sent, but "we are acting on one right now". A heal reload navigates the page
+// out from under the user with no explanation otherwise — they see their
+// terminals vanish and reappear with no way to connect that to an auth problem.
+// Truthy, so it suppresses the reconnect banner exactly like a real status does.
+export const AUTH_RELOADING = 'reloading';
 let authLostStatus = 0;
 const authLostSubs = new Set();
 
@@ -128,6 +135,9 @@ export function noteAuthStatus(status) {
 // onWatchdogFallback (optional) runs if the meta-refresh silently fails to
 // navigate, after the reload flag is cleared and before location.replace.
 export function forcePageReload(onWatchdogFallback) {
+  // Say what is about to happen (#677). Up for the fraction of a second before the
+  // meta-refresh takes, and for the whole 3s watchdog window if it silently fails.
+  setAuthLost(AUTH_RELOADING);
   const meta = document.createElement('meta');
   meta.httpEquiv = 'refresh';
   meta.content = '0;url=' + location.pathname + '?_=' + Date.now();
@@ -137,6 +147,9 @@ export function forcePageReload(onWatchdogFallback) {
   setTimeout(() => {
     console.warn('[auth-heal] meta-refresh did not navigate, falling back');
     window.__deepsteveReloadPending = false;
+    // The reload we announced did not happen. Revert to what is actually true, so the
+    // banner offers its Reload button again instead of promising a refresh that never came.
+    setAuthLost(lastVerdict === 'unauthed' ? 401 : 0);
     if (onWatchdogFallback) onWatchdogFallback();
     location.replace(location.pathname + '?_=' + Date.now());
   }, 3000);
@@ -179,6 +192,12 @@ export function maybeHealAuth() {
         return lastVerdict;
       }
       lastVerdict = 'unauthed';
+      // #677: the probe itself is evidence, whoever asked for it. #676 fed the auth-lost
+      // state only from api.js's fetch watch, so a tab whose SOCKETS were being refused —
+      // the ws-open.js gate calls straight in here — set nothing page-level and showed
+      // nothing until some unrelated /api call happened to fail too. Same status the fetch
+      // path would record, so the two agree instead of racing.
+      setAuthLost(res.status);
       let last = 0;
       try { last = Number(sessionStorage.getItem(GUARD_KEY)) || 0; } catch {}
       if (Date.now() - last < HEAL_COOLDOWN_MS) return lastVerdict;

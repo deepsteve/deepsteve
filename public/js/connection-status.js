@@ -11,6 +11,12 @@
  *
  *  - setTabIndicator(tabId, on): per-tab dot, toggled immediately — works for
  *    background and placeholder tabs since it lives on the tab element.
+ *  - setTabBlocked(tabId, on): the same slot in its "we are being refused"
+ *    colour (#677). #676 made an auth failure visible page-wide; this says WHICH
+ *    tabs it took down. A socket the gate declined to even emit — the server is
+ *    up and has said over HTTP that it will reject our cookie — never closes,
+ *    because it never opened, so noteReconnecting() below cannot describe it.
+ *    Waiting will not fix it either, which is what separates the two states.
  *  - renderBanner(count): one page-level "Connection lost" banner, shown only
  *    after graceMs of continuous outage (a ./restart.sh bounce reconnects on
  *    the first 1s retry; flashing a page banner for that trains users to
@@ -25,6 +31,7 @@
 export function createConnectionTracker({
   setTabIndicator,
   renderBanner,
+  setTabBlocked = () => {},
   graceMs = 1500,
   isReloadPending = () => window.__deepsteveReloadPending,
 } = {}) {
@@ -42,7 +49,11 @@ export function createConnectionTracker({
   }
 
   function updateBanner() {
-    const count = [...handles].filter(h => h.reconnecting && h.bannerEligible).length;
+    // A blocked handle is excluded: its story is the auth banner's (#676), and counting it
+    // here would put "reconnecting…" on screen for a connection that is not going to
+    // reconnect. app.js suppresses the banner outright while auth is lost; this keeps the
+    // count honest for the window before that suppression settles.
+    const count = [...handles].filter(h => h.reconnecting && h.bannerEligible && !h.blocked).length;
     if (count === 0) {
       if (graceTimer) { clearTimeout(graceTimer); graceTimer = null; }
       graceElapsed = false;
@@ -74,6 +85,7 @@ export function createConnectionTracker({
       tabId,
       bannerEligible,
       reconnecting: false,
+      blocked: false,
 
       // Server assigned (or changed) the session id: move any live indicator
       // and end the isNew banner deferral — from here the connection is a
@@ -81,25 +93,54 @@ export function createConnectionTracker({
       setSessionId(id) {
         if (handle.reconnecting && handle.tabId && handle.tabId !== id) {
           setTabIndicator(handle.tabId, false);
+          setTabBlocked(handle.tabId, false);
         }
         const moved = handle.tabId !== id;
         handle.tabId = id;
         handle.bannerEligible = true;
-        if (handle.reconnecting && moved) setTabIndicator(id, true);
+        if (handle.reconnecting && moved) {
+          if (handle.blocked) setTabBlocked(id, true);
+          else setTabIndicator(id, true);
+        }
         updateBanner();
       },
 
       noteReconnecting() {
         if (!handles.has(handle)) return; // socket of a closed tab can still fire
         handle.reconnecting = true;
-        if (handle.tabId) setTabIndicator(handle.tabId, true);
+        // A handshake actually went out this time, so whatever refused us before is no
+        // longer the story — hand the tab slot back to the ordinary reconnecting paint.
+        handle.blocked = false;
+        if (handle.tabId) {
+          setTabBlocked(handle.tabId, false);
+          setTabIndicator(handle.tabId, true);
+        }
         updateBanner();
       },
 
       noteReconnected() {
         if (!handles.has(handle)) return;
         handle.reconnecting = false;
-        if (handle.tabId) setTabIndicator(handle.tabId, false);
+        handle.blocked = false;
+        if (handle.tabId) {
+          setTabIndicator(handle.tabId, false);
+          setTabBlocked(handle.tabId, false);
+        }
+        updateBanner();
+      },
+
+      // The gate refused to emit a handshake for this connection (#677). Also marks it
+      // reconnecting, so a blocked connection still owns its tab slot and still clears
+      // through the one path — but the blocked flag keeps it out of the banner count and
+      // paints the slot in the refused colour instead.
+      noteBlocked() {
+        if (!handles.has(handle)) return;
+        handle.blocked = true;
+        handle.reconnecting = true;
+        if (handle.tabId) {
+          setTabIndicator(handle.tabId, false);
+          setTabBlocked(handle.tabId, true);
+        }
         updateBanner();
       },
 
@@ -109,7 +150,10 @@ export function createConnectionTracker({
       // banner forever.
       untrack() {
         if (!handles.delete(handle)) return;
-        if (handle.reconnecting && handle.tabId) setTabIndicator(handle.tabId, false);
+        if (handle.reconnecting && handle.tabId) {
+          setTabIndicator(handle.tabId, false);
+          setTabBlocked(handle.tabId, false);
+        }
         updateBanner();
       },
     };

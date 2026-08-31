@@ -32,6 +32,9 @@ export class HttpError extends Error {
  * auth-heal.js makes for the WebSocket path.
  */
 export function authMessage(status) {
+  // Not a server status — auth-heal's AUTH_RELOADING, meaning it is reloading us right
+  // now (#677). Named here rather than imported to keep api.js free of that dependency.
+  if (status === 'reloading') return 'Re-authenticating — refreshing the page\u2026';
   if (status === 401) return 'Session expired — reload the page to sign in again.';
   if (status === 429) return 'Too many rejected requests — reload the page to sign in again.';
   if (status === 403) return 'Blocked by the server (403) — this tab is not allowed to call the API.';
