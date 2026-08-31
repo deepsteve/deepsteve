@@ -241,6 +241,21 @@ function traceSession(event, fields) {
 const logRotator = createLogRotator({ targets: defaultLogPaths() });
 logRotator.start();
 
+// --- Cold-start timing ---
+// Three marks — first log line, port open, first browser window — so a slow boot can be
+// attributed without re-deriving it from `ps -o lstart` afterwards.
+//
+// process.uptime() is measured from node's own start, which is what makes the first mark
+// worth having: the entire require graph is ~30ms warm, so a large number there means the
+// time went to cold page cache inside this process, while a small one means it was spent
+// before main() (exec + dyld) and only `ps` can see it. On a post-reboot cold start that
+// gap has been ~17s — far larger than everything deepsteve itself does at startup.
+let browserMarked = false;
+function bootMark(what) {
+  log(`[startup] ${what} at +${process.uptime().toFixed(1)}s since node start`);
+}
+bootMark('first log line');
+
 // --- Waiting-classifier audit (#558 research instrumentation) ---
 // Records every waitingForInput decision, BEL classification, and a periodic sample
 // of all shells as JSONL, so the flag can be compared offline against what was
@@ -6223,6 +6238,7 @@ provisionAllProfileSkills(); // #543: link deepsteve skills into every profile's
 
 const server = app.listen(PORT, BIND, () => {
   log(`HTTP server listening on ${BIND}:${PORT} — UI at ${UI_URL}`);
+  bootMark('HTTP listening');
   if (TEST_MODE) {
     log('*** DEEPSTEVE_TEST_MODE: disposable test instance — killall enabled, browser auto-open and auto-update check disabled ***');
   }
@@ -6565,6 +6581,7 @@ function handleWsConnection(ws, req) {
     ws.windowId = url.searchParams.get('windowId') || null;
     reloadClients.add(ws);
     log(`[WS] Reload client connected (windowId=${ws.windowId || 'none'}), ${reloadClients.size} total`);
+    if (!browserMarked) { browserMarked = true; bootMark('first browser window connected'); }
     ws.isAlive = true;
     let lastBeat = Date.now();
     const pingInterval = setInterval(() => {
