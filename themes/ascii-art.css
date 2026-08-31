@@ -363,8 +363,8 @@ body {
 
 /* ── Mod cards ───────────────────────────────────────────────────────── */
 
-.mod-card {
-  border: 1px solid #555 !important;
+.mod-row {
+  border-bottom: 1px solid #555 !important;
 }
 
 .mod-card-footer {

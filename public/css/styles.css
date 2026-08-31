@@ -1047,23 +1047,71 @@ kbd {
 .marketplace-search input { width: 100%; padding: 7px 12px; background: var(--ds-bg-primary); border: 1px solid var(--ds-border); border-radius: 4px; color: var(--ds-text-primary); font-size: 13px; }
 .marketplace-search input:focus { outline: none; border-color: var(--ds-accent-blue); }
 .marketplace-search input::placeholder { color: var(--ds-text-secondary); }
-.marketplace-filters { display: flex; gap: 6px; padding: 12px 20px 0; }
-.filter-pill { padding: 4px 12px; background: var(--ds-bg-tertiary); border: 1px solid var(--ds-border); border-radius: 12px; color: var(--ds-text-secondary); font-size: 12px; cursor: pointer; }
-.filter-pill:hover { color: var(--ds-text-primary); border-color: var(--ds-text-secondary); }
-.filter-pill.active { background: var(--ds-accent-blue); color: #fff; border-color: var(--ds-accent-blue); }
-.marketplace-list { flex: 1; overflow-y: auto; padding: 12px 20px; min-height: 0; display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; align-content: start; }
-.mod-card { padding: 12px; border: 1px solid var(--ds-border); border-radius: 6px; background: var(--ds-bg-primary); }
-.mod-card:hover { border-color: var(--ds-text-secondary); }
-.mod-card-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-.mod-card-info { display: flex; align-items: center; gap: 8px; min-width: 0; }
-.mod-card-name { font-size: 14px; font-weight: 600; color: var(--ds-text-bright); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* Navigation (#673). The row that used to live here was six EXCLUSIVE filter pills mixing
+   three axes — what a thing is (Skills), how a mod draws (Panel/Fullscreen) and whether it
+   is on (Enabled) — so telling the kinds apart meant hiding everything else. Kind is now the
+   grouping, which frees the chips to be jump-to navigation and gives state its own control. */
+.marketplace-nav { display: flex; align-items: center; gap: 12px; padding: 10px 20px 6px; border-bottom: 1px solid var(--ds-border); }
+/* Wrap, never scroll. Eight sections do not fit on one line, and a horizontally scrolled
+   chip row hides the last section — Skills — behind the Enabled-only control. */
+.marketplace-jump { display: flex; flex-wrap: wrap; gap: 6px; flex: 1; min-width: 0; }
+.jump-chip { display: inline-flex; align-items: center; gap: 5px; padding: 3px 10px; background: var(--ds-bg-tertiary); border: 1px solid var(--ds-border); border-radius: 12px; color: var(--ds-text-secondary); font-family: inherit; font-size: 12px; white-space: nowrap; cursor: pointer; }
+.jump-chip:hover { color: var(--ds-text-primary); border-color: var(--ds-text-secondary); }
+.jump-chip-count { font-size: 10px; opacity: 0.75; }
+/* Both of these are <label>s, and `.modal label` (styles.css, base modal block) gives every
+   label in a modal `margin-bottom: 16px` — centred in a 32px row that reads as an 8px lift.
+   The `.modal ` prefix is load-bearing: it is what outweighs that rule's class+type
+   specificity, which a bare `.mod-card-toggle { margin: 0 }` does not. */
+.modal .marketplace-enabled-only { display: flex; align-items: center; gap: 6px; margin: 0; flex-shrink: 0; font-size: 12px; color: var(--ds-text-secondary); cursor: pointer; }
+.modal .mod-card-toggle { margin: 0; }
+.marketplace-enabled-only input { accent-color: var(--ds-accent-green); }
+
+/* THE scroll container: the group headings resolve their `top: 0` against it and the jump
+   chips measure group.offsetTop against it, which is what `position: relative` is for.
+   Padding lives on the rows and headings instead, so a sticky heading is full-bleed. */
+.marketplace-list { flex: 1; overflow-y: auto; min-height: 0; position: relative; padding: 0 0 12px; }
+
+/* A heading needs an opaque background or the rows scroll visibly through it. */
+.mod-group-head { position: sticky; top: 0; z-index: 1; display: flex; align-items: baseline; gap: 8px; padding: 10px 20px 4px; background: var(--ds-bg-secondary); font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--ds-text-secondary); }
+.mod-group-count { font-size: 10px; opacity: 0.8; }
+
+.mod-row { display: flex; flex-direction: column; border-bottom: 1px solid var(--ds-border); }
+.mod-group-body > .mod-row:last-child { border-bottom: none; }
+/* min-height, never height: a long badge run must push the line, and the dependency notice
+   and the expanded detail both have to be able to grow the row. */
+.mod-row-line { display: flex; align-items: center; gap: 8px; min-height: 32px; padding: 0 20px; cursor: pointer; }
+.mod-row-line:hover { background: var(--ds-bg-tertiary); }
+.mod-row-line:focus-visible { outline: 1px solid var(--ds-accent-blue); outline-offset: -1px; }
+/* Open is marked by background AND a rotated caret: some themes collapse the accent hues,
+   so no state in this modal is signalled by colour alone. */
+.mod-row.expanded .mod-row-line { background: var(--ds-selected-bg); }
+.mod-row-caret { flex: 0 0 10px; font-size: 11px; color: var(--ds-text-secondary); transition: transform 0.12s; }
+.mod-row.expanded .mod-row-caret { transform: rotate(90deg); }
+.mod-row-name { flex: 0 0 auto; max-width: 220px; font-size: 13px; font-weight: 500; color: var(--ds-text-bright); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mod-row-badges { display: flex; gap: 4px; flex: 0 0 auto; }
+.mod-row-desc { flex: 1 1 auto; min-width: 0; font-size: 12px; color: var(--ds-text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mod-row-actions { display: flex; align-items: center; gap: 6px; flex: 0 0 auto; }
+.mod-row-incompatible { opacity: 0.5; }
+
+/* The detail is built once and kept, so `.expanded` is what shows it. Without this rule
+   nothing hides it again and every row you open stays open — visibly wrong only until the
+   next render rebuilds the row, which makes it look intermittent. */
+.mod-row:not(.expanded) .mod-row-detail { display: none; }
+.mod-row-detail { padding: 2px 20px 12px 38px; }
+.mod-row-detail .mod-card-description { margin-top: 0; }
+.mod-row-meta { display: flex; align-items: center; gap: 8px; margin-top: 6px; }
+.mod-tools { display: flex; align-items: center; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+.mod-tool-tag { padding: 1px 7px; border: 1px solid var(--ds-border); border-radius: 8px; font-size: 10px; color: var(--ds-text-secondary); font-family: var(--ds-font-mono, monospace); }
+.mod-tools-note { font-size: 11px; color: var(--ds-text-secondary); }
+.mod-row-usage { margin-top: 6px; font-size: 11px; color: var(--ds-text-secondary); font-family: var(--ds-font-mono, monospace); }
+.mod-row-detail .skill-view-btn { margin-top: 8px; }
 .mod-badge { font-size: 10px; padding: 1px 6px; border-radius: 8px; white-space: nowrap; font-weight: 500; }
 .mod-badge.built-in { background: var(--ds-bg-tertiary); color: var(--ds-text-secondary); border: 1px solid var(--ds-border); }
 .mod-badge.official { background: rgba(88, 166, 255, 0.15); color: var(--ds-accent-blue); border: 1px solid rgba(88, 166, 255, 0.3); }
 .mod-badge.experimental { background: rgba(227, 179, 65, 0.15); color: #e3b341; border: 1px solid rgba(227, 179, 65, 0.3); }
 .mod-badge.skill { background: rgba(163, 113, 247, 0.15); color: #a371f7; border: 1px solid rgba(163, 113, 247, 0.3); }
+.mod-badge.incompatible { background: rgba(248, 81, 73, 0.15); color: var(--ds-accent-red); border: 1px solid rgba(248, 81, 73, 0.3); }
 .mod-card-version { font-size: 11px; color: var(--ds-text-secondary); }
-.mod-card-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
 .mod-card-toggle { position: relative; width: 36px; height: 20px; }
 .mod-card-toggle input { opacity: 0; width: 0; height: 0; }
 .mod-card-toggle .toggle-slider { position: absolute; inset: 0; background: var(--ds-bg-tertiary); border: 1px solid var(--ds-border); border-radius: 10px; cursor: pointer; transition: background 0.2s, border-color 0.2s; }
@@ -1075,7 +1123,7 @@ kbd {
 
 /* Skill view button & content modal */
 .skill-view-btn { background: var(--ds-bg-tertiary); border: 1px solid var(--ds-border); color: var(--ds-text-secondary); font-size: 11px; padding: 2px 8px; border-radius: 4px; cursor: pointer; transition: background 0.15s, color 0.15s; }
-.skill-view-btn:hover { background: var(--ds-bg-hover); color: var(--ds-text-primary); }
+.skill-view-btn:hover { background: var(--ds-btn-neutral-hover); color: var(--ds-text-primary); }
 .skill-content-modal { max-width: 700px; width: 90vw; }
 .skill-content-body { max-height: 60vh; overflow: auto; padding: 12px 16px; }
 .skill-content-body pre { margin: 0; white-space: pre-wrap; word-wrap: break-word; font-size: 12px; line-height: 1.5; color: var(--ds-text-primary); font-family: var(--ds-font-mono, monospace); }
@@ -1101,12 +1149,15 @@ kbd {
 .mod-card-footer .btn-uninstall:hover { background: rgba(248, 81, 73, 0.1); }
 .mod-card-footer .btn-update { padding: 4px 12px; background: var(--ds-accent-blue); border: none; color: #fff; border-radius: 4px; cursor: pointer; font-size: 12px; }
 .mod-card-footer .btn-update:hover { opacity: 0.9; }
-.mod-card-incompatible { opacity: 0.5; }
 .marketplace-modal .modal-buttons { padding: 12px 20px 20px; border-top: 1px solid var(--ds-border); }
 .marketplace-empty { padding: 32px 16px; text-align: center; color: var(--ds-text-secondary); font-size: 13px; }
 
 /* Automations chip row */
 .automations-section { padding: 12px 20px; border-bottom: 1px solid var(--ds-border); }
+.marketplace-list .automations-section { padding: 0; border-bottom: none; }
+.marketplace-list .automations-label { display: none; }
+.marketplace-list .automations-row { padding: 2px 20px 10px; }
+.marketplace-list .automations-empty { align-items: flex-start; padding: 2px 20px 10px; }
 .automations-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--ds-text-secondary); margin-bottom: 8px; }
 .automations-row { display: flex; gap: 8px; overflow-x: auto; align-items: center; padding-bottom: 4px; }
 .automations-row::-webkit-scrollbar { height: 4px; }

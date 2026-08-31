@@ -14,6 +14,7 @@ const { createPowerAssertion } = require('./power-assertion');
 const { resolveForkTip } = require('./fork-resolve');
 const { formatLogTimestamp, createLogRotator, defaultLogPaths } = require('./logging');
 const { findGitRoot } = require('./git-root');
+const { modKind } = require('./mod-kind');
 const { usableWorktree } = require('./worktree-support');
 const { stateDir, agentHomeDir, expandTilde, spawnCwdProblem, assertSpawnCwd, tmuxSocketPath, defaultTmuxSocketPath } = require('./paths');
 const { resolveBinary, runBinary, resolveUrlOpener, resolveLoginShell } = require('./bin-path');
@@ -4659,7 +4660,10 @@ app.get('/api/mods', (req, res) => {
         // a third-party mod installed via POST /api/mods/install, whose manifest we do not
         // control and which may still ship a stale tools array, cannot override the real
         // answer. A mod with no tools.js reports [].
-        mods.push({ id: entry.name, source, compatible, ...manifest, tools: getModTools(entry.name) });
+        // `kind` (#673) is derived the same way and sits after the spread for the same
+        // reason: it decides which section of the Mods modal the thing appears under, and a
+        // manifest we did not write must not be able to file itself under `app`.
+        mods.push({ id: entry.name, source, compatible, ...manifest, tools: getModTools(entry.name), kind: modKind(manifest) });
       } catch { /* skip dirs without valid mod.json */ }
     }
     // Append skills
@@ -4676,6 +4680,10 @@ app.get('/api/mods', (req, res) => {
               name: `/${id}`,
               description: meta.description || '',
               type: 'skill',
+              // Hardcoded, not derived: a skill is never a place you work from, so a skill
+              // file cannot talk its way into the Apps section — the same rule
+              // test/unit/apps-rail.test.js already pins for getApps().
+              kind: 'skill',
               source: 'built-in',
               compatible: true,
               version: pkg.version,

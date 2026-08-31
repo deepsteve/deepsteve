@@ -40,6 +40,20 @@ function validateManifest(mod, manifest) {
     errors.push(`[${mod}] mod.json must not declare "tools" — tools.js is the only source of truth (#644). Delete the key.`);
   }
 
+  // #673: `kind` decides which section of the Mods modal a mod appears under, and it is
+  // derived by mod-kind.js. GET /api/mods stamps it after the manifest spread, so a declared
+  // one is ignored rather than obeyed — say so at build time instead of letting an author
+  // believe it did something.
+  if ('kind' in manifest) {
+    errors.push(`[${mod}] mod.json must not declare "kind" — it is derived from display/app/tags/entry by mod-kind.js (#673). Delete the key.`);
+  }
+
+  // #673: `tags: "games"` instead of `["games"]` used to be harmless. Now it silently misses
+  // the Games section, which is placement the author can see is wrong but not why.
+  if ('tags' in manifest && (!Array.isArray(manifest.tags) || manifest.tags.some(t => typeof t !== 'string'))) {
+    errors.push(`[${mod}] "tags" must be an array of strings (e.g. ["games"])`);
+  }
+
   return errors;
 }
 
