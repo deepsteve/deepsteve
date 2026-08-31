@@ -682,6 +682,9 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
 /* Pending new-session banner (#563): shown when "New session" can't reach the
    server; the create is queued by the WS retry loop, this makes it visible. */
 .pending-session-banner { position: fixed; top: 12px; left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 8px; padding: 8px 16px; background: var(--ds-bg-secondary); border: 1px solid var(--ds-border); border-radius: 6px; box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35); color: var(--ds-text-secondary); font-size: 13px; font-family: monospace; z-index: 2600; }
+/* Tabular figures so the elapsed timer (#681) doesn't jitter as digits change.
+   The banner is already monospace; this survives a theme that isn't. */
+.pending-session-banner-label { font-variant-numeric: tabular-nums; }
 .pending-session-banner-cancel { padding: 2px 10px; font-size: 12px; font-family: inherit; color: var(--ds-text-secondary); background: var(--ds-bg-primary); border: 1px solid var(--ds-border); border-radius: 4px; cursor: pointer; flex-shrink: 0; }
 .pending-session-banner-cancel:hover { color: var(--ds-text-primary); border-color: var(--ds-accent-blue); }
 

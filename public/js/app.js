@@ -22,6 +22,7 @@ import { TabManager, getDefaultTabName, initTabArrows, refreshTabArrows } from '
 import { createTerminal, setupTerminalIO, fitTerminal, resizeTerminal, observeTerminalResize, measureTerminalSize, updateTerminalTheme, installTerminalWheelGuard } from './terminal.js';
 import { createWebSocket } from './ws-client.js';
 import { createConnectionTracker } from './connection-status.js';
+import { formatElapsed } from './elapsed.js';
 import { showDirectoryPicker } from './dir-picker.js';
 import { showSessionRestoreModal } from './session-restore-modal.js';
 import { LayoutManager } from './layout-manager.js';
@@ -2233,6 +2234,26 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
  */
 const pendingCreates = new Set();
 let pendingBannerEl = null;
+let pendingBannerTicker = null;
+
+/**
+ * The label, with the running elapsed time (#681). Without it the text is identical
+ * at 2 seconds and at 2 minutes and the only cue is a spinner, which says "something
+ * is happening" rather than "this has been stuck for a while".
+ *
+ * With several creates pending we show the OLDEST — that is the number that says how
+ * bad it is, and it is the one that keeps growing.
+ */
+function renderPendingBannerLabel() {
+  if (!pendingBannerEl || pendingCreates.size === 0) return;
+  let oldest = Infinity;
+  for (const p of pendingCreates) if (p.startedAt < oldest) oldest = p.startedAt;
+  const elapsed = formatElapsed(Date.now() - oldest);
+  pendingBannerEl.querySelector('.pending-session-banner-label').textContent =
+    pendingCreates.size > 1
+      ? `Server unreachable — ${pendingCreates.size} new sessions will open when it reconnects… (${elapsed})`
+      : `Server unreachable — your new session will open when it reconnects… (${elapsed})`;
+}
 
 // The reconnect banner (#556) sits in the same spot as the pending-create
 // banner and the auth banner (#676), and says less than either, so it yields to
@@ -2246,6 +2267,11 @@ function updatePendingBanner() {
   // Every add/settle/cancel funnels through here.
   syncBannerSuppression();
   if (pendingCreates.size === 0) {
+    // The only teardown site. settle(), cancel() and the {type:'error'} handler all
+    // funnel here, so stopping the ticker once here is what keeps a 1s interval from
+    // being left running behind a banner that is gone.
+    clearInterval(pendingBannerTicker);
+    pendingBannerTicker = null;
     if (pendingBannerEl) { pendingBannerEl.remove(); pendingBannerEl = null; }
     return;
   }
@@ -2265,16 +2291,20 @@ function updatePendingBanner() {
     pendingBannerEl.append(spinner, label, btn);
     document.body.appendChild(pendingBannerEl);
   }
-  pendingBannerEl.querySelector('.pending-session-banner-label').textContent =
-    pendingCreates.size > 1
-      ? `Server unreachable — ${pendingCreates.size} new sessions will open when it reconnects…`
-      : 'Server unreachable — your new session will open when it reconnects…';
+  // Render once now so the banner never appears without a value, then tick. Guarded
+  // so a second pending create doesn't stack a second interval.
+  renderPendingBannerLabel();
+  if (!pendingBannerTicker) pendingBannerTicker = setInterval(renderPendingBannerLabel, 1000);
 }
 
 // Arms a delayed banner for a brand-new session's first connect. Returns a
 // handle: settle() when the session arrives, cancel() aborts the attempt.
 function trackPendingCreate(ws, resolveReady, connHandle) {
   const entry = {
+    // When the create was ATTEMPTED, not when the banner arms. The 1500ms delay below
+    // is presentation; a timer that opens at 0s after 1.5s of waiting is the same
+    // dishonesty in a smaller form (#681).
+    startedAt: Date.now(),
     timer: null,
     settle() {
       clearTimeout(entry.timer);
