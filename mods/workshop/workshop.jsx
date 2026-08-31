@@ -976,6 +976,7 @@ function ChatPane({ sessionId, sessionName, pollMs, composerRef, onStateChange }
         <textarea
           ref={composerRef}
           value={draft}
+          autoComplete="off"
           disabled={closed || blocked}
           onChange={(e) => { setDraft(e.target.value); setDraftFor(sessionId, e.target.value); }}
           onKeyDown={(e) => {
@@ -2040,6 +2041,7 @@ function Workshop() {
                   <textarea
                     ref={replyRef}
                     value={draft}
+                    autoComplete="off"
                     onChange={(e) => setDraft(e.target.value)}
                     placeholder={selected.kind === 'result'
                       ? 'Why it needs changing \u2014 required to request changes, optional to approve'

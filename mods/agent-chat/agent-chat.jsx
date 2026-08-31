@@ -707,6 +707,7 @@ function ChatPanel() {
         <div style={{ display: 'flex', gap: 6 }}>
           <textarea
             value={input}
+            autoComplete="off"
             onChange={e => setInput(e.target.value)}
             onKeyDown={handleKeyDown}
             placeholder={isListening ? 'Listening...' : 'Type a message...'}

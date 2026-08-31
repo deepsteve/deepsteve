@@ -61,6 +61,13 @@ export function createTerminal(container, { cols, rows } = {}) {
   term.loadAddon(fit);
   term.open(container);
 
+  // xterm's hidden input sink is a real focused <textarea>, and 6.0.0 sets
+  // autocorrect/autocapitalize/spellcheck on it but not autocomplete -- so macOS
+  // AutoFill happily drops an SMS verification code into it, and `_inputEvent`
+  // forwards it to the PTY as if it had been typed. Opt the field out. (Safari
+  // treats this as a hint for its one-time-code heuristic, not a contract.)
+  if (term.textarea) term.textarea.setAttribute('autocomplete', 'off');
+
   // Ensure terminal gets focus when clicked
   container.addEventListener('click', () => term.focus());
 
