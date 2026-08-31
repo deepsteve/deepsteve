@@ -84,6 +84,18 @@ function parseBlockedId(id) {
   return rest ? rest : null;
 }
 
+/** `idle:<sessionId>` — the synthetic id an idle-awaiting-you row carries (#682). */
+function idleId(sessionId) {
+  return 'idle:' + sessionId;
+}
+
+/** The session id inside an idle id, or null for anything else. */
+function parseIdleId(id) {
+  if (typeof id !== 'string' || !id.startsWith('idle:')) return null;
+  const rest = id.slice('idle:'.length);
+  return rest ? rest : null;
+}
+
 /**
  * A ticket as an agent might repeat it back: 12, '12', '#12', 'w12' all mean w12.
  * The model-facing text says "#12", so all three spellings will be tried.
@@ -440,6 +452,8 @@ module.exports = {
   clampText,
   blockedId,
   parseBlockedId,
+  idleId,
+  parseIdleId,
   normalizeTicket,
   normalizeOptions,
   resultOptionsFor,

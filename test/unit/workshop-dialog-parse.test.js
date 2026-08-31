@@ -538,3 +538,54 @@ test('a plan path in prose is not a dialog', () => {
   assert.strictEqual(dp.detectDialog(fx.PLAN_PATH_IN_PROSE), null);
   assert.strictEqual(dp.parseDialog(fx.PLAN_PATH_IN_PROSE), null);
 });
+
+// ── the idle screen (#682) ───────────────────────────────────────────────────
+//
+// Two primitives the second derived kind rests on. Both read a screen that has NO
+// dialog on it, which is the case every other function in this file declines.
+
+test('screenFingerprint is stable across a repaint and moves when the screen does', () => {
+  const idle = ['⏺ Done.', '─'.repeat(60), '❯', '? for shortcuts'];
+  const same = idle.slice();
+  const moved = ['⏺ Done, and one more thing.', '─'.repeat(60), '❯', '? for shortcuts'];
+
+  assert.strictEqual(dp.screenFingerprint(idle), dp.screenFingerprint(same));
+  assert.notStrictEqual(dp.screenFingerprint(idle), dp.screenFingerprint(moved));
+  assert.strictEqual(
+    dp.screenFingerprint(idle), dp.screenFingerprint(idle.map((l) => `│ ${l} │`)),
+    'borders and padding are not content — a resize must not read as the agent moving on',
+  );
+});
+
+test('screenFingerprint answers where dialogFingerprint declines', () => {
+  // The reason this function exists at all: dialogFingerprint returns '' on every
+  // screen with no dialog, which is every idle screen, so it cannot carry the clock.
+  const idle = fx.PLAN_PATH_IN_PROSE;
+  assert.strictEqual(dp.dialogFingerprint(idle), '');
+  assert.notStrictEqual(dp.screenFingerprint(idle), '');
+  assert.strictEqual(dp.screenFingerprint([]), '');
+});
+
+test('lastAgentLine reads the last thing the agent said, not the chrome around it', () => {
+  assert.strictEqual(
+    dp.lastAgentLine(['⏺ Reading the file.', '⏺ The migration is applied.', '─'.repeat(60), '❯', '? for shortcuts']),
+    'The migration is applied.',
+  );
+  assert.strictEqual(
+    dp.lastAgentLine(fx.PLAN_PATH_IN_PROSE),
+    'I have written the plan.',
+    'the composer glyph, the rule and the auto-mode footer are all chrome',
+  );
+});
+
+test('lastAgentLine falls back to content rather than to nothing', () => {
+  // It is a scrape of a UI we do not control. If Claude Code stops drawing the ⏺ the
+  // row must still say something useful — a headline is the whole value of the row.
+  assert.strictEqual(
+    dp.lastAgentLine(['Applied 3 migrations.', '─'.repeat(60), '❯', '? for shortcuts']),
+    'Applied 3 migrations.',
+  );
+  assert.strictEqual(dp.lastAgentLine(['❯', '? for shortcuts']), '');
+  assert.strictEqual(dp.lastAgentLine([]), '');
+  assert.strictEqual(dp.lastAgentLine(['⏺ ' + 'x'.repeat(500)]).length, 200, 'capped');
+});

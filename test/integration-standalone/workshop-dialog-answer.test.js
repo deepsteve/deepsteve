@@ -343,9 +343,14 @@ test('a dialog answered from the inbox leaves it, with no leftover row', async (
     'the answered row to disappear from the inbox',
   );
   // Derived rows are computed per request, so "gone" means gone — there is no
-  // tombstone to reconcile and nothing carrying the session id any more.
-  const leftovers = (await inbox()).filter((i) => i.sessionId === id);
-  assert.deepStrictEqual(leftovers, [], 'a derived item must leave nothing behind');
+  // tombstone to reconcile and no blocked row carrying the session id any more.
+  //
+  // Scoped to `blocked:` since #682. The session is still alive and now sitting at its
+  // composer, so once it is past the idle grace window it legitimately becomes an
+  // `idle:` row — that is the feature, not a leftover. Asserting the whole inbox is
+  // empty here would be asserting the timing of a clock.
+  const leftovers = (await inbox()).filter((i) => i.id.startsWith(`blocked:${id}`));
+  assert.deepStrictEqual(leftovers, [], 'an answered dialog must leave no blocked row behind');
 });
 
 test('a dialog resolved in the terminal disappears on its own', async () => {

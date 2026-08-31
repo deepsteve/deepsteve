@@ -86,8 +86,15 @@
  */
 
 const fs = require('fs');
-const { execFile } = require('child_process');
+const { execFile, execFileSync } = require('child_process');
 const { z } = require('zod');
+// The one cross-mod require in this file (#682). merge-worktree.js is a pure library —
+// it takes a `git` runner and returns a status — with no ctx, no shells and no MCP, and
+// it encodes the merge semantics the bench must not have a second opinion about: refuse
+// on a dirty target, abort on conflict, leave the target untouched unless it says
+// `merged`. Reimplementing that here to avoid reaching across a mod boundary would be
+// the trade made backwards.
+const { mergeWorktree } = require('../deepsteve-core/merge-worktree');
 const projectScope = require('../../project-scope');
 const { resolveBinary } = require('../../bin-path');
 const inbox = require('./inbox');
@@ -116,6 +123,23 @@ const SCRAPE_ROWS = 30;
 const WIDE_ROWS = 60;         // one retry when a 30-row read truncates the option run
 const PREVIEW_ROWS = 15;
 const READ_FRESH_TIMEOUT_MS = 1000;
+
+// ── idle-awaiting-you (#682) ──
+//
+// How long a session must sit unchanged at its own prompt before the bench calls it
+// "waiting on you" rather than "between turns". The panel sends its own value from a
+// setting because the right number is a property of how the human works, not of the
+// software: 15s is right if you are watching, and maddening if you are not.
+//
+// The clamp is the contract. 0 is legal and means "the moment it stops" — a real
+// choice, and the one the unit tests use so they never have to wait.
+const IDLE_AFTER_DEFAULT_MS = 15_000;
+const IDLE_AFTER_MAX_MS = 6 * 60 * 60 * 1000;
+
+// How long "I'll deal with it later" lasts when the panel does not say. Long enough
+// to clear the bench and finish what you were doing, short enough that a session you
+// snoozed and forgot comes back the same afternoon.
+const SNOOZE_DEFAULT_MS = 30 * 60 * 1000;
 
 // ── chat pane (#670) ──
 // How much of a transcript's TAIL to read for the chat pane. Four times
@@ -174,6 +198,18 @@ const PROJECT_CACHE_MAX = 200;
 // Written only from POST /api/workshop/items/blocked:<id>/dismiss, which no MCP tool
 // calls — see the header. An agent must never be able to silence a human's inbox.
 const mutedDialogs = new Map();
+
+// sessionId -> { until, idleSince } — an idle row the human has snoozed (#682).
+//
+// The same shape of promise mutedDialogs makes, keyed on the same kind of evidence.
+// A dialog mute is keyed on the QUESTION, so it ends when the tab asks something
+// else; a snooze is keyed on `idleSince`, so it ends when the session does something
+// and comes back to its prompt with a fresh wait. Both mean "I have dealt with the
+// thing I was looking at", and neither can outlive the thing it was about.
+//
+// In memory, and written only from the panel's dismiss route — no MCP tool reaches
+// it. An agent must never be able to silence a human's bench.
+const snoozedSessions = new Map();
 
 // Sessions with a key dance in flight. A second concurrent answer would interleave
 // two key streams into one dialog.
@@ -393,11 +429,19 @@ function pendingPathFor(item) {
 }
 
 function serializeStored(item) {
+  const entry = item.sessionId ? ctx.shells.get(item.sessionId) : null;
   return {
     ...item,
     pendingPath: pendingPathFor(item),
-    sessionAlive: !!(item.sessionId && ctx.shells.has(item.sessionId)),
+    sessionAlive: !!entry,
     answerable: item.kind !== 'briefing' && item.status === 'open',
+    // The session verbs (#682), on every row that has a live session behind it — not
+    // just the derived idle ones. A question from an agent that has since finished its
+    // work is exactly as closable as any other, and the panel cannot work either of
+    // these out for itself: getSessions() reports THIS window's tabs, not the server's
+    // sessions, so a row for an agent in another window would look unreachable.
+    canClose: !!entry,
+    canMerge: !!(entry && entry.worktree),
   };
 }
 
@@ -438,12 +482,107 @@ function scrapeFor(id, entry, now) {
     ? prev.blockedSince
     : now;
 
-  const fresh = { seq, lines, detected, parsed, questionFp, blockedSince };
+  // The idle clock (#682), on the same principle and a wider fingerprint. questionFp
+  // is '' on every screen with no dialog — which is every idle screen — so it cannot
+  // carry this one; screenFingerprint hashes the whole tail instead. A repaint that
+  // changed nothing keeps the clock running, and any change to what is on screen is
+  // the agent doing something, which restarts it.
+  const screenFp = dialogParse.screenFingerprint(lines);
+  const idleSince = (prev && prev.idleSince && prev.screenFp === screenFp)
+    ? prev.idleSince
+    : now;
+
+  const fresh = { seq, lines, detected, parsed, questionFp, blockedSince, screenFp, idleSince };
   scrapeCache.set(id, fresh);
   return fresh;
 }
 
-function derivedItems(now) {
+/**
+ * "This agent finished and is waiting on YOU" — the second derived kind (#682).
+ *
+ * Workshop's actionable population used to be gated entirely on detectDialog, and the
+ * arithmetic of that gate is what made the panel informational: on a normal machine
+ * nothing is showing a dialog most of the time, so the bench was empty and the page
+ * was whatever sat below it. The state a human actually has to act on far more often
+ * is this one — the turn ended, nothing is queued, and nobody has said what next.
+ *
+ * Every clause below exists to keep this from becoming the noise the old gate was
+ * avoiding, so none of them is optional:
+ *
+ *   sessionInputState === 'idle'  the agent is at a prompt we can positively read.
+ *                                 A plain shell has no screenMarkers and classifies
+ *                                 'unknown', which is what keeps a bash prompt — idle
+ *                                 by nature, forever — out of the bench.
+ *   nothing queued                a prompt already on its way is not a wait on you.
+ *   idle >= idleAfterMs           between-turns flicker is not a wait either.
+ *   not snoozed                   you already looked at this one.
+ *
+ * Returns null rather than a row, so the caller's loop stays a flat scan.
+ */
+function idleRowFor(id, entry, scrape, now, idleAfterMs) {
+  if (ctx.sessionInputState(entry) !== 'idle') return null;
+  if (entry.pendingDelivery) return null;
+  if (entry.promptQueue && entry.promptQueue.length > 0) return null;
+  if (now - scrape.idleSince < idleAfterMs) return null;
+
+  const snooze = snoozedSessions.get(id);
+  if (snooze) {
+    // Ends on either count: the clock ran out, or the session moved on, which makes
+    // this a different wait from the one that was snoozed.
+    //
+    // Keyed on the screen fingerprint and NOT on idleSince. Two timestamps taken in
+    // the same millisecond are equal, so a timestamp key silently reads "the session
+    // has not moved on" for any change that lands inside one tick of the clock — and
+    // a fast agent's next message is exactly that. The fingerprint is what identifies
+    // a wait; the same rule, and the same reason, as the dialog mute above.
+    if (snooze.screenFp === scrape.screenFp && now < snooze.until) return null;
+    snoozedSessions.delete(id);
+  }
+
+  const { project, projectName } = projectFor(entry);
+  const said = dialogParse.lastAgentLine(scrape.lines);
+  return {
+    id: inbox.idleId(id),
+    kind: 'idle',
+    status: 'open',
+    // Deliberately NOT 'blocking'. A blocked agent cannot proceed without you; this
+    // one has simply run out of instructions. Ranking them together would put every
+    // finished session above a real dialog, which is how a bench stops being read.
+    urgency: 'normal',
+    sessionId: id,
+    sessionName: entry.name || null,
+    project,
+    projectName,
+    worktree: entry.worktree || null,
+    // Opaque to the panel, echoed back to /dismiss so a snooze cannot land on a wait
+    // that started after the row was drawn.
+    fingerprint: scrape.screenFp,
+    headline: said || 'Finished — waiting for you',
+    question: '',
+    context: '',
+    options: [],
+    recommendation: '',
+    cursorIndex: null,
+    multi: null,
+    // There is always something to do with an idle session: say the next thing.
+    answerable: true,
+    preview: scrape.lines.slice(-PREVIEW_ROWS),
+    createdAt: scrape.idleSince,
+    answeredAt: null,
+    answer: null,
+    deliveredVia: null,
+    dismissedReason: null,
+    pendingPath: 'prompt',
+    sessionAlive: true,
+    // What the bench may offer beyond a prompt. Computed here because the panel has
+    // no way to know either: it sees this window's tabs, not the server's sessions.
+    canClose: true,
+    canMerge: !!entry.worktree,
+    inFlight: false,
+  };
+}
+
+function derivedItems(now, { idleAfterMs = IDLE_AFTER_DEFAULT_MS } = {}) {
   const out = [];
   const live = new Set();
 
@@ -460,7 +599,11 @@ function derivedItems(now) {
     if (!entry.terminalScreen) continue;
 
     const scrape = scrapeFor(id, entry, now);
-    if (!scrape.detected) continue;
+    if (!scrape.detected) {
+      const row = idleRowFor(id, entry, scrape, now, idleAfterMs);
+      if (row) out.push(row);
+      continue;
+    }
 
     // Dismissed, and still the same question — stay quiet. A different fingerprint
     // means the tab moved on, so the mute expires with the dialog that earned it.
@@ -506,6 +649,8 @@ function derivedItems(now) {
       dismissedReason: null,
       pendingPath: 'dialog',
       sessionAlive: true,
+      canClose: true,
+      canMerge: !!entry.worktree,
       inFlight: inFlightChoices.has(id),
     });
   }
@@ -520,6 +665,12 @@ function derivedItems(now) {
   for (const id of [...mutedDialogs.keys()]) {
     const scrape = scrapeCache.get(id);
     if (!live.has(id) || !scrape || !scrape.detected) mutedDialogs.delete(id);
+  }
+  // The same sweep for snoozes. Only the dead-session half — the "moved on" half is
+  // idleRowFor's, because it needs the row's own idleSince to compare against and a
+  // snoozed session is one we deliberately did not build a row for.
+  for (const id of [...snoozedSessions.keys()]) {
+    if (!live.has(id)) snoozedSessions.delete(id);
   }
   return out;
 }
@@ -1121,7 +1272,7 @@ function registerRoutes(app, context) {
     const includeClosed = req.query.all === '1';
     const items = inbox.sortForInbox([
       ...stored.filter((i) => includeClosed || i.status === 'open').map(serializeStored),
-      ...derivedItems(now),
+      ...derivedItems(now, { idleAfterMs: idleAfterFrom(req.query) }),
     ]);
     res.json({ items, generatedAt: now });
   });
@@ -1130,12 +1281,16 @@ function registerRoutes(app, context) {
     const body = req.body || {};
     const blockedSession = inbox.parseBlockedId(req.params.id);
     if (blockedSession) return answerBlocked(res, blockedSession, body);
+    const idleSession = inbox.parseIdleId(req.params.id);
+    if (idleSession) return answerIdle(res, idleSession, body);
     return answerStored(res, req.params.id, body);
   });
 
   app.post('/api/workshop/items/:id/dismiss', (req, res) => {
     const blockedSession = inbox.parseBlockedId(req.params.id);
     if (blockedSession) return dismissBlocked(res, blockedSession, req.body || {});
+    const idleSession = inbox.parseIdleId(req.params.id);
+    if (idleSession) return snoozeIdle(res, idleSession, req.body || {});
     const item = inbox.byId(req.params.id);
     if (!item) return res.status(404).json({ error: 'not-found' });
     const wasOpenResult = item.kind === 'result' && item.status === 'open';
@@ -1152,6 +1307,59 @@ function registerRoutes(app, context) {
     ctx.log(`[workshop] dismiss ${item.id} reason=${item.dismissedReason}`
       + (wasOpenResult ? ' unparked=yes' : ''));
     res.json({ item: serializeStored(item) });
+  });
+
+  // ── managing the session itself (#682) ──
+  //
+  // A bench you can only answer FROM is still a place you leave to do the work. These
+  // two are the verbs an idle row actually needs: the session is finished, so either
+  // its work goes home or the tab does.
+  //
+  // Both are addressed by SESSION id, not item id. A row is a view of a session and is
+  // rebuilt every poll; "close the session behind the row I am looking at" is the
+  // durable statement, and it is still true if the row has moved.
+
+  app.post('/api/workshop/sessions/:id/close', (req, res) => {
+    const id = req.params.id;
+    if (!ctx.shells.has(id)) return res.status(404).json({ error: 'no-session' });
+    // ctx.closeSession is server.js's own, which writes a `closed: true` tombstone
+    // rather than deleting the record — the same path the tab's own close button
+    // takes. Workshop must never grow a second, tombstone-free way to end a session.
+    if (!ctx.closeSession(id)) return res.status(409).json({ error: 'close-failed' });
+    snoozedSessions.delete(id);
+    scrapeCache.delete(id);
+    ctx.log(`[workshop] close session=${id} from=bench`);
+    res.json({ ok: true, sessionId: id });
+  });
+
+  app.post('/api/workshop/sessions/:id/merge', (req, res) => {
+    const id = req.params.id;
+    const entry = ctx.shells.get(id);
+    if (!entry) return res.status(404).json({ error: 'no-session' });
+    // Offered only on a worktree row, and re-checked here: the panel's copy of the
+    // session is up to a poll old, and merging "into whatever the main checkout has
+    // checked out" from a session that is ALREADY the main checkout is a merge of a
+    // branch into itself at best and a surprise at worst.
+    if (!entry.worktree) return res.status(400).json({ error: 'not-a-worktree' });
+
+    let cwd = '';
+    let repoRoot = '';
+    try { ({ cwd, repoRoot } = ctx.sessionPaths(entry)); } catch { /* reported below */ }
+    if (!cwd || !repoRoot) return res.status(400).json({ error: 'no-repo' });
+
+    const target = typeof req.body?.target === 'string' && req.body.target.trim()
+      ? req.body.target.trim()
+      : undefined;
+    const result = mergeWorktree({ git: runGit, worktreeCwd: cwd, repoRoot, target });
+    ctx.log(`[workshop] merge session=${id} ${result.branch || '?'} -> ${result.target || '?'}`
+      + ` = ${result.status}`);
+    // No auto-close on success, unlike the merge_worktree MCP tool. That one arms one
+    // because the AGENT has to be told to stop and reliably isn't; here a human is
+    // looking at the row, with Close one key away. Closing a session somebody did not
+    // ask to close is not a thing to do on their behalf.
+    // Every status other than `merged` left the target checkout untouched, and the
+    // panel says which one it was. Not a 500: "the target is dirty" is an answer.
+    res.json(result);
   });
 
   // ── backlog (#671) ──
@@ -1316,7 +1524,9 @@ function registerRoutes(app, context) {
 
   app.get('/api/workshop/items/:id/screen', async (req, res) => {
     const stored = inbox.byId(req.params.id);
-    const sessionId = inbox.parseBlockedId(req.params.id) || (stored && stored.sessionId);
+    const sessionId = inbox.parseBlockedId(req.params.id)
+      || inbox.parseIdleId(req.params.id)
+      || (stored && stored.sessionId);
     if (!sessionId) return res.status(404).json({ error: 'not-found' });
     const entry = ctx.shells.get(sessionId);
     if (!entry) return res.status(404).json({ error: 'session-gone' });
@@ -1471,6 +1681,98 @@ function dismissBlocked(res, sessionId, body) {
   mutedDialogs.set(sessionId, scrape.questionFp);
   ctx.log(`[workshop] mute blocked:${sessionId} fp=${scrape.questionFp}`);
   res.json({ ok: true, muted: true, sessionId, fingerprint: scrape.questionFp });
+}
+
+// ── path 4: an idle session (#682) ───────────────────────────────────────────
+
+/**
+ * How long a session must have been idle, from the panel's own setting.
+ *
+ * Clamped rather than validated: a missing, absurd or hostile value becomes a usable
+ * number instead of a 400, because this is a listing route the panel polls every two
+ * seconds and there is nothing a failed poll can tell the human that a sane default
+ * cannot. 0 survives the clamp on purpose — see IDLE_AFTER_DEFAULT_MS.
+ */
+function idleAfterFrom(query) {
+  const raw = Number(query && query.idleAfter);
+  if (!Number.isFinite(raw) || raw < 0) return IDLE_AFTER_DEFAULT_MS;
+  return Math.min(Math.round(raw * 1000), IDLE_AFTER_MAX_MS);
+}
+
+/**
+ * Answering an idle row means saying the next thing — there is no dialog to drive and
+ * no stored item to stamp, so this is the ONE answer path that is purely a delivery.
+ *
+ * deliverPromptWhenReady, never a raw engine.write: it is the per-shell FIFO that
+ * sequences this behind anything already queued, and it owns the echo-gated submit
+ * that makes Ink see the Enter as its own stdin read. Writing the text here directly
+ * would be the #656 truncation again, from a new caller.
+ */
+function answerIdle(res, sessionId, body) {
+  const entry = ctx.shells.get(sessionId);
+  if (!entry) return res.status(404).json({ error: 'session-gone' });
+
+  const text = typeof body.text === 'string' ? body.text.trim() : '';
+  if (!text) {
+    return res.status(400).json({
+      error: 'empty',
+      hint: 'An idle session needs something to do — type the next instruction.',
+    });
+  }
+
+  ctx.deliverPromptWhenReady(sessionId, text, { source: 'workshop-bench' });
+  // The row is about to stop being true, and the panel should not have to wait a poll
+  // to find that out: a delivered prompt makes the session busy, which is the one
+  // state idleRowFor refuses. Dropping the snooze keeps a stale one from suppressing
+  // the NEXT wait, which is the one this prompt is about to create.
+  snoozedSessions.delete(sessionId);
+  ctx.log(`[workshop] prompt session=${sessionId} len=${text.length} from=bench`);
+  res.json({ ok: true, sessionId, deliveredVia: 'prompt' });
+}
+
+/**
+ * Snooze an idle row. The counterpart of dismissBlocked, and the same bargain: the
+ * row goes away while the thing it was about is unchanged, and comes back by itself
+ * when it isn't.
+ */
+function snoozeIdle(res, sessionId, body) {
+  const entry = ctx.shells.get(sessionId);
+  if (!entry) return res.status(404).json({ error: 'session-gone' });
+
+  const now = Date.now();
+  const scrape = scrapeFor(sessionId, entry, now);
+  if (body.expect && body.expect !== scrape.screenFp) {
+    return res.status(409).json({
+      error: 'session-moved-on',
+      hint: 'That session has done something since — the row will redraw with what it says now.',
+    });
+  }
+
+  const mins = Number(body.minutes);
+  const forMs = Number.isFinite(mins) && mins > 0
+    ? Math.min(Math.round(mins * 60_000), IDLE_AFTER_MAX_MS)
+    : SNOOZE_DEFAULT_MS;
+  const until = now + forMs;
+  snoozedSessions.set(sessionId, { until, screenFp: scrape.screenFp });
+  ctx.log(`[workshop] snooze idle:${sessionId} for=${Math.round(forMs / 1000)}s`);
+  res.json({ ok: true, snoozed: true, sessionId, until });
+}
+
+/**
+ * git for the merge route. A copy of mods/deepsteve-core/tools.js's, deliberately:
+ * execFileSync on a bare argv with no shell, no `zsh -l` (git is /usr/bin/git and the
+ * bare CI unit runner has no zsh at all), and it never throws — a failed merge is a
+ * value here, not an exception, because reporting which way it failed is the job.
+ */
+function runGit(args, cwd) {
+  try {
+    const stdout = execFileSync('git', args, {
+      cwd, encoding: 'utf8', timeout: 120000, stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    return { ok: true, stdout: stdout || '', stderr: '' };
+  } catch (e) {
+    return { ok: false, stdout: e.stdout || '', stderr: e.stderr || e.message || '' };
+  }
 }
 
 module.exports = { init, registerRoutes };

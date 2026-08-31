@@ -174,8 +174,18 @@ function makeCtx(shells) {
     shells,
     log: () => {},
     sessionPaths: (e) => ({ cwd: e.cwd, repoRoot: e.cwd, worktree: e.worktree }),
-    sessionInputState: () => 'idle',
+    // Per-entry since #682, because the idle row's membership gate reads it: a plain
+    // shell has no screenMarkers and classifies 'unknown', which is the ONLY thing
+    // keeping a bash prompt — idle by nature, forever — off the bench. A ctx that
+    // always says 'idle' would let that regress without a red test.
+    sessionInputState: (e) => (e && e.inputState) || 'idle',
     getDefaultEngine: () => null,
+    closeSession: (id) => {
+      if (!shells.has(id)) return false;
+      ctxClosed.push(id);
+      shells.delete(id);
+      return true;
+    },
     deliverPromptWhenReady: (id, prompt, opts) => {
       ctxDeliveries.push({ id, prompt, opts });
     },
@@ -196,11 +206,13 @@ function makeCtx(shells) {
 
 let ctxDeliveries = [];
 let ctxSaveStates = 0;
+let ctxClosed = [];
 
 /** Fresh world per test: new shells map, new app, and the tool handlers rebound. */
 function world() {
   ctxDeliveries = [];
   ctxSaveStates = 0;
+  ctxClosed = [];
   const shells = new Map();
   const ctx = makeCtx(shells);
   const app = new FakeApp();
@@ -253,23 +265,247 @@ test('a session on a permission dialog appears with its question and options', a
   assert.strictEqual(row.projectName, 'deepsteve');
 });
 
-test('an idle session at its composer is NOT in the inbox', async () => {
-  // The membership rule that matters: waitingForInput is true here too, because
-  // sessionInputState calls an empty composer "idle" exactly like a dialog.
+// ── derived idle items (#682) ────────────────────────────────────────────────
+//
+// Workshop's actionable population used to be gated entirely on detectDialog, and the
+// test that stood here asserted the consequence: an agent that finished its turn was
+// not an inbox row. That was the arithmetic that made the panel informational — on a
+// machine with nothing showing a dialog, which is the normal case, the bench was empty
+// and the page was the issue list below it.
+//
+// So the gate is now two gates, and everything below is about the second one being
+// tight enough to be worth having. `idleAfter=0` throughout: the grace window is real
+// but it is a clock, and a unit test that waits on a clock is a flaky test.
+
+/** A session sitting at its own composer, with `said` as the last thing it printed. */
+function idleEntry(id, said = 'Done — the migration is applied.', over = {}) {
+  const entry = makeEntry(id, null, over);
+  const render = () => ['⏺ ' + said, '─'.repeat(60), '❯', '─'.repeat(60), '? for shortcuts'];
+  entry.terminalScreen = { linesSync: (n) => render().slice(-n), lines: async (n) => render().slice(-n) };
+  return entry;
+}
+
+const NOW_IDLE = { query: { idleAfter: '0' } };
+
+test('a session that finished its turn is on the bench, headlined with what it said', async () => {
   const { shells, app } = world();
   const id = sid();
-  const entry = makeEntry(id, null);
-  entry.terminalScreen = {
-    linesSync: () => ['⏺ Done.', '─'.repeat(60), '❯', '─'.repeat(60), '? for shortcuts'],
-    lines: async () => entry.terminalScreen.linesSync(),
-  };
-  shells.set(id, entry);
+  shells.set(id, idleEntry(id));
 
-  const { body } = await app.call('GET', '/api/workshop/inbox');
+  const { body } = await app.call('GET', '/api/workshop/inbox', NOW_IDLE);
+  const row = body.items.find((i) => i.id === 'idle:' + id);
+  assert.ok(row, 'an agent waiting on you is the state Workshop exists to show');
+  assert.strictEqual(row.kind, 'idle');
+  assert.strictEqual(
+    row.urgency, 'normal',
+    'not blocking: a finished session must never outrank an agent stuck on a dialog',
+  );
+  assert.strictEqual(
+    row.headline, 'Done — the migration is applied.',
+    'a bench of rows all saying "Waiting for you" is a list of session names, which is '
+    + 'the informational surface this replaced',
+  );
+  assert.strictEqual(row.answerable, true);
+  assert.strictEqual(row.pendingPath, 'prompt');
+  assert.strictEqual(row.canClose, true);
+  assert.strictEqual(row.canMerge, false, 'nothing to merge outside a worktree');
+  assert.strictEqual(row.sessionName, 'fix-660');
+  assert.strictEqual(row.projectName, 'deepsteve');
+});
+
+test('a worktree session offers the merge its row is for', async () => {
+  const { shells, app } = world();
+  const id = sid();
+  shells.set(id, idleEntry(id, 'Committed. Ready to merge.', { worktree: 'github-issue-682' }));
+
+  const { body } = await app.call('GET', '/api/workshop/inbox', NOW_IDLE);
+  const row = body.items.find((i) => i.id === 'idle:' + id);
+  assert.strictEqual(row.canMerge, true);
+  assert.strictEqual(row.worktree, 'github-issue-682');
+});
+
+test('an idle row waits out the grace window before it appears', async () => {
+  // The between-turns case. Without this the bench flickers a row for every session
+  // that pauses to think, which is the fastest way to teach someone to ignore it.
+  const { shells, app } = world();
+  const id = sid();
+  shells.set(id, idleEntry(id));
+
+  const early = await app.call('GET', '/api/workshop/inbox', { query: { idleAfter: '900' } });
+  assert.deepStrictEqual(early.body.items, []);
+
+  const now = await app.call('GET', '/api/workshop/inbox', NOW_IDLE);
+  assert.strictEqual(now.body.items.length, 1, 'the same session, past its grace window');
+});
+
+test('a plain shell at a bash prompt is never on the bench', async () => {
+  // Idle by nature, forever. sessionInputState says 'unknown' for an agent type with
+  // no screenMarkers, and that is the whole guard — without it the bench fills with
+  // terminals nobody is waiting on and stops meaning anything.
+  const { shells, app } = world();
+  const id = sid();
+  shells.set(id, idleEntry(id, 'ready', { agentType: 'terminal', inputState: 'unknown' }));
+
+  const { body } = await app.call('GET', '/api/workshop/inbox', NOW_IDLE);
+  assert.deepStrictEqual(body.items, []);
+});
+
+test('a session with a prompt already on its way is not waiting on you', async () => {
+  const { shells, app } = world();
+  const queued = sid();
+  shells.set(queued, idleEntry(queued, 'ok', { promptQueue: [{ prompt: 'next' }] }));
+  const inflight = sid();
+  shells.set(inflight, idleEntry(inflight, 'ok', { pendingDelivery: { len: 4 } }));
+
+  const { body } = await app.call('GET', '/api/workshop/inbox', NOW_IDLE);
   assert.deepStrictEqual(
     body.items, [],
-    'without a positive dialog gate every agent that finished its turn is an inbox row',
+    'a queued prompt is an answer that has already been given — showing it as an '
+    + 'outstanding one is how a bench accumulates rows nobody needs to act on',
   );
+});
+
+test('a session showing a dialog is blocked, not idle — never both', async () => {
+  const { shells, app } = world();
+  const id = sid();
+  shells.set(id, makeEntry(id, new FakeDialog(['Yes', 'No'])));
+
+  const { body } = await app.call('GET', '/api/workshop/inbox', NOW_IDLE);
+  assert.deepStrictEqual(body.items.map((i) => i.id), ['blocked:' + id]);
+});
+
+test('answering an idle row delivers a prompt through the FIFO, never a raw write', async () => {
+  const { shells, app } = world();
+  const id = sid();
+  shells.set(id, idleEntry(id));
+
+  const { status, body } = await app.call('POST', '/api/workshop/items/:id/answer', {
+    params: { id: 'idle:' + id }, body: { text: '  now run the tests  ' },
+  });
+  assert.strictEqual(status, 200);
+  assert.strictEqual(body.deliveredVia, 'prompt');
+  assert.deepStrictEqual(
+    ctxDeliveries.map((d) => [d.id, d.prompt]), [[id, 'now run the tests']],
+    'deliverPromptWhenReady owns the per-shell FIFO and the echo-gated submit; a raw '
+    + 'engine.write here is the #656 truncation from a new caller',
+  );
+});
+
+test('an empty prompt is refused rather than delivered as a bare Enter', async () => {
+  const { shells, app } = world();
+  const id = sid();
+  shells.set(id, idleEntry(id));
+
+  const { status, body } = await app.call('POST', '/api/workshop/items/:id/answer', {
+    params: { id: 'idle:' + id }, body: { text: '   ' },
+  });
+  assert.strictEqual(status, 400);
+  assert.strictEqual(body.error, 'empty');
+  assert.deepStrictEqual(ctxDeliveries, []);
+});
+
+test('snoozing an idle row hides it, and the session moving on brings it back', async () => {
+  const { shells, app } = world();
+  const id = sid();
+  const entry = idleEntry(id, 'first thing');
+  shells.set(id, entry);
+
+  const before = await app.call('GET', '/api/workshop/inbox', NOW_IDLE);
+  const fp = before.body.items[0].fingerprint;
+
+  const snooze = await app.call('POST', '/api/workshop/items/:id/dismiss', {
+    params: { id: 'idle:' + id }, body: { expect: fp },
+  });
+  assert.strictEqual(snooze.status, 200);
+  assert.strictEqual(snooze.body.snoozed, true);
+
+  const quiet = await app.call('GET', '/api/workshop/inbox', NOW_IDLE);
+  assert.deepStrictEqual(quiet.body.items, [], 'snoozed');
+
+  // The session says something else. That is a NEW wait, and a snooze is only ever a
+  // promise about the one you looked at.
+  const render = () => ['⏺ second thing', '─'.repeat(60), '❯', '─'.repeat(60), '? for shortcuts'];
+  entry.terminalScreen = { linesSync: (n) => render().slice(-n), lines: async (n) => render().slice(-n) };
+  entry.outputSeq++;
+
+  const back = await app.call('GET', '/api/workshop/inbox', NOW_IDLE);
+  assert.strictEqual(back.body.items.length, 1);
+  assert.strictEqual(back.body.items[0].headline, 'second thing');
+});
+
+test('a snooze aimed at a wait that has already moved on is refused', async () => {
+  const { shells, app } = world();
+  const id = sid();
+  shells.set(id, idleEntry(id));
+  await app.call('GET', '/api/workshop/inbox', NOW_IDLE);
+
+  const { status, body } = await app.call('POST', '/api/workshop/items/:id/dismiss', {
+    params: { id: 'idle:' + id }, body: { expect: 'a fingerprint from some other screen' },
+  });
+  assert.strictEqual(status, 409);
+  assert.strictEqual(body.error, 'session-moved-on');
+});
+
+test('the idle clock survives a repaint that changed nothing', async () => {
+  // outputSeq bumps on a resize or a status-line tick. Resetting the wait clock there
+  // would make an agent that has been waiting forty minutes report forty seconds — and
+  // with a grace window in play, would keep the row from ever appearing at all.
+  const { shells, app } = world();
+  const id = sid();
+  const entry = idleEntry(id);
+  shells.set(id, entry);
+
+  const first = await app.call('GET', '/api/workshop/inbox', NOW_IDLE);
+  const createdAt = first.body.items[0].createdAt;
+
+  entry.outputSeq++;   // same screen, new sequence number
+  const again = await app.call('GET', '/api/workshop/inbox', NOW_IDLE);
+  assert.strictEqual(again.body.items[0].createdAt, createdAt);
+});
+
+test('closing a session from the bench goes through the host, and the row goes with it', async () => {
+  const { shells, app } = world();
+  const id = sid();
+  shells.set(id, idleEntry(id));
+
+  const { status, body } = await app.call('POST', '/api/workshop/sessions/:id/close', {
+    params: { id },
+  });
+  assert.strictEqual(status, 200);
+  assert.strictEqual(body.ok, true);
+  assert.deepStrictEqual(
+    ctxClosed, [id],
+    'ctx.closeSession is the host path that writes a closed:true tombstone — Workshop '
+    + 'must never grow a second way to end a session',
+  );
+
+  const after = await app.call('GET', '/api/workshop/inbox', NOW_IDLE);
+  assert.deepStrictEqual(after.body.items, []);
+});
+
+test('closing a session that is already gone is a 404, not a crash', async () => {
+  const { app } = world();
+  const { status, body } = await app.call('POST', '/api/workshop/sessions/:id/close', {
+    params: { id: 'never-existed' },
+  });
+  assert.strictEqual(status, 404);
+  assert.strictEqual(body.error, 'no-session');
+  assert.deepStrictEqual(ctxClosed, []);
+});
+
+test('merge refuses a session that is not in a worktree', async () => {
+  // Re-checked server-side even though the panel only offers the button on a worktree
+  // row: the panel's copy of the session is up to a poll old, and "merge into whatever
+  // the main checkout has checked out" from the main checkout is a surprise at best.
+  const { shells, app } = world();
+  const id = sid();
+  shells.set(id, idleEntry(id));
+
+  const { status, body } = await app.call('POST', '/api/workshop/sessions/:id/merge', {
+    params: { id },
+  });
+  assert.strictEqual(status, 400);
+  assert.strictEqual(body.error, 'not-a-worktree');
 });
 
 test('sessions with no emulator, killed, or tmux-attach are skipped', async () => {

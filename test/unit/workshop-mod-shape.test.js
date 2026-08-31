@@ -46,6 +46,9 @@ const jsx = read('workshop.jsx');
 const UNRENDERED_SETTINGS = new Set([
   'blockingOnly', 'seenAutoCycleNote', 'issueLabel', 'backlogCollapsed',
   'chatOpen', 'chatWidth',
+  // Which tab is showing (#682). A settings-modal control for "which tab am I looking
+  // at" would be a second, slower way to press the tab that is already on screen.
+  'tab',
 ]);
 
 test('the manifest passes the release-time validator', () => {

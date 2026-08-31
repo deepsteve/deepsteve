@@ -132,22 +132,30 @@ test('order matches the rendered list exactly, grouped or not', async () => {
 
 // ── the Backlog section (#671) ───────────────────────────────────────────────
 //
-// The Backlog renders BELOW the inbox in the same scrolling column, and one cursor walks
-// both. That is why it comes through visibleItems rather than keeping an order of its
-// own: two sections computing two orders is the bug the test above describes, with one
-// more place to make it.
+// The Backlog renders BELOW the briefings in the same scrolling column, and one cursor
+// walks both. That is why it comes through visibleItems rather than keeping an order of
+// its own: two sections computing two orders is the bug the test above describes, with
+// one more place to make it.
+//
+// Since #682 that column is a TAB — `tab: 'backlog'` — and the two sections under it are
+// the reading material: agent briefings, then the project's open issues. Every test
+// below used to pass `backlog` with no tab and compose it against questions, which was
+// the arrangement that made Workshop read as informational. The composition being
+// checked is unchanged; what it composes against moved.
 
 const issueRow = (n) => ({ id: `issue:${n}`, kind: 'issue', number: n, title: `issue ${n}` });
+const brief = (over = {}) => item({ kind: 'briefing', urgency: 'fyi', ...over });
+const READING = { tab: 'backlog' };
 
-test('backlog ids come after inbox ids, in one order', async () => {
+test('backlog ids come after briefing ids, in one order', async () => {
   const { visibleItems } = await load();
-  const v = visibleItems([item({ id: 'w1' }), item({ id: 'w2' })], {
-    backlog: [issueRow(671), issueRow(664)],
+  const v = visibleItems([brief({ id: 'w1' }), brief({ id: 'w2' })], {
+    ...READING, backlog: [issueRow(671), issueRow(664)],
   });
   assert.deepStrictEqual(v.order, ['w1', 'w2', 'issue:671', 'issue:664']);
   assert.deepStrictEqual(
     v.order, [...v.list.map((i) => i.id), ...v.backlog.map((i) => i.id)],
-    'render order is inbox-then-backlog, and `order` must be exactly that concatenation',
+    'render order is briefings-then-backlog, and `order` must be exactly that concatenation',
   );
 });
 
@@ -155,63 +163,116 @@ test('backlog order is preserved, never re-sorted here', async () => {
   // backlog-view.js owns that order (freshest first, number as the total-order
   // tiebreak). Re-sorting it here would make two modules disagree about the same list.
   const { visibleItems } = await load();
-  const v = visibleItems([], { backlog: [issueRow(3), issueRow(99), issueRow(1)] });
+  const v = visibleItems([], { ...READING, backlog: [issueRow(3), issueRow(99), issueRow(1)] });
   assert.deepStrictEqual(v.order, ['issue:3', 'issue:99', 'issue:1']);
 });
 
 test('a collapsed backlog is absent from both the order and the rows', async () => {
   const { visibleItems } = await load();
-  const v = visibleItems([item({ id: 'w1' })], {
-    backlog: [issueRow(671)], backlogCollapsed: true,
+  const v = visibleItems([brief({ id: 'w1' })], {
+    ...READING, backlog: [issueRow(671)], backlogCollapsed: true,
   });
   assert.deepStrictEqual(v.order, ['w1']);
   assert.deepStrictEqual(v.backlog, []);
 });
 
-test('grouping the inbox does not disturb the backlog tail', async () => {
+test('grouping does not disturb the backlog tail', async () => {
   const { visibleItems } = await load();
   const v = visibleItems([
-    item({ id: 'w1', project: '/repo/a', projectName: 'a' }),
-    item({ id: 'w2', project: '/repo/b', projectName: 'b', urgency: 'blocking' }),
-  ], { groupByProject: true, backlog: [issueRow(671)] });
+    brief({ id: 'w1', project: '/repo/a', projectName: 'a' }),
+    brief({ id: 'w2', project: '/repo/b', projectName: 'b' }),
+  ], { ...READING, groupByProject: true, backlog: [issueRow(671)] });
   assert.strictEqual(v.order[v.order.length - 1], 'issue:671');
   assert.strictEqual(v.order.length, 3);
 });
 
-test('an omitted backlog leaves the inbox exactly as it was', async () => {
+test('an omitted backlog leaves the list exactly as it was', async () => {
   const { visibleItems } = await load();
-  const v = visibleItems([item({ id: 'w1' })], {});
+  const v = visibleItems([brief({ id: 'w1' })], READING);
   assert.deepStrictEqual(v.order, ['w1']);
   assert.deepStrictEqual(v.backlog, []);
 });
 
 test('junk in the backlog does not corrupt the order', async () => {
   const { visibleItems } = await load();
-  const v = visibleItems([item({ id: 'w1' })], { backlog: [null, issueRow(5), undefined] });
+  const v = visibleItems([brief({ id: 'w1' })], {
+    ...READING, backlog: [null, issueRow(5), undefined],
+  });
   assert.deepStrictEqual(v.order, ['w1', 'issue:5']);
-  const v2 = visibleItems([item({ id: 'w1' })], { backlog: 'not an array' });
+  const v2 = visibleItems([brief({ id: 'w1' })], { ...READING, backlog: 'not an array' });
   assert.deepStrictEqual(v2.order, ['w1']);
 });
 
 test('collapsing the backlog moves the cursor out of it, not to nothing', async () => {
   // The composition that matters: nextSelection sees an id that has vanished from the
-  // order and falls back to the same INDEX, which lands on the last inbox row. A null
-  // here would blank the reading pane every time you collapsed the section.
+  // order and falls back to the same INDEX, which lands on the last briefing row. A
+  // null here would blank the reading pane every time you collapsed the section.
   const { visibleItems, nextSelection } = await load();
-  const open = visibleItems([item({ id: 'w1' }), item({ id: 'w2' })], { backlog: [issueRow(671)] });
-  const shut = visibleItems([item({ id: 'w1' }), item({ id: 'w2' })], {
-    backlog: [issueRow(671)], backlogCollapsed: true,
+  const items = [brief({ id: 'w1' }), brief({ id: 'w2' })];
+  const open = visibleItems(items, { ...READING, backlog: [issueRow(671)] });
+  const shut = visibleItems(items, {
+    ...READING, backlog: [issueRow(671)], backlogCollapsed: true,
   });
   assert.strictEqual(nextSelection('issue:671', open.order, shut.order), 'w2');
 });
 
-test('an empty inbox with a full backlog selects the first issue', async () => {
-  // A deliberate change to the old empty state: with nothing waiting on you, the thing
-  // worth looking at is the top of the backlog — which is the "sat down to start new
-  // work" case the feature exists for.
+test('an empty reading tab with a full backlog selects the first issue', async () => {
+  // A deliberate change to the old empty state: with nothing to read, the thing worth
+  // looking at is the top of the backlog — which is the "sat down to start new work"
+  // case the feature exists for.
   const { visibleItems, nextSelection } = await load();
-  const v = visibleItems([], { backlog: [issueRow(671), issueRow(664)] });
+  const v = visibleItems([], { ...READING, backlog: [issueRow(671), issueRow(664)] });
   assert.strictEqual(nextSelection(null, [], v.order), 'issue:671');
+});
+
+// ── the tab split itself (#682) ──────────────────────────────────────────────
+
+test('the bench carries obligations and the backlog tab carries reading material', async () => {
+  const { visibleItems } = await load();
+  const items = [
+    item({ id: 'w1', kind: 'blocked', urgency: 'blocking' }),
+    item({ id: 'w2', kind: 'idle' }),
+    item({ id: 'w3', kind: 'question' }),
+    item({ id: 'w4', kind: 'result' }),
+    brief({ id: 'w5' }),
+  ];
+  const bench = visibleItems(items, { backlog: [issueRow(671)] });
+  assert.deepStrictEqual(
+    bench.list.map((i) => i.id).sort(), ['w1', 'w2', 'w3', 'w4'],
+    'a briefing has nothing to answer and must not sit among the rows that do',
+  );
+  assert.deepStrictEqual(
+    bench.backlog, [],
+    'the whole point of the split: an issue list must never be what the bench shows '
+    + 'when nothing is waiting on you',
+  );
+  assert.deepStrictEqual(bench.order, ['w1', 'w2', 'w3', 'w4']);
+
+  const reading = visibleItems(items, { ...READING, backlog: [issueRow(671)] });
+  assert.deepStrictEqual(reading.list.map((i) => i.id), ['w5']);
+  assert.deepStrictEqual(reading.order, ['w5', 'issue:671']);
+});
+
+test('blockingOnly filters the bench and never the reading tab', async () => {
+  // A briefing is 'fyi' by construction, so applying the bench's urgency filter to the
+  // reading tab would empty it and read as "the backlog is broken".
+  const { visibleItems } = await load();
+  const items = [item({ id: 'w1', kind: 'blocked', urgency: 'blocking' }), brief({ id: 'w2' })];
+  assert.deepStrictEqual(
+    visibleItems(items, { blockingOnly: true }).list.map((i) => i.id), ['w1'],
+  );
+  assert.deepStrictEqual(
+    visibleItems(items, { ...READING, blockingOnly: true }).list.map((i) => i.id), ['w2'],
+  );
+});
+
+test('an idle row belongs to the bench', async () => {
+  const { tabOf } = await load();
+  assert.strictEqual(tabOf({ kind: 'idle' }), 'bench');
+  assert.strictEqual(tabOf({ kind: 'blocked' }), 'bench');
+  assert.strictEqual(tabOf({ kind: 'result' }), 'bench');
+  assert.strictEqual(tabOf({ kind: 'briefing' }), 'backlog');
+  assert.strictEqual(tabOf(null), 'bench', 'an unknown row is an obligation until proven otherwise');
 });
 
 test('an issue row cannot be answered, archived or option-picked', async () => {
@@ -250,14 +311,21 @@ test('the inbox keys are unchanged by the new flag defaulting to false', async (
 });
 
 test('showBriefings:false drops briefings and only briefings', async () => {
+  // Since #682 a briefing is only ever on the reading tab, so that is where the toggle
+  // has to be observed. The bench is unaffected either way — which is the assertion
+  // that matters, because a setting that could empty the bench would be a way to hide
+  // an agent that is waiting on you.
   const { visibleItems } = await load();
   const list = [
     item({ id: 'w1', kind: 'briefing', urgency: 'fyi' }),
     item({ id: 'w2', kind: 'question' }),
     item({ id: 'w3', kind: 'blocked', urgency: 'blocking' }),
   ];
-  assert.deepStrictEqual(visibleItems(list, { showBriefings: false }).order, ['w3', 'w2']);
-  assert.deepStrictEqual(visibleItems(list, { showBriefings: true }).order, ['w3', 'w2', 'w1']);
+  assert.deepStrictEqual(visibleItems(list, { ...READING, showBriefings: false }).order, []);
+  assert.deepStrictEqual(visibleItems(list, { ...READING, showBriefings: true }).order, ['w1']);
+  for (const showBriefings of [true, false]) {
+    assert.deepStrictEqual(visibleItems(list, { showBriefings }).order, ['w3', 'w2']);
+  }
 });
 
 test('blockingOnly filters on urgency, not kind', async () => {
@@ -391,8 +459,21 @@ test('digits stage an option, and only one that exists', async () => {
 
 test('shifted letters and unknown keys do nothing', async () => {
   const { keyAction } = await load();
-  for (const k of ['E', 'O', 'R', 'J', 'K', 'x', 'F1', 'Tab', ' ', '']) {
+  for (const k of ['E', 'O', 'R', 'J', 'K', 'X', 'M', 'q', 'z', 'F1', 'Tab', ' ', '']) {
     assert.strictEqual(keyAction(k, { optionCount: 3 }), null, `key ${JSON.stringify(k)}`);
+  }
+});
+
+test('the two session verbs are bound, repeat-blocked, and dead on an issue (#682)', async () => {
+  // Repeat is the one that matters: holding a key must not close five sessions. Both
+  // are also gated behind a confirm in the panel — these are the only keys in Workshop
+  // whose effect a second press cannot undo.
+  const { keyAction } = await load();
+  assert.deepStrictEqual(keyAction('x', {}), { type: 'closeSession' });
+  assert.deepStrictEqual(keyAction('m', {}), { type: 'mergeWorktree' });
+  for (const k of ['x', 'm']) {
+    assert.strictEqual(keyAction(k, { repeat: true }), null, `held ${k} must not repeat`);
+    assert.strictEqual(keyAction(k, { issue: true }), null, `${k} on a GitHub issue row`);
   }
 });
 
@@ -564,13 +645,16 @@ test('a result still sorts and filters like every other stored item', async () =
     { id: 'b1', kind: 'blocked', urgency: 'blocking', createdAt: 20 },
   ];
   assert.deepStrictEqual(
-    view.visibleItems(items, {}).order, ['b1', 'w1', 'w2'],
+    view.sortItems(items).map((i) => i.id), ['b1', 'w1', 'w2'],
     'urgency first: a result is normal, so it sits under a blocked agent and above a briefing',
   );
-  assert.deepStrictEqual(
-    view.visibleItems(items, { showBriefings: false }).order, ['b1', 'w1'],
-    'hiding briefings must not hide results — they are the opposite of a note you can skip',
-  );
+  for (const showBriefings of [true, false]) {
+    assert.deepStrictEqual(
+      view.visibleItems(items, { showBriefings }).order, ['b1', 'w1'],
+      'a result is an obligation, so it is on the bench and the briefing toggle — which '
+      + 'only ever reaches the reading tab — cannot touch it',
+    );
+  }
   assert.deepStrictEqual(
     view.visibleItems(items, { blockingOnly: true }).order, ['b1'],
   );
@@ -613,4 +697,25 @@ test('itemBody is scoped to results — it never edits another kind\'s context',
   }
   assert.strictEqual(view.itemBody(null), '');
   assert.strictEqual(view.itemBody({ kind: 'result' }), '');
+});
+
+test('an idle row is not measured against a blocked row’s clock (#682)', async () => {
+  // The bug this pins: on the shared scale a session that finished ninety seconds ago
+  // was already alarm-red, so every row on the bench went red within a minute and the
+  // colour stopped carrying information.
+  const { ageColor } = await load();
+  const twoMinutes = 120_000;
+  assert.notStrictEqual(
+    ageColor(twoMinutes, 'normal', 'idle'), ageColor(twoMinutes, 'normal', 'blocked'),
+    'two minutes is an emergency for a stopped agent and unremarkable for a finished one',
+  );
+  assert.strictEqual(ageColor(twoMinutes, 'normal', 'idle'), ageColor(0, 'normal'), 'still calm');
+  assert.strictEqual(ageColor(20 * 60_000, 'normal', 'idle'), ageColor(45_000, 'normal'), 'warn');
+  assert.strictEqual(ageColor(60 * 60_000, 'normal', 'idle'), ageColor(90_000, 'normal'), 'alert');
+  assert.strictEqual(
+    ageColor(60 * 60_000, 'fyi', 'idle'), ageColor(0, 'fyi'),
+    'fyi still outranks the scale — that rule is unchanged',
+  );
+  // Every existing caller passed two arguments and must keep the behaviour it had.
+  assert.strictEqual(ageColor(90_000, 'normal'), ageColor(90_000, 'normal', 'blocked'));
 });

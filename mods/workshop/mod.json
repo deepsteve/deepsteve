@@ -1,8 +1,8 @@
 {
   "name": "Workshop",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "minDeepsteveVersion": "0.4.0",
-  "description": "One inbox for every agent that needs you — blocked dialogs, questions and briefings, and the project's open issues in one place",
+  "description": "The bench for every agent that needs you — blocked dialogs, finished sessions waiting on their next instruction, questions and results, each with the verb it needs",
   "experimental": true,
   "enabledByDefault": false,
   "entry": "index.html",
@@ -15,6 +15,13 @@
       "label": "Refresh interval (s)",
       "description": "How often the inbox re-reads the server. Lower is snappier and costs more screen scrapes.",
       "default": 2
+    },
+    {
+      "key": "idleAfterSeconds",
+      "type": "number",
+      "label": "Call a session idle after (s)",
+      "description": "How long an agent must sit at its prompt before the bench says it is waiting on you. Lower if you are watching; higher if you are not.",
+      "default": 15
     },
     {
       "key": "showBriefings",

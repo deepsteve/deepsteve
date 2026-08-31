@@ -2,7 +2,7 @@ import * as React from 'react';
 import * as ReactDOM from 'react-dom/client';
 import {
   visibleItems, nextSelection, keyAction, isTypingTarget, typingAction,
-  formatAge, ageColor, itemSubject, itemBody, answerPayload,
+  formatAge, ageColor, itemSubject, itemBody, answerPayload, tabOf, TABS,
 } from './inbox-view.js';
 import { visibleBacklog, formatUpdated, matchNote } from './backlog-view.js';
 import { tokenize } from './markdown.js';
@@ -42,6 +42,11 @@ const KINDS = {
   question: { glyph: '?', color: C.blue, tint: 'rgba(88,166,255,0.14)', label: 'Question' },
   briefing: { glyph: 'i', color: C.dim, tint: 'rgba(139,148,158,0.12)', label: 'Briefing' },
   result: { glyph: '▤', color: C.purple, tint: 'rgba(163,113,247,0.14)', label: 'Result' },
+  // Green, and alone in that: an idle agent is the one row on the bench that is not a
+  // problem. It finished. The colour is the difference between "eight things are wrong"
+  // and "eight things are done and want their next instruction" — which is the whole
+  // reading of the bench, at a glance, before a single row has been opened.
+  idle: { glyph: '▸', color: C.greenHi, tint: 'rgba(46,160,67,0.13)', label: 'Waiting on you' },
 };
 const kindOf = (item) => KINDS[item && item.kind] || KINDS.question;
 
@@ -61,6 +66,11 @@ const DEFAULTS = {
   // keeps the DEFAULTS <-> mod.json parity check honest about the difference.
   chatOpen: false,
   chatWidth: 420,
+  // Which of the two tabs is showing (#682). Persisted like every other view toggle,
+  // because a fullscreen iframe is DESTROYED on hide and would otherwise snap back to
+  // the bench every time you looked away.
+  tab: 'bench',
+  idleAfterSeconds: 15,
 };
 
 /**
@@ -134,6 +144,37 @@ function Toggle({ on, label, onClick, title }) {
   );
 }
 
+/**
+ * One of the two tabs (#682).
+ *
+ * The count is the point, not decoration: the bench tab has to be able to say "nothing
+ * is waiting on you" from the reading tab, or the split just hides the obligations
+ * behind a click. `accent` is what makes a non-zero bench read as a number you owe
+ * someone rather than a badge.
+ */
+function TabButton({ id, label, count, active, accent, onClick }) {
+  const live = count > 0;
+  return (
+    <button
+      type="button" onClick={() => onClick(id)}
+      aria-pressed={active}
+      style={{
+        display: 'inline-flex', alignItems: 'baseline', gap: 7,
+        border: 'none', borderBottom: `2px solid ${active ? C.bright : 'transparent'}`,
+        background: 'transparent', padding: '0 2px 9px',
+        color: active ? C.bright : C.dim,
+        font: `600 13px ${SANS}`, cursor: 'pointer', transition: 'color 120ms',
+      }}
+    >
+      {label}
+      <span style={{
+        font: `12px ${MONO}`, fontVariantNumeric: 'tabular-nums',
+        color: live ? (accent || C.dim) : C.faint,
+      }}>{count}</span>
+    </button>
+  );
+}
+
 // ─── List ────────────────────────────────────────────────────────────────────
 
 const ItemRow = memo(function ItemRow({ item, selected, ageMs, compact, onSelect }) {
@@ -170,7 +211,7 @@ const ItemRow = memo(function ItemRow({ item, selected, ageMs, compact, onSelect
         )}
       </div>
       <span style={{
-        font: `13px ${MONO}`, color: ageColor(ageMs, item.urgency),
+        font: `13px ${MONO}`, color: ageColor(ageMs, item.urgency, item.kind),
         fontVariantNumeric: 'tabular-nums', flexShrink: 0, paddingTop: 1,
       }}>{formatAge(ageMs)}</span>
     </div>
@@ -407,8 +448,9 @@ function EmptyState() {
       <div style={{ fontSize: 28, color: C.hairline, lineHeight: 1 }}>{'⏸'}</div>
       <div style={{ font: `15px ${SANS}`, color: C.dim, margin: '18px 0 8px' }}>Nothing needs you</div>
       <div style={{ font: `13px/1.7 ${SANS}`, color: C.faint }}>
-        Blocked sessions land here the moment an agent hits a permission prompt. Agents can
-        also post here directly with <code style={{ font: `12px ${MONO}` }}>workshop_ask</code>,{' '}
+        Sessions land here the moment an agent hits a permission prompt, and again when
+        one finishes its turn with nothing queued. Agents can also post here directly with{' '}
+        <code style={{ font: `12px ${MONO}` }}>workshop_ask</code>,{' '}
         <code style={{ font: `12px ${MONO}` }}>workshop_brief</code> and{' '}
         <code style={{ font: `12px ${MONO}` }}>share_result</code>.
       </div>
@@ -1123,6 +1165,18 @@ function Workshop() {
 
   // ── Poll. A self-scheduling timeout, not an interval: that IS the answer to
   // overlapping fetches, since the next one is only armed once this one settles.
+  // The one URL both readers use. The threshold has to travel with every request
+  // because the derivation is server-side and stateless — there is no "current
+  // setting" over there to consult, by design: two browser windows may legitimately
+  // disagree about how long is long enough.
+  const inboxUrl = useMemo(() => {
+    const secs = Math.max(0, Number(settings.idleAfterSeconds));
+    return '/api/workshop/inbox?idleAfter='
+      + encodeURIComponent(Number.isFinite(secs) ? secs : DEFAULTS.idleAfterSeconds);
+  }, [settings.idleAfterSeconds]);
+  const inboxUrlRef = useRef(inboxUrl);
+  useEffect(() => { inboxUrlRef.current = inboxUrl; }, [inboxUrl]);
+
   useEffect(() => {
     let cancelled = false;
     let timer = null;
@@ -1134,7 +1188,7 @@ function Workshop() {
       // visible.
       if (!sendingRef.current) {
         try {
-          const r = await fetch('/api/workshop/inbox', { cache: 'no-store' });
+          const r = await fetch(inboxUrl, { cache: 'no-store' });
           // An auth rejection is not a hiccup and will not clear on its own: the
           // page's cookie is stale and only a full load re-issues it. Stop the
           // loop dead (#676) — re-arming at 2s is 30 rejected requests a minute
@@ -1162,7 +1216,7 @@ function Workshop() {
 
     tick();
     return () => { cancelled = true; if (timer) clearTimeout(timer); };
-  }, [pollMs]);
+  }, [pollMs, inboxUrl]);
 
   // ── Backlog poll (#671). Its own loop, on its own clock: the issue list changes on
   // the order of minutes and every refresh spawns `gh`, so running it at the inbox's 2s
@@ -1237,19 +1291,36 @@ function Workshop() {
     [backlog.issues, settings.backlogCollapsed],
   );
 
+  // Which tab is showing. Falls back rather than trusting storage: `tab` is persisted
+  // through the host's localStorage and a value from a future version of this panel
+  // must land on the bench, not on nothing.
+  const tab = TABS.includes(settings.tab) ? settings.tab : 'bench';
+
   const view = useMemo(
     () => visibleItems(items, {
+      tab,
       showBriefings: settings.showBriefings,
       blockingOnly: settings.blockingOnly,
       groupByProject: settings.groupByProject,
-      // One `order` covers both sections, so ↑/↓ walks out of the inbox and into the
-      // backlog. Two sections keeping two orders is the same class of bug the header
-      // comment on visibleItems warns about, with one more place to make it.
+      // One `order` covers both sections of the reading tab, so ↑/↓ walks out of the
+      // briefings and into the backlog. Two sections keeping two orders is the same
+      // class of bug the header comment on visibleItems warns about, with one more
+      // place to make it. On the bench there is no second section at all.
       backlog: settings.showBacklog ? backlogView.list : [],
       backlogCollapsed: !!settings.backlogCollapsed,
     }),
-    [items, settings.showBriefings, settings.blockingOnly, settings.groupByProject,
+    [items, tab, settings.showBriefings, settings.blockingOnly, settings.groupByProject,
       settings.showBacklog, settings.backlogCollapsed, backlogView.list],
+  );
+
+  // What each tab has to say for itself before it is opened. The bench count is the
+  // number this panel exists to publish, so it is the one thing on screen that must be
+  // true whichever tab you are on — which means counting `items`, not `view`.
+  const benchCount = useMemo(() => items.filter((i) => tabOf(i) === 'bench').length, [items]);
+  const readingCount = useMemo(
+    () => (settings.showBriefings ? items.filter((i) => tabOf(i) === 'backlog').length : 0)
+      + (settings.showBacklog ? backlogView.list.length : 0),
+    [items, settings.showBriefings, settings.showBacklog, backlogView.list],
   );
 
   useEffect(() => {
@@ -1284,7 +1355,8 @@ function Workshop() {
   // down and rebuild it on every poll.
   useEffect(() => {
     const id = selectedId;
-    if (!id || !String(id).startsWith('blocked:')) { setScreen(null); return undefined; }
+    const derived = !!id && (String(id).startsWith('blocked:') || String(id).startsWith('idle:'));
+    if (!derived) { setScreen(null); return undefined; }
     let cancelled = false;
     let timer = null;
     async function tick() {
@@ -1311,7 +1383,10 @@ function Workshop() {
   // ── Actions
   const refresh = useCallback(async () => {
     try {
-      const r = await fetch('/api/workshop/inbox', { cache: 'no-store' });
+      // The REF, not the value: refresh() is a dependency of every action callback
+      // below, and rebuilding it whenever the threshold setting changes would tear
+      // down and re-arm the keyboard listener for no reason.
+      const r = await fetch(inboxUrlRef.current, { cache: 'no-store' });
       if (r.ok) setItems((await r.json()).items || []);
     } catch { /* the poll will pick it up */ }
   }, []);
@@ -1385,6 +1460,64 @@ function Workshop() {
       refresh();
     }
   }, [view.list, picked, draft, refresh, archive]);
+
+  // ── The two session verbs (#682).
+  //
+  // Both go through one helper because they share everything that is easy to get
+  // wrong: they address the SESSION rather than the row, they refuse while another
+  // send is in flight, they report the server's own words rather than a generic
+  // failure, and they refresh so the bench stops showing a row that is no longer true.
+  //
+  // Neither is offered without a confirm. Everything else in this panel is either
+  // reversible or costs one keystroke in a terminal to undo; closing a session and
+  // merging a branch are not, and `x` and `m` are two keys away from `e` and `o`.
+  const sessionAction = useCallback(async (verb, item, { confirm: ask, body = {} } = {}) => {
+    if (!item || !item.sessionId || sendingRef.current) return;
+    if (ask && !window.confirm(ask)) return;
+    setSending(true);
+    sendingRef.current = true;
+    try {
+      const r = await fetch(
+        `/api/workshop/sessions/${encodeURIComponent(item.sessionId)}/${verb}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        },
+      );
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        setError(data.hint || data.error || `Couldn’t ${verb} that session.`);
+      } else if (verb === 'merge' && data.status !== 'merged') {
+        // A merge that did not merge is the case worth spelling out: every non-merged
+        // status left the target checkout untouched, and saying WHICH is the difference
+        // between "try again after committing" and "go and look at the conflict".
+        setError(data.message || `Merge did not run — ${data.status}.`);
+      } else {
+        setError(null);
+        setFlash(true);
+        setTimeout(() => setFlash(false), 220);
+      }
+    } catch (e) {
+      setError(`Couldn’t ${verb} that session — ${e.message}`);
+    } finally {
+      setSending(false);
+      sendingRef.current = false;
+      refresh();
+    }
+  }, [refresh]);
+
+  const closeSession = useCallback((item) => sessionAction('close', item, {
+    confirm: `Close ${item && (item.sessionName || item.sessionId)}?\n\n`
+      + 'The agent is terminated and its tab goes away. The conversation is kept and '
+      + 'can be resumed later.',
+  }), [sessionAction]);
+
+  const mergeWorktree = useCallback((item) => sessionAction('merge', item, {
+    confirm: `Merge ${item && item.worktree} into the main checkout?\n\n`
+      + 'Committed work only. If the target checkout is dirty, or the merge conflicts, '
+      + 'nothing is changed and the bench will say so.',
+  }), [sessionAction]);
 
   // Going to look at an agent is an EXCURSION (#661), not a one-hop jump: the host hides the
   // rail, filters the strip to that session's project, and puts a ⌘← trail in the tab strip —
@@ -1533,6 +1666,13 @@ function Workshop() {
         case 'archive': archive(); break;
         case 'open': openTab(); break;
         case 'github': openGitHub(); break;
+        // Refused here rather than in keyAction, which would have to know what a
+        // worktree is. `canClose`/`canMerge` are computed server-side because the
+        // panel cannot know either: getSessions() reports THIS window's tabs, not the
+        // server's sessions, so a row for an agent in another window would look
+        // un-closable from here.
+        case 'closeSession': if (item && item.canClose) closeSession(item); break;
+        case 'mergeWorktree': if (item && item.canMerge) mergeWorktree(item); break;
         case 'focusReply': replyRef.current?.focus(); break;
         case 'toggleChat': if (chatSessionId) toggleChat(); break;
         case 'help': setHelpOpen((v) => !v); break;
@@ -1542,7 +1682,8 @@ function Workshop() {
     };
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
-  }, [rows, send, archive, openTab, openGitHub, moveCursor, toggleChat, chatSessionId]);
+  }, [rows, send, archive, openTab, openGitHub, moveCursor, toggleChat, chatSessionId,
+    closeSession, mergeWorktree]);
 
   useEffect(() => { rootRef.current?.focus(); }, []);
 
@@ -1553,10 +1694,17 @@ function Workshop() {
   // selectedIsIssue rather than left to answerPayload's own null: a backlog row is not
   // an unanswerable item, it is not an item at all.
   const showReply = !selectedIsIssue && !!selected
-    && (selected.kind === 'question' || selected.kind === 'result');
+    && (selected.kind === 'question' || selected.kind === 'result' || selected.kind === 'idle');
   const canSend = !selectedIsIssue && !!(selected && (selected.kind === 'briefing'
     || answerPayload(selected, { picked, draft })));
-  const pathHint = (selected && !selectedIsIssue) ? PATH_HINT[selected.pendingPath] : null;
+  // An idle row's hint is its own, not PATH_HINT.prompt. That one says "when the agent
+  // is next idle", which is true of a stored question and absurd here — the row exists
+  // BECAUSE the agent is idle now, and a hint that hedges about it undermines the one
+  // thing the bench is asserting.
+  const pathHint = (!selected || selectedIsIssue) ? null
+    : selected.kind === 'idle'
+      ? 'goes straight to this agent, which is sitting at its prompt now'
+      : PATH_HINT[selected.pendingPath];
   // A result's headline is DERIVED from the first line of its summary, so rendering both
   // the H1 and the raw context says the same sentence twice.
   const body = (selected && !selectedIsIssue) ? itemBody(selected) : '';
@@ -1566,10 +1714,11 @@ function Workshop() {
   // when canSend turns true, so the button never offers a verb it will not perform.
   const sendVerb = (!selected || selectedIsIssue) ? 'Send'
     : selected.kind === 'briefing' ? 'Archive'
-      : selected.kind === 'result'
-        ? (picked === null ? 'Approve or request changes'
-          : (selected.options[picked] || {}).label || 'Send')
-        : 'Send';
+      : selected.kind === 'idle' ? 'Send prompt'
+        : selected.kind === 'result'
+          ? (picked === null ? 'Approve or request changes'
+            : (selected.options[picked] || {}).label || 'Send')
+          : 'Send';
 
   const inboxRows = [];
   if (view.groups) {
@@ -1670,32 +1819,51 @@ function Workshop() {
         display: 'flex', flexDirection: 'column', minHeight: 0,
         borderRight: `1px solid ${C.hairline}`, background: C.surface,
       }}>
+        {/* Two tabs, not two sections (#682). The obligations and the reading material
+            used to share one scroll, which is what made this panel informational: on a
+            machine with nothing blocked — the normal case — the page WAS the issue
+            list, so that is what Workshop looked like it was for. */}
         <div style={{
-          display: 'flex', alignItems: 'center', gap: 6, height: 40, padding: '0 12px',
+          display: 'flex', alignItems: 'flex-end', gap: 16, height: 40, padding: '0 12px',
           borderBottom: `1px solid ${C.hairline}`, flexShrink: 0,
         }}>
-          <span style={{ font: `600 13px ${SANS}`, color: C.bright, flex: 1 }}>
-            Inbox <span style={{ color: C.dim, fontVariantNumeric: 'tabular-nums' }}>{view.list.length}</span>
+          <TabButton
+            id="bench" label="Bench" count={benchCount} active={tab === 'bench'}
+            accent={C.orange} onClick={(t) => setSetting('tab', t)}
+          />
+          <TabButton
+            id="backlog" label="Backlog" count={readingCount} active={tab === 'backlog'}
+            onClick={(t) => setSetting('tab', t)}
+          />
+          <span style={{ flex: 1 }} />
+          <span style={{ display: 'flex', gap: 6, paddingBottom: 7 }}>
+            {/* An urgency filter on the reading tab would empty it — a briefing is
+                'fyi' by construction — and read as a broken backlog. */}
+            {tab === 'bench' && (
+              <Toggle
+                on={settings.blockingOnly} label="blocking" title="Show only items that are blocking an agent"
+                onClick={() => setSetting('blockingOnly', !settings.blockingOnly)}
+              />
+            )}
+            <Toggle
+              on={settings.groupByProject} label="group" title="Group by project"
+              onClick={() => setSetting('groupByProject', !settings.groupByProject)}
+            />
           </span>
-          <Toggle
-            on={settings.blockingOnly} label="blocking" title="Show only items that are blocking an agent"
-            onClick={() => setSetting('blockingOnly', !settings.blockingOnly)}
-          />
-          <Toggle
-            on={settings.groupByProject} label="group" title="Group by project"
-            onClick={() => setSetting('groupByProject', !settings.groupByProject)}
-          />
         </div>
         <div style={{ flex: 1, overflowY: 'auto', minHeight: 0 }}>
           {loading && view.list.length === 0
             ? <div style={{ padding: 24, font: `13px ${SANS}`, color: C.faint }}>Loading…</div>
             : inboxRows}
 
-          {/* ── Backlog: the other half of "what needs me". It scrolls WITH the inbox
-              rather than owning a pane, because the point is reading both in one
-              glance — an issue nobody has picked up is only interesting next to the
-              agents that are already running. */}
-          {settings.showBacklog && (
+          {/* ── Backlog: the reading tab's second section, under the briefings. It
+              scrolls WITH them rather than owning a pane of its own — both are things
+              to read rather than things to answer, and one cursor walks both.
+
+              Behind a tab since #682. It is genuinely useful and it is genuinely not
+              an obligation, and while it shared a scroll with the bench it was what
+              Workshop showed whenever nothing was waiting on you. */}
+          {tab === 'backlog' && settings.showBacklog && (
             <>
               <BacklogHeader
                 projectName={backlog.projectName}
@@ -1765,7 +1933,7 @@ function Workshop() {
               )}
               <span style={{ flex: 1 }} />
               <span style={{
-                font: `13px ${MONO}`, color: ageColor(ageOf(selected), selected.urgency),
+                font: `13px ${MONO}`, color: ageColor(ageOf(selected), selected.urgency, selected.kind),
                 fontVariantNumeric: 'tabular-nums',
               }}>{formatAge(ageOf(selected))}</span>
               <button
@@ -1875,7 +2043,9 @@ function Workshop() {
                     onChange={(e) => setDraft(e.target.value)}
                     placeholder={selected.kind === 'result'
                       ? 'Why it needs changing \u2014 required to request changes, optional to approve'
-                      : 'Reply \u2014 Enter for a newline, \u2318\u23ce to send'}
+                      : selected.kind === 'idle'
+                        ? 'What should it do next? \u2014 Enter for a newline, \u2318\u23ce to send'
+                        : 'Reply \u2014 Enter for a newline, \u2318\u23ce to send'}
                     style={{
                       width: '100%', minHeight: 72, maxHeight: 200, marginTop: 18,
                       background: C.bg, border: `1px solid ${C.border}`, borderRadius: 6,
@@ -1885,7 +2055,11 @@ function Workshop() {
                   />
                 )}
 
-                {selected.kind === 'blocked' && (
+                {/* An idle row gets the preview too. Its headline is one scraped line;
+                    when that is not enough to know what to say next, the last screenful
+                    usually is — and reaching it without leaving the bench is the whole
+                    difference between deciding here and opening the tab. */}
+                {(selected.kind === 'blocked' || selected.kind === 'idle') && (
                   <ScreenPreview
                     lines={(screen && screen.id === selected.id ? screen.lines : selected.preview) || []}
                     open={screenOpen}
@@ -1908,7 +2082,7 @@ function Workshop() {
                   background: canSend && !sending ? C.green : C.hairline,
                   color: canSend && !sending ? '#fff' : C.faint,
                   font: `600 13px ${SANS}`, cursor: canSend && !sending ? 'pointer' : 'default',
-                  transition: 'background 120ms',
+                  transition: 'background 120ms', whiteSpace: 'nowrap',
                 }}
                 onMouseEnter={(e) => { if (canSend && !sending) e.currentTarget.style.background = C.greenHi; }}
                 onMouseLeave={(e) => { if (canSend && !sending) e.currentTarget.style.background = C.green; }}
@@ -1920,7 +2094,10 @@ function Workshop() {
                   type="button" onClick={archive} disabled={sending}
                   title={selected.kind === 'blocked'
                     ? 'Drop this row. The dialog is left alone, and comes back if the tab asks something else.'
-                    : 'Archive this item without answering it.'}
+                    : selected.kind === 'idle'
+                      ? 'Hide this row for a while. Nothing is typed, and it comes back if the '
+                        + 'session says something else — or in half an hour if it does not.'
+                      : 'Archive this item without answering it.'}
                   style={{
                     display: 'inline-flex', alignItems: 'center', gap: 8,
                     border: `1px solid ${C.border}`, borderRadius: 5, padding: '6px 12px',
@@ -1929,10 +2106,47 @@ function Workshop() {
                     font: `13px ${SANS}`,
                     cursor: sending ? 'default' : 'pointer',
                   }}
-                ><Key>e</Key> {selected.kind === 'blocked' ? 'Dismiss' : 'Archive'}</button>
+                ><Key>e</Key> {selected.kind === 'blocked' ? 'Dismiss'
+                  : selected.kind === 'idle' ? 'Snooze' : 'Archive'}</button>
+              )}
+
+              {/* ── The two session verbs (#682).
+                  Rendered only where the server said they apply, and last in the row on
+                  purpose: they are the destructive pair, and putting Close next to Send
+                  is how you close a session you meant to prompt. Both confirm. */}
+              {selected.canMerge && (
+                <button
+                  type="button" onClick={() => mergeWorktree(selected)} disabled={sending}
+                  title={`Merge ${selected.worktree} into the main checkout. Committed work `
+                    + 'only; a dirty target or a conflict changes nothing and says so.'}
+                  style={{
+                    display: 'inline-flex', alignItems: 'center', gap: 8,
+                    border: `1px solid ${C.border}`, borderRadius: 5, padding: '6px 12px',
+                    background: 'transparent', color: C.text, font: `13px ${SANS}`,
+                    cursor: sending ? 'default' : 'pointer',
+                  }}
+                ><Key>m</Key> Merge</button>
+              )}
+              {selected.canClose && (
+                <button
+                  type="button" onClick={() => closeSession(selected)} disabled={sending}
+                  title="Close this session and its tab. The conversation is kept and can be resumed."
+                  style={{
+                    display: 'inline-flex', alignItems: 'center', gap: 8,
+                    border: `1px solid ${C.border}`, borderRadius: 5, padding: '6px 12px',
+                    background: 'transparent', color: C.dim, font: `13px ${SANS}`,
+                    cursor: sending ? 'default' : 'pointer',
+                  }}
+                ><Key>x</Key> Close</button>
               )}
               <span style={{ flex: 1 }} />
-              <span style={{ font: `11px ${SANS}`, color: C.dimmer, textAlign: 'right' }}>
+              {/* The hint yields, never the buttons. Four verbs fit a narrow window
+                  only if the sentence beside them is allowed to be clipped. */}
+              <span style={{
+                font: `11px ${SANS}`, color: C.dimmer, textAlign: 'right',
+                minWidth: 0, flexShrink: 1, overflow: 'hidden', textOverflow: 'ellipsis',
+                whiteSpace: 'nowrap',
+              }}>
                 {sending ? 'Sending…' : (pathHint || 'Nothing to answer')}
               </span>
             </div>
@@ -1978,7 +2192,9 @@ function Workshop() {
               ['1–9', 'stage an option'],
               ['⏎', 'send'],
               ['⌘⏎', 'send while typing'],
-              ['e', 'archive / dismiss a dialog'],
+              ['e', 'archive / dismiss / snooze'],
+              ['x', 'close the session'],
+              ['m', 'merge the worktree'],
               ['o', 'open the tab'],
               ['g', 'open the issue on GitHub'],
               ['r', 'reply box'],

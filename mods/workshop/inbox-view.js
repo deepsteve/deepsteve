@@ -23,6 +23,14 @@ export const URGENCY_RANK = { blocking: 0, normal: 1, fyi: 2 };
 export const AGE_WARN_MS = 30_000;
 export const AGE_ALERT_MS = 60_000;
 
+// An idle row's own clock (#682), an order of magnitude slower, because it is measuring
+// something else. Thirty seconds of a blocked agent is thirty seconds of a machine
+// stopped dead; thirty seconds of a finished one is nothing at all — it is the pause
+// while you read what it wrote. On the shared scale every row on the bench went red
+// within a minute, which is exactly how a colour stops being read.
+export const IDLE_WARN_MS = 10 * 60_000;
+export const IDLE_ALERT_MS = 45 * 60_000;
+
 const COLOR_CALM = '#8b949e';
 const COLOR_WARN = '#f0883e';
 const COLOR_ALERT = '#f85149';
@@ -88,17 +96,44 @@ export function flattenGroups(groups) {
  * `opts.backlog` is already sorted by the caller (backlog-view.js owns that order); a
  * collapsed section contributes rows to neither `backlog` nor `order`.
  */
+export const TABS = ['bench', 'backlog'];
+
+/**
+ * Which tab a row belongs to (#682).
+ *
+ * The split is "does this ask something of me" versus "is this here to be read", and
+ * it is the whole point of the two tabs. Workshop drifted into an informational panel
+ * because the reading material and the obligations shared one scroll: on a machine
+ * with nothing blocked — the normal case — the page WAS the issue list, so that is
+ * what Workshop looked like it was for.
+ *
+ * A briefing is reading material by definition (workshop_brief is read-only and has
+ * nothing to answer), so it moves across with the issues. Everything else is a row
+ * with a verb on it.
+ */
+export function tabOf(item) {
+  return (item && item.kind === 'briefing') ? 'backlog' : 'bench';
+}
+
 export function visibleItems(items, opts = {}) {
   const {
+    tab = 'bench',
     showBriefings = true, blockingOnly = false, groupByProject: grouped = false,
     backlog = [], backlogCollapsed = false,
   } = opts;
+  const onBench = tab !== 'backlog';
 
-  let list = (Array.isArray(items) ? items : []).filter(Boolean);
+  let list = (Array.isArray(items) ? items : []).filter(Boolean)
+    .filter((i) => (tabOf(i) === 'bench') === onBench);
   if (!showBriefings) list = list.filter((i) => i.kind !== 'briefing');
-  if (blockingOnly) list = list.filter((i) => i.urgency === 'blocking');
+  if (blockingOnly && onBench) list = list.filter((i) => i.urgency === 'blocking');
 
-  const issues = backlogCollapsed ? [] : (Array.isArray(backlog) ? backlog : []).filter(Boolean);
+  // Issues live on the backlog tab only, so on the bench there is no second section
+  // and `order` is the bench list alone — which is what keeps ↓ from walking the
+  // cursor off the end of the bench into rows that are not on screen.
+  const issues = (onBench || backlogCollapsed)
+    ? []
+    : (Array.isArray(backlog) ? backlog : []).filter(Boolean);
   const tail = issues.map((i) => i.id);
 
   if (grouped) {
@@ -129,12 +164,21 @@ export function formatAge(ms) {
   return Math.floor(h / 24) + 'd';
 }
 
-/** Colour never means urgency for an fyi — a briefing an hour old is still not urgent. */
-export function ageColor(ms, urgency) {
+/**
+ * Colour never means urgency for an fyi — a briefing an hour old is still not urgent.
+ *
+ * `kind` picks the scale, and it is optional so every existing caller keeps the one it
+ * had. Only 'idle' moves: see IDLE_WARN_MS for why a finished agent is not measured
+ * against the same clock as a stopped one.
+ */
+export function ageColor(ms, urgency, kind) {
   if (urgency === 'fyi') return COLOR_MUTED;
   const t = Number(ms) || 0;
-  if (t > AGE_ALERT_MS) return COLOR_ALERT;
-  if (t > AGE_WARN_MS) return COLOR_WARN;
+  const [warn, alert] = kind === 'idle'
+    ? [IDLE_WARN_MS, IDLE_ALERT_MS]
+    : [AGE_WARN_MS, AGE_ALERT_MS];
+  if (t > alert) return COLOR_ALERT;
+  if (t > warn) return COLOR_WARN;
   return COLOR_CALM;
 }
 
@@ -221,6 +265,16 @@ export function keyAction(key, { optionCount = 0, repeat = false, issue = false 
     // hold a conversation with — same reason `r` and `e` go quiet there (#670).
     case 'c': return issue ? null : { type: 'toggleChat' };
     case 'e': return (issue || repeat) ? null : { type: 'archive' };
+    // Session verbs (#682). Offered on every non-issue row and REFUSED by the caller
+    // on the ones that cannot take them — a row whose session is gone, a merge on a
+    // session that is not in a worktree. Deciding that here would mean this module
+    // knowing what a worktree is, which is how a keymap turns into a policy.
+    //
+    // `x` and `m` are both repeat-blocked for the reason Enter is: holding a key must
+    // not close five sessions. They also both go through a confirm in the panel, which
+    // is the real guard — these two are the only keys in Workshop that are hard to undo.
+    case 'x': return (issue || repeat) ? null : { type: 'closeSession' };
+    case 'm': return (issue || repeat) ? null : { type: 'mergeWorktree' };
     case 'Enter': return (issue || repeat) ? null : { type: 'send' };
     default: break;
   }
@@ -319,6 +373,10 @@ export function answerPayload(item, { picked = null, draft = '' } = {}) {
     if (text) payload.text = text;
     return payload;
   }
+  // Where an idle row lands (#682), and deliberately: it carries no options and has
+  // nothing to stage, so saying the next thing IS the whole answer. Empty text is null
+  // rather than an empty payload — a bare Enter into a live composer submits whatever
+  // is already sitting in it, which is not what "I pressed send on an empty box" means.
   return text ? { text } : null;
 }
 

@@ -521,9 +521,70 @@ function dialogFingerprint(lines) {
   return detected.kind + ':' + hash32(body.join('\n'));
 }
 
+/**
+ * "Is this the same screen as last time?" — the idle clock's only question (#682).
+ *
+ * dialogFingerprint cannot answer it: it returns '' whenever no dialog is on screen,
+ * which is exactly the case an idle session is in. So this is the same normalization
+ * with none of the dialog structure — every non-empty row of the tail, borders and
+ * cursor glyph off, hashed.
+ *
+ * Why a content hash rather than entry.lastActivity: a repaint that changes nothing
+ * (a resize, a status-line tick) bumps outputSeq, and resetting the wait clock there
+ * would mean an agent that has been waiting forty minutes reports forty seconds.
+ */
+function screenFingerprint(lines) {
+  const tail = tailOf(lines);
+  if (!tail) return '';
+  const body = [];
+  for (const row of tail) {
+    const line = stripBorders(str(row)).replace(CURSOR_GLYPH_RE, '').replace(/\s+/g, ' ').trim();
+    if (line) body.push(line);
+  }
+  return hash32(body.join('\n'));
+}
+
+// What an assistant's own output rows are prefixed with. The same family of screen
+// markers as COMPOSER_ROW_RE, and a TUI-version contract in the same way: if Claude
+// Code stops drawing it, lastAgentLine falls back to the last content row rather
+// than returning nothing.
+const AGENT_ROW_RE = /^[\s│┃|]*[⏺●•*][ \t]+(.*\S)[ \t]*$/;
+
+// Rows that are chrome, not something the agent said.
+const FOOTER_HINT_RE = /^\??\s*(for shortcuts|esc to|\S+ to interrupt)/i;
+
+/**
+ * The last thing the agent said, for an idle row's subject line (#682).
+ *
+ * A bench of rows all headlined "Waiting for you" is a list of session names, which
+ * is the informational surface this was supposed to replace. This is what makes an
+ * idle row scannable: you can tell which one finished the migration from which one
+ * is asking whether to continue, without opening either tab.
+ *
+ * Best-effort by construction, and the caller must treat it that way — it is a
+ * screen scrape of a UI we do not control, so it returns '' rather than guessing.
+ */
+function lastAgentLine(lines, max = 200) {
+  const tail = tailOf(lines);
+  if (!tail) return '';
+  let fallback = '';
+  for (let i = tail.length - 1; i >= 0; i--) {
+    const row = str(tail[i]);
+    if (COMPOSER_ROW_RE.test(row)) continue;
+    const line = stripBorders(row).replace(/\s+/g, ' ').trim();
+    if (!line || RULE_RE.test(row) || FOOTER_HINT_RE.test(line)) continue;
+    const marked = line.match(AGENT_ROW_RE);
+    if (marked) return marked[1].slice(0, max);
+    if (!fallback) fallback = line.slice(0, max);
+  }
+  return fallback;
+}
+
 module.exports = {
   detectDialog,
   dialogFingerprint,
+  screenFingerprint,
+  lastAgentLine,
   parseDialog,
   fingerprint,
   stripBorders,
