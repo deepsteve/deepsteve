@@ -153,6 +153,7 @@ Rules a change anywhere in the tree could violate. Each one has a page that expl
 - **`service.sh` is a sourced library, never an entry point.** Mode 644, no exec bit, no `main`, no `case "$1"`. That is a security property: an executable `service.sh` with argument dispatch would be a second, unguarded way to restart the daemon.
 - **The systemd unit must keep `KillMode=process`**, or the tmux server dies inside the daemon's cgroup and every `restart.sh` destroys every session.
 - **Auth is always on**, with no off switch — the only escape hatches *widen* the allowlists. The canonical browser URL is `http://deepsteve.localhost:3000`; agent/CLI traffic deliberately stays on plain `localhost`.
+- **The auth cookie's name carries the listen port** (`ds_auth_3000`). Cookies key on host, not port, so a second daemon on this machine shares the `deepsteve.localhost` jar; one shared name meant a test daemon silently overwrote the real install's cookie and every tab 401'd forever. Never add a route above `app.use(security.authGate)` — that set is exactly the static handlers, `/healthz` and `POST /api/client-log`, and a guard test pins it.
 - **The deploy that first turns auth on must use `./restart.sh --refresh`**, so already-open tabs reload and acquire the cookie.
 
 **Worktrees and merging** ([docs/sessions.md](docs/sessions.md))

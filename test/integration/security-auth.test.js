@@ -4,8 +4,8 @@
  *
  *   1. A cookieless browser-style WS upgrade is rejected with 401 (or 429
  *      mid-lockout) — the condition the heal exists to escape.
- *   2. The ds_auth cookie authenticates a WS upgrade — what the heal restores.
- *   3. GET / with Accept: text/html sets the ds_auth cookie — the guarantee
+ *   2. The auth cookie authenticates a WS upgrade — what the heal restores.
+ *   3. GET / with Accept: text/html sets the auth cookie — the guarantee
  *      that the heal's one page reload actually re-acquires auth.
  *   4. An unauthenticated /api request returns 401/429 — the probe the client
  *      uses to tell "server up but auth broken" (readable status) apart from
@@ -19,6 +19,11 @@
  * never redirect. Host-sensitive requests forge the Host header over
  * node:http (undici fetch forbids setting Host), so they behave identically
  * locally and in docker, where the server's real host is `server`.
+ *
+ * Plus the #675 contract: the cookie's NAME carries our listen port, so a second daemon on this
+ * machine cannot overwrite this install's cookie in the shared deepsteve.localhost jar; the legacy
+ * unqualified name stays readable for one release; and POST /api/client-log answers without
+ * credentials but only to an allowlisted Origin.
  *
  * Uses action=reload sockets (live-reload registration) so no PTY is spawned.
  * Keep unauthenticated requests to a handful — each one calls recordFailure()
@@ -39,6 +44,10 @@ const PORT = new URL(BASE_URL).port || '3000';
 // with the server's own port is always allowlisted, unlike the docker host.
 const ORIGIN = 'http://localhost:' + PORT;
 const UI_HOST = 'deepsteve.localhost';
+// The auth cookie carries the listen port in its NAME (#675) — see security.js. Derived from the
+// URL under test rather than hardcoded, because the standalone runner picks a random port while
+// the docker compose pins 3000.
+const COOKIE = `ds_auth_${PORT}`;
 
 // GET with an arbitrary (forged) Host header, without following redirects.
 function rawGet(pathname, headers) {
@@ -92,17 +101,26 @@ describe('Security auth contract (#536/#540)', () => {
       `expected 401 (or 429 mid-lockout), got ${result.status}`);
   });
 
-  it('accepts a WS upgrade authenticated by the ds_auth cookie', async () => {
-    const result = await tryUpgrade({ Origin: ORIGIN, Cookie: `ds_auth=${AUTH_TOKEN}` });
+  it('accepts a WS upgrade authenticated by the auth cookie', async () => {
+    const result = await tryUpgrade({ Origin: ORIGIN, Cookie: `${COOKIE}=${AUTH_TOKEN}` });
     assert.strictEqual(result.opened, true, 'cookie-authenticated upgrade should open');
   });
 
-  it('GET / on the canonical host sets a persistent ds_auth cookie (30d Max-Age, #545)', async () => {
+  // The legacy unqualified name stays readable for one release so a tab open across the upgrade
+  // is not logged out. Pinned so the fallback's removal is a deliberate act, not a silent one.
+  it('still accepts the legacy unqualified cookie name (#675 transition)', async () => {
+    const result = await tryUpgrade({ Origin: ORIGIN, Cookie: `ds_auth=${AUTH_TOKEN}` });
+    assert.strictEqual(result.opened, true, 'a pre-upgrade tab must keep working');
+  });
+
+  it('GET / on the canonical host sets a persistent, port-qualified cookie (30d Max-Age, #545/#675)', async () => {
     const res = await rawGet('/', { Host: `${UI_HOST}:${PORT}`, Accept: 'text/html' });
     assert.strictEqual(res.status, 200);
     const cookies = [].concat(res.headers['set-cookie'] || []);
-    const dsAuth = cookies.find(c => c.startsWith('ds_auth='));
-    assert.ok(dsAuth, `expected a ds_auth Set-Cookie, got: ${JSON.stringify(cookies)}`);
+    // Port-qualified (#675): cookies key on host, not port, so two daemons on this machine would
+    // otherwise write the same name into the same deepsteve.localhost jar and clobber each other.
+    const dsAuth = cookies.find(c => c.startsWith(`${COOKIE}=`));
+    assert.ok(dsAuth, `expected a ${COOKIE} Set-Cookie, got: ${JSON.stringify(cookies)}`);
     assert.match(dsAuth, /Max-Age=2592000/i,
       `expected a persistent cookie (Max-Age=2592000), got: ${dsAuth}`);
   });
@@ -111,7 +129,7 @@ describe('Security auth contract (#536/#540)', () => {
     const result = await tryUpgrade({
       Host: `${UI_HOST}:${PORT}`,
       Origin: `http://${UI_HOST}:${PORT}`,
-      Cookie: `ds_auth=${AUTH_TOKEN}`,
+      Cookie: `${COOKIE}=${AUTH_TOKEN}`,
     });
     assert.strictEqual(result.opened, true, 'canonical-origin upgrade should open');
   });
@@ -121,7 +139,7 @@ describe('Security auth contract (#536/#540)', () => {
     assert.strictEqual(res.status, 302);
     assert.strictEqual(res.headers.location, `http://${UI_HOST}:${PORT}/`);
     assert.strictEqual(res.headers['set-cookie'], undefined,
-      'a bounced navigation must not deposit ds_auth into the shared localhost jar');
+      'a bounced navigation must not deposit the auth cookie into the shared localhost jar');
   });
 
   it('preserves the original port in the canonical redirect (SSH tunnels)', async () => {
@@ -147,5 +165,52 @@ describe('Security auth contract (#536/#540)', () => {
     const res = await fetch(`${BASE_URL}/api/version`, { cache: 'no-store' });
     assert.ok([401, 429].includes(res.status),
       `expected 401 (or 429 mid-lockout), got ${res.status}`);
+  });
+});
+
+// POST /api/client-log is the one write endpoint mounted ABOVE the auth gate (#675). It has to be:
+// it reports the state where our cookie is broken, and requiring the cookie to report a broken
+// cookie is how 1,643 rejections came to leave no client-side trace at all. Its whole defense is
+// therefore the Origin allowlist plus the body caps, which makes both worth pinning.
+//
+// Kept deliberately short: every rejected request here calls recordFailure() on the same
+// process-wide limiter the tests above share.
+describe('the client-log beacon is exempt from auth but not from the Origin allowlist', () => {
+  function beacon(headers, body) {
+    return fetch(`${BASE_URL}/api/client-log`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...headers },
+      body: typeof body === 'string' ? body : JSON.stringify(body),
+    });
+  }
+
+  it('accepts an unauthenticated POST from an allowlisted Origin', async () => {
+    const res = await beacon({ Origin: ORIGIN }, { windowId: 'test-win', entries: [{ kind: 'fetch-401', msg: 'GET /api/probe' }] });
+    assert.strictEqual(res.status, 204, 'no cookie, no bearer — this must still be accepted');
+  });
+
+  it('rejects a foreign Origin', async () => {
+    // Browsers always send Origin on a POST, so this is what keeps the endpoint off the open web.
+    const res = await beacon({ Origin: 'https://evil.example' }, { entries: [{ kind: 'x', msg: 'y' }] });
+    assert.strictEqual(res.status, 403);
+  });
+
+  it('rejects a missing Origin', async () => {
+    // Unlike authGate, whose Origin check is conditional, this one is mandatory — Origin is the
+    // only thing standing between an unauthenticated write and any caller at all.
+    const res = await beacon({}, { entries: [{ kind: 'x', msg: 'y' }] });
+    assert.strictEqual(res.status, 403);
+  });
+
+  it('rejects an oversized body without leaking a stack trace', async () => {
+    const res = await beacon({ Origin: ORIGIN }, JSON.stringify({ entries: [{ kind: 'big', msg: 'x'.repeat(20000) }] }));
+    assert.ok([400, 413].includes(res.status), `expected 400/413, got ${res.status}`);
+    const text = await res.text();
+    assert.ok(!/ at .*\.js:\d+/.test(text), `body must not carry a stack trace: ${text.slice(0, 200)}`);
+  });
+
+  it('tolerates a malformed body', async () => {
+    const res = await beacon({ Origin: ORIGIN }, 'not json');
+    assert.ok([400, 413].includes(res.status), `expected 400/413, got ${res.status}`);
   });
 });

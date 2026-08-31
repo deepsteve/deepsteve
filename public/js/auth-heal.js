@@ -1,7 +1,7 @@
 /**
- * Auth self-heal for cookieless tabs (#540).
+ * Auth self-heal for tabs whose auth cookie is missing or stale (#540, #675).
  *
- * The ds_auth cookie is issued only on a full HTML page load (setAuthCookie in
+ * The auth cookie is issued only on a full HTML page load (setAuthCookie in
  * security.js), but a daemon restart makes open tabs silently reconnect their
  * WebSocket without reloading — so a tab that lacks the cookie has every WS
  * upgrade rejected by verifyWsClient forever and looks broken.
@@ -20,6 +20,15 @@
  * has already said it will reject — because the failed handshake itself is the
  * expensive part: it arms a FailDelay entry shared by every socket in the
  * browser. Healing after the damage is done was always the weaker half.
+ *
+ * WHO CALLS THIS (#675): originally only the two reconnect loops, which made the
+ * heal reachable only after a socket had dropped. A realm whose sockets were
+ * fine — or which holds none, as every mod iframe does — polled 401s forever
+ * instead: one stale cookie produced 1,643 daemon-log rejections over 25+
+ * minutes, through a restart and a page reload, because nothing it did counted
+ * as a socket failure. The fetch wrapper in client-log.js now calls it too, so
+ * any 401/429 heals, whatever raised it. The guards below are what keep that
+ * safe: a genuinely unauthorized page reloads once a minute, not in a loop.
  */
 
 import { nsKey } from './storage-namespace.js';
@@ -116,7 +125,7 @@ export function maybeHealAuth() {
       try { last = Number(sessionStorage.getItem(GUARD_KEY)) || 0; } catch {}
       if (Date.now() - last < HEAL_COOLDOWN_MS) return lastVerdict;
       try { sessionStorage.setItem(GUARD_KEY, String(Date.now())); } catch {}
-      console.warn('[auth-heal] WS auth rejected — reloading once to re-acquire the ds_auth cookie');
+      console.warn('[auth-heal] server rejected our auth — reloading once to re-acquire the cookie');
       window.__deepsteveReloadPending = true;
       forcePageReload();
       return lastVerdict;

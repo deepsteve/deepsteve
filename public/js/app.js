@@ -2,7 +2,7 @@
  * Main application entry point
  */
 
-import { initClientLog, clientLog } from './client-log.js';
+import { initClientLog, clientLog, wrapRealmFetch } from './client-log.js';
 import { initWsTrace } from './ws-trace.js';
 // Before anything initializes: wrap fetch + install global error handlers so
 // failures are beaconed to the server log. (Imports are hoisted, so this runs
@@ -2598,6 +2598,11 @@ function createDisplayTab(id, name, opts = {}) {
   iframe.sandbox = 'allow-scripts allow-forms allow-same-origin';
   iframe.allow = 'autoplay';
   container.appendChild(iframe);
+  // Same-origin, separate realm: its fetches need the beacon + auth heal wrapper the shell's own
+  // window got at startup, or a 401 here is invisible and unhealed (#675). Display tabs get no
+  // bridge injection, so unlike mod and project-mod iframes this is their only hookup. Not
+  // `{ once: true }` — an updated display tab reloads by reassigning src.
+  iframe.addEventListener('load', () => wrapRealmFetch(iframe.contentWindow, `display-tab:${id}`));
 
   const tabName = name || 'Display';
   // cwd = the spawning session's dir, so Context Views scopes this tab to the

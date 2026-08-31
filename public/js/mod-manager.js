@@ -13,6 +13,7 @@
 import { nsKey } from './storage-namespace.js';
 import { tabIcon, TabManager } from './tab-manager.js';
 import { MOD_ROW_SELECTOR, groupMods, isModEnabled } from './mod-groups.js';
+import { wrapRealmFetch } from './client-log.js';
 
 /**
  * The sandbox every mod iframe gets, in one place so the panel path and the
@@ -2999,6 +3000,12 @@ function isModActive() {
  */
 function _injectBridgeAPI(iframeEl, modId, tabInstanceId) {
   try {
+    // A mod iframe is same-origin but a separate JS realm, so it has its own untouched
+    // window.fetch — which is why the workshop panel could 401 on every poll for half an hour
+    // without producing a single client-side line or triggering the auth heal (#675). Wrap it from
+    // here, alongside the bridge, on the same reach that makes the bridge possible at all. The
+    // `load` listeners that call us are not `{ once: true }`, so a reassigned src re-wraps.
+    wrapRealmFetch(iframeEl.contentWindow, `mod:${modId}`);
     iframeEl.contentWindow.deepsteve = {
       getDeepsteveVersion() {
         return deepsteveVersion;

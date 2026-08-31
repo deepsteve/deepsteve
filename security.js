@@ -11,6 +11,7 @@
 //   3. Per-install token      — required on every surface. The browser gets it as an HttpOnly
 //                               cookie set on the page we serve, but only on a LOOPBACK host —
 //                               otherwise widening the allowlist hands the token to the whole LAN.
+//                               The cookie's NAME carries our port (#675) — see LEGACY_COOKIE_NAME.
 //                               Non-browser/MCP/CLI clients send it as `Authorization: Bearer`.
 //   4. Failure rate limiting  — throttles auth *failures* only; valid credentials never throttle.
 //
@@ -29,7 +30,15 @@ const { stateDir } = require('./paths');
 const crypto = require('crypto');
 
 const AUTH_TOKEN_FILE = path.join(stateDir(), 'auth-token');
-const COOKIE_NAME = 'ds_auth';
+// The cookie name is PORT-QUALIFIED (`ds_auth_3000`), computed per instance in createSecurity.
+// Cookies key on host, not port, and canonicalHostRedirect bounces every loopback navigation to
+// UI_HOST *preserving the original port* — so a second DeepSteve on another port (an isolated test
+// daemon with its own scratch auth-token, say) lands in the very same deepsteve.localhost jar and
+// silently overwrites this install's cookie. Every open tab then 401s on every fetch with a cookie
+// it can never refresh, which is #675. Qualifying the name lets the two coexist.
+// This constant is the LEGACY unqualified name, still accepted on read so tabs that were open
+// across the upgrade keep working without a forced reload.
+const LEGACY_COOKIE_NAME = 'ds_auth';
 // Canonical UI host (#545): loopback per RFC 6761, but its own cookie "site" — isolated from the
 // shared `localhost` jar whose per-host cap is what evicted ds_auth (#544).
 const UI_HOST = 'deepsteve.localhost';
@@ -111,6 +120,10 @@ function createSecurity(cfg) {
   const token = loadOrCreateToken(log);
   const tokenHash = crypto.createHash('sha256').update(token).digest();
 
+  // See LEGACY_COOKIE_NAME above: one name per listen port, so two daemons sharing the
+  // deepsteve.localhost jar can't clobber each other's cookie (#675).
+  const cookieName = `${LEGACY_COOKIE_NAME}_${port}`;
+
   // --- Allowlists (computed once at boot, like the HTTPS cert SANs) ---
   const LOOPBACK_HOSTS = ['localhost', '127.0.0.1', '::1', UI_HOST];
   // LAN IPs are only trusted when HTTPS/LAN mode is on (they only make sense there, and the certs
@@ -176,8 +189,16 @@ function createSecurity(cfg) {
     const m = /^Bearer\s+(.+)$/i.exec(req.headers['authorization'] || '');
     return m ? m[1].trim() : null;
   }
+  // Prefer this instance's port-qualified cookie; fall back to the legacy unqualified name so a tab
+  // that was open across the upgrade keeps working until its next page load re-mints under the new
+  // name. Note what that fallback does NOT do: if a second daemon had already clobbered the shared
+  // `ds_auth`, the surviving value is that daemon's token and this still rejects. It smooths the
+  // upgrade on a normal single-daemon install; it is not a second line of defense for #675 itself.
+  // The order matters — ours wins — because the legacy name is the one still open to clobbering.
+  // Time-boxed: drop the fallback a release after every open tab has had a page load.
   function cookieTokenOf(req) {
-    return parseCookies(req.headers['cookie'])[COOKIE_NAME] || null;
+    const jar = parseCookies(req.headers['cookie']);
+    return jar[cookieName] || jar[LEGACY_COOKIE_NAME] || null;
   }
 
   // --- Failure rate limiter (ClawJacked did no localhost throttling). Valid creds bypass this
@@ -201,17 +222,70 @@ function createSecurity(cfg) {
   // HTTP auth rejections used to be completely silent (the 2026-07-15 incident:
   // a page whose fetches all 401'd for hours left zero log lines — the empty
   // command palette and the misleading "not a git repository" alert were
-  // undiagnosable). Log them, throttled: max 5 lines per 10s window, then a
-  // suppressed-count line, so a broken page retrying can't bury the log.
-  let rejectWindowStart = 0, rejectLogged = 0, rejectSuppressed = 0;
-  function logAuthReject(msg) {
-    const now = Date.now();
-    if (now - rejectWindowStart > 10_000) {
-      if (rejectSuppressed > 0) log(`Auth: (${rejectSuppressed} more rejections suppressed)`);
-      rejectWindowStart = now; rejectLogged = 0; rejectSuppressed = 0;
+  // undiagnosable). Log them, but collapsed per repeating cause.
+  //
+  // The first cut throttled a single global budget of 5 lines per 10s window. A *burst* is not the
+  // shape this actually takes: #675 was a 2s poller, which emits ~5 per window, so the budget was
+  // never spent and every single poll got its own line — 541 identical `GET /api/workshop/inbox`
+  // rejections in half an hour, burying everything else. Collapse by CAUSE instead: key on
+  // method + path + reason, log a key's first occurrence immediately, then count and emit one
+  // rollup per key per window.
+  const REJECT_WINDOW_MS = 60_000;
+  const REJECT_MAX_KEYS = 50;   // bound the map; the overflow shares one bucket
+  // method + path + reason, with the parts that vary per call folded away, because a key that
+  // varies per call is not a key — it is the unthrottled log we started with.
+  //   - the query string goes: /api/git-root?cwd=A and ?cwd=B are one poller and one bug
+  //   - id-shaped path segments go: the incident's second-noisiest line was
+  //     /api/workshop/items/blocked%3A<sessionId>/screen, which would otherwise mint a key per
+  //     session and, once past REJECT_MAX_KEYS, spill every later session into the overflow bucket
+  const ID_SEGMENT = /^(?:[0-9a-f]{8,}|\d+|.*%3A.*|.*:.*)$/i;
+  function rejectKey(method, url, why) {
+    const q = String(url || '').indexOf('?');
+    const path = q === -1 ? String(url || '') : String(url).slice(0, q);
+    const collapsed = path.split('/').map(seg => (ID_SEGMENT.test(seg) ? ':id' : seg)).join('/');
+    return `${method} ${collapsed} — ${why}`;
+  }
+  const rejectCounts = new Map();   // key -> repeats since its first line
+  let rejectWindowStart = 0;
+  let rejectOverflow = 0;
+  let rejectTimer = null;
+
+  // Emit one rollup per key that repeated, then reset the window.
+  function flushAuthRejects() {
+    for (const [key, count] of rejectCounts) {
+      if (count > 0) log(`Auth: rejected ${key} ×${count + 1} in ${REJECT_WINDOW_MS / 1000}s`);
     }
-    if (rejectLogged < 5) { rejectLogged++; log(msg); }
-    else rejectSuppressed++;
+    if (rejectOverflow > 0) {
+      log(`Auth: (${rejectOverflow} more rejections across other endpoints)`);
+    }
+    rejectCounts.clear();
+    rejectOverflow = 0;
+    rejectWindowStart = 0;
+    if (rejectTimer) { clearTimeout(rejectTimer); rejectTimer = null; }
+  }
+
+  // A storm that stops must still print its tail. The old code only flushed on the NEXT rejection,
+  // so a count could sit unlogged for hours and then be stamped with the wrong time. unref() so a
+  // pending rollup never holds the process open.
+  function armRejectFlush() {
+    if (rejectTimer) return;
+    rejectTimer = setTimeout(() => { rejectTimer = null; flushAuthRejects(); }, REJECT_WINDOW_MS);
+    if (rejectTimer.unref) rejectTimer.unref();
+  }
+
+  function logAuthReject(key, msg) {
+    const now = Date.now();
+    if (rejectWindowStart && now - rejectWindowStart >= REJECT_WINDOW_MS) flushAuthRejects();
+    if (!rejectWindowStart) rejectWindowStart = now;
+    if (rejectCounts.has(key)) {
+      rejectCounts.set(key, rejectCounts.get(key) + 1);
+    } else if (rejectCounts.size >= REJECT_MAX_KEYS) {
+      rejectOverflow++;
+    } else {
+      rejectCounts.set(key, 0);
+      log(msg);   // first sighting of this cause — full detail, including the query string
+    }
+    armRejectFlush();
   }
 
   // === Express middleware ===
@@ -219,7 +293,12 @@ function createSecurity(cfg) {
   // 1. Host allowlist — first in the chain, applies to every request (static, /api, /mcp).
   function hostGuard(req, res, next) {
     if (!isAllowedHost(req.headers.host)) {
-      log(`Rejected: disallowed Host "${req.headers.host || ''}" (${req.method} ${req.url})`);
+      // Throttled and prefixed like the rest (#675). This is a Host rejection, not a credential
+      // one, and the `disallowed Host` reason says so — but it is still this module turning a
+      // request away, and one grep should find every kind. An unthrottled line here is a flood
+      // waiting for a misconfigured client, exactly like the one authGate had.
+      logAuthReject(rejectKey(req.method, req.url, 'disallowed Host'),
+        `Auth: rejected ${req.method} ${req.url} — disallowed Host "${req.headers.host || ''}" (403)`);
       return res.status(403).type('text/plain').send('Forbidden: Host not allowed');
     }
     next();
@@ -264,7 +343,7 @@ function createSecurity(cfg) {
     if (req.method === 'GET'
         && String(req.headers.accept || '').includes('text/html')
         && LOOPBACK_HOST_SET.has(hostnameOf(req.headers.host))) {
-      res.cookie(COOKIE_NAME, token, {
+      res.cookie(cookieName, token, {
         httpOnly: true, sameSite: 'strict', path: '/', secure: !!req.secure,
         maxAge: COOKIE_MAX_AGE_MS,
       });
@@ -287,7 +366,8 @@ function createSecurity(cfg) {
       // cross-origin fetch()/XHR always sends it, so this blocks the drive-by without breaking us.
       const origin = req.headers.origin;
       if (origin && !isAllowedOrigin(origin)) {
-        log(`Rejected: cookie auth with disallowed Origin "${origin}" (${req.method} ${req.url})`);
+        logAuthReject(rejectKey(req.method, req.url, 'cookie auth with disallowed Origin'),
+          `Auth: rejected ${req.method} ${req.url} — cookie auth with disallowed Origin "${origin}" (403)`);
         return res.status(403).type('text/plain').send('Forbidden: Origin not allowed');
       }
       return next();
@@ -299,19 +379,54 @@ function createSecurity(cfg) {
     // from "credentials present but wrong" (rotated token, forged cookie) —
     // they point at completely different failures.
     const why = bearer ? 'invalid bearer token' : cookieTok ? 'invalid auth cookie' : 'no credentials';
-    logAuthReject(`Auth: rejected ${req.method} ${req.url} — ${why} (${status})`);
+    logAuthReject(rejectKey(req.method, req.url, why),
+      `Auth: rejected ${req.method} ${req.url} — ${why} (${status})`);
     if (status === 429) return res.status(429).type('text/plain').send('Too Many Requests');
     return res.status(401).type('text/plain').send('Unauthorized');
+  }
+
+  // 5. Origin gate for the handful of routes that must answer an UNAUTHENTICATED request — today
+  //    just the client-log beacon, which exists to report the state where our cookie is broken and
+  //    so cannot itself require the cookie. authGate's Origin check is conditional ("if an Origin is
+  //    present it must be allowlisted"); here it is mandatory, because Origin is the only thing
+  //    standing between this route and any page on the internet. Browsers always send Origin on a
+  //    POST — including fetch(mode:'no-cors') and sendBeacon — so requiring it costs our own pages
+  //    nothing while excluding evil.com and every other localhost:PORT (allowedOrigins is
+  //    port-qualified). Runs after hostGuard, so DNS-rebinding victims are already gone.
+  //
+  //    Origin is NOT authentication, and nothing behind this gate may assume it is. Anything on
+  //    our own origin passes — including a display tab, a project-mod page, and any remote HTML
+  //    the Baby Browser is serving through /api/proxy — and so does any local process willing to
+  //    set the header. It is a same-origin check, so what it guards must be safe to hand a
+  //    same-origin caller. For the beacon that holds: its only power is writing bounded, sanitized
+  //    strings into the daemon log, which every one of those callers could already do by other
+  //    means. Do not put a second route behind this and assume more.
+  function requireAllowedOrigin(req, res, next) {
+    const origin = req.headers.origin;
+    if (!isAllowedOrigin(origin)) {
+      logAuthReject(rejectKey(req.method, req.url, 'disallowed/missing Origin'),
+        `Auth: rejected ${req.method} ${req.url} — disallowed/missing Origin "${origin || ''}" (403)`);
+      return res.status(403).type('text/plain').send('Forbidden: Origin not allowed');
+    }
+    next();
   }
 
   // === WebSocket upgrade guard (ws `verifyClient`) ===
   // Runs during the HTTP upgrade, BEFORE the handshake completes — so a rejected page never gets a
   // live socket. Requires an allowlisted Host, a present+allowlisted Origin (browsers always send
   // it; missing Origin is rejected), and a valid auth cookie (the only WS clients are browsers).
+  // Rejections here share authGate's prefix and throttle on purpose. They used to read
+  // `Rejected WS upgrade: …`, which meant a grep for `Auth: rejected` found every HTTP rejection
+  // and none of the WS ones — that mismatch is what produced #675's incorrect "zero WebSocket
+  // upgrades have ever been rejected" reading of the log. One prefix, one grep.
+  function logWsReject(why, detail) {
+    logAuthReject(`WS upgrade — ${why}`, `Auth: rejected WS upgrade — ${detail}`);
+  }
+
   function verifyWsClient(info, cb) {
     const req = info.req;
     if (!isAllowedHost(req.headers.host)) {
-      log(`Rejected WS upgrade: disallowed Host "${req.headers.host || ''}"`);
+      logWsReject('disallowed Host', `disallowed Host "${req.headers.host || ''}"`);
       return cb(false, 403, 'Forbidden');
     }
     // Non-browser clients (integration tests, remote-control tools) authenticate with a bearer token
@@ -321,13 +436,14 @@ function createSecurity(cfg) {
     if (bearer && validToken(bearer)) return cb(true);
     const origin = info.origin || req.headers.origin;
     if (!isAllowedOrigin(origin)) {
-      log(`Rejected WS upgrade: disallowed/missing Origin "${origin || ''}"`);
+      logWsReject('disallowed/missing Origin', `disallowed/missing Origin "${origin || ''}"`);
       return cb(false, 403, 'Forbidden');
     }
     const cookieTok = cookieTokenOf(req);
     if (!cookieTok || !validToken(cookieTok)) {
       recordFailure();
-      log(`Rejected WS upgrade: ${cookieTok ? 'invalid' : 'missing'} auth cookie`);
+      const why = `${cookieTok ? 'invalid' : 'missing'} auth cookie`;
+      logWsReject(why, why);
       return cb(false, lockedOut() ? 429 : 401, 'Unauthorized');
     }
     cb(true);
@@ -335,12 +451,13 @@ function createSecurity(cfg) {
 
   return {
     token,
-    cookieName: COOKIE_NAME,
+    cookieName,
     allowedHosts, allowedOrigins, mcpAllowedHosts,
     isAllowedHost, isAllowedOrigin, validToken,
-    hostGuard, canonicalHostRedirect, setAuthCookie, authGate, verifyWsClient,
-    _rateLimit: { lockedOut, recordFailure }, // exposed for tests
+    hostGuard, canonicalHostRedirect, setAuthCookie, authGate, requireAllowedOrigin, verifyWsClient,
+    _rateLimit: { lockedOut, recordFailure },              // exposed for tests
+    _rejectLog: { flush: flushAuthRejects, key: rejectKey }, // exposed for tests
   };
 }
 
-module.exports = { createSecurity, AUTH_TOKEN_FILE, COOKIE_NAME, UI_HOST };
+module.exports = { createSecurity, AUTH_TOKEN_FILE, LEGACY_COOKIE_NAME, UI_HOST };

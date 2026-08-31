@@ -54,7 +54,8 @@ export function initLiveReload({ onMessage, onShowRestartConfirm, onShowReloadOv
 
   // The error beacon rides this socket (it must work when fetch doesn't).
   // `ws` is reassigned on every reconnect, so hand over a getter, not the socket.
-  attachClientLogSender(() => ws);
+  // The windowId goes with it because the beacon's HTTP fallback has no socket to read it from.
+  attachClientLogSender(() => ws, windowId);
 
   const restartChannel = new BroadcastChannel(nsChannel('deepsteve-restart'));
 

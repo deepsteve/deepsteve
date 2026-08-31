@@ -17,7 +17,7 @@ const path = require('path');
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-cookie-scope-'));
 const prevHome = process.env.DEEPSTEVE_HOME;
 process.env.DEEPSTEVE_HOME = scratch;
-const { createSecurity, COOKIE_NAME, UI_HOST } = require('../../security.js');
+const { createSecurity, LEGACY_COOKIE_NAME, UI_HOST } = require('../../security.js');
 
 const PORT = 3000;
 const security = createSecurity({
@@ -52,7 +52,7 @@ describe('auth cookie is issued to loopback hosts only', () => {
     it(`issues the cookie on a page load from ${host}`, () => {
       const { cookie, nexted } = pageLoadFrom(host);
       assert.ok(cookie, `expected a cookie for loopback host ${host}`);
-      assert.strictEqual(cookie.name, COOKIE_NAME);
+      assert.strictEqual(cookie.name, security.cookieName);
       assert.strictEqual(cookie.value, security.token);
       assert.strictEqual(cookie.opts.httpOnly, true);
       assert.strictEqual(cookie.opts.sameSite, 'strict');
@@ -74,5 +74,64 @@ describe('auth cookie is issued to loopback hosts only', () => {
     // Guards the test above against passing for the wrong reason (a 403 rather than the scope fix).
     assert.ok(security.isAllowedHost('server:3000'), 'server must be an allowlisted Host');
     assert.ok(security.isAllowedHost('lanbox:3000'), 'lanbox must be an allowlisted Host');
+  });
+});
+
+// #675: cookies key on host, not port, and canonicalHostRedirect sends every loopback navigation to
+// UI_HOST keeping the original port. So two DeepSteve daemons on one machine — the real one and an
+// isolated test daemon with its own auth-token — write into the SAME deepsteve.localhost jar. With
+// one shared name the second silently overwrote the first's cookie and every open tab 401'd on
+// every fetch, forever, with a cookie no page load of its own would ever refresh.
+describe('the auth cookie name is port-qualified so two daemons cannot clobber each other', () => {
+  const other = createSecurity({
+    port: 3999,
+    httpsPort: 3443,
+    httpsEnabled: false,
+    getLanAddresses: () => ['localhost', '127.0.0.1'],
+    log: () => {},
+  });
+
+  it('carries the listen port', () => {
+    assert.strictEqual(security.cookieName, `${LEGACY_COOKIE_NAME}_3000`);
+    assert.strictEqual(other.cookieName, `${LEGACY_COOKIE_NAME}_3999`);
+  });
+
+  it('two instances on different ports use different names', () => {
+    assert.notStrictEqual(security.cookieName, other.cookieName,
+      'a shared name is what let a test daemon overwrite the real install cookie');
+  });
+
+  it("does not accept the other daemon's cookie", () => {
+    const req = { method: 'GET', url: '/api/version', headers: { cookie: `${other.cookieName}=${other.token}` } };
+    let status = 0;
+    const res = { status: (s) => { status = s; return res; }, type: () => res, send: () => {} };
+    let nexted = false;
+    security.authGate(req, res, () => { nexted = true; });
+    assert.ok(!nexted, 'another daemon token must not authenticate');
+    assert.strictEqual(status, 401);
+  });
+
+  // Transition path: a tab that was open across the upgrade still holds the unqualified cookie, and
+  // has no reason to reload until something makes it. Reading the legacy name keeps it working
+  // until its next page load re-mints under the new one.
+  it('still accepts the legacy unqualified cookie', () => {
+    const req = { method: 'GET', url: '/api/version', headers: { cookie: `${LEGACY_COOKIE_NAME}=${security.token}` } };
+    const res = { status: () => res, type: () => res, send: () => {} };
+    let nexted = false;
+    security.authGate(req, res, () => { nexted = true; });
+    assert.ok(nexted, 'a pre-upgrade tab must not be logged out by the rename');
+  });
+
+  it('prefers the port-qualified cookie when both are present', () => {
+    // The legacy cookie is the one a rogue daemon can still stomp, so ours has to win.
+    const req = {
+      method: 'GET',
+      url: '/api/version',
+      headers: { cookie: `${LEGACY_COOKIE_NAME}=not-the-token; ${security.cookieName}=${security.token}` },
+    };
+    const res = { status: () => res, type: () => res, send: () => {} };
+    let nexted = false;
+    security.authGate(req, res, () => { nexted = true; });
+    assert.ok(nexted, 'the port-qualified cookie must take precedence over a stale legacy one');
   });
 });

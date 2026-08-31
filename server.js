@@ -233,6 +233,38 @@ function log(...args) {
   console.log(`[${formatLogTimestamp()}]`, ...args);
 }
 
+// Error beacon from public/js/client-log.js — page JS errors and failed fetches. Shared by the two
+// transports (the live-reload WS message handler and POST /api/client-log), so the caps and the
+// line format can't drift between an authenticated and an unauthenticated caller.
+//
+// Everything here is attacker-controlled text on the unauthenticated path, so: bounded entry count,
+// bounded field lengths, and control characters stripped — a raw \r or an ANSI escape in the daemon
+// log corrupts the file for `grep` and can repaint a terminal that is tailing it.
+const CLIENT_LOG_MAX_ENTRIES = 25;
+function appendClientLogEntries(windowId, entries) {
+  if (!Array.isArray(entries)) return;
+  const win = sanitizeClientLogField(windowId, 40) || '?';
+  for (const e of entries.slice(0, CLIENT_LOG_MAX_ENTRIES)) {
+    const kind = sanitizeClientLogField(e && e.kind, 40) || 'event';
+    const msg = sanitizeClientLogField(e && e.msg, 400);
+    // The realm (shell, mod:workshop, display-tab:…) is what #675 lacked: 660 rejections and no way
+    // to tell which of the page's same-origin realms was making them.
+    const realm = sanitizeClientLogField(e && e.realm, 40);
+    log(`[client ${win}${realm ? ` ${realm}` : ''}] ${kind}: ${msg}`);
+  }
+}
+function sanitizeClientLogField(v, max) {
+  if (v === undefined || v === null) return '';
+  // Character-wise rather than a regex: a control-character class has to be written with literal
+  // escapes, and those have a habit of landing in the source as the raw bytes themselves.
+  let out = '';
+  for (const ch of String(v).slice(0, max)) {
+    const code = ch.codePointAt(0);
+    out += (code < 0x20 || code === 0x7f) ? ' ' : ch;   // C0 controls + DEL
+  }
+  return out;
+}
+
 // Session-lifecycle tracing for debugging session-ID / planMode divergence (issue #491).
 // Emits one JSON line per event into the daemon log, greppable via [session-trace].
 // `ts` (epoch ms) lets analysis order events across restarts independent of the log
@@ -382,6 +414,41 @@ app.use('/mods', express.static('mods'));
 // Public, unauthenticated readiness probe — lets live-reload detect "server back up" on a deploy
 // that turns auth on, before the reloaded page has re-acquired its cookie. Must stay above the gate.
 app.get('/healthz', (req, res) => res.json({ ok: true }));
+// Client error beacon, HTTP fallback (#675). Also above the gate, and for the same reason: it
+// exists to report the state where our cookie is broken, so it cannot require the cookie. The
+// beacon's primary transport is the live-reload WebSocket, but a page can be in exactly the state
+// worth reporting — every fetch 401ing — with no socket at all (a mod iframe holds none), and then
+// the failure leaves no client-side trace whatsoever. Its guards are Host (already applied above)
+// plus a MANDATORY allowlisted Origin, the body caps in appendClientLogEntries, and its own
+// limiter, so an unauthenticated caller can neither reach it from another origin nor flood the log.
+//
+// It must stay an app.post (an app.use would exempt every method, not just POST), the Origin check
+// must stay ahead of the body parser, and the handler must never call next(): its route-local
+// express.json marks req._body, and the global parser below skips a request already flagged, so a
+// fall-through would leave a later route parsing under this route's 8kb limit instead of its own.
+// test/unit/auth-exempt-routes.test.js pins all three.
+const BEACON_WINDOW_MS = 10_000;
+const BEACON_MAX_REQUESTS = 20;
+let beaconWindowStart = 0, beaconRequests = 0, beaconDropped = 0;
+app.post('/api/client-log', security.requireAllowedOrigin, express.json({ limit: '8kb' }), (req, res) => {
+  const now = Date.now();
+  if (now - beaconWindowStart > BEACON_WINDOW_MS) {
+    if (beaconDropped > 0) log(`[client] ${beaconDropped} beacon request(s) dropped — rate limit`);
+    beaconWindowStart = now; beaconRequests = 0; beaconDropped = 0;
+  }
+  // Always 204: a beacon that learns it was throttled has nothing useful to do about it, and a
+  // page retrying a rejected beacon is the flood we are trying to avoid.
+  if (++beaconRequests > BEACON_MAX_REQUESTS) { beaconDropped++; return res.status(204).end(); }
+  const body = req.body || {};
+  appendClientLogEntries(body.windowId, body.entries);
+  res.status(204).end();
+}, (err, req, res, _next) => {
+  // Route-local error handler. express.json calls next(err) on an oversized or malformed body, and
+  // this app registers no error middleware — so it would reach finalhandler, which serves the stack
+  // trace outside NODE_ENV=production. The installed service sets that; a daemon started as plain
+  // `node server.js` does not, which is every dev and agent run.
+  res.status(err && err.type === 'entity.too.large' ? 413 : 400).type('text/plain').send('Bad beacon');
+});
 // 4. Token gate — POSITIONAL, not a trailing catch-all: registered here it precedes every inline
 //    /api route and the async-mounted /mcp + mod routes, so it default-denies all of them (and any
 //    future control endpoint). The static handlers above short-circuit real files before this runs.
@@ -7067,15 +7134,11 @@ function handleWsConnection(ws, req) {
         } else if (parsed.type === 'restart-declined' && restartState) {
           restartState.resolve('declined');
         } else if (parsed.type === 'client-log' && Array.isArray(parsed.entries)) {
-          // Error beacon from public/js/client-log.js — page JS errors and
-          // failed fetches, delivered over this socket precisely because it
-          // works when the page's fetch() doesn't. Caps keep a hostile or
-          // broken page from flooding the log.
-          for (const e of parsed.entries.slice(0, 25)) {
-            const kind = String((e && e.kind) || 'event').slice(0, 40);
-            const msg = String((e && e.msg) || '').slice(0, 400);
-            log(`[client ${ws.windowId || '?'}] ${kind}: ${msg}`);
-          }
+          // Error beacon from public/js/client-log.js — page JS errors and failed fetches,
+          // delivered over this socket precisely because it works when the page's fetch() doesn't.
+          // The HTTP fallback at POST /api/client-log shares appendClientLogEntries, which carries
+          // the caps that keep a hostile or broken page from flooding the log.
+          appendClientLogEntries(ws.windowId, parsed.entries);
         }
       } catch {}
     });
