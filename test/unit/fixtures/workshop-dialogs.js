@@ -161,10 +161,12 @@ const NINE_OPTIONS = [
 
 // A real AskUserQuestion, captured 2026-08-30 from the #662 worktree. Claude Code
 // draws a rule between the last real option and the "Chat about this" escape hatch,
-// which stops collectOptions dead: option 4 is taken, the rule ends the run before
-// option 1 is reached, and parseDialog returns null. The row therefore renders as a
-// raw preview and cannot be answered from the panel — the exact shape that made a
-// dismissible blocked row necessary (#663).
+// and until #664 that stopped collectOptions dead: option 4 was taken, the rule ended
+// the run before option 1 was reached, and parseDialog returned null. Every
+// multi-option AskUserQuestion has this divider, so the whole feature degraded to a
+// raw preview on the majority of what the inbox exists to show.
+//
+// The #664 regression fixture: four options in order, cursor on the first.
 const RULED_OPTION_RUN = [
   '⏺ All three reports are in. I have two genuine design forks to settle.',
   '←  ☐ Scope  ☐ ⌘P  ☐ Toggle look  ✔ Submit  →',
@@ -177,6 +179,62 @@ const RULED_OPTION_RUN = [
   RULE,
   '  4. Chat about this',
   '',
+  'Enter to select · Tab/Arrow keys to navigate · Esc to cancel',
+];
+
+// The divider one row higher: it groups BOTH escape hatches, so the row directly above
+// it is option 2's DESCRIPTION rather than an option. Pins that the walk does not demand
+// an option row adjacent to the rule — a guard shaped that way reads the capture above
+// and refuses this, and Claude Code draws the divider under a description just as readily.
+const RULED_ESCAPE_GROUP = [
+  'Who gets the quiet-mode toggle?',
+  '❯ 1. Apps only (`app: true`)',
+  '     Keeps one flag meaning one thing.',
+  '  2. Every fullscreen mod view',
+  '     Broader payoff now.',
+  RULE,
+  '  3. Type something.',
+  '  4. Chat about this',
+  'Enter to select · Tab/Arrow keys to navigate · Esc to cancel',
+];
+
+// A box border AND an escape-hatch divider on one screen. `rules` (borders crossed
+// before the run starts) and `crossings` (dividers crossed inside it) are separate
+// budgets; spending one on the other loses the dialog.
+const BOXED_RULED_DIALOG = [
+  '╭' + '─'.repeat(40) + '╮',
+  '│ Do you want to proceed?',
+  '│ ❯ 1. Yes',
+  '│   2. Type something.',
+  '├' + '─'.repeat(40) + '┤',
+  '│   3. Chat about this',
+  '╰' + '─'.repeat(40) + '╯',
+  'Esc to cancel · Tab to amend',
+];
+
+// The far side of the rule is `2.` when the run needs `3.`, so this rule is the end of
+// the run, not a divider. Pins the load-bearing half of #664: stepping over a rule must
+// not RESCUE a run that contiguity would otherwise have killed.
+const RULE_BREAKS_RUN = [
+  'Pick a target',
+  '❯ 1. Alpha',
+  '  2. Beta',
+  RULE,
+  '  4. Chat about this',
+  'Enter to select · Tab/Arrow keys to navigate · Esc to cancel',
+];
+
+// The hole the divider tolerance widens by exactly one rule: a numbered list in the
+// TRANSCRIPT ending on the number the run wants. It chains on and the labels are junk —
+// but no transcript row carries a cursor glyph, so cursorIndex is null and the row is
+// never answerable. Contiguity is already the only guard here when there is no rule.
+const TRANSCRIPT_LIST_ACROSS_RULE = [
+  '⏺ I considered:',
+  '1. Alpha',
+  '2. Beta',
+  '3. Gamma',
+  RULE,
+  '  4. Chat about this',
   'Enter to select · Tab/Arrow keys to navigate · Esc to cancel',
 ];
 
@@ -196,4 +254,8 @@ module.exports = {
   LABEL_WITH_NUMBER,
   NINE_OPTIONS,
   RULED_OPTION_RUN,
+  RULED_ESCAPE_GROUP,
+  BOXED_RULED_DIALOG,
+  RULE_BREAKS_RUN,
+  TRANSCRIPT_LIST_ACROSS_RULE,
 };

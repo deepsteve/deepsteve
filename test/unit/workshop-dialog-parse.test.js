@@ -221,6 +221,112 @@ test('nine options parse in order', () => {
   assert.strictEqual(p.options[8].label, 'india');
 });
 
+// ── The escape-hatch divider (#664) ──────────────────────────────────────────
+
+test('the escape-hatch divider is crossed, and the whole run is read (#664)', () => {
+  // Claude Code draws a rule between the real answers and "Chat about this" on EVERY
+  // multi-option AskUserQuestion. null here is not one dialog lost — it is the inbox
+  // degrading to Action Required with more scrolling on the majority of its rows.
+  const p = dp.parseDialog(fx.RULED_OPTION_RUN);
+  assert.ok(p, 'the most common AskUserQuestion shape in this repo must parse');
+  assert.deepStrictEqual(p.options.map((o) => o.n), [1, 2, 3, 4]);
+  assert.strictEqual(p.options[3].label, 'Chat about this');
+  assert.strictEqual(p.options[0].label.startsWith('Apps only (`app: true`)'), true);
+  assert.strictEqual(p.cursorIndex, 0);
+  assert.strictEqual(p.kind, 'question');
+  assert.strictEqual(
+    p.question,
+    'Who gets the quiet-mode toggle? #661 shipped `"app": true` on Workshop only.',
+  );
+  assert.strictEqual(p.multi.count, 4);
+});
+
+test('the cursor lands on the row we think it does, on both sides of the divider', () => {
+  // The property the answer path stakes a live session on: sendChoice moves Up/Down
+  // RELATIVE to cursorIndex and then presses Enter, so an index that is right about
+  // the number but wrong about the row is a wrong button in someone's session.
+  const labels = ['Uniform', 'Minimal', 'Type something.', 'Chat about this'];
+  for (let i = 0; i < labels.length; i++) {
+    const rows = ['How wide should the wiring be?'];
+    labels.forEach((label, j) => {
+      if (j === labels.length - 1) rows.push(fx.RULE);
+      rows.push(`${j === i ? '❯' : ' '} ${j + 1}. ${label}`);
+    });
+    rows.push('Enter to select · Tab/Arrow keys to navigate · Esc to cancel');
+
+    const p = dp.parseDialog(rows);
+    assert.ok(p, `cursor on option ${i + 1} must still parse`);
+    assert.strictEqual(p.cursorIndex, i, `cursor should be at index ${i}`);
+    // Index alone would pass a run that is uniformly shifted; the label is what pins
+    // the index to the actual screen row.
+    assert.strictEqual(p.options[p.cursorIndex].label, labels[i]);
+    assert.deepStrictEqual(p.options.map((o) => o.label), labels);
+  }
+});
+
+test('a description above the divider does not stop the walk', () => {
+  // The divider groups BOTH escape hatches here, so the row directly above it is a
+  // description. Demanding an adjacent option row would refuse this whole shape.
+  const p = dp.parseDialog(fx.RULED_ESCAPE_GROUP);
+  assert.ok(p);
+  assert.deepStrictEqual(p.options.map((o) => o.n), [1, 2, 3, 4]);
+  assert.strictEqual(p.options[3].label, 'Chat about this');
+  assert.strictEqual(p.cursorIndex, 0);
+});
+
+test('a divider the run does not continue across still ends it', () => {
+  // Stepping over a rule must never RESCUE a run. Contiguity, the blank/continuation
+  // budgets and the composer break all still apply to every row past the divider, so a
+  // rule that is really the end of the run dies one iteration later instead of at it.
+  assert.strictEqual(dp.parseDialog(fx.RULE_BREAKS_RUN), null);
+
+  const twoDividers = [
+    'Pick a target',
+    '❯ 1. Alpha',
+    fx.RULE,
+    '  2. Beta',
+    fx.RULE,
+    '  3. Gamma',
+    'Enter to select · Esc to cancel',
+  ];
+  assert.strictEqual(dp.parseDialog(twoDividers), null, 'one crossing per run, not two');
+
+  const proseBelow = [
+    'Pick a target',
+    '❯ 1. Alpha',
+    '  2. Type something.',
+    fx.RULE,
+    '     stray transcript prose',
+    '  3. Chat about this',
+    'Enter to select · Esc to cancel',
+  ];
+  assert.strictEqual(
+    dp.parseDialog(proseBelow), null,
+    'a divider sitting ABOVE rows that belong to the option below it is not a divider',
+  );
+});
+
+test('a box border and an escape-hatch divider are different budgets', () => {
+  // `rules` counts borders crossed BEFORE the run starts, `crossings` counts dividers
+  // crossed inside it. Spending one on the other loses the dialog.
+  const p = dp.parseDialog(fx.BOXED_RULED_DIALOG);
+  assert.ok(p, 'a boxed dialog with an inner divider must parse');
+  assert.deepStrictEqual(p.options.map((o) => o.label), ['Yes', 'Type something.', 'Chat about this']);
+  assert.strictEqual(p.cursorIndex, 0);
+});
+
+test('a numbered transcript list spliced across a rule can never be pressed', () => {
+  // The known hole, pinned rather than pretended away: a transcript list ending on the
+  // number the run wants chains on across a rule. It is unpressable because transcript
+  // rows carry no cursor glyph — tools.js gates `answerable` on cursorIndex !== null —
+  // and contiguity is already the only guard against this when there is no rule at all.
+  const p = dp.parseDialog(fx.TRANSCRIPT_LIST_ACROSS_RULE);
+  assert.strictEqual(
+    p && p.cursorIndex, null,
+    'either unreadable or unanswerable — never a confident wrong answer',
+  );
+});
+
 // ── Multi-question AskUserQuestion ───────────────────────────────────────────
 
 test('a multi-question tab strip is reported, without an index', () => {
@@ -316,11 +422,11 @@ test('an unreadable dialog still fingerprints, and two of them do not collide', 
   // The case the whole thing exists for: parseDialog gives up, so there is no question
   // string to hash. Falling back to '' would make every unreadable dialog on the
   // machine one identity — one dismissal silencing all of them.
-  assert.strictEqual(dp.parseDialog(fx.RULED_OPTION_RUN), null, 'this capture is unreadable');
-  const a = dp.dialogFingerprint(fx.RULED_OPTION_RUN);
+  assert.strictEqual(dp.parseDialog(fx.SINGLE_OPTION), null, 'this capture is unreadable');
+  const a = dp.dialogFingerprint(fx.SINGLE_OPTION);
   assert.ok(a, 'an unreadable dialog is still identifiable');
 
-  const other = fx.RULED_OPTION_RUN.map(
+  const other = fx.SINGLE_OPTION.map(
     (l) => (l.startsWith('❯ 1.') ? '❯ 1. Something else entirely' : l),
   );
   assert.notStrictEqual(dp.dialogFingerprint(other), a);

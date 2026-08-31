@@ -471,6 +471,13 @@ an inbox row. The listing reads `entry.terminalScreen.linesSync(n)` and never
 `readTerminalScreen`, which would replay the whole scrollback into a fresh emulator and `await`
 a parse queue one chatty session can defer indefinitely.
 
+**The option run is walked upward from the footer, and steps over one rule.** Claude Code draws a
+divider above its escape hatches ("Type something.", "Chat about this") on every multi-option
+AskUserQuestion, and treating that as the end of the run made the majority of them unreadable
+(#664). Stepping over it is safe because it decides nothing: contiguity — `n !== expected` — still
+decides, and every row past the divider goes through the same budgets as any other. A second rule
+means box borders rather than a divider, and the run stops.
+
 ### How an item leaves the inbox
 
 Every row is an obligation, so nothing is dropped silently — but a row nobody will ever act on is
@@ -498,11 +505,11 @@ daemon, for the reason the `wait_seconds` holds do: losing one costs a row you a
 back once, and persisting one costs a second store to reconcile against sessions that are gone.
 
 The fingerprint is the whole dialog block, not the parsed question, because `parseDialog()` returns
-`null` on any dialog whose option run it cannot walk — a real AskUserQuestion draws a rule between
-the last option and "Chat about this", which stops the walk dead. Those all shared one empty
-fingerprint, so hashing the question alone would let a single dismissal silence every unreadable
-dialog on the machine, and give each of them one inherited age. The cursor glyph is stripped, so
-arrowing between options is navigation rather than a new question.
+`null` on any dialog whose option run it cannot walk — a run truncated by the read window, a single
+option on screen, a rule the run does not continue across. Those all share one empty fingerprint, so
+hashing the question alone would let a single dismissal silence every unreadable dialog on the
+machine, and give each of them one inherited age. The cursor glyph is stripped, so arrowing between
+options is navigation rather than a new question.
 
 A blocked row carries the `fingerprint` it was drawn with, and the panel echoes it back as
 `expect` — the same confirmed-not-assumed check `sendChoice` makes before pressing a button. A
