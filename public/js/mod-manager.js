@@ -27,8 +27,28 @@ import { tabIcon, TabManager } from './tab-manager.js';
  * null, and every mousemove handler gated on it silently receives nothing — the
  * camera simply never turns, with no visible error. That is how village,
  * space-station and monkey-code all shipped.
+ *
+ * `allow-popups` (#671) is what lets a mod link OUT. Without it a mod cannot open an
+ * external URL at all: `<a target="_blank">` and `window.open()` are both refused, and
+ * refused SILENTLY — no exception, no console line, the click just does nothing. It
+ * grants no authority a mod did not already have, because `allow-same-origin` above
+ * already gives every mod iframe full same-origin reach into this document. What it
+ * buys is a REAL link on a data row, so ⌘-click, middle-click and "copy link address"
+ * behave the way they do everywhere else; a JS-driven button loses all three.
+ *
+ * `allow-popups-to-escape-sandbox` is NOT a second nice-to-have — the two ship together
+ * or the feature is worse than absent. A popup opened from a sandboxed document
+ * INHERITS the opener's sandbox flags, so with `allow-popups` alone github.com would
+ * load in a sandboxed top-level context with no `allow-top-navigation` and no
+ * `allow-forms`: the page appears, and then every link on it silently does nothing.
+ * That reads as "GitHub is broken", not as "our iframe is misconfigured". Escaping
+ * grants the mod nothing either — the popup is a different origin in its own top-level
+ * browsing context, reachable already by anything `allow-same-origin` permits.
+ *
+ * test/unit/mod-sandbox.test.js pins both tokens, because dropping either is invisible
+ * until someone clicks a link.
  */
-const MOD_SANDBOX = 'allow-scripts allow-same-origin allow-pointer-lock';
+const MOD_SANDBOX = 'allow-scripts allow-same-origin allow-pointer-lock allow-popups allow-popups-to-escape-sandbox';
 
 const STORAGE_KEY = nsKey('deepsteve-enabled-mods'); // Set of enabled mod IDs
 const KNOWN_MODS_KEY = nsKey('deepsteve-known-mods'); // All mod IDs known at last save

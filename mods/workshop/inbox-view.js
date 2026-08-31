@@ -80,21 +80,34 @@ export function flattenGroups(groups) {
  * Every keyboard move indexes into `order`, never into the sorted array. Getting that
  * wrong (arrows following sortItems while the DOM follows the grouping) is the single
  * most likely bug in this panel, which is why both halves come from one function.
+ *
+ * The Backlog (#671) is a second SECTION, not a second list, and it goes through here
+ * for the same reason: two sections computing their own order independently is the same
+ * bug with more places to make it. Backlog ids come last because the section renders
+ * last, so ↑/↓ walks out of the inbox and into the backlog exactly as it looks.
+ * `opts.backlog` is already sorted by the caller (backlog-view.js owns that order); a
+ * collapsed section contributes rows to neither `backlog` nor `order`.
  */
 export function visibleItems(items, opts = {}) {
-  const { showBriefings = true, blockingOnly = false, groupByProject: grouped = false } = opts;
+  const {
+    showBriefings = true, blockingOnly = false, groupByProject: grouped = false,
+    backlog = [], backlogCollapsed = false,
+  } = opts;
 
   let list = (Array.isArray(items) ? items : []).filter(Boolean);
   if (!showBriefings) list = list.filter((i) => i.kind !== 'briefing');
   if (blockingOnly) list = list.filter((i) => i.urgency === 'blocking');
 
+  const issues = backlogCollapsed ? [] : (Array.isArray(backlog) ? backlog : []).filter(Boolean);
+  const tail = issues.map((i) => i.id);
+
   if (grouped) {
     const groups = groupByProject(list);
     const flat = flattenGroups(groups);
-    return { groups, list: flat, order: flat.map((i) => i.id) };
+    return { groups, list: flat, backlog: issues, order: [...flat.map((i) => i.id), ...tail] };
   }
   const sorted = sortItems(list);
-  return { groups: null, list: sorted, order: sorted.map((i) => i.id) };
+  return { groups: null, list: sorted, backlog: issues, order: [...sorted.map((i) => i.id), ...tail] };
 }
 
 /** '0s' '42s' '3m 5s' '7m' '1h 4m' '2d' — a briefing can sit for a day, and 1440m is unreadable. */
@@ -163,8 +176,14 @@ export function isTypingTarget(el) {
  * `repeat` blocks the two keys that commit — holding Enter must not fire ten answers,
  * and holding `e` must not archive the whole inbox — while leaving navigation
  * repeatable, which is what makes holding an arrow feel right.
+ *
+ * `issue` (#671) is set when the cursor is on a Backlog row. Nothing can be answered,
+ * archived or option-picked on a GitHub issue, so those three return null rather than
+ * firing against whatever inbox item happens to be nearby — and `g` opens the issue on
+ * GitHub. Navigation, escape, help and `o` are identical either way, which is what lets
+ * one cursor walk both sections.
  */
-export function keyAction(key, { optionCount = 0, repeat = false } = {}) {
+export function keyAction(key, { optionCount = 0, repeat = false, issue = false } = {}) {
   switch (key) {
     case 'ArrowDown': case 'j': return { type: 'move', delta: 1 };
     case 'ArrowUp': case 'k': return { type: 'move', delta: -1 };
@@ -172,12 +191,14 @@ export function keyAction(key, { optionCount = 0, repeat = false } = {}) {
     case 'End': return { type: 'last' };
     case 'Escape': return { type: 'escape' };
     case '?': return { type: 'help' };
-    case 'r': return { type: 'focusReply' };
     case 'o': return { type: 'open' };
-    case 'e': return repeat ? null : { type: 'archive' };
-    case 'Enter': return repeat ? null : { type: 'send' };
+    case 'g': return issue ? { type: 'github' } : null;
+    case 'r': return issue ? null : { type: 'focusReply' };
+    case 'e': return (issue || repeat) ? null : { type: 'archive' };
+    case 'Enter': return (issue || repeat) ? null : { type: 'send' };
     default: break;
   }
+  if (issue) return null;
   if (/^[1-9]$/.test(key)) {
     const index = Number(key) - 1;
     return index < optionCount ? { type: 'pick', index } : null;
