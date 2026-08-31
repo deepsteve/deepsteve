@@ -45,22 +45,39 @@ class FakeWebSocket {
     this.url = url;
     this.readyState = FakeWebSocket.CONNECTING;
     this.onopen = this.onmessage = this.onerror = this.onclose = null;
+    // ws-trace.js (#674) watches every socket via addEventListener rather than the on*
+    // properties, precisely because ws-client assigns those right after construction and
+    // would clobber it. The fake carries both surfaces so that path is really exercised
+    // here, not silently skipped.
+    this._listeners = new Map();
     sockets.push(this);
   }
+  _emit(type, ev) {
+    this[`on${type}`]?.(ev);
+    for (const fn of this._listeners.get(type) || []) fn(ev);
+  }
   // --- test drivers ---
-  _open() { this.readyState = FakeWebSocket.OPEN; this.onopen?.(); }
+  _open() { this.readyState = FakeWebSocket.OPEN; this._emit('open', {}); }
   _die({ wasClean = false, code = 1006 } = {}) {
     this.readyState = FakeWebSocket.CLOSED;
-    this.onclose?.({ wasClean, code });
+    this._emit('close', { wasClean, code });
   }
   // --- the real API surface ---
   send() {}
+  addEventListener(type, fn) {
+    if (!this._listeners.has(type)) this._listeners.set(type, []);
+    this._listeners.get(type).push(fn);
+  }
+  removeEventListener(type, fn) {
+    const l = this._listeners.get(type);
+    if (l) this._listeners.set(type, l.filter(f => f !== fn));
+  }
   close() {
     // Matches the WHATWG behaviour that caused the bug: closing a CONNECTING socket
     // "fails the connection" → onclose with wasClean=false, NOT a clean close.
     const wasConnecting = this.readyState === FakeWebSocket.CONNECTING;
     this.readyState = FakeWebSocket.CLOSED;
-    this.onclose?.({ wasClean: !wasConnecting, code: wasConnecting ? 1006 : 1000 });
+    this._emit('close', { wasClean: !wasConnecting, code: wasConnecting ? 1006 : 1000 });
   }
 }
 globalThis.WebSocket = FakeWebSocket;
@@ -72,6 +89,11 @@ async function load() {
   // module-level dedupe state that would otherwise leak across tests.
   const q = '?t=' + Math.random();
   const probe = await import('../../public/js/server-probe.js' + q);
+  // Deliberately WITHOUT the cachebust: a query string does not propagate to a module's
+  // own relative imports, so this is the exact auth-heal instance ws-client will use.
+  // Its verdict cache and probe cooldown are module state that leaks between cases.
+  const auth = await import('../../public/js/auth-heal.js');
+  auth._reset();
   const mod = await import('../../public/js/ws-client.js' + q);
   return { createWebSocket: mod.createWebSocket, probe };
 }
@@ -232,6 +254,40 @@ test('pauses while a heal reload is pending, and resumes if it is cancelled', as
   globalThis.window.__deepsteveReloadPending = false;
   await tick(900);
   assert.strictEqual(sockets.length, 2, 'must resume rather than wedge forever');
+});
+
+// --------------------------------------------------------------- the auth half of the gate
+
+test('a cookie the server has already rejected costs zero handshakes', async () => {
+  reset();
+  // The #674 shape. /healthz is unauthenticated, so it answers happily while
+  // security.js's verifyWsClient rejects the upgrade with 401 — and the browser reports
+  // that as close code 1006, identical to "server down". The only way to know before
+  // committing is to ask over HTTP and WAIT for the answer.
+  //
+  // The GUARD_KEY is pre-armed so auth-heal's 60s one-reload cooldown SUPPRESSES the heal.
+  // That is the case that mattered: knowing the handshake is doomed, being unable to fix
+  // it by reloading, and sending it anyway.
+  store.set('deepsteve-auth-healed', String(Date.now()));
+  let probes = 0;
+  fetchImpl = async (url) => {
+    probes++;
+    return String(url).includes('/api/version') ? { ok: false, status: 401 } : { ok: true, status: 200 };
+  };
+
+  const { createWebSocket } = await load();
+  createWebSocket({ cwd: '/tmp' });
+
+  await tick(400);
+  assert.strictEqual(sockets.length, 0,
+    'the server said over HTTP that it would reject this upgrade — emitting it anyway is what arms the browser-global FailDelay entry (#674)');
+  assert.ok(probes <= 4,
+    `a refusal must be paced, not spun: got ${probes} probes in 400ms. An unbounded retry here is what pinned the delay at its 60s cap`);
+
+  // ...and it must recover on its own rather than wedge, once auth is good again.
+  fetchImpl = async () => ({ ok: true, status: 200 });
+  await tick(5000);
+  assert.strictEqual(sockets.length, 1, 'reconnects once the cookie is accepted again');
 });
 
 // --------------------------------------------------------------- probe dedupe

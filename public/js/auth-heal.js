@@ -14,6 +14,12 @@
  * a reload will fix it — GET / always re-issues the cookie, and valid creds
  * bypass the failure rate limiter, so the heal works even mid-lockout. A 403
  * (valid cookie + disallowed Origin/Host misconfig) is NOT healable by reload.
+ *
+ * Since #674 this is a PRE-FLIGHT gate, not just a diagnosis after the fact.
+ * ws-open.js awaits the verdict below and refuses to emit a handshake the server
+ * has already said it will reject — because the failed handshake itself is the
+ * expensive part: it arms a FailDelay entry shared by every socket in the
+ * browser. Healing after the damage is done was always the weaker half.
  */
 
 import { nsKey } from './storage-namespace.js';
@@ -25,12 +31,26 @@ const GUARD_KEY = nsKey('deepsteve-auth-healed');
 const HEAL_COOLDOWN_MS = 60_000;
 const PROBE_COOLDOWN_MS = 2_000;
 
+// fetch() has no default timeout, and since #674 callers AWAIT this probe before opening a
+// socket — so a request that never settles would pin `inFlight` and park every reconnect
+// loop in the window on one dead promise. Exactly the hazard server-probe.js's
+// PROBE_TIMEOUT_MS exists for, and it bites harder here: the heal is only ever awaited in
+// the state where /healthz just answered, so a stall is by construction NOT the benign
+// "the server is still booting" reading. Well under ws-open.js's WS_BACKOFF_MAX_MS.
+const PROBE_TIMEOUT_MS = 3_000;
+
 let inFlight = null;
 let lastProbe = 0;
+// The last thing we actually learned about our cookie. Returned during the probe cooldown
+// so a caller inside that window gets the last real reading rather than a shrug — see the
+// verdict contract on maybeHealAuth().
+let lastVerdict = 'unknown';
 
 // Called from every successful WS open — re-arms the one-shot heal so a second
-// restart shortly after a heal-reload can heal again immediately.
+// restart shortly after a heal-reload can heal again immediately. An accepted upgrade is
+// also the strongest possible evidence our cookie is good, so it settles the verdict too.
 export function noteAuthOk() {
+  lastVerdict = 'ok';
   try { sessionStorage.removeItem(GUARD_KEY); } catch {}
 }
 
@@ -57,27 +77,56 @@ export function forcePageReload(onWatchdogFallback) {
 
 // Probe an authenticated endpoint (cookie auto-sent on same-origin fetch,
 // /api/version is cheap and side-effect free) and reload once if the server is
-// up but rejecting our auth. No-op on 2xx (auth fine — the WS failure is
-// something else) and on network error (server down — the caller's reconnect
-// loop keeps waiting). Shared by every reconnect loop in the window; the
-// module-level inFlight/lastProbe dedupe concurrent callers.
+// up but rejecting our auth. Shared by every reconnect loop in the window; the
+// module-level inFlight/lastProbe dedupe concurrent callers, so a 13-session
+// restore burst costs one request, not thirteen. Do NOT "fix" a slow heal by
+// giving each caller its own fetch: server-probe.js's header explains that
+// /api/version 401s feed a single GLOBAL rate-limit bucket in security.js, and
+// the shared inFlight is the only thing holding that call rate down.
+//
+// Resolves to a verdict, which since #674 is the point rather than a courtesy:
+//
+//   'ok'        the server accepted our cookie — go ahead and open the socket
+//   'unauthed'  it answered 401/429 — the upgrade WILL be rejected, so the caller
+//               must not emit it. This is true even when the reload below is
+//               suppressed by HEAL_COOLDOWN_MS: knowing the handshake is doomed
+//               and sending it anyway is precisely the thing that arms Firefox's
+//               browser-global FailDelay entry and silences every other socket.
+//   'down'      no answer at all (or the probe timed out) — say nothing; the
+//               caller's /healthz gate owns that case
+//   'unknown'   nothing has been learned yet
+//   'reloading' a heal reload is already in flight; the page is leaving
 export function maybeHealAuth() {
-  if (window.__deepsteveReloadPending) return;
-  if (inFlight) return;
-  if (Date.now() - lastProbe < PROBE_COOLDOWN_MS) return;
+  if (window.__deepsteveReloadPending) return Promise.resolve('reloading');
+  if (inFlight) return inFlight;
+  if (Date.now() - lastProbe < PROBE_COOLDOWN_MS) return Promise.resolve(lastVerdict);
   lastProbe = Date.now();
   inFlight = (async () => {
     try {
-      const res = await fetch('/api/version', { cache: 'no-store' });
-      if (res.status !== 401 && res.status !== 429) return;
+      // Guarded so an engine without AbortSignal.timeout fails OPEN (no timeout) rather
+      // than throwing here, which the catch below would read as 'down' on every probe.
+      const signal = AbortSignal.timeout ? AbortSignal.timeout(PROBE_TIMEOUT_MS) : undefined;
+      const res = await fetch('/api/version', { cache: 'no-store', signal });
+      if (res.status !== 401 && res.status !== 429) {
+        lastVerdict = 'ok';
+        return lastVerdict;
+      }
+      lastVerdict = 'unauthed';
       let last = 0;
       try { last = Number(sessionStorage.getItem(GUARD_KEY)) || 0; } catch {}
-      if (Date.now() - last < HEAL_COOLDOWN_MS) return;
+      if (Date.now() - last < HEAL_COOLDOWN_MS) return lastVerdict;
       try { sessionStorage.setItem(GUARD_KEY, String(Date.now())); } catch {}
       console.warn('[auth-heal] WS auth rejected — reloading once to re-acquire the ds_auth cookie');
       window.__deepsteveReloadPending = true;
       forcePageReload();
-    } catch { /* server down — reconnect loop keeps waiting */ }
-    finally { inFlight = null; }
+      return lastVerdict;
+    } catch {
+      lastVerdict = 'down'; // server down, unreachable, or the probe timed out
+      return lastVerdict;
+    } finally { inFlight = null; }
   })();
+  return inFlight;
 }
+
+// Test seam only — inFlight/lastProbe/lastVerdict are module state that leaks across cases.
+export function _reset() { inFlight = null; lastProbe = 0; lastVerdict = 'unknown'; }

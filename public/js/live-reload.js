@@ -11,19 +11,30 @@
  * All windows show the confirmation modal. First response wins — the deciding
  * window sends restart-confirmed/declined to the server and broadcasts
  * restart-decided via BroadcastChannel to dismiss modals in other windows.
+ *
+ * Connecting is a LOOP (#674), the same shape ws-client.js has had since #553, and for the
+ * same reason. What was here before: the first connect() fired blind at page load, and
+ * every failure re-entered through pollAndReconnect() with no failure accounting and no
+ * delay at all — so a server that was up but rejecting our cookie produced a fresh doomed
+ * handshake every fetch round trip, forever. Roughly fourteen of those pin Firefox's
+ * browser-global FailDelay entry at its 60s cap, which then silences every OTHER socket in
+ * the browser: the loop poisons the page and then goes quiet, because its own handshakes
+ * stop reaching the server too. Read ws-open.js's header for the mechanism.
  */
 
 import { nsChannel, nsKey } from './storage-namespace.js';
-import { maybeHealAuth, forcePageReload, noteAuthOk } from './auth-heal.js';
+import { forcePageReload, noteAuthOk } from './auth-heal.js';
 import { onWake } from './wake-watch.js';
-import { waitForServer, probeStats } from './server-probe.js';
+import { waitForServer, probeStats, sleep } from './server-probe.js';
 import { attachClientLogSender, clientLog } from './client-log.js';
+import { openGatedSocket, backoffDelay, WS_STABLE_MS } from './ws-open.js';
 
 // Handoff for the reload-timing beacon below. sessionStorage because it has to survive
 // exactly one navigation — the one we are about to cause — and nothing longer.
 const RELOAD_TRACE_KEY = 'deepsteve-reload-trace';
 
 const State = {
+  DISCONNECTED: 'disconnected',
   CONNECTED: 'connected',
   CONFIRMING: 'confirming',
   CONFIRMED: 'confirmed',
@@ -36,6 +47,10 @@ export function initLiveReload({ onMessage, onShowRestartConfirm, onShowReloadOv
   let state = State.DISCONNECTED;
   let pingTimer = null;
   let lastPingTime = 0;
+  let wsFailures = 0;
+  // Set when the page hands itself over to pollAndReload(): a navigation is coming and
+  // this loop must not open another socket in front of it.
+  let stopped = false;
 
   // The error beacon rides this socket (it must work when fetch doesn't).
   // `ws` is reassigned on every reconnect, so hand over a getter, not the socket.
@@ -53,58 +68,124 @@ export function initLiveReload({ onMessage, onShowRestartConfirm, onShowReloadOv
     state = newState;
   }
 
-  function connect() {
+  function reloadUrl() {
     const wsProto = location.protocol === 'https:' ? 'wss://' : 'ws://';
     const params = 'action=reload' + (windowId ? '&windowId=' + encodeURIComponent(windowId) : '');
-    ws = new WebSocket(wsProto + location.host + '?' + params);
+    return wsProto + location.host + '?' + params;
+  }
 
-    ws.onopen = () => {
-      noteAuthOk();
-      setState(State.CONNECTED);
-      lastPingTime = Date.now();
-      if (pingTimer) clearInterval(pingTimer);
-      pingTimer = setInterval(() => {
-        if (Date.now() - lastPingTime > 45000 && ws.readyState === WebSocket.OPEN) {
-          console.log('[live-reload] no ping in 45s, reconnecting...');
-          ws.close();
-        }
-      }, 45000);
-    };
+  // Guarded control-plane send. `ws` is undefined until the gate first opens and can be a
+  // closed socket mid-reconnect; the bare ws.send() this replaces only ever worked because
+  // connect() used to assign the socket synchronously.
+  function sendCtl(obj) {
+    if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj));
+  }
 
-    ws.onmessage = (e) => {
-      try {
-        const msg = JSON.parse(e.data);
-        if (msg.type === 'ping') {
-          lastPingTime = Date.now();
-          ws.send(JSON.stringify({ type: 'pong' }));
-        } else if (msg.type === 'confirm-restart') {
-          if (state === State.CONNECTED || state === State.CONFIRMED) showConfirmInAllWindows();
-        } else if (msg.type === 'reload') {
-          // Server is about to shut down with --refresh — mark for reload
-          if (state === State.CONFIRMED) {
-            window.__deepsteveReloadPending = true;
+  /**
+   * Wire one socket and resolve when it closes, so a single turn of runReload() spans that
+   * socket's whole life. Resolves { openMs, terminal }; `terminal` means the page has been
+   * handed to pollAndReload() and the loop must not open anything in front of it.
+   *
+   * Every handler and the ping timer close over `sock`, never the module-scoped `ws`. That
+   * matters now the loop can be re-entered across an await: an interval armed for one
+   * socket would otherwise force-close a newer one.
+   */
+  function wireSocket(sock) {
+    return new Promise((resolve) => {
+      let openedAt = 0;
+      // Before any handler: client-log.js's sender reads this getter on its own 3s
+      // interval, which can land at any moment from here on.
+      ws = sock;
+
+      const stopPing = () => { if (pingTimer) { clearInterval(pingTimer); pingTimer = null; } };
+
+      sock.onopen = () => {
+        openedAt = Date.now();
+        noteAuthOk();
+        setState(State.CONNECTED);
+        lastPingTime = Date.now();
+        stopPing();
+        pingTimer = setInterval(() => {
+          if (Date.now() - lastPingTime > 45000 && sock.readyState === WebSocket.OPEN) {
+            console.log('[live-reload] no ping in 45s, reconnecting...');
+            sock.close();
           }
-        } else if (onMessage) {
-          onMessage(msg);
+        }, 45000);
+      };
+
+      sock.onmessage = (e) => {
+        try {
+          const msg = JSON.parse(e.data);
+          if (msg.type === 'ping') {
+            lastPingTime = Date.now();
+            sock.send(JSON.stringify({ type: 'pong' }));
+          } else if (msg.type === 'confirm-restart') {
+            if (state === State.CONNECTED || state === State.CONFIRMED) showConfirmInAllWindows();
+          } else if (msg.type === 'reload') {
+            // Server is about to shut down with --refresh — mark for reload
+            if (state === State.CONFIRMED) {
+              window.__deepsteveReloadPending = true;
+            }
+          } else if (onMessage) {
+            onMessage(msg);
+          }
+        } catch {}
+      };
+
+      sock.onclose = () => {
+        stopPing();
+        const openMs = openedAt ? Date.now() - openedAt : -1;
+
+        if (state === State.CONFIRMED || state === State.RELOADING) {
+          // Restart was confirmed — wait for server and reload
+          window.__deepsteveReloadPending = true;
+          setState(State.RELOADING);
+          if (onShowReloadOverlay) onShowReloadOverlay();
+          stopped = true;
+          pollAndReload();
+          resolve({ openMs, terminal: true });
+          return;
         }
-      } catch {}
-    };
 
-    ws.onclose = () => {
-      if (pingTimer) { clearInterval(pingTimer); pingTimer = null; }
-
-      if (state === State.CONFIRMED || state === State.RELOADING) {
-        // Restart was confirmed — wait for server and reload
-        window.__deepsteveReloadPending = true;
-        setState(State.RELOADING);
-        if (onShowReloadOverlay) onShowReloadOverlay();
-        pollAndReload();
-      } else {
-        // Unexpected disconnect — always reconnect
         setState(State.RECONNECTING);
-        pollAndReconnect();
+        resolve({ openMs, terminal: false });
+      };
+    });
+  }
+
+  /**
+   * One socket at a time, for the life of the page. This replaces the old
+   * connect()/pollAndReconnect() pair, whose cycle had no delay of any kind — see the
+   * module header for what that cost.
+   */
+  async function runReload() {
+    while (!stopped) {
+      // A heal/restart reload is navigating this page away. Park rather than exit:
+      // auth-heal's watchdog clears the flag if the meta-refresh silently fails, and the
+      // tab must resume connecting rather than wedge forever. Same contract as
+      // ws-client.js's loop, which live-reload had no equivalent of.
+      while (window.__deepsteveReloadPending && !stopped) await sleep(500);
+      if (stopped) return;
+
+      const { socket, reason } = await openGatedSocket(reloadUrl(), {
+        shouldStop: () => stopped || !!window.__deepsteveReloadPending,
+        label: 'reload',
+      });
+      if (stopped) { try { socket?.close(); } catch {} return; }
+      if (!socket) {
+        // 'unauthed': the server is up and has told us it will reject this upgrade.
+        // Sending it anyway, at fetch speed, is the loop this whole rewrite exists to
+        // remove. 'stopped' parks at the top of the loop and needs no delay.
+        if (reason === 'unauthed') await sleep(backoffDelay(wsFailures++));
+        continue;
       }
-    };
+      if (state === State.RECONNECTING) console.log('[live-reload] server is back, reconnecting WS...');
+
+      const { openMs, terminal } = await wireSocket(socket);
+      if (terminal) return; // pollAndReload() owns the page from here
+      if (openMs >= WS_STABLE_MS) wsFailures = 0;
+      else await sleep(backoffDelay(wsFailures++));
+    }
   }
 
   // --- Reload: wait for the server to come back, then force-reload the page ---
@@ -177,18 +258,6 @@ export function initLiveReload({ onMessage, onShowRestartConfirm, onShowReloadOv
     } catch {}
   }
 
-  // --- Silent reconnect: wait for the server to come back, then reconnect WS ---
-
-  async function pollAndReconnect() {
-    await waitForServer();
-    console.log('[live-reload] server is back, reconnecting WS...');
-    // /healthz is unauthenticated, so "server up" says nothing about our cookie. In a
-    // window with zero terminal sessions this socket is the only reconnect loop, so it
-    // must run the auth probe itself or a cookieless tab loops rejected upgrades forever.
-    maybeHealAuth();
-    connect();
-  }
-
   // --- Show modal in every window, first response wins ---
 
   function showConfirmInAllWindows() {
@@ -219,11 +288,11 @@ export function initLiveReload({ onMessage, onShowRestartConfirm, onShowReloadOv
       if (confirmed) {
         setState(State.CONFIRMED);
         window.__deepsteveReloadPending = true;
-        ws.send(JSON.stringify({ type: 'restart-confirmed' }));
+        sendCtl({ type: 'restart-confirmed' });
         restartChannel.postMessage({ type: 'restart-decided', confirmed: true });
       } else {
         setState(State.CONNECTED);
-        ws.send(JSON.stringify({ type: 'restart-declined' }));
+        sendCtl({ type: 'restart-declined' });
         restartChannel.postMessage({ type: 'restart-decided', confirmed: false });
       }
     });
@@ -241,9 +310,13 @@ export function initLiveReload({ onMessage, onShowRestartConfirm, onShowReloadOv
     history.replaceState(null, '', clean);
   }
   stripCacheBuster();
-  // Before connect(): the beacon queues until the socket it rides is open anyway, and
-  // this way the trace is cleared even if the socket never comes up.
+  // Before the loop starts: the beacon queues until the socket it rides is open anyway,
+  // and this way the trace is cleared even if the socket never comes up.
   reportPreviousReload();
 
-  connect();
+  // The first connect goes through the same gate as every later one. It used to be the
+  // exception — one blind handshake per page load, landing in exactly the window where the
+  // daemon is least likely to be listening (a machine reboot restores this tab before the
+  // LaunchAgent is up), and one entry poisons every socket in the browser.
+  runReload();
 }

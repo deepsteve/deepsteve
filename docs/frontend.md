@@ -114,3 +114,25 @@ const matchesShortcut = register({
 - **Orphan detection**: Uses BroadcastChannel for cross-tab heartbeats. When a new tab opens and finds localStorage windows with no heartbeat response within 1.5s, those sessions are offered for restore.
 - **Per-window view state** goes in `sessionStorage` through `nsKey`, like context-views' five rail keys and the excursion stack (`deepsteve-excursion`, #661): it survives a reload, dies with the window, and cannot leak into a second one. The counterpart is `localStorage` for things that are a *preference* rather than a place — which app is open (`deepsteve-active-mod-view`) and which apps you sit in with the chrome gone (`deepsteve-app-quiet`, #662) are browser-wide; where you wandered from one is not.
 - **Recursive windows (Baby Browser)**: Opening DeepSteve inside its own Baby Browser proxy shares the same origin, so sessionStorage/localStorage/BroadcastChannel would collide. `storage-namespace.js` detects iframe nesting depth and prefixes all keys with `ds{depth}-` (e.g., `ds1-deepsteve`). Depth 0 (top-level) uses no prefix for backward compatibility. Each recursion level gets fully isolated sessions, tabs, and layout state.
+
+## Opening a WebSocket
+
+**Every socket in the client is constructed by `openGatedSocket()` in `public/js/ws-open.js`, and nowhere else.** `test/unit/ws-single-construct.test.js` asserts that `new WebSocket(` appears exactly once under `public/`.
+
+The reason is a browser-wide penalty, not a local one. Firefox implements RFC 6455 §7.2.3 by keying a FailDelay entry on `{address, path, port, originSuffix}`, where `path` comes from `GetFilePath()` and **excludes the query string**. Every DeepSteve socket is `ws://host/?params` → path `/`, so there is **one entry for the whole browser**, shared across tabs, windows and nested Baby Browser instances. Each failed handshake ramps it ×1.5 to a 60s cap; a later connect to a delayed host is parked in `CONNECTING_DELAYED` behind a timer with no traffic and **no error event** — it just sits in `readyState CONNECTING`. The entry only expires 60s + the current delay after the *last* failure, so a client that keeps retrying keeps it alive forever. **No backoff schedule can dig us out. The only winning move is to never create the entry.**
+
+The gate has two halves and both are load-bearing:
+
+1. **`waitForServer()`** (`server-probe.js`) — is the server there? HTTP runs through a different subsystem with no shared failure accounting, so probing is free where a handshake is not.
+2. **`maybeHealAuth()`** (`auth-heal.js`) — will it accept *us*? A missing or stale `ds_auth` cookie makes `verifyWsClient` reject the upgrade with 401, and the browser reports that as close code 1006 — indistinguishable from "server down". Since #674 the probe resolves to a verdict (`ok` / `unauthed` / `down` / `unknown`) and the gate **refuses to emit a handshake it has been told will be rejected**, including when auth-heal's 60s one-reload guard has suppressed the reload that would fix it. It carries an `AbortSignal.timeout` for the same reason `serverUp()` does: callers await it, so a fetch that never settles would park every reconnect loop in the window on one dead promise.
+
+Both callers — `ws-client.js` (terminal sessions) and `live-reload.js` (the reload/beacon socket) — run the same loop shape: park while `window.__deepsteveReloadPending` is set, ask the gate, and on a refusal pace the retry (`backoffDelay()`, 1s→30s jittered) rather than spin. `openGatedSocket` returns `{ socket, reason }`; a `null` socket is *not* a failed attempt and must not be counted as one.
+
+Two failures this replaced, both of which looked correct when written:
+
+- `live-reload.js`'s `connect()` at the end of `initLiveReload()` fired unconditionally at every page load — the one ungated handshake in the tree, and on a machine reboot a guaranteed failure, because the browser restores the tab before the daemon is listening.
+- Its reconnect path (`onclose` → `pollAndReconnect()` → `connect()`) had no backoff and no failure accounting at all, so a server that was up but rejecting the cookie produced a fresh doomed handshake every fetch round trip. That loop poisons the browser and then falls silent, because once the entry is ramped its own handshakes stop reaching the server too — which is why the daemon log shows very few rejected upgrades for a very large outage.
+
+Mods are not scanned by the guard (they are user- and agent-authored), but the rule applies to them: a mod runs in a nested realm that shares the same entry. A mod that needs a socket should import `openGatedSocket`.
+
+Three beacons from `ws-trace.js` report what the daemon cannot see, over the `client-log.js` channel: `ws-failed` (closed before ever opening — the arming event), `ws-slow-open` (opened after ≥3s with no error — a parked handshake), and `ws-abandoned` (still `CONNECTING` at `pagehide`).

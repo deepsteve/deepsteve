@@ -82,7 +82,7 @@ line below is a trigger: if you are about to do that thing, read that page first
 | [docs/scheduled-tasks.md](docs/scheduled-tasks.md) | touching `mods/scheduled-tasks/`, or assuming an unattended run behaves like an interactive tab |
 | [docs/testing.md](docs/testing.md) | adding a suite, a daemon fixture, or anything that runs tmux from a test |
 | [docs/platform.md](docs/platform.md) | touching `service.sh`, the launchd plist / systemd unit, `paths.js`, `bin-path.js`, auth, HTTPS, or the npm package (`bin/deepsteve.js`, `package.json`'s `files`) |
-| [docs/frontend.md](docs/frontend.md) | adding a keyboard shortcut, a palette command, or touching client-side session storage |
+| [docs/frontend.md](docs/frontend.md) | adding a keyboard shortcut, a palette command, opening a WebSocket, or touching client-side session storage |
 | [docs/timelapse.md](docs/timelapse.md) | touching timelapse recording, the shared DOM→PNG capture in `public/js/dom-capture.js`, or the panel-tab rail indicator |
 | [docs/agents.md](docs/agents.md) | assuming a feature works for a given agent, adding an agent, or using a core MCP session tool |
 | [docs/mods.md](docs/mods.md) | writing or changing a DeepSteve Mod, a Project Mod, or a display tab |
@@ -163,6 +163,7 @@ Rules a change anywhere in the tree could violate. Each one has a page that expl
 
 **Frontend** ([docs/frontend.md](docs/frontend.md))
 
+- **Every WebSocket in the client is constructed by `openGatedSocket()` in `public/js/ws-open.js`** (a guard test pins it to one site). A handshake we don't expect to succeed arms a FailDelay entry keyed on a path that excludes the query string, so it is shared by *every* socket in the browser — which then sit silent in `CONNECTING` for up to 60s with no error event, and no backoff can undo it. The gate is both halves: `/healthz` for "is it up" and the awaited auth verdict for "will it accept us". A refusal is paced, never spun.
 - **Every global key binding is declared in the `shortcuts.js` registry**, at *module scope*, and uses the matcher `register()` hands back — so a binding cannot be changed without editing its entry. The ⌘? overlay renders the registry; the list is never hand-maintained. Adding or renaming a binding means updating the exact-id set in `test/unit/shortcuts-registry.test.js`, which is the drift guard.
 - **Strict modifier equality** in that matcher is what keeps Ctrl+F reaching the PTY for vim's `<C-f>` while ⌘F opens search. A test pins it; don't loosen it.
 - **Every mutation of the client session stores goes through `public/js/session-stores.js`.** `app.js` never writes `TabSessions` or `SessionStore` session lists by hand — that facade is what keeps the two from drifting.
