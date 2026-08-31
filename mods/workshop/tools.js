@@ -1,15 +1,27 @@
 /**
  * Workshop (#660) — one inbox for every agent that needs you.
  *
- * Three MCP tools let an agent post a question or a briefing; four REST routes let
- * the panel read the inbox and answer from it. Blocked sessions — the ones sitting
- * on a real Claude Code permission / AskUserQuestion dialog — are DERIVED per request
- * from ctx.shells and never stored, so they exist exactly as long as the dialog does.
+ * Three MCP tools let an agent post a question or a briefing; six REST routes let
+ * the panel read the inbox, answer from it, and read the project's backlog. Blocked
+ * sessions — the ones sitting on a real Claude Code permission / AskUserQuestion
+ * dialog — are DERIVED per request from ctx.shells and never stored, so they exist
+ * exactly as long as the dialog does.
  *
  * The panel POLLS its own /api/workshop/inbox rather than receiving a broadcast.
  * That is not an oversight: a new push feed would need a notifyX/onXChanged pair in
- * public/js/mod-manager.js plus a dispatch line in public/js/app.js, and this feature
- * ships with no host edit at all.
+ * public/js/mod-manager.js plus a dispatch line in public/js/app.js.
+ *
+ * ── The Backlog (#671) ──
+ *
+ * The two backlog routes shell out to `gh` on a cadence of minutes, not the inbox's
+ * two seconds, and every rule they apply — parsing, matching an issue to a live tab,
+ * the TTL cache — lives in ./backlog.js, which never sees this ctx. That split is what
+ * lets test/unit drive the matching with no `gh` on PATH; the bare unit CI job has none.
+ *
+ * Both routes degrade quietly and NEVER 500. A missing `gh`, an unauthenticated one, a
+ * repo with no GitHub remote and a label the repo has never defined all produce an
+ * empty list with an `error` string the panel renders as one grey line. The backlog is
+ * an accessory to the inbox; it must not be able to make the inbox look broken.
  *
  * ── Why Workshop deliberately does NOT go through requestMetaControlsConsent ──
  *
@@ -29,10 +41,13 @@
  * thing #519 guards.
  */
 
+const { execFile } = require('child_process');
 const { z } = require('zod');
 const projectScope = require('../../project-scope');
+const { resolveBinary } = require('../../bin-path');
 const inbox = require('./inbox');
 const dialogParse = require('./dialog-parse');
+const backlog = require('./backlog');
 
 // Stashed by init() and shared with registerRoutes(), the mods/scheduled-tasks and
 // mods/project-mods pattern: mcp-server.js always calls init() first, and both halves
@@ -191,6 +206,98 @@ function callerFields(extra) {
     project,
     projectName: projectScope.displayName(project),
   };
+}
+
+// ── backlog: the project's open issues (#671) ────────────────────────────────
+
+const issueCache = backlog.createCache({ ttlMs: backlog.BACKLOG_TTL_MS });
+const labelCache = backlog.createCache({ ttlMs: backlog.LABEL_TTL_MS });
+
+// The panel's own cadence may not out-run the cache, or a user who sets the refresh to
+// 30s gets a `gh` spawn every 30s forever. Clamped both ways: below, a client asking for
+// fresher-than-30s data is told no; above, a stale-beyond-15min list stops being useful.
+const MIN_MAX_AGE_MS = 30_000;
+const MAX_MAX_AGE_MS = 900_000;
+
+/**
+ * `gh`, exactly the shape of server.js's fetchIssueFromGitHub: an absolute path from
+ * resolveBinary (the LaunchAgent PATH has no /opt/homebrew/bin), argv and NEVER a shell,
+ * a 15s ceiling, and every failure — missing binary, non-zero exit, timeout — resolving
+ * to a reason rather than rejecting.
+ */
+function runGh(argv, cwd) {
+  return new Promise((resolve) => {
+    const gh = resolveBinary('gh');
+    if (!gh) return resolve({ error: 'gh-unavailable' });
+    execFile(gh, argv, { cwd, encoding: 'utf8', timeout: 15000, maxBuffer: 4 * 1024 * 1024 },
+      (err, stdout) => {
+        if (err) {
+          // One line, not one per poll: the negative cache is what keeps this rare.
+          ctx.log(`[workshop] gh ${argv[0]} ${argv[1] || ''} failed in ${cwd}: ${err.message.split('\n')[0]}`);
+          return resolve({ error: 'gh-failed' });
+        }
+        resolve({ stdout });
+      });
+  });
+}
+
+/**
+ * Which repo the backlog is about.
+ *
+ * An explicit `?project=` pins it; otherwise it follows the browser's active session,
+ * which is the whole design — the backlog shows the project you are looking at rather
+ * than owning a notion of "current repo" of its own. resolveProject goes through
+ * ctx.sessionPaths, so a `github-issue-671` worktree tab resolves to its PARENT repo and
+ * asks about deepsteve, not about the worktree.
+ *
+ * The last resort is the most recently active live session. A browser that has just
+ * opened Workshop with no session focused still gets the project the machine is
+ * evidently working on, which beats an empty panel that looks broken.
+ */
+function backlogProject(query) {
+  const explicit = String((query && query.project) || '').trim();
+  if (explicit) return projectScope.canonicalRoot(explicit) || '';
+
+  const sessionId = String((query && query.session) || '').trim();
+  if (sessionId && ctx.shells.has(sessionId)) {
+    const p = projectScope.resolveProject(null, sessionId, ctx);
+    if (p) return p;
+  }
+
+  let best = null;
+  for (const [, entry] of ctx.shells) {
+    if (!entry || entry.agentType === 'tmux-attach') continue;
+    if (!best || (entry.lastActivity || 0) > (best.lastActivity || 0)) best = entry;
+  }
+  return best ? projectFor(best).project : '';
+}
+
+/** Live sessions as backlog.js wants them: no ctx, no engines, no terminal screens. */
+function sessionsForMatch() {
+  const out = [];
+  for (const [id, entry] of ctx.shells) {
+    // Same two exclusions derivedItems makes: a killed session is not working on
+    // anything, and a tmux-attach is an ephemeral view of a pane rather than a tab.
+    if (!entry || entry.killed || entry.agentType === 'tmux-attach') continue;
+    out.push({
+      id,
+      name: entry.name || null,
+      worktree: entry.worktree || null,
+      project: projectFor(entry).project,
+    });
+  }
+  return out;
+}
+
+/**
+ * A label is a command-line argument, and argv means no quoting to get wrong — but it is
+ * still worth refusing something that cannot be a GitHub label, so a junk localStorage
+ * value produces an empty list rather than a 15s `gh` timeout per refresh.
+ */
+function cleanLabel(raw) {
+  const s = String(raw == null ? '' : raw).trim();
+  if (!s || s.length > 60 || /[\n\r\0]/.test(s)) return '';
+  return s;
 }
 
 // ── derived blocked items ────────────────────────────────────────────────────
@@ -617,6 +724,76 @@ function registerRoutes(app, context) {
     inbox.save();
     ctx.log(`[workshop] dismiss ${item.id} reason=${item.dismissedReason}`);
     res.json({ item: serializeStored(item) });
+  });
+
+  // ── backlog (#671) ──
+  //
+  // Registered before the /items/:id routes for the same reason mods/scheduled-tasks
+  // puts /history first: a literal path must not be shadowed by a parameterised one.
+
+  app.get('/api/workshop/backlog', async (req, res) => {
+    const project = backlogProject(req.query);
+    const label = cleanLabel(req.query && req.query.label);
+    const now = Date.now();
+
+    if (!project) {
+      return res.json({ project: '', projectName: '', label, issues: [], generatedAt: now, error: 'no-project' });
+    }
+    if (!label) {
+      return res.json({
+        project, projectName: projectScope.displayName(project),
+        label: '', issues: [], generatedAt: now, error: 'no-label',
+      });
+    }
+
+    const maxAgeMs = Math.max(MIN_MAX_AGE_MS,
+      Math.min(MAX_MAX_AGE_MS, Number(req.query && req.query.maxAgeMs) || backlog.BACKLOG_TTL_MS));
+
+    const result = await issueCache.get(`${project}\0${label}`, async () => {
+      const r = await runGh(
+        // `--label=<v>` as ONE token, not two: a label starting with `-` is otherwise
+        // read by gh's own flag parser as a flag. There is no shell anywhere on this
+        // path, so the `=` form costs nothing and closes that case.
+        //
+        // `--limit` is mandatory, not tidiness — gh defaults to 30 and truncates
+        // silently, which looks exactly like "that is all there is".
+        ['issue', 'list', `--label=${label}`, '--state', 'open',
+          '--json', 'number,title,labels,url,updatedAt', '--limit', String(backlog.MAX_ISSUES)],
+        project,
+      );
+      if (r.error) return { error: r.error, issues: [] };
+      const issues = backlog.parseIssues(r.stdout);
+      return { issues, truncated: issues.length >= backlog.MAX_ISSUES };
+    }, { now, maxAgeMs });
+
+    res.json({
+      project,
+      projectName: projectScope.displayName(project),
+      label,
+      // Matched on the way OUT, never cached: the issue list is minutes-stale by design
+      // but "which tab is on it" must be current, or a tab opened thirty seconds ago
+      // stays invisible for two minutes.
+      issues: backlog.matchSessions(result.issues || [], sessionsForMatch(), project),
+      truncated: !!result.truncated,
+      error: result.error || null,
+      cached: !!result.cached,
+      ageMs: result.ageMs || 0,
+      generatedAt: now,
+    });
+  });
+
+  app.get('/api/workshop/labels', async (req, res) => {
+    const project = backlogProject(req.query);
+    const now = Date.now();
+    if (!project) return res.json({ project: '', labels: [], error: 'no-project' });
+
+    const result = await labelCache.get(project, async () => {
+      const r = await runGh(['label', 'list', '--json', 'name,color', '--limit', '100'], project);
+      if (r.error) return { error: r.error, labels: [] };
+      return { labels: backlog.parseLabels(r.stdout) };
+    }, { now });
+
+    res.json({ project, labels: result.labels || [], error: result.error || null });
   });
 
   app.get('/api/workshop/items/:id/screen', async (req, res) => {

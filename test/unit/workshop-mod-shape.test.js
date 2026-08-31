@@ -33,7 +33,15 @@ const jsx = read('workshop.jsx');
 // are not in it (mods/tasks/tasks.jsx already stores its filters this way), and a
 // fullscreen iframe is DESTROYED on hide, so the host's localStorage is the only place
 // a view toggle can survive.
-const UNRENDERED_SETTINGS = new Set(['blockingOnly', 'seenAutoCycleNote']);
+//
+// `issueLabel` (#671) is here for a harder reason than taste: it is a STRING, and the
+// settings modal renders only checkboxes and number inputs — see the type test below.
+// Declaring it in mod.json would draw nothing at all, so the picker lives in the
+// Backlog header, next to the list it filters. `backlogCollapsed` is a disclosure
+// state, the same shape as `blockingOnly`.
+const UNRENDERED_SETTINGS = new Set([
+  'blockingOnly', 'seenAutoCycleNote', 'issueLabel', 'backlogCollapsed',
+]);
 
 test('the manifest passes the release-time validator', () => {
   assert.deepStrictEqual(validateManifest('workshop', manifest), []);
@@ -168,6 +176,26 @@ test('the inbox is sourced from the server, not from this window\'s tabs', () =>
       + 'use is deciding whether `o` can reach a session from this window.',
     );
   }
+});
+
+test('the backlog is sourced from the server too (#671)', () => {
+  // Same argument as the inbox above, plus one of its own: matching an issue to a tab
+  // needs `entry.worktree`, and the bridge's session list does not carry it
+  // (public/js/app.js hands mods {id, name, cwd, waitingForInput, type}). A panel-side
+  // match could therefore only guess from the tab NAME — which agents rename — so the
+  // authoritative half of the rule is only reachable server-side.
+  assert.match(jsx, /\/api\/workshop\/backlog/, 'the panel must read the server-side backlog');
+  assert.match(jsx, /\/api\/workshop\/labels/, 'the label picker must read the server-side label list');
+});
+
+test('the pop-out is a real link, not a scripted open (#671)', () => {
+  // The sandbox half of this feature lives in test/unit/mod-sandbox.test.js, because it
+  // is the host's iframe rather than this mod's page.
+  assert.match(
+    jsx, /target="_blank"\s+rel="noopener noreferrer"/,
+    'the GitHub pop-out must be a real anchor — a scripted window.open loses ⌘-click, '
+    + 'middle-click and "copy link address", which is most of what a link is for',
+  );
 });
 
 test('the panel never writes to a PTY itself', () => {

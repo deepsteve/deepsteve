@@ -1,8 +1,8 @@
 {
   "name": "Workshop",
-  "version": "0.9.0",
+  "version": "0.10.0",
   "minDeepsteveVersion": "0.4.0",
-  "description": "One inbox for every agent that needs you — blocked dialogs, questions and briefings in one place",
+  "description": "One inbox for every agent that needs you — blocked dialogs, questions and briefings, and the project's open issues in one place",
   "experimental": true,
   "enabledByDefault": false,
   "entry": "index.html",
@@ -36,6 +36,20 @@
       "label": "Compact rows",
       "description": "One line per item — hides the session and project line",
       "default": false
+    },
+    {
+      "key": "showBacklog",
+      "type": "boolean",
+      "label": "Show backlog",
+      "description": "List the focused project's open GitHub issues for a chosen label under the inbox",
+      "default": true
+    },
+    {
+      "key": "backlogPollSeconds",
+      "type": "number",
+      "label": "Backlog refresh (s)",
+      "description": "How often the issue list re-reads GitHub. Minutes, not seconds — a backlog changes slowly and every refresh runs gh.",
+      "default": 120
     }
   ]
 }

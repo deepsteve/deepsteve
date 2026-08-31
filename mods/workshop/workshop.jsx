@@ -4,6 +4,7 @@ import {
   visibleItems, nextSelection, keyAction, isTypingTarget,
   formatAge, ageColor, itemSubject, answerPayload,
 } from './inbox-view.js';
+import { visibleBacklog, formatUpdated, matchNote } from './backlog-view.js';
 
 const { useState, useEffect, useCallback, useRef, useMemo, memo } = React;
 
@@ -48,6 +49,25 @@ const DEFAULTS = {
   compactRows: false,
   blockingOnly: false,
   seenAutoCycleNote: false,
+  showBacklog: true,
+  backlogPollSeconds: 120,
+  issueLabel: 'bug',
+  backlogCollapsed: false,
+};
+
+/**
+ * Why the backlog is empty, in the user's terms.
+ *
+ * Every one of these is a normal state on some machine, not a bug — which is why the
+ * section says its own sentence in grey rather than raising the inbox's red error strip.
+ * The backlog is an accessory; it must not be able to make the inbox look broken.
+ */
+const BACKLOG_ERRORS = {
+  'no-project': 'Open a session in a project to see its issues.',
+  'no-label': 'Pick a label to list.',
+  'gh-unavailable': 'The GitHub CLI (gh) isn’t on this machine’s PATH.',
+  'gh-failed': 'gh couldn’t list issues here — no GitHub remote, or not signed in.',
+  unreachable: 'Couldn’t reach the server for the issue list.',
 };
 
 // What the send bar says is about to happen. The three answer paths behave completely
@@ -146,6 +166,208 @@ const ItemRow = memo(function ItemRow({ item, selected, ageMs, compact, onSelect
   );
 });
 
+/**
+ * A backlog row is a SIBLING of ItemRow, not a branch inside it.
+ *
+ * The two say different things and must not be mistakable for one another: an inbox row
+ * is an agent that has stopped and is waiting on you, a backlog row is a piece of work
+ * nobody has picked up. So no Stamp, no urgency colour, and a flat hairline on the left
+ * instead of a kind-coloured bar — an issue must never read as something blocking.
+ */
+const BacklogRow = memo(function BacklogRow({ issue, selected, now, compact, onSelect }) {
+  const note = matchNote(issue);
+  return (
+    <div
+      onClick={() => onSelect(issue.id)}
+      style={{
+        display: 'flex', alignItems: 'flex-start', gap: 9,
+        padding: compact ? '7px 12px 7px 0' : '10px 12px 10px 0',
+        borderBottom: `1px solid ${C.hairline}`,
+        borderLeft: `3px solid ${selected ? C.dim : 'transparent'}`,
+        paddingLeft: 12,
+        background: selected ? C.raised : 'transparent',
+        cursor: 'pointer', transition: 'background 120ms',
+      }}
+    >
+      <span style={{
+        font: `12px ${MONO}`, color: note ? C.green : C.faint, flexShrink: 0,
+        paddingTop: 2, fontVariantNumeric: 'tabular-nums',
+      }}>#{issue.number}</span>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{
+          font: `${selected ? 600 : 400} 13px/1.4 ${SANS}`,
+          color: selected ? C.bright : C.text,
+          overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+        }}>{issue.title}</div>
+        {/* Only rendered when something IS on it. "No tab yet" is the state this whole
+            view exists to surface, and it is shown by this line's absence — a row that
+            spells it out turns the useful default into noise on every row. */}
+        {!compact && note && (
+          <div style={{
+            font: `12px/1.4 ${MONO}`, color: C.dimmer, marginTop: 2,
+            overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+          }}>
+            <span style={{ color: C.green }}>↳ on it: </span>
+            {note.text}
+            {!note.exact && <span style={{ color: C.faint }}> (by name)</span>}
+          </div>
+        )}
+      </div>
+      <span style={{
+        font: `13px ${MONO}`, color: C.faint,
+        fontVariantNumeric: 'tabular-nums', flexShrink: 0, paddingTop: 1,
+      }}>{formatUpdated(issue.updatedAt, now)}</span>
+    </div>
+  );
+});
+
+/**
+ * The Backlog's own header: which project, which label, how many, and the collapse.
+ *
+ * The label picker lives HERE rather than in the gear menu because the mod settings
+ * modal renders only checkboxes and number inputs (public/js/mod-manager.js) — a string
+ * setting there is an invisible control. Putting it on the panel is the better place
+ * anyway: it sits next to the list it filters.
+ */
+function BacklogHeader({
+  projectName, label, labels, count, collapsed, error, onToggle, onLabel, onLabelMenu,
+}) {
+  return (
+    <div style={{
+      position: 'sticky', top: 0, zIndex: 1,
+      display: 'flex', alignItems: 'center', gap: 8, height: 28, padding: '0 12px',
+      background: C.bg, borderTop: `1px solid ${C.border}`, borderBottom: `1px solid ${C.hairline}`,
+      font: `600 11px ${MONO}`, letterSpacing: '0.06em', textTransform: 'uppercase',
+      color: C.dim,
+    }}>
+      <button
+        type="button" onClick={onToggle}
+        title={collapsed ? 'Expand the backlog' : 'Collapse the backlog'}
+        style={{
+          border: 'none', background: 'transparent', color: C.dim, cursor: 'pointer',
+          font: `11px ${MONO}`, padding: 0, width: 12, flexShrink: 0,
+        }}
+      >{collapsed ? '▸' : '▾'}</button>
+      <span style={{ flexShrink: 0 }}>Backlog</span>
+      {projectName && (
+        <span style={{
+          color: C.faint, textTransform: 'none', letterSpacing: 0,
+          overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0,
+        }}>{projectName}</span>
+      )}
+      <select
+        value={label}
+        onChange={(e) => onLabel(e.target.value)}
+        onMouseDown={onLabelMenu}
+        onFocus={onLabelMenu}
+        title="Which label to list"
+        style={{
+          border: `1px solid ${C.border}`, borderRadius: 4, background: C.surface,
+          color: C.text, font: `600 11px ${MONO}`, padding: '1px 4px', cursor: 'pointer',
+          maxWidth: 130, flexShrink: 0,
+        }}
+      >
+        {/* The current label is always an option, even before the label list lands or
+            when the repo no longer defines it — otherwise the select would silently
+            jump to whatever happens to be first and change what you are looking at. */}
+        {(labels.some((l) => l.name === label) ? labels : [{ name: label }, ...labels])
+          .map((l) => <option key={l.name} value={l.name}>{l.name}</option>)}
+      </select>
+      <span style={{ flex: 1 }} />
+      <span style={{ color: error ? C.faint : C.dim, fontVariantNumeric: 'tabular-nums' }}>
+        {error ? '—' : count}
+      </span>
+    </div>
+  );
+}
+
+/**
+ * The reading pane for a backlog row.
+ *
+ * The pop-out is a real `<a target="_blank">`, not a scripted `window.open`, which is
+ * the whole reason the mod iframe now carries `allow-popups` and
+ * `allow-popups-to-escape-sandbox`. A real link is what makes ⌘-click, middle-click and
+ * "copy link address" behave; a button loses all three, and this row's entire job is to
+ * hand you the issue.
+ */
+function IssueBench({ issue, now, hasLocalTab, onShowTab }) {
+  const note = matchNote(issue);
+  const linkStyle = {
+    display: 'inline-flex', alignItems: 'center', gap: 6,
+    border: `1px solid ${C.border}`, borderRadius: 5, background: 'transparent',
+    color: C.text, font: `12px ${SANS}`, padding: '5px 10px',
+    cursor: 'pointer', textDecoration: 'none',
+  };
+  return (
+    <>
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: 10, height: 40, padding: '0 32px',
+        borderBottom: `1px solid ${C.hairline}`, flexShrink: 0,
+      }}>
+        <span style={{ font: `13px ${MONO}`, color: note ? C.green : C.dim }}>#{issue.number}</span>
+        {note && (
+          <span style={{ font: `12px ${MONO}`, color: C.dim }}>
+            {note.exact ? 'has a tab' : 'named by a tab'}
+          </span>
+        )}
+        <span style={{ flex: 1 }} />
+        <span style={{ font: `13px ${MONO}`, color: C.faint, fontVariantNumeric: 'tabular-nums' }}>
+          {formatUpdated(issue.updatedAt, now)}
+        </span>
+      </div>
+
+      <div style={{ flex: 1, overflowY: 'auto', minHeight: 0 }}>
+        <div style={{ maxWidth: 760, padding: '24px 32px 28px' }}>
+          <h1 style={{
+            font: `600 22px/1.3 ${SANS}`, letterSpacing: '-0.01em', color: C.bright,
+          }}>{issue.title}</h1>
+
+          {issue.labels && issue.labels.length > 0 && (
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 14 }}>
+              {issue.labels.map((name) => (
+                <span key={name} style={{
+                  border: `1px solid ${C.border}`, borderRadius: 999,
+                  padding: '2px 9px', font: `11px ${MONO}`, color: C.dim,
+                }}>{name}</span>
+              ))}
+            </div>
+          )}
+
+          {/* The body is deliberately absent. Fetching it means one `gh issue view` per
+              row, and the decision this pane supports is "is anyone on this, and do I
+              want to read it" — which the title, the labels and the link already
+              answer. */}
+          <div style={{ font: `13px/1.6 ${SANS}`, color: C.dim, marginTop: 18 }}>
+            {note
+              ? <>Already being worked on in <strong style={{ color: C.text }}>{note.text}</strong>
+                {note.exact
+                  ? ' — matched on its worktree, so this is exact.'
+                  : ' — matched on the tab’s name only, so check before assuming.'}</>
+              : 'Nothing in Deep Steve is working on this yet.'}
+          </div>
+
+          <div style={{ display: 'flex', gap: 8, marginTop: 22 }}>
+            <a href={issue.url} target="_blank" rel="noopener noreferrer" style={linkStyle}>
+              <Key>g</Key> Open on GitHub ↗
+            </a>
+            <button
+              type="button" onClick={onShowTab} disabled={!note || !hasLocalTab}
+              title={!note
+                ? 'No Deep Steve session is on this issue'
+                : hasLocalTab
+                  ? 'Show the session working on this'
+                  : 'That session has no tab in this window — open it from the Sessions menu first'}
+              style={{ ...linkStyle, opacity: (note && hasLocalTab) ? 1 : 0.45 }}
+            >
+              <Key>o</Key> Show tab
+            </button>
+          </div>
+        </div>
+      </div>
+    </>
+  );
+}
+
 function GroupHeader({ name, count }) {
   return (
     <div style={{
@@ -225,6 +447,9 @@ function Workshop() {
   const [localIds, setLocalIds] = useState(() => new Set());
   const [now, setNow] = useState(() => Date.now());
   const [helpOpen, setHelpOpen] = useState(false);
+  const [backlog, setBacklog] = useState({ issues: [], projectName: '', error: null });
+  const [labels, setLabels] = useState([]);
+  const [activeSessionId, setActiveSessionId] = useState(null);
 
   // Refs, for the long-lived timers and listeners that must not close over stale state.
   const rootRef = useRef(null);
@@ -265,6 +490,16 @@ function Workshop() {
     return window.deepsteve.onSessionsChanged((list) => {
       setLocalIds(new Set((list || []).map((s) => s.id)));
     });
+  }, [bridgeReady]);
+
+  // Which project the Backlog is about. NOT getSessions() — this is the host's own
+  // notion of the focused tab, which is a single id rather than this window's tab list,
+  // so it carries none of that call's window-scoping problem. The server turns the id
+  // into a repo root; a worktree tab resolves to its parent repo, so an issue tab asks
+  // about the project it is fixing rather than about its own worktree.
+  useEffect(() => {
+    if (!bridgeReady || !window.deepsteve.onActiveSessionChanged) return undefined;
+    return window.deepsteve.onActiveSessionChanged((id) => setActiveSessionId(id || null));
   }, [bridgeReady]);
 
   const setSetting = useCallback((key, value) => {
@@ -309,6 +544,60 @@ function Workshop() {
     return () => { cancelled = true; if (timer) clearTimeout(timer); };
   }, [pollMs]);
 
+  // ── Backlog poll (#671). Its own loop, on its own clock: the issue list changes on
+  // the order of minutes and every refresh spawns `gh`, so running it at the inbox's 2s
+  // would be one subprocess per two seconds per browser window for an answer that is
+  // almost always identical. Same shape as the inbox loop above — self-scheduling, backs
+  // off while hidden, and keeps the last good list on error.
+  const backlogMs = Math.max(30, Math.min(1800, Number(settings.backlogPollSeconds) || 120)) * 1000;
+  const issueLabel = String(settings.issueLabel || 'bug');
+  useEffect(() => {
+    if (!settings.showBacklog) { setBacklog({ issues: [], projectName: '', error: null }); return undefined; }
+    let cancelled = false;
+    let timer = null;
+
+    async function tick() {
+      if (cancelled) return;
+      try {
+        const q = new URLSearchParams({ label: issueLabel, maxAgeMs: String(backlogMs) });
+        if (activeSessionId) q.set('session', activeSessionId);
+        const r = await fetch(`/api/workshop/backlog?${q}`, { cache: 'no-store' });
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const data = await r.json();
+        if (cancelled) return;
+        setBacklog({
+          issues: Array.isArray(data.issues) ? data.issues : [],
+          projectName: data.projectName || '',
+          truncated: !!data.truncated,
+          error: data.error || null,
+        });
+      } catch {
+        // Deliberately not setError(): that strip is the INBOX's, and a backlog that
+        // cannot reach `gh` must not make the inbox look broken. The section's own
+        // header shows a dash and the last good list stays.
+        if (!cancelled) setBacklog((b) => ({ ...b, error: 'unreachable' }));
+      }
+      if (cancelled) return;
+      timer = setTimeout(tick, document.visibilityState === 'hidden' ? backlogMs * 5 : backlogMs);
+    }
+
+    tick();
+    return () => { cancelled = true; if (timer) clearTimeout(timer); };
+  }, [settings.showBacklog, issueLabel, backlogMs, activeSessionId]);
+
+  // The label list is fetched once, when you first reach for the picker — not on the
+  // poll. A repo's labels change on the order of never, and `gh label list` is a second
+  // subprocess nobody asked for on every refresh.
+  const loadLabels = useCallback(() => {
+    if (labels.length) return;
+    const q = new URLSearchParams();
+    if (activeSessionId) q.set('session', activeSessionId);
+    fetch(`/api/workshop/labels?${q}`, { cache: 'no-store' })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => { if (d && Array.isArray(d.labels)) setLabels(d.labels); })
+      .catch(() => {});
+  }, [labels.length, activeSessionId]);
+
   // One root tick drives every row's age. Action Required puts an interval inside each
   // row, which is 40 timers at 40 rows; don't copy that.
   useEffect(() => {
@@ -318,13 +607,25 @@ function Workshop() {
 
   // ── Derived view. `order` is render order, and the cursor walks it — never the
   // sorted array, or arrows select a different row from the one highlighted.
+  // Sorted by backlog-view.js, which owns that order; visibleItems only appends the ids.
+  const backlogView = useMemo(
+    () => visibleBacklog(backlog.issues, { collapsed: !!settings.backlogCollapsed }),
+    [backlog.issues, settings.backlogCollapsed],
+  );
+
   const view = useMemo(
     () => visibleItems(items, {
       showBriefings: settings.showBriefings,
       blockingOnly: settings.blockingOnly,
       groupByProject: settings.groupByProject,
+      // One `order` covers both sections, so ↑/↓ walks out of the inbox and into the
+      // backlog. Two sections keeping two orders is the same class of bug the header
+      // comment on visibleItems warns about, with one more place to make it.
+      backlog: settings.showBacklog ? backlogView.list : [],
+      backlogCollapsed: !!settings.backlogCollapsed,
     }),
-    [items, settings.showBriefings, settings.blockingOnly, settings.groupByProject],
+    [items, settings.showBriefings, settings.blockingOnly, settings.groupByProject,
+      settings.showBacklog, settings.backlogCollapsed, backlogView.list],
   );
 
   useEffect(() => {
@@ -333,10 +634,17 @@ function Workshop() {
     if (next !== selectedIdRef.current) setSelectedId(next);
   }, [view.order]);
 
+  // One cursor walks two sections, so every id lookup has to see both. `rows` is the
+  // union in render order, and it is what `selected`, `o` and the excursion walk all
+  // index into — three places that would otherwise each need their own branch, and each
+  // be a place where a backlog row silently stops responding to a key.
+  const rows = useMemo(() => [...view.list, ...view.backlog], [view.list, view.backlog]);
+
   const selected = useMemo(
-    () => view.list.find((i) => i.id === selectedId) || null,
-    [view.list, selectedId],
+    () => rows.find((i) => i.id === selectedId) || null,
+    [rows, selectedId],
   );
+  const selectedIsIssue = !!selected && selected.kind === 'issue';
 
   // Reset the staged answer only when the SELECTION changes, never on a poll.
   useEffect(() => { setPicked(null); setDraft(''); setScreenOpen(false); }, [selectedId]);
@@ -458,9 +766,18 @@ function Workshop() {
     return true;
   }, [localIds]);
 
+  // `rows`, not `view.list`: a matched backlog row carries the sessionId of the tab
+  // already on that issue, so `o` opens it exactly as it opens a blocked agent's tab.
   const openTab = useCallback(() => {
-    visit(view.list.find((i) => i.id === selectedIdRef.current));
-  }, [view.list, visit]);
+    visit(rows.find((i) => i.id === selectedIdRef.current));
+  }, [rows, visit]);
+
+  // The pop-out, as a keystroke. The row and the bench both render a real <a> — this is
+  // only the `g` path, and it needs `allow-popups` on the mod iframe exactly as they do.
+  const openGitHub = useCallback(() => {
+    const item = rows.find((i) => i.id === selectedIdRef.current);
+    if (item && item.kind === 'issue' && item.url) window.open(item.url, '_blank', 'noopener');
+  }, [rows]);
 
   const moveCursor = useCallback((to) => {
     const order = orderRef.current;
@@ -485,7 +802,7 @@ function Workshop() {
   // Refs, not deps: the host holds one handler for the life of the iframe, and `view` is
   // rebuilt on every 2s poll.
   const cycleRef = useRef({ list: [], visit: () => false });
-  useEffect(() => { cycleRef.current = { list: view.list, visit }; }, [view.list, visit]);
+  useEffect(() => { cycleRef.current = { list: rows, visit }; }, [rows, visit]);
   useEffect(() => {
     if (!bridgeReady || !window.deepsteve.onExcursionCycle) return undefined;
     return window.deepsteve.onExcursionCycle(({ delta }) => {
@@ -496,7 +813,10 @@ function Workshop() {
       if (i < 0) i = 0;
       // Step PAST anything this window cannot show. getSessions() is window-scoped, so a
       // scheduled run with no tab here is a legitimate inbox row with nothing to visit —
-      // stopping on one would end the walk at the first unattended agent.
+      // stopping on one would end the walk at the first unattended agent. An UNMATCHED
+      // backlog row is the same case for free: visit() already returns false without a
+      // sessionId, so the walk steps over the issues nobody has started and lands on the
+      // ones that do have a tab.
       for (let steps = 0; steps < order.length; steps++) {
         i += delta;
         if (i < 0 || i >= order.length) return;   // ran off the end: stay put
@@ -543,10 +863,15 @@ function Workshop() {
       }
       if (e.metaKey || e.ctrlKey) return;   // leave the browser's own shortcuts alone
 
-      const item = view.list.find((i) => i.id === selectedIdRef.current);
+      const item = rows.find((i) => i.id === selectedIdRef.current);
       const action = keyAction(e.key, {
         optionCount: (item && item.options && item.options.length) || 0,
         repeat: e.repeat,
+        // A backlog row cannot be answered, archived or option-picked. keyAction returns
+        // null for those keys rather than the JSX ignoring the action later, so `e` on an
+        // issue never reaches archive() — which looks up in view.list and would silently
+        // do nothing, i.e. the same outcome by accident instead of by rule.
+        issue: !!item && item.kind === 'issue',
       });
       if (!action) return;
       e.preventDefault();
@@ -562,6 +887,7 @@ function Workshop() {
         case 'send': send(); break;
         case 'archive': archive(); break;
         case 'open': openTab(); break;
+        case 'github': openGitHub(); break;
         case 'focusReply': replyRef.current?.focus(); break;
         case 'help': setHelpOpen((v) => !v); break;
         case 'escape': setHelpOpen(false); break;
@@ -570,24 +896,27 @@ function Workshop() {
     };
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
-  }, [view.list, send, archive, openTab, moveCursor]);
+  }, [rows, send, archive, openTab, openGitHub, moveCursor]);
 
   useEffect(() => { rootRef.current?.focus(); }, []);
 
   // ── Render
   const ageOf = (item) => Math.max(0, now - (item.createdAt || now));
   const hasLocalTab = !!(selected && selected.sessionId && localIds.has(selected.sessionId));
-  const showReply = !!selected && selected.kind === 'question';
-  const canSend = !!(selected && (selected.kind === 'briefing'
+  // All three belong to the answer bench, which an issue never reaches. Gated on
+  // selectedIsIssue rather than left to answerPayload's own null: a backlog row is not
+  // an unanswerable item, it is not an item at all.
+  const showReply = !selectedIsIssue && !!selected && selected.kind === 'question';
+  const canSend = !selectedIsIssue && !!(selected && (selected.kind === 'briefing'
     || answerPayload(selected, { picked, draft })));
-  const pathHint = selected ? PATH_HINT[selected.pendingPath] : null;
+  const pathHint = (selected && !selectedIsIssue) ? PATH_HINT[selected.pendingPath] : null;
 
-  const rows = [];
+  const inboxRows = [];
   if (view.groups) {
     for (const group of view.groups) {
-      rows.push(<GroupHeader key={'g:' + group.project} name={group.name} count={group.items.length} />);
+      inboxRows.push(<GroupHeader key={'g:' + group.project} name={group.name} count={group.items.length} />);
       for (const item of group.items) {
-        rows.push(
+        inboxRows.push(
           <ItemRow
             key={item.id} item={item} selected={item.id === selectedId}
             ageMs={ageOf(item)} compact={settings.compactRows} onSelect={setSelectedId}
@@ -597,7 +926,7 @@ function Workshop() {
     }
   } else {
     for (const item of view.list) {
-      rows.push(
+      inboxRows.push(
         <ItemRow
           key={item.id} item={item} selected={item.id === selectedId}
           ageMs={ageOf(item)} compact={settings.compactRows} onSelect={setSelectedId}
@@ -668,13 +997,65 @@ function Workshop() {
         <div style={{ flex: 1, overflowY: 'auto', minHeight: 0 }}>
           {loading && view.list.length === 0
             ? <div style={{ padding: 24, font: `13px ${SANS}`, color: C.faint }}>Loading…</div>
-            : rows}
+            : inboxRows}
+
+          {/* ── Backlog: the other half of "what needs me". It scrolls WITH the inbox
+              rather than owning a pane, because the point is reading both in one
+              glance — an issue nobody has picked up is only interesting next to the
+              agents that are already running. */}
+          {settings.showBacklog && (
+            <>
+              <BacklogHeader
+                projectName={backlog.projectName}
+                label={issueLabel}
+                labels={labels}
+                count={backlogView.list.length}
+                collapsed={!!settings.backlogCollapsed}
+                error={backlog.error}
+                onToggle={() => setSetting('backlogCollapsed', !settings.backlogCollapsed)}
+                onLabel={(v) => setSetting('issueLabel', v)}
+                onLabelMenu={loadLabels}
+              />
+              {!settings.backlogCollapsed && (
+                backlog.error
+                  ? <div style={{ padding: '10px 12px', font: `12px ${SANS}`, color: C.faint }}>
+                    {BACKLOG_ERRORS[backlog.error] || 'The issue list is unavailable.'}
+                  </div>
+                  : backlogView.list.length === 0
+                    ? <div style={{ padding: '10px 12px', font: `12px ${SANS}`, color: C.faint }}>
+                      Nothing open with this label.
+                    </div>
+                    : <>
+                      {backlogView.list.map((issue) => (
+                        <BacklogRow
+                          key={issue.id} issue={issue} selected={issue.id === selectedId}
+                          now={now} compact={settings.compactRows} onSelect={setSelectedId}
+                        />
+                      ))}
+                      {/* gh pages at 100. Saying so is the difference between a capped
+                          list and a list that looks complete but isn't. */}
+                      {backlog.truncated && (
+                        <div style={{ padding: '8px 12px', font: `11px ${SANS}`, color: C.faint }}>
+                          Showing the first {backlogView.list.length} — there are more on GitHub.
+                        </div>
+                      )}
+                    </>
+              )}
+            </>
+          )}
         </div>
       </div>
 
       {/* ── Right: the bench ── */}
       <div style={{ display: 'flex', flexDirection: 'column', minHeight: 0 }}>
-        {!selected ? <EmptyState /> : (
+        {/* An issue gets its OWN bench, not a branch inside the answer bench. There is
+            nothing here to answer, pick or archive, so every control the inbox bench
+            carries would be dead — and the send bar below it must not render at all. */}
+        {selectedIsIssue ? (
+          <IssueBench
+            issue={selected} now={now} hasLocalTab={hasLocalTab} onShowTab={openTab}
+          />
+        ) : !selected ? <EmptyState /> : (
           <>
             <div style={{
               display: 'flex', alignItems: 'center', gap: 10, height: 40, padding: '0 32px',
@@ -873,6 +1254,7 @@ function Workshop() {
               ['⌘⏎', 'send while typing'],
               ['e', 'archive / dismiss a dialog'],
               ['o', 'open the tab'],
+              ['g', 'open the issue on GitHub'],
               ['r', 'reply box'],
               ['⌘\\', 'quiet mode'],
               ['?', 'this'],

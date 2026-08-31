@@ -406,7 +406,31 @@ function registerRoutes(app, context) {
 
 ### Iframe Sandboxing
 
-All mod iframes use `sandbox="allow-scripts allow-same-origin"`. This allows JavaScript execution and same-origin access (needed for the bridge API injection) while blocking other capabilities like popups and form submission.
+Every mod iframe gets the same sandbox, declared once as `MOD_SANDBOX` in
+`public/js/mod-manager.js` so the panel path and the fullscreen path cannot drift apart:
+
+```
+allow-scripts allow-same-origin allow-pointer-lock allow-popups allow-popups-to-escape-sandbox
+```
+
+Each token is there for a reason, and every one of them fails **silently** when removed —
+nothing throws, the affordance just stops existing:
+
+| Token | Without it |
+|---|---|
+| `allow-scripts` | the page does not run at all |
+| `allow-same-origin` | no `window.deepsteve`; the bridge is injected across the boundary and needs it |
+| `allow-pointer-lock` | `requestPointerLock()` throws SecurityError and a 3D mod's mouse-look camera never turns |
+| `allow-popups` | a mod cannot link out at all — `<a target="_blank">` and `window.open()` are both refused, with no console error |
+| `allow-popups-to-escape-sandbox` | the popup *opens* but inherits this sandbox, so it has no `allow-top-navigation`: the linked page appears and then every link on it does nothing |
+
+The last two ship together or the pop-out is worse than absent. `test/unit/mod-sandbox.test.js`
+pins all five with those reasons in the failure messages.
+
+**This attribute is not what isolates a mod, and nothing should be written as though it were.**
+`allow-same-origin` gives every mod iframe full same-origin reach into the host document — that
+is the design (mods, display tabs and project mods are same-origin and trusted), and it is why
+`allow-popups-to-escape-sandbox` grants a mod no authority it did not already have.
 
 ### Panel Mods
 
@@ -449,7 +473,9 @@ or AskUserQuestion dialog, with the question and options parsed and rendered inl
 
 Everything lives in `mods/workshop/`. There is no `server.js` edit and no new bridge hook:
 `registerRoutes(app, context)` already hands every mod the full `initMCP` context, and the panel
-polls its own `GET /api/workshop/inbox`.
+polls its own `GET /api/workshop/inbox`. (The [Backlog](#the-backlog-671) added one host change —
+two popup flags on `MOD_SANDBOX` — but that is the shared iframe sandbox, made once for every mod,
+not a Workshop hook.)
 
 **Workshop is the first [App](#apps-661).** Going to look at an agent is a `visitSession()`, not
 a `focusSession()`, so ⌘← brings you back; and its `onExcursionCycle` handler moves the *same*
@@ -557,6 +583,75 @@ way to answer another agent's item, revisit this** — at that point Workshop be
 `logRcWrite` only logs text matching `/(^|\s)\/rc(\s|$)/` — deliberately not a keylogger — and
 arrow keys plus `\r` can never match it, so the explicit `[workshop] answer …` log line is the
 only record that a human moved a cursor in someone else's session.
+
+### The Backlog (#671)
+
+A second, collapsible section under the inbox listing the **open issues carrying one label** for
+the project in focus — and marking the ones a Deep Steve tab is already on. The inbox answers
+"which agent needs me"; this answers "what is outstanding that nothing is working on yet", and
+the reason they share a column is the diff between them.
+
+**The label lives on the panel, not in the gear menu.** The mod settings modal renders only
+checkboxes and number inputs (`_showSettingsModal`, `public/js/mod-manager.js`), so a string
+setting there would be an invisible control. It is stored through `updateSetting('issueLabel', …)`
+like `blockingOnly`, and listed in `UNRENDERED_SETTINGS` in `test/unit/workshop-mod-shape.test.js`.
+`showBacklog` and `backlogPollSeconds` **are** in `mod.json`, because those two types do render.
+
+**Mod settings never reach the server**, so the label travels as `?label=`. That is also why the
+server-side cache is keyed on `project + label` rather than on the panel's idea of state.
+
+**The project follows the focused tab.** `GET /api/workshop/backlog?session=<id>` resolves it with
+`projectScope.resolveProject`, which goes through `ctx.sessionPaths` — so a `github-issue-671`
+worktree tab asks about its **parent repo**, not about the worktree. With no session named, or one
+that has since closed, it falls back to the most recently active live session; with no sessions at
+all it returns `error: 'no-project'` and says so rather than showing some other project's backlog.
+The resolved `projectName` is rendered in the section header, so it is never ambiguous.
+
+**Matching an issue to a tab is two tiers, and the order matters:**
+
+1. `entry.worktree === 'github-issue-<n>'` — exact. Minted once by `startIssueSession`, on
+   `serializeShellEntry`'s persisted allowlist, and never rewritten.
+2. a `#<n>` token in `entry.name` — a mention, not a claim.
+
+The worktree tier is authoritative because **a tab's name is mutable and its worktree is not**.
+The ws `{type:'rename'}` handler assigns `entry.name` outright, so an agent can rename its own tab
+to whatever describes the work and take the `#N` with it; `entry.worktree` is minted once by
+`startIssueSession` and never written again. The title tier exists for the case where
+`usableWorktree()` dropped the worktree (a repo with no commits, #656) and the name is the only
+signal left; rows say `(by name)` when that is what matched.
+
+**Every match is project-scoped, and that is part of the rule rather than a nicety.** Each repo
+numbers its issues from 1, so on a machine with two checkouts open an ungated `github-issue-12`
+would routinely mark an unrelated issue #12 as in progress.
+
+Matching happens **server-side and on the way out, never cached**: the issue list is minutes-stale
+by design, but "which tab is on it" has to be current or a tab opened thirty seconds ago stays
+invisible for two minutes. It has to be server-side at all because the bridge's session list
+carries no `worktree` (`getSessions()` returns `{id, name, cwd, waitingForInput, type}`), so a
+panel-side match could only ever guess from the name.
+
+**Cadence.** The panel polls on its own clock — default 120s, clamped to 30s–30min — and the
+server caches per `project + label` for two minutes, with failures cached for twenty seconds and
+concurrent requests sharing one subprocess. The server cache is not redundant with the poll: a
+fullscreen mod's iframe is **destroyed on hide**, so every re-entry into the app is a fresh mount
+and an immediate fetch, and each browser window polls independently.
+
+**It never returns 500.** A missing `gh`, an unauthenticated one, a repo with no GitHub remote and
+a label the repo has never defined all produce an empty list plus an `error` string the section
+renders as one grey line. The inbox's error path paints a red bar across the top of the app, and a
+project that simply is not on GitHub must not be able to trigger it. (`GET /api/issues` in
+`server.js` does 500, deliberately — that serves a picker the user opened on purpose.)
+
+One thing `gh` cannot tell you: **a label that does not exist and a label with no open issues are
+byte-identical** — exit 0, `[]`, both. The picker is populated from `gh label list` precisely so
+the choice comes from labels the repo actually has.
+
+**One cursor, two sections.** Backlog ids (`issue:<n>`) join the inbox's single `order` inside
+`visibleItems()`, so ↑/↓ walks straight out of the inbox and into the backlog, and collapsing the
+section moves the cursor back out rather than blanking the pane. `e`, Enter and the digits return
+`null` on an issue row instead of being ignored later; `g` opens it on GitHub. The ⌘↑/⌘↓ excursion
+walk needed no change at all — it already steps past anything `visit()` refuses, which is exactly
+the issues nobody has started.
 
 ### Coexisting with Action Required
 

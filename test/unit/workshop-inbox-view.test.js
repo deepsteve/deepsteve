@@ -130,6 +130,125 @@ test('order matches the rendered list exactly, grouped or not', async () => {
   }
 });
 
+// ── the Backlog section (#671) ───────────────────────────────────────────────
+//
+// The Backlog renders BELOW the inbox in the same scrolling column, and one cursor walks
+// both. That is why it comes through visibleItems rather than keeping an order of its
+// own: two sections computing two orders is the bug the test above describes, with one
+// more place to make it.
+
+const issueRow = (n) => ({ id: `issue:${n}`, kind: 'issue', number: n, title: `issue ${n}` });
+
+test('backlog ids come after inbox ids, in one order', async () => {
+  const { visibleItems } = await load();
+  const v = visibleItems([item({ id: 'w1' }), item({ id: 'w2' })], {
+    backlog: [issueRow(671), issueRow(664)],
+  });
+  assert.deepStrictEqual(v.order, ['w1', 'w2', 'issue:671', 'issue:664']);
+  assert.deepStrictEqual(
+    v.order, [...v.list.map((i) => i.id), ...v.backlog.map((i) => i.id)],
+    'render order is inbox-then-backlog, and `order` must be exactly that concatenation',
+  );
+});
+
+test('backlog order is preserved, never re-sorted here', async () => {
+  // backlog-view.js owns that order (freshest first, number as the total-order
+  // tiebreak). Re-sorting it here would make two modules disagree about the same list.
+  const { visibleItems } = await load();
+  const v = visibleItems([], { backlog: [issueRow(3), issueRow(99), issueRow(1)] });
+  assert.deepStrictEqual(v.order, ['issue:3', 'issue:99', 'issue:1']);
+});
+
+test('a collapsed backlog is absent from both the order and the rows', async () => {
+  const { visibleItems } = await load();
+  const v = visibleItems([item({ id: 'w1' })], {
+    backlog: [issueRow(671)], backlogCollapsed: true,
+  });
+  assert.deepStrictEqual(v.order, ['w1']);
+  assert.deepStrictEqual(v.backlog, []);
+});
+
+test('grouping the inbox does not disturb the backlog tail', async () => {
+  const { visibleItems } = await load();
+  const v = visibleItems([
+    item({ id: 'w1', project: '/repo/a', projectName: 'a' }),
+    item({ id: 'w2', project: '/repo/b', projectName: 'b', urgency: 'blocking' }),
+  ], { groupByProject: true, backlog: [issueRow(671)] });
+  assert.strictEqual(v.order[v.order.length - 1], 'issue:671');
+  assert.strictEqual(v.order.length, 3);
+});
+
+test('an omitted backlog leaves the inbox exactly as it was', async () => {
+  const { visibleItems } = await load();
+  const v = visibleItems([item({ id: 'w1' })], {});
+  assert.deepStrictEqual(v.order, ['w1']);
+  assert.deepStrictEqual(v.backlog, []);
+});
+
+test('junk in the backlog does not corrupt the order', async () => {
+  const { visibleItems } = await load();
+  const v = visibleItems([item({ id: 'w1' })], { backlog: [null, issueRow(5), undefined] });
+  assert.deepStrictEqual(v.order, ['w1', 'issue:5']);
+  const v2 = visibleItems([item({ id: 'w1' })], { backlog: 'not an array' });
+  assert.deepStrictEqual(v2.order, ['w1']);
+});
+
+test('collapsing the backlog moves the cursor out of it, not to nothing', async () => {
+  // The composition that matters: nextSelection sees an id that has vanished from the
+  // order and falls back to the same INDEX, which lands on the last inbox row. A null
+  // here would blank the reading pane every time you collapsed the section.
+  const { visibleItems, nextSelection } = await load();
+  const open = visibleItems([item({ id: 'w1' }), item({ id: 'w2' })], { backlog: [issueRow(671)] });
+  const shut = visibleItems([item({ id: 'w1' }), item({ id: 'w2' })], {
+    backlog: [issueRow(671)], backlogCollapsed: true,
+  });
+  assert.strictEqual(nextSelection('issue:671', open.order, shut.order), 'w2');
+});
+
+test('an empty inbox with a full backlog selects the first issue', async () => {
+  // A deliberate change to the old empty state: with nothing waiting on you, the thing
+  // worth looking at is the top of the backlog — which is the "sat down to start new
+  // work" case the feature exists for.
+  const { visibleItems, nextSelection } = await load();
+  const v = visibleItems([], { backlog: [issueRow(671), issueRow(664)] });
+  assert.strictEqual(nextSelection(null, [], v.order), 'issue:671');
+});
+
+test('an issue row cannot be answered, archived or option-picked', async () => {
+  // keyAction returns null rather than the JSX ignoring the action later. The difference
+  // matters: send()/archive() look up in the inbox list and would no-op anyway, so
+  // without this the right outcome would happen for the wrong reason and break the day
+  // someone made those lookups span both sections.
+  const { keyAction } = await load();
+  for (const key of ['e', 'Enter', '1', '9', 'r']) {
+    assert.strictEqual(keyAction(key, { optionCount: 3, issue: true }), null, `${key} must be inert on an issue`);
+  }
+});
+
+test('an issue row still moves, opens and helps', async () => {
+  const { keyAction } = await load();
+  assert.deepStrictEqual(keyAction('j', { issue: true }), { type: 'move', delta: 1 });
+  assert.deepStrictEqual(keyAction('k', { issue: true }), { type: 'move', delta: -1 });
+  assert.deepStrictEqual(keyAction('Home', { issue: true }), { type: 'first' });
+  assert.deepStrictEqual(keyAction('o', { issue: true }), { type: 'open' });
+  assert.deepStrictEqual(keyAction('?', { issue: true }), { type: 'help' });
+  assert.deepStrictEqual(keyAction('Escape', { issue: true }), { type: 'escape' });
+});
+
+test('`g` is the pop-out, and ONLY on an issue', async () => {
+  const { keyAction } = await load();
+  assert.deepStrictEqual(keyAction('g', { issue: true }), { type: 'github' });
+  assert.strictEqual(keyAction('g', {}), null, '`g` must stay unbound in the inbox');
+});
+
+test('the inbox keys are unchanged by the new flag defaulting to false', async () => {
+  const { keyAction } = await load();
+  assert.deepStrictEqual(keyAction('e', {}), { type: 'archive' });
+  assert.deepStrictEqual(keyAction('Enter', {}), { type: 'send' });
+  assert.deepStrictEqual(keyAction('r', {}), { type: 'focusReply' });
+  assert.deepStrictEqual(keyAction('1', { optionCount: 2 }), { type: 'pick', index: 0 });
+});
+
 test('showBriefings:false drops briefings and only briefings', async () => {
   const { visibleItems } = await load();
   const list = [

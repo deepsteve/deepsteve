@@ -939,3 +939,120 @@ test('the screen endpoint returns live preview lines for a blocked session', asy
   assert.ok(r.body.lines.some((l) => l.includes('Do you want to proceed?')));
   assert.strictEqual(r.body.state, 'idle');
 });
+
+// ── the backlog routes (#671) ────────────────────────────────────────────────
+//
+// What these prove is PLUMBING: the routes are registered, they resolve a project the
+// way project-scope.js does, and they never 500 whatever the environment does. The
+// rules themselves — parsing, matching, caching — are proved against backlog.js with an
+// injected fetcher in test/unit/workshop-backlog.test.js, because doing it here would
+// need a real GitHub CLI and a real repo.
+//
+// PROJECT_DIR is a real directory that is deliberately NOT a repo, so the one `gh` call
+// these can trigger fails in milliseconds with no network. On the CI runner there is no
+// `gh` at all and the same paths return the other error. Both are asserted as a set,
+// which is what keeps this suite environment-independent.
+
+const GH_ERRORS = ['gh-unavailable', 'gh-failed'];
+
+// A distinct label per test: the caches are module state, and two tests sharing a key
+// would have the second silently assert against the first one's cached answer.
+let nextLabel = 0;
+const label = () => 'ds-test-label-' + (++nextLabel);
+
+test('with no session and no shells, the backlog says so instead of guessing', async () => {
+  const { app } = world();
+  const r = await app.call('GET', '/api/workshop/backlog', { query: { label: 'bug' } });
+  assert.strictEqual(r.status, 200);
+  assert.strictEqual(r.body.error, 'no-project');
+  assert.deepStrictEqual(r.body.issues, []);
+  assert.strictEqual(r.body.project, '');
+});
+
+test('the backlog follows the session the caller names', async () => {
+  const { shells, app } = world();
+  const id = sid();
+  shells.set(id, makeEntry(id, new FakeDialog(['Yes'])));
+  const r = await app.call('GET', '/api/workshop/backlog', {
+    query: { label: label(), session: id },
+  });
+  assert.strictEqual(r.status, 200);
+  assert.strictEqual(r.body.projectName, 'deepsteve');
+  assert.ok(Array.isArray(r.body.issues));
+  assert.ok(GH_ERRORS.includes(r.body.error), `unexpected error ${r.body.error}`);
+});
+
+test('a stale session id falls back to the most recently active shell', async () => {
+  // Ordinary rather than exotic: the panel sends whatever getActiveSessionId() last
+  // reported, and that tab may have been closed since. Falling through to '' here would
+  // blank the backlog every time you closed the tab you had been looking at.
+  const { shells, app } = world();
+  const id = sid();
+  shells.set(id, makeEntry(id, new FakeDialog(['Yes'])));
+  const r = await app.call('GET', '/api/workshop/backlog', {
+    query: { label: label(), session: 'sess-that-never-existed' },
+  });
+  assert.strictEqual(r.body.projectName, 'deepsteve');
+});
+
+test('an explicit project pins the backlog regardless of the session', async () => {
+  const { app } = world();
+  const r = await app.call('GET', '/api/workshop/backlog', {
+    query: { label: label(), project: PROJECT_DIR },
+  });
+  assert.strictEqual(r.body.project, PROJECT_DIR);
+});
+
+test('a missing or unusable label is refused before a subprocess is spawned', async () => {
+  const { shells, app } = world();
+  const id = sid();
+  shells.set(id, makeEntry(id, new FakeDialog(['Yes'])));
+  for (const bad of [undefined, '', '   ', 'x'.repeat(61), 'two\nlines']) {
+    const r = await app.call('GET', '/api/workshop/backlog', { query: { label: bad, session: id } });
+    assert.strictEqual(r.status, 200, 'still never a 500');
+    assert.strictEqual(r.body.error, 'no-label', `accepted ${JSON.stringify(bad)} as a label`);
+  }
+});
+
+test('the backlog route never 500s, whatever the environment does', async () => {
+  // The contract the panel depends on. Its inbox error strip paints a red bar across the
+  // top of the app; a project that simply is not hosted must not be able to trigger it,
+  // because that is a fact about the project rather than a failure.
+  const { shells, app } = world();
+  const id = sid();
+  shells.set(id, makeEntry(id, new FakeDialog(['Yes'])));
+  const r = await app.call('GET', '/api/workshop/backlog', { query: { label: label(), session: id } });
+  assert.strictEqual(r.status, 200);
+});
+
+test('the label route mirrors the backlog route, including never failing loudly', async () => {
+  const { shells, app } = world();
+
+  // Before any shell exists: nothing to fall back to, so it must SAY nothing rather
+  // than resolve some other project's labels. Asserted first on purpose — once a shell
+  // is in the map the fallback correctly kicks in and this case is unreachable.
+  const none = await app.call('GET', '/api/workshop/labels');
+  assert.strictEqual(none.status, 200);
+  assert.strictEqual(none.body.error, 'no-project');
+  assert.deepStrictEqual(none.body.labels, []);
+
+  const id = sid();
+  shells.set(id, makeEntry(id, new FakeDialog(['Yes'])));
+  const r = await app.call('GET', '/api/workshop/labels', { query: { session: id } });
+  assert.strictEqual(r.status, 200);
+  assert.ok(Array.isArray(r.body.labels));
+  assert.ok(GH_ERRORS.includes(r.body.error), `unexpected error ${r.body.error}`);
+});
+
+test('a second call for the same project and label is served from the cache', async () => {
+  // Proved through the response rather than a spy, because the fetcher is built inside
+  // the route: a cached answer carries cached:true and a fresh one cannot.
+  const { shells, app } = world();
+  const id = sid();
+  shells.set(id, makeEntry(id, new FakeDialog(['Yes'])));
+  const l = label();
+  const first = await app.call('GET', '/api/workshop/backlog', { query: { label: l, session: id } });
+  const second = await app.call('GET', '/api/workshop/backlog', { query: { label: l, session: id } });
+  assert.strictEqual(first.body.cached, false);
+  assert.strictEqual(second.body.cached, true, 'a repeat inside the TTL must not re-spawn the subprocess');
+});
