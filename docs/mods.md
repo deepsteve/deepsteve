@@ -471,11 +471,11 @@ or AskUserQuestion dialog, with the question and options parsed and rendered inl
 **questions and briefings agents post deliberately** through `workshop_ask`, `workshop_brief` and
 `workshop_check`. You answer from the inbox instead of switching to the tab.
 
-Everything lives in `mods/workshop/`. There is no `server.js` edit and no new bridge hook:
+Everything lives in `mods/workshop/`. There is no new bridge hook:
 `registerRoutes(app, context)` already hands every mod the full `initMCP` context, and the panel
 polls its own `GET /api/workshop/inbox`. (The [Backlog](#the-backlog-671) added one host change —
 two popup flags on `MOD_SANDBOX` — but that is the shared iframe sandbox, made once for every mod,
-not a Workshop hook.)
+not a Workshop hook. The [workflow stages](#the-workflow-stages-668) added a real one; see below.)
 
 **Workshop is the first [App](#apps-661).** Going to look at an agent is a `visitSession()`, not
 a `focusSession()`, so ⌘← brings you back; and its `onExcursionCycle` handler moves the *same*
@@ -503,6 +503,29 @@ AskUserQuestion, and treating that as the end of the run made the majority of th
 (#664). Stepping over it is safe because it decides nothing: contiguity — `n !== expected` — still
 decides, and every row past the divider goes through the same budgets as any other. A second rule
 means box borders rather than a divider, and the run stops.
+
+### The workflow stages (#668)
+
+Nothing about the inbox makes an agent *use* it. The workflow stages are four numbered lines
+appended to every GitHub-issue prompt — orient with a `workshop_brief` before writing code, take a
+decision you cannot make alone to `workshop_ask` rather than assuming, post a surprise the moment
+you find it, and justify the result before merging — so a finished issue can be judged from the
+inbox instead of by opening its tab.
+
+They live in `issue-prompt.js` and are appended by `renderIssuePrompt()`, so this is the one part
+of Workshop that **is** a host edit. **The toggle is `issueStagesEnabled`, a `SETTINGS_SCHEMA`
+entry, not a Workshop mod setting** — a mod's own settings are per-browser `localStorage`
+(`public/js/mod-manager.js`) and never reach the server, and this decision is made server-side at
+spawn time, which is the same reason `scheduledTasksEnabled`, `projectModsEnabled` and
+`metaControlsEnabled` exist. Default **off**. The mechanism — the single reader, the three call
+sites, the `stages=<on|off>` field on the `[issue] #N:` line — is in
+[sessions.md](sessions.md); what matters here is the coupling in the other direction: the stage
+text **names Workshop's tools**, so renaming one breaks a prompt that lives outside this mod. A
+unit test in `test/unit/issue-prompt.test.js` fails if the stages name a tool no mod registers.
+
+Turning it on is a decision about two mods' worth of state, because Workshop the *app* is off by
+default per browser while its MCP tools register server-side regardless: stages on with the app
+never enabled means agents posting into an inbox nobody is reading.
 
 ### How an item leaves the inbox
 

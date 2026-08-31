@@ -26,7 +26,7 @@ const { terminalEnv } = require('./terminal-env');
 const { readComposerDraft, isPromptStaged, isPromptOnScreen, promptDraftVerdict } = require('./composer-state');
 const { wrapRunCommand } = require('./terminal-run');
 const { isTerminalReport } = require('./terminal-input');
-const { renderIssuePrompt, issueWorktreeName, issueTabName } = require('./issue-prompt');
+const { renderIssuePrompt, issueWorktreeName, issueTabName, WORKFLOW_STAGES } = require('./issue-prompt');
 const { readRecentUserMessages, compareDelivered } = require('./prompt-delivery-check');
 const { enrichTabs, summarizeRun } = require('./timelapse-snapshot');
 const NodePtyEngine = require('./engines/node-pty');
@@ -544,6 +544,16 @@ const SETTINGS_SCHEMA = [
   // checkbox synchronously, before its own /api/settings fetch resolves, and a change
   // made in one window has to reach the picker in the others.
   { name: 'issueAutopilot',             type: 'boolean', default: false },
+  // #668: the workflow stages appended to every issue prompt — orient, ask rather than
+  // guess, flag surprises, justify before merging — so a finished issue can be judged
+  // from the Workshop inbox instead of by opening its tab. A mod's own enable/disable is
+  // per-browser localStorage and never reaches the server, and this decision is made
+  // server-side at spawn time, so it needs a real setting (same reason projectModsEnabled
+  // and scheduledTasksEnabled exist). Read live inside issueStagesText(), so a Settings
+  // change applies with no restart — same rule as issueAutopilot above. Default OFF: it
+  // changes what every issue session is asked to do, and stage 4 names `share_result`,
+  // which #669 builds.
+  { name: 'issueStagesEnabled',         type: 'boolean', default: false },
   { name: 'wandPromptTemplate',         type: 'string',  default: WAND_DEFAULT_TEMPLATE, broadcast: false,
     logValue: v => `(${v.length} chars)` },
   { name: 'cmdTabSwitch',               type: 'boolean', default: false },
@@ -6135,9 +6145,29 @@ function autopilotLogLabel(on, explicit) {
  * the fact. `source` is a parameter, never guessed from the call stack; a caller that
  * forgets it shows up as `unknown` rather than claiming a surface it isn't.
  */
-function logIssueStart({ number, id, source, agentType, engineType, worktree, cwd, on, explicit }) {
+function logIssueStart({ number, id, source, agentType, engineType, worktree, cwd, on, explicit, stages }) {
+  // `stages` reports whether this session was given the workflow stages (#668). "Started
+  // with stages" and "started without" are different runs and the log has to say which.
+  // An omitted argument reads `unknown` rather than `off`, for the same reason `source`
+  // defaults to it: a caller that forgot must not be able to claim a state it never chose.
   log(`[issue] #${number}: id=${id}, source=${source}, agent=${agentType}, engine=${engineType}, `
-    + `worktree=${worktree || 'none'}, cwd=${cwd}, autopilot=${autopilotLogLabel(on, explicit)}`);
+    + `worktree=${worktree || 'none'}, cwd=${cwd}, autopilot=${autopilotLogLabel(on, explicit)}, `
+    + `stages=${stages == null ? 'unknown' : (stages ? 'on' : 'off')}`);
+}
+
+/**
+ * The workflow-stage text a starting issue session gets, or null (#668).
+ *
+ * The single reader of the `issueStagesEnabled` setting, for the same reason
+ * renderIssuePrompt is the single reader of `wandPromptTemplate`. Callers capture the
+ * result ONCE per start: startIssueSession renders the prompt twice — inline body now,
+ * gh-fetch body seconds later inside a `.then()` — and logs the decision at spawn, so
+ * three live reads would let a Settings flip mid-flight produce a log line describing a
+ * prompt nobody got. This is also where #669 branches, when the stages have to name a
+ * tool only the daemon can confirm is registered.
+ */
+function issueStagesText() {
+  return settings.issueStagesEnabled ? WORKFLOW_STAGES : null;
 }
 
 /**
@@ -6166,6 +6196,15 @@ function startIssueSession({ number, title, body, labels, url, cwd, agentType, c
   // autopilotLogLabel(). Kept as its own flag rather than re-derived at the log line,
   // so the two can never disagree about what "explicit" meant.
   const autopilotExplicit = autopilot != null;
+  // #668: captured ONCE, here, rather than read at each use. This function renders the
+  // prompt twice — inline body now, gh-fetch body seconds later inside a .then() — and
+  // logs the decision at spawn; a live read at each of those three points would let a
+  // Settings flip mid-flight produce a log line that describes a prompt nobody got.
+  // Deliberately NOT a parameter: start_issue already exposes `autopilot` as an
+  // agent-settable argument and #653's `setting=` clause exists because a model filling
+  // that in silently overrode a user preference. An agent that could switch off its own
+  // reporting obligation is a strictly worse version of that.
+  const stages = issueStagesText();
 
   // Inherit whatever the caller didn't specify from the calling session.
   const caller = callerId ? shells.get(callerId) : null;
@@ -6218,7 +6257,7 @@ function startIssueSession({ number, title, body, labels, url, cwd, agentType, c
   // tmux to node-pty (#620), and engineType must record what happened.
   const sessionEngine = spawnSession(getDefaultEngine(), id, agentType, spawnArgs, spawnCwd, { cols: 120, rows: 40, env: sessionEnv(id, { name, worktree, windowId: windowId || null, cwd: spawnCwd, agentType, configDir, codexHomeId }) });
   const engineType = sessionEngine === tmuxEngine ? 'tmux' : 'node-pty';
-  logIssueStart({ number, id, source, agentType, engineType, worktree, cwd: spawnCwd, on: autopilotOn, explicit: autopilotExplicit });
+  logIssueStart({ number, id, source, agentType, engineType, worktree, cwd: spawnCwd, on: autopilotOn, explicit: autopilotExplicit, stages: !!stages });
   shells.set(id, { clients: new Set(), cwd: spawnCwd, claudeSessionId, agentType, codexHomeId, configDir: configDir || null, engine: sessionEngine, engineType, worktree: worktree || null, windowId: windowId || null, name, planMode: !!settings.wandPlanMode, autopilot: autopilotOn, waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now(), loading: true });
   wireShellOutput(id);
   emitSessionOpen(id);
@@ -6239,16 +6278,18 @@ function startIssueSession({ number, title, body, labels, url, cwd, agentType, c
   // readiness wait or their configured delay. An inline body renders now; without
   // one, fetch from GitHub and render when it lands.
   if (body) {
-    deliverPromptWhenReady(id, renderIssuePrompt(settings.wandPromptTemplate, { number, title, labels, url, body }));
+    deliverPromptWhenReady(id, renderIssuePrompt(settings.wandPromptTemplate, { number, title, labels, url, body }, { stages }));
   } else {
     fetchIssueFromGitHub(number, cwd).then(gh => {
+      // `stages` is the const captured at the top, not a fresh read: this closure runs
+      // seconds later, after the log line already reported the decision (#668).
       deliverPromptWhenReady(id, renderIssuePrompt(settings.wandPromptTemplate, {
         number,
         title,
         labels: labels || (gh ? gh.labels : null),
         url: url || (gh ? gh.url : null),
         body: gh ? gh.body : null,
-      }));
+      }, { stages }));
     });
   }
 
@@ -7391,6 +7432,10 @@ function handleWsConnection(ws, req) {
         // client that skips it.
         const autopilotExplicit = parsed.autopilot != null;
         entry.autopilot = parsed.autopilot == null ? !!settings.issueAutopilot : !!parsed.autopilot;
+        // #668: same rule as autopilot above — read off `settings`, so a Settings change
+        // applies with no restart. Unlike autopilot there is no per-start override: the
+        // picker offers none, and the WS message must not be able to introduce one.
+        const stages = issueStagesText();
         saveState();
         broadcastAutopilot(id);
         // This path never calls startIssueSession, so it logs its own start line (#653) —
@@ -7403,9 +7448,12 @@ function handleWsConnection(ws, req) {
           number: parsed.issue?.number ?? '?', id, source: 'ws-issue',
           agentType: entry.agentType, engineType: entry.engineType,
           worktree: entry.worktree, cwd: entry.cwd,
-          on: entry.autopilot, explicit: autopilotExplicit,
+          on: entry.autopilot, explicit: autopilotExplicit, stages: !!stages,
         });
-        deliverPromptWhenReady(id, renderIssuePrompt(settings.wandPromptTemplate, parsed.issue || {}));
+        // `{ stages }` is the THIRD argument. Folding it into the second — the variable
+        // bag — would render as nothing (an unknown {{name}} is empty by design) and the
+        // picker would be the one surface silently starting a different kind of session.
+        deliverPromptWhenReady(id, renderIssuePrompt(settings.wandPromptTemplate, parsed.issue || {}, { stages }));
         return;
       }
       if (parsed.type === 'rename') { entry.name = parsed.name || null; return; }

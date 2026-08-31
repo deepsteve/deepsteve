@@ -14,7 +14,7 @@ const path = require('path');
 
 const {
   renderIssuePrompt, normalizeLabels, issueWorktreeName, issueTabName, ISSUE_BODY_LIMIT,
-  ISSUE_COMPLETE_INSTRUCTION,
+  ISSUE_COMPLETE_INSTRUCTION, WORKFLOW_STAGES,
 } = require('../../issue-prompt.js');
 
 const ROOT = path.join(__dirname, '..', '..');
@@ -133,6 +133,9 @@ test('the instruction is NOT in the shipped default template', () => {
   const template = server.slice(start, server.indexOf('`;', start));
   assert.ok(start > 0 && !template.includes('issue_complete'),
     'WAND_DEFAULT_TEMPLATE must not carry the issue_complete line — append it in renderIssuePrompt (#643)');
+  // Same argument, same failure mode, for the workflow stages (#668).
+  assert.ok(!template.includes('workshop'),
+    'WAND_DEFAULT_TEMPLATE must not carry the workflow stages — append them in renderIssuePrompt (#668)');
 });
 
 test('autopilot is persisted, not just held in memory', () => {
@@ -171,6 +174,150 @@ test('an omitted autopilot seeds from the remembered preference, not from off (#
   // And it is a real setting, so it is persisted and validated like every other one.
   assert.ok(/name: 'issueAutopilot',\s+type: 'boolean'/.test(server),
     'issueAutopilot must be a SETTINGS_SCHEMA entry (#651)');
+});
+
+// --- workflow stages (#668) -------------------------------------------------
+
+test('the stages land after the completion instruction, at the very end', () => {
+  // Stage 4 already ends in issue_complete, so putting the stages last means the
+  // completion instruction above reads as the rule the workflow then refines, and
+  // nothing is repeated after the list.
+  const out = renderIssuePrompt('BODY', { number: 1, title: 't' }, { stages: 'STAGES' });
+  assert.equal(out, `BODY\n\n${ISSUE_COMPLETE_INSTRUCTION}\n\nSTAGES`);
+});
+
+test('no stages renders byte-for-byte what it rendered before (#668)', () => {
+  // issueStagesEnabled is default-off, so this is the path nearly every install takes
+  // and the third argument must be invisible on it.
+  const fields = { number: 668, title: 'stages off', body: 'b', labels: 'x', url: 'u' };
+  const base = renderIssuePrompt(TEMPLATE, fields);
+  for (const opts of [undefined, {}, { stages: null }, { stages: '' }, { stages: false }]) {
+    assert.equal(renderIssuePrompt(TEMPLATE, fields, opts), base,
+      `stages=${JSON.stringify(opts)} must not change the prompt (#668)`);
+  }
+});
+
+test('a user-edited template can neither drop the stages nor reorder them', () => {
+  // Same guarantee the completion instruction has: they are appended AFTER
+  // substitution, so no template can lose them.
+  for (const template of ['', 'no variables at all', TEMPLATE, '{{body}}']) {
+    const out = renderIssuePrompt(template, { number: 1, title: 't' }, { stages: WORKFLOW_STAGES });
+    assert.ok(out.endsWith(WORKFLOW_STAGES),
+      `template ${JSON.stringify(template)} lost the workflow stages`);
+    assert.ok(out.includes(ISSUE_COMPLETE_INSTRUCTION),
+      'the completion instruction must still be delivered alongside them');
+  }
+});
+
+test('the shipped stage text stays cheap enough to paste on every issue', () => {
+  // This is typed into a TUI composer on every issue start, on top of a body already
+  // clipped at ISSUE_BODY_LIMIT. A budget is the only thing that stops it growing a
+  // paragraph per release until it is bigger than the issue it is about.
+  assert.ok(WORKFLOW_STAGES.length <= 900,
+    `the stages are ${WORKFLOW_STAGES.length} characters — keep them under 900 (#668)`);
+});
+
+test('the stage text names only tools a mod actually registers (#668)', () => {
+  // The stages point an agent at tools BY NAME. Naming one that does not exist is the
+  // failure issue_complete already guards against for the merge skill: the agent gets
+  // "no such tool" and improvises. share_result arrives with #669, and is the reason
+  // issueStagesEnabled ships OFF — delete it from PENDING when that lands.
+  const PENDING = new Set(['share_result']);
+  const sources = ['mods/workshop/tools.js', 'mods/deepsteve-core/tools.js'].map(read);
+  const named = [...new Set([...WORKFLOW_STAGES.matchAll(
+    /(?:mcp__deepsteve__)?\b(workshop_\w+|issue_complete|share_result)\b/g)].map(m => m[1]))];
+  assert.ok(named.length >= 3, 'the stages should name the tools they want called');
+  for (const name of named) {
+    if (PENDING.has(name)) continue;
+    // Tool keys sit at exactly four-space indentation in both files.
+    assert.ok(sources.some(s => new RegExp(`^ {4}${name}: \\{`, 'm').test(s)),
+      `the workflow stages name "${name}", which no mod registers (#668)`);
+  }
+});
+
+// Two of the three renderIssuePrompt call sites are one-liners and one spans seven
+// lines, so the "read to the next `});`" terminator the #653 guard gets away with would
+// slice the wrong text here. Balance parens from the call's own opening one instead.
+function callSlice(src, at) {
+  let depth = 0;
+  for (let i = src.indexOf('(', at); i < src.length; i++) {
+    if (src[i] === '(') depth++;
+    else if (src[i] === ')' && --depth === 0) return src.slice(at, i + 1);
+  }
+  throw new Error(`unbalanced renderIssuePrompt( call at offset ${at}`);
+}
+
+test('every renderIssuePrompt call site decides about stages (#668)', () => {
+  // Miss one and that surface silently starts a DIFFERENT KIND of session from the
+  // other two — the picker gets no stages while MCP and HTTP do. That is the drift #642
+  // collapsed, and nothing in the running system would show it: the prompt is delivered,
+  // the session works, the reporting just never happens.
+  const server = read('server.js');
+  let from = 0, sites = 0;
+  for (;;) {
+    // The require at the top of server.js names it without a paren, so it is not matched.
+    const at = server.indexOf('renderIssuePrompt(', from);
+    if (at === -1) break;
+    from = at + 1;
+    sites++;
+    const call = callSlice(server, at);
+    assert.match(call, /\bstages\b/,
+      `a renderIssuePrompt call site does not pass stages (#668):\n${call}`);
+  }
+  // The COUNT matters as much as the per-site check: a refactor that inlined a site to
+  // zero would pass the loop vacuously.
+  assert.equal(sites, 3,
+    `expected the 3 known renderIssuePrompt call sites in server.js, found ${sites} — `
+    + 'a new issue-start surface has to decide about stages too (#668)');
+});
+
+test('the stages setting is read in exactly one place (#668)', () => {
+  // startIssueSession renders TWICE — inline body now, gh-fetch body seconds later in a
+  // .then() — and logs the decision once, at spawn. Three live reads is three chances
+  // for a Settings flip mid-flight to make the log describe a prompt nobody got.
+  const server = read('server.js');
+  assert.equal(server.split('settings.issueStagesEnabled').length - 1, 1,
+    'settings.issueStagesEnabled must be read once, in issueStagesText() (#668)');
+});
+
+test('issueStagesEnabled is a server setting, and it is off by default (#668)', () => {
+  // A mod's own settings are per-browser localStorage and never reach the server; this
+  // decision is made server-side at spawn time, so it needs a real schema entry — the
+  // same reason projectModsEnabled and scheduledTasksEnabled exist.
+  assert.ok(/name: 'issueStagesEnabled',\s+type: 'boolean',\s+default: false/.test(read('server.js')),
+    'issueStagesEnabled must be a SETTINGS_SCHEMA entry defaulting to false (#668)');
+});
+
+test('the [issue] start line says whether the session got the stages (#668)', () => {
+  // "Started with stages" and "started without" are different runs, and the log is what
+  // tells them apart afterwards.
+  const server = read('server.js');
+  const fn = server.slice(server.indexOf('function logIssueStart('));
+  assert.match(fn.slice(0, fn.indexOf('\n}')), /stages=/,
+    'logIssueStart must report the stage decision on its one line');
+
+  let from = 0, calls = 0;
+  for (;;) {
+    const at = server.indexOf('logIssueStart({', from);
+    if (at === -1) break;
+    from = at + 1;
+    if (server.slice(0, at).endsWith('function ')) continue; // the declaration, not a call
+    calls++;
+    assert.match(server.slice(at, server.indexOf('});', at)), /\bstages:/,
+      'a logIssueStart call site omits stages — its line would read stages=unknown (#668)');
+  }
+  assert.equal(calls, 2, `expected the 2 known logIssueStart call sites, found ${calls}`);
+});
+
+test('the Settings checkbox actually reaches the server (#668)', () => {
+  // applySettingsFromBody skips any key absent from the body, so a checkbox that is
+  // rendered and wired but left out of settingsPayload is a switch that silently does
+  // nothing — no error, no log line. That is the likeliest failure in this change.
+  const app = read('public/js/app.js');
+  assert.ok(app.includes('id="wand-issue-stages"'), 'the GitHub tab needs the checkbox (#668)');
+  const payload = app.slice(app.indexOf('const settingsPayload = {'));
+  assert.match(payload.slice(0, payload.indexOf('};')), /\bissueStagesEnabled\b/,
+    'issueStagesEnabled must be in settingsPayload or the checkbox does nothing (#668)');
 });
 
 // --- drift guards: one implementation, one reader ---------------------------

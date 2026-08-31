@@ -837,6 +837,7 @@ settingsBtn?.addEventListener('click', async () => {
   const currentMaxTitle = settingsData.maxIssueTitleLength || 25;
   const currentWandPlanMode = settingsData.wandPlanMode !== undefined ? settingsData.wandPlanMode : true;
   const currentIssueAutopilot = !!settingsData.issueAutopilot;
+  const currentIssueStagesEnabled = !!settingsData.issueStagesEnabled;
   const currentWandTemplate = settingsData.wandPromptTemplate || defaultsData.wandPromptTemplate || '';
   const currentSymlinkWorktreeSettings = !!settingsData.symlinkWorktreeSettings;
   const currentCmdTabSwitch = !!settingsData.cmdTabSwitch;
@@ -1284,6 +1285,16 @@ settingsBtn?.addEventListener('click', async () => {
           An issue session that finishes its work merges itself instead of leaving the tab for review.
           The issue picker's Autopilot checkbox writes this too; every start path uses it.
         </p>
+        <label style="font-size: 13px; color: var(--ds-text-primary); cursor: pointer; display: flex; align-items: center; gap: 8px; margin-bottom: 4px;">
+          <input type="checkbox" id="wand-issue-stages" ${currentIssueStagesEnabled ? 'checked' : ''} style="accent-color: var(--ds-accent-green);">
+          Add workflow stages to the issue prompt
+        </label>
+        <p style="font-size: 12px; color: var(--ds-text-secondary); margin: 0 0 12px 24px;">
+          Asks an issue session to post its plan, its open questions and its surprises to the Workshop
+          inbox as it works, and to justify the result before merging — so finished work can be judged
+          without opening the tab. Enable the Workshop app to read them. The last stage names
+          <code>share_result</code>, which does not exist yet.
+        </p>
         <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px;">
           <span style="font-size: 13px; color: var(--ds-text-primary);">Prompt template</span>
           <button class="btn-secondary" id="wand-template-reset" style="padding: 2px 8px; font-size: 11px;">Reset</button>
@@ -1618,6 +1629,7 @@ settingsBtn?.addEventListener('click', async () => {
     const newMaxTitle = Number(overlay.querySelector('#max-issue-title-length').value) || 25;
     const wandPlanMode = overlay.querySelector('#wand-plan-mode').checked;
     const issueAutopilot = overlay.querySelector('#wand-autopilot').checked;
+    const issueStagesEnabled = overlay.querySelector('#wand-issue-stages').checked;
     const wandPromptTemplate = overlay.querySelector('#wand-prompt-template').value;
     const symlinkWorktreeSettings = overlay.querySelector('#symlink-worktree-settings').checked;
     const cmdTabSwitch = overlay.querySelector('#cmd-tab-switch').checked;
@@ -1700,7 +1712,7 @@ settingsBtn?.addEventListener('click', async () => {
     const preventSleepWhileActive = overlay.querySelector('#prevent-sleep-while-active').checked;
     const inheritRemoteControl = overlay.querySelector('#inherit-rc-newtab').checked;
     const inheritRemoteControlOnFork = overlay.querySelector('#inherit-rc-fork').checked;
-    const settingsPayload = { shellProfile, maxIssueTitleLength: newMaxTitle, wandPlanMode, issueAutopilot, wandPromptTemplate, symlinkWorktreeSettings, cmdTabSwitch, cmdTabSwitchHoldMs, commandPaletteEnabled, commandPaletteShortcut, shortcutsHelpEnabled, shortcutsHelpShortcut, hashCommandsEnabled, contextViewsEnabled, projectModsEnabled, timelapseEnabled, timelapseIntervalMinutes, metaControlsEnabled, inheritRemoteControl, inheritRemoteControlOnFork, overviewDefaultLayout, enabledAgents, ...agentBinaries, ...(selectedEngine ? { engine: selectedEngine } : {}), scrollbackKB, recentSessionsLimit, autoUpdateCheckEnabled, autoUpdateCheckIntervalHours, autoUpdateApply, sessionLogEnabled, timecardEnabled, timecardSampleMinutes, scheduledTasksEnabled, scheduledTasksOpenInBackground, scheduledDefaultModel, scheduledDefaultEffort, preventSleepWhileActive, customAgentConfigs };
+    const settingsPayload = { shellProfile, maxIssueTitleLength: newMaxTitle, wandPlanMode, issueAutopilot, issueStagesEnabled, wandPromptTemplate, symlinkWorktreeSettings, cmdTabSwitch, cmdTabSwitchHoldMs, commandPaletteEnabled, commandPaletteShortcut, shortcutsHelpEnabled, shortcutsHelpShortcut, hashCommandsEnabled, contextViewsEnabled, projectModsEnabled, timelapseEnabled, timelapseIntervalMinutes, metaControlsEnabled, inheritRemoteControl, inheritRemoteControlOnFork, overviewDefaultLayout, enabledAgents, ...agentBinaries, ...(selectedEngine ? { engine: selectedEngine } : {}), scrollbackKB, recentSessionsLimit, autoUpdateCheckEnabled, autoUpdateCheckIntervalHours, autoUpdateApply, sessionLogEnabled, timecardEnabled, timecardSampleMinutes, scheduledTasksEnabled, scheduledTasksOpenInBackground, scheduledDefaultModel, scheduledDefaultEffort, preventSleepWhileActive, customAgentConfigs };
     let resp = await fetch('/api/settings', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

@@ -226,6 +226,19 @@ async function setIssueAutopilotDefault(issueAutopilot) {
   assert.equal((await r.json()).issueAutopilot, issueAutopilot, 'the setting must echo back as posted');
 }
 
+// #668. Server-side and read live at spawn, so a POST is the whole switch — but every
+// caller must restore it in a `finally`, or every later test in this file inherits a
+// prompt ~800 characters longer than the one it was written against.
+async function setIssueStages(issueStagesEnabled) {
+  const r = await fetch(`${BASE}/api/settings`, {
+    method: 'POST',
+    headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+    body: JSON.stringify({ issueStagesEnabled }),
+  });
+  assert.equal(r.status, 200, 'POST /api/settings must accept issueStagesEnabled');
+  assert.equal((await r.json()).issueStagesEnabled, issueStagesEnabled, 'the setting must echo back as posted');
+}
+
 const issueComplete = async (sessionId) =>
   parseTool(await mcp.callTool({ name: 'issue_complete', arguments: { session_id: sessionId } }));
 
@@ -412,6 +425,70 @@ test('a missing cwd is refused with 400 and a code, not a 500', async () => {
   const res = await startIssueHttp({ number: 1, title: 'gone', cwd: path.join(tmpRoot, 'no-such-dir') });
   assert.equal(res.status, 400);
   assert.equal(res.json.code, 'cwd-missing');
+});
+
+// --- workflow stages (#668) -------------------------------------------------
+
+test('with the stages setting off, the prompt says nothing about Workshop', async () => {
+  // Default off. The stages change what EVERY issue session is asked to do, and stage 4
+  // names a tool #669 has not built — so the off path is the one that has to be exact.
+  const res = await startIssueHttp({
+    number: 6680, title: 'stages off', body: 'STAGES-OFF-6680',
+    cwd: projDir, windowId: 'win-1',
+  });
+  assert.equal(res.status, 200, `expected 200, got ${res.status}: ${JSON.stringify(res.json)}`);
+  opened.push(res.json.id);
+
+  const client = new SessionClient();
+  await client.connect({ id: res.json.id, cwd: projDir });
+  await waitFor(() => client.screen().includes('STAGES-OFF-6680'), 'the issue prompt to reach the PTY', 30000, 250);
+  // issue_complete is unconditional (#643) and lands in the same paste, so seeing the
+  // body means the whole prompt arrived — an absent workshop_brief is a real absence.
+  assert.ok(client.screen().includes('issue_complete'), 'the completion instruction still ships');
+  assert.ok(!client.screen().includes('workshop_brief'), 'the stages must not ship with the setting off');
+  client.close();
+
+  assert.match(await issueLogFor(res.json.id), /stages=off/,
+    'the [issue] line must record that this run got no stages (#668)');
+});
+
+test('with the stages setting on, every start path delivers them', async () => {
+  await setIssueStages(true);
+  try {
+    // HTTP, which routes through startIssueSession like MCP start_issue does.
+    const res = await startIssueHttp({
+      number: 6681, title: 'stages on', body: 'STAGES-ON-6681',
+      cwd: projDir, windowId: 'win-1',
+    });
+    assert.equal(res.status, 200, `expected 200, got ${res.status}: ${JSON.stringify(res.json)}`);
+    opened.push(res.json.id);
+    const client = new SessionClient();
+    await client.connect({ id: res.json.id, cwd: projDir });
+    await waitFor(() => client.screen().includes('workshop_brief'),
+      'the workflow stages to reach the PTY', 30000, 250);
+    assert.ok(client.screen().includes('STAGES-ON-6681'), 'the issue body still ships alongside them');
+    client.close();
+    assert.match(await issueLogFor(res.json.id), /stages=on/,
+      'the [issue] line must record that this run got the stages (#668)');
+
+    // The picker path renders in a different place and does not call startIssueSession —
+    // missing it there would make the picker silently start a different kind of session
+    // from the other two, with no runtime symptom at all.
+    const tab = new SessionClient();
+    await tab.connect({ new: '1', cwd: projDir, windowId: 'win-1', agentType: 'claude', worktree: 'github-issue-6681' });
+    opened.push(tab.session.id);
+    tab.ws.send(JSON.stringify({
+      type: 'issue', loading: true,
+      issue: { number: 6681, title: 'stages on, picker', body: 'PICKER-STAGES-6681' },
+    }));
+    await waitFor(() => tab.screen().includes('workshop_brief'),
+      'the picker path to deliver the stages too', 30000, 250);
+    tab.close();
+    assert.match(await issueLogFor(tab.session.id), /source=ws-issue,.*stages=on/,
+      'the picker line must record the stages as well (#668)');
+  } finally {
+    await setIssueStages(false);
+  }
 });
 
 // --- autopilot (#643) ------------------------------------------------------
