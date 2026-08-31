@@ -40,15 +40,16 @@ function fakeClassList() {
 
 /**
  * A tab element. applyTabName() reaches for exactly two children by class ('.tab-label',
- * '.tab-icon') and _wireTabEvents() for one more ('.close'), so the stub children exist
- * unconditionally rather than being parsed out of the assigned innerHTML — which is kept
- * verbatim so a test can assert on the markup itself.
+ * '.tab-icon') and _wireTabEvents() for two more ('.close', '.tab-history'), so the stub
+ * children exist unconditionally rather than being parsed out of the assigned innerHTML —
+ * which is kept verbatim so a test can assert on the markup itself.
  */
 function fakeTabElement() {
   const children = {
     '.tab-label': { textContent: '', classList: fakeClassList() },
     '.tab-icon': { textContent: '', classList: fakeClassList() },
     '.close': { addEventListener: () => {} },
+    '.tab-history': { addEventListener: () => {} },   // #672
     '.badge': { classList: fakeClassList() },
     '.speaker-icon': { classList: fakeClassList() },
   };

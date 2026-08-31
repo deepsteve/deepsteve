@@ -42,6 +42,7 @@ function fakeElement() {
     '.tab-label': { textContent: '', classList: fakeClassList() },
     '.tab-icon': { textContent: '', classList: fakeClassList() },
     '.close': { addEventListener: () => {} },
+    '.tab-history': { addEventListener: () => {} },   // #672
   };
   const el = {
     children,
@@ -148,6 +149,8 @@ test('clicking asks for the opposite value, both ways', async () => {
 test('the item sits in its own group, between Send to Window and Fork tab', async () => {
   // Placement is load-bearing: Autopilot changes what the session does on its own,
   // which is a different kind of act from Fork/Close, and grouping says so.
+  // History (#672) sits with Fork rather than with Autopilot — both are things you
+  // do TO a session's conversation, and neither changes how it runs.
   const { tab } = await setup({ getAutopilot: () => false });
   const menu = (tab.listeners.contextmenu({ preventDefault: () => {}, clientX: 1, clientY: 1 }), bodyChildren.at(-1));
   const labels = menu.children.map((c) => (c.className === 'context-menu-separator' ? '---' : labelOf(c)));
@@ -158,6 +161,7 @@ test('the item sits in its own group, between Send to Window and Fork tab', asyn
     '&nbsp;&nbsp; Autopilot',
     '---',
     'Fork tab',
+    'History…',
     'Close tab',
   ]);
 });

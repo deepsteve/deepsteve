@@ -19,6 +19,28 @@ When daemon restarts:
 4. When client reconnects with saved ID, spawns `claude --resume <claudeSessionId>` in saved cwd
 5. If `--resume` fails (exits within 5s), falls back to `claude -c --fork-session --session-id <newUUID>`
 
+## The transcript path has one derivation (#672)
+
+`transcriptPath(entry)` (server.js, next to `claudeProjectDir`) is the only place that
+turns a session record into `<claudeProjectDir>/<claudeSessionId>.jsonl`. Everything that
+reads a transcript goes through it: `deriveSessionLabel`, the #656 delivery oracle, the
+restore path's `--resume`-or-spawn-fresh test, and the History endpoint.
+
+**Pass `entry.cwd` verbatim, never `sessionPaths(entry).cwd`.** `claudeProjectDir` does its
+own worktree join, so handing it an already-joined worktree path yields
+`<repo>/.claude/worktrees/x/.claude/worktrees/x` and silently finds nothing. That mistake
+is one line away, because `/api/shells/:id/info` — the obvious template for a per-session
+route — destructures `sessionPaths()` on its first line.
+
+**`GET /api/shells/:id/transcript`** is the History view's endpoint. It looks the session
+up in `shells` and then in `savedState`, so a **tombstoned** session still serves its
+history — tombstoning never deletes the `.jsonl`, that file is Claude Code's, and a closed
+session's history is the case with no other route to it. It never falls back to the
+`recentSessions` ring buffer, whose rows may lack `configDir`/`worktree`: a wrong path
+reads someone else's conversation instead of failing. Paging is by byte offset (Claude
+Code appends only, so an offset never moves) in `transcript-window.js`, and records become
+renderable entries in the pure `transcript-view.js`.
+
 ## A session's cwd must exist (#632)
 
 **A spawn whose cwd is gone is refused, never relocated.** `spawnSession` calls `assertSpawnCwd(cwd)` (`paths.js`, next to `expandTilde`) before it touches an engine, and each surface pre-flights with `spawnCwdProblem()` so the message fits: the two WS paths send `{type:'error', code, cwd, message}`, `/api/start-issue` and `/api/start-automation` answer `400`, the MCP tools (`open_terminal`, `run_in_terminal`, `start_issue`) return `isError` telling the agent to pass an explicit `cwd`, and a scheduled task records a failed run row instead of running. Codes: `cwd-missing`, `cwd-not-a-directory`, `cwd-unusable`. A falsy cwd is deliberately allowed through — `serializeShellEntry` writes the field unconditionally, so a record can carry `undefined`, and that has always meant "inherit".

@@ -130,6 +130,22 @@ function showContextMenu(x, y, sessionId, callbacks) {
   };
   menu.appendChild(forkEl);
 
+  // History (#672) — the keyboard/right-click route to the same pane the tab's
+  // ⧗ opens. Disabled, not omitted, on a tab that has no transcript: unlike
+  // Autopilot (which is absent when it cannot apply), "this agent keeps no
+  // history" is worth saying once rather than leaving the reader to wonder.
+  const historyEl = document.createElement('div');
+  historyEl.className = 'context-menu-item';
+  const hasHistory = document.getElementById('tab-' + sessionId)?.classList.contains('has-history');
+  if (!hasHistory) historyEl.classList.add('disabled');
+  historyEl.textContent = 'History…';
+  historyEl.onclick = () => {
+    if (!hasHistory) return;
+    hideContextMenu();
+    callbacks.onHistory?.(sessionId);
+  };
+  menu.appendChild(historyEl);
+
   // Close tab
   const closeEl = document.createElement('div');
   closeEl.className = 'context-menu-item';
@@ -437,13 +453,15 @@ function applyTabName(tabEl, name) {
  * applyTabName(), so a tab's markup has exactly one definition regardless of which path built
  * it. The speaker icon deliberately has no `title` of its own: it is aria-hidden, and a child
  * title shadows the tab's — which cost you the name in the icon rail, where the speaker stays
- * visible but the label does not.
+ * visible but the label does not. The history glyph (#672) carries an `aria-label` and no
+ * `title` for exactly that reason; CSS keeps it out of the rail entirely.
  */
 const TAB_INNER_HTML = `
       <span class="badge"></span>
       <span class="tab-icon" aria-hidden="true"></span>
       <span class="speaker-icon" aria-hidden="true">${SPEAKER_SVG}</span>
       <span class="tab-label"></span>
+      <span class="tab-history" aria-label="History">&#10711;</span>
       <span class="close">&#10005;</span>
     `;
 
@@ -472,6 +490,14 @@ export const TabManager = {
       callbacks.onClose?.(sessionId);
     });
 
+    // History (#672). The span is in every tab's skeleton but CSS keeps it hidden
+    // until updateHistoryAffordance() marks the tab as having a transcript, so a
+    // display tab or a Codex session never shows one.
+    tab.querySelector('.tab-history').addEventListener('click', (e) => {
+      e.stopPropagation();
+      callbacks.onHistory?.(sessionId);
+    });
+
     tab.addEventListener('contextmenu', (e) => {
       e.preventDefault();
       showContextMenu(e.clientX, e.clientY, sessionId, callbacks);
@@ -479,8 +505,10 @@ export const TabManager = {
 
     // Drag to reorder — starts on move past threshold, click if no drag
     const onPointerDown = (e) => {
-      // Ignore close button, right-click
-      if (e.target.closest('.close')) return;
+      // Ignore the tab's own buttons and right-click. A button left out of this
+      // list still fires its click handler, but the press ALSO arms a tab drag —
+      // so the tab follows the pointer while the pane opens underneath it.
+      if (e.target.closest('.close, .tab-history')) return;
       if (e.button && e.button !== 0) return;
 
       const startX = e.touches ? e.touches[0].clientX : e.clientX;
@@ -609,6 +637,17 @@ export const TabManager = {
   updateBadge(sessionId, visible) {
     const badge = document.querySelector('#tab-' + sessionId + ' .badge');
     if (badge) badge.classList.toggle('visible', visible);
+  },
+
+  /**
+   * Mark a tab as having a readable transcript (#672), which is what makes its
+   * history glyph appear. Derived from the agentType the server sends on the
+   * session socket, so a Codex tab, a plain shell and every iframe-backed tab
+   * simply never get the class and never show the button.
+   */
+  updateHistoryAffordance(sessionId, available) {
+    const tab = document.getElementById('tab-' + sessionId);
+    if (tab) tab.classList.toggle('has-history', !!available);
   },
 
   /**

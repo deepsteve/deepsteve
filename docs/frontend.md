@@ -69,6 +69,20 @@ Four facts about the terminal that are expensive to re-derive, and two of them w
 
 Base64 is decoded through `TextDecoder`, not straight off `atob` — `atob` yields bytes, and handing those to the clipboard mojibakes every accent and box-drawing glyph. `navigator.clipboard` is absent outside a secure context (the canonical `deepsteve.localhost` origin is one; a plain-HTTP LAN address is not), so there is a hidden-textarea `execCommand('copy')` fallback that restores focus afterwards. Tests: `test/unit/terminal-wheel-guard.test.js`, `test/unit/osc-clipboard.test.js`.
 
+## History pane (`public/js/session-history.js`, #672)
+
+An agent tab has no scrollback to scroll — Claude Code repaints inside its own alternate screen, so tmux history and xterm scrollback are both 0 rows ([terminal-engines.md](terminal-engines.md)). The pane reads the agent's `~/.claude/projects/<project>/<uuid>.jsonl` instead, through `GET /api/shells/:id/transcript`.
+
+**It belongs to a tab, not to the window.** It mounts inside that session's `.terminal-container` — the ⌘F search-bar precedent, not the full-bleed Scheduled History one — so switching tabs hides it with its container. Two consequences that are easy to undo by accident: `switchTo()` must **not** close it the way it closes the search bar, and it must call `SessionHistory.focusIfOpen(id)` **before** `term.focus()`, or the terminal behind a visible pane takes the keyboard and every arrow key goes to the agent.
+
+**The affordance is one glyph on the tab.** `.tab-history` sits in `TAB_INNER_HTML` beside `.close`, carries an `aria-label` and deliberately no `title` (a child title shadows the tab's own), and is revealed by `.has-history` — set from the `agentType` the server has always sent on the session socket. It is in the collapsed icon-rail's hide-list; a glyph surviving into a 48px rail is the rendering fault `619571f` removed. There is **no global key binding**, so the `shortcuts.js` registry and its drift guard are untouched: the tab glyph, the tab's right-click menu and a ⌘K palette entry are the three routes, and ⌘Y/⌘⇧H are browser-owned anyway.
+
+**The loaded range extends at both ends.** `?before=` walks backwards, `?after=` forwards and doubles as the live tail (idle, it is one `stat` and zero reads); "Beginning" and "Latest" reload at an end rather than walking there, because the largest transcript measured is 139 MB. Two rules the client cannot drop: terminate paging on `cursor.hasMore`, **never** on `entries.length` (a window can be entirely bookkeeping and yield zero entries with history still behind it), and discard everything when the echoed `claudeSessionId` changes, because a fork or a plan-mode exit starts a new file and a byte cursor into the old one is meaningless.
+
+**Reading position** is `sessionStorage` under `nsKey('deepsteve-history-pos')`, anchored on a message `uuid` rather than a pixel offset — the transcript grows and the window resizes, and both move a pixel. Reopening walks back a bounded number of pages looking for that anchor before giving up and staying at the tail.
+
+Tests: `test/unit/session-history-client.test.js` (the folding, grouping and formatting helpers), plus `transcript-view` / `transcript-window` for the server halves.
+
 ## Keyboard Shortcuts (`public/js/shortcuts.js`)
 
 **Every global key binding is declared in the `shortcuts.js` registry, and the ⌘? overlay (`shortcuts-help.js`) renders `getAll()`. The list is never hand-maintained** — that's the whole point of #549, and before it there were four independent capture-phase listeners with `parseShortcut`/`matchesShortcut` copy-pasted verbatim into two of them.

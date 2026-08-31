@@ -31,6 +31,7 @@ import { init as initProgressBar, start as progressStart, done as progressDone }
 import { init as initHashCommands, beforeSend as hashCommandsBeforeSend, setWaitingForInput as setHashCommandsWaiting, setEnabled as setHashCommandsEnabled, dismiss as dismissHashCommands } from './hash-commands.js';
 import { init as initOverviewMode, setEnabled as setOverviewModeEnabled, setShortcut as setOverviewModeShortcut, setDefaultLayout as setOverviewDefaultLayout, toggle as toggleOverviewMode, isOverviewActive, getLayout as getOverviewLayout, updateFocus as updateOverviewFocus, onTabsReordered as onOverviewTabsReordered, syncToContext as syncOverviewToContext } from './overview-mode.js';
 import { init as initTerminalSearch, attachSearchAddon, closeIfOpen as closeTerminalSearch } from './terminal-search.js';
+import * as SessionHistory from './session-history.js';
 import { init as initContextViews, setEnabled as setContextViewsEnabled, applyFilter as refreshContextFilter, requestNewTabInContext, resolveContextRepo, chooseContextDir, setContexts as applyServerContexts, setActiveContext as setActiveContextFromPanel, getActiveContextId, getActiveContextInfo, orderRecentDirsByContext, activeContextIsEmpty, noteActiveTab, revealTabContext, showToast, setRailSuppressed, setRailQuiet } from './context-views.js';
 import * as ProjectMods from './project-mods.js';
 import { nsKey } from './storage-namespace.js';
@@ -1990,6 +1991,14 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
         if (msg.claudeSessionId) {
           SessionStores.setClaudeSessionId(msg.id, msg.claudeSessionId);
         }
+        // agentType has always been on this message; nothing read it until #672.
+        // It is what decides whether the tab gets a History glyph — only Claude
+        // Code keeps a transcript on disk, so only its tabs have one to show.
+        if (msg.agentType) {
+          const sess = sessions.get(msg.id);
+          if (sess) sess.agentType = msg.agentType;
+          TabManager.updateHistoryAffordance(msg.id, msg.agentType === 'claude');
+        }
       } else if (msg.type === 'close-tab') {
         if (assignedId) killSession(assignedId);
       } else if (msg.type === 'gone') {
@@ -2397,6 +2406,9 @@ function initTerminal(id, ws, cwd, initialName, { hasScrollback = false, pending
       if (await confirmCloseSession(sessionId)) killSession(sessionId);
     },
     onRename: (sessionId) => renameSession(sessionId),
+    // History (#672). Only agent tabs get this callback — the three iframe-backed
+    // tab types have no transcript, and their tabs never carry the glyph either.
+    onHistory: (sessionId) => SessionHistory.toggle(sessionId),
     onReorder: (orderedIds) => {
       SessionStores.reorder(getWindowId(), orderedIds);
       notifyTabsChanged();
@@ -2889,7 +2901,11 @@ function switchTo(id) {
       try {
         fitTerminal(session.term, session.fit, session.ws);
       } finally {
-        session.term.focus();
+        // A History pane belongs to its tab and is NOT closed on a switch (unlike
+        // the ⌘F bar above), so coming back to a tab that had one finds it still
+        // up. Focus has to follow it, or the terminal behind it takes the
+        // keyboard and every arrow key goes to the agent instead of the pane.
+        if (!SessionHistory.focusIfOpen(id)) session.term.focus();
         requestAnimationFrame(() => {
           session.scrollControl.scrollToBottom();
         });
@@ -3438,6 +3454,10 @@ function showReloadOverlay() {
 function killSession(id) {
   const session = sessions.get(id);
   if (!session) return;
+
+  // The History pane lives inside session.container, so removing the container
+  // takes its DOM with it — but not its poll timer or its Map entry (#672).
+  SessionHistory.discard(id);
 
   if (session.type === 'mod-tab' || session.type === 'display-tab' || session.type === 'project-mod') {
     // Mod/display/project-mod tabs: no PTY/WS to clean up
@@ -4954,6 +4974,12 @@ async function init() {
     toggleOverviewMode: () => toggleOverviewMode(),
     showShortcutsHelp: () => openShortcutsHelp(),
     restoreSessions: () => reopenSessionRestore(),
+    // Only meaningful on an agent tab; on any other the glyph is absent too, so
+    // the palette entry quietly does nothing rather than opening an empty pane.
+    toggleHistory: () => {
+      const s = activeId && sessions.get(activeId);
+      if (s && s.agentType === 'claude') SessionHistory.toggle(activeId);
+    },
     focusTerminal: () => {
       if (activeId) {
         const s = sessions.get(activeId);
@@ -4990,6 +5016,18 @@ async function init() {
   // applySettings is what actually starts the beacon, so a daemon with sampling off
   // never sees a request.
   initTimecardPresence({ windowId: getWindowId() });
+
+  // The transcript pane (#672). No key binding of its own: it is opened from the
+  // tab's ⧗, its right-click menu, or the palette — the same shape Scheduled
+  // History has, and it keeps the shortcut registry untouched.
+  SessionHistory.init({
+    getSession: (id) => sessions.get(id) || null,
+    getActiveSessionId: () => activeId,
+    focusTerminal: (id) => {
+      const s = sessions.get(id || activeId);
+      if (s?.term) s.term.focus();
+    },
+  });
 
   // Initialize Overview Mode (Cmd+O by default)
   initOverviewMode({

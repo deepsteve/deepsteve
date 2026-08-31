@@ -74,6 +74,7 @@ Claude is the one agent never probed, because it is the default and the fallback
 | Session pinned by | `--session-id` | per-tab `CODEX_HOME` | nothing | `--session` | `--session-dir` | nothing |
 | Resume retry → fresh fallback | yes | — | — | — | — | — |
 | Transcript-derived tab label | yes | — | — | — | — | — |
+| History view (JSONL transcript) | yes | — | — | — | — | — |
 | Listed in Recent Sessions | yes | yes | yes | yes | yes | — |
 | Graceful exit | `/exit` | SIGTERM | Ctrl+C | Ctrl+C | SIGTERM | SIGHUP |
 | Test coverage | deep | moderate | negative only | negative only | negative only | incidental |
@@ -106,6 +107,14 @@ once, then falls back to a fresh session with a new UUID (`resume-retry` →
 which is cwd-scoped and would adopt a sibling tab's conversation (#542). The live session
 id is tracked by an `fs.watch` on the transcript directory plus a PTY-output matcher, so
 a fork or a `/clear` re-points the saved id rather than orphaning it.
+
+**History (#672).** That same transcript is what the tab's `⧗` reads. It is the only
+history an agent tab has: Claude Code repaints inside its own alternate screen, so no
+line ever reaches tmux's history or xterm's scrollback (see
+[terminal-engines.md](terminal-engines.md)). The pane is Claude-only for a structural
+reason rather than a missing port — the other agents have no `claudeSessionId` and write
+no `.jsonl`, so `supportsSessionWatch` gates it and everything else gets a stated empty
+state. See [frontend.md](frontend.md) for the pane and `GET /api/shells/:id/transcript`.
 
 **MCP.** Full. A per-shell config file is written to `~/.deepsteve/mcp-configs/<id>.json`
 mode `0600` and passed as a *path* — never inline, or the bearer token would be visible
@@ -194,9 +203,10 @@ path. What Codex does *not* have is ongoing idle/busy classification: `state` fr
 - No fork. Per-tab `CODEX_HOME` is the closest thing.
 - No `/rc` inheritance — that is a Claude Code feature and `maybeInheritRemoteControl`
   returns immediately for anything else.
-- No transcript-derived tab label: `deriveSessionLabel` reads a Claude `.jsonl`, and
-  Codex tabs have `claudeSessionId: null` by construction, so they fall back to the
-  directory name.
+- No transcript-derived tab label, and no History pane (#672): both read a Claude
+  `.jsonl`, and Codex tabs have `claudeSessionId: null` by construction. The label falls
+  back to the directory name; the History affordance is simply absent from the tab, and
+  the endpoint answers `{ supported: false }` rather than an error.
 - Not registered as a global MCP server by `install.sh` / `restart.sh` the way Claude and
   OpenCode are; Codex is wired per session instead.
 

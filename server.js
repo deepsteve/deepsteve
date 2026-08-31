@@ -29,6 +29,11 @@ const { isTerminalReport } = require('./terminal-input');
 const { renderIssuePrompt, issueWorktreeName, issueTabName, WORKFLOW_STAGES } = require('./issue-prompt');
 const { readRecentUserMessages, compareDelivered } = require('./prompt-delivery-check');
 const { enrichTabs, summarizeRun } = require('./timelapse-snapshot');
+// History view (#672): bytes → lines, then lines → renderable entries. Namespaced
+// rather than destructured so the two constants keep their module's name at the
+// use site, where they are read as tuning knobs.
+const TRANSCRIPT_WINDOW = require('./transcript-window');
+const { normalizeLines } = require('./transcript-view');
 const NodePtyEngine = require('./engines/node-pty');
 const TmuxEngine = require('./engines/tmux');
 
@@ -1847,6 +1852,27 @@ function claudeProjectDir(cwd, worktree, configDir) {
   return path.join(base, dirName);
 }
 
+/**
+ * A session's Claude Code transcript, or null when it cannot have one.
+ *
+ * The ONE derivation of this path (#672). `entry` is anything carrying
+ * { claudeSessionId, cwd, worktree, configDir } — a live shell, a savedState
+ * record, or a recent-sessions row.
+ *
+ * Pass `entry.cwd` VERBATIM. claudeProjectDir() does its own worktree join
+ * (above), so handing it sessionPaths(entry).cwd — which for a native-worktree
+ * agent is already the worktree path — produces
+ * `<repo>/.claude/worktrees/x/.claude/worktrees/x` and silently finds nothing.
+ * That is easy to write by accident because /api/shells/:id/info, the obvious
+ * template for a per-session route, destructures sessionPaths() on its first line.
+ */
+function transcriptPath(entry) {
+  if (!entry || !entry.claudeSessionId || !entry.cwd) return null;
+  return path.join(
+    claudeProjectDir(entry.cwd, entry.worktree, entry.configDir),
+    `${entry.claudeSessionId}.jsonl`);
+}
+
 // --- Transcript-derived session labels (#560) ---
 // A restore list of "claude, claude, claude…" is useless (8 of 12 sessions in the
 // 2026-07-15 wipe had name: null), so unnamed sessions get a label pulled from
@@ -1862,7 +1888,7 @@ const labelCache = new Map(); // claudeSessionId → { mtimeMs, label }
 function deriveSessionLabel(entry) {
   if (!entry || !entry.claudeSessionId || !entry.cwd) return null;
   try {
-    const file = path.join(claudeProjectDir(entry.cwd, entry.worktree, entry.configDir), `${entry.claudeSessionId}.jsonl`);
+    const file = transcriptPath(entry);
     const stat = fs.statSync(file);
     const cached = labelCache.get(entry.claudeSessionId);
     if (cached && cached.mtimeMs === stat.mtimeMs) return cached.label;
@@ -2417,9 +2443,7 @@ async function checkDeliveredPrompt(id, entry, text) {
       // A fork or a close swaps the entry, and the answer would then be about a
       // different conversation — stop rather than report it against this one.
       if (shells.get(id) !== entry || entry.killed) return;
-      const file = path.join(
-        claudeProjectDir(entry.cwd, entry.worktree, entry.configDir),
-        `${entry.claudeSessionId}.jsonl`);
+      const file = transcriptPath(entry);
       const verdict = compareDelivered(text, readRecentUserMessages(file));
       if (!verdict.known) continue;              // record not written yet
       if (verdict.ok) {
@@ -4345,6 +4369,7 @@ const BUILTIN_COMMANDS = [
   { id: 'overview-mode', type: 'builtin', name: 'Overview Mode', description: 'Show all terminals at once' },
   { id: 'shortcuts-help', type: 'builtin', name: 'Keyboard Shortcuts', description: 'Show all keyboard shortcuts' },
   { id: 'restore-sessions', type: 'builtin', name: 'Restore Sessions', description: 'Recover sessions from closed windows and tombstones' },
+  { id: 'history', type: 'builtin', name: 'History', description: "Scroll this tab's transcript" },
 ];
 
 function getCustomCommands() {
@@ -5770,6 +5795,161 @@ app.get('/api/shells/:id/info', (req, res) => {
   });
 });
 
+// --- History: a session's Claude Code transcript, paged (#672) ---
+//
+// An agent tab cannot have a scrollbar — Claude Code repaints inside its own
+// alternate screen, so tmux history and xterm scrollback are both 0 rows and
+// there is nothing outside the process for one to attach to. Its transcript is,
+// and this is the only way to read it. The pane is public/js/session-history.js.
+//
+// Paging runs BACKWARDS from the end, because "latest" is where a reader starts,
+// and the cursor is a byte offset because Claude Code appends only: an offset,
+// unlike a line index, never moves under a growing file. The heavy lifting is in
+// two dependency-free modules — transcript-window.js (bytes → lines) and
+// transcript-view.js (lines → entries) — so the parts worth testing need no
+// daemon. This handler owns only the path, the capability gate and the envelope.
+
+const TRANSCRIPT_LIMIT_DEFAULT = 200;
+const TRANSCRIPT_LIMIT_MAX = 500;
+const TRANSCRIPT_WINDOW_MIN = 64 * 1024;
+
+/**
+ * A bounded non-negative integer from a query string, or `fallback` when absent.
+ * Returns null for anything that is not a plain digit string, which the caller
+ * turns into a 400 rather than coercing.
+ *
+ * The split matters. A SIZE (`limit`, `window`) is a hint about how much work to
+ * do, so a nonsensical one has a sensible nearest value and clamping keeps the
+ * request meaningful — and the clamp is load-bearing, because `?window=1e9`
+ * without it is a one-line OOM that any same-origin page can fire (display tabs
+ * are trusted, so the auth gate is not a wall here). A CURSOR (`before`, `after`)
+ * is a position, and a wrong position is not a smaller position: `?before=-1`
+ * clamped to 0 would silently mean "start at the tail", so the pane would page
+ * back to the beginning, be handed the tail again, and scroll forever.
+ */
+function intParam(raw, { fallback = null, min = 0, max = Number.MAX_SAFE_INTEGER }) {
+  if (raw === undefined || raw === '') return fallback;
+  if (!/^\d+$/.test(String(raw))) return null;
+  const n = Number(raw);
+  if (!Number.isSafeInteger(n)) return null;
+  return Math.max(min, Math.min(max, n));
+}
+
+app.get('/api/shells/:id/transcript', async (req, res) => {
+  const id = req.params.id;
+  // A tombstoned session is the case this feature exists for: a live agent's
+  // history is one ↑ away inside its own TUI, a closed one's is reachable only
+  // here. Tombstoning never deletes the .jsonl (that file is Claude Code's, not
+  // ours) and serializeShellEntry persists exactly the fields the path needs.
+  // Deliberately NOT falling back to the recentSessions ring buffer: those rows
+  // may lack configDir/worktree, and a wrong path silently reads someone else's
+  // conversation rather than failing.
+  const live = shells.get(id);
+  const entry = live || savedState[id];
+  if (!entry) return res.status(404).json({ error: 'Session not found' });
+
+  // Validate BEFORE the capability and existence short-circuits below. A
+  // malformed cursor is malformed whatever the tab is, and gating validation on
+  // agentType made `?before=abc` a 400 on a Claude tab and a 200 on a terminal
+  // one — the kind of inconsistency a client only discovers in production.
+  const before = intParam(req.query.before, {});
+  const after = intParam(req.query.after, {});
+  const limit = intParam(req.query.limit, { fallback: TRANSCRIPT_LIMIT_DEFAULT, min: 1, max: TRANSCRIPT_LIMIT_MAX });
+  const window = intParam(req.query.window, {
+    fallback: TRANSCRIPT_WINDOW.DEFAULT_WINDOW, min: TRANSCRIPT_WINDOW_MIN, max: TRANSCRIPT_WINDOW.MAX_LINE });
+  if (before === null && req.query.before !== undefined) return res.status(400).json({ error: 'before must be a non-negative integer' });
+  if (after === null && req.query.after !== undefined) return res.status(400).json({ error: 'after must be a non-negative integer' });
+  if (limit === null) return res.status(400).json({ error: 'limit must be a positive integer' });
+  if (window === null) return res.status(400).json({ error: 'window must be a positive integer' });
+  if (req.query.before !== undefined && req.query.after !== undefined) {
+    return res.status(400).json({ error: 'pass before or after, not both' });
+  }
+
+  const agentType = entry.agentType || 'claude';
+  const envelope = {
+    supported: true,
+    exists: false,
+    closed: !live,
+    live: !!live,
+    agentType,
+    claudeSessionId: entry.claudeSessionId || null,
+    file: null,
+    entries: [],
+    cursor: { before: null, after: null, hasMore: false },
+    stats: null,
+  };
+
+  // Not an error: "this agent keeps no transcript" is a property of a perfectly
+  // valid session, and the pane has to render it. Routing every legitimate empty
+  // state through the error path would make each one look like a failure.
+  if (!getAgentConfig(agentType).supportsSessionWatch) {
+    return res.json({ ...envelope, supported: false, reason: 'unsupported-agent' });
+  }
+
+  const file = transcriptPath(entry);
+  if (!file) return res.json({ ...envelope, reason: 'never-prompted' });
+
+  try {
+    if (req.query.after !== undefined) {
+      // Tail. When nothing was appended this is one stat and ZERO reads, which is
+      // why the pane needs no separate "has it changed?" endpoint.
+      const page = await TRANSCRIPT_WINDOW.readForwardWindow(file, { after, window });
+      const { entries, stats } = normalizeLines({ lines: page.lines });
+      return res.json({
+        ...envelope, exists: true,
+        file: { size: page.size, mtimeMs: page.mtimeMs },
+        entries, stats,
+        cursor: { before: null, after: page.nextAfter, hasMore: false },
+      });
+    }
+
+    // Backwards. Keep reading windows until we have `limit` entries or run out of
+    // file: a 512 KB window can be entirely `attachment` bookkeeping and yield
+    // ZERO entries while history remains, so entry count cannot drive the loop.
+    // MAX_PAGE_WINDOWS bounds the work when a stretch of transcript is all noise.
+    const MAX_PAGE_WINDOWS = 8;
+    let cursor = before;
+    let atStart = false;
+    let collected = [];
+    const total = { lines: 0, entries: 0, dropped: 0, unparsed: 0, oversize: 0, truncatedEntries: 0 };
+    let size = 0, mtimeMs = 0;
+
+    for (let i = 0; i < MAX_PAGE_WINDOWS; i++) {
+      const page = await TRANSCRIPT_WINDOW.readBackwardWindow(file, { before: cursor, window });
+      size = page.size; mtimeMs = page.mtimeMs;
+      const { entries, stats } = normalizeLines({ lines: page.lines });
+      for (const k of Object.keys(total)) total[k] += stats[k];
+      collected = entries.concat(collected);   // oldest-first on the wire
+      cursor = page.start;
+      atStart = page.atStart || page.start === 0;
+      if (atStart || collected.length >= limit) break;
+    }
+
+    res.json({
+      ...envelope, exists: true,
+      file: { size, mtimeMs },
+      entries: collected,
+      stats: total,
+      // `after` seeds the tail poll from this response, so the client needs no
+      // extra round trip to start following a live session.
+      cursor: { before: cursor, after: size, hasMore: !atStart },
+    });
+  } catch (e) {
+    if (e && e.code === 'ENOENT') {
+      // Claude only writes the file on the first message, so a tab that has never
+      // been prompted has no transcript at all. Normal, not broken.
+      return res.json({ ...envelope, reason: 'never-prompted' });
+    }
+    if (e && e.code === 'REWOUND') {
+      // The file shrank or was replaced: the cursor was valid when it was issued,
+      // but the bytes it named are gone. 409, not 400 — the request was fine.
+      return res.status(409).json({ error: 'transcript-rewound', size: e.size });
+    }
+    log(`Transcript read failed for ${id}: ${e.message}`);
+    res.status(500).json({ error: 'Could not read transcript' });
+  }
+});
+
 // "Clear disconnected" marks sessions closed — it never hard-deletes (#561).
 // Tombstones age out via pruneClosedSessions() or an explicit per-session forget.
 app.post('/api/shells/clear-disconnected', (req, res) => {
@@ -7138,7 +7318,7 @@ function handleWsConnection(ws, req) {
       // lost, and state.json/TabSessions stay stable.
       let spawnFresh = false;
       if (agentConfig.supportsSessionWatch && claudeSessionId) {
-        const transcript = path.join(claudeProjectDir(cwd, savedWorktree, restored.configDir), `${claudeSessionId}.jsonl`);
+        const transcript = transcriptPath({ cwd, worktree: savedWorktree, configDir: restored.configDir, claudeSessionId });
         spawnFresh = !fs.existsSync(transcript);
         if (spawnFresh) log(`Session ${id} has no transcript at ${transcript} — spawning fresh instead of --resume`);
       } else if (savedAgentType === 'codex') {

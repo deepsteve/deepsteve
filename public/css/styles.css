@@ -118,6 +118,14 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
 .tab.active { background: var(--ds-bg-primary); color: var(--ds-text-bright); border-bottom-color: var(--ds-bg-primary); }
 .tab .close { opacity: 0.5; cursor: pointer; font-size: 11px; }
 .tab .close:hover { opacity: 1; color: var(--ds-accent-red); }
+/* History (#672). Present in every tab's skeleton, shown only on a tab that has a
+   transcript (.has-history, set from the agentType the server sends) and only
+   while that tab is active or hovered — a tab is 250px at most, and a glyph on
+   every idle tab buys nothing. */
+.tab .tab-history { display: none; opacity: 0.5; cursor: pointer; font-size: 11px; }
+.tab.has-history.active .tab-history,
+.tab.has-history:hover .tab-history { display: inline; }
+.tab .tab-history:hover { opacity: 1; color: var(--ds-accent-blue); }
 .tab .badge { width: 8px; height: 8px; background: var(--ds-accent-blue); border-radius: 50%; display: inline-block; visibility: hidden; flex-shrink: 0; }
 .tab .badge.visible { visibility: visible; }
 .tab .speaker-icon { display: none; flex-shrink: 0; width: 13px; height: 13px; color: var(--ds-accent-blue); }
@@ -370,6 +378,7 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
    knocks the icon off centre. */
 #app-container.vertical-layout.icon-rail .tab .tab-label,
 #app-container.vertical-layout.icon-rail .tab .close,
+#app-container.vertical-layout.icon-rail .tab .tab-history,
 #app-container.vertical-layout.icon-rail #new-btn-dropdown {
   display: none;
 }
@@ -1335,6 +1344,65 @@ kbd {
 .sched-hist-detail-hint { font-size: 11px; color: var(--ds-text-secondary); }
 .sched-hist-go { padding: 3px 8px; background: var(--ds-btn-neutral); border: 1px solid var(--ds-border); border-radius: 4px; color: var(--ds-text-primary); font-family: inherit; font-size: 11px; cursor: pointer; }
 .sched-hist-go:hover { background: var(--ds-btn-neutral-hover); }
+
+/* Session History (#672) — the transcript pane.
+
+   ABSOLUTE, not fixed: it belongs to one tab, so it is mounted inside that
+   session's .terminal-container (position:absolute; inset:0) and hides with it on
+   a tab switch. Same reference box as .reload-overlay. z-index sits above the
+   ⌘F search bar (10) and below the reload overlay (100), so a live-reload notice
+   still lands on top of it.
+
+   Every colour is a --ds-* var so the shipped themes restyle it for free, and no
+   state is signalled by hue alone — win-95 collapses several accents onto the
+   same navy, which is why each row kind carries a glyph. */
+.sess-hist { position: absolute; inset: 0; z-index: 20; display: flex; padding: 6px; background: var(--ds-overlay); }
+.sess-hist-panel { flex: 1; min-width: 0; display: flex; flex-direction: column; overflow: hidden; background: var(--ds-bg-secondary); border: 1px solid var(--ds-border); border-radius: 6px; box-shadow: 0 8px 32px var(--ds-shadow); outline: none; }
+.sess-hist-header { display: flex; align-items: center; gap: 8px; padding: 6px 10px; background: var(--ds-bg-primary); border-bottom: 1px solid var(--ds-border); }
+.sess-hist-title { font-size: 13px; font-weight: 600; color: var(--ds-text-bright); }
+.sess-hist-sub { font-size: 11px; color: var(--ds-text-secondary); }
+.sess-hist-spacer { flex: 1; }
+.sess-hist-btn { min-width: 24px; padding: 2px 6px; background: var(--ds-btn-neutral); border: 1px solid var(--ds-border); border-radius: 4px; color: var(--ds-text-primary); font-family: inherit; font-size: 12px; line-height: 1.4; cursor: pointer; }
+.sess-hist-btn:hover { background: var(--ds-btn-neutral-hover); }
+.sess-hist-btn.on { border-color: var(--ds-accent-blue); color: var(--ds-accent-blue); }
+
+/* THE POINT OF THE WHOLE FEATURE: a scroll surface over the conversation, which
+   the terminal underneath structurally cannot offer. */
+.sess-hist-body { flex: 1; overflow-y: auto; overflow-x: hidden; padding: 8px 0 24px; font-size: 13px; line-height: 1.5; color: var(--ds-text-primary); }
+.sess-hist-body::-webkit-scrollbar { width: 10px; }
+.sess-hist-body::-webkit-scrollbar-thumb { background: var(--ds-border); border-radius: 5px; }
+.sess-hist-body::-webkit-scrollbar-thumb:hover { background: var(--ds-text-secondary); }
+
+.sess-hist-note { padding: 32px 20px; font-size: 13px; color: var(--ds-text-secondary); text-align: center; }
+.sess-hist-warn { margin: 6px 12px; padding: 6px 10px; border: 1px solid var(--ds-accent-orange); border-radius: 4px; font-size: 12px; color: var(--ds-accent-orange); }
+.sess-hist-more { display: block; width: calc(100% - 24px); margin: 4px 12px; padding: 4px; background: transparent; border: 1px dashed var(--ds-border); border-radius: 4px; color: var(--ds-text-secondary); font-family: inherit; font-size: 11px; cursor: pointer; }
+.sess-hist-more:hover { border-color: var(--ds-text-secondary); color: var(--ds-text-primary); }
+
+.sess-hist-group { padding: 6px 14px 2px; }
+.sess-hist-role { display: flex; align-items: baseline; gap: 8px; margin-bottom: 2px; font-size: 11px; letter-spacing: 0.04em; text-transform: uppercase; }
+.sess-hist-who { color: var(--ds-text-secondary); }
+.sess-hist-group.role-user .sess-hist-who { color: var(--ds-accent-green-soft); }
+.sess-hist-group.role-assistant .sess-hist-who { color: var(--ds-accent-blue); }
+.sess-hist-when { font-size: 10px; color: var(--ds-text-secondary); opacity: 0.7; }
+
+.sess-hist-row { padding: 1px 0 1px 6px; border-left: 2px solid transparent; }
+.sess-hist-row.selected { border-left-color: var(--ds-accent-blue); background: var(--ds-selected-bg); }
+.sess-hist-row.is-meta { opacity: 0.6; }
+/* Wrap, never scroll sideways: the body is the only scroll container, and a long
+   command line must not give the page a horizontal scrollbar. */
+.sess-hist-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+.sess-hist-cut { color: var(--ds-accent-orange); font-size: 11px; }
+
+.sess-hist-fold { display: block; }
+.sess-hist-foldline { display: flex; align-items: baseline; gap: 8px; width: 100%; padding: 1px 0; background: none; border: none; color: var(--ds-text-secondary); font-family: inherit; font-size: 12px; text-align: left; cursor: pointer; }
+.sess-hist-foldline:hover { color: var(--ds-text-primary); }
+.sess-hist-fold.is-error .sess-hist-name { color: var(--ds-accent-red); }
+.sess-hist-glyph { flex: 0 0 auto; width: 12px; text-align: center; }
+.sess-hist-name { flex: 0 0 auto; color: var(--ds-text-primary); }
+.sess-hist-summary { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; opacity: 0.8; }
+.sess-hist-caret { flex: 0 0 auto; opacity: 0.6; }
+.sess-hist-detail { margin: 2px 0 6px 20px; padding: 6px 8px; max-height: 320px; overflow: auto; background: var(--ds-bg-tertiary); border: 1px solid var(--ds-border); border-radius: 4px; font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', Menlo, monospace; font-size: 11px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.sess-hist-oneline { display: flex; align-items: baseline; gap: 8px; font-size: 12px; color: var(--ds-text-secondary); }
 
 /* Hash Commands (#) autocomplete */
 .hash-command-popup { position: absolute; bottom: 8px; left: 16px; right: 16px; max-width: 420px; background: var(--ds-bg-secondary); border: 1px solid var(--ds-border); border-radius: 6px; box-shadow: 0 4px 20px var(--ds-shadow); z-index: 200; display: flex; flex-direction: column; font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', Menlo, monospace; overflow: hidden; }

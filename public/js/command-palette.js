@@ -167,6 +167,9 @@ async function executeCommand(cmd) {
       case 'restore-sessions':
         callbacks.restoreSessions?.();
         break;
+      case 'history':
+        callbacks.toggleHistory?.();
+        break;
     }
   } else if (cmd.type === 'open-app') {
     callbacks.openApp?.(cmd.appId);
