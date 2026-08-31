@@ -372,3 +372,154 @@ test('holding an already-answered item resolves at once and registers no timer',
     + 'otherwise a 50s timer outlives a call that already returned',
   );
 });
+
+// ── results (#669) ───────────────────────────────────────────────────────────
+//
+// A result is a question with a FIXED two-option set. That is the whole reason
+// share_result needed almost no new machinery — applyAnswer, the waits registry and
+// the panel's 1-9 bindings all work on it unchanged — and it is also why the two
+// options being un-forgeable matters: issue_complete unlocks a merge on
+// `optionIndex === APPROVE_INDEX` and on nothing else.
+
+test('a result mints its own two options and DISCARDS any the caller supplied', () => {
+  const r = mk({
+    kind: 'result',
+    headline: 'Rewrote the wheel handler',
+    options: [{ label: 'Ship it' }, { label: 'Approve' }, { label: 'Whatever' }],
+  }, 1);
+
+  assert.strictEqual(r.kind, 'result');
+  assert.deepStrictEqual(r.options.map((o) => o.label), ['Approve', 'Request changes']);
+  assert.strictEqual(
+    r.options[inbox.APPROVE_INDEX].label, 'Approve',
+    'the gate reads an INDEX, so an agent that could reorder or extend this list could '
+    + 'hand itself an approval',
+  );
+});
+
+test('the minted options are a copy, so one item cannot mutate every other result', () => {
+  const a = mk({ kind: 'result', headline: 'a' }, 1);
+  const b = mk({ kind: 'result', headline: 'b' }, 2);
+  a.options[0].label = 'TAMPERED';
+  assert.strictEqual(b.options[0].label, 'Approve');
+  assert.strictEqual(inbox.RESULT_OPTIONS[0].label, 'Approve', 'the module constant is untouched');
+});
+
+test('a result is normal urgency, not blocking', () => {
+  assert.strictEqual(
+    mk({ kind: 'result', headline: 'done' }, 1).urgency, 'normal',
+    'the agent IS stopped, but every finished issue pulsing red at the top of the inbox '
+    + 'is how a human learns to stop looking at the top of the inbox',
+  );
+});
+
+test('a result carries before/after/caveats and an empty image list', () => {
+  const r = mk({
+    kind: 'result', headline: 'h',
+    before: 'the wheel walked history', after: 'the wheel is inert', caveats: 'untested on xterm 5',
+  }, 1);
+  assert.strictEqual(r.before, 'the wheel walked history');
+  assert.strictEqual(r.after, 'the wheel is inert');
+  assert.strictEqual(r.caveats, 'untested on xterm 5');
+  assert.deepStrictEqual(r.images, [], 'filled in by tools.js once the item has an id');
+});
+
+test('the evidence fields are clamped like every other agent-supplied string', () => {
+  const long = 'x'.repeat(inbox.MAX_SECTION + 500);
+  const r = mk({ kind: 'result', headline: 'h', before: long, after: long, caveats: long }, 1);
+  for (const f of ['before', 'after', 'caveats']) {
+    assert.strictEqual(r[f].length, inbox.MAX_SECTION, `${f} must be clamped`);
+  }
+});
+
+test('the evidence fields are empty on every other kind, so nothing has to branch', () => {
+  for (const kind of ['question', 'briefing']) {
+    const it = mk({ kind, headline: 'h', before: 'b', after: 'a', caveats: 'c' }, 1);
+    assert.deepStrictEqual(
+      [it.before, it.after, it.caveats, it.images], ['', '', '', []],
+      `a ${kind} must not sprout result fields from a stray argument`,
+    );
+  }
+});
+
+test('an unknown kind falls back to question rather than inventing a fourth', () => {
+  assert.strictEqual(mk({ kind: 'nonsense', headline: 'h' }, 1).kind, 'question');
+});
+
+test('approving and rejecting a result are ordinary applyAnswer transitions', () => {
+  const approved = mk({ kind: 'result', headline: 'h' }, 1);
+  assert.strictEqual(inbox.applyAnswer(approved, { optionIndex: 0 }, NOW), 'ok');
+  assert.strictEqual(approved.answer.optionIndex, inbox.APPROVE_INDEX);
+  assert.strictEqual(approved.answer.optionLabel, 'Approve');
+
+  const changes = mk({ kind: 'result', headline: 'h' }, 2);
+  assert.strictEqual(inbox.applyAnswer(changes, { optionIndex: 1, text: 'the empty case' }, NOW), 'ok');
+  assert.strictEqual(changes.answer.optionIndex, 1);
+  assert.strictEqual(changes.answer.text, 'the empty case');
+
+  const third = mk({ kind: 'result', headline: 'h' }, 3);
+  assert.strictEqual(
+    inbox.applyAnswer(third, { optionIndex: 2 }, NOW), 'bad-option',
+    'there is no third option to pick',
+  );
+});
+
+test('a result is EXEMPT from the dead-session sweep', () => {
+  // The exact case the sweep exists for, and the exact case it is wrong for: the
+  // session is gone because the agent finished. That is when you READ the writeup.
+  const result = mk({ kind: 'result', sessionId: 'gone', headline: 'h' }, 1, NOW);
+  const question = mk({ kind: 'question', sessionId: 'gone', headline: 'h' }, 2, NOW);
+  const dead = () => false;
+
+  inbox.sweepDeadSessions([result, question], dead, NOW, 5000);
+  assert.strictEqual(result.missingSince, null,
+    'not even stamped — a stamp is what would let it age into the dismissal branch later');
+
+  inbox.sweepDeadSessions([result, question], dead, NOW + 1_000_000, 5000);
+  assert.strictEqual(result.status, 'open', 'a result outlives the tab that produced it');
+  assert.strictEqual(question.status, 'dismissed', 'the sweep still works on everything else');
+});
+
+test('results are retained in their own bucket, so a briefing storm cannot evict one', () => {
+  const list = [];
+  const result = mk({ kind: 'result', headline: 'the writeup' }, 1, NOW);
+  inbox.applyAnswer(result, { optionIndex: 0 }, NOW + 1);
+  list.push(result);
+  for (let i = 0; i < 300; i++) {
+    const b = mk({ kind: 'briefing', headline: 'b' + i }, i + 2, NOW + 10 + i);
+    inbox.applyDismiss(b, 'archived', NOW + 2000 + i);
+    list.push(b);
+  }
+
+  const kept = inbox.retain(list, 200, 200);
+  assert.strictEqual(kept.filter((i) => i.kind === 'briefing').length, 200, 'briefings still capped');
+  assert.ok(
+    kept.some((i) => i.headline === 'the writeup'),
+    'the 201st briefing must not delete the writeup for the change that broke production',
+  );
+});
+
+test('results are capped too — a second bucket, not an exemption', () => {
+  const list = Array.from({ length: 30 }, (_, i) => {
+    const r = mk({ kind: 'result', headline: 'r' + i }, i + 1, NOW + i);
+    inbox.applyAnswer(r, { optionIndex: 0 }, NOW + 1000 + i);
+    return r;
+  });
+  const kept = inbox.retain(list, 200, 5);
+  assert.strictEqual(kept.length, 5, 'the file stays bounded in both buckets');
+  assert.deepStrictEqual(
+    kept.map((i) => i.headline), ['r25', 'r26', 'r27', 'r28', 'r29'],
+    'newest kept, and the output is still in createdAt order',
+  );
+});
+
+test('an OPEN result survives retention regardless of either cap', () => {
+  const open = mk({ kind: 'result', headline: 'awaiting review' }, 1, NOW);
+  const closed = Array.from({ length: 10 }, (_, i) => {
+    const r = mk({ kind: 'result', headline: 'r' + i }, i + 2, NOW + i + 1);
+    inbox.applyAnswer(r, { optionIndex: 0 }, NOW + 1000 + i);
+    return r;
+  });
+  const kept = inbox.retain([open, ...closed], 0, 0);
+  assert.deepStrictEqual(kept.map((i) => i.headline), ['awaiting review']);
+});

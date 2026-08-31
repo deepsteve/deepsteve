@@ -468,14 +468,17 @@ Panel mods are auto-enabled on first visit (when no mod preferences have been sa
 
 One fullscreen inbox merging **blocked sessions** — anything sitting on a Claude Code permission
 or AskUserQuestion dialog, with the question and options parsed and rendered inline — and the
-**questions and briefings agents post deliberately** through `workshop_ask`, `workshop_brief` and
-`workshop_check`. You answer from the inbox instead of switching to the tab.
+**questions, briefings and results agents post deliberately** through `workshop_ask`,
+`workshop_brief`, `share_result` and `workshop_check`. You answer from the inbox instead of
+switching to the tab, and since #669 a finished issue has to be approved here before
+`issue_complete` will say "merge".
 
 Everything lives in `mods/workshop/`. There is no new bridge hook:
 `registerRoutes(app, context)` already hands every mod the full `initMCP` context, and the panel
 polls its own `GET /api/workshop/inbox`. (The [Backlog](#the-backlog-671) added one host change —
 two popup flags on `MOD_SANDBOX` — but that is the shared iframe sandbox, made once for every mod,
-not a Workshop hook. The [workflow stages](#the-workflow-stages-668) added a real one; see below.)
+not a Workshop hook. The [workflow stages](#the-workflow-stages-668) added a real one, and the
+[merge gate](#results-and-the-merge-gate-669) three more; see below.)
 
 **Workshop is the first [App](#apps-661).** Going to look at an agent is a `visitSession()`, not
 a `focusSession()`, so ⌘← brings you back; and its `onExcursionCycle` handler moves the *same*
@@ -536,6 +539,7 @@ its own failure, and before #663 the inbox had no way to shed one.
 |---|---|
 | Question (`workshop_ask`) | answered, archived with `e`, or its session has been absent from `ctx.shells` for `EXPIRY_GRACE_MS` (5 min) |
 | Briefing (`workshop_brief`) | archived with `e` — `⏎` archives it too, since there is nothing to answer |
+| Result (`share_result`) | approved, returned for changes, or archived with `e`. **Never by the dead-session sweep** — see below |
 | Blocked (derived) | the dialog resolves, the session goes, or **`e` mutes it** |
 
 The dead-session sweep is two-phase and never eager: the first pass only stamps `missingSince`,
@@ -569,6 +573,89 @@ redraws.
 Only `POST /api/workshop/items/blocked:<id>/dismiss` writes a mute, and no MCP tool calls it. **An
 agent must never be able to silence a human's inbox** — same line as the meta-controls reasoning
 below.
+
+### Results, and the merge gate (#669)
+
+A **result** is the writeup an agent posts to justify its work *before* it is allowed to
+merge — `share_result({ summary, before?, after?, images?, caveats? })`. The point is not
+ceremony: the context needed to judge a change is built by the agent at the moment it
+still has it, instead of being reconstructed by a human hours later from a diff.
+
+**A result is a question with a fixed two-option set.** That is the whole implementation.
+`applyAnswer`, the waits registry, the answer-to-PTY path and the panel's 1-9 bindings
+all work on it unchanged, and the two options — **Approve** / **Request changes** — are
+*minted* in `inbox.js` and any `options` the caller passed is discarded. That matters
+because the gate unlocks on `optionIndex === APPROVE_INDEX` and on nothing else: an agent
+that could add or reorder an option could write the button it needs clicked.
+
+The gate is two fields on the shell entry, stamped the way the issue picker stamps
+`autopilot` and read by `issue_complete` at completion time:
+
+| Field | Written by | Effect |
+|---|---|---|
+| `resultItemId` | `share_result` — the **agent's own** call | *Refuses* the merge: "you shared #N, it is awaiting review" |
+| `resultApprovedAt` | `answerStored`, from the panel | Permits it: `issue_complete` answers as it always did |
+
+The asymmetry is the security property. An agent can only ever move itself from "share
+one" to "waiting"; the field that permits a merge is written on exactly one line, reached
+only from a human pressing a key in the panel. Both are carried by `serializeShellEntry()`
+and the restore path, so a `./restart.sh` between Approve and `issue_complete` does not
+silently send the agent back to the start.
+
+The gate rides on **[`issueStagesEnabled`](#the-workflow-stages-668)**, the same setting the
+stage text does, rather than a second toggle of its own. Stage 4 is what tells an agent
+`share_result` exists at all, so a gate that could be on while the stages were off would refuse a
+merge for a tool the session was never told about. With it off — the default — neither field is
+consulted and `issue_complete` answers byte-identically to before the feature existed.
+
+**Request changes clears both stamps**, so the agent is back to "share a result first":
+the result it shared no longer stands. **Archiving an open result clears them too** — the
+session would otherwise sit on "awaiting review" for a review that was thrown away, which
+is the one state `issue_complete` has no way out of. Text with no option picked is read as
+a request for changes and never as an approval; the ambiguous case must not be the one
+that unlocks a merge.
+
+**Nothing arms the auto-close before approval.** `merge_worktree` is still the only site
+that calls `armSessionAutoClose`, so a session parked on a result is safe — but any future
+"close it when it looks done" sweep would collect exactly the sessions waiting to be read.
+
+#### Two rules the store enforces for results
+
+**A result outlives its session, so it is exempt from `sweepDeadSessions`.** The sweep
+dismisses open items whose session has been gone for five minutes, which is right for a
+question nobody can answer any more and exactly backwards for a result — the session being
+gone is *when you read the writeup*. Results are not even stamped with `missingSince`, so
+one cannot age into the dismissal branch later. An open result whose session has gone
+reports `pendingPath: 'gone'`, and the panel says so before you click rather than after:
+Approve still records the decision, writes to no PTY, and returns a note saying the agent
+was not told.
+
+**Results have their own retention bucket.** `RETENTION_CAP` keeps 200 closed items;
+`RESULT_RETENTION_CAP` keeps 200 closed *results* separately. One shared cap would let a
+chatty week of `workshop_brief` quietly delete the writeup for the change that broke
+production. It is a second bucket rather than an exemption, so the file is still bounded.
+
+#### Images are copied, not referenced
+
+`images` takes screenshot ids and paths, and `mods/workshop/images.js` **copies the bytes**
+into `stateDir()/workshop-images/` at share time, storing only `<itemId>-<n>.png` on the
+item. Two independent reasons:
+
+- `workshop.json` is read whole on every poll of `/api/workshop/inbox`, so base64 in there
+  is fatal to the panel's 2-second refresh — not merely wasteful.
+- A screenshot id rots. The screenshots subsystem deletes anything older than seven days,
+  so a durable record that only *references* one loses its evidence in a week.
+
+Copying also collapses the security question. `GET /api/workshop/images/:file` accepts only
+names this module produces and reads out of one directory; every decision about where the
+bytes came from was made once, at ingest, where a refusal can be explained to the agent
+that caused it. A path ref must **realpath** into the calling session's repo root or cwd,
+and that ordering is load-bearing: `ctx.pathInside` is a pure string prefix test with no
+canonicalization, so `<repo>/../../../etc/passwd` and a symlink out of the repo both
+satisfy it happily until the path is resolved first. `.svg` is refused along with every
+non-image type — it is a script-bearing document, and these render in a same-origin
+iframe. `sweepOrphans()` runs on each share and deletes any file no live item names, which
+is what bounds the store when retention evicts an old result.
 
 ### The three answer paths, and why they differ
 

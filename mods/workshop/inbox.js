@@ -22,6 +22,12 @@ const FILE_VERSION = 1;
 // is a live obligation, and silently dropping one discards an agent's question.
 const RETENTION_CAP = 200;
 
+// Results get their OWN bucket (#669), not a slice of the one above. A result is the
+// project's durable record of what it did and why; sharing one cap with briefings means
+// a chatty week of workshop_brief quietly deletes the writeup for the change that broke
+// production. Two caps still bound the file — this is a second bucket, not an exemption.
+const RESULT_RETENTION_CAP = 200;
+
 // The other direction, which retention cannot cap: an agent in a loop posting
 // questions nobody answers. workshop_ask refuses past this.
 const MAX_OPEN = 500;
@@ -34,12 +40,29 @@ const EXPIRY_GRACE_MS = 5 * 60 * 1000;
 
 const MAX_HEADLINE = 4000;
 const MAX_CONTEXT = 8000;
+const MAX_SECTION = 8000;     // a result's before / after / caveats, each on its own
 const MAX_OPTIONS = 9;        // the inbox binds keys 1-9
 const MAX_LABEL = 400;
 const MAX_DETAIL = 1000;
 
+const KINDS = ['question', 'briefing', 'result'];
 const URGENCIES = ['fyi', 'normal', 'blocking'];
 const URGENCY_RANK = { blocking: 0, normal: 1, fyi: 2 };
+
+/**
+ * A result's options are MINTED, never supplied (#669).
+ *
+ * That is the whole implementation shortcut: a result is a question with a fixed
+ * two-option set, so applyAnswer, the waits registry, the panel's 1-9 bindings and the
+ * answer-to-PTY path in tools.js all work on it unchanged. Index 0 is the ONLY value
+ * that approves — see APPROVE_INDEX, which the answer path reads rather than matching
+ * on the label.
+ */
+const APPROVE_INDEX = 0;
+const RESULT_OPTIONS = [
+  { label: 'Approve', detail: 'The work stands. The agent is told to call issue_complete.' },
+  { label: 'Request changes', detail: 'Say what needs changing; the agent keeps working and shares again.' },
+];
 
 // ── pure helpers ─────────────────────────────────────────────────────────────
 
@@ -86,11 +109,29 @@ function normalizeOptions(raw) {
 }
 
 /**
+ * A briefing has nothing to answer, a result has exactly two answers, and a question
+ * gets whatever it asked for.
+ *
+ * A result's options are minted from RESULT_OPTIONS and any `fields.options` is
+ * DISCARDED, not merged: the gate in issue_complete reads `optionIndex === APPROVE_INDEX`
+ * and nothing else, so an agent that could add a third option — or reorder these two —
+ * could hand itself an approval.
+ */
+function resultOptionsFor(kind, fields) {
+  if (kind === 'briefing') return [];
+  if (kind === 'result') return RESULT_OPTIONS.map((o) => ({ ...o }));
+  return normalizeOptions(fields.options);
+}
+
+/**
  * Build one item. Pure: `seq` and `now` are supplied by the caller, so a test can
  * assert exact ids without reaching into module state. add() is the impure wrapper.
  */
 function makeItem(fields = {}, { seq, now = Date.now() } = {}) {
-  const kind = fields.kind === 'briefing' ? 'briefing' : 'question';
+  const kind = KINDS.includes(fields.kind) ? fields.kind : 'question';
+  // A result is deliberately NOT 'blocking'. The agent parked on one is stopped, so the
+  // temptation is real — but every finished issue pulsing red at the top of the inbox is
+  // how a human learns to stop looking at the top of the inbox.
   const urgency = URGENCIES.includes(fields.urgency)
     ? fields.urgency
     : (kind === 'briefing' ? 'fyi' : 'normal');
@@ -108,9 +149,18 @@ function makeItem(fields = {}, { seq, now = Date.now() } = {}) {
     urgency,
     headline: clampText(fields.headline, MAX_HEADLINE).trim(),
     context: clampText(fields.context, MAX_CONTEXT),
-    options: kind === 'briefing' ? [] : normalizeOptions(fields.options),
+    options: resultOptionsFor(kind, fields),
     recommendation: clampText(fields.recommendation, MAX_LABEL).trim(),
     tag: clampText(fields.tag, 120).trim(),
+    // #669 — a result's evidence. Empty strings on every other kind, so the panel and
+    // the store never have to branch on kind to read them.
+    before: kind === 'result' ? clampText(fields.before, MAX_SECTION).trim() : '',
+    after: kind === 'result' ? clampText(fields.after, MAX_SECTION).trim() : '',
+    caveats: kind === 'result' ? clampText(fields.caveats, MAX_SECTION).trim() : '',
+    // Filled in by tools.js after the item has an id: [{ file, ref }]. Never base64 —
+    // workshop.json is read whole on every poll of /api/workshop/inbox, and an inlined
+    // PNG in there is fatal to the panel's refresh interval.
+    images: [],
     createdAt: now,
     answeredAt: null,
     answer: null,
@@ -168,14 +218,27 @@ function applyDismiss(item, reason, now = Date.now()) {
  * Bound the file. Every OPEN item survives regardless of the cap — see MAX_OPEN for
  * the other half of the bound. Output is in createdAt order, the file's canonical
  * ordering.
+ *
+ * Closed RESULTS are counted in their own bucket (#669). Sharing one cap would let a
+ * week of briefings evict the writeups, which is the one thing a durable record must
+ * not do; two buckets keep the file bounded without that. Newest-first inside each.
  */
-function retain(items, cap = RETENTION_CAP) {
+function retain(items, cap = RETENTION_CAP, resultCap = RESULT_RETENTION_CAP) {
   if (!Array.isArray(items)) return [];
+  const newestFirst = (a, b) =>
+    (b.answeredAt || b.createdAt || 0) - (a.answeredAt || a.createdAt || 0);
+
   const open = items.filter((i) => i && i.status === 'open');
-  const closed = items.filter((i) => i && i.status !== 'open');
-  closed.sort((a, b) => (b.answeredAt || b.createdAt || 0) - (a.answeredAt || a.createdAt || 0));
-  const kept = closed.slice(0, Math.max(0, cap));
-  return [...open, ...kept].sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
+  const closedResults = items.filter((i) => i && i.status !== 'open' && i.kind === 'result');
+  const closedOther = items.filter((i) => i && i.status !== 'open' && i.kind !== 'result');
+  closedResults.sort(newestFirst);
+  closedOther.sort(newestFirst);
+
+  return [
+    ...open,
+    ...closedResults.slice(0, Math.max(0, resultCap)),
+    ...closedOther.slice(0, Math.max(0, cap)),
+  ].sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
 }
 
 /**
@@ -187,12 +250,19 @@ function retain(items, cap = RETENTION_CAP) {
  *
  * Returns how many items changed, so the caller only saves and broadcasts on a
  * real change.
+ *
+ * RESULTS ARE EXEMPT (#669). Dismissing an item whose session is gone is right for a
+ * question nobody can answer any more and exactly backwards for a result, whose entire
+ * purpose is to outlive the tab that produced it — the writeup is what you read *after*
+ * the agent has finished and the session has been closed. They are not even stamped
+ * with `missingSince`, so a result can never age into the dismissal branch later.
  */
 function sweepDeadSessions(items, isAlive, now = Date.now(), graceMs = EXPIRY_GRACE_MS) {
   if (!Array.isArray(items)) return 0;
   let changed = 0;
   for (const item of items) {
     if (!item || item.status !== 'open' || !item.sessionId) continue;
+    if (item.kind === 'result') continue;
     if (isAlive(item.sessionId)) {
       if (item.missingSince) { item.missingSince = null; changed++; }
       continue;
@@ -372,6 +442,7 @@ module.exports = {
   parseBlockedId,
   normalizeTicket,
   normalizeOptions,
+  resultOptionsFor,
   makeItem,
   applyAnswer,
   applyDismiss,
@@ -394,10 +465,15 @@ module.exports = {
   hasWait,
   // constants
   RETENTION_CAP,
+  RESULT_RETENTION_CAP,
   MAX_OPEN,
   EXPIRY_GRACE_MS,
   MAX_OPTIONS,
   MAX_HEADLINE,
   MAX_CONTEXT,
+  MAX_SECTION,
+  KINDS,
   URGENCY_RANK,
+  APPROVE_INDEX,
+  RESULT_OPTIONS,
 };

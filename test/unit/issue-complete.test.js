@@ -119,3 +119,119 @@ test('every call is logged, because the call rate is the thing to measure', asyn
   assert.match(logs[0], /issue_complete: on autopilot=on -> merge/);
   assert.match(logs[1], /issue_complete: off autopilot=off -> stop/);
 });
+
+// ── The review gate (#669) ───────────────────────────────────────────────────
+//
+// Two fields on the shell entry, stamped by Workshop the way the picker stamps
+// `autopilot` and read here for the same reason: the value RIGHT NOW is the whole
+// answer. The important property is that the gate fails OPEN — every install that has
+// never turned `issueStagesEnabled` on must get byte-identical answers to before it existed
+// — so half these tests are about the feature being absent.
+
+function gateTools({ stages = true } = {}) {
+  const shells = new Map([
+    // The three gate states, on an autopilot-on session so "merge" is the answer that
+    // would otherwise come back.
+    ['nothing-shared', { autopilot: true, agentType: 'claude', worktree: 'w' }],
+    ['shared', { autopilot: true, agentType: 'claude', worktree: 'w', resultItemId: 'w42' }],
+    ['approved', {
+      autopilot: true, agentType: 'claude', worktree: 'w',
+      resultItemId: 'w42', resultApprovedAt: 1_700_000_000_000,
+    }],
+    // Autopilot off, but approved: the gate must hand back to the ORIGINAL logic rather
+    // than answering for it.
+    ['approved-no-autopilot', {
+      autopilot: false, agentType: 'claude', worktree: 'w',
+      resultItemId: 'w42', resultApprovedAt: 1_700_000_000_000,
+    }],
+    // The state Workshop leaves behind when a human requests changes: it clears BOTH.
+    ['rejected', { autopilot: true, agentType: 'claude', worktree: 'w', resultItemId: null, resultApprovedAt: null }],
+  ]);
+  const logs = [];
+  const tools = init({
+    shells,
+    settings: { enabledSkills: ['merge'], issueStagesEnabled: stages },
+    log: (m) => logs.push(m),
+  });
+  return { tools, shells, logs };
+}
+
+test('stages on, nothing shared: share a result first, and no merge is named', async () => {
+  const { tools } = gateTools();
+  const p = parse(await tools.issue_complete.handler({}, callerExtra('nothing-shared')));
+  assert.equal(p.next, 'share_result');
+  assert.match(p.instruction, /share_result/);
+  assert.doesNotMatch(p.instruction, /\/deepsteve:merge|\$deepsteve-merge|merge_worktree/,
+    'a refused gate must not also hand the agent the merge it is being refused');
+  assert.match(p.instruction, /Do NOT merge/);
+});
+
+test('stages on, shared but not approved: end your turn, and do not poll', async () => {
+  const { tools } = gateTools();
+  const p = parse(await tools.issue_complete.handler({}, callerExtra('shared')));
+  assert.equal(p.next, 'await_review');
+  assert.equal(p.result, 'w42');
+  assert.equal(p.approved, false);
+  assert.match(p.instruction, /w42/, 'name the item, so the agent can say which one it is waiting on');
+  assert.match(p.instruction, /End your turn/i);
+  assert.match(p.instruction, /arrive as a new message/i,
+    'the whole async shape depends on the agent believing this rather than polling');
+  assert.doesNotMatch(p.instruction, /merge_worktree|\/deepsteve:merge/);
+});
+
+test('stages on and approved: today\'s answer, unchanged', async () => {
+  const { tools } = gateTools();
+  const p = parse(await tools.issue_complete.handler({}, callerExtra('approved')));
+  assert.equal(p.next, 'merge');
+  assert.equal(p.autopilot, true);
+  assert.match(p.instruction, /when you complete, run \/deepsteve:merge/);
+});
+
+test('approval does not override Autopilot — the gate is a second lock, not a key', async () => {
+  const { tools } = gateTools();
+  const p = parse(await tools.issue_complete.handler({}, callerExtra('approved-no-autopilot')));
+  assert.equal(p.next, 'stop');
+  assert.equal(p.autopilot, false);
+  assert.match(p.instruction, /leave this tab open/,
+    'a human approving the WRITEUP has not thereby turned Autopilot on');
+});
+
+test('a rejected result is back to "share a result first"', async () => {
+  const { tools } = gateTools();
+  const p = parse(await tools.issue_complete.handler({}, callerExtra('rejected')));
+  assert.equal(p.next, 'share_result',
+    'Workshop clears both stamps on Request changes, so the last result no longer stands');
+});
+
+test('stages OFF: neither field is consulted, in any combination', async () => {
+  const { tools } = gateTools({ stages: false });
+  for (const id of ['nothing-shared', 'shared', 'approved', 'rejected']) {
+    const p = parse(await tools.issue_complete.handler({}, callerExtra(id)));
+    assert.equal(p.next, 'merge', `${id} must answer exactly as it did before #669`);
+  }
+});
+
+test('an install that has never heard of issueStagesEnabled is not gated', async () => {
+  // The realistic shape: `settings` predates the schema entry entirely.
+  const shells = new Map([['s', { autopilot: true, agentType: 'claude', worktree: 'w' }]]);
+  const tools = init({ shells, settings: { enabledSkills: ['merge'] }, log: () => {} });
+  const p = parse(await tools.issue_complete.handler({}, callerExtra('s')));
+  assert.equal(p.next, 'merge', 'undefined must read as off, not as undefined behaviour');
+});
+
+test('a gated call is logged, with which gate it hit', async () => {
+  const { tools, logs } = gateTools();
+  await tools.issue_complete.handler({}, callerExtra('shared'));
+  const line = logs.at(-1);
+  assert.match(line, /issue_complete/);
+  assert.match(line, /stages=on/);
+  assert.match(line, /result=w42/);
+  assert.match(line, /await_review/,
+    'the call rate AND the refusal rate are what would justify a daemon-side backstop');
+});
+
+test('the tool description warns about the gate in both states', () => {
+  const { tools } = gateTools({ stages: false });
+  assert.match(tools.issue_complete.description, /share_result/,
+    'the description is static, so it has to be true whether or not stages are on');
+});

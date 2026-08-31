@@ -1297,8 +1297,9 @@ settingsBtn?.addEventListener('click', async () => {
         <p style="font-size: 12px; color: var(--ds-text-secondary); margin: 0 0 12px 24px;">
           Asks an issue session to post its plan, its open questions and its surprises to the Workshop
           inbox as it works, and to justify the result before merging — so finished work can be judged
-          without opening the tab. Enable the Workshop app to read them. The last stage names
-          <code>share_result</code>, which does not exist yet.
+          without opening the tab. Enable the Workshop app to read them. It also turns the last stage
+          into a gate: <code>issue_complete</code> will not say &ldquo;merge&rdquo; until the session has posted a
+          writeup with <code>share_result</code> and you have approved it.
         </p>
         <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px;">
           <span style="font-size: 13px; color: var(--ds-text-primary);">Prompt template</span>

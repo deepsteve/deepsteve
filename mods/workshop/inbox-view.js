@@ -156,6 +156,29 @@ export function itemSubject(item) {
 }
 
 /**
+ * The body text to render under the headline.
+ *
+ * A result has no headline argument of its own — its schema is prose — so the server
+ * derives one from the first line of `summary` and keeps the WHOLE summary as the body,
+ * which is the right call for the stored record and reads as a stutter on screen: the
+ * H1 and the first line of the body are the same sentence. Drop the duplicate here
+ * rather than truncating the record, so what is stored stays lossless and only the
+ * rendering knows the two overlap.
+ *
+ * Scoped to results. A question's headline is a separate argument and any overlap with
+ * its context is the agent's own doing.
+ */
+export function itemBody(item) {
+  const context = String((item && item.context) || '');
+  if (!item || item.kind !== 'result') return context;
+  const headline = String(item.headline || '').trim();
+  if (!headline) return context;
+  const [first, ...rest] = context.split('\n');
+  if (first.trim() !== headline) return context;
+  return rest.join('\n').replace(/^\n+/, '');
+}
+
+/**
  * Is focus somewhere that owns its own keystrokes?
  *
  * A false negative means typing `e` in the reply box archives the item. A false
@@ -225,11 +248,24 @@ export function nextSelection(prevId, prevOrder, nextOrder) {
 }
 
 /**
+ * The index of a result's Approve option. Mirrors inbox.js's APPROVE_INDEX, which is
+ * what mints the fixed pair — the panel never invents these two options, it renders the
+ * ones the server sent.
+ */
+export const APPROVE_INDEX = 0;
+
+/**
  * What to POST, or null when there is nothing to send.
  *
  * A blocked item never carries text: it is a live modal, a permission prompt has no
  * text field at all, and the server refuses it with a 400. Dropping it here means the
  * refusal is a design, not an error the user has to read.
+ *
+ * A result's Request changes needs text, and refusing here is the same idea applied to
+ * the other end: an agent handed "Request changes" and nothing else learns only that it
+ * was wrong, not how, and its next result is the same result. Approve needs none — the
+ * work speaks for itself, and demanding a sentence to say yes is how a review gate
+ * becomes a thing people turn off.
  */
 export function answerPayload(item, { picked = null, draft = '' } = {}) {
   if (!item || item.kind === 'briefing') return null;
@@ -242,6 +278,17 @@ export function answerPayload(item, { picked = null, draft = '' } = {}) {
     const payload = { optionIndex: picked };
     const label = item.options[picked] && item.options[picked].label;
     if (label) payload.expect = fingerprint(label);
+    return payload;
+  }
+
+  if (item.kind === 'result') {
+    // Text alone is NOT a decision on a result: the server reads it as a request for
+    // changes, and a human who typed a note meaning to approve would be surprised by
+    // that. Make them press the button.
+    if (!hasPick) return null;
+    if (picked !== APPROVE_INDEX && !text) return null;
+    const payload = { optionIndex: picked };
+    if (text) payload.text = text;
     return payload;
   }
 

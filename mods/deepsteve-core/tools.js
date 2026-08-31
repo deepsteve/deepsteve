@@ -447,7 +447,10 @@ function init(context) {
         + 'The answer depends on Autopilot, a per-session setting the USER controls (from the issue picker '
         + 'and the tab context menu); it is not yours to decide. With Autopilot off you are told to stop and '
         + 'leave the tab for review; with it on you are told how to merge this session yourself. '
-        + 'Every issue session is asked to call this, in both states.',
+        + 'Every issue session is asked to call this, in both states. '
+        + 'When workflow stages are enabled it will also refuse to answer until you have shared a result '
+        + 'with `share_result` and a human has approved it — call it anyway and it will tell you which of '
+        + 'those two things is missing.',
       schema: {
         session_id: z.string().optional().describe('Caller session ID (auto-detected if omitted).'),
       },
@@ -462,6 +465,50 @@ function init(context) {
         // turning autopilot off a real cancel: nothing was ever queued, so there is
         // nothing to unwind, and the flag's value right now is the whole answer.
         const on = !!caller.autopilot;
+
+        // ── The review gate (#669) ──
+        //
+        // Both fields are stamped by Workshop on this same shell entry, the way the
+        // issue picker stamps `autopilot`, and read here for the same reason: the value
+        // right now is the whole answer. `resultItemId` says a result was shared;
+        // `resultApprovedAt` says a HUMAN approved it, and is written on exactly one
+        // line in mods/workshop/tools.js, downstream of a keypress in the panel.
+        //
+        // Gated on the SAME setting #668's stage text is, deliberately — stage 4 is what
+        // tells an agent share_result exists, and a gate that could be on while the stage
+        // text was off would refuse a merge for a tool the session was never told about.
+        //
+        // Fails open by construction. With `issueStagesEnabled` off — the default, and
+        // every install that has never heard of it — neither field is consulted and the
+        // three answers below are byte-identical to what they were before this issue.
+        const stages = !!settings.issueStagesEnabled;
+        const resultId = caller.resultItemId || null;
+        const approved = !!caller.resultApprovedAt;
+        let gate = null;
+        if (stages && !resultId) {
+          gate = {
+            next: 'share_result',
+            instruction: 'Share a result first: call `share_result` with what you did and why this shape, '
+              + 'a before/after, and any images that are the evidence. A human reads it and approves it, '
+              + 'and then calling me again will tell you whether to merge. Do NOT merge and do NOT close '
+              + 'this session in the meantime.',
+          };
+        } else if (stages && !approved) {
+          gate = {
+            next: 'await_review',
+            instruction: `You shared result ${resultId} and it is awaiting review. End your turn now — the `
+              + 'decision will arrive as a new message in this session. If it is approved, call me again; '
+              + 'if changes are requested, address them and call `share_result` again. Do NOT merge, do NOT '
+              + 'close this session, and do not poll for the answer.',
+          };
+        }
+        if (gate) {
+          const payload = { autopilot: on, stages: true, result: resultId, approved, ...gate };
+          log(`[MCP] issue_complete: ${callerId} autopilot=${on ? 'on' : 'off'} stages=on `
+            + `result=${resultId || 'none'} -> ${payload.next}`);
+          return { content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }] };
+        }
+
         let payload;
         if (!on) {
           payload = {
@@ -500,8 +547,11 @@ function init(context) {
         }
         // Logged on every call (#643). The feature rests on the agent actually calling
         // this, and this line is the only evidence of the call rate — which is what a
-        // daemon-side backstop would have to be justified by.
-        log(`[MCP] issue_complete: ${callerId} autopilot=${on ? 'on' : 'off'} -> ${payload.next}`);
+        // daemon-side backstop would have to be justified by. One line, not two: with
+        // stages on, "started with stages" and "started without" are different runs.
+        log(`[MCP] issue_complete: ${callerId} autopilot=${on ? 'on' : 'off'}`
+          + (stages ? ` stages=on result=${resultId || 'none'}/approved` : '')
+          + ` -> ${payload.next}`);
         return { content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }] };
       },
     },

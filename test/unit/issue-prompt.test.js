@@ -220,9 +220,9 @@ test('the shipped stage text stays cheap enough to paste on every issue', () => 
 test('the stage text names only tools a mod actually registers (#668)', () => {
   // The stages point an agent at tools BY NAME. Naming one that does not exist is the
   // failure issue_complete already guards against for the merge skill: the agent gets
-  // "no such tool" and improvises. share_result arrives with #669, and is the reason
-  // issueStagesEnabled ships OFF — delete it from PENDING when that lands.
-  const PENDING = new Set(['share_result']);
+  // "no such tool" and improvises. PENDING held share_result while #668 shipped ahead of
+  // it; #669 landed the tool, so the set is empty and every name is now checked for real.
+  const PENDING = new Set();
   const sources = ['mods/workshop/tools.js', 'mods/deepsteve-core/tools.js'].map(read);
   const named = [...new Set([...WORKFLOW_STAGES.matchAll(
     /(?:mcp__deepsteve__)?\b(workshop_\w+|issue_complete|share_result)\b/g)].map(m => m[1]))];

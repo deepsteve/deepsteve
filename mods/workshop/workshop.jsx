@@ -2,7 +2,7 @@ import * as React from 'react';
 import * as ReactDOM from 'react-dom/client';
 import {
   visibleItems, nextSelection, keyAction, isTypingTarget,
-  formatAge, ageColor, itemSubject, answerPayload,
+  formatAge, ageColor, itemSubject, itemBody, answerPayload,
 } from './inbox-view.js';
 import { visibleBacklog, formatUpdated, matchNote } from './backlog-view.js';
 
@@ -27,6 +27,7 @@ const C = {
   red: '#f85149',
   green: '#238636',
   greenHi: '#2ea043',
+  purple: '#a371f7',      // results only — distinct from blocked-orange and question-blue
 };
 
 // Mono for anything that came off a terminal or names a machine thing; system-ui for
@@ -39,6 +40,7 @@ const KINDS = {
   blocked: { glyph: '⏸', color: C.orange, tint: 'rgba(240,136,62,0.14)', label: 'Blocked' },
   question: { glyph: '?', color: C.blue, tint: 'rgba(88,166,255,0.14)', label: 'Question' },
   briefing: { glyph: 'i', color: C.dim, tint: 'rgba(139,148,158,0.12)', label: 'Briefing' },
+  result: { glyph: '▤', color: C.purple, tint: 'rgba(163,113,247,0.14)', label: 'Result' },
 };
 const kindOf = (item) => KINDS[item && item.kind] || KINDS.question;
 
@@ -76,6 +78,9 @@ const PATH_HINT = {
   held: 'resolves the agent’s pending workshop_ask — nothing is typed',
   prompt: 'delivers as a new prompt when the agent is next idle',
   dialog: 'moves the cursor in its real dialog, re-reads the screen, then commits',
+  // A result outlives its session on purpose, so this is a normal end state and the
+  // human has to know BEFORE clicking, not from a note afterwards.
+  gone: 'that session is gone — this records your decision and tells nobody',
 };
 
 // ─── Small pieces ────────────────────────────────────────────────────────────
@@ -392,8 +397,9 @@ function EmptyState() {
       <div style={{ font: `15px ${SANS}`, color: C.dim, margin: '18px 0 8px' }}>Nothing needs you</div>
       <div style={{ font: `13px/1.7 ${SANS}`, color: C.faint }}>
         Blocked sessions land here the moment an agent hits a permission prompt. Agents can
-        also post here directly with <code style={{ font: `12px ${MONO}` }}>workshop_ask</code> and{' '}
-        <code style={{ font: `12px ${MONO}` }}>workshop_brief</code>.
+        also post here directly with <code style={{ font: `12px ${MONO}` }}>workshop_ask</code>,{' '}
+        <code style={{ font: `12px ${MONO}` }}>workshop_brief</code> and{' '}
+        <code style={{ font: `12px ${MONO}` }}>share_result</code>.
       </div>
     </div>
   );
@@ -429,6 +435,115 @@ function ScreenPreview({ lines, open, onToggle }) {
   );
 }
 
+/** A small uppercase rule-and-label, the RECOMMENDS block's sibling. */
+function Section({ label, color, children }) {
+  return (
+    <div style={{ minWidth: 0 }}>
+      <div style={{
+        font: `600 11px/1.4 ${MONO}`, letterSpacing: '0.08em',
+        color: color || C.dim, marginBottom: 5,
+      }}>{label}</div>
+      <div style={{
+        font: `14px/1.6 ${SANS}`, color: C.text, whiteSpace: 'pre-wrap',
+        overflowWrap: 'anywhere',
+      }}>{children}</div>
+    </div>
+  );
+}
+
+/**
+ * A result's evidence (#669): the before/after pair, the caveats, the images.
+ *
+ * Before and after sit SIDE BY SIDE because the comparison is the point — stacked, they
+ * read as two paragraphs and the reader has to hold the first one in their head. The
+ * grid collapses to one column under 640px, where two columns would be two columns of
+ * four words.
+ *
+ * Images are <img src> against /api/workshop/images/<file>, never inlined: the bytes
+ * were copied into the Workshop store at share time precisely so the inbox JSON — which
+ * the panel re-reads every couple of seconds — never carries them.
+ */
+function ResultBody({ item, onZoom }) {
+  const hasPair = !!(item.before || item.after);
+  const imgs = Array.isArray(item.images) ? item.images : [];
+  if (!hasPair && !item.caveats && imgs.length === 0) return null;
+
+  return (
+    <div style={{ marginTop: 22, display: 'flex', flexDirection: 'column', gap: 20 }}>
+      {hasPair && (
+        <div style={{
+          display: 'grid', gap: 20,
+          gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))',
+          borderLeft: `2px solid ${C.purple}`, paddingLeft: 14,
+        }}>
+          <Section label="BEFORE" color={C.dim}>{item.before || '—'}</Section>
+          <Section label="AFTER" color={C.purple}>{item.after || '—'}</Section>
+        </div>
+      )}
+
+      {imgs.length > 0 && (
+        <div style={{
+          display: 'grid', gap: 10,
+          gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))',
+        }}>
+          {imgs.map((img) => (
+            <button
+              key={img.file} type="button" onClick={() => onZoom(img.file)}
+              title={`${img.ref} — click to enlarge`}
+              style={{
+                padding: 0, border: `1px solid ${C.border}`, borderRadius: 6,
+                background: C.sunken, cursor: 'zoom-in', overflow: 'hidden', lineHeight: 0,
+              }}
+            >
+              <img
+                src={`/api/workshop/images/${encodeURIComponent(img.file)}`}
+                alt={img.ref || 'result image'}
+                style={{ display: 'block', width: '100%', height: 130, objectFit: 'cover' }}
+              />
+            </button>
+          ))}
+        </div>
+      )}
+
+      {item.caveats && (
+        <div style={{
+          borderLeft: `2px solid ${C.orange}`, padding: '2px 0 2px 12px',
+          background: 'rgba(240,136,62,0.05)',
+        }}>
+          <Section label="CAVEATS" color={C.orange}>{item.caveats}</Section>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Full-bleed image view. Any click or Escape closes it — nothing to learn. */
+function Lightbox({ file, onClose }) {
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === 'Escape') { e.stopPropagation(); onClose(); } };
+    // Capture, so it beats the panel's own Escape handler to the event.
+    document.addEventListener('keydown', onKey, true);
+    return () => document.removeEventListener('keydown', onKey, true);
+  }, [onClose]);
+
+  return (
+    <div
+      onClick={onClose}
+      style={{
+        position: 'fixed', inset: 0, zIndex: 20, background: 'rgba(1,4,9,0.88)',
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        padding: 32, cursor: 'zoom-out',
+      }}
+    >
+      <img
+        src={`/api/workshop/images/${encodeURIComponent(file)}`}
+        alt={file}
+        style={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain' }}
+      />
+    </div>
+  );
+}
+
 // ─── Root ────────────────────────────────────────────────────────────────────
 
 function Workshop() {
@@ -450,6 +565,7 @@ function Workshop() {
   const [backlog, setBacklog] = useState({ issues: [], projectName: '', error: null });
   const [labels, setLabels] = useState([]);
   const [activeSessionId, setActiveSessionId] = useState(null);
+  const [zoom, setZoom] = useState(null);   // a result image filename, or null
 
   // Refs, for the long-lived timers and listeners that must not close over stale state.
   const rootRef = useRef(null);
@@ -647,7 +763,7 @@ function Workshop() {
   const selectedIsIssue = !!selected && selected.kind === 'issue';
 
   // Reset the staged answer only when the SELECTION changes, never on a poll.
-  useEffect(() => { setPicked(null); setDraft(''); setScreenOpen(false); }, [selectedId]);
+  useEffect(() => { setPicked(null); setDraft(''); setScreenOpen(false); setZoom(null); }, [selectedId]);
 
   // ── Live screen preview, its own loop, armed only for a blocked selection.
   // Keyed on [selectedId, pollMs] and deliberately NOT on `items`, which would tear it
@@ -903,13 +1019,27 @@ function Workshop() {
   // ── Render
   const ageOf = (item) => Math.max(0, now - (item.createdAt || now));
   const hasLocalTab = !!(selected && selected.sessionId && localIds.has(selected.sessionId));
-  // All three belong to the answer bench, which an issue never reaches. Gated on
+  // All of these belong to the answer bench, which an issue never reaches. Gated on
   // selectedIsIssue rather than left to answerPayload's own null: a backlog row is not
   // an unanswerable item, it is not an item at all.
-  const showReply = !selectedIsIssue && !!selected && selected.kind === 'question';
+  const showReply = !selectedIsIssue && !!selected
+    && (selected.kind === 'question' || selected.kind === 'result');
   const canSend = !selectedIsIssue && !!(selected && (selected.kind === 'briefing'
     || answerPayload(selected, { picked, draft })));
   const pathHint = (selected && !selectedIsIssue) ? PATH_HINT[selected.pendingPath] : null;
+  // A result's headline is DERIVED from the first line of its summary, so rendering both
+  // the H1 and the raw context says the same sentence twice.
+  const body = (selected && !selectedIsIssue) ? itemBody(selected) : '';
+
+  // "Send" says nothing on a result — the two outcomes are opposite, and this label is
+  // the last thing read before Enter. Blank until an option is staged, which is also
+  // when canSend turns true, so the button never offers a verb it will not perform.
+  const sendVerb = (!selected || selectedIsIssue) ? 'Send'
+    : selected.kind === 'briefing' ? 'Archive'
+      : selected.kind === 'result'
+        ? (picked === null ? 'Approve or request changes'
+          : (selected.options[picked] || {}).label || 'Send')
+        : 'Send';
 
   const inboxRows = [];
   if (view.groups) {
@@ -1097,11 +1227,11 @@ function Workshop() {
                   font: `600 22px/1.3 ${SANS}`, letterSpacing: '-0.01em', color: C.bright,
                 }}>{selected.headline || selected.question || '(no subject)'}</h1>
 
-                {selected.context && (
+                {body && (
                   <div style={{
                     font: `15px/1.6 ${selected.kind === 'blocked' ? MONO : SANS}`,
                     color: C.text, whiteSpace: 'pre-wrap', marginTop: 12,
-                  }}>{selected.context}</div>
+                  }}>{body}</div>
                 )}
 
                 {selected.multi && (
@@ -1152,6 +1282,10 @@ function Workshop() {
                   </div>
                 )}
 
+                {selected.kind === 'result' && (
+                  <ResultBody item={selected} onZoom={setZoom} />
+                )}
+
                 {selected.kind === 'blocked' && !selected.answerable && (
                   <div style={{ font: `13px/1.6 ${SANS}`, color: C.orange, marginTop: 18 }}>
                     This dialog couldn’t be read well enough to answer from here — the screen is
@@ -1165,7 +1299,9 @@ function Workshop() {
                     ref={replyRef}
                     value={draft}
                     onChange={(e) => setDraft(e.target.value)}
-                    placeholder="Reply &mdash; Enter for a newline, &#8984;&#9166; to send"
+                    placeholder={selected.kind === 'result'
+                      ? 'Why it needs changing \u2014 required to request changes, optional to approve'
+                      : 'Reply \u2014 Enter for a newline, \u2318\u23ce to send'}
                     style={{
                       width: '100%', minHeight: 72, maxHeight: 200, marginTop: 18,
                       background: C.bg, border: `1px solid ${C.border}`, borderRadius: 6,
@@ -1203,7 +1339,7 @@ function Workshop() {
                 onMouseEnter={(e) => { if (canSend && !sending) e.currentTarget.style.background = C.greenHi; }}
                 onMouseLeave={(e) => { if (canSend && !sending) e.currentTarget.style.background = C.green; }}
               >
-                <Key>{'⏎'}</Key> {selected.kind === 'briefing' ? 'Archive' : 'Send'}
+                <Key>{'⏎'}</Key> {sendVerb}
               </button>
               {selected.kind !== 'briefing' && (
                 <button
@@ -1230,6 +1366,8 @@ function Workshop() {
         )}
       </div>
       </div>
+
+      {zoom && <Lightbox file={zoom} onClose={() => setZoom(null)} />}
 
       {helpOpen && (
         <div

@@ -478,3 +478,103 @@ test('the fingerprint matches dialog-parse.js byte for byte', async () => {
     );
   }
 });
+
+// ── results (#669) ───────────────────────────────────────────────────────────
+
+test('a result approves on the option alone, with no text required', async () => {
+  const view = await load();
+  const result = { kind: 'result', options: [{ label: 'Approve' }, { label: 'Request changes' }] };
+  assert.deepStrictEqual(
+    view.answerPayload(result, { picked: view.APPROVE_INDEX, draft: '' }),
+    { optionIndex: 0 },
+    'demanding a sentence to say yes is how a review gate becomes a thing people turn off',
+  );
+  assert.deepStrictEqual(
+    view.answerPayload(result, { picked: view.APPROVE_INDEX, draft: '  nice  ' }),
+    { optionIndex: 0, text: 'nice' },
+    'but a note is carried through when there is one',
+  );
+});
+
+test('Request changes with an empty draft sends nothing', async () => {
+  const view = await load();
+  const result = { kind: 'result', options: [{ label: 'Approve' }, { label: 'Request changes' }] };
+  assert.strictEqual(
+    view.answerPayload(result, { picked: 1, draft: '   ' }), null,
+    'an agent told only that it was wrong, and not how, writes the same result again — '
+    + 'refusing here makes that a design rather than an error message',
+  );
+  assert.deepStrictEqual(
+    view.answerPayload(result, { picked: 1, draft: 'the empty case' }),
+    { optionIndex: 1, text: 'the empty case' },
+  );
+});
+
+test('text alone is not a decision on a result', async () => {
+  const view = await load();
+  const result = { kind: 'result', options: [{ label: 'Approve' }, { label: 'Request changes' }] };
+  assert.strictEqual(
+    view.answerPayload(result, { picked: null, draft: 'why this way?' }), null,
+    'the server reads bare text as a request for changes, so a human who typed a note '
+    + 'meaning to approve would be surprised. Make them press the button.',
+  );
+});
+
+test('a result still sorts and filters like every other stored item', async () => {
+  const view = await load();
+  const items = [
+    { id: 'w1', kind: 'result', urgency: 'normal', createdAt: 10 },
+    { id: 'w2', kind: 'briefing', urgency: 'fyi', createdAt: 5 },
+    { id: 'b1', kind: 'blocked', urgency: 'blocking', createdAt: 20 },
+  ];
+  assert.deepStrictEqual(
+    view.visibleItems(items, {}).order, ['b1', 'w1', 'w2'],
+    'urgency first: a result is normal, so it sits under a blocked agent and above a briefing',
+  );
+  assert.deepStrictEqual(
+    view.visibleItems(items, { showBriefings: false }).order, ['b1', 'w1'],
+    'hiding briefings must not hide results — they are the opposite of a note you can skip',
+  );
+  assert.deepStrictEqual(
+    view.visibleItems(items, { blockingOnly: true }).order, ['b1'],
+  );
+});
+
+test('itemBody drops the headline a result derived from its own first line', async () => {
+  const view = await load();
+  const item = {
+    kind: 'result',
+    headline: 'Wheel events no longer walk history.',
+    context: 'Wheel events no longer walk history.\n\nThe alt-buffer branch is gone.',
+  };
+  assert.strictEqual(
+    view.itemBody(item), 'The alt-buffer branch is gone.',
+    'the H1 and the first line of the body were the same sentence, twice on screen',
+  );
+});
+
+test('itemBody leaves the record alone when there is nothing to drop', async () => {
+  const view = await load();
+  // A one-line summary: the H1 carries all of it and the body is empty.
+  assert.strictEqual(
+    view.itemBody({ kind: 'result', headline: 'Done.', context: 'Done.' }), '',
+  );
+  // A headline that is NOT the first line (clamped, edited, whatever) keeps everything.
+  assert.strictEqual(
+    view.itemBody({ kind: 'result', headline: 'Something else', context: 'First line\nSecond' }),
+    'First line\nSecond',
+  );
+  assert.strictEqual(view.itemBody({ kind: 'result', headline: '', context: 'body' }), 'body');
+});
+
+test('itemBody is scoped to results — it never edits another kind\'s context', async () => {
+  const view = await load();
+  for (const kind of ['question', 'briefing', 'blocked']) {
+    assert.strictEqual(
+      view.itemBody({ kind, headline: 'same', context: 'same\nmore' }), 'same\nmore',
+      `a ${kind}'s headline is its own argument; any overlap is the agent's doing`,
+    );
+  }
+  assert.strictEqual(view.itemBody(null), '');
+  assert.strictEqual(view.itemBody({ kind: 'result' }), '');
+});

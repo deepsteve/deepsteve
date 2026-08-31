@@ -36,6 +36,19 @@ delete process.env.DEEPSTEVE_HOME;
 const PROJECT_DIR = path.join(SCRATCH, 'deepsteve');
 fs.mkdirSync(PROJECT_DIR, { recursive: true });
 
+// #669 fixtures: a screenshot store the fake ctx points at, an image inside the
+// project, and one outside it that share_result must refuse to attach.
+const SHOTS_DIR = path.join(SCRATCH, 'shots');
+const OUTSIDE_DIR = path.join(SCRATCH, 'outside');
+fs.mkdirSync(SHOTS_DIR, { recursive: true });
+fs.mkdirSync(OUTSIDE_DIR, { recursive: true });
+const TINY_PNG = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+  'base64',
+);
+fs.writeFileSync(path.join(PROJECT_DIR, 'shot.png'), TINY_PNG);
+fs.writeFileSync(path.join(OUTSIDE_DIR, 'secret.png'), TINY_PNG);
+
 const workshop = require('../../mods/workshop/tools.js');
 const inbox = require('../../mods/workshop/inbox.js');
 const fx = require('./fixtures/workshop-dialogs.js');
@@ -146,6 +159,9 @@ class FakeApp {
     const res = {
       status(c) { code = c; return res; },
       json(p) { payload = p; done(); return res; },
+      // The images route (#669) ends with sendFile or a bare end(), never json().
+      end() { done(); return res; },
+      sendFile(f) { payload = { sentFile: f }; done(); return res; },
     };
     await handler({ params, query, body }, res);
     await finished;
@@ -157,20 +173,34 @@ function makeCtx(shells) {
   return {
     shells,
     log: () => {},
-    sessionPaths: (e) => ({ repoRoot: e.cwd, worktree: e.worktree }),
+    sessionPaths: (e) => ({ cwd: e.cwd, repoRoot: e.cwd, worktree: e.worktree }),
     sessionInputState: () => 'idle',
     getDefaultEngine: () => null,
     deliverPromptWhenReady: (id, prompt, opts) => {
       ctxDeliveries.push({ id, prompt, opts });
     },
+    // #669. saveState is what persists the review-gate stamps across a restart, so the
+    // tests assert it was actually called rather than only that the field was set.
+    saveState: () => { ctxSaveStates++; },
+    // Verbatim from server.js — a stricter copy here would prove nothing about
+    // production. Notably it does NO canonicalization; images.js realpaths first.
+    pathInside: (p2, dir) => {
+      if (!p2 || !dir) return false;
+      const base = String(dir).replace(/\/+$/, '');
+      return p2 === base || p2.startsWith(base + '/');
+    },
+    screenshots: new Map(),
+    getScreenshotPath: (id) => path.join(SHOTS_DIR, `${id}.png`),
   };
 }
 
 let ctxDeliveries = [];
+let ctxSaveStates = 0;
 
 /** Fresh world per test: new shells map, new app, and the tool handlers rebound. */
 function world() {
   ctxDeliveries = [];
+  ctxSaveStates = 0;
   const shells = new Map();
   const ctx = makeCtx(shells);
   const app = new FakeApp();
@@ -1055,4 +1085,262 @@ test('a second call for the same project and label is served from the cache', as
   const second = await app.call('GET', '/api/workshop/backlog', { query: { label: l, session: id } });
   assert.strictEqual(first.body.cached, false);
   assert.strictEqual(second.body.cached, true, 'a repeat inside the TTL must not re-spawn the subprocess');
+});
+
+// ── share_result and the review gate (#669) ──────────────────────────────────
+//
+// The stamps are the security surface. `resultItemId` is written by the AGENT's own
+// tool call and by itself REFUSES a merge; `resultApprovedAt` is what permits one, and
+// is written on exactly one line reachable only from the answer endpoint. These tests
+// exist to keep that asymmetry from quietly collapsing — an agent that could set
+// resultApprovedAt could approve its own work, which is precisely the thing #519 guards.
+
+function liveSession(shells, id) {
+  const entry = makeEntry(id, null, { waitingForInput: false, terminalScreen: null });
+  shells.set(id, entry);
+  return entry;
+}
+
+test('share_result posts a result and parks the agent without approving anything', async () => {
+  const { shells, tools } = world();
+  const id = sid();
+  const entry = liveSession(shells, id);
+
+  const res = await tools.share_result.handler(
+    { summary: 'Dropped the alt-buffer branch.\nSecond line ignored for the subject.' },
+    extraFor(id),
+  );
+  const said = res.content[0].text;
+
+  assert.match(said, /awaiting review/i);
+  assert.match(said, /End your turn/i);
+  assert.match(said, /Do not call issue_complete/i,
+    'the return text is the only thing standing between the agent and an immediate merge attempt');
+
+  assert.ok(entry.resultItemId, 'the caller is stamped with the item it shared');
+  assert.strictEqual(
+    entry.resultApprovedAt, null,
+    'SHARING MUST NOT APPROVE. If this ever becomes truthy, an agent approves its own work.',
+  );
+  assert.ok(ctxSaveStates > 0, 'the stamp is persisted, or a restart loses the park');
+});
+
+test('the shared item is a result, with the summary as body and its first line as subject', async () => {
+  const { shells, tools, app } = world();
+  const id = sid();
+  const entry = liveSession(shells, id);
+
+  await tools.share_result.handler({
+    summary: 'Wheel events no longer walk history.\n\nThe alt-buffer branch is gone.',
+    before: 'ESC[A / ESC[B on every wheel tick',
+    after: 'inert; tmux owns the scroll',
+    caveats: 'untested against xterm 5',
+  }, extraFor(id));
+
+  const { body } = await app.call('GET', '/api/workshop/inbox');
+  const item = body.items.find((i) => i.id === entry.resultItemId);
+  assert.ok(item, 'the result shows up in the inbox');
+  assert.strictEqual(item.kind, 'result');
+  assert.strictEqual(item.headline, 'Wheel events no longer walk history.',
+    'the first line becomes the list subject, so itemSubject() needs no knowledge of results');
+  assert.match(item.context, /The alt-buffer branch is gone/, 'the whole summary is kept');
+  assert.strictEqual(item.before, 'ESC[A / ESC[B on every wheel tick');
+  assert.strictEqual(item.after, 'inert; tmux owns the scroll');
+  assert.strictEqual(item.caveats, 'untested against xterm 5');
+  assert.deepStrictEqual(item.options.map((o) => o.label), ['Approve', 'Request changes']);
+  assert.strictEqual(item.sessionId, id, 'the agent never identifies itself');
+});
+
+test('images are attached by reference and reported when refused', async () => {
+  const { shells, ctx, tools, app } = world();
+  const id = sid();
+  const entry = liveSession(shells, id);
+  ctx.screenshots.set('a1b2c3d4', { id: 'a1b2c3d4' });
+  fs.writeFileSync(path.join(SHOTS_DIR, 'a1b2c3d4.png'), TINY_PNG);
+
+  const res = await tools.share_result.handler({
+    summary: 'A UI change reviewed from prose is not reviewed.',
+    images: ['a1b2c3d4', './shot.png', path.join(OUTSIDE_DIR, 'secret.png')],
+  }, extraFor(id));
+
+  const { body } = await app.call('GET', '/api/workshop/inbox');
+  const item = body.items.find((i) => i.id === entry.resultItemId);
+  assert.strictEqual(item.images.length, 2, 'the two legitimate refs landed');
+  assert.ok(item.images.every((i) => /^w\d+-\d+\.png$/.test(i.file)), 'stored as filenames');
+
+  const wire = JSON.stringify(body);
+  assert.ok(!/base64|data:image/i.test(wire),
+    'the inbox JSON is re-fetched every 2s — an inlined PNG in there is fatal to the poll');
+
+  assert.match(res.content[0].text, /Not attached/,
+    'a silently dropped image means the agent writes its next result exactly the same way');
+  assert.match(res.content[0].text, /outside-project/);
+});
+
+test('the images route serves the store and nothing else', async () => {
+  const { shells, tools, app } = world();
+  const id = sid();
+  const entry = liveSession(shells, id);
+  await tools.share_result.handler({ summary: 'with evidence', images: ['./shot.png'] }, extraFor(id));
+
+  const { body } = await app.call('GET', '/api/workshop/inbox');
+  const file = body.items.find((i) => i.id === entry.resultItemId).images[0].file;
+
+  const ok = await app.call('GET', '/api/workshop/images/:file', { params: { file } });
+  assert.strictEqual(ok.status, 200);
+  assert.match(ok.body.sentFile, new RegExp(`${file}$`));
+
+  for (const bad of ['../../etc/passwd', '/etc/passwd', 'workshop.json', 'w9999-0.png']) {
+    const r = await app.call('GET', '/api/workshop/images/:file', { params: { file: bad } });
+    assert.strictEqual(r.status, 404, `the route must refuse ${bad}`);
+  }
+});
+
+test('Approve stamps the gate and tells the agent to complete', async () => {
+  const { shells, tools, app } = world();
+  const id = sid();
+  const entry = liveSession(shells, id);
+  await tools.share_result.handler({ summary: 'done' }, extraFor(id));
+  const itemId = entry.resultItemId;
+
+  const r = await app.call('POST', '/api/workshop/items/:id/answer', {
+    params: { id: itemId }, body: { optionIndex: 0 },
+  });
+
+  assert.strictEqual(r.status, 200);
+  assert.strictEqual(r.body.deliveredVia, 'prompt');
+  assert.ok(entry.resultApprovedAt, 'this is the field that unlocks the merge');
+  assert.strictEqual(entry.resultItemId, itemId, 'and the item it belongs to is kept');
+
+  const delivered = ctxDeliveries.at(-1);
+  assert.strictEqual(delivered.id, id);
+  assert.match(delivered.prompt, /approved/i);
+  assert.match(delivered.prompt, /issue_complete/,
+    'Approve means "call issue_complete now" — the agent should not have to infer that');
+  assert.strictEqual(delivered.opts.source, 'workshop',
+    'the FIFO, never submitToShell and never e.pendingDelivery directly');
+});
+
+test('Request changes clears BOTH stamps, so the agent is back to sharing', async () => {
+  const { shells, tools, app } = world();
+  const id = sid();
+  const entry = liveSession(shells, id);
+  await tools.share_result.handler({ summary: 'done' }, extraFor(id));
+
+  await app.call('POST', '/api/workshop/items/:id/answer', {
+    params: { id: entry.resultItemId },
+    body: { optionIndex: 1, text: 'does not handle the empty case' },
+  });
+
+  assert.strictEqual(entry.resultItemId, null);
+  assert.strictEqual(entry.resultApprovedAt, null);
+  const delivered = ctxDeliveries.at(-1);
+  assert.match(delivered.prompt, /Changes requested/i);
+  assert.match(delivered.prompt, /does not handle the empty case/, 'the reviewer own words');
+  assert.match(delivered.prompt, /share_result again/);
+});
+
+test('free text with no option picked is NOT an approval', async () => {
+  const { shells, tools, app } = world();
+  const id = sid();
+  const entry = liveSession(shells, id);
+  await tools.share_result.handler({ summary: 'done' }, extraFor(id));
+
+  await app.call('POST', '/api/workshop/items/:id/answer', {
+    params: { id: entry.resultItemId }, body: { text: 'why did you do it this way?' },
+  });
+
+  assert.strictEqual(
+    entry.resultApprovedAt, null,
+    'the ambiguous case must never be the one that unlocks a merge',
+  );
+  assert.strictEqual(entry.resultItemId, null);
+});
+
+test('a result whose session is gone records the decision and types nowhere', async () => {
+  const { shells, tools, app } = world();
+  const id = sid();
+  liveSession(shells, id);
+  await tools.share_result.handler({ summary: 'done' }, extraFor(id));
+  const { body: before } = await app.call('GET', '/api/workshop/inbox');
+  const item = before.items.find((i) => i.kind === 'result');
+
+  shells.delete(id);                       // the daemon restarted, or the tab was closed
+  const deliveriesBefore = ctxDeliveries.length;
+
+  const r = await app.call('POST', '/api/workshop/items/:id/answer', {
+    params: { id: item.id }, body: { optionIndex: 0 },
+  });
+
+  assert.strictEqual(r.status, 200, 'the decision is still recorded — that is the point of a record');
+  assert.strictEqual(r.body.deliveredVia, 'undelivered');
+  assert.match(r.body.note, /session is gone/i, 'and it says so honestly rather than pretending');
+  assert.strictEqual(ctxDeliveries.length, deliveriesBefore,
+    'NOTHING may be written toward a dead session');
+});
+
+test('an open result survives the dead-session sweep the inbox listing runs', async () => {
+  const { shells, tools, app } = world();
+  const id = sid();
+  liveSession(shells, id);
+  await tools.share_result.handler({ summary: 'outlives its tab' }, extraFor(id));
+  shells.delete(id);
+  // Another live session, so the listing's boot-grace guard lets the sweep run at all.
+  liveSession(shells, sid());
+
+  await app.call('GET', '/api/workshop/inbox');
+  await app.call('GET', '/api/workshop/inbox');
+  const { body } = await app.call('GET', '/api/workshop/inbox');
+
+  const item = body.items.find((i) => i.kind === 'result' && i.headline === 'outlives its tab');
+  assert.ok(item, 'a result is exempt — it is read AFTER the agent has finished');
+  assert.strictEqual(item.status, 'open');
+  assert.strictEqual(item.pendingPath, 'gone',
+    'and the panel is told before the click, not by a note afterwards');
+});
+
+test('archiving an open result un-parks its agent', async () => {
+  const { shells, tools, app } = world();
+  const id = sid();
+  const entry = liveSession(shells, id);
+  await tools.share_result.handler({ summary: 'done' }, extraFor(id));
+
+  await app.call('POST', '/api/workshop/items/:id/dismiss', {
+    params: { id: entry.resultItemId }, body: { reason: 'archived' },
+  });
+
+  assert.strictEqual(
+    entry.resultItemId, null,
+    'otherwise the session sits on "awaiting review" for a review that was thrown away — '
+    + 'the one state issue_complete has no way out of',
+  );
+  assert.strictEqual(entry.resultApprovedAt, null, 'and archiving is certainly not an approval');
+});
+
+test('workshop_check reports a result decision in a result vocabulary', async () => {
+  const { shells, tools, app } = world();
+  const id = sid();
+  const entry = liveSession(shells, id);
+  await tools.share_result.handler({ summary: 'done' }, extraFor(id));
+  const itemId = entry.resultItemId;
+  const seq = itemId.slice(1);
+
+  const open = await tools.workshop_check.handler({ ticket: seq });
+  assert.match(open.content[0].text, /awaiting review/i);
+
+  await app.call('POST', '/api/workshop/items/:id/answer', {
+    params: { id: itemId }, body: { optionIndex: 0 },
+  });
+  const done = await tools.workshop_check.handler({ ticket: seq });
+  assert.match(done.content[0].text, /APPROVED/);
+  assert.match(done.content[0].text, /issue_complete/);
+});
+
+test('share_result declares no options of its own — the two are minted server-side', () => {
+  const { tools } = world();
+  assert.deepStrictEqual(
+    Object.keys(tools.share_result.schema).sort(),
+    ['after', 'before', 'caveats', 'images', 'summary'],
+    'an `options` argument here would let an agent write the button it needs clicked',
+  );
 });

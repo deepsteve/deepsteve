@@ -1,11 +1,11 @@
 /**
- * Workshop (#660) — one inbox for every agent that needs you.
+ * Workshop (#660, #669) — one inbox for every agent that needs you.
  *
- * Three MCP tools let an agent post a question or a briefing; six REST routes let
- * the panel read the inbox, answer from it, and read the project's backlog. Blocked
- * sessions — the ones sitting on a real Claude Code permission / AskUserQuestion
- * dialog — are DERIVED per request from ctx.shells and never stored, so they exist
- * exactly as long as the dialog does.
+ * Four MCP tools let an agent post a question, a briefing or a result; seven REST routes
+ * let the panel read the inbox, answer from it, fetch a result's images, and read the
+ * project's backlog. Blocked sessions — the ones sitting on a real Claude Code
+ * permission / AskUserQuestion dialog — are DERIVED per request from ctx.shells and
+ * never stored, so they exist exactly as long as the dialog does.
  *
  * The panel POLLS its own /api/workshop/inbox rather than receiving a broadcast.
  * That is not an oversight: a new push feed would need a notifyX/onXChanged pair in
@@ -23,6 +23,19 @@
  * empty list with an `error` string the panel renders as one grey line. The backlog is
  * an accessory to the inbox; it must not be able to make the inbox look broken.
  *
+ * ── The host edits, which this file used to claim did not exist ──
+ *
+ * #660 shipped with none, and said so here. The merge gate (#669) has three, because a
+ * decision made server-side at completion time cannot live in a mod's own settings:
+ *
+ *   1. issue_complete (mods/deepsteve-core/tools.js) reads `caller.resultItemId` and
+ *      `caller.resultApprovedAt`, which share_result and the answer path below stamp,
+ *      gated on the `issueStagesEnabled` setting #668 already added.
+ *   2+3. serializeShellEntry() and the restore path in server.js carry those two fields,
+ *      so an approval survives a ./restart.sh between Approve and issue_complete.
+ *
+ * Still to come: #670 needs a transcript path in the initMCP ctx.
+ *
  * ── Why Workshop deliberately does NOT go through requestMetaControlsConsent ──
  *
  * The meta-controls gate prices one specific risk: an AGENT typing into another
@@ -33,12 +46,19 @@
  * approve their own click — and a DECLINE there starts a 60s cooldown that would then
  * block the next unrelated meta_type.
  *
- * The three MCP tools below write nothing to any PTY; they only append to the inbox.
+ * The four MCP tools below write nothing to any PTY; they only append to the inbox.
  * The only PTY writes live in the answer paths, reachable exclusively from
  * POST /api/workshop/items/:id/answer, which no MCP tool calls. If that ever stops
  * being true — if an agent gains any way to answer another agent's item — this
  * decision must be revisited, because at that point Workshop becomes exactly the
  * thing #519 guards.
+ *
+ * That still holds with the merge gate in place, and it is worth being explicit about
+ * why, because "an agent can now unlock its own merge" is the shape of the thing #519
+ * guards. It cannot: share_result only appends an item and stamps the caller's own
+ * `resultItemId`, which by itself REFUSES the merge. The stamp that permits one —
+ * `resultApprovedAt` — is written on exactly one line, in answerStored, reached only
+ * from the human pressing a key in the panel. Approving is answering a question.
  */
 
 const { execFile } = require('child_process');
@@ -48,6 +68,7 @@ const { resolveBinary } = require('../../bin-path');
 const inbox = require('./inbox');
 const dialogParse = require('./dialog-parse');
 const backlog = require('./backlog');
+const images = require('./images');
 
 // Stashed by init() and shared with registerRoutes(), the mods/scheduled-tasks and
 // mods/project-mods pattern: mcp-server.js always calls init() first, and both halves
@@ -311,6 +332,11 @@ function cleanLabel(raw) {
 function pendingPathFor(item) {
   if (inbox.hasWait(item.id)) return 'held';
   if (item.sessionId && ctx.shells.has(item.sessionId)) return 'prompt';
+  // A result outlives its session by design (it is exempt from the dead-session sweep),
+  // so an open one with nowhere to deliver is a NORMAL end state, not a broken row — and
+  // the panel has to say so before the human clicks Approve rather than after. Scoped to
+  // results: for a question this state resolves itself when the sweep dismisses the row.
+  if (item.kind === 'result' && item.status === 'open') return 'gone';
   return null;
 }
 
@@ -556,6 +582,77 @@ function answerPrompt(item) {
   return `[Workshop] Re: ${answerSubject(item)}\n\n${formatAnswer(item.answer)}`;
 }
 
+// ── results (#669) ───────────────────────────────────────────────────────────
+
+/**
+ * True only for the Approve option, by INDEX.
+ *
+ * By index and never by label, because the index is what inbox.js mints and what
+ * applyAnswer validates against the minted list. Matching on the label would put a
+ * string an agent could influence between "the human clicked the first button" and
+ * "the merge is unlocked".
+ *
+ * Text with no option picked is therefore NOT an approval. A human who types a reaction
+ * and hits Enter has said something about the work, which is a request for changes at
+ * worst and ambiguous at best — and the ambiguous case must never be the one that
+ * unlocks a merge.
+ */
+function isApproval(item) {
+  return !!(item && item.answer && item.answer.optionIndex === inbox.APPROVE_INDEX);
+}
+
+/**
+ * The prompt a decision delivers into the session.
+ *
+ * Distinct from answerPrompt() because a result's answer is an instruction, not a reply:
+ * the agent's next move differs completely between the two, and "Approve" on its own
+ * line does not say which.
+ */
+function resultPrompt(item) {
+  const note = (item.answer && item.answer.text) || '';
+  if (isApproval(item)) {
+    return `[Workshop] Result #${item.seq} approved.${note ? `\n\n${note}` : ''}\n\n`
+      + 'Call mcp__deepsteve__issue_complete now to find out whether to merge.';
+  }
+  return `[Workshop] Changes requested on result #${item.seq}.${note ? `\n\n${note}` : ''}\n\n`
+    + 'Address this, then call share_result again with what changed. issue_complete will '
+    + 'refuse until a result is approved.';
+}
+
+/**
+ * Record a decision on the caller's live shell entry, the way the issue picker stamps
+ * `autopilot` (server.js) — issue_complete reads both at completion time.
+ *
+ * Only ever called with a decision the human made. `resultApprovedAt` is the single
+ * field that unlocks a merge, and this is the only function that sets it.
+ *
+ * A rejection clears BOTH, so the agent is back to "share a result first": the result it
+ * shared no longer stands, and leaving `resultItemId` set would park it on a decision
+ * that has already been made.
+ */
+function stampResultDecision(sessionId, approved) {
+  const entry = sessionId ? ctx.shells.get(sessionId) : null;
+  if (!entry) return false;
+  if (approved) {
+    entry.resultApprovedAt = Date.now();
+  } else {
+    entry.resultItemId = null;
+    entry.resultApprovedAt = null;
+  }
+  if (ctx.saveState) ctx.saveState();
+  return true;
+}
+
+/**
+ * The list row's one-line subject. A result has no `headline` argument of its own — the
+ * schema is prose — so the first non-empty line of the summary becomes one, and
+ * itemSubject() in the panel keeps working with no knowledge of results at all.
+ */
+function resultHeadline(summary) {
+  const lines = String(summary || '').split('\n').map((l) => l.trim()).filter(Boolean);
+  return lines.length ? lines[0].slice(0, 200) : 'Result';
+}
+
 // ── MCP tools ────────────────────────────────────────────────────────────────
 
 function init(context) {
@@ -650,14 +747,94 @@ function init(context) {
       },
     },
 
+    share_result: {
+      description:
+        'Post the writeup that justifies the work you just did, and park until a human has '
+        + 'read it. This is an APPROVAL GATE, not a status update: when workflow stages are '
+        + 'enabled, issue_complete will refuse to tell you to merge until a result you shared '
+        + 'has been approved. Returns IMMEDIATELY — end your turn; the decision arrives as a '
+        + 'new message in this session. Approve means "call issue_complete now"; a request for '
+        + 'changes brings the reviewer\'s words back to you, and you fix them and share again. '
+        + 'Write `summary` for a person who has not read your diff and will not open your tab: '
+        + 'what changed and WHY THIS SHAPE, not a changelog. Attach `images` whenever a picture '
+        + 'is the evidence — a UI change reviewed from prose is not reviewed. You never identify '
+        + 'yourself: session, project and worktree are attached automatically.',
+      schema: {
+        summary: z.string().describe('What you changed and why this shape, in prose. The justification, not a changelog. The first line becomes the inbox subject, so lead with the point.'),
+        before: z.string().optional().describe('The observable behaviour before your change — what the reviewer would have seen. Text, or the reference of an image you also pass in `images`.'),
+        after: z.string().optional().describe('The same thing after it. The pair is what makes the change judgeable without running it.'),
+        images: z.array(z.string()).max(images.MAX_IMAGES).optional().describe(
+          `Evidence, by reference: a screenshot id from screenshot_capture / list_screenshots, or a path to an image file inside this session's project. Max ${images.MAX_IMAGES}. Never a data URL or base64 — pass the id or the path and the file is copied into the record for you.`,
+        ),
+        caveats: z.string().optional().describe('What this does NOT cover: what you left out, what you could not test, what should be watched after it ships. Say "none" rather than omitting it if you genuinely believe there are none.'),
+      },
+      handler: async (args, extra) => {
+        if (inbox.openCount() >= inbox.MAX_OPEN) {
+          return text(
+            `The Workshop inbox already has ${inbox.MAX_OPEN} unanswered items, so this result `
+            + 'was not added. Something is posting items nobody is answering — stop and tell '
+            + 'the user rather than retrying.',
+          );
+        }
+
+        const fields = callerFields(extra);
+        const item = inbox.add({
+          kind: 'result',
+          ...fields,
+          headline: resultHeadline(args.summary),
+          context: args.summary,
+          before: args.before,
+          after: args.after,
+          caveats: args.caveats,
+        });
+
+        // After add(), because the files are named for the item. sweepOrphans then runs
+        // against the post-retention list, which is what collects the images of any
+        // result this insert just evicted.
+        const entry = item.sessionId ? ctx.shells.get(item.sessionId) : null;
+        const ingested = images.ingest(item, args.images, { entry, ctx });
+        item.images = ingested.images;
+        images.sweepOrphans(inbox.all());
+        inbox.save();
+
+        // The stamp that makes issue_complete say "you shared one, it is awaiting review".
+        // On its own it REFUSES the merge — only the human's Approve adds resultApprovedAt.
+        if (entry) {
+          entry.resultItemId = item.id;
+          entry.resultApprovedAt = null;
+          if (ctx.saveState) ctx.saveState();
+        }
+
+        ctx.log(
+          `[workshop] result ${item.id} session=${item.sessionId || '?'} `
+          + `images=${item.images.length} skipped=${ingested.skipped.length}`,
+        );
+
+        // Named, never swallowed: an agent that believes it attached a screenshot and
+        // silently did not will write its next result exactly the same way.
+        const skipNote = ingested.skipped.length
+          ? '\n\nNot attached: '
+            + ingested.skipped.map((s) => `${s.ref} (${s.reason})`).join('; ')
+            + '.'
+          : '';
+
+        return text(
+          `Result #${item.seq} is on the Workshop inbox awaiting review. End your turn now — `
+          + 'the decision will arrive as a new message. Do not call issue_complete until this '
+          + `is approved, and do not merge or close this session.${skipNote}`,
+        );
+      },
+    },
+
     workshop_check: {
       description:
-        'Check whether a Workshop question has been answered yet, by the ticket number '
-        + 'workshop_ask returned. Only needed if you chose to keep working instead of ending '
-        + 'your turn; the normal path is to end your turn and let the answer arrive as a new '
-        + 'message. Returns the answer if one is in, otherwise says it is still open.',
+        'Check whether a Workshop question or result has been decided yet, by the ticket '
+        + 'number workshop_ask or share_result returned. Only needed if you chose to keep '
+        + 'working instead of ending your turn; the normal path is to end your turn and let '
+        + 'the answer arrive as a new message. Returns the answer if one is in, otherwise says '
+        + 'it is still open.',
       schema: {
-        ticket: z.string().describe('The ticket workshop_ask returned, e.g. "12" or "#12".'),
+        ticket: z.string().describe('The ticket workshop_ask or share_result returned, e.g. "12" or "#12".'),
       },
       handler: async ({ ticket }) => {
         const id = inbox.normalizeTicket(ticket);
@@ -666,14 +843,28 @@ function init(context) {
         }
         const item = inbox.byId(id);
         if (!item) return text(`There is no Workshop item ${id}.`);
+        const isResult = item.kind === 'result';
+
         if (item.status === 'dismissed') {
-          return text(`#${item.seq} was archived without an answer${item.dismissedReason ? ` (${item.dismissedReason})` : ''}. Do not wait on it.`);
+          const why = item.dismissedReason ? ` (${item.dismissedReason})` : '';
+          return text(isResult
+            ? `Result #${item.seq} was archived without a decision${why}, so it does not count `
+              + 'as approved. Share a fresh result if you still need to complete.'
+            : `#${item.seq} was archived without an answer${why}. Do not wait on it.`);
         }
         if (item.status !== 'answered') {
-          return text(
-            `#${item.seq} is still open. Rather than checking again, end your turn — the answer `
-            + 'will arrive as a new message in this session when the human gets to it.',
-          );
+          return text(isResult
+            ? `Result #${item.seq} is still awaiting review. Rather than checking again, end your `
+              + 'turn — the decision will arrive as a new message when the human gets to it.'
+            : `#${item.seq} is still open. Rather than checking again, end your turn — the answer `
+              + 'will arrive as a new message in this session when the human gets to it.');
+        }
+        if (isResult) {
+          const note = (item.answer && item.answer.text) ? `\n\n${item.answer.text}` : '';
+          return text(isApproval(item)
+            ? `Result #${item.seq} was APPROVED.${note}\n\nCall issue_complete now.`
+            : `Result #${item.seq} was returned for CHANGES.${note}\n\nAddress it and call `
+              + 'share_result again.');
         }
         return text(`Answer to #${item.seq}: ${formatAnswer(item.answer)}`);
       },
@@ -717,12 +908,19 @@ function registerRoutes(app, context) {
     if (blockedSession) return dismissBlocked(res, blockedSession, req.body || {});
     const item = inbox.byId(req.params.id);
     if (!item) return res.status(404).json({ error: 'not-found' });
+    const wasOpenResult = item.kind === 'result' && item.status === 'open';
     const status = inbox.applyDismiss(item, (req.body && req.body.reason) || 'archived');
     if (status !== 'ok') {
       return res.status(409).json({ error: status, item: serializeStored(item) });
     }
+    // Archiving an open result un-parks its agent. Without this the session sits at
+    // "you shared #N and it is awaiting review" for a review that has been thrown away —
+    // the one state issue_complete has no way out of. Not an approval: stampResultDecision
+    // with `false` clears both fields, so the agent is back to "share a result first".
+    if (wasOpenResult) stampResultDecision(item.sessionId, false);
     inbox.save();
-    ctx.log(`[workshop] dismiss ${item.id} reason=${item.dismissedReason}`);
+    ctx.log(`[workshop] dismiss ${item.id} reason=${item.dismissedReason}`
+      + (wasOpenResult ? ' unparked=yes' : ''));
     res.json({ item: serializeStored(item) });
   });
 
@@ -796,6 +994,16 @@ function registerRoutes(app, context) {
     res.json({ project, labels: result.labels || [], error: result.error || null });
   });
 
+  // A result's evidence (#669). Serves ONLY out of the Workshop image store, and only
+  // names that store itself produced — every question about where the bytes came from
+  // was settled at ingest time in images.js. Behind security.authGate like every mod
+  // route.
+  app.get('/api/workshop/images/:file', (req, res) => {
+    const full = images.servePath(req.params.file);
+    if (!full) return res.status(404).end();
+    res.sendFile(full);
+  });
+
   app.get('/api/workshop/items/:id/screen', async (req, res) => {
     const stored = inbox.byId(req.params.id);
     const sessionId = inbox.parseBlockedId(req.params.id) || (stored && stored.sessionId);
@@ -818,6 +1026,12 @@ function answerStored(res, id, body) {
       .json({ error: status, item: serializeStored(item) });
   }
 
+  const isResult = item.kind === 'result';
+  // The ONE line in this file that can unlock a merge, and it is downstream of a human
+  // pressing a key in the panel. Stamped before delivery so an agent that is somehow
+  // already mid-turn cannot read a stale entry after the prompt lands.
+  const stamped = isResult ? stampResultDecision(item.sessionId, isApproval(item)) : false;
+
   // Path 1 BEFORE path 2, and only after applyAnswer, so a concurrent workshop_check
   // can never observe "answered, but no answer".
   let via;
@@ -826,7 +1040,7 @@ function answerStored(res, id, body) {
   } else if (item.sessionId && ctx.shells.has(item.sessionId)) {
     // The FIFO, never submitToShell and never e.pendingDelivery directly — the queue
     // is what sequences this behind anything already staged for the session.
-    ctx.deliverPromptWhenReady(item.sessionId, answerPrompt(item), {
+    ctx.deliverPromptWhenReady(item.sessionId, isResult ? resultPrompt(item) : answerPrompt(item), {
       source: 'workshop',
       skipIf: (sid) => !ctx.shells.has(sid),
       skipReason: 'session gone before the Workshop answer could be delivered',
@@ -846,9 +1060,18 @@ function answerStored(res, id, body) {
   ctx.log(
     `[workshop] answer ${item.id} via=${via} option=${opt} `
     + `${item.answer.optionLabel ? JSON.stringify(item.answer.optionLabel) : ''} `
-    + `text=${item.answer.text.length}ch`,
+    + `text=${item.answer.text.length}ch`
+    + (isResult ? ` decision=${isApproval(item) ? 'approved' : 'changes'} stamped=${stamped ? 'yes' : 'no'}` : ''),
   );
-  res.json({ item: serializeStored(item), deliveredVia: via });
+
+  // A result whose session has gone is a decision worth RECORDING and impossible to
+  // deliver — the record is the whole point of the kind, so it is written either way and
+  // the panel is told plainly that the agent was never informed. Nothing was written to
+  // any PTY on this path; `via` already says undelivered.
+  const note = (isResult && !stamped)
+    ? 'Recorded. That session is gone, so the agent was not told — nothing was typed anywhere.'
+    : undefined;
+  res.json({ item: serializeStored(item), deliveredVia: via, ...(note ? { note } : {}) });
 }
 
 async function answerBlocked(res, sessionId, body) {
