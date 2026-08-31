@@ -686,6 +686,16 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
 .session-error-banner-dismiss { padding: 2px 10px; font-size: 12px; font-family: inherit; color: var(--ds-text-secondary); background: var(--ds-bg-primary); border: 1px solid var(--ds-border); border-radius: 4px; cursor: pointer; flex-shrink: 0; }
 .session-error-banner-dismiss:hover { color: var(--ds-text-primary); border-color: var(--ds-accent-red); }
 
+/* Auth-lost banner (#676): every API call is coming back 401/403/429, so the tab
+   is not authenticated and nothing in it works. Same geometry as the three
+   banners above and the highest z-index of the four, because it outranks all of
+   them — a "reconnecting…" or "starting session…" message is noise next to it.
+   Not dismissible: there is nothing to go back to until the page reloads. */
+.auth-banner { position: fixed; top: 12px; left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 12px; max-width: min(720px, calc(100vw - 32px)); padding: 8px 16px; background: var(--ds-bg-secondary); border: 1px solid var(--ds-accent-red); border-radius: 6px; box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35); color: var(--ds-text-primary); font-size: 13px; font-family: monospace; z-index: 2602; }
+.auth-banner-label { overflow-wrap: anywhere; }
+.auth-banner-reload { padding: 2px 10px; font-size: 12px; font-family: inherit; color: var(--ds-text-primary); background: var(--ds-bg-primary); border: 1px solid var(--ds-accent-red); border-radius: 4px; cursor: pointer; flex-shrink: 0; }
+.auth-banner-reload:hover { background: var(--ds-bg-tertiary); }
+
 /* Top-of-page progress bar (automation prefill) */
 #ds-progress-bar { position: fixed; top: 0; left: 0; width: 100%; height: 3px; z-index: 10000; pointer-events: none; opacity: 0; transition: opacity 0.4s ease; }
 #ds-progress-bar.active { opacity: 1; }

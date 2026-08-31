@@ -25,10 +25,11 @@
  *  - window JS errors ('error' events)
  *  - unhandled promise rejections
  *  - any same-origin /api/* or /mcp fetch that throws or returns >= 400
- *  - and, on 401/429, triggers the auth heal (see auth-heal.js)
+ *  - and reports every /api status to auth-heal.js, which heals a 401/429 and publishes
+ *    the verdict for the UI (see auth-heal.js)
  */
 
-import { maybeHealAuth } from './auth-heal.js';
+import { noteAuthStatus } from './auth-heal.js';
 
 const MAX_QUEUE = 100;   // ring cap — beyond this, count drops instead of growing
 const MAX_BATCH = 20;    // entries per WS message
@@ -118,7 +119,7 @@ export function attachClientLogSender(socketGetter, id) {
  * Wrap one realm's fetch so its failing /api/* and /mcp calls are beaconed, and a 401/429
  * triggers the auth heal.
  *
- * `win` may be a child iframe's contentWindow. It is deliberately the PARENT's maybeHealAuth that
+ * `win` may be a child iframe's contentWindow. It is deliberately the PARENT's auth-heal that
  * runs for a child realm: the heal's one-shot guard is a sessionStorage key namespaced by iframe
  * depth, and its in-flight/cooldown state is module-local, so a per-iframe copy would give every
  * frame its own guard and its own idea of whether a reload is already pending. One shell-realm
@@ -168,9 +169,13 @@ export function wrapRealmFetch(win, realm) {
       // /api/proxy is excluded because it passes the UPSTREAM status through: a remote site the
       // Baby Browser is showing can answer 401, and that says nothing about our cookie. Still worth
       // beaconing, never worth probing for.
-      if ((res.status === 401 || res.status === 429) && !apiPath.startsWith('/api/proxy')) {
-        maybeHealAuth();
-      }
+      //
+      // noteAuthStatus rather than maybeHealAuth (#676): it still triggers the heal for a
+      // 401/429, and additionally records the VERDICT — so a cookie that stays bad past the
+      // heal's cooldown reaches onAuthLost subscribers (the page banner, the mod panels)
+      // instead of leaving every caller to swallow its own 401 in silence. It is fed every
+      // status, not only the failures, because only a success can clear that state again.
+      if (!apiPath.startsWith('/api/proxy')) noteAuthStatus(res.status);
       return res;
     }, (err) => {
       record('fetch-network', `${method} ${apiPath} — ${err && err.message ? err.message : err}`, realm);

@@ -13,6 +13,8 @@ initClientLog();
 // before the first socket is asked for, which is initLiveReload() far below.
 initWsTrace();
 
+import { fetchJSON, authMessage } from './api.js';
+import { onAuthLost, isAuthLost, forcePageReload } from './auth-heal.js';
 import { SessionStore } from './session-store.js';
 import { SessionStores, getTabSessions } from './session-stores.js';
 import { WindowManager } from './window-manager.js';
@@ -59,7 +61,7 @@ let activeId = null;
 // Cached automations for the new-tab dropdown (refreshed on load + modal close)
 let cachedAutomations = [];
 function refreshAutomationsCache() {
-  fetch('/api/automations').then(r => r.json()).then(data => {
+  fetchJSON('/api/automations').then(data => {
     cachedAutomations = data.automations || [];
     refreshAutomationsDropdown();
   }).catch(() => {});
@@ -327,7 +329,7 @@ function applySettings(settings) {
   // Enabled agents + custom config profiles (#537) aren't in the broadcast payload
   // (broadcast:false), so re-fetch /api/agents to pick up changes made in another window
   // and keep the pickers + badge mapping current. (`which` probes are fast.)
-  fetch('/api/agents').then(r => r.json()).then(data => {
+  fetchJSON('/api/agents').then(data => {
     window.__deepsteveAgents = data.agents || [];
     const stillExists = window.__deepsteveAgents.some(a => a.id === window.__deepsteveDefaultAgent);
     if (!stillExists) window.__deepsteveDefaultAgent = data.defaultAgent || 'claude';
@@ -826,18 +828,30 @@ function showAutoCycleToast({ name, seconds = 5, onExpire, onCancel } = {}) {
 }
 
 settingsBtn?.addEventListener('click', async () => {
-  const [settingsData, themesData, versionData, defaultsData, enginesData, agentsData] = await Promise.all([
-    fetch('/api/settings').then(r => r.json()),
-    fetch('/api/themes').then(r => r.json()),
-    fetch('/api/version').then(r => r.json()).catch(() => ({ current: '?', latest: null, updateAvailable: false })),
-    fetch('/api/settings/defaults').then(r => r.json()).catch(() => ({})),
-    fetch('/api/engines').then(r => r.json()).catch(() => ({ engines: [], current: null })),
-    // Fetched here rather than read off the page-load cache (#622): the agent rows are
-    // now generated from this, so a failed init fetch would render an empty section —
-    // and Settings is exactly where you land after installing an agent, so a fresh
-    // availability probe beats a snapshot taken when the page loaded.
-    fetch('/api/agents').then(r => r.json()).catch(() => null),
-  ]);
+  // /api/settings and /api/themes have no fallback on purpose — a Settings modal
+  // rendered from guessed values would offer to SAVE them over the real ones. So
+  // their failure aborts the open, loudly (#676). Before, they had no .catch at
+  // all: a 401 rejected the whole await and the modal silently never appeared.
+  let settingsData, themesData, versionData, defaultsData, enginesData, agentsData;
+  try {
+    [settingsData, themesData, versionData, defaultsData, enginesData, agentsData] = await Promise.all([
+      fetchJSON('/api/settings'),
+      fetchJSON('/api/themes'),
+      fetchJSON('/api/version').catch(() => ({ current: '?', latest: null, updateAvailable: false })),
+      fetchJSON('/api/settings/defaults').catch(() => ({})),
+      fetchJSON('/api/engines').catch(() => ({ engines: [], current: null })),
+      // Fetched here rather than read off the page-load cache (#622): the agent rows are
+      // now generated from this, so a failed init fetch would render an empty section —
+      // and Settings is exactly where you land after installing an agent, so a fresh
+      // availability probe beats a snapshot taken when the page loaded.
+      fetchJSON('/api/agents').catch(() => null),
+    ]);
+  } catch (e) {
+    // An auth failure already put the page-level banner up; anything else needs
+    // its own word, or the button reads as dead.
+    if (!isAuthLost()) showToast(`Couldn’t open Settings — ${e.message}`);
+    return;
+  }
   const currentProfile = settingsData.shellProfile || '~/.zshrc';
   const currentMaxTitle = settingsData.maxIssueTitleLength || 25;
   const currentWandPlanMode = settingsData.wandPlanMode !== undefined ? settingsData.wandPlanMode : true;
@@ -2193,11 +2207,17 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
 const pendingCreates = new Set();
 let pendingBannerEl = null;
 
+// The reconnect banner (#556) sits in the same spot as the pending-create
+// banner and the auth banner (#676), and says less than either, so it yields to
+// both. Two independent writers of one boolean is last-writer-wins, so every
+// setSuppressed call goes through here and reads both conditions.
+function syncBannerSuppression() {
+  ConnectionStatus.setSuppressed(pendingCreates.size > 0 || !!isAuthLost());
+}
+
 function updatePendingBanner() {
-  // The reconnect banner (#556) sits in the same spot and says less — while a
-  // pending create is on screen, it yields. Every add/settle/cancel funnels
-  // through here, so this is the single suppression choke point.
-  ConnectionStatus.setSuppressed(pendingCreates.size > 0);
+  // Every add/settle/cancel funnels through here.
+  syncBannerSuppression();
   if (pendingCreates.size === 0) {
     if (pendingBannerEl) { pendingBannerEl.remove(); pendingBannerEl = null; }
     return;
@@ -2328,6 +2348,53 @@ const ConnectionStatus = createConnectionTracker({
   setTabIndicator: (tabId, on) => TabManager.updateReconnecting(tabId, on),
   renderBanner: renderReconnectBanner,
 });
+
+/**
+ * Auth-lost banner (#676). A tab whose ds_auth cookie has gone stale gets a 401
+ * on every request, and until now said nothing: each caller swallowed its own
+ * failure and the pollers kept hammering. api.js's fetch watch reports the
+ * status, auth-heal decides what it means, and this renders the one thing the
+ * user can act on.
+ *
+ * Not dismissible and not a toast: nothing in the tab works until it is fixed.
+ * auth-heal already attempts one silent reload per minute; this is what shows
+ * when that reload did not take (or is on cooldown), plus the button to do it
+ * by hand. forcePageReload, not location.reload() — Firefox blocks the latter
+ * while a beforeunload handler is registered, and app.js registers one.
+ */
+let authBannerEl = null;
+
+function renderAuthBanner(status) {
+  if (!status) {
+    if (authBannerEl) { authBannerEl.remove(); authBannerEl = null; }
+    // The socket comes back with the cookie; hand the spot back to #556.
+    syncBannerSuppression();
+    return;
+  }
+  // A "Connection lost — reconnecting…" banner in the same spot would be both
+  // wrong (the server is up) and useless (it never will reconnect).
+  syncBannerSuppression();
+  if (!authBannerEl) {
+    authBannerEl = document.createElement('div');
+    authBannerEl.className = 'auth-banner';
+    const label = document.createElement('span');
+    label.className = 'auth-banner-label';
+    authBannerEl.appendChild(label);
+    // A 403 is a Host/Origin misconfiguration; reloading cannot fix it, so the
+    // button only appears for the statuses where it is the actual remedy.
+    if (status !== 403) {
+      const btn = document.createElement('button');
+      btn.className = 'auth-banner-reload';
+      btn.textContent = 'Reload';
+      btn.addEventListener('click', () => forcePageReload());
+      authBannerEl.appendChild(btn);
+    }
+    document.body.appendChild(authBannerEl);
+  }
+  authBannerEl.querySelector('.auth-banner-label').textContent = authMessage(status);
+}
+
+onAuthLost(renderAuthBanner);
 
 /**
  * Show a loading banner at the top of a terminal container.
@@ -4382,7 +4449,11 @@ async function showIssuePicker() {
   let issueObserver = null;  // infinite-scroll IntersectionObserver; hoisted so teardown is centralized here
   new MutationObserver((_, obs) => { if (!overlay.parentNode) { document.removeEventListener('keydown', onEscIssuePicker); issueObserver?.disconnect(); obs.disconnect(); } }).observe(document.body, { childList: true });
 
-  let issues, wandPlanMode, hasMore;
+  // wandPlanMode defaults here rather than in fetchAndRender: /api/settings is
+  // allowed to fail without taking the picker down (#676), and Start still has
+  // to send something.
+  let issues, hasMore;
+  let wandPlanMode = true;
   let selectedIssue = null;
   let currentPage = 1;
   let loadingMore = false;
@@ -4499,15 +4570,18 @@ async function showIssuePicker() {
     issueObserver?.disconnect();
     issueObserver = null;
     try {
-      const [issuesRes, settingsData] = await Promise.all([
-        fetch('/api/issues?cwd=' + encodeURIComponent(gitRoot)),
-        fetch('/api/settings').then(r => r.json())
+      // Settings is ancillary — it supplies two defaults the picker already
+      // has. Before #676 its failure rejected the whole Promise.all, so a 401
+      // on /api/settings blanked an issue list that had loaded fine; and since
+      // it was parsed with no res.ok check, what surfaced was the JSON.parse
+      // error from authGate's text/plain "Unauthorized" body, not a reason.
+      const [issuesData, settingsData] = await Promise.all([
+        fetchJSON('/api/issues?cwd=' + encodeURIComponent(gitRoot)),
+        fetchJSON('/api/settings').catch(() => ({}))
       ]);
-      if (!issuesRes.ok) throw new Error((await issuesRes.json()).error || 'Failed to fetch issues');
-      const issuesData = await issuesRes.json();
       issues = issuesData.issues;
       hasMore = issuesData.hasMore;
-      wandPlanMode = settingsData.wandPlanMode !== undefined ? settingsData.wandPlanMode : true;
+      if (settingsData.wandPlanMode !== undefined) wandPlanMode = settingsData.wandPlanMode;
       if (settingsData.maxIssueTitleLength) maxIssueTitleLength = settingsData.maxIssueTitleLength;
 
       // Modal may have been dismissed while loading
@@ -4548,12 +4622,23 @@ async function showIssuePicker() {
       if (!overlay.parentNode) return;
       const list = overlay.querySelector('.issue-list');
       if (list) {
+        // On an auth failure, retrying in place can never succeed — the cookie
+        // is what is wrong, and only a full page load re-issues it. So the
+        // button becomes a reload instead of a retry (#676), and for a 403
+        // (Host/Origin misconfig, which a reload does not fix either) there is
+        // no button at all rather than one that lies about what it will do.
+        const canReload = e.status === 401 || e.status === 429;
+        const button = e.status === 403
+          ? ''
+          : `<button class="issue-retry" id="issue-retry">${canReload ? 'Reload' : 'Retry'}</button>`;
         list.outerHTML = `
           <div class="issue-error">
             <div class="issue-error-message">${escapeHtml(e.message)}</div>
-            <button class="issue-retry" id="issue-retry">Retry</button>
+            ${button}
           </div>`;
-        overlay.querySelector('#issue-retry').onclick = () => {
+        const retryBtn = overlay.querySelector('#issue-retry');
+        if (retryBtn) retryBtn.onclick = () => {
+          if (canReload) { forcePageReload(); return; }
           const errorDiv = overlay.querySelector('.issue-error');
           if (errorDiv) {
             errorDiv.outerHTML = '<div class="issue-list"><div class="issue-loading"><span class="issue-loading-text">Loading issues…</span></div></div>';
@@ -4588,11 +4673,11 @@ async function showIssuePicker() {
   });
 
   // Populate repo dropdown asynchronously
-  fetch('/api/git-roots', {
+  fetchJSON('/api/git-roots', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ paths: allCwds })
-  }).then(r => r.json()).then(data => {
+  }).then(data => {
     if (!overlay.parentNode || !data.roots || data.roots.length <= 1) return;
     repoSelect.innerHTML = data.roots.map(r =>
       `<option value="${escapeHtml(r.root)}"${r.root === gitRoot ? ' selected' : ''}>${escapeHtml(r.name)}</option>`
@@ -4631,12 +4716,12 @@ async function init() {
   const isExistingTab = WindowManager.hasExistingWindowId();
 
   // Cache available agents and default agent setting for new-tab menu and settings
-  fetch('/api/agents').then(r => r.json()).then(data => {
+  fetchJSON('/api/agents').then(data => {
     window.__deepsteveAgents = data.agents || [];
     window.__deepsteveDefaultAgent = data.defaultAgent || 'claude';
     initEnginesDropdown();
   }).catch(() => {});
-  fetch('/api/settings').then(r => r.json()).then(s => { window.__deepsteveDefaultAgent = s.defaultAgent || 'claude'; }).catch(() => {});
+  fetchJSON('/api/settings').then(s => { window.__deepsteveDefaultAgent = s.defaultAgent || 'claude'; }).catch(() => {});
   refreshAutomationsCache();
 
   // Initialize layout manager

@@ -793,6 +793,10 @@ function ChatPane({ sessionId, sessionName, pollMs, composerRef, onStateChange }
       try {
         const since = cursorRef.current ? `?since=${encodeURIComponent(cursorRef.current)}` : '';
         const r = await fetch(`/api/workshop/chat/${encodeURIComponent(sessionId)}${since}`, { cache: 'no-store' });
+        // Stop, don't re-arm (#676): a rejected cookie is permanent until the page
+        // reloads. The panel-level auth strip is what says so — this loop only has
+        // to stop feeding authGate's failure limiter.
+        if (isAuthStatus(r.status)) { if (!cancelled) setLoading(false); return; }
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         const data = await r.json();
         // A response that lost the race to a newer one — or to the POST that just ran —
@@ -988,12 +992,20 @@ function setDraftFor(sessionId, value) {
   } catch { /* private mode — a lost draft is not worth a crash */ }
 }
 
+// The statuses that mean "this page's ds_auth cookie is no good" — the same set
+// public/js/api.js uses host-side. A mod runs in its own iframe with its own
+// module graph, so this is a deliberate one-line copy rather than an import.
+const isAuthStatus = (s) => s === 401 || s === 403 || s === 429;
+
 function Workshop() {
   const [bridgeReady, setBridgeReady] = useState(() => !!window.deepsteve);
   const [settings, setSettings] = useState(DEFAULTS);
   const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  // 0, or the status that condemned this page's ds_auth cookie (#676). Distinct
+  // from `error`, which is transient and dismissible; this one ends the poll.
+  const [authLost, setAuthLost] = useState(0);
   const [selectedId, setSelectedId] = useState(null);
   const [picked, setPicked] = useState(null);
   const [draft, setDraft] = useState('');
@@ -1118,6 +1130,15 @@ function Workshop() {
       if (!sendingRef.current) {
         try {
           const r = await fetch('/api/workshop/inbox', { cache: 'no-store' });
+          // An auth rejection is not a hiccup and will not clear on its own: the
+          // page's cookie is stale and only a full load re-issues it. Stop the
+          // loop dead (#676) — re-arming at 2s is 30 rejected requests a minute
+          // forever, and each one calls recordFailure() in authGate, walking the
+          // tab into its 429 lockout.
+          if (isAuthStatus(r.status)) {
+            if (!cancelled) { setAuthLost(r.status); setLoading(false); }
+            return;
+          }
           if (!r.ok) throw new Error(`HTTP ${r.status}`);
           const data = await r.json();
           if (cancelled) return;
@@ -1156,6 +1177,8 @@ function Workshop() {
         const q = new URLSearchParams({ label: issueLabel, maxAgeMs: String(backlogMs) });
         if (activeSessionId) q.set('session', activeSessionId);
         const r = await fetch(`/api/workshop/backlog?${q}`, { cache: 'no-store' });
+        // Same stop as the inbox loop (#676) — the auth strip above speaks for all three.
+        if (isAuthStatus(r.status)) { if (!cancelled) setAuthLost(r.status); return; }
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         const data = await r.json();
         if (cancelled) return;
@@ -1261,6 +1284,12 @@ function Workshop() {
       if (cancelled) return;
       try {
         const r = await fetch(`/api/workshop/items/${encodeURIComponent(id)}/screen`, { cache: 'no-store' });
+        // Same stop as the inbox loop (#676): a rejected cookie is permanent
+        // until the page reloads, so re-arming only feeds authGate's limiter.
+        if (isAuthStatus(r.status)) {
+          if (!cancelled) setAuthLost(r.status);
+          return;
+        }
         if (r.ok) {
           const d = await r.json();
           if (!cancelled) setScreen({ id, lines: d.lines || [] });
@@ -1567,6 +1596,38 @@ function Workshop() {
         outline: 'none', background: C.bg,
       }}
     >
+      {/* Auth strip (#676): both polls have stopped and nothing here will update
+          again until the page reloads, so this outranks the status strip below and
+          is not dismissible. Reload targets window.top, not this frame — the panel
+          is an iframe, and only a top-level HTML GET re-issues the ds_auth cookie.
+          No button for a 403: that is a Host/Origin misconfiguration on the server
+          side, and a reload does not fix it. */}
+      {authLost > 0 && (
+        <div style={{
+          flexShrink: 0,
+          display: 'flex', alignItems: 'center', gap: 10, padding: '7px 14px',
+          background: 'rgba(248,81,73,0.14)',
+          borderBottom: `1px solid ${C.hairline}`,
+          font: `12px ${SANS}`, color: C.red,
+        }}>
+          <span style={{ flex: 1 }}>
+            {authLost === 403
+              ? 'Blocked by the server (403) — this tab is not allowed to call the API.'
+              : 'Session expired — reload the page to sign in again.'}
+          </span>
+          {authLost !== 403 && (
+            <button
+              type="button"
+              onClick={() => { try { window.top.location.reload(); } catch { location.reload(); } }}
+              style={{
+                border: `1px solid ${C.red}`, borderRadius: 4, background: 'transparent',
+                color: C.red, font: `11px ${SANS}`, padding: '2px 8px', cursor: 'pointer',
+              }}
+            >Reload</button>
+          )}
+        </div>
+      )}
+
       {/* Status strip: only when there is something to say. It sits OUTSIDE the grid
           on purpose — as a grid row it made the two panes size to their content
           whenever it was absent, which is most of the time. */}

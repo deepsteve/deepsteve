@@ -29,6 +29,13 @@
  * as a socket failure. The fetch wrapper in client-log.js now calls it too, so
  * any 401/429 heals, whatever raised it. The guards below are what keep that
  * safe: a genuinely unauthorized page reloads once a minute, not in a loop.
+ *
+ * WHAT IT SAYS OUT LOUD (#676): healing silently is right while it works, and
+ * wrong once it doesn't — a tab whose cookie stays bad past the cooldown just
+ * kept failing, with nothing on screen and every fetch's own catch swallowing
+ * the reason. So that wrapper now reports the STATUS here (noteAuthStatus)
+ * rather than only asking for a heal, and this module publishes the verdict via
+ * onAuthLost() for the page-level banner in app.js and the mod panels to render.
  */
 
 import { nsKey } from './storage-namespace.js';
@@ -61,6 +68,57 @@ let lastVerdict = 'unknown';
 export function noteAuthOk() {
   lastVerdict = 'ok';
   try { sessionStorage.removeItem(GUARD_KEY); } catch {}
+  setAuthLost(0);
+}
+
+// ------------------------------------------------------------- auth-lost state
+// `authLostStatus` is 0 when our credentials are known good, else the status
+// that condemned them. Subscribers fire on the TRANSITION only: a 401 storm is
+// hundreds of responses and must not be hundreds of banner renders.
+let authLostStatus = 0;
+const authLostSubs = new Set();
+
+function setAuthLost(status) {
+  if (authLostStatus === status) return;
+  authLostStatus = status;
+  for (const cb of authLostSubs) {
+    try { cb(status); } catch (e) { console.error('[auth-heal] onAuthLost subscriber threw', e); }
+  }
+}
+
+// 0 = credentials fine; otherwise the rejecting status (401/403/429).
+export function isAuthLost() {
+  return authLostStatus;
+}
+
+// Subscribe to the transition. Fires immediately if auth is already lost, so a
+// late subscriber (a mod panel, a modal) doesn't miss the edge. Returns an
+// unsubscribe function.
+export function onAuthLost(cb) {
+  authLostSubs.add(cb);
+  if (authLostStatus) { try { cb(authLostStatus); } catch {} }
+  return () => authLostSubs.delete(cb);
+}
+
+/**
+ * Verdict from an HTTP response's status (api.js's installAuthWatch feeds every
+ * same-origin /api response here). 401/429 are healable, so they get the same
+ * one-reload-per-60s treatment as a rejected WS upgrade; 403 is a Host/Origin
+ * misconfiguration that a reload cannot fix, so it is recorded but never healed.
+ * Anything else that isn't an error status clears the state.
+ */
+export function noteAuthStatus(status) {
+  if (status === 401 || status === 429) {
+    setAuthLost(status);
+    maybeHealAuth();
+    return;
+  }
+  if (status === 403) {
+    setAuthLost(403);
+    return;
+  }
+  // A 5xx or a 404 says nothing about our cookie — only a success does.
+  if (status >= 200 && status < 400) noteAuthOk();
 }
 
 // Force a page reload via <meta http-equiv="refresh"> instead of
