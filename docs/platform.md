@@ -42,6 +42,33 @@ service-definition change is involved). Since #621 the service definition passes
 `DEEPSTEVE_LOG_DIR` explicitly, so the platform table in `paths.js` is only a fallback for
 installs that predate it.
 
+## Cold start: boot marks and browser auto-open (#665)
+
+Three `[startup]` lines, each stamped with `process.uptime()`, split a slow boot into legs
+you can attribute without reconstructing it from `ps -o lstart` afterwards: **first log
+line** (everything before it is exec + dyld + cold page-ins, ~11s on a post-reboot start,
+against a ~30ms warm require graph), **HTTP listening** (deepsteve's own startup), and
+**first browser window connected**. A measured reboot broke down as 39s of launchd
+scheduling at login, 11.4s of page-ins, 3.0s of our startup, and 5.3s of the last leg.
+
+That last leg is the daemon's own doing. When nothing is connected shortly after
+`app.listen`, the daemon opens the UI itself (`openBrowserUrl`), and it holds off first so
+that a browser which *already* has a page loaded can reconnect on its own instead of being
+buried under a phantom second tab. Three things decide how long it waits:
+
+- The wait is skipped entirely on a `./restart.sh` (the `.restarting` flag) and in test mode.
+- `AUTO_OPEN_GRACE_MS` (3s; `DEEPSTEVE_AUTO_OPEN_GRACE_MS`) is the hold-off for the case it
+  actually protects — a crash respawn under `KeepAlive` / `Restart=always`, where a live
+  browser is sitting in `public/js/server-probe.js`'s `/healthz` loop. It must out-wait that
+  loop's worst-case gap between probes (`MAX_DELAY_MS` plus jitter), or the guard loses its
+  own race; when both constants were 5s it did exactly that, by ~300ms. `test/unit/server-probe.test.js`
+  pins the relationship, so raising either one alone fails the build.
+- `AUTO_OPEN_BOOT_WINDOW_S` (300s; `DEEPSTEVE_AUTO_OPEN_BOOT_WINDOW_S`) drops the hold-off to
+  zero when `os.uptime()` says the machine only just booted. No earlier daemon was listening,
+  so the restored tab's navigation was refused and there is no page of ours running to
+  reconnect — the wait is pure dead time on the slowest path we have. A daemon crash inside
+  that window costs at worst one extra tab.
+
 ## Security
 
 DeepSteve is **localhost-first with token authentication** (#536). The server binds to `127.0.0.1` by default (overridable with `--bind`). Every surface — the web UI WebSocket, the MCP HTTP endpoint, and all REST/control endpoints — is guarded *before* application code runs by three checks that live in `security.js`:

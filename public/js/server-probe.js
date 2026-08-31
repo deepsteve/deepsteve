@@ -32,11 +32,23 @@
  * does not imply "our upgrade will be accepted" — call maybeHealAuth() after a gate pass.
  */
 
+import { onWake } from './wake-watch.js';
+
 // Growth starts small so a normal ~2-3s daemon restart is still noticed promptly (probes
-// land at roughly 0, 0.25, 0.6, 1.2, 2.0, 3.3s), while the cap keeps a tab left open
-// against a long-dead server from polling forever.
+// land at roughly 0, 0.25, 0.6, 1.2, 2.0, 3.3s — the first five delays all sit under the
+// cap, so that case is governed by BASE_DELAY_MS and GROWTH alone), while the cap keeps a
+// tab left open against a long-dead server from polling forever.
+//
+// MAX_DELAY_MS is load-bearing in a second, non-obvious place (#665). It is the worst-case
+// gap between two probes, so it bounds how long a *loaded* browser can take to notice the
+// daemon is back — and server.js's AUTO_OPEN_GRACE_MS has to out-wait exactly that, or the
+// daemon pops a tab over a browser that was about to reconnect on its own. At 5s the two
+// were equal and the guard lost its own race by ~300ms. Keep them in step; a unit test
+// (test/unit/server-probe.test.js) pins the relationship. The lower cap costs nothing that
+// matters: one localhost fetch every 1.5s per JS realm while the server is actually down,
+// and concurrent callers still collapse onto one via inFlight.
 const BASE_DELAY_MS = 250;
-const MAX_DELAY_MS = 5_000;
+const MAX_DELAY_MS = 1_500;
 const GROWTH = 1.5;
 const JITTER_FRAC = 0.25;
 
@@ -49,7 +61,30 @@ const JITTER_FRAC = 0.25;
 // inFlight, which is the only sharing that actually matters.
 let inFlight = null;
 
+// Resolvers for every waitForServer() currently sleeping between probes (#665). A wake
+// means the world changed under us — the machine resumed, the network came back, the tab
+// came forward — so cut the sleep short AND drop back to BASE_DELAY_MS rather than
+// resuming a ramp that was measured against the old world. Same contract as ws-client.js's
+// kickWait, which resets wsFailures for the same reason.
+//
+// Note wake-watch's 3s debounce is shared by ALL its subscribers, so a kick landing within
+// 3s of ws-client's own wake is swallowed. That is fine at a 1.5s cap — the loop is never
+// more than one ordinary delay from a fresh probe anyway.
+const waiters = new Set();
+
 export const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+/** Cut every sleeping probe loop short and reset its backoff. */
+export function kickProbes() {
+  for (const kick of [...waiters]) kick();
+}
+
+// Safe at module scope: wake-watch touches document/window only inside its init(), so
+// importing it here keeps server-probe.js importable in plain Node for unit tests.
+// Deliberately NOT guarded on window.__deepsteveReloadPending the way ws-client.js is — a
+// pending reload is precisely the case that wants the fastest possible probe, since
+// live-reload.js's pollAndReload() is the loop waiting on it.
+onWake(kickProbes);
 
 /**
  * ±JITTER_FRAC around ms. Decorrelates separate JS realms — multiple windows and nested
@@ -80,6 +115,25 @@ export function serverUp() {
 }
 
 /**
+ * Interruptible sleep for the backoff between probes. Resolves true if kickProbes() cut it
+ * short, false if the timer simply ran out — which is what tells the caller whether to keep
+ * ramping or start the schedule over. Mirrors ws-client.js's wait()/kickWait pair.
+ */
+function sleepOrKick(ms) {
+  return new Promise((resolve) => {
+    let timer = null;
+    const finish = (kicked) => {
+      clearTimeout(timer);
+      waiters.delete(kick);
+      resolve(kicked);
+    };
+    const kick = () => finish(true);
+    timer = setTimeout(() => finish(false), ms);
+    waiters.add(kick);
+  });
+}
+
+/**
  * Poll until the server answers. Resolves true when it does, or false if shouldStop()
  * goes true first (a closed socket / unloading page). Probes immediately, so the common
  * "server is fine" case costs one localhost fetch (~1-2ms) and no delay.
@@ -90,11 +144,11 @@ export async function waitForServer(shouldStop = () => false) {
     if (shouldStop()) return false;
     if (await serverUp()) return true;
     if (shouldStop()) return false;
-    await sleep(jitter(delay));
-    delay = Math.min(MAX_DELAY_MS, delay * GROWTH);
+    const kicked = await sleepOrKick(jitter(delay));
+    delay = kicked ? BASE_DELAY_MS : Math.min(MAX_DELAY_MS, delay * GROWTH);
   }
 }
 
 // Test seam only — lets unit tests assert the schedule without hard-coding magic numbers.
 export const _config = { BASE_DELAY_MS, MAX_DELAY_MS, GROWTH, JITTER_FRAC };
-export function _reset() { inFlight = null; }
+export function _reset() { inFlight = null; kickProbes(); }

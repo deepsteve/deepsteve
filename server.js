@@ -241,7 +241,7 @@ function traceSession(event, fields) {
 const logRotator = createLogRotator({ targets: defaultLogPaths() });
 logRotator.start();
 
-// --- Cold-start timing ---
+// --- Cold-start timing (#665) ---
 // Three marks — first log line, port open, first browser window — so a slow boot can be
 // attributed without re-deriving it from `ps -o lstart` afterwards.
 //
@@ -6236,18 +6236,35 @@ app.post('/api/meta-controls-consent', (req, res) => {
 reconcileSkills();
 provisionAllProfileSkills(); // #543: link deepsteve skills into every profile's config dir
 
+// How long to hold off before popping a tab of our own (#665). The grace exists for
+// exactly one case: a browser that already has a page of ours loaded is sitting in
+// server-probe.js's /healthz loop and will reconnect on its own — a crash respawn under
+// KeepAlive / Restart=always, since the intentional-restart case is already excluded by
+// the .restarting flag below. It must therefore out-wait that loop's worst-case gap
+// between probes, which is server-probe.js's MAX_DELAY_MS plus its jitter. At 5s the two
+// were equal and this guard lost its own race by ~300ms; keep them in step, and note that
+// test/unit/server-probe.test.js pins the relationship.
+const AUTO_OPEN_GRACE_MS = parseInt(process.env.DEEPSTEVE_AUTO_OPEN_GRACE_MS, 10) || 3000;
+// ...but nothing can be waiting for us right after a machine boot: no earlier daemon was
+// listening, so the restored tab's navigation was refused and there is no page of ours
+// running to reconnect. Waiting is then pure dead time on the slowest path we have —
+// measured at 62.9s from kernel boot to a usable UI, of which this was 5.3s. A daemon
+// crash inside the window costs at worst one extra tab.
+const AUTO_OPEN_BOOT_WINDOW_S = parseInt(process.env.DEEPSTEVE_AUTO_OPEN_BOOT_WINDOW_S, 10) || 300;
+
 const server = app.listen(PORT, BIND, () => {
   log(`HTTP server listening on ${BIND}:${PORT} — UI at ${UI_URL}`);
   bootMark('HTTP listening');
   if (TEST_MODE) {
     log('*** DEEPSTEVE_TEST_MODE: disposable test instance — killall enabled, browser auto-open and auto-update check disabled ***');
   }
-  // Auto-open browser if no clients connect within 5s of startup.
+  // Auto-open browser if no clients connect within the grace period.
   // Skipped on restart: restart.sh writes .restarting before unloading the
   // old daemon, so existing browsers get a chance to silently reconnect
-  // without a phantom new tab racing in. Cold starts (no marker) keep the
-  // original behavior. Also skipped in test mode — a throwaway test daemon
-  // must never pop a tab in (or expose itself to) the developer's browser.
+  // without a phantom new tab racing in. Cold starts (no marker) still open a
+  // tab; how long they wait first is the grace above. Also skipped in test mode
+  // — a throwaway test daemon must never pop a tab in (or expose itself to) the
+  // developer's browser.
   let skipAutoOpen = TEST_MODE;
   try {
     if (fs.existsSync(RESTARTING_FLAG)) {
@@ -6259,13 +6276,14 @@ const server = app.listen(PORT, BIND, () => {
     log(`Failed to check/clear .restarting flag: ${e.message}`);
   }
   if (!skipAutoOpen) {
+    const graceMs = os.uptime() < AUTO_OPEN_BOOT_WINDOW_S ? 0 : AUTO_OPEN_GRACE_MS;
     setTimeout(() => {
       const connected = [...reloadClients].filter(c => c.readyState === 1);
       if (connected.length === 0) {
-        log('No browser connected after startup, opening default browser');
+        log(`No browser connected ${graceMs}ms after startup, opening default browser`);
         openBrowserUrl();
       }
-    }, 5000);
+    }, graceMs);
   }
 
   // Auto-update: load install source and kick off the first check after the

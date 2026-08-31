@@ -197,8 +197,8 @@ export function createWebSocket(options = {}) {
   };
 
   // Interruptible sleep for the loop's backoff: _onWake()/close() resolve it early via
-  // kickWait. (The gate's own waits live inside waitForServer and cap at 5s, so a wake
-  // is never more than 5s from a fresh probe there.)
+  // kickWait. (The gate's own waits live inside waitForServer, which since #665 subscribes
+  // to the same wake signal and kicks itself — so both halves of the loop wake together.)
   function wait(ms) {
     return new Promise((resolve) => {
       const t = setTimeout(done, ms);
