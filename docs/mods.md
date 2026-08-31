@@ -433,6 +433,12 @@ Both `init` and `registerRoutes` receive a context object:
 | `shells` | Map of active shell instances |
 | `wss` | WebSocket server instance |
 | `MODS_DIR` | Absolute path to the `mods/` directory |
+| `transcriptPath` | `transcriptPath(entry)` — where a session's `.jsonl` **would** be, or `null` if it has no `claudeSessionId`. It does not ask whether the agent keeps a transcript at all; a caller that cares must check `getAgentConfig(agentType).supportsSessionWatch` itself. Re-derive it every time — a fork rewrites the transcript id with no event (#670, #672) |
+
+The table is the short list, not the whole object: `initMCP` (`server.js`) hands both
+functions the daemon's full context — `deliverPromptWhenReady`, `sessionPaths`,
+`getSavedSession`, `getAgentConfig`, `pathInside`, `settings`, `screenshots` and ~45 more.
+Read the call site before re-implementing something.
 
 ### Browser-Bridge Pattern
 
@@ -545,14 +551,18 @@ or AskUserQuestion dialog, with the question and options parsed and rendered inl
 **questions, briefings and results agents post deliberately** through `workshop_ask`,
 `workshop_brief`, `share_result` and `workshop_check`. You answer from the inbox instead of
 switching to the tab, and since #669 a finished issue has to be approved here before
-`issue_complete` will say "merge".
+`issue_complete` will say "merge". Approving is a transaction, though, and the reaction to a
+result is usually a question — so since #670 a third column turns any item with a session
+behind it into a conversation. See [The chat pane](#the-chat-pane-670).
 
 Everything lives in `mods/workshop/`. There is no new bridge hook:
 `registerRoutes(app, context)` already hands every mod the full `initMCP` context, and the panel
-polls its own `GET /api/workshop/inbox`. (The [Backlog](#the-backlog-671) added one host change —
-two popup flags on `MOD_SANDBOX` — but that is the shared iframe sandbox, made once for every mod,
-not a Workshop hook. The [workflow stages](#the-workflow-stages-668) added a real one, and the
-[merge gate](#results-and-the-merge-gate-669) three more; see below.)
+polls its own routes. (The [Backlog](#the-backlog-671) added one host change — two popup flags on
+`MOD_SANDBOX` — but that is the shared iframe sandbox, made once for every mod, not a Workshop
+hook. The [workflow stages](#the-workflow-stages-668) added a real one, the
+[merge gate](#results-and-the-merge-gate-669) three more, and the
+[chat pane](#the-chat-pane-670) a fourth — `transcriptPath`, which is server.js's own helper,
+shared with #672, put into the mod context.)
 
 **Workshop is the first [App](#apps-661).** Going to look at an agent is a `visitSession()`, not
 a `focusSession()`, so ⌘← brings you back; and its `onExcursionCycle` handler moves the *same*
@@ -731,6 +741,76 @@ non-image type — it is a script-bearing document, and these render in a same-o
 iframe. `sweepOrphans()` runs on each share and deletes any file no live item names, which
 is what bounds the store when retention evicts an old result.
 
+### The chat pane (#670)
+
+Approve and reject are a transaction. The actual reaction to a piece of work is usually neither —
+it is *"why did you do it this way?"* — so a third column, **list | detail | chat**, makes it a
+conversation with the agent that did the work. It is bound to a **session**, not to an item: two
+rows from the same agent are one thread, and the cursor moving between them must not tear it down.
+`c` toggles it, and its width is a per-browser `updateSetting` key with no gear control.
+
+**Receiving splits by agent, and the split is `transcriptFor(entry)` returning `null`** — a
+three-line wrapper in `tools.js` that asks `supportsSessionWatch` *and then*
+`ctx.transcriptPath`. The ctx helper alone answers only "where would it be", which for a
+non-transcript agent is a path that never exists; reading that as the agent-type switch
+works today only because those agents happen to carry no `claudeSessionId`.
+
+| Source | When | Cost |
+|---|---|---|
+| the session's own `.jsonl` | `getAgentConfig(agentType).supportsSessionWatch` — Claude | none; no extra turn, no cooperation from the agent |
+| `stateDir()/workshop-chat.json` | everything else, filled by the `workshop_say` tool | one turn per reply |
+
+Both emit the same `{ id, role, text, at }` shape, so the pane cannot tell them apart. On the
+transcript path the store is **not written at all** — Claude records the human's message itself,
+and a copy would show every question twice. On the store path it holds **both** sides, because
+nothing else records that the human asked anything.
+
+**The transcript path is re-derived every request and never cached.** `adoptClaudeSession` rewrites
+`entry.claudeSessionId` on a fork, a `/clear` and a plan-mode exit and emits no event, so the path
+*is* the cache key and every rotation would be a full rebuild anyway. Measured on the transcripts
+on one machine, parsing a 1 MB tail costs ~2.6 ms even when the file behind it is 139 MB; a delta
+reader would buy that back only by assuming the file is strictly append-only, which we cannot
+prove, and a wrong assumption there corrupts a thread silently. The bound that matters is on the
+wire: `GET /api/workshop/chat/:id?since=<messageId>` returns only what is new. A rotation shows up
+as a changed `threadKey`, which is the client's cue to drop its cursor and take the thread whole.
+
+The tail is **1 MB**, four times `prompt-delivery-check.js`'s window, because that module wants the
+last user message and finds it immediately while this one wants a conversation: a tool-heavy
+session is ~20 KB of `tool_result` and `thinking` per rendered message, and 256 KB yielded as few
+as one readable message on a real 52 MB transcript.
+
+**A session that has never been prompted has no `.jsonl` at all** (#542). That renders as "nothing
+yet", never as an error. A **closed** session still reads, through `ctx.getSavedSession` — the
+session is gone, the conversation is not — with the composer disabled.
+
+**Sending is `ctx.deliverPromptWhenReady`, and three cases refuse before it.** Two of them prevent
+a real misfire rather than a confusing message:
+
+| Refusal | Why it is not merely defensive |
+|---|---|
+| session gone | `deliverPromptWhenReady` is a **silent no-op** on a missing shell, so without the gate the human watches a message sit queued forever |
+| session showing a dialog | a permission prompt classifies as `'waiting'` (`screen-classifier.js`), so `drainPromptQueue` would read the screen as idle and type a paragraph of prose into the modal 500 ms later |
+| mid key-dance (`inFlightChoices`) | a chat message interleaved with `sendChoice`'s arrows corrupts both |
+
+None writes a byte to a PTY, and `test/unit/workshop-chat-routes.test.js` asserts exactly that.
+
+**The reply instruction is chosen at delivery time, by agent type** — appended to the prompt only
+when the agent keeps no transcript. That is what lets the workflow stages stay agent-agnostic while
+the agents that need `workshop_say` still hear about it.
+
+**Markdown is a tokenizer, not a library.** `mods/workshop/markdown.js` returns an AST and
+`workshop.jsx` maps it to React **elements**, so there is no HTML string at any point and
+agent-authored text cannot become markup — the class of bug is absent by construction rather than
+filtered by a sanitizer. Mod iframes are `allow-same-origin` (they must be, for the bridge), so the
+sandbox provides no XSS containment; the element tree is the containment.
+`test/unit/workshop-mod-shape.test.js` fails the build if `innerHTML` or its React twin appears in
+`workshop.jsx`. A scheme allowlist is still needed and still enforced — React renders
+`<a href="javascript:…">` happily — and `data:image/svg+xml` is refused, an SVG being a code URL
+wearing an image's name.
+
+`workshop_say` takes **no session parameter**: it writes the caller's own thread via
+`callerFields()`, reaches no PTY, and is rate-limited, so it does not move the consent line below.
+
 ### The three answer paths, and why they differ
 
 | Situation | What happens | PTY write |
@@ -760,9 +840,13 @@ That gate prices one risk: an *agent* typing into another agent's session (#519)
 in Workshop originates from a human pressing a key in the host UI, behind the same auth cookie
 that already authorizes closing the session. Routing it through the modal would ask the user to
 approve their own click, and a decline there starts a 60 s cooldown that would block the next
-unrelated `meta_type`. The three MCP tools write nothing to any PTY. **If an agent ever gains a
-way to answer another agent's item, revisit this** — at that point Workshop becomes exactly what
-#519 guards. The reasoning is repeated in the header of `mods/workshop/tools.js`.
+unrelated `meta_type`. The five MCP tools write nothing to any PTY. The two that look like they
+move this line do not: `share_result` can only stamp the field that *refuses* a merge, never the
+one that permits it (see the asymmetry above), and `workshop_say` takes no session parameter, so
+there is no spelling of it that reaches another agent's conversation. **If an agent ever gains a
+way to answer another agent's item, or to put text into another agent's session through here,
+revisit this** — at that point Workshop becomes exactly what #519 guards. The reasoning is
+repeated in the header of `mods/workshop/tools.js`.
 
 `logRcWrite` only logs text matching `/(^|\s)\/rc(\s|$)/` — deliberately not a keylogger — and
 arrow keys plus `\r` can never match it, so the explicit `[workshop] answer …` log line is the

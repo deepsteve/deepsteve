@@ -39,8 +39,13 @@ const jsx = read('workshop.jsx');
 // Declaring it in mod.json would draw nothing at all, so the picker lives in the
 // Backlog header, next to the list it filters. `backlogCollapsed` is a disclosure
 // state, the same shape as `blockingOnly`.
+//
+// `chatOpen` / `chatWidth` (#670) are furniture, not preferences — set by dragging and by
+// pressing `c`, and a number box in the gear menu for either would be a control nobody
+// would ever reach for.
 const UNRENDERED_SETTINGS = new Set([
   'blockingOnly', 'seenAutoCycleNote', 'issueLabel', 'backlogCollapsed',
+  'chatOpen', 'chatWidth',
 ]);
 
 test('the manifest passes the release-time validator', () => {
@@ -209,4 +214,32 @@ test('the panel never writes to a PTY itself', () => {
       + 'which is where the verify-before-commit dance and the audit line live.',
     );
   }
+});
+
+test('the panel never turns agent text into markup (#670)', () => {
+  // The chat pane renders markdown an AGENT wrote, and an agent's prose routinely carries
+  // strings it read somewhere else — a README, an issue body, a dependency's error text.
+  // markdown.js returns an AST and workshop.jsx maps it to ELEMENTS, so there is no point
+  // at which that text could become HTML. That is a categorical property, and it survives
+  // only as long as neither of these appears here.
+  for (const forbidden of ['dangerouslySetInnerHTML', 'innerHTML']) {
+    assert.ok(
+      !jsx.includes(forbidden),
+      `workshop.jsx references ${forbidden}. Mod iframes are allow-same-origin (they must `
+      + 'be, for the window.deepsteve bridge), so the sandbox provides no XSS containment '
+      + 'at all — the React element tree IS the containment. Render the AST from '
+      + 'markdown.js instead; if a construct renders wrong, render it as literal text.',
+    );
+  }
+});
+
+test('the chat pane sends through the FIFO route, never a bare prompt write', () => {
+  const tools = fs.readFileSync(path.join(MOD_DIR, 'tools.js'), 'utf8');
+  assert.match(tools, /ctx\.deliverPromptWhenReady\(sessionId, chatPrompt\(/,
+    'the chat POST must queue through deliverPromptWhenReady — the per-shell FIFO is what '
+    + 'sequences a question behind whatever the agent is already doing');
+  assert.ok(
+    !/e\.pendingDelivery\s*=/.test(tools),
+    'never arm pendingDelivery directly; deliverPromptWhenReady owns that (docs/sessions.md)',
+  );
 });

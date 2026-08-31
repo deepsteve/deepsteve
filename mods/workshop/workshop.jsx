@@ -1,10 +1,11 @@
 import * as React from 'react';
 import * as ReactDOM from 'react-dom/client';
 import {
-  visibleItems, nextSelection, keyAction, isTypingTarget,
+  visibleItems, nextSelection, keyAction, isTypingTarget, typingAction,
   formatAge, ageColor, itemSubject, itemBody, answerPayload,
 } from './inbox-view.js';
 import { visibleBacklog, formatUpdated, matchNote } from './backlog-view.js';
+import { tokenize } from './markdown.js';
 
 const { useState, useEffect, useCallback, useRef, useMemo, memo } = React;
 
@@ -55,6 +56,11 @@ const DEFAULTS = {
   backlogPollSeconds: 120,
   issueLabel: 'bug',
   backlogCollapsed: false,
+  // Not in mod.json on purpose — a pane width is not a settings-modal control. Both are
+  // listed in UNRENDERED_SETTINGS in test/unit/workshop-mod-shape.test.js, which is what
+  // keeps the DEFAULTS <-> mod.json parity check honest about the difference.
+  chatOpen: false,
+  chatWidth: 420,
 };
 
 /**
@@ -546,6 +552,442 @@ function Lightbox({ file, onClose }) {
 
 // ─── Root ────────────────────────────────────────────────────────────────────
 
+// ─── Markdown ────────────────────────────────────────────────────────────────
+// The AST comes from markdown.js and is turned into ELEMENTS here — there is no HTML
+// string at any point, which is what makes agent-authored text unable to become markup.
+// The two React/DOM escape hatches that would undo that are banned from this file outright
+// by workshop-mod-shape.test.js, which greps for them by name; if a construct renders
+// wrong, the fix is to render it as literal text, never to hand it to the browser as HTML.
+
+function Spans({ spans }) {
+  return (
+    <>
+      {(spans || []).map((s, i) => {
+        if (s.type === 'code') {
+          return (
+            <code key={i} style={{
+              font: `0.92em ${MONO}`, background: C.sunken, color: C.bright,
+              border: `1px solid ${C.hairline}`, borderRadius: 4, padding: '1px 5px',
+            }}>{s.text}</code>
+          );
+        }
+        if (s.type === 'link') {
+          return (
+            <a
+              key={i} href={s.href} target="_blank" rel="noopener noreferrer"
+              style={{ color: C.blue, textDecoration: 'none', borderBottom: `1px solid ${C.blue}40` }}
+            ><Spans spans={s.children} /></a>
+          );
+        }
+        if (s.type === 'image') {
+          return (
+            <img
+              key={i} src={s.src} alt={s.alt || ''} loading="lazy"
+              style={{
+                display: 'block', maxWidth: '100%', borderRadius: 6,
+                border: `1px solid ${C.hairline}`, margin: '8px 0',
+              }}
+            />
+          );
+        }
+        if (s.type === 'strong') return <strong key={i} style={{ color: C.bright }}><Spans spans={s.children} /></strong>;
+        if (s.type === 'em') return <em key={i}><Spans spans={s.children} /></em>;
+        return <React.Fragment key={i}>{s.text}</React.Fragment>;
+      })}
+    </>
+  );
+}
+
+/** One message body. Sans for prose, mono for anything that came off a machine. */
+const Markdown = memo(function Markdown({ text }) {
+  const blocks = useMemo(() => tokenize(text), [text]);
+  return (
+    <div style={{ font: `14px/1.6 ${SANS}`, color: C.text, overflowWrap: 'anywhere' }}>
+      {blocks.map((b, i) => {
+        if (b.type === 'code') {
+          return (
+            <pre key={i} style={{
+              background: C.sunken, border: `1px solid ${C.hairline}`, borderRadius: 6,
+              padding: '10px 12px', margin: '10px 0', overflowX: 'auto',
+              font: `12.5px/1.5 ${MONO}`, color: C.text,
+            }}><code>{b.text}</code></pre>
+          );
+        }
+        if (b.type === 'heading') {
+          const size = [19, 17, 15.5, 14.5, 14, 13.5][b.level - 1] || 14;
+          return (
+            <div key={i} style={{
+              font: `600 ${size}px/1.35 ${SANS}`, color: C.bright, margin: '14px 0 6px',
+            }}><Spans spans={b.spans} /></div>
+          );
+        }
+        if (b.type === 'hr') {
+          return <div key={i} style={{ height: 1, background: C.hairline, margin: '14px 0' }} />;
+        }
+        if (b.type === 'quote') {
+          return (
+            <div key={i} style={{
+              borderLeft: `3px solid ${C.border}`, padding: '2px 0 2px 12px',
+              margin: '8px 0', color: C.dim, whiteSpace: 'pre-wrap',
+            }}><Spans spans={b.spans} /></div>
+          );
+        }
+        if (b.type === 'list') {
+          const List = b.ordered ? 'ol' : 'ul';
+          return (
+            <List key={i} style={{ margin: '8px 0', paddingLeft: 22 }}>
+              {b.items.map((item, j) => (
+                <li key={j} style={{ margin: '3px 0' }}><Spans spans={item} /></li>
+              ))}
+            </List>
+          );
+        }
+        return (
+          <p key={i} style={{ margin: '8px 0', whiteSpace: 'pre-wrap' }}>
+            <Spans spans={b.spans} />
+          </p>
+        );
+      })}
+    </div>
+  );
+});
+
+// ─── Chat (#670) ─────────────────────────────────────────────────────────────
+
+const CHAT_MIN = 300;
+const CHAT_MAX = 760;
+const CHAT_DEFAULT = 420;
+
+const clampChat = (w) => Math.max(CHAT_MIN, Math.min(CHAT_MAX, Math.round(Number(w) || CHAT_DEFAULT)));
+
+// With the pane shut this is byte-identical to the two-column layout Workshop has always
+// had, which is what keeps the chat entirely absent rather than merely hidden.
+const chatColumns = (w) => (w == null
+  ? 'clamp(300px, 27%, 420px) 1fr'
+  : `clamp(300px, 27%, 420px) minmax(360px, 1fr) 5px ${w}px`);
+
+/**
+ * The divider between the bench and the chat. Pointer capture, not document listeners.
+ *
+ * The host's three resizers (mod-manager, layout-manager, context-views) all install a
+ * document mousemove/mouseup pair and set pointerEvents:'none' on every panel iframe,
+ * because they drag ACROSS mod iframes and would otherwise lose the pointer to one. This
+ * one is inside a single iframe with no children, so setPointerCapture does the same job
+ * with no globals to leak and no teardown to get wrong — it keeps delivering events even
+ * when the pointer leaves the window.
+ */
+function ChatSplitter({ onResize, onReset }) {
+  const [dragging, setDragging] = useState(false);
+  return (
+    <div
+      role="separator" aria-orientation="vertical" aria-label="Resize chat" tabIndex={0}
+      onPointerDown={(e) => {
+        e.currentTarget.setPointerCapture(e.pointerId);
+        setDragging(true);
+      }}
+      onPointerMove={(e) => { if (dragging) onResize(e.clientX); }}
+      onPointerUp={(e) => {
+        e.currentTarget.releasePointerCapture(e.pointerId);
+        setDragging(false);
+        onResize(e.clientX, { commit: true });
+      }}
+      onDoubleClick={onReset}
+      onKeyDown={(e) => {
+        // Arrows are unbound in keyAction, but stop them anyway: a separator that moved
+        // the list cursor as well as itself would be indefensible.
+        if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+        e.preventDefault();
+        e.stopPropagation();
+        onResize(e.key === 'ArrowLeft' ? 16 : -16, { nudge: true, commit: true });
+      }}
+      title="Drag to resize — double-click to reset"
+      style={{
+        cursor: 'col-resize', background: dragging ? C.blue : C.hairline,
+        transition: dragging ? 'none' : 'background 120ms',
+      }}
+    />
+  );
+}
+
+function ChatMessage({ msg }) {
+  const mine = msg.role === 'human';
+  return (
+    <div style={{ padding: '10px 16px', borderBottom: `1px solid ${C.hairline}` }}>
+      <div style={{
+        font: `600 10px ${MONO}`, letterSpacing: '0.08em', textTransform: 'uppercase',
+        color: mine ? C.dim : C.blue, marginBottom: 5,
+      }}>
+        {mine ? 'You' : 'Agent'}
+        {msg.pending && <span style={{ color: C.orange, marginLeft: 8 }}>queued</span>}
+      </div>
+      <Markdown text={msg.text} />
+      {msg.truncated && (
+        <div style={{ font: `11px ${SANS}`, color: C.dimmer, marginTop: 6 }}>
+          … truncated — the whole message is in the tab.
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * The third column: one session's conversation.
+ *
+ * Bound to a SESSION, not to the selected item. Two inbox rows from the same agent are one
+ * conversation, so moving the cursor between them must not tear this down, reset the
+ * scroll, or lose a half-typed question — which is why every piece of state in here is
+ * keyed on sessionId and why the effect below does not depend on `selectedId`.
+ */
+function ChatPane({ sessionId, sessionName, pollMs, composerRef, onStateChange }) {
+  const [messages, setMessages] = useState([]);
+  const [meta, setMeta] = useState(null);
+  const [draft, setDraft] = useState('');
+  const [pending, setPending] = useState([]);
+  const [error, setError] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [sending, setSending] = useState(false);
+
+  const listRef = useRef(null);
+  const stickyRef = useRef(true);       // was the reader at the bottom before this update?
+  const cursorRef = useRef(null);       // last message id we hold, the `since` cursor
+  const threadKeyRef = useRef(null);
+  const seqRef = useRef(0);             // monotonic guard: drop a stale in-flight response
+
+  // Everything resets when the SESSION changes — never when the selected item does.
+  useEffect(() => {
+    setMessages([]); setMeta(null); setPending([]); setError(null); setLoading(true);
+    cursorRef.current = null;
+    threadKeyRef.current = null;
+    stickyRef.current = true;
+    // The draft is per-session and survives a cursor move, so it is restored, not cleared.
+    setDraft(draftFor(sessionId));
+  }, [sessionId]);
+
+  const apply = useCallback((data) => {
+    // A fork rotates the transcript onto a new file whose ids we have never seen, so every
+    // cursor we hold is stale. Dropping what we have and taking the new thread whole is
+    // the entire handling of that: one re-render of visually identical text.
+    const rotated = threadKeyRef.current !== null && data.threadKey !== threadKeyRef.current;
+    threadKeyRef.current = data.threadKey;
+    setMeta(data);
+    setMessages((prev) => {
+      const base = (rotated || !cursorRef.current) ? [] : prev;
+      const next = data.messages.length ? base.concat(data.messages) : base;
+      return next;
+    });
+    if (data.head) cursorRef.current = data.head;
+    // Anything the agent has now echoed back is no longer merely queued.
+    if (data.messages.length) {
+      setPending((p) => p.filter((q) => !data.messages.some((m) => m.text.trim() === q.text.trim())));
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!sessionId) return undefined;
+    let cancelled = false;
+    let timer = null;
+
+    async function tick() {
+      if (cancelled) return;
+      const seq = ++seqRef.current;
+      try {
+        const since = cursorRef.current ? `?since=${encodeURIComponent(cursorRef.current)}` : '';
+        const r = await fetch(`/api/workshop/chat/${encodeURIComponent(sessionId)}${since}`, { cache: 'no-store' });
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const data = await r.json();
+        // A response that lost the race to a newer one — or to the POST that just ran —
+        // would resurrect messages the newer one already reconciled.
+        if (cancelled || seq !== seqRef.current) return;
+        apply(data);
+        setError(null);
+      } catch (e) {
+        if (!cancelled) setError(e.message);
+      }
+      if (!cancelled) setLoading(false);
+      if (cancelled) return;
+      // Floored at 2s: pollSeconds now drives three loops and this one reads a file.
+      timer = setTimeout(tick, document.visibilityState === 'hidden' ? 10000 : Math.max(2000, pollMs));
+    }
+
+    tick();
+    return () => { cancelled = true; if (timer) clearTimeout(timer); };
+  }, [sessionId, pollMs, apply]);
+
+  // Follow the tail only if the reader was already at it. Yanking the view while someone
+  // is reading an older reply is the fastest way to make a live pane unusable.
+  useEffect(() => {
+    const el = listRef.current;
+    if (el && stickyRef.current) el.scrollTop = el.scrollHeight;
+  }, [messages, pending]);
+
+  useEffect(() => { if (onStateChange) onStateChange(meta); }, [meta, onStateChange]);
+
+  const closed = meta ? !meta.alive : false;
+  const blocked = meta ? !!meta.blocked : false;
+  const canSend = !!meta && !closed && !blocked && !sending && draft.trim().length > 0;
+
+  const send = useCallback(async () => {
+    const body = draft.trim();
+    if (!body || sending) return;
+    setSending(true);
+    // Optimistic, and honestly labelled. On the transcript path the message does not appear
+    // until Claude ACCEPTS it, which is after whatever turn it is in the middle of — that
+    // can be minutes. A pane that showed nothing in the meantime would make a person type
+    // it again.
+    const optimistic = { id: `pending-${Date.now()}`, role: 'human', text: body, at: Date.now(), pending: true };
+    setPending((p) => p.concat(optimistic));
+    setDraft('');
+    setDraftFor(sessionId, '');
+    stickyRef.current = true;
+    try {
+      const r = await fetch(`/api/workshop/chat/${encodeURIComponent(sessionId)}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: body }),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        setPending((p) => p.filter((q) => q !== optimistic));
+        setDraft(body);
+        setError(data.hint || data.error || `HTTP ${r.status}`);
+      } else if (data.message) {
+        // The store path recorded it durably, so the optimistic copy is redundant.
+        setPending((p) => p.filter((q) => q !== optimistic));
+        setMessages((m) => m.concat(data.message));
+        cursorRef.current = data.message.id;
+      }
+    } catch (e) {
+      setPending((p) => p.filter((q) => q !== optimistic));
+      setDraft(body);
+      setError(e.message);
+    }
+    setSending(false);
+  }, [draft, sending, sessionId]);
+
+  const shown = messages.concat(pending);
+  const placeholder = closed
+    ? 'This session has closed.'
+    : blocked ? 'Answer the dialog first.' : `Ask ${sessionName || 'this agent'} something…`;
+
+  return (
+    <div style={{
+      display: 'flex', flexDirection: 'column', minHeight: 0,
+      background: C.surface, borderLeft: `1px solid ${C.hairline}`,
+    }}>
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: 8, height: 40, padding: '0 14px',
+        borderBottom: `1px solid ${C.hairline}`, flexShrink: 0,
+      }}>
+        <span style={{ font: `600 13px ${SANS}`, color: C.bright, flex: 1 }}>Chat</span>
+        {meta && meta.source === 'store' && (
+          <span
+            title="This agent has no transcript to read, so its replies arrive through the workshop_say tool."
+            style={{ font: `10px ${MONO}`, letterSpacing: '0.06em', color: C.dimmer, textTransform: 'uppercase' }}
+          >via tool</span>
+        )}
+        {closed && <span style={{ font: `11px ${SANS}`, color: C.orange }}>closed</span>}
+      </div>
+
+      <div
+        ref={listRef}
+        onScroll={(e) => {
+          const el = e.currentTarget;
+          stickyRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 48;
+        }}
+        style={{ flex: 1, overflowY: 'auto', minHeight: 0 }}
+      >
+        {meta && meta.truncated && (
+          <div style={{ padding: '8px 16px', font: `11px ${SANS}`, color: C.dimmer, borderBottom: `1px solid ${C.hairline}` }}>
+            Showing the most recent messages. Earlier history is in the tab.
+          </div>
+        )}
+        {loading && !shown.length
+          ? <div style={{ padding: 20, font: `13px ${SANS}`, color: C.faint }}>Loading…</div>
+          : shown.length
+            ? shown.map((m) => <ChatMessage key={m.id} msg={m} />)
+            : (
+              <div style={{ padding: 20, font: `13px/1.6 ${SANS}`, color: C.faint }}>
+                {meta && meta.empty === 'no-replies'
+                  ? 'Nothing yet. This agent replies through the workshop_say tool — anything it prints in its terminal stays there.'
+                  : 'Nothing yet — this session hasn’t been prompted.'}
+              </div>
+            )}
+      </div>
+
+      {error && (
+        <div style={{
+          flexShrink: 0, padding: '7px 14px', font: `12px ${SANS}`, color: C.red,
+          background: 'rgba(248,81,73,0.10)', borderTop: `1px solid ${C.hairline}`,
+        }}>{error}</div>
+      )}
+
+      <div style={{ flexShrink: 0, padding: 12, borderTop: `1px solid ${C.hairline}`, background: C.bg }}>
+        <textarea
+          ref={composerRef}
+          value={draft}
+          disabled={closed || blocked}
+          onChange={(e) => { setDraft(e.target.value); setDraftFor(sessionId, e.target.value); }}
+          onKeyDown={(e) => {
+            // Handled here and stopped here. The document listener maps Cmd-Enter to the
+            // ANSWER send, and a message meant for the agent must never fire that.
+            if (e.key === 'Enter' && !e.shiftKey && !e.metaKey && !e.ctrlKey) {
+              e.preventDefault();
+              e.stopPropagation();
+              send();
+            } else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+              e.preventDefault();
+              e.stopPropagation();
+              send();
+            } else if (e.key === 'Escape') {
+              e.stopPropagation();
+              e.target.blur();
+            }
+          }}
+          placeholder={placeholder}
+          rows={3}
+          style={{
+            width: '100%', resize: 'none', background: C.bg,
+            border: `1px solid ${C.border}`, borderRadius: 6, padding: '8px 10px',
+            font: `14px/1.5 ${SANS}`, color: closed || blocked ? C.faint : C.text,
+          }}
+        />
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 8 }}>
+          <button
+            type="button" onClick={send} disabled={!canSend}
+            style={{
+              border: 'none', borderRadius: 5, padding: '5px 11px',
+              background: canSend ? C.green : C.hairline, color: canSend ? '#fff' : C.faint,
+              font: `600 12px ${SANS}`, cursor: canSend ? 'pointer' : 'default',
+            }}
+          >{sending ? 'Sending…' : 'Send'}</button>
+          <span style={{ flex: 1 }} />
+          <span style={{ font: `11px ${SANS}`, color: C.dimmer, textAlign: 'right' }}>
+            {closed
+              ? 'History stays readable — there is nobody to answer.'
+              : blocked
+                ? 'Waiting on a dialog — answer that first.'
+                : '⏎ to send · queues behind whatever it is doing'}
+          </span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Per-session drafts, in the iframe's own sessionStorage. An app iframe is DESTROYED when
+// it is hidden, and the cursor moves between rows of the same session constantly; neither
+// should cost a half-typed question.
+function draftKey(sessionId) { return `ws-chat-draft:${sessionId}`; }
+function draftFor(sessionId) {
+  try { return sessionStorage.getItem(draftKey(sessionId)) || ''; } catch { return ''; }
+}
+function setDraftFor(sessionId, value) {
+  try {
+    if (value) sessionStorage.setItem(draftKey(sessionId), value);
+    else sessionStorage.removeItem(draftKey(sessionId));
+  } catch { /* private mode — a lost draft is not worth a crash */ }
+}
+
 function Workshop() {
   const [bridgeReady, setBridgeReady] = useState(() => !!window.deepsteve);
   const [settings, setSettings] = useState(DEFAULTS);
@@ -570,6 +1012,9 @@ function Workshop() {
   // Refs, for the long-lived timers and listeners that must not close over stale state.
   const rootRef = useRef(null);
   const replyRef = useRef(null);
+  const chatRef = useRef(null);
+  const gridRef = useRef(null);
+  const chatWidthRef = useRef(clampChat(DEFAULTS.chatWidth));
   const sendingRef = useRef(false);
   const orderRef = useRef([]);
   const selectedIdRef = useRef(null);
@@ -625,6 +1070,39 @@ function Workshop() {
     // host's localStorage is the only place a view toggle can survive.
     window.deepsteve?.updateSetting?.(key, value);
   }, []);
+
+  // ── Chat pane geometry. The live width is a REF and a direct style write; only the
+  // released width reaches setSetting, because updateSetting touches localStorage and
+  // posts to the host bridge and doing that at pointer-move cadence is 60 writes a second.
+  const chatWidth = clampChat(settings.chatWidth);
+  useEffect(() => { chatWidthRef.current = chatWidth; }, [chatWidth]);
+
+  const resizeChat = useCallback((x, opts = {}) => {
+    const grid = gridRef.current;
+    if (!grid) return;
+    const rect = grid.getBoundingClientRect();
+    // A nudge is a delta; a drag is an absolute pointer position measured from the RIGHT
+    // edge, which is the edge the chat column is pinned to.
+    const raw = opts.nudge ? chatWidthRef.current + x : rect.right - x;
+    // Never let the bench be squeezed out of existence by the pane that reads it.
+    const next = clampChat(Math.min(raw, rect.width - 460));
+    chatWidthRef.current = next;
+    grid.style.gridTemplateColumns = chatColumns(next);
+    if (opts.commit) setSetting('chatWidth', next);
+  }, [setSetting]);
+
+  const resetChat = useCallback(() => {
+    chatWidthRef.current = CHAT_DEFAULT;
+    if (gridRef.current) gridRef.current.style.gridTemplateColumns = chatColumns(CHAT_DEFAULT);
+    setSetting('chatWidth', CHAT_DEFAULT);
+  }, [setSetting]);
+
+  const toggleChat = useCallback(() => {
+    const next = !settings.chatOpen;
+    setSetting('chatOpen', next);
+    // Opening it is nearly always because you want to type in it.
+    if (next) setTimeout(() => chatRef.current?.focus(), 0);
+  }, [settings.chatOpen, setSetting]);
 
   // ── Poll. A self-scheduling timeout, not an interval: that IS the answer to
   // overlapping fetches, since the next one is only armed once this one settles.
@@ -762,7 +1240,13 @@ function Workshop() {
   );
   const selectedIsIssue = !!selected && selected.kind === 'issue';
 
-  // Reset the staged answer only when the SELECTION changes, never on a poll.
+  // The chat is bound to the SESSION, not to the item: two rows from the same agent are
+  // one conversation, and the pane must not tear down as the cursor moves between them.
+  const chatSessionId = (selected && selected.sessionId) || null;
+  const chatOpen = !!settings.chatOpen && !!chatSessionId;
+
+  // Reset the staged answer only when the SELECTION changes, never on a poll. Deliberately
+  // NOT extended to chat state — that keys on sessionId and lives inside ChatPane.
   useEffect(() => { setPicked(null); setDraft(''); setScreenOpen(false); setZoom(null); }, [selectedId]);
 
   // ── Live screen preview, its own loop, armed only for a blocked selection.
@@ -973,8 +1457,17 @@ function Workshop() {
         // Exactly two keys are ours in here. Everything else — `e`, `o`, digits, bare
         // Enter — belongs to the textarea. This early return IS the "the inbox ate my
         // letter e" fix; do not add cases without a test.
-        if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); send(); }
-        else if (e.key === 'Escape') { e.preventDefault(); e.target.blur(); }
+        //
+        // Still two keys with the chat composer in play (#670): what changed is that
+        // Cmd-Enter now means something different depending on WHICH box has focus, and
+        // that decision lives in typingAction so the truth table is testable. The composer
+        // stops its own keys anyway, so this is the belt to its braces.
+        const action = typingAction(e.key, {
+          meta: e.metaKey || e.ctrlKey,
+          chat: e.target === chatRef.current,
+        });
+        if (action === 'send-answer') { e.preventDefault(); send(); }
+        else if (action === 'blur') { e.preventDefault(); e.target.blur(); }
         return;
       }
       if (e.metaKey || e.ctrlKey) return;   // leave the browser's own shortcuts alone
@@ -1005,6 +1498,7 @@ function Workshop() {
         case 'open': openTab(); break;
         case 'github': openGitHub(); break;
         case 'focusReply': replyRef.current?.focus(); break;
+        case 'toggleChat': if (chatSessionId) toggleChat(); break;
         case 'help': setHelpOpen((v) => !v); break;
         case 'escape': setHelpOpen(false); break;
         default: break;
@@ -1012,7 +1506,7 @@ function Workshop() {
     };
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
-  }, [rows, send, archive, openTab, openGitHub, moveCursor]);
+  }, [rows, send, archive, openTab, openGitHub, moveCursor, toggleChat, chatSessionId]);
 
   useEffect(() => { rootRef.current?.focus(); }, []);
 
@@ -1099,9 +1593,9 @@ function Workshop() {
         </div>
       )}
 
-      <div style={{
+      <div ref={gridRef} style={{
         flex: 1, minHeight: 0, display: 'grid',
-        gridTemplateColumns: 'clamp(300px, 27%, 420px) 1fr',
+        gridTemplateColumns: chatColumns(chatOpen ? chatWidth : null),
       }}>
       {/* ── Left: the run-sheet ── */}
       <div style={{
@@ -1219,6 +1713,18 @@ function Workshop() {
                   cursor: hasLocalTab ? 'pointer' : 'default',
                 }}
               ><Key>o</Key> Open tab</button>
+              {chatSessionId && (
+                <button
+                  type="button" onClick={toggleChat}
+                  title="Ask this agent about its work, without leaving Workshop"
+                  style={{
+                    display: 'inline-flex', alignItems: 'center', gap: 6,
+                    border: `1px solid ${settings.chatOpen ? C.blue : C.border}`, borderRadius: 5,
+                    background: 'transparent', color: settings.chatOpen ? C.blue : C.text,
+                    font: `12px ${SANS}`, padding: '3px 8px', cursor: 'pointer',
+                  }}
+                ><Key active={settings.chatOpen}>c</Key> Chat</button>
+              )}
             </div>
 
             <div style={{ flex: 1, overflowY: 'auto', minHeight: 0, position: 'relative' }}>
@@ -1365,6 +1871,20 @@ function Workshop() {
           </>
         )}
       </div>
+
+      {/* ── Right of the bench: the conversation ── */}
+      {chatOpen && (
+        <>
+          <ChatSplitter onResize={resizeChat} onReset={resetChat} />
+          <ChatPane
+            key={chatSessionId}
+            sessionId={chatSessionId}
+            sessionName={selected && (selected.sessionName || selected.sessionId)}
+            pollMs={pollMs}
+            composerRef={chatRef}
+          />
+        </>
+      )}
       </div>
 
       {zoom && <Lightbox file={zoom} onClose={() => setZoom(null)} />}
@@ -1394,6 +1914,7 @@ function Workshop() {
               ['o', 'open the tab'],
               ['g', 'open the issue on GitHub'],
               ['r', 'reply box'],
+              ['c', 'chat with this session'],
               ['⌘\\', 'quiet mode'],
               ['?', 'this'],
             ].map(([k, what]) => (

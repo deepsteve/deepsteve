@@ -375,6 +375,7 @@ test('the key map', async () => {
   assert.deepStrictEqual(keyAction('e', opts), { type: 'archive' });
   assert.deepStrictEqual(keyAction('o', opts), { type: 'open' });
   assert.deepStrictEqual(keyAction('r', opts), { type: 'focusReply' });
+  assert.deepStrictEqual(keyAction('c', opts), { type: 'toggleChat' });
   assert.deepStrictEqual(keyAction('?', opts), { type: 'help' });
   assert.deepStrictEqual(keyAction('Escape', opts), { type: 'escape' });
 });
@@ -392,6 +393,41 @@ test('shifted letters and unknown keys do nothing', async () => {
   const { keyAction } = await load();
   for (const k of ['E', 'O', 'R', 'J', 'K', 'x', 'F1', 'Tab', ' ', '']) {
     assert.strictEqual(keyAction(k, { optionCount: 3 }), null, `key ${JSON.stringify(k)}`);
+  }
+});
+
+test('typingAction: exactly two keys are ours inside a text box (#670)', async () => {
+  const { typingAction } = await load();
+
+  // Cmd-Enter means a different thing in each of the two boxes, and that is the ONLY
+  // difference between them. The branch is on which box has focus, not on a new key.
+  assert.strictEqual(typingAction('Enter', { meta: true, chat: false }), 'send-answer');
+  assert.strictEqual(typingAction('Enter', { meta: true, chat: true }), 'send-chat');
+  assert.strictEqual(typingAction('Escape', {}), 'blur');
+  assert.strictEqual(typingAction('Escape', { chat: true }), 'blur');
+
+  // A bare Enter belongs to the box. In the reply box it is a newline; the chat composer
+  // handles and stops its own, so it never reaches this at all.
+  assert.strictEqual(typingAction('Enter', {}), null);
+  assert.strictEqual(typingAction('Enter', { chat: true }), null);
+});
+
+test('typingAction: every other key belongs to the textarea', async () => {
+  const { typingAction } = await load();
+  // This is the machine-readable form of "the inbox ate my letter e". Walking the whole
+  // alphabet plus the digits is what keeps a future case from being added quietly.
+  const keys = [
+    ...'abcdefghijklmnopqrstuvwxyz'.split(''),
+    ...'0123456789'.split(''),
+    'ArrowUp', 'ArrowDown', 'Home', 'End', 'Tab', '?', ' ', 'Backspace',
+  ];
+  for (const key of keys) {
+    for (const meta of [false, true]) {
+      for (const chat of [false, true]) {
+        assert.strictEqual(typingAction(key, { meta, chat }), null,
+          `${key} (meta=${meta}, chat=${chat}) must belong to the text box`);
+      }
+    }
   }
 });
 

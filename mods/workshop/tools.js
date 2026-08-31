@@ -1,15 +1,21 @@
 /**
  * Workshop (#660, #669) — one inbox for every agent that needs you.
  *
- * Four MCP tools let an agent post a question, a briefing or a result; seven REST routes
- * let the panel read the inbox, answer from it, fetch a result's images, and read the
- * project's backlog. Blocked sessions — the ones sitting on a real Claude Code
- * permission / AskUserQuestion dialog — are DERIVED per request from ctx.shells and
- * never stored, so they exist exactly as long as the dialog does.
+ * Five MCP tools let an agent post a question, a briefing, a result or a chat reply; nine
+ * REST routes let the panel read the inbox, answer from it, fetch a result's images, read
+ * the project's backlog, and hold a conversation with a session. Blocked sessions — the
+ * ones sitting on a real Claude Code permission / AskUserQuestion dialog — are DERIVED per
+ * request from ctx.shells and never stored, so they exist exactly as long as the dialog does.
  *
- * The panel POLLS its own /api/workshop/inbox rather than receiving a broadcast.
- * That is not an oversight: a new push feed would need a notifyX/onXChanged pair in
+ * The panel POLLS its own routes rather than receiving a broadcast. That is not an
+ * oversight: a new push feed would need a notifyX/onXChanged pair in
  * public/js/mod-manager.js plus a dispatch line in public/js/app.js.
+ *
+ * Workshop shipped (#660) with no host edit at all. It now has exactly one: ctx.transcriptPath,
+ * put in the mod context for the chat pane (#670). The function itself is server.js's and is
+ * shared with #672 — locating a session's conversation means knowing both how Claude Code
+ * encodes a project directory and which transcript id the session has rotated onto, and
+ * neither belongs in a mod.
  *
  * ── The Backlog (#671) ──
  *
@@ -34,7 +40,19 @@
  *   2+3. serializeShellEntry() and the restore path in server.js carry those two fields,
  *      so an approval survives a ./restart.sh between Approve and issue_complete.
  *
- * Still to come: #670 needs a transcript path in the initMCP ctx.
+ * The chat pane (#670) adds a fourth: `transcriptPath` in the initMCP ctx. The function is
+ * server.js's own and is shared with #672 — locating a session's conversation means knowing
+ * both how Claude Code encodes a project directory and which transcript id the session has
+ * rotated onto, and neither belongs in a mod.
+ *
+ * ── The chat pane (#670) ──
+ *
+ * Approve and Request changes are a transaction; the reaction to a piece of work is usually
+ * a question. So a result — or any item with a session behind it — opens a conversation in
+ * a third column. It reads from whichever of two places the conversation actually lives:
+ * the agent's own transcript when it keeps one, else the workshop_say store in
+ * ./chat-store.js. Both render identically. The parsing rules are in ./transcript.js and
+ * the markdown in ./markdown.js, and neither sees this ctx — same split, same reason.
  *
  * ── Why Workshop deliberately does NOT go through requestMetaControlsConsent ──
  *
@@ -46,12 +64,12 @@
  * approve their own click — and a DECLINE there starts a 60s cooldown that would then
  * block the next unrelated meta_type.
  *
- * The four MCP tools below write nothing to any PTY; they only append to the inbox.
- * The only PTY writes live in the answer paths, reachable exclusively from
- * POST /api/workshop/items/:id/answer, which no MCP tool calls. If that ever stops
- * being true — if an agent gains any way to answer another agent's item — this
- * decision must be revisited, because at that point Workshop becomes exactly the
- * thing #519 guards.
+ * The five MCP tools below write nothing to any PTY; they only append to a store. The only
+ * PTY writes live in the answer paths and in POST /api/workshop/chat/:sessionId, all
+ * reachable exclusively from the panel and none of them called by any MCP tool. If that
+ * ever stops being true — if an agent gains any way to answer another agent's item, or to
+ * put text into another agent's session through here — this decision must be revisited,
+ * because at that point Workshop becomes exactly the thing #519 guards.
  *
  * That still holds with the merge gate in place, and it is worth being explicit about
  * why, because "an agent can now unlock its own merge" is the shape of the thing #519
@@ -59,13 +77,22 @@
  * `resultItemId`, which by itself REFUSES the merge. The stamp that permits one —
  * `resultApprovedAt` — is written on exactly one line, in answerStored, reached only
  * from the human pressing a key in the panel. Approving is answering a question.
+ *
+ * workshop_say (#670) is the newest tool and the other one that looks like it moves the
+ * line. It does not either: it takes no session parameter, writes only the CALLER's own
+ * thread via callerFields, and reaches no PTY. An agent can put text on the human's screen,
+ * which workshop_ask and workshop_brief already could; it cannot put text in another
+ * agent's session, which is the thing being guarded.
  */
 
+const fs = require('fs');
 const { execFile } = require('child_process');
 const { z } = require('zod');
 const projectScope = require('../../project-scope');
 const { resolveBinary } = require('../../bin-path');
 const inbox = require('./inbox');
+const chatStore = require('./chat-store');
+const transcript = require('./transcript');
 const dialogParse = require('./dialog-parse');
 const backlog = require('./backlog');
 const images = require('./images');
@@ -89,6 +116,24 @@ const SCRAPE_ROWS = 30;
 const WIDE_ROWS = 60;         // one retry when a 30-row read truncates the option run
 const PREVIEW_ROWS = 15;
 const READ_FRESH_TIMEOUT_MS = 1000;
+
+// ── chat pane (#670) ──
+// How much of a transcript's TAIL to read for the chat pane. Four times
+// prompt-delivery-check.js's TAIL_READ_BYTES on purpose: that module wants the last user
+// message and finds it immediately, this one wants a CONVERSATION. Measured over the real
+// transcripts on this machine — a tool-heavy session is ~20KB of tool_result and thinking
+// per rendered message, so a 256KB window yielded as few as ONE readable message on a
+// 52MB file, and 1MB yielded 18-52. The read itself costs 2.6ms on a 139MB transcript,
+// which is why there is no cache here: see the comment on chatMessages().
+const CHAT_TAIL_BYTES = 1024 * 1024;
+
+// One message. A pasted file in a reply would otherwise be the entire response body.
+const MAX_MESSAGE_CHARS = 20000;
+
+// workshop_say, per session. An agent in a loop narrating itself into the human's chat
+// pane is the same failure MAX_OPEN prices for workshop_ask, and needs the same answer.
+const SAY_WINDOW_MS = 60000;
+const SAY_MAX_PER_WINDOW = 20;
 
 // The MCP SDK's DEFAULT_REQUEST_TIMEOUT_MSEC is 60000
 // (node_modules/@modelcontextprotocol/sdk/dist/cjs/shared/protocol.js). 50s leaves
@@ -826,6 +871,42 @@ function init(context) {
       },
     },
 
+    workshop_say: {
+      description:
+        'Reply into the Workshop chat pane — the panel where the human is reading your work '
+        + 'and asking about it. Use this when a question arrives in this session that came '
+        + 'from that pane, and for nothing else: it is a reply channel, not a progress log. '
+        + 'You only need it if you were told to; agents whose conversation the panel can '
+        + 'already read are never asked to call it. Markdown renders, including fenced code.',
+      schema: {
+        text: z.string().describe('Your reply, as you would say it to the person reading. Markdown is fine.'),
+      },
+      // No session parameter, deliberately, and this is the property that keeps the
+      // security note at the top of this file true: callerFields pins the thread to the
+      // CALLER's own session, so there is no spelling of this tool that writes into
+      // another agent's conversation.
+      handler: async (args, extra) => {
+        const { sessionId } = callerFields(extra);
+        if (!sessionId) {
+          return text(
+            'This session could not be identified, so there is no chat thread to reply into. '
+            + 'Answer in your own transcript instead.',
+          );
+        }
+        if (!sayAllowed(sessionId, Date.now())) {
+          return text(
+            `That is more than ${SAY_MAX_PER_WINDOW} replies in a minute. Stop calling this and `
+            + 'tell the user what is going on in your own words instead — the pane is a '
+            + 'conversation, not a log.',
+          );
+        }
+        const message = chatStore.append(sessionId, { role: 'agent', text: args.text });
+        if (!message) return text('There was nothing to say — the text was empty.');
+        ctx.log(`[workshop] say ${message.id} session=${sessionId} ${message.text.length}ch`);
+        return text('Delivered to the Workshop chat pane.');
+      },
+    },
+
     workshop_check: {
       description:
         'Check whether a Workshop question or result has been decided yet, by the ticket '
@@ -870,6 +951,148 @@ function init(context) {
       },
     },
   };
+}
+
+// ── chat (#670) ──────────────────────────────────────────────────────────────
+
+/** Does this agent keep a transcript we can read, and where? Null when it does not.
+ *
+ * Two questions, deliberately asked together, because the chat pane treats the answer as
+ * one thing: null means "use the workshop_say store instead". supportsSessionWatch is the
+ * daemon's own predicate for "transcript-backed", so no agent id is named here — a new
+ * agent that keeps a readable transcript gets the transcript path for free.
+ *
+ * ctx.transcriptPath alone is not enough: it is shared with #672 and answers only "where
+ * WOULD it be", which for a non-transcript agent is a path that never exists. Reading it
+ * as the agent-type switch would work today only because those agents happen to carry no
+ * claudeSessionId, which is a coincidence, not a rule.
+ */
+function transcriptFor(entry) {
+  if (!entry) return null;
+  if (!ctx.getAgentConfig(entry.agentType).supportsSessionWatch) return null;
+  return ctx.transcriptPath(entry);
+}
+
+/**
+ * The entry behind a session id, live or closed.
+ *
+ * getSavedSession is what makes "a closed session has a readable history" true: a
+ * tombstoned record still carries cwd, worktree, configDir and claudeSessionId, which is
+ * everything transcriptPath needs. The session is gone; the conversation is not.
+ */
+function chatEntry(sessionId) {
+  if (!sessionId) return null;
+  return ctx.shells.get(sessionId) || ctx.getSavedSession(sessionId) || null;
+}
+
+/** Read the tail of a transcript. Returns '' for a file that is not there yet. */
+function readTail(file, bytes) {
+  let fd = null;
+  try {
+    const stat = fs.statSync(file);
+    if (!stat.size) return '';
+    const len = Math.min(stat.size, bytes);
+    const buf = Buffer.alloc(len);
+    fd = fs.openSync(file, 'r');
+    fs.readSync(fd, buf, 0, len, stat.size - len);
+    return buf.toString('utf8');
+  } catch {
+    // ENOENT is the #542 case and the common one: a session spawned with --session-id
+    // writes no .jsonl until its FIRST message, so a tab that has never been prompted
+    // has no file. That is "nothing yet", not an error, and the caller renders it as
+    // an empty thread.
+    return '';
+  } finally {
+    if (fd !== null) { try { fs.closeSync(fd); } catch {} }
+  }
+}
+
+/**
+ * One session's conversation, from whichever of the two sources it actually has.
+ *
+ * The source is chosen by transcriptFor returning null, which is the daemon's own
+ * supportsSessionWatch predicate — so nothing here names an agent. Both branches return
+ * the SAME message shape, which is what makes "the pane must not look like two different
+ * features" structurally true rather than a thing to remember.
+ *
+ * Deliberately NOT cached. The path has to be re-derived every call anyway, because
+ * adoptClaudeSession rewrites entry.claudeSessionId on a fork, a /clear and a plan-mode
+ * exit and emits no event — so the path IS the cache key and every rotation is a full
+ * rebuild regardless. Measured, a full parse of a 1MB tail costs 2.6ms even when the file
+ * behind it is 139MB. A delta reader would buy that back at the price of assuming the
+ * file is strictly append-only, which we cannot prove, and a wrong assumption there
+ * corrupts a thread silently. The bound that matters is on the WIRE (`since`), not here.
+ */
+function chatMessages(entry, sessionId) {
+  const file = transcriptFor(entry);
+  if (file) {
+    const { messages, truncated } = transcript.parseTranscript(readTail(file, CHAT_TAIL_BYTES));
+    return { source: 'transcript', messages: messages.map(clampMessage), truncated };
+  }
+  return {
+    source: 'store',
+    messages: chatStore.thread(sessionId).map(clampMessage),
+    truncated: false,
+  };
+}
+
+/** Cap one message's body, and normalise `at` to epoch ms across both sources. */
+function clampMessage(m) {
+  const over = m.text.length > MAX_MESSAGE_CHARS;
+  return {
+    id: m.id || m.uuid || null,
+    role: m.role,
+    text: over ? m.text.slice(0, MAX_MESSAGE_CHARS) : m.text,
+    at: typeof m.at === 'number' ? m.at : null,
+    ...(over ? { truncated: true } : {}),
+  };
+}
+
+/**
+ * Everything after `since`, or everything if `since` is unknown.
+ *
+ * An unknown cursor is the normal case twice over — first load, and the poll after a fork
+ * rotates the transcript onto a file whose ids the client has never seen — so it must mean
+ * "send it all", not "send nothing".
+ */
+function sliceSince(messages, since) {
+  if (!since) return messages;
+  const at = messages.findIndex((m) => m.id === since);
+  return at === -1 ? messages : messages.slice(at + 1);
+}
+
+/**
+ * The text actually delivered into the session.
+ *
+ * No `[Workshop] Re:` prefix, unlike answerPrompt: an answer arrives cold and has to name
+ * what it is answering, whereas a chat message is a chat message and should read as one in
+ * the terminal. Attribution rides on options.source, which is what the submit log consumes.
+ *
+ * The one addition is the reply instruction, and it is chosen HERE — at delivery time, by
+ * agent type — rather than living in the issue prompt. That is what lets the workflow
+ * stages stay agent-agnostic while the agents that need the tool still hear about it.
+ */
+function chatPrompt(body, entry) {
+  if (transcriptFor(entry)) return body;
+  return `${body}\n\n${SAY_INSTRUCTION}`;
+}
+
+const SAY_INSTRUCTION =
+  '(Reply with the workshop_say tool — that is what reaches the human’s Workshop chat '
+  + 'pane. Text printed in this terminal does not.)';
+
+// sessionId -> [timestamps], the workshop_say rate limiter's sliding window.
+const sayCalls = new Map();
+
+function sayAllowed(sessionId, now) {
+  const recent = (sayCalls.get(sessionId) || []).filter((t) => now - t < SAY_WINDOW_MS);
+  if (recent.length >= SAY_MAX_PER_WINDOW) {
+    sayCalls.set(sessionId, recent);
+    return false;
+  }
+  recent.push(now);
+  sayCalls.set(sessionId, recent);
+  return true;
 }
 
 // ── REST ─────────────────────────────────────────────────────────────────────
@@ -1002,6 +1225,93 @@ function registerRoutes(app, context) {
     const full = images.servePath(req.params.file);
     if (!full) return res.status(404).end();
     res.sendFile(full);
+  });
+
+  // ── chat (#670) ──
+  // Addressed by DEEPSTEVE SESSION ID and nothing else. The route never accepts a path, a
+  // cwd, a configDir or a claudeSessionId, so there is no spelling of it that reads an
+  // arbitrary file: the only way to name a transcript is to be a session the daemon
+  // already knows about, and the entry lookup is what does the naming.
+  app.get('/api/workshop/chat/:sessionId', (req, res) => {
+    const sessionId = req.params.sessionId;
+    const entry = chatEntry(sessionId);
+    if (!entry) return res.status(404).json({ error: 'session-unknown' });
+
+    const { source, messages, truncated } = chatMessages(entry, sessionId);
+    const alive = ctx.shells.has(sessionId);
+    const blocked = alive ? !!scrapeFor(sessionId, entry, Date.now()).detected : false;
+    const slice = sliceSince(messages, req.query.since);
+
+    res.json({
+      sessionId,
+      source,
+      // The client resets its `since` cursor whenever this changes. A fork copies the
+      // history into a NEW file with new uuids, so every id the client holds is stale at
+      // that moment and the whole thread has to re-render — visually identical, but from
+      // ids that exist. Cheap, and it is the entire handling of a rotation.
+      threadKey: source === 'transcript' ? (entry.claudeSessionId || null) : 'store',
+      alive,
+      blocked,
+      // A session with no transcript yet has said nothing yet — that is #542, and it is
+      // not an error at any layer.
+      empty: messages.length === 0 ? (source === 'transcript' ? 'never-prompted' : 'no-replies') : null,
+      truncated,
+      messages: slice,
+      head: messages.length ? messages[messages.length - 1].id : null,
+      total: messages.length,
+    });
+  });
+
+  app.post('/api/workshop/chat/:sessionId', (req, res) => {
+    const sessionId = req.params.sessionId;
+    const body = (req.body && typeof req.body.text === 'string') ? req.body.text.trim() : '';
+    if (!body) return res.status(400).json({ error: 'empty' });
+
+    // 1. Gone. Not defensive: deliverPromptWhenReady is a SILENT no-op on a missing shell,
+    //    so without this the human watches a message sit queued forever.
+    const entry = ctx.shells.get(sessionId);
+    if (!entry) {
+      return res.status(409).json({
+        error: 'session-gone',
+        hint: 'This session has closed. Its history stays readable, but there is nobody to answer.',
+      });
+    }
+
+    // 2. Showing a dialog. This one prevents a real misfire rather than a confusing one:
+    //    a permission prompt classifies as 'waiting' (screen-classifier.js), so
+    //    drainPromptQueue would take the screen for idle and submit half a second later —
+    //    typing a paragraph of prose into a modal whose Enter answers a question the human
+    //    never read. Same refusal answerBlocked makes, for the same reason, reusing the
+    //    same detector rather than adding a second one.
+    if (scrapeFor(sessionId, entry, Date.now()).detected) {
+      return res.status(409).json({
+        error: 'session-blocked',
+        hint: 'This session is waiting on a dialog — answer that from the inbox first, or press o to open the tab.',
+      });
+    }
+
+    // 3. Mid key-dance. A chat message interleaved with sendChoice's arrow keys would
+    //    corrupt both.
+    if (inFlightChoices.has(sessionId)) return res.status(409).json({ error: 'busy' });
+
+    // On the store path the human's own message has nowhere else to be recorded, so it
+    // goes in before delivery. On the transcript path it must NOT: Claude will write it
+    // itself, and a copy here would show every question twice.
+    const onStorePath = !transcriptFor(entry);
+    const stored = onStorePath ? chatStore.append(sessionId, { role: 'human', text: body }) : null;
+
+    // The FIFO, never submitToShell and never e.pendingDelivery — the queue is what
+    // sequences this behind whatever the agent is already mid-way through, which is the
+    // whole difference between asking a question and interrupting one.
+    ctx.deliverPromptWhenReady(sessionId, chatPrompt(body, entry), {
+      source: 'workshop-chat',
+      skipIf: (sid) => !ctx.shells.has(sid),
+      skipReason: 'session gone before the Workshop chat message could be delivered',
+      onDeliver: (sid) => ctx.log(`[workshop] chat -> ${sid} ${body.length}ch`),
+    });
+    // Length, never content — the same rule the answer log follows.
+    ctx.log(`[workshop] chat queued session=${sessionId} ${body.length}ch path=${onStorePath ? 'store' : 'transcript'}`);
+    res.json({ queued: true, message: stored });
   });
 
   app.get('/api/workshop/items/:id/screen', async (req, res) => {

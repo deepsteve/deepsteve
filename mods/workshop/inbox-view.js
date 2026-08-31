@@ -217,6 +217,9 @@ export function keyAction(key, { optionCount = 0, repeat = false, issue = false 
     case 'o': return { type: 'open' };
     case 'g': return issue ? { type: 'github' } : null;
     case 'r': return issue ? null : { type: 'focusReply' };
+    // A Backlog row is a GitHub issue with no session behind it, so there is nothing to
+    // hold a conversation with — same reason `r` and `e` go quiet there (#670).
+    case 'c': return issue ? null : { type: 'toggleChat' };
     case 'e': return (issue || repeat) ? null : { type: 'archive' };
     case 'Enter': return (issue || repeat) ? null : { type: 'send' };
     default: break;
@@ -226,6 +229,25 @@ export function keyAction(key, { optionCount = 0, repeat = false, issue = false 
     const index = Number(key) - 1;
     return index < optionCount ? { type: 'pick', index } : null;
   }
+  return null;
+}
+
+/**
+ * What a keystroke means while focus is INSIDE a text box.
+ *
+ * Exactly two keys are ours in there; everything else — `e`, `o`, digits, bare Enter —
+ * belongs to the box, and that is the "the inbox ate my letter e" fix. What the chat pane
+ * (#670) adds is not a third key but a second box, and Cmd-Enter has to mean a different
+ * thing in each: "send this answer" in the reply box, "send this message" in the composer.
+ * The branch is therefore on WHICH box has focus, which is the honest distinction, and it
+ * lives here rather than in the JSX so the whole truth table is testable.
+ */
+export function typingAction(key, { meta = false, chat = false } = {}) {
+  if (key === 'Enter' && meta) return chat ? 'send-chat' : 'send-answer';
+  // The composer sends on a bare Enter (Shift+Enter is a newline), which it handles on its
+  // own element and stops from reaching the document. So a bare Enter never arrives here
+  // from the composer, and in the reply box it is a newline like any other key.
+  if (key === 'Escape') return 'blur';
   return null;
 }
 
