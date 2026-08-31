@@ -69,6 +69,8 @@ let panelMods = new Map();       // modId → { iframe, mod }
 let visiblePanelId = null;       // which panel is currently VISIBLE (or null)
 let panelTabsContainer = null;   // #panel-tabs DOM element
 let panelTabs = new Map();       // modId → tab button element
+let railIndicator = null;        // host-owned element pinned above the panel tabs (#667)
+let railIndicatorVisible = true; // ...and whether its owner is currently showing it
 let taskCallbacks = [];          // [{modId, cb}] — callbacks for task broadcasts
 let scheduledTaskCallbacks = []; // [{modId, cb}] — callbacks for scheduled-task broadcasts
 let agentChatCallbacks = [];     // [{modId, cb}] — callbacks for agent-chat broadcasts
@@ -1561,11 +1563,7 @@ function _createPanelTab(mod) {
 
   panelTabsContainer.appendChild(btn);
   panelTabs.set(mod.id, btn);
-
-  // Show the tabs strip if we have panel tabs
-  if (panelTabs.size > 0) {
-    panelTabsContainer.style.display = 'flex';
-  }
+  _updatePanelTabsVisibility();
 }
 
 /**
@@ -1577,11 +1575,47 @@ function _removePanelTab(modId) {
     btn.remove();
     panelTabs.delete(modId);
   }
+  _updatePanelTabsVisibility();
+}
 
-  // Hide tabs strip if no more panel tabs
-  if (panelTabs.size === 0) {
-    panelTabsContainer.style.display = 'none';
-  }
+/**
+ * The strip is shown when it has anything VISIBLE in it. Panel tabs are no longer the
+ * only thing that counts (#667): timelapse's recording dot is mounted here too, and it
+ * has to survive the user disabling every panel mod — the dot IS the stop button, so a
+ * hidden strip would be a run with no way to end it.
+ *
+ * The indicator's own visibility has to be part of the sum, not just its existence:
+ * timelapse turned off with no panel mods enabled would otherwise leave a bare 26px
+ * bordered column standing next to nothing, which reads as a rendering fault.
+ */
+function _updatePanelTabsVisibility() {
+  const anything = panelTabs.size > 0 || (railIndicator && railIndicatorVisible);
+  panelTabsContainer.style.display = anything ? 'flex' : 'none';
+}
+
+/**
+ * Mount a host-owned indicator at the TOP of the panel-tab strip (#667).
+ *
+ * First child, so it sits above "Action Required" and every other panel tab: the strip is
+ * a flex column, so ordering is the whole collision story and overlap is impossible by
+ * construction. It also keeps the indicator genuinely top-right in BOTH layouts — under
+ * vertical-layout #content-row starts at y=0, and unlike anything in #tabs it does not
+ * move to the left rail or vanish under quiet mode.
+ */
+function mountRailIndicator(el) {
+  railIndicator = el;
+  panelTabsContainer.insertBefore(el, panelTabsContainer.firstChild);
+  _updatePanelTabsVisibility();
+}
+
+/**
+ * The indicator's owner hides and shows its own element; this is how it says so, since
+ * the strip's visibility depends on it. Two owners, one notification — rather than
+ * mod-manager reaching into an element it does not own to read a style.
+ */
+function setRailIndicatorVisible(on) {
+  railIndicatorVisible = !!on;
+  _updatePanelTabsVisibility();
 }
 
 /**
@@ -3024,6 +3058,8 @@ function getNewTabItems() {
 
 export const ModManager = {
   init,
+  mountRailIndicator,
+  setRailIndicatorVisible,
   loadAvailableMods,
   showModView,
   showTerminalForSession,

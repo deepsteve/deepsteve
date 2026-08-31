@@ -24,6 +24,11 @@
   --ds-reconnect-overlay: rgba(13, 17, 23, 0.75);
   --ds-reconnect-glow: rgba(240, 136, 62, 0.3);
   --ds-reconnect-dot: var(--ds-accent-orange);
+  /* Timelapse recording indicator (#667). Its own token rather than --ds-accent-red:
+     that one is documented below as reserved for destructive actions and errors, and is
+     already the .panel-tab-badge colour — a bare red dot on the same strip as red unread
+     badges would say two different things at once. */
+  --ds-recording: #f85149;
 
   /* Context panel (left rail) — fully theme-overridable. Base theme keeps it a
      flush, square-edged column; themes (e.g. retro-monitor) round it and add a
@@ -968,6 +973,38 @@ kbd {
 .panel-tab.active { color: var(--ds-accent-blue); border-left-color: var(--ds-accent-blue); background: var(--ds-bg-tertiary); }
 .panel-tab-badge { display: none; position: absolute; top: 6px; right: 2px; min-width: 8px; height: 8px; background: var(--ds-accent-red, #f85149); border-radius: 50%; font-size: 0; }
 .panel-tab-badge.visible { display: block; }
+
+/* Timelapse recording circle (#667) — the FIRST child of #panel-tabs, so it sits above
+   "Action Required" and every other panel tab. The strip is a flex column, so ordering is
+   the whole collision story: it cannot overlap the rail chrome no matter how many panel
+   mods are enabled. It is also genuinely top-right in both layouts, because vertical-layout
+   starts #content-row at y=0, and it survives quiet mode — neither of which is true of
+   anything mounted in #tabs.
+
+   Idle is a HOLLOW ring, armed is SOLID and pulsing. The shape carries the state as well as
+   the colour, because win-95.css and ascii-art.css both restyle this corner with
+   !important and a hue-only distinction would not survive them. */
+.timelapse-dot {
+  flex-shrink: 0;
+  align-self: center;
+  width: 14px;
+  height: 14px;
+  margin: 10px 0 6px;
+  padding: 0;
+  border: 2px solid var(--ds-text-secondary);
+  border-radius: 50%;
+  background: transparent;
+  cursor: pointer;
+  opacity: 0.55;
+  transition: opacity 0.15s, border-color 0.15s;
+}
+.timelapse-dot:hover { opacity: 1; border-color: var(--ds-recording, #f85149); }
+.timelapse-dot.recording {
+  background: var(--ds-recording, #f85149);
+  border-color: var(--ds-recording, #f85149);
+  opacity: 1;
+  animation: pulse 1.5s ease-in-out infinite;
+}
 
 /* Panel resizer */
 #panel-resizer { display: none; width: 4px; background: var(--ds-border); cursor: col-resize; flex-shrink: 0; transition: background 0.15s; }

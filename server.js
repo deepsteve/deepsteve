@@ -28,6 +28,7 @@ const { wrapRunCommand } = require('./terminal-run');
 const { isTerminalReport } = require('./terminal-input');
 const { renderIssuePrompt, issueWorktreeName, issueTabName } = require('./issue-prompt');
 const { readRecentUserMessages, compareDelivered } = require('./prompt-delivery-check');
+const { enrichTabs, summarizeRun } = require('./timelapse-snapshot');
 const NodePtyEngine = require('./engines/node-pty');
 const TmuxEngine = require('./engines/tmux');
 
@@ -324,6 +325,11 @@ function auditClassifyBels(e, data) {
 const STATE_FILE = path.join(DS_DIR, 'state.json');
 const DISPLAY_TABS_DIR = path.join(DS_DIR, 'display-tabs');
 const SCREENSHOTS_DIR = path.join(DS_DIR, 'screenshots');
+// One directory per timelapse run (#667): ~/.deepsteve/timelapse/<runId>/NNNN.{png,json}.
+// Deliberately not swept on a timer the way SCREENSHOTS_DIR is — a run is a record
+// somebody chose to make, and one silently ageing out would destroy the thing it exists
+// to be. DELETE /api/timelapse/runs/:runId is the disposal path.
+const TIMELAPSE_DIR = path.join(DS_DIR, 'timelapse');
 const SETTINGS_FILE = path.join(DS_DIR, 'settings.json');
 const CONTEXTS_FILE = path.join(DS_DIR, 'contexts.json');
 // Per-context uploaded icon images (#579): <contextId>.png / .svg. Emoji icons still
@@ -380,6 +386,8 @@ app.use((req, res, next) => {
   // express.json({ limit: '50mb' }). Skip the default-100KB global parser here, or
   // it runs first and rejects them with PayloadTooLargeError before they reach the route.
   if (req.path.startsWith('/api/screenshots')) return next();
+  // Same reason for timelapse frames (#667) — each one carries a base64 PNG.
+  if (req.path.startsWith('/api/timelapse')) return next();
   express.json()(req, res, next);
 });
 
@@ -549,6 +557,13 @@ const SETTINGS_SCHEMA = [
   // exists. Read live by mods/project-mods/tools.js off the mutated-in-place settings
   // object, so toggling it takes effect with no restart.
   { name: 'projectModsEnabled',         type: 'boolean', default: true },
+  // Timelapse (#667). Server-authoritative because a mod's own toggle is per-browser
+  // localStorage and never reaches the daemon — the same reason projectModsEnabled and
+  // scheduledTasksEnabled exist. Read live at each route, so it takes effect with no
+  // restart; broadcast because the browser owns both the recording circle and the timer,
+  // and a change made in one window has to reach the others.
+  { name: 'timelapseEnabled',           type: 'boolean', default: true },
+  { name: 'timelapseIntervalMinutes',   type: 'number',  default: 5, clamp: [1, 60], round: true },
   { name: 'commandPaletteShortcut',     type: 'string',  default: 'Meta+k' },
   { name: 'overviewModeEnabled',        type: 'boolean', default: true },
   { name: 'overviewModeShortcut',       type: 'string',  default: 'Meta+o' },
@@ -5184,6 +5199,161 @@ app.delete('/api/screenshots/:id', (req, res) => {
   const existed = screenshots.has(id);
   deleteScreenshot(id);
   if (existed) broadcast({ type: 'screenshot-deleted', id });
+  res.json({ deleted: existed });
+});
+
+// ─────────────────────────────────────────────────────────────── Timelapse (#667)
+//
+// A run is a directory of NNNN.png + NNNN.json pairs plus a run.json manifest. The
+// browser drives the cadence (capture needs a live browser, so it has to), and sends the
+// picture together with the half of the snapshot only it knows — tab strip order, titles,
+// which tab is active, whether the window had focus. The daemon joins on the half only IT
+// knows (agent type, worktree, cwd, busy/idle) and writes the pair. See
+// timelapse-snapshot.js for why the join lives server-side.
+
+/**
+ * runId is a path segment supplied by a client, so it is validated twice: a charset that
+ * cannot express `/` or `..` at all, and then a containment check with the same helper
+ * every other path-taking route uses. Returns the absolute dir, or null to refuse.
+ */
+function timelapseRunDir(runId) {
+  if (typeof runId !== 'string' || !/^[A-Za-z0-9._-]{1,120}$/.test(runId)) return null;
+  const dir = path.resolve(TIMELAPSE_DIR, runId);
+  return pathInside(dir, path.resolve(TIMELAPSE_DIR)) && dir !== path.resolve(TIMELAPSE_DIR)
+    ? dir : null;
+}
+
+/** Read a run's sidecars, oldest first. Skips anything unparseable rather than throwing. */
+function readTimelapseFrames(dir) {
+  const frames = [];
+  let names = [];
+  try { names = fs.readdirSync(dir); } catch { return frames; }
+  for (const n of names.filter(n => /^\d+\.json$/.test(n)).sort()) {
+    try { frames.push(JSON.parse(fs.readFileSync(path.join(dir, n), 'utf8'))); } catch {}
+  }
+  return frames;
+}
+
+/** Next NNNN for a run. Server-owned, so a browser that lost its state cannot overwrite. */
+function nextFrameSeq(dir) {
+  let max = 0;
+  try {
+    for (const n of fs.readdirSync(dir)) {
+      const m = /^(\d+)\.png$/.exec(n);
+      if (m) max = Math.max(max, parseInt(m[1], 10));
+    }
+  } catch {}
+  return max + 1;
+}
+
+app.post('/api/timelapse/frame', express.json({ limit: '50mb' }), (req, res) => {
+  if (!settings.timelapseEnabled) return res.status(403).json({ error: 'Timelapse is disabled' });
+  const { runId, dataUrl, startedAt, intervalMs, capturedAt, expectedAt, window: win, tabs } = req.body || {};
+
+  const dir = timelapseRunDir(runId);
+  if (!dir) return res.status(400).json({ error: 'Invalid runId' });
+  if (typeof dataUrl !== 'string' || !dataUrl.startsWith('data:image/png;base64,')) {
+    return res.status(400).json({ error: 'Invalid dataUrl' });
+  }
+  const buf = Buffer.from(dataUrl.slice('data:image/png;base64,'.length), 'base64');
+  if (buf.length === 0) return res.status(400).json({ error: 'Empty image data' });
+
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    const seq = nextFrameSeq(dir);
+    const name = String(seq).padStart(4, '0');
+    const sidecar = {
+      runId,
+      seq,
+      // The time it ACTUALLY happened next to the time it was aiming for. A browser can be
+      // a minute late out of a throttled background tab, and the gap between these two is
+      // the only honest record of that.
+      capturedAt: Number(capturedAt) || Date.now(),
+      expectedAt: Number(expectedAt) || null,
+      window: win && typeof win === 'object' ? win : {},
+      tabs: enrichTabs(tabs, { shells, savedState, sessionInputState, sessionPaths }),
+    };
+    fs.writeFileSync(path.join(dir, `${name}.png`), buf);
+    fs.writeFileSync(path.join(dir, `${name}.json`), JSON.stringify(sidecar, null, 2));
+
+    const manifest = path.join(dir, 'run.json');
+    let existing = {};
+    try { existing = JSON.parse(fs.readFileSync(manifest, 'utf8')); } catch {}
+    fs.writeFileSync(manifest, JSON.stringify({
+      runId,
+      startedAt: existing.startedAt || Number(startedAt) || sidecar.capturedAt,
+      windowId: (sidecar.window && sidecar.window.windowId) || existing.windowId || null,
+      intervalMs: Number(intervalMs) || existing.intervalMs || null,
+      deepsteveVersion: pkg.version,
+      lastFrameAt: sidecar.capturedAt,
+      frames: seq,
+    }, null, 2));
+
+    res.json({ runId, seq, name });
+  } catch (e) {
+    log(`[timelapse] Failed to write frame for ${runId}: ${e.message}`);
+    res.status(500).json({ error: 'Write failed: ' + e.message });
+  }
+});
+
+app.get('/api/timelapse/runs', (req, res) => {
+  if (!settings.timelapseEnabled) return res.status(403).json({ error: 'Timelapse is disabled' });
+  const runs = [];
+  let names = [];
+  try { names = fs.readdirSync(TIMELAPSE_DIR); } catch { return res.json({ runs }); }
+  for (const runId of names) {
+    const dir = timelapseRunDir(runId);
+    if (!dir) continue;
+    let stat = null;
+    try { stat = fs.statSync(dir); } catch { continue; }
+    if (!stat.isDirectory()) continue;
+    let manifest = {};
+    try { manifest = JSON.parse(fs.readFileSync(path.join(dir, 'run.json'), 'utf8')); } catch {}
+    let frames = 0, bytes = 0;
+    try {
+      for (const f of fs.readdirSync(dir)) {
+        if (/^\d+\.png$/.test(f)) frames++;
+        try { bytes += fs.statSync(path.join(dir, f)).size; } catch {}
+      }
+    } catch {}
+    runs.push({
+      runId,
+      windowId: manifest.windowId || null,
+      startedAt: manifest.startedAt || null,
+      lastFrameAt: manifest.lastFrameAt || null,
+      intervalMs: manifest.intervalMs || null,
+      frames,
+      bytes,
+    });
+  }
+  runs.sort((a, b) => (b.startedAt || 0) - (a.startedAt || 0) || a.runId.localeCompare(b.runId));
+  res.json({ runs });
+});
+
+app.get('/api/timelapse/runs/:runId/summary', (req, res) => {
+  if (!settings.timelapseEnabled) return res.status(403).json({ error: 'Timelapse is disabled' });
+  const dir = timelapseRunDir(req.params.runId);
+  if (!dir || !fs.existsSync(dir)) return res.status(404).json({ error: 'No such run' });
+  let manifest = {};
+  try { manifest = JSON.parse(fs.readFileSync(path.join(dir, 'run.json'), 'utf8')); } catch {}
+  res.json({
+    runId: req.params.runId,
+    windowId: manifest.windowId || null,
+    ...summarizeRun(readTimelapseFrames(dir), manifest.intervalMs),
+  });
+});
+
+app.delete('/api/timelapse/runs/:runId', (req, res) => {
+  const dir = timelapseRunDir(req.params.runId);
+  if (!dir) return res.status(400).json({ error: 'Invalid runId' });
+  const existed = fs.existsSync(dir);
+  // Not gated on timelapseEnabled: turning the feature off must never strand a run's
+  // disk usage behind a setting the user just flipped.
+  try {
+    if (existed) fs.rmSync(dir, { recursive: true, force: true });
+  } catch (e) {
+    return res.status(500).json({ error: 'Delete failed: ' + e.message });
+  }
   res.json({ deleted: existed });
 });
 
