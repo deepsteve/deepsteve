@@ -1,6 +1,6 @@
 /**
- * The Backlog: a project's open GitHub issues for one label, matched to the tabs
- * already working on them (#671).
+ * The Backlog: a project's open GitHub issues — all of them, or one label's worth —
+ * matched to the tabs already working on them (#671, #679).
  *
  * Workshop's inbox answers "which agent needs me". This answers the other half of the
  * same question — "what is outstanding that nothing is working on yet" — and the whole
@@ -34,6 +34,30 @@ const MAX_ISSUES = 100;
 
 /** The id namespace. Must not collide with `blocked:<sessionId>` or a stored `w<n>` ticket. */
 const issueId = (number) => `issue:${number}`;
+
+/**
+ * `gh issue list` argv for one label, or for none.
+ *
+ * An empty label omits `--label` ENTIRELY rather than passing an empty one — that is the
+ * unfiltered backlog, every open issue in the project (#679). `--label=` with nothing
+ * after it is a real argument to gh and matches nothing, which is the opposite.
+ *
+ * `--label=<v>` is ONE token, not two: a label starting with `-` is otherwise read by
+ * gh's own flag parser as a flag. There is no shell anywhere on this path, so the `=`
+ * form costs nothing and closes that case.
+ *
+ * `--limit` is mandatory, not tidiness — gh defaults to 30 and truncates silently, which
+ * looks exactly like "that is all there is".
+ */
+function issueListArgs(label) {
+  return [
+    'issue', 'list',
+    ...(label ? [`--label=${label}`] : []),
+    '--state', 'open',
+    '--json', 'number,title,labels,url,updatedAt',
+    '--limit', String(MAX_ISSUES),
+  ];
+}
 
 /**
  * `gh issue list --json number,title,labels,url,updatedAt` → normalised rows.
@@ -226,6 +250,7 @@ module.exports = {
   ERROR_TTL_MS,
   CACHE_MAX,
   issueId,
+  issueListArgs,
   parseIssues,
   parseLabels,
   worktreeIssueNumber,

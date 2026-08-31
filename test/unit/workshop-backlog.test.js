@@ -44,6 +44,39 @@ const session = (over = {}) => ({
   id: 'a1', name: null, worktree: null, project: PROJECT, ...over,
 });
 
+// ── the gh argv ──────────────────────────────────────────────────────────────
+//
+// Built here rather than in the route so it can be asserted with no subprocess. Both
+// halves are silent when wrong: a stray `--label=` matches nothing and looks exactly
+// like an empty backlog, and a missing `--limit` truncates at gh's default of 30 and
+// looks exactly like "that is all there is".
+
+test('a label rides as ONE token, so a leading dash is not read as a flag', () => {
+  const argv = backlog.issueListArgs('-weird');
+  assert.deepStrictEqual(argv.slice(0, 3), ['issue', 'list', '--label=-weird']);
+  assert.strictEqual(argv.filter((a) => a.startsWith('--label')).length, 1);
+});
+
+test('no label omits --label entirely — the unfiltered backlog (#679)', () => {
+  for (const empty of ['', undefined, null]) {
+    const argv = backlog.issueListArgs(empty);
+    assert.ok(!argv.some((a) => a.startsWith('--label')),
+      `${JSON.stringify(empty)} produced a --label argument`);
+    // Not merely absent as a flag: no empty argument left behind either, which gh would
+    // read as a positional and reject.
+    assert.ok(!argv.includes(''), 'left a stray empty argument in the argv');
+    assert.deepStrictEqual(argv.slice(0, 2), ['issue', 'list']);
+  }
+});
+
+test('both forms keep --state open, --json and an explicit --limit', () => {
+  for (const argv of [backlog.issueListArgs('bug'), backlog.issueListArgs('')]) {
+    assert.strictEqual(argv[argv.indexOf('--state') + 1], 'open');
+    assert.strictEqual(argv[argv.indexOf('--json') + 1], 'number,title,labels,url,updatedAt');
+    assert.strictEqual(argv[argv.indexOf('--limit') + 1], String(backlog.MAX_ISSUES));
+  }
+});
+
 // ── parsing ──────────────────────────────────────────────────────────────────
 
 test('a real gh payload becomes rows, with labels flattened to names', () => {

@@ -41,7 +41,7 @@
       "key": "showBacklog",
       "type": "boolean",
       "label": "Show backlog",
-      "description": "List the focused project's open GitHub issues for a chosen label under the inbox",
+      "description": "List the focused project's open GitHub issues under the inbox — all of them, or one label's worth",
       "default": true
     },
     {

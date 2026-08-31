@@ -54,7 +54,7 @@ const DEFAULTS = {
   seenAutoCycleNote: false,
   showBacklog: true,
   backlogPollSeconds: 120,
-  issueLabel: 'bug',
+  issueLabel: '',
   backlogCollapsed: false,
   // Not in mod.json on purpose — a pane width is not a settings-modal control. Both are
   // listed in UNRENDERED_SETTINGS in test/unit/workshop-mod-shape.test.js, which is what
@@ -72,7 +72,7 @@ const DEFAULTS = {
  */
 const BACKLOG_ERRORS = {
   'no-project': 'Open a session in a project to see its issues.',
-  'no-label': 'Pick a label to list.',
+  'bad-label': 'That label can’t be used — pick another.',
   'gh-unavailable': 'The GitHub CLI (gh) isn’t on this machine’s PATH.',
   'gh-failed': 'gh couldn’t list issues here — no GitHub remote, or not signed in.',
   unreachable: 'Couldn’t reach the server for the issue list.',
@@ -233,7 +233,7 @@ const BacklogRow = memo(function BacklogRow({ issue, selected, now, compact, onS
 });
 
 /**
- * The Backlog's own header: which project, which label, how many, and the collapse.
+ * The Backlog's own header: which project, which issues, how many, and the collapse.
  *
  * The label picker lives HERE rather than in the gear menu because the mod settings
  * modal renders only checkboxes and number inputs (public/js/mod-manager.js) — a string
@@ -271,17 +271,22 @@ function BacklogHeader({
         onChange={(e) => onLabel(e.target.value)}
         onMouseDown={onLabelMenu}
         onFocus={onLabelMenu}
-        title="Which label to list"
+        title="Which issues to list"
         style={{
           border: `1px solid ${C.border}`, borderRadius: 4, background: C.surface,
           color: C.text, font: `600 11px ${MONO}`, padding: '1px 4px', cursor: 'pointer',
           maxWidth: 130, flexShrink: 0,
         }}
       >
+        {/* The empty value is a SCOPE, not a label — "no filter", every open issue
+            (#679). It leads the list because clearing a filter should be the first
+            thing you reach, and because it is where a fresh Workshop starts. */}
+        <option value="">all issues</option>
         {/* The current label is always an option, even before the label list lands or
             when the repo no longer defines it — otherwise the select would silently
-            jump to whatever happens to be first and change what you are looking at. */}
-        {(labels.some((l) => l.name === label) ? labels : [{ name: label }, ...labels])
+            jump to whatever happens to be first and change what you are looking at.
+            Not for the empty one: `{ name: '' }` would draw a second, blank row. */}
+        {(!label || labels.some((l) => l.name === label) ? labels : [{ name: label }, ...labels])
           .map((l) => <option key={l.name} value={l.name}>{l.name}</option>)}
       </select>
       <span style={{ flex: 1 }} />
@@ -1165,7 +1170,9 @@ function Workshop() {
   // almost always identical. Same shape as the inbox loop above — self-scheduling, backs
   // off while hidden, and keeps the last good list on error.
   const backlogMs = Math.max(30, Math.min(1800, Number(settings.backlogPollSeconds) || 120)) * 1000;
-  const issueLabel = String(settings.issueLabel || 'bug');
+  // `|| ''`, never `|| 'bug'`: an empty label is a real choice — the unfiltered
+  // backlog (#679) — and a default would coerce it straight back on every reload.
+  const issueLabel = String(settings.issueLabel || '');
   useEffect(() => {
     if (!settings.showBacklog) { setBacklog({ issues: [], projectName: '', error: null }); return undefined; }
     let cancelled = false;
@@ -1708,7 +1715,7 @@ function Workshop() {
                   </div>
                   : backlogView.list.length === 0
                     ? <div style={{ padding: '10px 12px', font: `12px ${SANS}`, color: C.faint }}>
-                      Nothing open with this label.
+                      {issueLabel ? 'Nothing open with this label.' : 'Nothing open in this project.'}
                     </div>
                     : <>
                       {backlogView.list.map((issue) => (

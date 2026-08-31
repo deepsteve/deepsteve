@@ -854,8 +854,9 @@ only record that a human moved a cursor in someone else's session.
 
 ### The Backlog (#671)
 
-A second, collapsible section under the inbox listing the **open issues carrying one label** for
-the project in focus — and marking the ones a Deep Steve tab is already on. The inbox answers
+A second, collapsible section under the inbox listing the **open issues** of the project in
+focus — every one of them, or only those carrying one label — and marking the ones a Deep Steve
+tab is already on. The inbox answers
 "which agent needs me"; this answers "what is outstanding that nothing is working on yet", and
 the reason they share a column is the diff between them.
 
@@ -865,8 +866,17 @@ setting there would be an invisible control. It is stored through `updateSetting
 like `blockingOnly`, and listed in `UNRENDERED_SETTINGS` in `test/unit/workshop-mod-shape.test.js`.
 `showBacklog` and `backlogPollSeconds` **are** in `mod.json`, because those two types do render.
 
+**The first option in the picker is `all issues`, and it is the default (#679).** Its value is the
+empty string — a *scope*, not a label — and it is what `DEFAULTS.issueLabel` now holds. The read in
+`workshop.jsx` is `String(settings.issueLabel || '')` and must stay that way: the `|| 'bug'` it
+replaced would coerce a cleared filter straight back on every reload, so the "all" choice could
+never survive one. For the same reason the synthesised stand-in option (the one that keeps a label
+the repo no longer defines visible in the picker) is skipped when the label is empty — `{ name: '' }`
+would draw a second, blank row.
+
 **Mod settings never reach the server**, so the label travels as `?label=`. That is also why the
-server-side cache is keyed on `project + label` rather than on the panel's idea of state.
+server-side cache is keyed on `project + label` rather than on the panel's idea of state; the
+unfiltered list is simply the empty-label key, `` `${project}\0` ``.
 
 **The project follows the focused tab.** `GET /api/workshop/backlog?session=<id>` resolves it with
 `projectScope.resolveProject`, which goes through `ctx.sessionPaths` — so a `github-issue-671`
@@ -906,13 +916,24 @@ and an immediate fetch, and each browser window polls independently.
 
 **It never returns 500.** A missing `gh`, an unauthenticated one, a repo with no GitHub remote and
 a label the repo has never defined all produce an empty list plus an `error` string the section
-renders as one grey line. The inbox's error path paints a red bar across the top of the app, and a
+renders as one grey line. So does a **malformed** label — over 60 characters, or carrying a newline
+or a NUL. That one is refused by `cleanLabel` in `tools.js` before any subprocess is spawned
+(`error: 'bad-label'`), because the value arrives from the browser's own settings and a junk one
+would otherwise cost a 15 s `gh` timeout on every refresh, forever. `cleanLabel` therefore has
+three outcomes rather than two: `''` for absent, which means *list everything*; `null` for
+malformed; the label itself otherwise. Absent and malformed used to collapse to the same `''`,
+which is precisely why "no filter" had nowhere to live before #679. The inbox's error path paints a red bar across the top of the app, and a
 project that simply is not on GitHub must not be able to trigger it. (`GET /api/issues` in
 `server.js` does 500, deliberately — that serves a picker the user opened on purpose.)
 
 One thing `gh` cannot tell you: **a label that does not exist and a label with no open issues are
 byte-identical** — exit 0, `[]`, both. The picker is populated from `gh label list` precisely so
 the choice comes from labels the repo actually has.
+
+The argv itself is built by `backlog.issueListArgs(label)` rather than inline in the route, so the
+two shapes can be asserted without a subprocess in `test/unit/workshop-backlog.test.js`. An empty
+label omits `--label` **entirely** — `--label=` with nothing after it is a real argument to `gh`
+and matches nothing, which is the opposite of what "all" means.
 
 **One cursor, two sections.** Backlog ids (`issue:<n>`) join the inbox's single `order` inside
 `visibleItems()`, so ↑/↓ walks straight out of the inbox and into the backlog, and collapsing the

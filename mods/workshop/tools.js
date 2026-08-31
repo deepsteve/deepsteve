@@ -359,10 +359,17 @@ function sessionsForMatch() {
  * A label is a command-line argument, and argv means no quoting to get wrong — but it is
  * still worth refusing something that cannot be a GitHub label, so a junk localStorage
  * value produces an empty list rather than a 15s `gh` timeout per refresh.
+ *
+ * Three outcomes, not two (#679). Absent and malformed used to collapse to the same `''`,
+ * which is why "no filter" had nowhere to live: `''` now means *list everything* and a
+ * present-but-unusable value returns `null` so the route can still refuse it before
+ * spawning anything.
  */
 function cleanLabel(raw) {
-  const s = String(raw == null ? '' : raw).trim();
-  if (!s || s.length > 60 || /[\n\r\0]/.test(s)) return '';
+  if (raw == null) return '';
+  const s = String(raw).trim();
+  if (!s) return '';
+  if (s.length > 60 || /[\n\r\0]/.test(s)) return null;
   return s;
 }
 
@@ -1160,10 +1167,13 @@ function registerRoutes(app, context) {
     if (!project) {
       return res.json({ project: '', projectName: '', label, issues: [], generatedAt: now, error: 'no-project' });
     }
-    if (!label) {
+    // An ABSENT label is not an error — it is the unfiltered backlog, every open issue in
+    // the project (#679). Only a malformed one is refused, and it is refused here so that
+    // a junk stored value never reaches `gh`.
+    if (label === null) {
       return res.json({
         project, projectName: projectScope.displayName(project),
-        label: '', issues: [], generatedAt: now, error: 'no-label',
+        label: '', issues: [], generatedAt: now, error: 'bad-label',
       });
     }
 
@@ -1171,17 +1181,7 @@ function registerRoutes(app, context) {
       Math.min(MAX_MAX_AGE_MS, Number(req.query && req.query.maxAgeMs) || backlog.BACKLOG_TTL_MS));
 
     const result = await issueCache.get(`${project}\0${label}`, async () => {
-      const r = await runGh(
-        // `--label=<v>` as ONE token, not two: a label starting with `-` is otherwise
-        // read by gh's own flag parser as a flag. There is no shell anywhere on this
-        // path, so the `=` form costs nothing and closes that case.
-        //
-        // `--limit` is mandatory, not tidiness — gh defaults to 30 and truncates
-        // silently, which looks exactly like "that is all there is".
-        ['issue', 'list', `--label=${label}`, '--state', 'open',
-          '--json', 'number,title,labels,url,updatedAt', '--limit', String(backlog.MAX_ISSUES)],
-        project,
-      );
+      const r = await runGh(backlog.issueListArgs(label), project);
       if (r.error) return { error: r.error, issues: [] };
       const issues = backlog.parseIssues(r.stdout);
       return { issues, truncated: issues.length >= backlog.MAX_ISSUES };

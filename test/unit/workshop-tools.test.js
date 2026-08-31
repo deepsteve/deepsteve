@@ -1033,14 +1033,39 @@ test('an explicit project pins the backlog regardless of the session', async () 
   assert.strictEqual(r.body.project, PROJECT_DIR);
 });
 
-test('a missing or unusable label is refused before a subprocess is spawned', async () => {
+test('an unusable label is refused before a subprocess is spawned', async () => {
+  // Not a hypothetical: the label is a string kept in the browser's own settings, so the
+  // route's input is whatever localStorage holds. Refusing it here is what keeps a junk
+  // value from costing a 15s `gh` timeout on every refresh, forever.
   const { shells, app } = world();
   const id = sid();
   shells.set(id, makeEntry(id, new FakeDialog(['Yes'])));
-  for (const bad of [undefined, '', '   ', 'x'.repeat(61), 'two\nlines']) {
+  for (const bad of ['x'.repeat(61), 'two\nlines', 'nul\0byte']) {
     const r = await app.call('GET', '/api/workshop/backlog', { query: { label: bad, session: id } });
     assert.strictEqual(r.status, 200, 'still never a 500');
-    assert.strictEqual(r.body.error, 'no-label', `accepted ${JSON.stringify(bad)} as a label`);
+    assert.strictEqual(r.body.error, 'bad-label', `accepted ${JSON.stringify(bad)} as a label`);
+    assert.deepStrictEqual(r.body.issues, []);
+  }
+});
+
+test('no label means every open issue, not an error (#679)', async () => {
+  // The whole point of #679: absent and malformed used to be the same `''`, so there was
+  // no way to say "no filter". Now only the malformed case is refused — an absent label
+  // goes through to `gh` exactly like a real one, which on this machine means it comes
+  // back with a gh error rather than a `no-label` short-circuit.
+  //
+  // Unlike the tests above this one cannot use label(): the unfiltered cache key is the
+  // fixed `${project}\0`, so a second case would be served the first one's answer. One
+  // pass, and `cached` is left unasserted for the same reason.
+  const { shells, app } = world();
+  const id = sid();
+  shells.set(id, makeEntry(id, new FakeDialog(['Yes'])));
+  for (const absent of [undefined, '', '   ']) {
+    const r = await app.call('GET', '/api/workshop/backlog', { query: { label: absent, session: id } });
+    assert.strictEqual(r.status, 200);
+    assert.strictEqual(r.body.label, '');
+    assert.notStrictEqual(r.body.error, 'bad-label', `${JSON.stringify(absent)} was read as junk`);
+    assert.ok(GH_ERRORS.includes(r.body.error), `unexpected error ${r.body.error}`);
   }
 });
 
