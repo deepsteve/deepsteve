@@ -1,0 +1,29 @@
+{
+  "name": "Simeon",
+  "version": "0.2.0",
+  "minDeepsteveVersion": "0.4.0",
+  "description": "A live UI REPL \u2014 describe an interface and watch an agent stream it into being, one row at a time",
+  "experimental": true,
+  "enabledByDefault": false,
+  "entry": "index.html",
+  "app": true,
+  "toolbar": {
+    "label": "Simeon"
+  },
+  "settings": [
+    {
+      "key": "rowIntervalMs",
+      "type": "number",
+      "label": "Extra row smoothing (ms)",
+      "description": "Rows already arrive one at a time as the model writes them, so this is off by default. Raise it only to slow a burst down further.",
+      "default": 0
+    },
+    {
+      "key": "showRawRows",
+      "type": "boolean",
+      "label": "Show the row feed",
+      "description": "Mirror every row the agent emits in a side rail, so you can read the language as it streams",
+      "default": true
+    }
+  ]
+}

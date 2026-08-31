@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Simeon</title>
+  <link rel="stylesheet" href="simeon.css">
+</head>
+<body>
+  <div id="sim-app">
+    <div id="sim-stage">
+      <div id="sim-canvas"></div>
+      <div id="sim-empty">
+        <b>SIMEON</b>
+        the canvas is empty<br>
+        ask for an interface below and watch it assemble
+      </div>
+    </div>
+
+    <aside id="sim-rail">
+      <h2>Row feed</h2>
+      <div id="sim-rows"></div>
+    </aside>
+
+    <section id="sim-console">
+      <div id="sim-bar">
+        <span id="sim-dot" data-state="live"></span>
+        <span id="sim-state">ready</span>
+        <span class="sim-spacer"></span>
+        <span id="sim-count">0 nodes</span>
+        <select id="sim-model" title="Model — the biggest speed lever">
+          <option value="">default</option>
+          <option value="fable">fable</option>
+          <option value="sonnet">sonnet</option>
+          <option value="opus">opus</option>
+        </select>
+        <button id="sim-stop" type="button">Stop</button>
+        <button id="sim-toggle-rail" type="button">Rows</button>
+        <button id="sim-reset" type="button">Clear</button>
+      </div>
+      <div id="sim-log"></div>
+      <div id="sim-input-wrap">
+        <textarea id="sim-input" rows="1" placeholder="Describe the interface you want. ⏎ to send, ⇧⏎ for a new line."></textarea>
+        <button id="sim-send" type="button">Send</button>
+      </div>
+    </section>
+  </div>
+  <script type="module" src="boot.js"></script>
+</body>
+</html>

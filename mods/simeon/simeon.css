@@ -1,0 +1,383 @@
+/* Simeon — the look.
+ *
+ * Mod iframes receive NO theme variables from the host, so nothing here reads a --ds-*
+ * token. Simeon defines its own palette outright: it is a canvas an agent draws on, and
+ * it should look the same wherever it is embedded. */
+
+:root {
+  --sim-void:      #05070d;
+  --sim-deep:      #080c16;
+  --sim-panel:     #0c1220;
+  --sim-panel-hi:  #111a2c;
+  --sim-line:      #1d2c47;
+  --sim-line-hi:   #2b4368;
+
+  --sim-ink:       #cfe3ff;
+  --sim-ink-dim:   #6f86ad;
+  --sim-ink-faint: #43536e;
+
+  --sim-accent:    #35e6d4;
+  --sim-accent-2:  #7b6cff;
+  --sim-ok:        #45e08a;
+  --sim-warn:      #ffc24d;
+  --sim-alert:     #ff5c7a;
+
+  --sim-mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, monospace;
+  --sim-sans: system-ui, -apple-system, "Segoe UI", sans-serif;
+
+  color-scheme: dark;
+}
+
+* { margin: 0; box-sizing: border-box; }
+html, body { height: 100%; }
+
+body {
+  background: var(--sim-void);
+  color: var(--sim-ink);
+  font-family: var(--sim-sans);
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+}
+
+button, input, textarea { font-family: inherit; color: inherit; }
+:focus-visible { outline: 1px solid var(--sim-accent); outline-offset: 2px; }
+
+::-webkit-scrollbar { width: 9px; height: 9px; }
+::-webkit-scrollbar-thumb { background: var(--sim-line); border-radius: 5px; border: 2px solid transparent; background-clip: padding-box; }
+::-webkit-scrollbar-thumb:hover { background: var(--sim-line-hi); background-clip: padding-box; }
+::-webkit-scrollbar-track { background: transparent; }
+
+/* ── frame ───────────────────────────────────────────────────────────────────── */
+
+#sim-app {
+  height: 100%;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-rows: minmax(0, 1fr) auto;
+}
+
+#sim-stage {
+  grid-column: 1; grid-row: 1;
+  position: relative;
+  overflow: auto;
+  padding: 26px 28px 34px;
+  /* The backdrop: a faint survey grid with a wash of colour at the top corners. */
+  background:
+    radial-gradient(1100px 420px at 12% -12%, rgba(53, 230, 212, 0.10), transparent 70%),
+    radial-gradient(900px 380px at 96% -6%, rgba(123, 108, 255, 0.10), transparent 70%),
+    linear-gradient(var(--sim-line) 1px, transparent 1px) 0 0 / 100% 44px,
+    linear-gradient(90deg, var(--sim-line) 1px, transparent 1px) 0 0 / 44px 100%,
+    var(--sim-void);
+  background-blend-mode: normal, normal, overlay, overlay, normal;
+}
+#sim-stage::after {
+  /* A slow scan pass, so an idle canvas is not a dead one. Absolute inside the stage, never
+     fixed: a fixed overlay is positioned against the viewport and washes over the console
+     below, which is a chat box and has no business glowing. */
+  content: ''; position: absolute; left: 0; right: 0; top: 0; pointer-events: none;
+  background: linear-gradient(180deg, transparent 0%, rgba(53, 230, 212, 0.05) 50%, transparent 100%);
+  height: 180px; animation: sim-scan 9s linear infinite;
+}
+@keyframes sim-scan { from { transform: translateY(-200px); } to { transform: translateY(100vh); } }
+
+#sim-canvas { display: flex; flex-direction: column; gap: 22px; min-height: 100%; }
+
+#sim-empty {
+  margin: auto; text-align: center; color: var(--sim-ink-faint);
+  font-family: var(--sim-mono); font-size: 12.5px; line-height: 2;
+  letter-spacing: 0.06em;
+}
+#sim-empty b { display: block; color: var(--sim-ink-dim); font-size: 13px; letter-spacing: 0.28em; margin-bottom: 10px; }
+
+/* ── the row feed ────────────────────────────────────────────────────────────── */
+
+#sim-rail {
+  grid-column: 2; grid-row: 1;
+  width: 300px; overflow: auto;
+  border-left: 1px solid var(--sim-line);
+  background: var(--sim-deep);
+  padding: 12px 0 24px;
+  font-family: var(--sim-mono); font-size: 11px;
+}
+#sim-rail[hidden] { display: none; }
+#sim-rail h2 {
+  font-size: 9.5px; letter-spacing: 0.24em; text-transform: uppercase;
+  color: var(--sim-ink-faint); font-weight: 600; padding: 0 14px 10px;
+}
+.sim-rowline {
+  padding: 2.5px 14px; white-space: pre-wrap; word-break: break-word;
+  color: var(--sim-ink-dim); border-left: 2px solid transparent;
+  animation: sim-rowline-in 0.35s ease both;
+}
+.sim-rowline[data-kind="n"] { color: var(--sim-accent); border-left-color: rgba(53, 230, 212, 0.5); }
+.sim-rowline[data-kind="d"] { color: var(--sim-accent-2); border-left-color: rgba(123, 108, 255, 0.5); }
+.sim-rowline[data-kind="x"], .sim-rowline[data-kind="c"] { color: var(--sim-alert); }
+.sim-rowline[data-kind="#"] { color: var(--sim-ink-faint); font-style: italic; }
+@keyframes sim-rowline-in { from { opacity: 0; transform: translateX(10px); } to { opacity: 1; transform: none; } }
+
+/* ── console ─────────────────────────────────────────────────────────────────── */
+
+#sim-console {
+  grid-column: 1 / -1; grid-row: 2;
+  display: flex; flex-direction: column;
+  border-top: 1px solid var(--sim-line);
+  background: linear-gradient(180deg, var(--sim-deep), var(--sim-void));
+  max-height: 46vh;
+}
+
+#sim-bar {
+  display: flex; align-items: center; gap: 10px;
+  padding: 7px 14px; border-bottom: 1px solid var(--sim-line);
+  font-family: var(--sim-mono); font-size: 10.5px; letter-spacing: 0.12em;
+  color: var(--sim-ink-faint); text-transform: uppercase;
+}
+#sim-bar .sim-spacer { flex: 1; }
+#sim-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--sim-ink-faint); flex: none; }
+#sim-dot[data-state="live"]     { background: var(--sim-ok); box-shadow: 0 0 8px var(--sim-ok); }
+#sim-dot[data-state="thinking"] { background: var(--sim-accent); box-shadow: 0 0 8px var(--sim-accent); animation: sim-pulse 1.1s ease-in-out infinite; }
+#sim-dot[data-state="starting"] { background: var(--sim-warn); box-shadow: 0 0 8px var(--sim-warn); animation: sim-pulse 1.1s ease-in-out infinite; }
+#sim-dot[data-state="idle"]     { background: var(--sim-ink-faint); }
+#sim-dot[data-state="down"]     { background: var(--sim-alert); }
+@keyframes sim-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.25; } }
+
+#sim-bar button {
+  background: transparent; border: 1px solid var(--sim-line);
+  color: var(--sim-ink-dim); font-family: var(--sim-mono); font-size: 10px;
+  letter-spacing: 0.12em; text-transform: uppercase;
+  padding: 3px 9px; border-radius: 4px; cursor: pointer;
+}
+#sim-bar button:hover { border-color: var(--sim-accent); color: var(--sim-accent); }
+#sim-model {
+  background: var(--sim-panel); border: 1px solid var(--sim-line); border-radius: 4px;
+  color: var(--sim-ink-dim); font-family: var(--sim-mono); font-size: 10px;
+  letter-spacing: 0.1em; padding: 2px 4px; cursor: pointer;
+}
+#sim-model:hover { border-color: var(--sim-accent); color: var(--sim-accent); }
+
+#sim-log { flex: 1; overflow: auto; padding: 12px 14px; display: flex; flex-direction: column; gap: 9px; min-height: 60px; }
+
+.sim-msg {
+  max-width: 78ch; font-size: 13px; line-height: 1.55;
+  padding: 7px 11px; border-radius: 8px; border: 1px solid transparent;
+  animation: sim-msg-in 0.28s ease both; white-space: pre-wrap; word-break: break-word;
+}
+.sim-msg[data-role="user"]  { align-self: flex-end; background: var(--sim-panel-hi); border-color: var(--sim-line-hi); }
+.sim-msg[data-role="agent"] { align-self: flex-start; background: rgba(53, 230, 212, 0.07); border-color: rgba(53, 230, 212, 0.28); }
+.sim-msg[data-role="press"] { align-self: flex-end; background: transparent; border-color: var(--sim-line);
+  font-family: var(--sim-mono); font-size: 11px; color: var(--sim-ink-dim); }
+.sim-msg[data-role="press"]::before { content: '▸ pressed  '; color: var(--sim-accent-2); }
+.sim-msg[data-role="system"] { align-self: center; background: transparent; color: var(--sim-alert);
+  font-family: var(--sim-mono); font-size: 11px; border-color: rgba(255, 92, 122, 0.35); }
+@keyframes sim-msg-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+
+#sim-input-wrap { display: flex; gap: 8px; padding: 10px 14px 12px; border-top: 1px solid var(--sim-line); }
+#sim-input {
+  flex: 1; resize: none; min-height: 40px; max-height: 160px;
+  background: var(--sim-panel); border: 1px solid var(--sim-line); border-radius: 8px;
+  padding: 10px 12px; font-size: 13.5px; line-height: 1.45; color: var(--sim-ink);
+}
+#sim-input:focus { border-color: var(--sim-accent); outline: none; box-shadow: 0 0 0 3px rgba(53, 230, 212, 0.10); }
+#sim-input::placeholder { color: var(--sim-ink-faint); }
+#sim-send {
+  align-self: stretch; padding: 0 18px; border-radius: 8px; cursor: pointer;
+  border: 1px solid var(--sim-accent); background: rgba(53, 230, 212, 0.12);
+  color: var(--sim-accent); font-family: var(--sim-mono); font-size: 11px;
+  letter-spacing: 0.16em; text-transform: uppercase;
+}
+#sim-send:hover:not(:disabled) { background: rgba(53, 230, 212, 0.22); }
+#sim-send:disabled { opacity: 0.35; cursor: default; }
+
+/* ── components ──────────────────────────────────────────────────────────────── */
+
+.sim-node { position: relative; }
+
+.sim-stack { display: flex; min-width: 0; }
+.sim-col  { flex-direction: column; }
+.sim-row  { flex-direction: row; }
+.sim-grid { display: grid; }
+.sim-row > .sim-node { min-width: 0; }
+
+.sim-screen { display: flex; flex-direction: column; gap: 18px; }
+.sim-screen-hd { display: flex; align-items: baseline; gap: 12px; padding-bottom: 12px; border-bottom: 1px solid var(--sim-line); }
+.sim-screen-mark { width: 9px; height: 9px; background: var(--sim-accent); box-shadow: 0 0 12px var(--sim-accent); transform: rotate(45deg); flex: none; }
+.sim-screen-title { font-size: 19px; font-weight: 600; letter-spacing: 0.02em; }
+.sim-screen-sub { font-family: var(--sim-mono); font-size: 11px; color: var(--sim-ink-dim); letter-spacing: 0.1em; }
+
+.sim-card {
+  background: linear-gradient(180deg, var(--sim-panel), var(--sim-deep));
+  border: 1px solid var(--sim-line); border-radius: 10px; overflow: hidden;
+  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.45);
+}
+.sim-card-hd {
+  display: flex; align-items: center; gap: 10px;
+  padding: 9px 14px; border-bottom: 1px solid var(--sim-line);
+  background: rgba(255, 255, 255, 0.015);
+}
+.sim-card-title { font-family: var(--sim-mono); font-size: 10.5px; letter-spacing: 0.2em; text-transform: uppercase; color: var(--sim-ink-dim); }
+.sim-card-note { margin-left: auto; font-family: var(--sim-mono); font-size: 10.5px; color: var(--sim-ink-faint); }
+.sim-card-body { padding: 14px; }
+.sim-card[data-tone="accent"] { border-color: rgba(53, 230, 212, 0.35); }
+.sim-card[data-tone="accent"] .sim-card-title { color: var(--sim-accent); }
+.sim-card[data-tone="alert"]  { border-color: rgba(255, 92, 122, 0.4); }
+.sim-card[data-tone="alert"] .sim-card-title { color: var(--sim-alert); }
+.sim-card[data-tone="warn"]   { border-color: rgba(255, 194, 77, 0.4); }
+.sim-card[data-tone="ok"]     { border-color: rgba(69, 224, 138, 0.4); }
+
+.sim-title { font-weight: 600; letter-spacing: 0.01em; }
+.sim-title[data-size="sm"] { font-size: 13px; }
+.sim-title[data-size="md"] { font-size: 16px; }
+.sim-title[data-size="lg"] { font-size: 22px; }
+.sim-title[data-size="xl"] { font-size: 30px; letter-spacing: -0.01em; }
+
+.sim-text { font-size: 13.5px; line-height: 1.6; color: var(--sim-ink-dim); }
+.sim-text[data-mono="on"] { font-family: var(--sim-mono); font-size: 12px; }
+
+.sim-stat {
+  flex: 1 1 0; min-width: 120px;
+  padding: 13px 15px; border: 1px solid var(--sim-line); border-radius: 10px;
+  background: linear-gradient(180deg, var(--sim-panel), var(--sim-deep));
+}
+.sim-stat-label { font-family: var(--sim-mono); font-size: 9.5px; letter-spacing: 0.22em; text-transform: uppercase; color: var(--sim-ink-faint); margin-bottom: 7px; }
+.sim-stat-line { display: flex; align-items: baseline; gap: 5px; }
+.sim-stat-value { font-family: var(--sim-mono); font-size: 27px; font-weight: 600; letter-spacing: -0.02em; line-height: 1; }
+.sim-stat-unit { font-family: var(--sim-mono); font-size: 12px; color: var(--sim-ink-faint); }
+.sim-stat-trend { margin-left: auto; font-family: var(--sim-mono); font-size: 11px; color: var(--sim-ink-dim); }
+.sim-stat[data-tone="accent"] { border-color: rgba(53, 230, 212, 0.35); }
+.sim-stat[data-tone="accent"] .sim-stat-value { color: var(--sim-accent); text-shadow: 0 0 22px rgba(53, 230, 212, 0.4); }
+.sim-stat[data-tone="ok"]    .sim-stat-value { color: var(--sim-ok); }
+.sim-stat[data-tone="warn"]  .sim-stat-value { color: var(--sim-warn); }
+.sim-stat[data-tone="alert"] .sim-stat-value { color: var(--sim-alert); text-shadow: 0 0 22px rgba(255, 92, 122, 0.4); }
+.sim-stat[data-tone="alert"] { border-color: rgba(255, 92, 122, 0.4); }
+
+.sim-bar { display: flex; flex-direction: column; gap: 6px; }
+/* space-between alone lets a long label butt straight into its value ("DEPTH VS CRUSH
+   RATING1834"). The gap is the separation; the label yields first because the number is
+   the thing being read. */
+.sim-bar-hd { display: flex; justify-content: space-between; gap: 12px; font-family: var(--sim-mono); font-size: 10.5px; letter-spacing: 0.12em; color: var(--sim-ink-dim); text-transform: uppercase; }
+.sim-bar-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sim-bar-value { flex: none; }
+.sim-bar-track { height: 6px; border-radius: 3px; background: var(--sim-panel-hi); overflow: hidden; border: 1px solid var(--sim-line); }
+.sim-bar-fill { height: 100%; width: 0; border-radius: 3px; background: linear-gradient(90deg, var(--sim-accent-2), var(--sim-accent)); transition: width 0.55s cubic-bezier(0.22, 1, 0.36, 1); box-shadow: 0 0 12px rgba(53, 230, 212, 0.5); }
+.sim-bar[data-tone="ok"]    .sim-bar-fill { background: var(--sim-ok); box-shadow: 0 0 12px rgba(69, 224, 138, 0.5); }
+.sim-bar[data-tone="warn"]  .sim-bar-fill { background: var(--sim-warn); box-shadow: 0 0 12px rgba(255, 194, 77, 0.5); }
+.sim-bar[data-tone="alert"] .sim-bar-fill { background: var(--sim-alert); box-shadow: 0 0 12px rgba(255, 92, 122, 0.5); }
+
+.sim-spark { height: 46px; }
+.sim-spark svg { width: 100%; height: 100%; display: block; overflow: visible; }
+.sim-spark-line { fill: none; stroke: var(--sim-accent); stroke-width: 1.4; vector-effect: non-scaling-stroke; stroke-linejoin: round; filter: drop-shadow(0 0 5px rgba(53, 230, 212, 0.6)); }
+.sim-spark-area { fill: rgba(53, 230, 212, 0.12); stroke: none; }
+.sim-spark[data-tone="alert"] .sim-spark-line { stroke: var(--sim-alert); }
+.sim-spark[data-tone="alert"] .sim-spark-area { fill: rgba(255, 92, 122, 0.12); }
+
+/* heart — --sim-beat is set per node from its own bpm, so the rhythm carries the reading */
+.sim-heart { display: flex; align-items: center; gap: 13px; padding: 6px 0 2px; }
+.sim-heart-svg { width: 44px; height: 41px; display: block; overflow: visible; transform-origin: 50% 58%; }
+.sim-heart-path { fill: var(--sim-alert); }
+.sim-heart-glow { fill: var(--sim-alert); opacity: 0.4; filter: blur(7px); }
+.sim-heart[data-beating="yes"] .sim-heart-svg {
+  animation: sim-beat var(--sim-beat, 1s) ease-in-out infinite;
+}
+.sim-heart-bpm {
+  font-family: var(--sim-mono); font-size: 12px; letter-spacing: 0.16em;
+  color: var(--sim-alert); text-shadow: 0 0 16px rgba(255, 92, 122, 0.45);
+}
+.sim-heart[data-tone="accent"] .sim-heart-path,
+.sim-heart[data-tone="accent"] .sim-heart-glow { fill: var(--sim-accent); }
+.sim-heart[data-tone="accent"] .sim-heart-bpm { color: var(--sim-accent); text-shadow: 0 0 16px rgba(53, 230, 212, 0.45); }
+.sim-heart[data-tone="ok"] .sim-heart-path,
+.sim-heart[data-tone="ok"] .sim-heart-glow { fill: var(--sim-ok); }
+.sim-heart[data-tone="ok"] .sim-heart-bpm { color: var(--sim-ok); text-shadow: none; }
+.sim-heart[data-tone="warn"] .sim-heart-path,
+.sim-heart[data-tone="warn"] .sim-heart-glow { fill: var(--sim-warn); }
+.sim-heart[data-tone="warn"] .sim-heart-bpm { color: var(--sim-warn); text-shadow: none; }
+
+/* systole, a short recoil, then the weaker second sound — then rest for the remainder */
+@keyframes sim-beat {
+  0%   { transform: scale(1); }
+  8%   { transform: scale(1.17); }
+  17%  { transform: scale(0.985); }
+  27%  { transform: scale(1.09); }
+  40%  { transform: scale(1); }
+  100% { transform: scale(1); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sim-heart[data-beating="yes"] .sim-heart-svg { animation: none; }
+}
+
+.sim-list { list-style: none; padding: 0; display: flex; flex-direction: column; }
+.sim-list[data-empty="yes"]::after { content: 'no entries'; font-family: var(--sim-mono); font-size: 11px; color: var(--sim-ink-faint); }
+.sim-list-item {
+  display: flex; gap: 10px; align-items: baseline;
+  padding: 6px 0 6px 14px; font-size: 13px; position: relative;
+  border-bottom: 1px solid rgba(29, 44, 71, 0.55);
+}
+.sim-list-item:last-child { border-bottom: none; }
+.sim-list-item::before { content: ''; position: absolute; left: 2px; top: 12px; width: 4px; height: 4px; border-radius: 50%; background: var(--sim-ink-faint); }
+.sim-list-item[data-tone="accent"]::before { background: var(--sim-accent); box-shadow: 0 0 7px var(--sim-accent); }
+.sim-list-item[data-tone="ok"]::before     { background: var(--sim-ok); }
+.sim-list-item[data-tone="warn"]::before   { background: var(--sim-warn); }
+.sim-list-item[data-tone="alert"]::before  { background: var(--sim-alert); box-shadow: 0 0 7px var(--sim-alert); }
+.sim-list-label { flex: 1; min-width: 0; }
+.sim-list-value { font-family: var(--sim-mono); font-size: 11.5px; color: var(--sim-ink-dim); }
+
+.sim-badge {
+  display: inline-block; align-self: flex-start;
+  padding: 3px 9px; border-radius: 999px; border: 1px solid var(--sim-line);
+  font-family: var(--sim-mono); font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase;
+  color: var(--sim-ink-dim);
+}
+.sim-badge[data-tone="accent"] { border-color: var(--sim-accent); color: var(--sim-accent); background: rgba(53, 230, 212, 0.1); }
+.sim-badge[data-tone="ok"]     { border-color: var(--sim-ok); color: var(--sim-ok); background: rgba(69, 224, 138, 0.1); }
+.sim-badge[data-tone="warn"]   { border-color: var(--sim-warn); color: var(--sim-warn); background: rgba(255, 194, 77, 0.1); }
+.sim-badge[data-tone="alert"]  { border-color: var(--sim-alert); color: var(--sim-alert); background: rgba(255, 92, 122, 0.1); }
+
+.sim-btn {
+  align-self: flex-start; cursor: pointer;
+  padding: 8px 16px; border-radius: 7px;
+  border: 1px solid var(--sim-line-hi); background: var(--sim-panel-hi);
+  font-family: var(--sim-mono); font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase;
+  transition: border-color 0.18s, color 0.18s, background 0.18s;
+}
+.sim-btn:hover:not(:disabled) { border-color: var(--sim-accent); color: var(--sim-accent); background: rgba(53, 230, 212, 0.1); }
+.sim-btn:disabled { opacity: 0.4; cursor: default; }
+.sim-btn[data-tone="accent"] { border-color: var(--sim-accent); color: var(--sim-accent); }
+.sim-btn[data-tone="alert"]  { border-color: var(--sim-alert); color: var(--sim-alert); }
+.sim-btn-hit { animation: sim-hit 0.4s ease; }
+@keyframes sim-hit { 0% { box-shadow: 0 0 0 0 rgba(53, 230, 212, 0.55); } 100% { box-shadow: 0 0 0 16px rgba(53, 230, 212, 0); } }
+
+.sim-unknown {
+  align-self: flex-start; padding: 6px 12px; border-radius: 6px;
+  border: 1px dashed var(--sim-alert); color: var(--sim-alert);
+  font-family: var(--sim-mono); font-size: 11px; letter-spacing: 0.1em;
+}
+
+/* ── arrival ─────────────────────────────────────────────────────────────────── */
+
+.sim-enter { animation: sim-enter 0.42s cubic-bezier(0.22, 1, 0.36, 1) both; }
+@keyframes sim-enter {
+  0%   { opacity: 0; transform: translateY(12px) scale(0.985); filter: blur(3px); }
+  55%  { opacity: 1; filter: blur(0); }
+  100% { opacity: 1; transform: none; filter: none; }
+}
+/* The edge glow that reads as "this just landed". Separate from the transform above so a
+   component with its own transform is not fought over. */
+.sim-enter::after {
+  content: ''; position: absolute; inset: -1px; border-radius: inherit; pointer-events: none;
+  box-shadow: inset 0 0 0 1px var(--sim-accent), 0 0 26px rgba(53, 230, 212, 0.35);
+  animation: sim-enter-glow 0.7s ease-out forwards;
+}
+@keyframes sim-enter-glow { from { opacity: 0.85; } to { opacity: 0; } }
+
+.sim-flash { animation: sim-flash 0.65s ease-out; }
+@keyframes sim-flash {
+  0%   { background-color: rgba(123, 108, 255, 0.30); }
+  100% { background-color: transparent; }
+}
+
+.sim-exit { animation: sim-exit 0.24s ease-in forwards; pointer-events: none; }
+@keyframes sim-exit { to { opacity: 0; transform: translateX(-14px) scale(0.97); } }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; }
+}
