@@ -1,0 +1,10 @@
+{
+  "name": "Timecard",
+  "version": "0.1.0",
+  "minDeepsteveVersion": "0.4.0",
+  "description": "Your own hours in Deep Steve, sampled locally and charted by day, week and month",
+  "enabledByDefault": true,
+  "entry": "index.html",
+  "app": true,
+  "toolbar": { "label": "Timecard" }
+}

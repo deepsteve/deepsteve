@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    /* Mod iframes receive NO theme variables from the host, so every var() here MUST
+       carry a fallback — an unfallbacked var() renders transparent-on-transparent,
+       which reads as a broken build. timecard.js additionally MIRRORS the host's
+       computed --ds-* tokens onto this document's :root, which is what makes the card
+       follow a light theme (win-95) instead of being stuck on these dark defaults. The
+       fallbacks are the floor if that mirror ever fails.
+       test/unit/timecard-mod-shape.test.js enforces both halves. */
+    * { margin: 0; box-sizing: border-box; }
+    html, body { height: 100%; }
+    body {
+      background: var(--ds-bg-primary, #0d1117);
+      color: var(--ds-text-primary, #c9d1d9);
+      font-family: system-ui, -apple-system, sans-serif;
+      overflow: auto;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* No card wrapper, no border, no shadow, no gradient: whitespace is the container. */
+    #timecard-root { padding: 44px 36px; }
+    .tc-card { max-width: 560px; }
+
+    /* The switcher baseline-aligns with the headline, so the row aligns on the first
+       line of .tc-head — the big number — not on the range label under it. */
+    .tc-top { display: flex; align-items: baseline; justify-content: space-between; gap: 24px; }
+
+    .tc-headline { display: flex; align-items: baseline; gap: 8px; }
+    .tc-total {
+      font-size: 34px;
+      font-weight: 500;
+      letter-spacing: -0.02em;
+      color: var(--ds-text-primary, #c9d1d9);
+    }
+    .tc-unit { font-size: 15px; color: var(--ds-text-secondary, #8b949e); }
+    .tc-range { font-size: 13px; color: var(--ds-text-secondary, #8b949e); margin-top: 6px; }
+
+    .tc-views { display: flex; gap: 14px; flex: 0 0 auto; }
+    .tc-views button {
+      font-family: inherit;
+      font-size: 13px;
+      background: none;
+      border: none;
+      padding: 0;
+      cursor: pointer;
+      color: var(--ds-text-secondary, #8b949e);
+    }
+    .tc-views button.active { color: var(--ds-text-primary, #c9d1d9); }
+    :focus-visible { outline: 1px solid var(--ds-text-secondary, #8b949e); outline-offset: 3px; }
+
+    .tc-chart { display: flex; align-items: flex-end; gap: 10px; height: 120px; margin-top: 30px; }
+    .tc-bar {
+      flex: 1;
+      border-radius: 3px 3px 0 0;
+      background: var(--ds-text-primary, #c9d1d9);
+    }
+    /* A zero renders as a hairline rather than a gap, so the rhythm of the period stays
+       readable — a week with Sunday missing should still look like seven days. Square,
+       because a 3px radius on a 2px bar is a lozenge. */
+    .tc-bar.zero { height: 2px; border-radius: 0; background: var(--ds-border, #30363d); }
+
+    /* Same gaps and flex:1 as the chart, so a label sits under its own bar. */
+    .tc-axis {
+      display: flex;
+      gap: 10px;
+      padding-top: 10px;
+      border-top: 1px solid var(--ds-border, #30363d);
+    }
+    .tc-axis span {
+      flex: 1;
+      text-align: center;
+      font-size: 12px;
+      color: var(--ds-text-secondary, #8b949e);
+    }
+
+    .tc-stats { display: flex; gap: 32px; margin-top: 32px; }
+    .tc-stat-label { font-size: 12px; color: var(--ds-text-secondary, #8b949e); }
+    .tc-stat-value { font-size: 16px; color: var(--ds-text-primary, #c9d1d9); margin-top: 4px; }
+
+    .tc-error { font-size: 13px; color: var(--ds-text-secondary, #8b949e); margin-top: 30px; }
+    [hidden] { display: none !important; }
+  </style>
+</head>
+<body>
+  <div id="timecard-root">
+    <div class="tc-card">
+      <div class="tc-top">
+        <div class="tc-head">
+          <div class="tc-headline">
+            <span class="tc-total" id="tc-total">0.0</span>
+            <span class="tc-unit">hours</span>
+          </div>
+          <div class="tc-range" id="tc-range"></div>
+        </div>
+        <div class="tc-views" id="tc-views">
+          <button type="button" data-view="day">Day</button>
+          <button type="button" data-view="week">Week</button>
+          <button type="button" data-view="month">Month</button>
+        </div>
+      </div>
+      <div class="tc-chart" id="tc-chart"></div>
+      <div class="tc-axis" id="tc-axis"></div>
+      <div class="tc-stats" id="tc-stats"></div>
+      <div class="tc-error" id="tc-error" hidden></div>
+    </div>
+  </div>
+  <script type="module" src="timecard.js"></script>
+</body>
+</html>

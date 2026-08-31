@@ -611,6 +611,27 @@ const SETTINGS_SCHEMA = [
   { name: 'autoUpdateCheckIntervalHours', type: 'number', default: 6, clamp: [1, 168] },
   { name: 'autoUpdateApply',            type: 'boolean', default: true },
   { name: 'sessionLogEnabled',          type: 'boolean', default: false },
+  // Timecard (#666): sample whether a human is working in Deep Steve and append it to
+  // ~/.deepsteve/timecard.jsonl. On by default — the issue's framing is "start storing
+  // timecard data", the file never leaves this machine, and a timecard that stays empty
+  // until you find a checkbox never has anything to show. A mod's own enable/disable is
+  // per-browser localStorage and never reaches the server, so the sampler needs a real
+  // setting to fail closed against; same reason scheduledTasksEnabled exists. Read live
+  // by mods/timecard/tools.js off the mutated-in-place settings object, so toggling it
+  // stops and starts sampling with no restart. Broadcast because the browser's presence
+  // beacon (public/js/timecard-presence.js) is armed from it.
+  { name: 'timecardEnabled',            type: 'boolean', default: true },
+  // How often that sample is taken. `custom` rather than `enum` because coerceSetting's
+  // enum branch does String(raw) and would store "5" — every reader would then have to
+  // remember to Number() it. Rejecting an out-of-set value surfaces it in the POST
+  // response's `warnings` instead of silently reinstating the default, the same reason
+  // #631 chose custom for terminalRunLingerSeconds. The tick runs at a fixed 1-minute
+  // cadence and reads this live, so there is no timer to restart on change.
+  { name: 'timecardSampleMinutes',      type: 'custom',  default: 5,
+    sanitize: (raw) => {
+      const n = Math.round(Number(raw));
+      return [1, 5, 15].includes(n) ? n : null;
+    } },
   // Waiting-classifier audit (#558 research): logs every waitingForInput decision +
   // periodic samples to ~/.deepsteve/waiting-audit.jsonl. Server-side research
   // instrumentation, default off; read live at each call site (no restart to toggle).
