@@ -29,7 +29,7 @@ import { init as initScheduledHistory, open as openScheduledHistory, refresh as 
 import { init as initTimecardPresence, setEnabled as setTimecardPresenceEnabled } from './timecard-presence.js';
 import { init as initProgressBar, start as progressStart, done as progressDone } from './progress-bar.js';
 import { init as initHashCommands, beforeSend as hashCommandsBeforeSend, setWaitingForInput as setHashCommandsWaiting, setEnabled as setHashCommandsEnabled, dismiss as dismissHashCommands } from './hash-commands.js';
-import { init as initOverviewMode, setEnabled as setOverviewModeEnabled, setShortcut as setOverviewModeShortcut, setDefaultLayout as setOverviewDefaultLayout, toggle as toggleOverviewMode, isOverviewActive, updateFocus as updateOverviewFocus, onTabsReordered as onOverviewTabsReordered, syncToContext as syncOverviewToContext } from './overview-mode.js';
+import { init as initOverviewMode, setEnabled as setOverviewModeEnabled, setShortcut as setOverviewModeShortcut, setDefaultLayout as setOverviewDefaultLayout, toggle as toggleOverviewMode, isOverviewActive, getLayout as getOverviewLayout, updateFocus as updateOverviewFocus, onTabsReordered as onOverviewTabsReordered, syncToContext as syncOverviewToContext } from './overview-mode.js';
 import { init as initTerminalSearch, attachSearchAddon, closeIfOpen as closeTerminalSearch } from './terminal-search.js';
 import { init as initContextViews, setEnabled as setContextViewsEnabled, applyFilter as refreshContextFilter, requestNewTabInContext, resolveContextRepo, chooseContextDir, setContexts as applyServerContexts, setActiveContext as setActiveContextFromPanel, getActiveContextId, getActiveContextInfo, orderRecentDirsByContext, activeContextIsEmpty, noteActiveTab, revealTabContext, showToast, setRailSuppressed, setRailQuiet } from './context-views.js';
 import * as ProjectMods from './project-mods.js';
@@ -37,6 +37,7 @@ import { nsKey } from './storage-namespace.js';
 import { formatShortcut } from './shortcuts.js';
 import { init as initWakeWatch } from './wake-watch.js';
 import { openNewWindow, isFreshRequest } from './new-window.js';
+import { init as initTimelapse, setEnabled as setTimelapseEnabled, setIntervalMinutes as setTimelapseInterval } from './timelapse.js';
 
 // Configuration
 let maxIssueTitleLength = 25;
@@ -287,6 +288,12 @@ function applySettings(settings) {
   }
   if (settings.contextViewsEnabled !== undefined) {
     setContextViewsEnabled(settings.contextViewsEnabled);
+  }
+  if (settings.timelapseEnabled !== undefined) {
+    setTimelapseEnabled(settings.timelapseEnabled);
+  }
+  if (settings.timelapseIntervalMinutes !== undefined) {
+    setTimelapseInterval(settings.timelapseIntervalMinutes);
   }
   // Project mods (#618): the gate lives with the list, not with this payload, so
   // re-read it — refresh() re-renders every surface, dropping or restoring them.
@@ -845,6 +852,8 @@ settingsBtn?.addEventListener('click', async () => {
   const currentProjectModsEnabled = settingsData.projectModsEnabled !== false;
   const currentOverviewDefaultLayout = settingsData.overviewDefaultLayout || 'tall';
   const currentMetaControlsEnabled = !!settingsData.metaControlsEnabled;
+  const currentTimelapseEnabled = settingsData.timelapseEnabled !== false;
+  const currentTimelapseInterval = settingsData.timelapseIntervalMinutes || 5;
   const currentInheritRc = settingsData.inheritRemoteControl !== false;
   const currentInheritRcFork = settingsData.inheritRemoteControlOnFork !== false;
   const currentAutoUpdateCheckEnabled = settingsData.autoUpdateCheckEnabled !== undefined ? settingsData.autoUpdateCheckEnabled : true;
@@ -1058,6 +1067,23 @@ settingsBtn?.addEventListener('click', async () => {
           shows up in that project's rail entry, as a square button in the tab strip, or as a pinned background tab.
           Entirely local to this machine, and to that one project. Turning this off hides every project mod and
           refuses new ones.
+        </p>
+      </div>
+      <div class="settings-section">
+        <h3>Timelapse</h3>
+        <label style="font-size: 13px; color: var(--ds-text-primary); cursor: pointer; display: flex; align-items: center; gap: 8px;">
+          <input type="checkbox" id="timelapse-enabled" ${currentTimelapseEnabled ? 'checked' : ''} style="accent-color: var(--ds-accent-green);">
+          Enabled
+        </label>
+        <label style="font-size: 13px; color: var(--ds-text-primary); display: flex; align-items: center; gap: 8px; margin-top: 10px;">
+          Interval (minutes)
+          <input type="number" id="timelapse-interval" value="${currentTimelapseInterval}" min="1" max="60" step="1" style="width: 80px; padding: 4px 6px; background: var(--ds-bg-primary); border: 1px solid var(--ds-border); border-radius: 4px; color: var(--ds-text-primary); font-size: 13px;">
+        </label>
+        <p style="font-size: 11px; color: var(--ds-text-secondary); margin-top: 4px;">
+          Puts a recording circle above the panel tabs, top right. Click it and deepsteve saves a screenshot plus a
+          JSON snapshot of the tab layout on every interval, into <code>~/.deepsteve/timelapse/&lt;run&gt;/</code> — one folder
+          per browser window, per run. Recording needs the browser open, so a closed laptop simply leaves a gap.
+          Turning this off hides the circle and refuses new frames.
         </p>
       </div>
       <div class="settings-section">
@@ -1610,6 +1636,8 @@ settingsBtn?.addEventListener('click', async () => {
     }
     const hashCommandsEnabled = overlay.querySelector('#hash-commands-enabled').checked;
     const contextViewsEnabled = overlay.querySelector('#context-views-enabled').checked;
+    const timelapseEnabled = overlay.querySelector('#timelapse-enabled').checked;
+    const timelapseIntervalMinutes = Math.max(1, Math.min(60, Math.round(Number(overlay.querySelector('#timelapse-interval').value)) || 5));
     const projectModsEnabled = overlay.querySelector('#project-mods-enabled').checked;
     const metaControlsEnabled = overlay.querySelector('#meta-controls-enabled').checked;
     const overviewDefaultLayout = overlay.querySelector('#overview-default-layout').value;
@@ -1672,7 +1700,7 @@ settingsBtn?.addEventListener('click', async () => {
     const preventSleepWhileActive = overlay.querySelector('#prevent-sleep-while-active').checked;
     const inheritRemoteControl = overlay.querySelector('#inherit-rc-newtab').checked;
     const inheritRemoteControlOnFork = overlay.querySelector('#inherit-rc-fork').checked;
-    const settingsPayload = { shellProfile, maxIssueTitleLength: newMaxTitle, wandPlanMode, issueAutopilot, wandPromptTemplate, symlinkWorktreeSettings, cmdTabSwitch, cmdTabSwitchHoldMs, commandPaletteEnabled, commandPaletteShortcut, shortcutsHelpEnabled, shortcutsHelpShortcut, hashCommandsEnabled, contextViewsEnabled, projectModsEnabled, metaControlsEnabled, inheritRemoteControl, inheritRemoteControlOnFork, overviewDefaultLayout, enabledAgents, ...agentBinaries, ...(selectedEngine ? { engine: selectedEngine } : {}), scrollbackKB, recentSessionsLimit, autoUpdateCheckEnabled, autoUpdateCheckIntervalHours, autoUpdateApply, sessionLogEnabled, timecardEnabled, timecardSampleMinutes, scheduledTasksEnabled, scheduledTasksOpenInBackground, scheduledDefaultModel, scheduledDefaultEffort, preventSleepWhileActive, customAgentConfigs };
+    const settingsPayload = { shellProfile, maxIssueTitleLength: newMaxTitle, wandPlanMode, issueAutopilot, wandPromptTemplate, symlinkWorktreeSettings, cmdTabSwitch, cmdTabSwitchHoldMs, commandPaletteEnabled, commandPaletteShortcut, shortcutsHelpEnabled, shortcutsHelpShortcut, hashCommandsEnabled, contextViewsEnabled, projectModsEnabled, timelapseEnabled, timelapseIntervalMinutes, metaControlsEnabled, inheritRemoteControl, inheritRemoteControlOnFork, overviewDefaultLayout, enabledAgents, ...agentBinaries, ...(selectedEngine ? { engine: selectedEngine } : {}), scrollbackKB, recentSessionsLimit, autoUpdateCheckEnabled, autoUpdateCheckIntervalHours, autoUpdateApply, sessionLogEnabled, timecardEnabled, timecardSampleMinutes, scheduledTasksEnabled, scheduledTasksOpenInBackground, scheduledDefaultModel, scheduledDefaultEffort, preventSleepWhileActive, customAgentConfigs };
     let resp = await fetch('/api/settings', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1692,6 +1720,8 @@ settingsBtn?.addEventListener('click', async () => {
     setShortcutsHelpShortcut(shortcutsHelpShortcut);
     setHashCommandsEnabled(hashCommandsEnabled);
     setContextViewsEnabled(contextViewsEnabled);
+    setTimelapseEnabled(timelapseEnabled);
+    setTimelapseInterval(timelapseIntervalMinutes);
     ProjectMods.refresh();   // the project-mods gate ships with the list, not with settings (#618)
     // Refresh agents data — enabled set and/or custom config profiles (#537) may have
     // changed (custom-config edits aren't reflected in the enabledAgents diff), so just
@@ -4643,6 +4673,46 @@ async function init() {
     // #app-container; the rail's display is written inline by context-views, so it has to be
     // asked. Same one-way rule as above — mod-manager never imports context-views.
     onQuietChanged: (on) => setRailQuiet(on),
+  });
+
+  // Timelapse recorder (#667). After ModManager.init() — the recording dot mounts at the
+  // top of #panel-tabs, which mod-manager creates. The window-level state it reports
+  // (layout, overview, quiet, panel) is read off the DOM classes those modules already
+  // set, rather than widening four modules' APIs for one consumer.
+  initTimelapse({
+    mountIndicator: (el) => ModManager.mountRailIndicator(el),
+    // The rail hides itself when nothing visible is left in it, and a dot hidden by the
+    // off switch does not count — otherwise turning timelapse off with no panel mods
+    // enabled leaves a bare bordered column standing next to nothing.
+    onIndicatorVisibility: (on) => ModManager.setRailIndicatorVisible(on),
+    getWindowId: () => getWindowId(),
+    getActiveTabId: () => activeId,
+    getTabInfo: (id) => {
+      const s = sessions.get(id);
+      if (!s) return null;
+      return {
+        name: s.name || getDefaultTabName(s.cwd || ''),
+        type: s.type || 'terminal',
+        cwd: s.cwd || null,
+        waitingForInput: !!s.waitingForInput,
+        hasUnseenActivity: !!s.hasUnseenActivity,
+        modId: s.modId || null,
+        projectModId: s.projectModId || null,
+      };
+    },
+    getLayoutInfo: () => {
+      const container = document.getElementById('app-container');
+      const panel = document.getElementById('panel-container');
+      return {
+        tabLayout: LayoutManager.getLayout(),
+        iconRail: !!container?.classList.contains('icon-rail'),
+        quiet: !!container?.classList.contains('quiet-mode'),
+        overview: { active: isOverviewActive(), layout: getOverviewLayout() },
+        activeViewId: ModManager.getActiveViewId() || null,
+        panelWidth: panel && panel.style.display !== 'none' ? panel.offsetWidth : 0,
+        contextId: getActiveContextId() || null,
+      };
+    },
   });
 
   // Initialize Context Views (folder-based tab grouping + left panel).

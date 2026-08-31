@@ -1,5 +1,9 @@
 import * as React from 'react';
 import * as ReactDOM from 'react-dom/client';
+// Absolute, not relative: babel-standalone injects the compiled module under a blob: URL,
+// against which a relative specifier would resolve to the wrong origin. Shared with
+// timelapse (#667) so there is exactly one DOM→PNG path in the tree.
+import { captureElementToPng } from '/js/dom-capture.js';
 const { useState, useCallback, useRef, useEffect, useMemo } = React;
 
 function formatTimestamp(ts) {
@@ -12,49 +16,6 @@ function formatTimestamp(ts) {
 
 function screenshotUrl(id) {
   return `/api/screenshots/${id}.png`;
-}
-
-/**
- * Render a DOM element to a PNG data URL.
- *
- * modern-screenshot can't see inside an <iframe>, so when the target is (or wraps) a
- * same-origin iframe — display tabs (`/api/display-tab/...`) and mod panels — we capture
- * the iframe's own document instead. The iframe is same-origin and sandboxed with
- * `allow-same-origin`, so its contentDocument is reachable.
- *
- * A child iframe only counts as "the content" when it is visible and covers at
- * least half of the element's area. Without that guard, capturing a container
- * that merely contains iframes (e.g. `#app-container`, which holds every hidden
- * panel-mod iframe) diverted to the first display:none iframe, whose 0×0 canvas
- * serializes to an invalid `data:,` URL and the capture failed.
- */
-function contentIframeOf(el) {
-  if (el.tagName === 'IFRAME') return el;
-  const elArea = Math.max(1, el.clientWidth * el.clientHeight);
-  for (const fr of el.querySelectorAll('iframe')) {
-    const area = fr.clientWidth * fr.clientHeight;
-    if (area > 0 && area / elArea >= 0.5) return fr;
-  }
-  return null;
-}
-
-async function captureElementToPng(el) {
-  const iframe = contentIframeOf(el);
-  if (iframe) {
-    let doc = null;
-    try { doc = iframe.contentDocument; } catch { /* cross-origin */ }
-    if (!doc || !doc.documentElement) {
-      throw new Error('Cannot read iframe content (not yet loaded or cross-origin)');
-    }
-    const node = doc.documentElement;
-    const bodyBg = doc.body && (doc.defaultView || window).getComputedStyle(doc.body).backgroundColor;
-    return window.modernScreenshot.domToPng(node, {
-      width: iframe.clientWidth || node.scrollWidth,
-      height: iframe.clientHeight || node.scrollHeight,
-      backgroundColor: bodyBg && bodyBg !== 'rgba(0, 0, 0, 0)' ? bodyBg : '#ffffff',
-    });
-  }
-  return window.modernScreenshot.domToPng(el);
 }
 
 function ScreenshotsPanel() {
