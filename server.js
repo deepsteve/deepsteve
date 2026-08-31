@@ -35,6 +35,8 @@ const { enrichTabs, summarizeRun } = require('./timelapse-snapshot');
 // use site, where they are read as tuning knobs.
 const TRANSCRIPT_WINDOW = require('./transcript-window');
 const { normalizeLines } = require('./transcript-view');
+const { disposableDaemon } = require('./disposable');
+const { createIdleWatchdog } = require('./idle-watchdog');
 const NodePtyEngine = require('./engines/node-pty');
 const TmuxEngine = require('./engines/tmux');
 
@@ -78,6 +80,41 @@ const HTTPS_PORT = parseInt(parseCLIValue('https-port') || process.env.DEEPSTEVE
 // and disables the browser auto-open + auto-update check (side effects a test run must
 // not have). A production daemon never sets this — there is no reason to.
 const TEST_MODE = parseCLIFlag('test-mode') || process.env.DEEPSTEVE_TEST_MODE === '1';
+
+// Is this the canonical install, or a throwaway (#678)? TEST_MODE is one input among
+// several: the daemon an agent starts by hand to verify a change sets no flag at all,
+// which is exactly why the answer is DERIVED rather than declared — see disposable.js.
+// A disposable daemon logs its URL instead of opening a browser, and arms an idle
+// watchdog that shuts it down. Neither can happen on the installed daemon.
+//
+// Assigned, not const-initialized here, because the predicate consults the install-source
+// marker and versionStatus is declared far below; classifyDaemon() runs at the bottom of
+// module load, before anything can call openBrowserUrl(). DISPOSABLE_REASONS feeds the
+// boot log so an unexpected "no browser opened" names its own cause.
+let DISPOSABLE = false;
+let DISPOSABLE_REASONS = [];
+function classifyDaemon() {
+  const verdict = disposableDaemon({
+    testMode: TEST_MODE,
+    port: PORT,
+    dirname: __dirname,
+    stateDir: DS_DIR,
+    installSource: versionStatus.installSource,
+    env: process.env,
+    homedir: os.homedir(),
+    userHomedir: (() => { try { return os.userInfo().homedir; } catch { return null; } })(),
+  });
+  DISPOSABLE = verdict.disposable;
+  DISPOSABLE_REASONS = verdict.reasons;
+  return verdict;
+}
+// How long a disposable daemon may sit with nobody attached and no session activity
+// before it tears itself down. 0 disables. Deliberately an env var and NOT a
+// SETTINGS_SCHEMA entry: a scratch-HOME daemon boots on default settings anyway, and a
+// knob that can end the daemon has no business in the settings modal of a real install.
+const IDLE_SHUTDOWN_MS = process.env.DEEPSTEVE_IDLE_SHUTDOWN_MS !== undefined
+  ? (parseInt(process.env.DEEPSTEVE_IDLE_SHUTDOWN_MS, 10) || 0)
+  : 30 * 60 * 1000;
 
 // Like parseCLIValue but collects ALL occurrences of a repeatable flag (--allow-origin,
 // --allow-host). Used for the auth escape-hatch that widens the Origin/Host allowlists (#536).
@@ -161,6 +198,14 @@ let metaConsentDeclinedAt = 0; // cooldown start so a retrying agent can't nag t
 // rather than failing invisibly the way the old bare `exec('open …')` did (it passed no
 // callback, so any failure was discarded).
 function openBrowserUrl(url = UI_URL) {
+  // A throwaway daemon never opens a tab in the user's daily browser (#678). The guard
+  // lives HERE rather than at the call sites because there are two of them — the startup
+  // timer and deliverToWindow's `openBrowser` — and a third would inherit the bug. Say the
+  // URL instead: the reason a second instance is running is that someone wants to look at it.
+  if (DISPOSABLE) {
+    log(`Disposable daemon (${DISPOSABLE_REASONS.join(', ')}) — not opening a browser. Open ${url} yourself`);
+    return;
+  }
   const opener = resolveUrlOpener();
   if (!opener) {
     log(`No URL opener found (open/xdg-open) — open ${url} yourself`);
@@ -5686,6 +5731,23 @@ app.get('/api/recoverable-sessions', (req, res) => {
   });
 });
 
+// Close every session this daemon owns. Tombstones rather than deletes (#561), so a
+// conversation stays resurrectable via --resume. Two callers, both of which are only ever
+// reachable on a daemon that is by construction not the user's: the test-only killall
+// route below, and the idle self-shutdown (#678).
+function killAllSessions(reason) {
+  const killed = [];
+  for (const [id, entry] of shells) {
+    killed.push({ id, pid: (entry.engine || ptyEngine).getPid(id) });
+    tombstoneSession(id, entry, reason);
+    notifyClientsShellExited(id);
+    killShell(entry, id, reason);
+    shells.delete(id);
+  }
+  if (killed.length > 0) saveState();
+  return killed;
+}
+
 app.post('/api/shells/killall', (req, res) => {
   // #562: killall destroys EVERY session on this server. Its only callers are the
   // integration tests; a stray test run against a live daemon once wiped all of a
@@ -5696,16 +5758,7 @@ app.post('/api/shells/killall', (req, res) => {
              'It is enabled only when the server runs with DEEPSTEVE_TEST_MODE=1. See #562.',
     });
   }
-  const killed = [];
-  for (const [id, entry] of shells) {
-    killed.push({ id, pid: (entry.engine || ptyEngine).getPid(id) });
-    tombstoneSession(id, entry, 'killed');
-    notifyClientsShellExited(id);
-    killShell(entry, id, 'killed');
-    shells.delete(id);
-  }
-  if (killed.length > 0) saveState();
-  res.json({ killed });
+  res.json({ killed: killAllSessions('killed') });
 });
 
 // Permanent removal requires an explicit ?forget=1 — without it, DELETE is
@@ -6743,11 +6796,20 @@ const AUTO_OPEN_GRACE_MS = parseInt(process.env.DEEPSTEVE_AUTO_OPEN_GRACE_MS, 10
 // crash inside the window costs at worst one extra tab.
 const AUTO_OPEN_BOOT_WINDOW_S = parseInt(process.env.DEEPSTEVE_AUTO_OPEN_BOOT_WINDOW_S, 10) || 300;
 
+// Decide canonical-vs-throwaway before anything can open a browser (#678). The marker read
+// is what lets an npm install identify itself, so it has to happen first; the listen
+// callback below no longer repeats it.
+loadInstallSource();
+classifyDaemon();
+
 const server = app.listen(PORT, BIND, () => {
   log(`HTTP server listening on ${BIND}:${PORT} — UI at ${UI_URL}`);
   bootMark('HTTP listening');
   if (TEST_MODE) {
     log('*** DEEPSTEVE_TEST_MODE: disposable test instance — killall enabled, browser auto-open and auto-update check disabled ***');
+  }
+  if (DISPOSABLE) {
+    log(`*** Disposable daemon (${DISPOSABLE_REASONS.join(', ')}) — no browser auto-open; idle shutdown ${IDLE_SHUTDOWN_MS > 0 ? `after ${Math.round(IDLE_SHUTDOWN_MS / 60000)} min idle` : 'disabled'}. Set DEEPSTEVE_DISPOSABLE=0 to opt out ***`);
   }
   // Auto-open browser if no clients connect within the grace period.
   // Skipped on restart: restart.sh writes .restarting before unloading the
@@ -6755,8 +6817,11 @@ const server = app.listen(PORT, BIND, () => {
   // without a phantom new tab racing in. Cold starts (no marker) still open a
   // tab; how long they wait first is the grace above. Also skipped in test mode
   // — a throwaway test daemon must never pop a tab in (or expose itself to) the
-  // developer's browser.
-  let skipAutoOpen = TEST_MODE;
+  // developer's browser. Since #678 that reasoning covers every disposable daemon,
+  // not only the ones that remembered a flag — openBrowserUrl() refuses on its own,
+  // and this skips arming the timer so the "No browser connected" line below can't
+  // describe a decision that was never taken.
+  let skipAutoOpen = TEST_MODE || DISPOSABLE;
   try {
     if (fs.existsSync(RESTARTING_FLAG)) {
       fs.unlinkSync(RESTARTING_FLAG);
@@ -6777,9 +6842,9 @@ const server = app.listen(PORT, BIND, () => {
     }, graceMs);
   }
 
-  // Auto-update: load install source and kick off the first check after the
-  // server is listening (so the GitHub fetch doesn't block boot).
-  loadInstallSource();
+  // Auto-update: kick off the first check after the server is listening (so the
+  // GitHub fetch doesn't block boot). The install source itself was already loaded
+  // before listen — classifyDaemon() needs it (#678).
   refreshGitTreeClean();
   if (settings.autoUpdateCheckEnabled && !TEST_MODE) {
     setTimeout(() => {
@@ -6814,6 +6879,57 @@ const powerAssertion = createPowerAssertion({
 // six spawn sites plus mod context helpers, and ≤5s of acquire/release latency is
 // irrelevant on sleep timescales.
 setInterval(() => powerAssertion.sync(), 5000).unref();
+
+// --- Idle self-shutdown for a throwaway daemon (#678) ---
+// Armed only when DISPOSABLE, so this can never reach the installed daemon; see
+// disposable.js for what "disposable" is derived from. The interesting input is
+// lastActivityAt: an unattended agent still producing PTY output is NOT idle, so a
+// scheduled run with no browser attached keeps the daemon alive for as long as it works.
+function newestSessionActivity() {
+  let newest = 0;
+  for (const [, e] of shells) {
+    if (e.lastActivity > newest) newest = e.lastActivity;
+    if (e.lastInputTime > newest) newest = e.lastInputTime;
+  }
+  return newest;
+}
+
+// Unlike the normal shutdown, this DESTROYS this daemon's sessions rather than detaching
+// them: the whole point is that nothing survives to hold a port, a tmux socket and a set
+// of PTYs nobody remembers starting. Every id comes out of our own `shells` map, which is
+// what keeps this inside "destroy only what this daemon can positively identify as its
+// own" — it never enumerates the socket, and it never goes near kill-server.
+function idleShutdown(idleMs) {
+  if (shuttingDown) return;
+  log(`[idle-watchdog] disposable daemon idle for ${Math.round(idleMs / 1000)}s — closing ${shells.size} session(s) and exiting`);
+  const entries = [...shells.entries()];
+  killAllSessions('idle-shutdown');
+  for (const [id, entry] of entries) {
+    const eng = entry.engine || ptyEngine;
+    if (entry.agentType === 'tmux-attach' || !eng.canDetach) continue;
+    // killShell escalates over ~10s and the tmux session only ends when its pane process
+    // does; naming the session directly is what guarantees no ds-* server outlives us.
+    try { eng.destroy(id); } catch (e) { log(`[idle-watchdog] destroy ${id} failed: ${e.message}`); }
+  }
+  // Hand off to the ordinary graceful shutdown for the state save and the exit. Its
+  // phase-0 tmux DETACH loop is a no-op now that `shells` is empty — which is precisely
+  // the difference between this and a restart.
+  process.kill(process.pid, 'SIGTERM');
+}
+
+const idleWatchdog = createIdleWatchdog({
+  idleMs: IDLE_SHUTDOWN_MS,
+  clientCount: () => [...reloadClients].filter(c => c.readyState === 1).length,
+  lastActivityAt: newestSessionActivity,
+  // holdoffRemaining takes the window explicitly (it has no default — passing none
+  // yields NaN, which compares false and silently disables the check). Reuse the
+  // detach reaper's window: same question, same right answer.
+  holdoffRemaining: () => sleepWatch.holdoffRemaining(DETACH_HOLDOFF_MS),
+  isShuttingDown: () => shuttingDown,
+  onIdle: idleShutdown,
+  log,
+});
+if (DISPOSABLE) idleWatchdog.start();
 
 // #558 audit sampler: transitions alone cannot reveal a STUCK state (the idle
 // timer is armed only by output, so a wrong `false` persists silently). A 5s
