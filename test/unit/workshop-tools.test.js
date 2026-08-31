@@ -50,13 +50,18 @@ const ENTER = '\r';
  * A permission dialog that actually responds to arrow keys, one key per write.
  * `swapOnFirstKey` re-labels the options the moment we touch it, standing in for the
  * dialog being replaced between the poll that drew the card and the click.
+ *
+ * `divider` draws the rule a real AskUserQuestion puts above its escape hatches (#664).
+ * It is decoration, not a row: the cursor arithmetic below stays over the flat `labels`
+ * array, which is exactly how the real TUI treats it. Opt-in, so no existing test moves.
  */
 class FakeDialog {
-  constructor(labels, { cursor = 0, swapOnFirstKey = null, frozen = false } = {}) {
+  constructor(labels, { cursor = 0, swapOnFirstKey = null, frozen = false, divider = false } = {}) {
     this.labels = labels;
     this.cursor = cursor;
     this.swapOnFirstKey = swapOnFirstKey;
     this.frozen = frozen;       // ignores arrow keys — the cursor-did-not-land case
+    this.divider = divider;
     this.selected = null;
     this.writes = [];
   }
@@ -76,10 +81,15 @@ class FakeDialog {
       // row disappear from the inbox with no leftover.
       return ['⏺ Proceeding.', '─'.repeat(60), '❯', '─'.repeat(60), '? for shortcuts'];
     }
+    const rows = [];
+    this.labels.forEach((l, i) => {
+      if (this.divider && i === this.labels.length - 1) rows.push('─'.repeat(60));
+      rows.push(`${i === this.cursor ? '❯' : ' '} ${i + 1}. ${l}`);
+    });
     return [
       'deepsteve - read_session_screen (MCP)',
       'Do you want to proceed?',
-      ...this.labels.map((l, i) => `${i === this.cursor ? '❯' : ' '} ${i + 1}. ${l}`),
+      ...rows,
       'Esc to cancel · Tab to amend',
     ];
   }
@@ -274,6 +284,9 @@ test('an unparseable dialog stays listed but is not answerable', async () => {
 
 // ── path 3: answering a live dialog ──────────────────────────────────────────
 
+// A real AskUserQuestion: two answers, then the escape hatches below a rule.
+const RULED = ['Uniform', 'Minimal', 'Type something.', 'Chat about this'];
+
 test('answering moves the cursor the right way and commits', async () => {
   const { shells, app } = world();
   const id = sid();
@@ -308,6 +321,66 @@ test('answering upward walks the other way', async () => {
   assert.strictEqual(r.body.direction, 'Up');
   assert.deepStrictEqual(dialog.writes, [KEY_UP, KEY_UP, ENTER]);
   assert.strictEqual(dialog.selected, 0);
+});
+
+test('a ruled AskUserQuestion is answerable, and lands on the intended row (#664)', async () => {
+  // Every multi-option AskUserQuestion has a rule above its escape hatches. Before #664
+  // these rows carried no options at all and could only be opened in their tab.
+  const { shells, app } = world();
+  const id = sid();
+  const dialog = new FakeDialog(RULED, { divider: true });
+  shells.set(id, makeEntry(id, dialog));
+
+  const { body } = await app.call('GET', '/api/workshop/inbox');
+  const row = body.items.find((i) => i.id === 'blocked:' + id);
+  assert.ok(row, 'a ruled dialog is still a row');
+  assert.strictEqual(row.answerable, true, 'and now it can be answered from here');
+  assert.strictEqual(row.cursorIndex, 0);
+  assert.deepStrictEqual(row.options.map((o) => o.label), RULED);
+
+  const r = await app.call('POST', '/api/workshop/items/:id/answer', {
+    params: { id: 'blocked:' + id }, body: { optionIndex: 2 },
+  });
+  assert.strictEqual(r.body.ok, true);
+  assert.strictEqual(r.body.steps, 2);
+  assert.deepStrictEqual(dialog.writes, [KEY_DOWN, KEY_DOWN, ENTER]);
+  assert.strictEqual(dialog.selected, 2);
+  assert.strictEqual(r.body.optionLabel, 'Type something.');
+});
+
+test('the option BELOW the divider is reachable, and it is the one pressed', async () => {
+  // The assertion an off-by-one across the divider fails. `Chat about this` is the last
+  // row of the menu but the first below the rule, so a run that mis-counts the divider
+  // as a row commits the wrong option here.
+  const { shells, app } = world();
+  const id = sid();
+  const dialog = new FakeDialog(RULED, { divider: true });
+  shells.set(id, makeEntry(id, dialog));
+
+  const r = await app.call('POST', '/api/workshop/items/:id/answer', {
+    params: { id: 'blocked:' + id }, body: { optionIndex: 3 },
+  });
+  assert.strictEqual(r.body.ok, true);
+  assert.strictEqual(r.body.steps, 3, 'three rows to travel, not four — the rule is not a row');
+  assert.deepStrictEqual(dialog.writes, [KEY_DOWN, KEY_DOWN, KEY_DOWN, ENTER]);
+  assert.strictEqual(dialog.selected, 3);
+  assert.strictEqual(r.body.optionLabel, 'Chat about this');
+});
+
+test('walking UP across the divider lands on the right row too', async () => {
+  const { shells, app } = world();
+  const id = sid();
+  const dialog = new FakeDialog(RULED, { divider: true, cursor: 3 });
+  shells.set(id, makeEntry(id, dialog));
+
+  const r = await app.call('POST', '/api/workshop/items/:id/answer', {
+    params: { id: 'blocked:' + id }, body: { optionIndex: 0 },
+  });
+  assert.strictEqual(r.body.ok, true);
+  assert.strictEqual(r.body.direction, 'Up');
+  assert.deepStrictEqual(dialog.writes, [KEY_UP, KEY_UP, KEY_UP, ENTER]);
+  assert.strictEqual(dialog.selected, 0);
+  assert.strictEqual(r.body.optionLabel, 'Uniform');
 });
 
 test('the cursor already on target sends Enter alone', async () => {
@@ -531,10 +604,11 @@ test('the same question asked again after the dialog cleared is a new row', asyn
 test('a dialog Workshop cannot parse is still dismissible', async () => {
   const { shells, app } = world();
   const id = sid();
-  // The real capture: a rule between the last option and "Chat about this" stops
-  // collectOptions dead, so the row renders as a raw preview and cannot be answered
-  // from here. Before #663 it could not be got rid of either.
-  const entry = makeEntry(id, null, { terminalScreen: staticScreen(fx.RULED_OPTION_RUN) });
+  // Only one option is on screen, so detectDialog says "blocked" while parseDialog says
+  // "unreadable": the row renders as a raw preview and cannot be answered from here.
+  // Before #663 it could not be got rid of either. (This used to be RULED_OPTION_RUN,
+  // which #664 taught the parser to read.)
+  const entry = makeEntry(id, null, { terminalScreen: staticScreen(fx.SINGLE_OPTION) });
   shells.set(id, entry);
 
   const { body } = await app.call('GET', '/api/workshop/inbox');
@@ -551,9 +625,11 @@ test('a dialog Workshop cannot parse is still dismissible', async () => {
 
 test('two unparseable dialogs do not share one mute', async () => {
   const { shells, app } = world();
+  // Genuinely unreadable: a lone option, so parseDialog gives up while detectDialog
+  // still sees a dialog. It used to be the ruled shape, which #664 made parseable — the
+  // test would then still have PASSED on a premise that was silently false.
   const footer = 'Enter to select · Tab/Arrow keys to navigate · Esc to cancel';
-  const rule = '─'.repeat(60);
-  const screenOf = (q) => [q, '❯ 1. One', '  2. Type something.', rule, '  3. Chat about this', footer];
+  const screenOf = (q) => [q, '❯ 1. One', footer];
 
   const a = sid();
   const b = sid();

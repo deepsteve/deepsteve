@@ -122,12 +122,14 @@ class Client {
   close() { try { this.ws?.close(); } catch {} this.ws = null; }
 }
 
-async function openBlockedSession() {
+async function openBlockedSession(menuOver = {}) {
   // menuOnBoot puts the stub straight into the dialog, so the session is "blocked"
   // from its first frame with no prompt round trip to sequence.
   policy({
     menuOnBoot: true,
-    menu: { banner: BANNER, question: QUESTION, options: OPTIONS, cursor: 0 },
+    menu: {
+      banner: BANNER, question: QUESTION, options: OPTIONS, cursor: 0, ...menuOver,
+    },
   });
   const c = new Client();
   clients.push(c);
@@ -274,6 +276,58 @@ test('answering from the inbox selects the intended option in the real session',
     'each arrow must arrive as its OWN stdin read — batched bytes are not keys to Ink, '
     + 'and would show up here as a single move or none at all',
   );
+});
+
+test('a ruled AskUserQuestion is answered through a real PTY (#664)', async () => {
+  // The shape every multi-option AskUserQuestion has: a rule between the real answers
+  // and "Chat about this". The unit fixtures pin that the run parses across it; only
+  // this test can pin the assumption the ANSWER path rests on — that the rule is
+  // decoration, so one arrow still moves exactly one option and the cursor lands on the
+  // row the human clicked rather than one short of it.
+  const RULED = ['Uniform', 'Minimal', 'Type something.', 'Chat about this'];
+  const { id } = await openBlockedSession({
+    options: RULED,
+    divider: true,
+    footer: 'Enter to select · Tab/Arrow keys to navigate · Esc to cancel',
+  });
+
+  // Wait for the row to be ANSWERABLE, not merely present: the first frame the poll
+  // catches can be a half-painted repaint, and this suite reads a real PTY. waitFor
+  // still fails the test if it never becomes answerable, which is the thing under test.
+  const row = await waitFor(
+    async () => {
+      const r = await blockedRow(id);
+      return r && r.answerable ? r : null;
+    },
+    'a ruled dialog that Workshop can answer',
+  );
+  assert.strictEqual(row.cursorIndex, 0);
+  assert.deepStrictEqual(row.options.map((o) => o.label), RULED);
+
+  // The option immediately BELOW the divider — the one an off-by-one gets wrong.
+  const r = await fetch(`${BASE}/api/workshop/items/${encodeURIComponent(row.id)}/answer`, {
+    method: 'POST',
+    headers: jsonHeaders(),
+    body: JSON.stringify({ optionIndex: 3, expect: 'chat about this' }),
+  });
+  const body = await r.json();
+  assert.strictEqual(r.status, 200, `answer failed: ${JSON.stringify(body)}`);
+  assert.strictEqual(body.ok, true);
+  assert.strictEqual(body.steps, 3, 'three rows to travel — the rule is not one of them');
+  assert.strictEqual(body.direction, 'Down');
+
+  const selected = await waitFor(
+    () => events(id).find((e) => e.event === 'menu-select'),
+    'the stub to record a selection',
+  );
+  assert.strictEqual(
+    selected.index, 3,
+    `the agent committed option ${selected.index + 1}, not 4 — the divider moved the cursor`,
+  );
+  assert.strictEqual(selected.label, 'Chat about this');
+
+  const moves = events(id).filter((e) => e.event === 'menu-move');
+  assert.deepStrictEqual(moves.map((m) => m.cursor), [1, 2, 3]);
 });
 
 test('a dialog answered from the inbox leaves it, with no leftover row', async () => {

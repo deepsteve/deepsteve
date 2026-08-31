@@ -95,8 +95,8 @@ function loadPolicy() {
     pasteMarkers: !!f.pasteMarkers,
     transcript: !!f.transcript,
     // #660 — a permission dialog that really responds to arrow keys. `menu` is
-    // { banner, question, options[], footer }; `menuOnBoot` puts it up immediately,
-    // otherwise a submitted prompt containing `menuTrigger` raises it.
+    // { banner, question, options[], footer, divider }; `menuOnBoot` puts it up
+    // immediately, otherwise a submitted prompt containing `menuTrigger` raises it.
     menu: (f.menu && typeof f.menu === 'object') ? f.menu : null,
     menuOnBoot: !!f.menuOnBoot,
     menuTrigger: String(f.menuTrigger || 'SHOW-MENU'),
@@ -169,6 +169,11 @@ function menuLines() {
   if (m.banner) rows.push(m.banner);
   rows.push(m.question || 'Do you want to proceed?');
   options.forEach((label, i) => {
+    // #664 — the rule a real AskUserQuestion draws above its escape hatches. It is
+    // DECORATION, not a row: menuCursor below stays an index into the flat `options`
+    // array and one arrow still moves one option, which is precisely the assumption
+    // Workshop's relative key dance makes and the unit fixtures cannot check.
+    if (m.divider && i === options.length - 1) rows.push('─'.repeat(60));
     rows.push(`${i === menuCursor ? '❯' : ' '} ${i + 1}. ${label}`);
   });
   rows.push(m.footer || 'Esc to cancel · Tab to amend');

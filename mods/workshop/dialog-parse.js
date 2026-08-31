@@ -46,6 +46,11 @@ const MAX_BLANK_GAP = 1;    // blank rows tolerated inside the option run
 const MAX_CONT_ROWS = 3;    // wrapped rows tolerated per option
 const MULTI_LOOKBACK = 8;   // rows above the question scanned for a tab strip
 
+// Section dividers stepped over INSIDE the option run. One is what a real
+// AskUserQuestion draws; a second means we are walking through box borders, so the run
+// stops. Contiguity is what makes stepping over the first one safe.
+const MAX_RULE_CROSSINGS = 1;
+
 // The same marker family screen-classifier.js's CLAUDE_SCREEN_MARKERS.permission
 // already validates against real captures. Kept as one regex here because we need
 // the INDEX of the match, not merely that one exists.
@@ -178,6 +183,26 @@ function detectDialog(lines) {
  * the option it belongs to, so it is buffered and prepended to the next option
  * taken. Taking option 1 stops the walk immediately, which is what keeps the
  * question line above it from being swallowed as a continuation.
+ *
+ * A rule inside that run used to end it. But Claude Code draws one above its escape
+ * hatches ("Type something.", "Chat about this"), and that is not an edge case: it is
+ * every multi-option AskUserQuestion, which was the majority of what the inbox exists
+ * to show (#664). So the walk steps over at most MAX_RULE_CROSSINGS of them.
+ *
+ * Crossing is safe because it decides nothing — CONTIGUITY still decides. Every row past
+ * the divider goes through the same `n !== expected` break, the same blank and
+ * continuation budgets and the same composer break as any other row, so a rule that is
+ * really the end of the run dies on the next iteration instead of this one. Re-checking
+ * any of that here before crossing is provably dead code: an exhaustive sweep of every
+ * arrangement of rows either side of a divider finds no screen where a lookahead changes
+ * the result. The two conditions below are the ones that are NOT redundant — see them.
+ *
+ * What none of it rules out: a numbered list in the TRANSCRIPT whose last entry happens
+ * to be the number the run wants, sitting right above a rule. It chains on and the labels
+ * are junk. Contiguity is already the only thing between the run and such a list when
+ * there is no rule at all, so this widens an existing hole by one rule rather than opening
+ * one — and it stays unpressable either way, because a transcript row carries no cursor
+ * glyph, so cursorIndex comes back null and tools.js marks the row unanswerable.
  */
 function collectOptions(tail, footerIndex) {
   const desc = [];          // options in descending order
@@ -185,6 +210,7 @@ function collectOptions(tail, footerIndex) {
   let pending = [];         // buffered continuation rows, in screen order
   let blanks = 0;
   let rules = 0;            // box borders crossed before the run starts
+  let crossings = 0;        // section dividers crossed INSIDE the run
   let firstIndex = -1;      // tail index of option 1
 
   for (let i = footerIndex - 1; i >= 0; i--) {
@@ -209,11 +235,25 @@ function collectOptions(tail, footerIndex) {
     }
 
     if (RULE_RE.test(line)) {
-      // A rule INSIDE the run ends it. Before the run starts it is normally a box's
-      // bottom border sitting between the options and the footer, which is what a
-      // rounded-box dialog looks like — breaking there loses the whole dialog.
-      if (desc.length) break;
-      if (++rules > 2) break;
+      // Before the run starts this is normally a box's bottom border sitting between
+      // the options and the footer, which is what a rounded-box dialog looks like —
+      // breaking there loses the whole dialog.
+      if (!desc.length) {
+        if (++rules > 2) break;
+        continue;
+      }
+      // Inside the run this is the escape-hatch divider (#664). Both conditions below
+      // change outcomes; neither is ceremony. A second rule means we are crossing box
+      // borders rather than one divider, and a non-empty `pending` means the rule sits
+      // ABOVE rows that belong to the option below it — which no dialog draws, and which
+      // would otherwise fold transcript prose into a button's label.
+      if (crossings >= MAX_RULE_CROSSINGS) break;
+      if (pending.length) break;
+      crossings++;
+      // A divider separates harder than a blank row does. Without this reset a divider
+      // with a blank line on EACH side spends the whole MAX_BLANK_GAP budget and the run
+      // dies on the row after the one we just chose to step over.
+      blanks = 0;
       continue;
     }
 
