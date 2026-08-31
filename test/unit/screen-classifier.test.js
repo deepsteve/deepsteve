@@ -93,3 +93,17 @@ test('markers cover the real permission and idle-footer phrasings', () => {
   // content: a finished spinner stops repainting.
   assert.match('✻ Sautéed for 42s', CLAUDE_SCREEN_MARKERS.spinner);
 });
+
+test('the plan-approval gate reads as waiting, and a saved plan path does not', () => {
+  // Its footer names neither Esc nor Enter and its question is "Would you like to
+  // proceed?", so none of the other permission markers see it — a session sitting on
+  // it reported 'unknown', which is what kept Workshop's pre-filter from ever
+  // scraping the screen. Both halves of the marker are load-bearing: `.claude/plans/`
+  // on its own is what an agent writes every time it saves one, mid-turn.
+  const gate = 'ctrl+g to edit in VS Code · ~/.claude/plans/i-need-you-to-humming-lobster.md';
+  assert.ok(CLAUDE_SCREEN_MARKERS.permission.some((re) => re.test(gate)));
+  assert.strictEqual(classify({ tail: gate, lastSpinnerTime: undefined }), 'waiting');
+
+  const prose = 'Saved the plan to ~/.claude/plans/i-need-you-to-humming-lobster.md and moved on.';
+  assert.ok(!CLAUDE_SCREEN_MARKERS.permission.some((re) => re.test(prose)));
+});

@@ -46,6 +46,15 @@ const MAX_BLANK_GAP = 1;    // blank rows tolerated inside the option run
 const MAX_CONT_ROWS = 3;    // wrapped rows tolerated per option
 const MULTI_LOOKBACK = 8;   // rows above the question scanned for a tab strip
 
+// The side panel Claude Code draws to the RIGHT of an AskUserQuestion's options.
+// MIN_PANEL_COL is what keeps a dialog's OWN frame from matching; MIN_PANEL_ROWS is
+// top border + a body row + bottom border, the smallest thing that is a box at all.
+const MIN_PANEL_COL = 8;
+const MIN_PANEL_ROWS = 3;
+const PANEL_TOP_CHARS = '┌╭┏';
+const PANEL_MID_CHARS = '│┃├┤';
+const PANEL_BOT_CHARS = '└╰┗';
+
 // Section dividers stepped over INSIDE the option run. One is what a real
 // AskUserQuestion draws; a second means we are walking through box borders, so the run
 // stops. Contiguity is what makes stepping over the first one safe.
@@ -54,10 +63,20 @@ const MAX_RULE_CROSSINGS = 1;
 // The same marker family screen-classifier.js's CLAUDE_SCREEN_MARKERS.permission
 // already validates against real captures. Kept as one regex here because we need
 // the INDEX of the match, not merely that one exists.
+//
+// The last alternative is the plan-approval gate, whose footer names neither Esc nor
+// Enter — it is the ctrl+g line. BOTH halves of it are required: `.claude/plans/` on
+// its own is what an agent writes any time it mentions the plan file it just saved,
+// and that sentence in a transcript must not read as a live dialog.
 const DIALOG_FOOTER_RE =
-  /Esc to (cancel|go back)\b|Enter to select\b|Tab to (amend|switch questions)\b|Tab\/Arrow keys/i;
+  /Esc to (cancel|go back)\b|Enter to select\b|Tab to (amend|switch questions)\b|Tab\/Arrow keys|ctrl\+g to edit in\b.{0,40}\.claude\/plans\//i;
 
 const PERMISSION_Q_RE = /^Do you want to\b/i;
+
+// A key hint drawn INSIDE the option run — Claude Code puts one under the last option
+// of the plan-approval gate. It is not a wrapped label, and folding it in names the
+// button "Tell Claude what to change shift+tab to approve with this feedback".
+const HINT_ROW_RE = /^shift\+tab to\b/i;
 
 // `  2. Yes, and don't ask again…` / `❯ 1. Yes` / `❯1. Uniform (recommended)`
 const OPTION_RE = /^[\s│┃|]*([❯›>])?[ \t]*(\d{1,2})[.)][ \t]+(.*\S)[ \t]*$/;
@@ -240,6 +259,12 @@ function collectOptions(tail, footerIndex) {
       // breaking there loses the whole dialog.
       if (!desc.length) {
         if (++rules > 2) break;
+        // Rows between this rule and the footer never joined an option, and a rule
+        // separates: they are the dialog's trailing chrome — an UNNUMBERED "Chat about
+        // this", a "Notes: press n to add notes" — not a wrapped label belonging to
+        // whatever option sits above the rule. Folding them in names a button after
+        // them. This is the pre-run twin of the `pending.length` break below.
+        pending = [];
         continue;
       }
       // Inside the run this is the escape-hatch divider (#664). Both conditions below
@@ -267,6 +292,7 @@ function collectOptions(tail, footerIndex) {
 
     const cont = stripBorders(line);
     if (!cont) continue;
+    if (HINT_ROW_RE.test(cont)) continue;
     if (pending.length >= MAX_CONT_ROWS) break;
     pending.unshift(cont);
     blanks = 0;
@@ -326,10 +352,94 @@ function readMulti(tail, questionIndex, footerLine) {
 }
 
 /**
+ * Where a side panel closes, or -1 if the box at (top, col) never closes cleanly.
+ * Strict on purpose: a column that is not a border on every row in between is not a
+ * box, and half a box is not something to reformat a screen around.
+ */
+function panelClosingRow(tail, top, col) {
+  for (let i = top + 1; i < tail.length; i++) {
+    const ch = str(tail[i])[col];
+    if (ch === undefined) return -1;
+    if (PANEL_BOT_CHARS.includes(ch)) return i;
+    if (!PANEL_MID_CHARS.includes(ch)) return -1;
+  }
+  return -1;
+}
+
+/** The topmost complete side panel, or null. */
+function findSidePanel(tail) {
+  for (let r = 0; r < tail.length; r++) {
+    const row = str(tail[r]);
+    for (let c = MIN_PANEL_COL; c < row.length; c++) {
+      if (!PANEL_TOP_CHARS.includes(row[c])) continue;
+      // Text to its LEFT on its opening row is what tells a side panel apart from the
+      // dialog's own frame: a frame opens on a row of its own.
+      if (!row.slice(0, c).trim()) continue;
+      const bottom = panelClosingRow(tail, r, c);
+      if (bottom >= 0 && bottom - r + 1 >= MIN_PANEL_ROWS) return { col: c, top: r, bottom };
+    }
+  }
+  return null;
+}
+
+/**
+ * The panel's bottom border, plus any rows under it that sit only in its column —
+ * Claude Code hangs "Notes: press n to add notes" below the box, indented to it.
+ */
+function lastPanelRow(tail, { col, bottom }) {
+  let last = bottom;
+  for (let i = bottom + 1; i < tail.length; i++) {
+    const line = str(tail[i]);
+    if (!line.trim()) continue;            // a blank row decides nothing either way
+    if (line.slice(0, col).trim()) break;  // content in the option column ends the panel
+    last = i;
+  }
+  return last;
+}
+
+/**
+ * A left-column-only view of a screen whose dialog has a side panel, or null.
+ *
+ * This exists because the side-by-side layout is unreadable head-on: the options and
+ * the panel share ROWS, so `3. Slot-first only │ tap rack E -> E lifts` is one line,
+ * and the fifteen rows of box art between the last option and the footer blow both
+ * MAX_BLANK_GAP and MAX_CONT_ROWS long before the walk reaches an option.
+ *
+ * Rows inside the panel's span whose left column is empty are DROPPED, not blanked.
+ * A blanked row still spends the walk's blank budget, and a fifteen-row hole spends
+ * it fifteen times over — but a row that only ever held panel is not a gap in the
+ * option column, it is not in that column at all.
+ */
+function stripSidePanel(tail) {
+  const panel = findSidePanel(tail);
+  if (!panel) return null;
+  const last = lastPanelRow(tail, panel);
+  const out = [];
+  for (let i = 0; i < tail.length; i++) {
+    const line = str(tail[i]);
+    if (i < panel.top || i > last) { out.push(line); continue; }
+    const left = line.slice(0, panel.col).replace(/\s+$/, '');
+    if (!left) continue;
+    out.push(left);
+  }
+  return out;
+}
+
+/**
  * The full read. null means "a dialog is up but its options could not be read" —
  * the caller keeps the row and renders a raw screen preview instead.
  */
 function parseDialog(lines) {
+  const direct = readDialog(lines);
+  if (direct) return direct;
+  // Only ever a RETRY. Reformatting a screen is a big hammer, and every layout that
+  // reads straight must keep reading straight — including the ones whose box art the
+  // panel detector would happily latch onto.
+  const split = stripSidePanel(tailOf(lines) || []);
+  return split ? readDialog(split) : null;
+}
+
+function readDialog(lines) {
   const detected = detectDialog(lines);
   if (!detected) return null;
 

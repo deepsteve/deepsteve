@@ -80,6 +80,11 @@ const CLAUDE_SCREEN_MARKERS = {
     /Esc to cancel\b/i, // "Esc to cancel · Tab to amend"
     /Enter to select\b/i,
     /Tab to switch questions\b/i,
+    // The plan-approval gate ("…ready to execute. Would you like to proceed?"), whose
+    // footer names neither Esc nor Enter — it is the ctrl+g line. Both halves are
+    // required: `.claude/plans/` alone is what an agent writes any time it mentions
+    // the plan file it just saved, and this list is matched against a transcript tail.
+    /ctrl\+g to edit in\b.{0,40}\.claude\/plans\//i,
   ],
 
   // Idle composer footer — the agent is sitting at its input prompt. These are the

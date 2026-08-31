@@ -451,3 +451,90 @@ test('advancing a multi-question strip is a new question', () => {
     'answering one sub-question puts a different question on screen',
   );
 });
+
+// ── the side-by-side detail panel ────────────────────────────────────────────
+
+test('a dialog with a detail panel beside its options is read, not previewed', () => {
+  // The layout current Claude Code draws for an AskUserQuestion with per-option
+  // detail. Options and panel share ROWS, so nothing about it can be read by walking
+  // rows: `3. Slot-first only │ tap rack E -> E lifts` is one line, and the box art
+  // between the last option and the footer is fifteen rows of budget the walk does
+  // not have. null here is two thirds of a live inbox saying "Waiting on a dialog".
+  const p = dp.parseDialog(fx.SIDE_PANEL_DIALOG);
+  assert.ok(p, 'the side-by-side AskUserQuestion must parse');
+  assert.deepStrictEqual(p.options.map((o) => o.n), [1, 2, 3]);
+  assert.deepStrictEqual(
+    p.options.map((o) => o.label),
+    ['Both ends (Recommended)', 'Source-first only', 'Slot-first only'],
+  );
+  assert.strictEqual(p.cursorIndex, 0);
+  assert.strictEqual(p.question, 'Which direction should tap focus work in?');
+  assert.strictEqual(p.multi.count, 4);
+});
+
+test('panel rows never leak into a label the answer path compares', () => {
+  // sendChoice re-reads the screen and matches fingerprint(label) against what sits
+  // under the cursor. A label carrying panel text is not merely ugly: it is compared
+  // twice, and any instability in the panel refuses every answer.
+  const p = dp.parseDialog(fx.SIDE_PANEL_DIALOG);
+  for (const o of p.options) {
+    assert.ok(!/[│┃┌┐└┘]/.test(o.label), `box art in label: ${o.label}`);
+    assert.ok(!/tap rack E|SOURCE-FIRST/.test(o.label), `panel text in label: ${o.label}`);
+  }
+});
+
+test('an UNNUMBERED escape hatch is not folded into the last option', () => {
+  // The multi-question variant draws "Chat about this" with no number, below the
+  // divider. Buffered as a continuation it names the button "Slot-first only Chat
+  // about this" — and that label is what a human clicks in the panel.
+  const p = dp.parseDialog(fx.SIDE_PANEL_DIALOG);
+  assert.strictEqual(p.options[2].label, 'Slot-first only');
+});
+
+test('the panel retry never fires on a layout that already reads', () => {
+  // stripSidePanel reformats a screen, which is a big hammer; it is reachable only
+  // after a straight read has failed. Every boxed fixture must reach the same result
+  // it did before the retry existed — the dialog's own frame is not a side panel.
+  for (const name of ['BOXED_DIALOG', 'BOXED_RULED_DIALOG', 'PERMISSION_WRAPPED', 'NINE_OPTIONS']) {
+    const p = dp.parseDialog(fx[name]);
+    assert.ok(p, `${name} must still parse`);
+    assert.deepStrictEqual(
+      p.options.map((o) => o.n),
+      p.options.map((_, i) => i + 1),
+      `${name} numbering changed`,
+    );
+  }
+});
+
+// ── the plan-approval gate ───────────────────────────────────────────────────
+
+test('the plan-approval gate is a dialog, and its options are readable', () => {
+  // Its footer names neither Esc nor Enter, so before the ctrl+g alternative this was
+  // invisible to detectDialog — no row at all, not even an unreadable one.
+  const d = dp.detectDialog(fx.PLAN_APPROVAL);
+  assert.ok(d, 'the plan-approval gate must be detected');
+  const p = dp.parseDialog(fx.PLAN_APPROVAL);
+  assert.ok(p, 'the plan-approval gate must parse');
+  assert.deepStrictEqual(
+    p.options.map((o) => o.label),
+    ['Yes, and use auto mode', 'Yes, manually approve edits', 'Tell Claude what to change'],
+  );
+  assert.strictEqual(p.cursorIndex, 0);
+  assert.strictEqual(
+    p.headline,
+    'Claude has written up a plan and is ready to execute. Would you like to proceed?',
+  );
+});
+
+test('a key hint under the last option is not that option label', () => {
+  const p = dp.parseDialog(fx.PLAN_APPROVAL);
+  assert.strictEqual(p.options[2].label, 'Tell Claude what to change');
+});
+
+test('a plan path in prose is not a dialog', () => {
+  // Both halves of the ctrl+g alternative are load-bearing. `.claude/plans/` alone is
+  // what an agent writes every time it saves a plan, and this fixture also carries a
+  // numbered run in the same sentence — an idle composer must stay idle.
+  assert.strictEqual(dp.detectDialog(fx.PLAN_PATH_IN_PROSE), null);
+  assert.strictEqual(dp.parseDialog(fx.PLAN_PATH_IN_PROSE), null);
+});

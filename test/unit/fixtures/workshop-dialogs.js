@@ -238,6 +238,75 @@ const TRANSCRIPT_LIST_ACROSS_RULE = [
   'Enter to select · Tab/Arrow keys to navigate · Esc to cancel',
 ];
 
+// The side-by-side layout: Claude Code draws a detail panel to the RIGHT of the
+// options, so the options and the panel share ROWS. Transcribed from session b6cc95de.
+// Head-on this is unreadable — the fifteen rows of box art between `3.` and the footer
+// blow both the blank and the continuation budget — so it is the stripSidePanel retry's
+// regression fixture. Note the escape hatch here is UNNUMBERED, unlike the
+// single-question variant's `5. Chat about this`.
+const SIDE_PANEL_DIALOG = [
+  '⏺ The tutorial\'s copy teaches "Drag" — worth knowing.',
+  '',
+  RULE,
+  '←  ☐ Focus flow  ☐ Kill switch  ☐ Landing hints  ✔ Submit  →',
+  '',
+  'Which direction should tap focus work in?',
+  '',
+  '❯ 1. Both ends (Recommended)      ┌──────────────────────────────────────────────────┐',
+  '  2. Source-first only            │ SOURCE-FIRST (mirrors drag)                      │',
+  '  3. Slot-first only              │   tap rack E      -> E lifts, legal slots hint   │',
+  '                                  │   tap slot 3      -> E lands. done.              │',
+  '                                  │                                                  │',
+  '                                  │   tap placed A    -> A lifts                     │',
+  '                                  │   tap placed E    -> A and E trade places        │',
+  '                                  │   tap the rack    -> A comes off the board       │',
+  '                                  │                                                  │',
+  '                                  │ DESTINATION-FIRST (the issue\'s headline)         │',
+  '                                  │   tap empty slot  -> slot is aimed               │',
+  '                                  │   tap rack E      -> E lands there. done.        │',
+  '                                  │                                                  │',
+  '                                  │ EITHER tap on the selected thing again -> cancel │',
+  '                                  └──────────────────────────────────────────────────┘',
+  '',
+  '                                  Notes: press n to add notes',
+  '',
+  RULE,
+  '  Chat about this',
+  '',
+  'Enter to select · ↑/↓ to navigate · n to add notes · Tab to switch questions · Esc to cancel',
+];
+
+// The plan-approval gate, transcribed from session 1c26c177. Its footer names neither
+// Esc nor Enter, and its question is "Would you like to proceed?" rather than "Do you
+// want to" — so before the ctrl+g alternative it was invisible to detectDialog AND to
+// screen-classifier.js, which is why the session read as state 'unknown'. The
+// shift+tab row under option 3 is a key hint, not option 3's wrapped label.
+const PLAN_APPROVAL = [
+  '   - No surface in the app renders the default no-builder path. All three',
+  '     NextWrdCountdown(...) call sites in lib/ pass a builder.',
+  '  ' + RULE,
+  '   Claude has written up a plan and is ready to execute. Would you like to proceed?',
+  '',
+  '   ❯ 1. Yes, and use auto mode',
+  '     2. Yes, manually approve edits',
+  '     3. Tell Claude what to change',
+  '        shift+tab to approve with this feedback',
+  '',
+  '   ctrl+g to edit in VS Code · ~/.claude/plans/i-need-you-to-humming-lobster.md',
+];
+
+// A plan path in PROSE, which is what an agent writes every time it saves one. The
+// ctrl+g alternative must need both halves, or every session that mentions its own
+// plan file reads as a live dialog.
+const PLAN_PATH_IN_PROSE = [
+  '⏺ I have written the plan.',
+  '',
+  '  Saved to ~/.claude/plans/i-need-you-to-humming-lobster.md — 1. read it, 2. run it.',
+  '',
+  '❯ ',
+  '  ⏵⏵ auto mode on (shift+tab to cycle) · esc to interrupt',
+];
+
 module.exports = {
   RULE,
   PERMISSION_WRAPPED,
@@ -258,4 +327,7 @@ module.exports = {
   BOXED_RULED_DIALOG,
   RULE_BREAKS_RUN,
   TRANSCRIPT_LIST_ACROSS_RULE,
+  SIDE_PANEL_DIALOG,
+  PLAN_APPROVAL,
+  PLAN_PATH_IN_PROSE,
 };
