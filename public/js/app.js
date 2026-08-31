@@ -3347,6 +3347,46 @@ async function reopenSessionRestore() {
 }
 
 /**
+ * The reachability repair (#680): adopt live sessions the server groups under THIS
+ * window that this window is not showing.
+ *
+ * The bug it closes: a session spawned into this window whose open-session message
+ * reached a page that reloaded (rejected WS upgrade on a stale auth cookie) before it
+ * persisted anything. Server-side the session is healthy and correctly grouped; this
+ * window's stores simply never heard about it, and no surface reads the server — the
+ * tab bar draws from localStorage, and the restore modal only offers windows that are
+ * LOST, which mine is not. See unclaimedOwnSessions() for why the predicate is narrow.
+ *
+ * ORDERING IS THE WHOLE POINT of where this is called from. It has to run AFTER the
+ * startup restore has settled, for two independent reasons:
+ *
+ *   1. `sessions` must be populated, or every tab we just opened looks unclaimed and
+ *      we adopt duplicates of all of them.
+ *   2. The restore modal broadcasts `restore-claimed` when another window takes a
+ *      session. Reconciling first would race that, and adoption is automatic — we
+ *      would re-open a session a sibling window is mid-claim on.
+ *
+ * Never blocks startup: any failure means zero adoptions.
+ */
+async function reconcileOwnWindow() {
+  const known = new Set([...sessions.keys(), ...getTabSessions().map(s => s.id)]);
+  const missing = await WindowManager.listOwnMissing(known);
+  if (missing.length === 0) return;
+
+  // Over the live-reload socket, not fetch — this is exactly the dead-cookie state in
+  // which every fetch() 401s while the sockets stay healthy, and a silent repair is
+  // how the original bug stayed invisible for two minutes.
+  clientLog('window-reconcile',
+    `adopting ${missing.length} session(s) the server groups here but this window never saw: `
+    + missing.map(s => s.id).join(','));
+
+  const windowId = getWindowId();
+  for (const sess of missing) SessionStores.add(windowId, { id: sess.id, cwd: sess.cwd, name: sess.name });
+  await restoreSessions(missing, { allowDuplicate: false });
+  showToast(`Reopened ${missing.length} session${missing.length > 1 ? 's' : ''} that belonged to this window`);
+}
+
+/**
  * Show confirmation dialog if agent is busy. Returns true if close should proceed.
  * For locally-connected sessions, checks in-memory state. For server-only sessions
  * (dropdown), fetches state from the server.
@@ -5045,6 +5085,11 @@ async function init() {
         // run that finished before this window connected), we want a clean "gone",
         // not a resurrected tombstone.
         if (msg.windowId && msg.windowId !== getWindowId()) return;
+        // A repair re-emit from the server's orphan sweep (#680) says "you should have
+        // a tab for this" — which is only news if we don't. The normal path keeps
+        // allowDuplicate: true, so without this guard every sweep would stack a second
+        // tab-<id> node on a window that was fine all along.
+        if (msg.repair && sessions.has(msg.id)) return;
         createSession(msg.cwd, msg.id, false, { name: msg.name, allowDuplicate: true, initialPrompt: msg.initialPrompt, loading: msg.loading, background: msg.background, noRestore: true });
         // A background open (unattended scheduled run, #600) stays silent — the
         // top-of-page progress bar is ambient interruption for work the user
@@ -5394,17 +5439,21 @@ async function init() {
   const tabSessions = getTabSessions();
   console.log('[init] tab sessions:', tabSessions);
 
+  // Held so reconcileOwnWindow() can wait for the restore to settle — see the note at
+  // the bottom of init() for why it is a race and not an await.
+  let startupRestore = Promise.resolve();
+
   if (isExistingTab && tabSessions.length > 0) {
     // Existing tab with sessions saved in sessionStorage — restore them
     console.log('[init] Restoring from tab sessions');
-    restoreSessions(tabSessions);
+    startupRestore = restoreSessions(tabSessions);
   } else if (isExistingTab) {
     // Existing tab but the tab-session list is empty — try localStorage as fallback
     const savedSessions = SessionStore.getWindowSessions(windowId);
     console.log('[init] windowId:', windowId, 'savedSessions (fallback):', savedSessions);
     if (savedSessions.length > 0) {
       console.log('[init] Restoring from localStorage fallback');
-      restoreSessions(savedSessions);
+      startupRestore = restoreSessions(savedSessions);
     } else {
       console.log('[init] No saved sessions, landing on the empty state');
       await landWithNoTabs();
@@ -5416,7 +5465,7 @@ async function init() {
       for (const session of legacySessions) {
         SessionStores.add(windowId, session);
       }
-      restoreSessions(legacySessions);
+      startupRestore = restoreSessions(legacySessions);
     } else {
       // Startup restore offer (#560, reshaped by #658). Auto-shows only when there
       // are orphaned window groups or ungrouped sessions to reclaim — closed
@@ -5434,10 +5483,32 @@ async function init() {
     }
   }
 
-  // Update window activity periodically
+  // The reachability repair (#680) — the ONE surface that reads the server's session
+  // list for this window rather than localStorage, which is what makes "a live session
+  // is always reachable" true rather than merely usually true. See reconcileOwnWindow()
+  // for why it cannot run before the restore.
+  //
+  // A RACE, not an await, and the deadline is the load-bearing part. A restore's
+  // promise resolves only when the server answers each session's WS; when it doesn't
+  // (dead cookie, daemon down) ws-client reconnects forever and the promise never
+  // settles. Awaiting it would mean the repair never runs in precisely the degraded
+  // state that creates the sessions it exists to find. Reconciling early cannot double
+  // up: every id being restored is already in TabSessions — that is where the restore
+  // list came from — so reconcileOwnWindow() counts them as known either way.
+  // Update window activity periodically. Armed BEFORE the reconciliation below, which
+  // waits on things that can take seconds — a repair must never cost this window its
+  // lastActive heartbeat.
   setInterval(() => {
     SessionStore.touchWindow(windowId);
   }, 60000);
+
+  const RESTORE_SETTLE_DEADLINE_MS = 15000;
+  await Promise.race([
+    startupRestore.catch(() => {}),
+    new Promise(r => setTimeout(r, RESTORE_SETTLE_DEADLINE_MS)),
+  ]);
+  // A repair that throws must not be the reason a window fails to finish starting.
+  await reconcileOwnWindow().catch(e => clientLog('window-reconcile', `failed: ${e && e.message ? e.message : e}`));
 }
 
 // Start the app

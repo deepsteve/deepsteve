@@ -19,6 +19,7 @@ const { usableWorktree } = require('./worktree-support');
 const { stateDir, agentHomeDir, expandTilde, spawnCwdProblem, assertSpawnCwd, tmuxSocketPath, defaultTmuxSocketPath } = require('./paths');
 const { resolveBinary, runBinary, resolveUrlOpener, resolveLoginShell } = require('./bin-path');
 const { createPendingOpens } = require('./pending-opens');
+const { findOrphanSessions } = require('./orphan-sweep');
 const { reattachSurvivingTmuxSessions } = require('./tmux-reattach');
 const { createSessionAutoClose } = require('./session-auto-close');
 const { classifyScreenTail, CLAUDE_SCREEN_MARKERS } = require('./screen-classifier');
@@ -216,16 +217,24 @@ function openBrowserUrl(url = UI_URL) {
 
 // Deliver a message to a specific browser window, falling back to first available client.
 // If no clients are connected, queues the message for flush on next connection.
+//
+// Returns HOW it went out (#680): 'window' (the named window took it), 'broadcast' (some
+// other window did, with the windowId preserved for the client-side guard), or 'queued'
+// (nobody was connected, so pendingOpens holds it for the next one). This used to be a
+// local that was computed and thrown away, which is how MCP start_issue could report a
+// tab as open when no browser had ever heard of it.
 function deliverToWindow(msg, targetWindowId, { openBrowser } = {}) {
   const msgObj = typeof msg === 'string' ? JSON.parse(msg) : { ...msg };
   const readyClients = [...reloadClients].filter(c => c.readyState === 1);
   let delivered = false;
+  let outcome = 'queued';
 
   if (targetWindowId) {
     for (const client of readyClients) {
       if (client.windowId === targetWindowId && client.readyState === 1) {
         client.send(JSON.stringify(msgObj));
         delivered = true;
+        outcome = 'window';
         break;
       }
     }
@@ -244,6 +253,7 @@ function deliverToWindow(msg, targetWindowId, { openBrowser } = {}) {
       readyClients[0].send(JSON.stringify(msgObj));
     }
     delivered = true;
+    outcome = 'broadcast';
   }
 
   if (!delivered) {
@@ -253,6 +263,32 @@ function deliverToWindow(msg, targetWindowId, { openBrowser } = {}) {
       openBrowserUrl();
     }
   }
+  return outcome;
+}
+
+// How long a freshly spawned session gets to acquire a browser client before we say so
+// (#680). Generous: it has to cover the page reload that auth-heal.js performs when a
+// stale cookie gets a WS upgrade rejected — which is precisely the window in which the
+// original orphan was created.
+const ATTACH_DEADLINE_MS = 8000;
+
+/**
+ * Say out loud when a session nobody asked for in a browser turns out to have no
+ * browser (#680). MCP start_issue / open_terminal return the instant the PTY spawns —
+ * that is the right latency, but it means their success shape is a claim about the
+ * spawn, never about the tab. This is the deferred half of that claim.
+ *
+ * Reporting only. The repair is the orphan sweep, which will find the same session a
+ * few seconds later and re-emit its open-session; this line is what makes the failure
+ * legible when someone goes back through the log asking what happened.
+ */
+function noteSpawnDelivery(id, { tabDelivery, windowId, source }) {
+  setTimeout(() => {
+    const entry = shells.get(id);
+    if (!entry || entry.clients.size > 0) return;
+    log(`[spawn] ${id}: no browser client attached ${ATTACH_DEADLINE_MS / 1000}s after ${source} `
+      + `(tabDelivery=${tabDelivery}, windowId=${windowId || 'none'}) — the session is running but may have no tab`);
+  }, ATTACH_DEADLINE_MS).unref();
 }
 
 // A queued message is only worth delivering if the thing it points at still exists
@@ -5574,6 +5610,12 @@ function buildWindowsView({ collectUngrouped = false } = {}) {
       status,
       createdAt: entry.createdAt || null,
       lastActivity: entry.lastActivity || null,
+      // How many browsers are showing this session right now (#680). Carried on the
+      // shared view rather than derived by a second pass over `shells`, so the orphan
+      // sweep, /api/windows and /api/recoverable-sessions answer from one builder and
+      // cannot drift about what is on screen. Always 0 for a `saved` row — those have
+      // no live shell to attach to.
+      attached: entry.clients ? entry.clients.size : 0,
     };
     if (!entry.windowId) {
       // Exists, but belongs to no window. For the recover view (#560) these are
@@ -5747,6 +5789,57 @@ function killAllSessions(reason) {
   if (killed.length > 0) saveState();
   return killed;
 }
+
+// ── The orphan sweep (#680) ───────────────────────────────────────────────────────
+//
+// The invariant: a live, non-closed session is reachable from at least one UI surface,
+// always. Before this, the server's session list and a window's own tab list could
+// silently disagree and nothing ever noticed — #680's session ran mid-turn, invisible
+// from every surface, until someone tailed this log.
+//
+// This is the assertion that the invariant holds, and it is deliberately NOT quiet:
+// every offender gets a log line naming it. It runs against buildWindowsView() — the
+// same builder /api/windows and /api/recoverable-sessions answer from — so the check
+// and the surfaces cannot drift about what exists.
+//
+// It also repairs. Re-emitting open-session to the owning window heals it in place,
+// without waiting for that window to be reloaded; the client's own startup
+// reconciliation is then a backstop rather than the only cure. The re-emit carries
+// `repair: true` so the client can ignore it when the tab is already there.
+//
+// Capped per session because a client that cannot open the tab (a broken page, an
+// extension eating the message) must not be pushed at forever. After the cap we keep
+// logging and stop acting — losing the repair is recoverable, a log loop is not.
+const MAX_ORPHAN_REPAIRS = 3;
+const ORPHAN_SWEEP_MS = 30000;
+let orphanSeenSince = new Map();
+const orphanRepairs = new Map(); // id → repairs already attempted
+
+function sweepOrphanSessions() {
+  const { windows } = buildWindowsView();
+  const { orphans, seenSince } = findOrphanSessions({ windows, seenSince: orphanSeenSince, now: Date.now() });
+  orphanSeenSince = seenSince;
+  for (const id of [...orphanRepairs.keys()]) {
+    if (!seenSince.has(id)) orphanRepairs.delete(id); // recovered — a later offence starts fresh
+  }
+
+  for (const o of orphans) {
+    const done = orphanRepairs.get(o.id) || 0;
+    const secs = Math.round(o.forMs / 1000);
+    const label = o.name ? ` (${JSON.stringify(o.name)})` : '';
+    if (done >= MAX_ORPHAN_REPAIRS) {
+      log(`[orphan] ${o.id}${label} still unreachable from window ${o.windowId} after ${secs}s `
+        + `and ${done} repair attempt(s) — the session is alive; not re-emitting again`);
+      continue;
+    }
+    orphanRepairs.set(o.id, done + 1);
+    log(`[orphan] ${o.id}${label} grouped under live window ${o.windowId} with 0 attached clients `
+      + `for ${secs}s — re-emitting open-session (repair ${done + 1}/${MAX_ORPHAN_REPAIRS})`);
+    deliverToWindow({ type: 'open-session', id: o.id, cwd: o.cwd, name: o.name, windowId: o.windowId, repair: true }, o.windowId);
+  }
+}
+
+setInterval(sweepOrphanSessions, ORPHAN_SWEEP_MS).unref();
 
 app.post('/api/shells/killall', (req, res) => {
   // #562: killall destroys EVERY session on this server. Its only callers are the
@@ -6605,8 +6698,9 @@ function startIssueSession({ number, title, body, labels, url, cwd, agentType, c
     });
   }
 
-  deliverToWindow({ type: 'open-session', id, cwd: spawnCwd, name, windowId, loading: true }, windowId, { openBrowser });
-  return { id, name, cwd: spawnCwd, worktree: worktree || null, engineType, autopilot: autopilotOn };
+  const tabDelivery = deliverToWindow({ type: 'open-session', id, cwd: spawnCwd, name, windowId, loading: true }, windowId, { openBrowser });
+  noteSpawnDelivery(id, { tabDelivery, windowId, source: `start_issue #${number} (${source})` });
+  return { id, name, cwd: spawnCwd, worktree: worktree || null, engineType, autopilot: autopilotOn, tabDelivery };
 }
 
 app.post('/api/start-issue', (req, res) => {
@@ -6643,7 +6737,11 @@ app.post('/api/start-issue', (req, res) => {
     return res.status(400).json({ error: result.error.message, code: result.error.code, cwd: result.error.cwd });
   }
   log(`[API] start-issue: windowId=${windowId}, sessionId=${result.id}, readyClients=${readyClients.length}, clientWindowIds=[${readyClients.map(c => c.windowId).join(',')}]`);
-  res.json({ id: result.id, name: result.name, url: UI_URL });
+  // tabDelivery (#680): whether the tab actually reached the window that asked for it,
+  // went out to the others, or is queued for the next one to connect. Spawning a session
+  // and opening a tab for it are two events, and this endpoint used to report only the
+  // first.
+  res.json({ id: result.id, name: result.name, url: UI_URL, tabDelivery: result.tabDelivery });
 });
 
 // restart.sh calls this before restarting. Server asks browser(s) for
@@ -7986,7 +8084,8 @@ function broadcastToWindow(windowId, msg) {
 }
 
 // Initialize MCP server (async, ~100ms for dynamic import)
-initMCP({ app, security, shells, wss, broadcast, broadcastToWindow, log, MODS_DIR, closeSession, tombstoneSession, handleShellGone, spawnSession, sessionEnv, getSpawnArgs, mcpConfigArgs, getAgentConfig, resolveConfigDir, validateModel, validateEffort, wireShellOutput, watchClaudeSessionDir, unwatchClaudeSessionDir, resolveForkParentSession, transcriptPath, saveState, validateWorktree, ensureWorktree, sessionPaths, submitToShell, fetchIssueFromGitHub, deliverPromptWhenReady, startIssueSession, reloadClients, deliverToWindow, settings, isShuttingDown: () => shuttingDown, displayTabs, setDisplayTab, deleteDisplayTab, screenshots, setScreenshot, deleteScreenshot, getScreenshotPath, getDefaultEngine, getForegroundCommand, sessionLog, emitSessionOpen, getContexts: () => contexts, pathInside, getSavedSession: (id) => savedState[id] || null, stripEscapeSequences, readTerminalScreen, sessionInputState, maybeInheritRemoteControl, requestMetaControlsConsent, registerRestartBlocker, armSessionAutoClose, logRcWrite }).catch(e => log('MCP init failed:', e.message));
+initMCP({ app, security, shells, wss, broadcast, broadcastToWindow, log, MODS_DIR, closeSession, tombstoneSession, handleShellGone, spawnSession, sessionEnv, getSpawnArgs, mcpConfigArgs, getAgentConfig, resolveConfigDir, validateModel, validateEffort, wireShellOutput, watchClaudeSessionDir, unwatchClaudeSessionDir, resolveForkParentSession, transcriptPath, saveState, validateWorktree, ensureWorktree, sessionPaths, submitToShell, fetchIssueFromGitHub, deliverPromptWhenReady, startIssueSession, reloadClients, deliverToWindow, noteSpawnDelivery, settings, isShuttingDown: () => shuttingDown, displayTabs, setDisplayTab, deleteDisplayTab, screenshots, setScreenshot, deleteScreenshot, getScreenshotPath, getDefaultEngine, getForegroundCommand, sessionLog, emitSessionOpen, getContexts: () => contexts, pathInside, getSavedSession: (id) => savedState[id] || null, stripEscapeSequences, readTerminalScreen, sessionInputState, maybeInheritRemoteControl, requestMetaControlsConsent, registerRestartBlocker, armSessionAutoClose, logRcWrite }).catch(e => log('MCP init failed:', e.message));
+initMCP({ app, security, shells, wss, broadcast, broadcastToWindow, log, MODS_DIR, closeSession, tombstoneSession, handleShellGone, spawnSession, sessionEnv, getSpawnArgs, mcpConfigArgs, getAgentConfig, resolveConfigDir, validateModel, validateEffort, wireShellOutput, watchClaudeSessionDir, unwatchClaudeSessionDir, resolveForkParentSession, saveState, validateWorktree, ensureWorktree, sessionPaths, submitToShell, fetchIssueFromGitHub, deliverPromptWhenReady, startIssueSession, reloadClients, deliverToWindow, noteSpawnDelivery, settings, isShuttingDown: () => shuttingDown, displayTabs, setDisplayTab, deleteDisplayTab, screenshots, setScreenshot, deleteScreenshot, getScreenshotPath, getDefaultEngine, getForegroundCommand, sessionLog, emitSessionOpen, getContexts: () => contexts, pathInside, getSavedSession: (id) => savedState[id] || null, stripEscapeSequences, readTerminalScreen, sessionInputState, maybeInheritRemoteControl, requestMetaControlsConsent, registerRestartBlocker, armSessionAutoClose, logRcWrite }).catch(e => log('MCP init failed:', e.message));
 
 // Watch themes directory for changes and broadcast to clients
 let themeWatchDebounce = null;

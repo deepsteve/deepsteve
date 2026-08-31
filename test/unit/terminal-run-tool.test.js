@@ -42,7 +42,7 @@ const parse = (res) => JSON.parse(res.content[0].text);
  * along by pushing lines onto it. `finish(code)` appends the marker the wrapper would
  * have printed — the daemon learns the exit status from that line and nowhere else.
  */
-function makeContext({ linger = 20000, arm = 'wired' } = {}) {
+function makeContext({ linger = 20000, arm = 'wired', tabDelivery = 'window' } = {}) {
   const shells = new Map([['caller', { cwd: CALLER_CWD, windowId: 'w1', configDir: null }]]);
   const spawns = [];
   const armCalls = [];
@@ -68,7 +68,11 @@ function makeContext({ linger = 20000, arm = 'wired' } = {}) {
     wireShellOutput: () => {},
     emitSessionOpen: () => {},
     saveState: () => {},
-    deliverToWindow: (msg) => opened.push(msg),
+    // Mirrors the real one since #680: it returns HOW the tab went out, and the tools
+    // put that in their result. A stub returning undefined would let a regression to
+    // "success no matter what happened to the tab" pass unnoticed.
+    deliverToWindow: (msg) => { opened.push(msg); return tabDelivery; },
+    noteSpawnDelivery: () => {},
     handleShellGone: (id, reason) => { shells.delete(id); closes.push({ id, reason, via: 'exit' }); },
     // Returns false without recording anything when the session is already gone, exactly
     // as server.js:5015 does — otherwise the belt-and-braces close on the shell_gone path
@@ -305,6 +309,22 @@ test('open_terminal still returns its old fields, plus a cleanup reminder naming
   assert.match(p.cleanupReminder, /close_session/);
   assert.ok(p.cleanupReminder.includes(p.id), 'it names the id the agent must pass');
   assert.match(p.cleanupReminder, /run_in_terminal/);
+  // #680: spawning a session and opening a tab for it are two events. The result used
+  // to report only the first, so an agent could truthfully say "done" about a PTY while
+  // no browser had ever heard of the tab.
+  assert.strictEqual(p.tabDelivery, 'window');
+  assert.strictEqual(p.note, undefined, 'a tab that went where it was asked needs no caveat');
+});
+
+test('#680: a tab nobody received comes back with a caveat, not a bare success', async () => {
+  const c = makeContext({ tabDelivery: 'queued' });
+  const p = parse(await c.tools.open_terminal.handler({ command: 'npm run dev' }, callerExtra('caller')));
+
+  assert.ok(p.id, 'the session still spawned — that part did succeed');
+  assert.strictEqual(p.tabDelivery, 'queued');
+  assert.match(p.note, /no browser window was connected/i);
+  assert.match(p.note, /do not tell the user a tab is open/i,
+    'the agent is told what NOT to claim, since that is the failure this closes');
 });
 
 // --- drift guards on the prose, the merge-auto-close.test.js precedent ------------

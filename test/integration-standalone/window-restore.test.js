@@ -372,6 +372,92 @@ test('the grouping survives a daemon restart', async () => {
   assert.strictEqual(win.sessions.length, 2);
 });
 
+test('#680: a session whose client never attaches is visible and repaired, never merely lost', async () => {
+  // The #680 sequence, reduced. A window is open (its live-reload socket is up), a
+  // session is spawned INTO that window by the server, and the client never records it —
+  // in production because the page reloaded to re-acquire an auth cookie between the
+  // open-session message and persisting it, here simply by never attaching.
+  //
+  // Server-side the session is perfectly healthy. What made it a bug is that it was then
+  // reachable from nothing: the tab bar draws from localStorage, and the restore modal
+  // offers only LOST windows — this window is open, so it is never offered, and offering
+  // it would be wrong anyway since its other tabs are on screen.
+  const WINDOW = 'win-680';
+  const reload = await reloadClient(WINDOW);
+
+  // Collect the sweep's repairs from before the orphan is provoked, so none can be
+  // missed in the gap between spawning and starting to listen.
+  const repairs = [];
+  reload.on('message', (data) => {
+    let msg; try { msg = JSON.parse(data.toString()); } catch { return; }
+    if (msg && msg.type === 'open-session' && msg.repair) repairs.push(msg);
+  });
+
+  try {
+    const r = await fetch(`${BASE}/api/start-issue`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeaders() },
+      // An inline body keeps this off the network — startIssueSession only reaches
+      // GitHub when it has none.
+      body: JSON.stringify({ number: 680, title: 'Invisible session', body: 'x', cwd: projDir, windowId: WINDOW }),
+    });
+    assert.ok(r.ok, `POST /api/start-issue -> ${r.status}`);
+    const started = await r.json();
+
+    // The spawn now reports how the tab actually went out, instead of a success shape
+    // that says nothing about whether a browser ever heard of it.
+    assert.strictEqual(started.tabDelivery, 'window', 'delivered to the named window');
+
+    // The server's view: grouped under a LIVE window, active, and shown by nobody.
+    // Those three facts together are the arrangement no surface covers.
+    const payload = await waitFor(async () => {
+      const p = await getWindows();
+      const w = findWindow(p, WINDOW);
+      return w && w.sessions.some(s => s.id === started.id) ? p : null;
+    }, 'the session to appear under its window');
+
+    const win = findWindow(payload, WINDOW);
+    assert.strictEqual(win.live, true, 'the owning window is connected right now');
+    const row = win.sessions.find(s => s.id === started.id);
+    assert.strictEqual(row.status, 'active', 'the session is alive');
+    assert.strictEqual(row.attached, 0, 'and no browser is showing it');
+
+    // 1. The client-side repair: this window's own reconciliation recovers it. Driving
+    //    the REAL module (not a copy of the rule) is the point — a divergence between
+    //    what the server reports and what the client adopts is how #680 happened.
+    globalThis.window = globalThis;
+    globalThis.window.parent = globalThis.window;
+    const { unclaimedOwnSessions, mergeWindows } = await import('../../public/js/window-manager.js');
+
+    assert.deepStrictEqual(
+      unclaimedOwnSessions({ server: payload, myWindowId: WINDOW, localIds: [] }).map(s => s.id),
+      [started.id],
+      'a window with an empty tab list adopts the session the server says is its');
+
+    // ...and the restore modal genuinely cannot reach it: mergeWindows skips my own
+    // window, which is exactly why the reconciliation above had to exist. (Other
+    // windows this suite left behind are still offered — that is the picker working.)
+    const offered = mergeWindows({
+      local: {}, server: { ...payload, knownSessionIds: new Set(payload.knownSessionIds) },
+      myWindowId: WINDOW, liveIds: new Set([WINDOW]),
+    });
+    assert.ok(!offered.some(w => w.windowId === WINDOW), 'my own window is never offered back to me');
+    assert.ok(!offered.some(w => w.sessions.some(s => s.id === started.id)),
+      'and the session is in no other offer either — no surface but the reconciliation can reach it');
+
+    // 2. The server-side repair, end to end: the sweep notices and re-emits. This is the
+    //    half that heals a window without waiting for it to be reloaded. Worst case is
+    //    two sweep intervals — one to start the grace clock, one to expire it.
+    const msg = await waitFor(
+      () => repairs.find(m => m.id === started.id),
+      'the orphan sweep to re-emit open-session', 120000, 1000);
+    assert.strictEqual(msg.windowId, WINDOW);
+    assert.strictEqual(msg.repair, true, 'flagged so a window that is fine ignores it');
+  } finally {
+    try { reload.close(); } catch {}
+  }
+});
+
 test('the suite never opens a real browser', async () => {
   // server.js auto-opens the default browser 5s after a cold start with no client
   // attached — which is every daemon this suite spawns. A scratch HOME does not

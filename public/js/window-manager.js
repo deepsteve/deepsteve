@@ -166,6 +166,46 @@ export function mergeWindows({ local, server, myWindowId, liveIds }) {
   return merged;
 }
 
+/**
+ * The other half of mergeWindows(): live sessions the server groups under MY OWN
+ * window that this window's tab list never saw (#680).
+ *
+ * mergeWindows() opts out of myWindowId on purpose — it answers "which windows may I
+ * be offered to restore", and a window that is open cannot be offered to itself. That
+ * left one arrangement covered by no surface at all: the tab bar draws from
+ * localStorage and never from the server, the restore modal offers whole WINDOWS and
+ * mine is not lost, and mergeWindows skips me. A session spawned into this window
+ * whose open-session message landed on a page that reloaded before persisting it (a
+ * rejected WS upgrade on a stale auth cookie) is then alive, healthy, correctly
+ * grouped server-side — and invisible everywhere.
+ *
+ * Deliberately narrow, because the result is adopted automatically:
+ *
+ *  - No server opinion (failed fetch, nested Baby Browser) means no adoption. We
+ *    cannot tell "you are missing a tab" from "we could not ask".
+ *  - status 'active' only. A 'saved' row grouped here is a session this window was
+ *    offered and did not restore; re-opening those would resurrect tabs the user
+ *    deliberately passed on, which is the one failure mode automatic adoption has to
+ *    avoid.
+ *  - Anything already on screen or already in the tab list is not missing.
+ *
+ * Pure and exported for unit testing — see test/unit/window-merge.test.js.
+ *
+ * @param {?object}  server      { windows } from /api/windows, or null if unavailable
+ * @param {string}   myWindowId
+ * @param {Iterable} localIds    session ids this window already knows about
+ * @returns {Array}  [{ id, cwd, name }] in the server's createdAt order
+ */
+export function unclaimedOwnSessions({ server, myWindowId, localIds }) {
+  if (!server || !Array.isArray(server.windows)) return [];
+  const mine = server.windows.find(w => w.windowId === myWindowId);
+  if (!mine) return [];
+  const known = localIds instanceof Set ? localIds : new Set(localIds || []);
+  return (mine.sessions || [])
+    .filter(s => s.status === 'active' && !known.has(s.id))
+    .map(s => ({ id: s.id, cwd: s.cwd, name: s.name }));
+}
+
 function pruneStaleWindows() {
   const now = Date.now();
   for (const [id, entry] of liveWindows) {
@@ -275,6 +315,34 @@ export const WindowManager = {
       recents: server.recents,
       closedCount: server.closedCount,
     };
+  },
+
+  /**
+   * Sessions the server groups under THIS window that this window is not showing
+   * (#680) — the reachability repair, run once per page load after restore settles.
+   *
+   * Uses /api/windows, not /api/recoverable-sessions: the recover view costs a
+   * synchronous transcript read per unnamed row (#658), and none of that enrichment is
+   * needed to open a tab. /api/windows is the same buildWindowsView() builder with no
+   * file I/O, and until now had no client caller at all.
+   *
+   * There is no roll-call here and there must not be: the question is about MY window,
+   * which by definition is alive, and paying ORPHAN_DETECTION_TIMEOUT on every page
+   * load to learn nothing would be a 1.5s tax on startup.
+   *
+   * Returns [] on any failure — a page that cannot reach the server adopts nothing.
+   */
+  async listOwnMissing(localIds) {
+    if (recursionDepth > 0) return [];
+    try {
+      const res = await fetch('/api/windows');
+      if (!res.ok) return [];
+      const data = await res.json();
+      if (!data || !Array.isArray(data.windows)) return [];
+      return unclaimedOwnSessions({ server: data, myWindowId: this.getWindowId(), localIds });
+    } catch {
+      return [];
+    }
   },
 
   /**

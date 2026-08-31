@@ -282,3 +282,101 @@ test('lastActive takes the newer of localStorage and server', async () => {
 
   assert.strictEqual(out[0].lastActive, 900);
 });
+
+// ------------------------------------------- unclaimedOwnSessions (#680)
+//
+// THE CASE THE TESTS ABOVE STRUCTURALLY CANNOT EXPRESS. Every one of them passes
+// myWindowId: 'win-me' and then asserts about some OTHER window, because mergeWindows'
+// first line is `if (windowId === myWindowId ...) continue`. So a session the server
+// groups under my own window that localStorage never saw was uncovered by construction,
+// and #680 is what that gap looked like in production: a live agent, mid-turn, grouped
+// correctly server-side under a window that was open on screen, reachable from no UI
+// surface at all — the tab bar reads localStorage, and the restore modal only offers
+// windows that are LOST.
+//
+// The fix is a second function rather than a change to mergeWindows: "which windows may
+// I be offered" and "what am I missing" are different questions, and folding them would
+// put the user's own open window in the restore picker.
+
+// The buggy arrangement, as /api/windows reports it: my window, holding a session my
+// tab list has never heard of.
+const missingFromMe = () => server([
+  serverWindow('win-me', [serverSession('mine-open'), serverSession('invisible')], { live: true }),
+]);
+
+test('#680: mergeWindows still drops a session grouped under my own window', async () => {
+  const { mergeWindows } = await load();
+  const out = mergeWindows({
+    local: { 'win-me': localWindow([{ id: 'mine-open', cwd: '/repo', name: 'open' }]) },
+    server: missingFromMe(),
+    myWindowId: 'win-me',
+    liveIds: new Set(['win-me']),
+  });
+
+  // Unchanged contract, pinned deliberately: this is the drop that #680 is about, and
+  // the repair must NOT be made by teaching the restore picker to offer me to myself.
+  assert.deepStrictEqual(out, [], 'my own window is never a restore candidate');
+});
+
+test('#680: unclaimedOwnSessions recovers it instead of dropping it', async () => {
+  const { unclaimedOwnSessions } = await load();
+  const out = unclaimedOwnSessions({
+    server: missingFromMe(),
+    myWindowId: 'win-me',
+    localIds: ['mine-open'],
+  });
+
+  assert.deepStrictEqual(ids(out), ['invisible'],
+    'the session no surface could reach is recovered');
+  assert.deepStrictEqual(out[0], { id: 'invisible', cwd: '/repo', name: null },
+    'narrowed to the shape restoreSessions() wants');
+});
+
+test('#680: a session already on screen is not adopted twice', async () => {
+  const { unclaimedOwnSessions } = await load();
+  const out = unclaimedOwnSessions({
+    server: missingFromMe(),
+    myWindowId: 'win-me',
+    localIds: new Set(['mine-open', 'invisible']),
+  });
+
+  assert.deepStrictEqual(out, [], 'nothing is missing');
+});
+
+test('#680: a saved session under my window is NOT adopted', async () => {
+  const { unclaimedOwnSessions } = await load();
+  // A 'saved' row grouped here is history this window was offered and did not restore.
+  // Adoption is automatic, so pulling those in would re-open tabs the user passed on —
+  // the one failure mode that makes automatic adoption worse than the bug.
+  const out = unclaimedOwnSessions({
+    server: server([serverWindow('win-me', [
+      { ...serverSession('declined'), status: 'saved' },
+      serverSession('live-one'),
+    ], { live: true })]),
+    myWindowId: 'win-me',
+    localIds: [],
+  });
+
+  assert.deepStrictEqual(ids(out), ['live-one']);
+});
+
+test('#680: no server opinion adopts nothing', async () => {
+  const { unclaimedOwnSessions } = await load();
+  // Failed fetch or a nested Baby Browser. "You are missing a tab" and "we could not
+  // ask" are indistinguishable here, and only one of them justifies opening a tab.
+  assert.deepStrictEqual(unclaimedOwnSessions({ server: null, myWindowId: 'win-me', localIds: [] }), []);
+  assert.deepStrictEqual(unclaimedOwnSessions({ server: {}, myWindowId: 'win-me', localIds: [] }), []);
+});
+
+test('#680: sessions under OTHER windows are never adopted', async () => {
+  const { unclaimedOwnSessions } = await load();
+  // Those belong to the restore modal (if their window is lost) or to that window
+  // (if it isn't). Stealing them here would race a live sibling window.
+  const out = unclaimedOwnSessions({
+    server: server([serverWindow('win-other', [serverSession('theirs')])]),
+    myWindowId: 'win-me',
+    localIds: [],
+  });
+
+  assert.deepStrictEqual(out, []);
+});

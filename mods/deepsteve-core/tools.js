@@ -23,6 +23,21 @@ function runGit(args, cwd) {
   }
 }
 
+// What actually happened to the tab (#680). Spawning a session and opening a tab for it
+// are two different events, and these tools used to report only the first — so an agent
+// told the user "I opened a tab" on the strength of a PTY existing, which is how #680's
+// session ended up running invisibly while its caller reported success.
+//
+// deliverToWindow() returns 'window' | 'broadcast' | 'queued'. Only 'window' means the
+// tab went where it was asked to go; the other two get a sentence the agent can repeat.
+function tabDeliveryNote(tabDelivery) {
+  if (tabDelivery === 'window') return { tabDelivery };
+  if (tabDelivery === 'broadcast') {
+    return { tabDelivery, note: 'Your window was not connected; the tab was offered to the other open windows instead. Tell the user which window to look in rather than assuming it is theirs.' };
+  }
+  return { tabDelivery, note: 'No browser window was connected, so the tab is queued and will open when one connects. The session is running either way — do not tell the user a tab is open.' };
+}
+
 // "2 minutes" / "45 seconds" — the auto-close delay in words, so the agent has a
 // sentence to paraphrase to the user instead of an epoch timestamp (#627).
 function describeDelay(seconds) {
@@ -111,7 +126,7 @@ function init(context) {
     watchClaudeSessionDir, unwatchClaudeSessionDir, resolveForkParentSession, saveState,
     validateWorktree, ensureWorktree, sessionPaths, submitToShell,
     deliverPromptWhenReady, startIssueSession,
-    reloadClients, deliverToWindow, settings, log, isShuttingDown,
+    reloadClients, deliverToWindow, noteSpawnDelivery, settings, log, isShuttingDown,
     emitSessionOpen,
     stripEscapeSequences, readTerminalScreen, sessionInputState, maybeInheritRemoteControl, requestMetaControlsConsent, logRcWrite,
     armSessionAutoClose,
@@ -437,7 +452,7 @@ function init(context) {
           source: 'mcp',
         });
         if (result.error) return refuseCwdProblem(result.error);
-        return { content: [{ type: 'text', text: JSON.stringify({ id: result.id, name: result.name, cwd: result.cwd, worktree: result.worktree, autopilot: result.autopilot }) }] };
+        return { content: [{ type: 'text', text: JSON.stringify({ id: result.id, name: result.name, cwd: result.cwd, worktree: result.worktree, autopilot: result.autopilot, ...tabDeliveryNote(result.tabDelivery) }) }] };
       },
     },
     issue_complete: {
@@ -697,10 +712,12 @@ function init(context) {
             handleShellGone(id);
           });
           saveState();
-          deliverToWindow({ type: 'open-session', id, cwd: effectiveCwd, name: tabName, windowId }, windowId);
+          const shellDelivery = deliverToWindow({ type: 'open-session', id, cwd: effectiveCwd, name: tabName, windowId }, windowId);
+          noteSpawnDelivery(id, { tabDelivery: shellDelivery, windowId, source: 'open_terminal (shell)' });
           return { content: [{ type: 'text', text: JSON.stringify({
             id, name: tabName || id, cwd: effectiveCwd, worktree: null,
             command: hasCommand ? rawCommand : null,
+            ...tabDeliveryNote(shellDelivery),
             // #631: 0 of the first 102 terminal tabs an agent opened were ever closed by
             // an agent. Nothing asked them to — so ask here, at the point of use, the way
             // merge_worktree returns autoCloseMessage. A doc line three files away does
@@ -797,9 +814,10 @@ function init(context) {
         });
         saveState();
 
-        deliverToWindow({ type: 'open-session', id, cwd: spawnCwd, name: tabName, windowId }, windowId);
+        const agentDelivery = deliverToWindow({ type: 'open-session', id, cwd: spawnCwd, name: tabName, windowId }, windowId);
+        noteSpawnDelivery(id, { tabDelivery: agentDelivery, windowId, source: `open_terminal (${effectiveAgentType})` });
 
-        return { content: [{ type: 'text', text: JSON.stringify({ id, name: tabName || id, cwd: spawnCwd, worktree: validatedWorktree }) }] };
+        return { content: [{ type: 'text', text: JSON.stringify({ id, name: tabName || id, cwd: spawnCwd, worktree: validatedWorktree, ...tabDeliveryNote(agentDelivery) }) }] };
       },
     },
     run_in_terminal: {
