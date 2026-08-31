@@ -52,6 +52,18 @@ const MAX_DELAY_MS = 1_500;
 const GROWTH = 1.5;
 const JITTER_FRAC = 0.25;
 
+// A probe that never settles is strictly worse than a probe that fails. `inFlight` below is
+// shared by every reconnect loop in the window, so ONE hung fetch parks all of them on the
+// same dead promise for as long as it hangs — and kickProbes() cannot dig them out, because
+// it resolves the sleep and the next call hands back that very promise. fetch() has no
+// default timeout, so this abort is the only thing bounding it.
+//
+// Deliberately generous, because a stalled probe is sometimes the correct reading: /healthz
+// shares the WS server's event loop, and a boot that blocks it for seconds (state restore,
+// the scheduled-task worktree sweep) should make us WAIT rather than hammer. Aborting does
+// not hammer — it just lets the backoff schedule run again instead of waiting forever.
+const PROBE_TIMEOUT_MS = 5_000;
+
 // NO success cache here, deliberately. Caching a recent "yes" for even ~250ms reintroduces
 // the exact bug this module exists to prevent: when the daemon restarts, every socket in
 // the window drops at once, and a cached "yes" would wave them all straight past the gate
@@ -60,6 +72,21 @@ const JITTER_FRAC = 0.25;
 // callers (restoreSessions' parallel connects) already collapse onto one fetch via
 // inFlight, which is the only sharing that actually matters.
 let inFlight = null;
+
+// Test seam only — lets the wedge test exercise the abort without a 5s wall clock.
+let probeTimeoutMs = PROBE_TIMEOUT_MS;
+export function _setProbeTimeout(ms) { probeTimeoutMs = ms; }
+
+// Attribution for the next slow reload (#665 shipped the daemon half of this). The
+// [startup] marks can say "the browser took 59s to come back"; only the page can say
+// whether that was probes that never ran, a probe that ran and hung, or a navigation that
+// stalled after the gate had already opened. Monotonic for the life of the page, so
+// callers diff a before/after snapshot rather than coordinating a reset.
+let probeCount = 0;
+let slowestProbeMs = 0;
+
+/** Counters for a caller that wants to describe how a wait actually went. */
+export function probeStats() { return { probes: probeCount, slowestProbeMs }; }
 
 // Resolvers for every waitForServer() currently sleeping between probes (#665). A wake
 // means the world changed under us — the machine resumed, the network came back, the tab
@@ -100,13 +127,20 @@ export function jitter(ms, frac = JITTER_FRAC) {
 export function serverUp() {
   if (inFlight) return inFlight;
   // Assign to a local first: `finally` nulls the field before callers read it back.
+  const startedAt = Date.now();
   const p = (async () => {
     try {
-      const res = await fetch('/healthz', { cache: 'no-store' });
+      // The guard makes a hypothetical engine without AbortSignal.timeout fail OPEN (no
+      // timeout) rather than throw here — a throw is caught below and would read as "server
+      // down" on every probe, wedging the gate shut instead of merely slowly.
+      const signal = AbortSignal.timeout ? AbortSignal.timeout(probeTimeoutMs) : undefined;
+      const res = await fetch('/healthz', { cache: 'no-store', signal });
       return res.ok;
     } catch {
-      return false; // server down / unreachable
+      return false; // server down, unreachable, or the probe timed out
     } finally {
+      probeCount++;
+      slowestProbeMs = Math.max(slowestProbeMs, Date.now() - startedAt);
       inFlight = null;
     }
   })();
@@ -150,5 +184,5 @@ export async function waitForServer(shouldStop = () => false) {
 }
 
 // Test seam only — lets unit tests assert the schedule without hard-coding magic numbers.
-export const _config = { BASE_DELAY_MS, MAX_DELAY_MS, GROWTH, JITTER_FRAC };
-export function _reset() { inFlight = null; kickProbes(); }
+export const _config = { BASE_DELAY_MS, MAX_DELAY_MS, GROWTH, JITTER_FRAC, PROBE_TIMEOUT_MS };
+export function _reset() { inFlight = null; probeTimeoutMs = PROBE_TIMEOUT_MS; kickProbes(); }

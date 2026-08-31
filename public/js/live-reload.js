@@ -13,11 +13,15 @@
  * restart-decided via BroadcastChannel to dismiss modals in other windows.
  */
 
-import { nsChannel } from './storage-namespace.js';
+import { nsChannel, nsKey } from './storage-namespace.js';
 import { maybeHealAuth, forcePageReload, noteAuthOk } from './auth-heal.js';
 import { onWake } from './wake-watch.js';
-import { waitForServer } from './server-probe.js';
-import { attachClientLogSender } from './client-log.js';
+import { waitForServer, probeStats } from './server-probe.js';
+import { attachClientLogSender, clientLog } from './client-log.js';
+
+// Handoff for the reload-timing beacon below. sessionStorage because it has to survive
+// exactly one navigation — the one we are about to cause — and nothing longer.
+const RELOAD_TRACE_KEY = 'deepsteve-reload-trace';
 
 const State = {
   CONNECTED: 'connected',
@@ -111,14 +115,66 @@ export function initLiveReload({ onMessage, onShowRestartConfirm, onShowReloadOv
   // detect "server back up" and reload to acquire the cookie.
 
   async function pollAndReload() {
+    const closedAt = Date.now();
+    const before = probeStats();
     for (;;) {
       await waitForServer();
       console.log('[live-reload] server is back, reloading page...');
+      stashReloadTrace(closedAt, before);
       // Settles only if forcePageReload's watchdog fires (the meta-refresh didn't
       // navigate). On success the page is gone and this never resolves — so looping is
       // just the old code's re-arm, without an interval left running behind it.
       await new Promise(resolve => forcePageReload(resolve));
     }
+  }
+
+  // --- Reload timing attribution ---
+  //
+  // On 2026-08-31 a restart had the daemon listening 0.4s after node start and the first
+  // browser window back at +59.4s. server.js's [startup] marks bound that gap but cannot
+  // see inside it, and the page that could was replaced by the reload it was waiting for.
+  // So: the outgoing page writes down how its wait went, and the page it produces reports
+  // that over the client-log beacon, where it lands in the daemon log next to the marks.
+  //
+  // The three numbers split the gap at its two real seams — the gate (did we notice the
+  // server was back?) and the navigation (did the new page start once we did?) — which is
+  // the difference between a wedged probe, a throttled timer, and a stalled page load.
+
+  function stashReloadTrace(closedAt, before) {
+    const after = probeStats();
+    try {
+      sessionStorage.setItem(nsKey(RELOAD_TRACE_KEY), JSON.stringify({
+        gateMs: Date.now() - closedAt,
+        probes: after.probes - before.probes,
+        slowestProbeMs: after.slowestProbeMs,
+        // A hidden tab has its timers throttled to roughly 1/min, which is an innocent
+        // explanation for a ~60s gate. Recording it is what makes that distinguishable
+        // from a probe that hung with the tab in the foreground.
+        hidden: document.visibilityState === 'hidden',
+        handoffAt: Date.now(),
+      }));
+    } catch {}
+  }
+
+  function reportPreviousReload() {
+    let raw = null;
+    try {
+      raw = sessionStorage.getItem(nsKey(RELOAD_TRACE_KEY));
+      // Read once. A trace left behind would be re-reported on every later reload of this
+      // tab, and a stale number is worse than no number.
+      sessionStorage.removeItem(nsKey(RELOAD_TRACE_KEY));
+    } catch {}
+    if (!raw) return;
+    try {
+      const t = JSON.parse(raw);
+      // timeOrigin is the new document's own start, so this is strictly the navigation:
+      // meta-refresh → request → response. performance.now() is everything after it.
+      const navMs = Math.max(0, Math.round(performance.timeOrigin - t.handoffAt));
+      const bootMs = Math.round(performance.now());
+      clientLog('reload-timing',
+        `gate ${t.gateMs}ms (${t.probes} probe(s), slowest ${t.slowestProbeMs}ms` +
+        `${t.hidden ? ', tab hidden' : ''}) + nav ${navMs}ms + boot ${bootMs}ms`);
+    } catch {}
   }
 
   // --- Silent reconnect: wait for the server to come back, then reconnect WS ---
@@ -185,6 +241,9 @@ export function initLiveReload({ onMessage, onShowRestartConfirm, onShowReloadOv
     history.replaceState(null, '', clean);
   }
   stripCacheBuster();
+  // Before connect(): the beacon queues until the socket it rides is open anyway, and
+  // this way the trace is cleared even if the socket never comes up.
+  reportPreviousReload();
 
   connect();
 }

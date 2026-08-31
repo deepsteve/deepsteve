@@ -69,6 +69,35 @@ buried under a phantom second tab. Three things decide how long it waits:
   reconnect — the wait is pure dead time on the slowest path we have. A daemon crash inside
   that window costs at worst one extra tab.
 
+### The restart leg, and why the page has to report it
+
+`AUTO_OPEN_GRACE_MS` covers a crash respawn. A `./restart.sh` skips auto-open entirely, so on
+that path a browser reconnecting on its own is the *only* way the UI comes back. On 2026-08-31
+a restart had **HTTP listening at +0.4s and the first browser window at +59.4s** — a gap the
+marks could bound but not explain, because the only page that could explain it was replaced by
+the reload it had been waiting for. Two things close that:
+
+- **The probe is time-bounded.** `serverUp()` gives its `/healthz` fetch an
+  `AbortSignal.timeout` (`PROBE_TIMEOUT_MS`, 5s). `fetch` has no default timeout and `inFlight`
+  is shared by every reconnect loop in the window, so a single request that never settled used
+  to park all of them on the same dead promise — and `kickProbes()` could not dig them out,
+  because it resolves the sleep and the next call hands back that very promise. The timeout has
+  to stay *above* `MAX_DELAY_MS` (pinned by the same unit test): `/healthz` shares the WS
+  server's event loop, and a boot that blocks it for a moment should make the page wait, not
+  abort every probe and never pass the gate.
+- **The page reports its own wait.** `live-reload.js` stashes a trace in `sessionStorage` just
+  before it navigates; the page that navigation produces beacons it over the client-log socket,
+  where it lands in the daemon log next to the marks:
+
+  ```
+  [client win-a9vqzn5b] reload-timing: gate 1300ms (4 probe(s), slowest 2ms) + nav 421ms + boot 12ms
+  ```
+
+  The split is the diagnosis. A large **gate** reached in few probes is throttled timers — a
+  hidden tab ticks roughly once a minute, which is why `hidden` is recorded at all. A large gate
+  with a large **slowest** is a probe that hung. A large **nav** is the navigation itself, and
+  exonerates the loop entirely.
+
 ## Security
 
 DeepSteve is **localhost-first with token authentication** (#536). The server binds to `127.0.0.1` by default (overridable with `--bind`). Every surface — the web UI WebSocket, the MCP HTTP endpoint, and all REST/control endpoints — is guarded *before* application code runs by three checks that live in `security.js`:

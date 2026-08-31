@@ -2,7 +2,7 @@
  * Main application entry point
  */
 
-import { initClientLog } from './client-log.js';
+import { initClientLog, clientLog } from './client-log.js';
 // Before anything initializes: wrap fetch + install global error handlers so
 // failures are beaconed to the server log. (Imports are hoisted, so this runs
 // after module-scope code but before every init call and fetch below —
@@ -1806,6 +1806,10 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
       if (typeof msg !== 'object' || msg === null) throw null;
     } catch {
       // Not a JSON control message - pass to terminal (or buffer if not yet created)
+      // Stamp the first byte for the restore beacon (see reportRestoreTiming). Taken here,
+      // ahead of the branch, so buffered-before-the-terminal-exists still counts as arrival.
+      const paintKey = assignedId || existingId;
+      if (paintKey && !firstDataAt.has(paintKey)) firstDataAt.set(paintKey, performance.now());
       const session = [...sessions.values()].find(s => s.ws === ws);
       if (session) {
         session.term.write(e.data);
@@ -2857,7 +2861,41 @@ function userJumpTo(id) {
  * then selects the right tab once — avoiding the race where the last session
  * to connect wins.
  */
+// When the first byte reached each restored session's terminal, relative to page start.
+// "The tabs sat there connecting for half a minute" and "the daemon answered every one of
+// them in 48ms" are both true readings of the same restart; this is the number that says
+// which leg the wait was actually in.
+const firstDataAt = new Map();
+
+/**
+ * Beacon how the restore itself went, as `[client <windowId>] restore-timing: ...` in the
+ * daemon log — next to the [startup] marks and live-reload.js's reload-timing line, so one
+ * grep covers the whole path from node start to a painted terminal.
+ *
+ * The daemon can see neither end of this leg: not when the page got around to asking (it
+ * only sees the socket arrive), and not whether the scrollback it wrote ever reached a
+ * terminal. Sampled on a delay rather than at ready-time because a paint can land just
+ * after the connect promise settles — and a session still unpainted when the sample runs is
+ * itself the finding, which is why the count is reported as a fraction and not waited on.
+ */
+const RESTORE_SAMPLE_MS = 5000;
+
+function reportRestoreTiming(sessionList, askedAt) {
+  const terminals = sessionList.filter(e =>
+    e.type !== 'display-tab' && e.type !== 'mod-tab' && e.type !== 'project-mod');
+  if (terminals.length === 0) return;
+  const readyAt = performance.now();
+  setTimeout(() => {
+    const paints = terminals.map(e => firstDataAt.get(e.id)).filter(t => typeof t === 'number');
+    const last = paints.length ? `+${Math.round(Math.max(...paints))}ms` : 'never';
+    clientLog('restore-timing',
+      `${terminals.length} session(s) — asked +${Math.round(askedAt)}ms, ready +${Math.round(readyAt)}ms, ` +
+      `painted ${paints.length}/${terminals.length}, last ${last} (from page start)`);
+  }, RESTORE_SAMPLE_MS);
+}
+
 async function restoreSessions(sessionList, opts = {}) {
+  const askedAt = performance.now();
   const savedActiveId = ActiveTab.get();
   const allowDuplicate = opts.allowDuplicate !== undefined ? opts.allowDuplicate : true;
 
@@ -2923,6 +2961,7 @@ async function restoreSessions(sessionList, opts = {}) {
   });
 
   const results = await Promise.all(promises);
+  reportRestoreTiming(sessionList, askedAt);
 
   // Clean up rejected sessions
   results.forEach((resolvedId, i) => {

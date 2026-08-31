@@ -12,6 +12,10 @@
 //   2. The wake kick. waitForServer()'s backoff used to be a bare, uncancellable sleep, so
 //      a slept or backgrounded tab sat out the full cap before its next probe even though
 //      wake-watch had already told everyone else the world had changed.
+//   3. The probe is time-bounded. fetch() has no default timeout and `inFlight` is shared by
+//      every reconnect loop in the window, so one /healthz that never settles used to park
+//      the whole window on a dead promise — with kickProbes() unable to help, since it
+//      resolves the sleep and the next call returns that same promise.
 //
 // No browser: the only global the module chain touches is fetch, and wake-watch touches
 // document/window solely inside its init(), which we never call.
@@ -171,4 +175,68 @@ test('a non-ok response keeps the gate closed', async () => {
   stop = true;
   mod.kickProbes();
   assert.strictEqual(await done, false);
+});
+
+// -------------------------------------------------------------- the probe's own timeout
+
+test('a hung probe cannot wedge the gate', async () => {
+  const mod = await load();
+  mod._setProbeTimeout(60); // the real 5s, without the 5s
+  probeTimes = [];
+
+  // Node's AbortSignal.timeout() timer is unref'd, so while the stub below is hanging there
+  // is nothing ref'd left and the runner declares the event loop resolved out from under the
+  // test. Browsers have no such notion; this heartbeat only restores the browser's behaviour.
+  const keepAlive = setInterval(() => {}, 10);
+
+  // A fetch that settles only when its own abort signal fires — i.e. never on its own.
+  // This is the shape that was fatal: serverUp() pinned the dead promise in inFlight, and
+  // every later caller in the window (the reload loop, every session socket's reconnect)
+  // was handed it back instead of a fresh probe.
+  let hangs = 2;
+  fetchImpl = (url, opts) => {
+    if (hangs-- > 0) {
+      return new Promise((_, reject) => {
+        opts.signal.addEventListener('abort', () => reject(new Error('aborted')));
+      });
+    }
+    return Promise.resolve({ ok: true, status: 200 });
+  };
+
+  const t0 = Date.now();
+  assert.strictEqual(await mod.waitForServer(), true, 'the gate must survive a probe that never answers');
+  clearInterval(keepAlive);
+  assert.strictEqual(probeTimes.length, 3, 'two probes aborted, then the one that answered');
+  assert.ok(Date.now() - t0 < 2000, 'and it must recover on the timeout, not on the fetch');
+});
+
+test('every probe carries an abort signal, and it out-waits the backoff cap', async () => {
+  const mod = await load();
+  probeTimes = [];
+  let opts = null;
+  fetchImpl = async (url, o) => { opts = o; return { ok: true, status: 200 }; };
+
+  assert.strictEqual(await mod.waitForServer(), true);
+  assert.ok(opts && opts.signal, 'an untimed /healthz can hang for as long as the network lets it');
+  assert.ok(
+    mod._config.PROBE_TIMEOUT_MS > mod._config.MAX_DELAY_MS,
+    `PROBE_TIMEOUT_MS (${mod._config.PROBE_TIMEOUT_MS}ms) must out-wait MAX_DELAY_MS ` +
+    `(${mod._config.MAX_DELAY_MS}ms). /healthz shares the WS server's event loop, so a boot ` +
+    'that blocks it briefly should make us wait, not abort every probe and never pass the gate.',
+  );
+});
+
+test('probeStats() counts the probes the reload beacon reports', async () => {
+  const mod = await load();
+  probeTimes = [];
+  fetchImpl = async () => ({ ok: true, status: 200 });
+
+  const before = mod.probeStats();
+  assert.strictEqual(await mod.waitForServer(), true);
+  const after = mod.probeStats();
+
+  // live-reload.js's reload trace is a before/after diff of exactly this, so a counter that
+  // stopped moving would silently report "0 probes" for every slow reload it exists to explain.
+  assert.strictEqual(after.probes - before.probes, 1);
+  assert.ok(after.slowestProbeMs >= 0);
 });
