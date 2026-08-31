@@ -12,6 +12,7 @@
 
 import { nsKey } from './storage-namespace.js';
 import { tabIcon, TabManager } from './tab-manager.js';
+import { MOD_ROW_SELECTOR, groupMods, isModEnabled } from './mod-groups.js';
 
 /**
  * The sandbox every mod iframe gets, in one place so the panel path and the
@@ -206,7 +207,11 @@ function _checkRequirements(modId) {
 }
 
 /**
- * Show a brief dependency notice on a mod card that auto-fades after 4s.
+ * Show a brief dependency notice on a mod row that auto-fades after 4s.
+ *
+ * It attaches to the ROW, never to the row's detail body: the detail is collapsed by
+ * default, and a notice rendered inside it would silently mute every "Also enabled: …" and
+ * "Missing: …" message the dependency engine produces.
  * type: 'info' | 'error'
  */
 function _showDepNotice(card, message, type) {
@@ -222,14 +227,22 @@ function _showDepNotice(card, message, type) {
 }
 
 /**
- * Refresh all checkbox toggle states in the marketplace modal to match enabledMods.
- * Requires card.dataset.modId on each card.
+ * Refresh every toggle in the open Mods modal to match the real enabled state.
+ * Requires row.dataset.modId on each row.
+ *
+ * It reads that state through isModEnabled() rather than `enabledMods.has(id)` because the
+ * two kinds keep it in two different places, and asking the Set about a skill is a bug: a
+ * skill's id is `skill:merge` and enabledMods only ever holds mod ids, so every dependency
+ * cascade and every cross-tab `storage` event used to silently uncheck all nine skill
+ * toggles in an open modal. Grouping makes that worse, not better — the skills now sit
+ * together, so they would all blink off at once.
  */
 function _refreshCardToggles(overlay) {
-  for (const card of overlay.querySelectorAll('.mod-card[data-mod-id]')) {
-    const id = card.dataset.modId;
-    const cb = card.querySelector('.mod-card-toggle input[type="checkbox"]');
-    if (cb) cb.checked = enabledMods.has(id);
+  for (const row of overlay.querySelectorAll(MOD_ROW_SELECTOR)) {
+    const id = row.dataset.modId;
+    const cb = row.querySelector('.mod-card-toggle input[type="checkbox"]');
+    // A catalog-only row has no toggle and no entry in allMods; both are fine.
+    if (cb) cb.checked = isModEnabled(allMods.find(m => m.id === id) || { id }, enabledMods);
   }
 }
 
@@ -552,6 +565,10 @@ async function _showMarketplaceModal() {
   // Fetch installed mods and catalog in parallel
   let catalogMods = [];
   let automations = [];
+  // Whether the MCP tool index has been scanned yet (#644). Kept, not discarded, because an
+  // expanded row lists a mod's tools: without it an empty array during the boot window would
+  // read as "this mod has no tools" instead of "nothing has been scanned yet".
+  let mcpReady = true;
   try {
     const [modsRes, catalogRes, automationsRes] = await Promise.all([
       fetch('/api/mods').then(r => r.json()).catch(() => null),
@@ -561,6 +578,7 @@ async function _showMarketplaceModal() {
     if (modsRes) {
       allMods = modsRes.mods || [];
       deepsteveVersion = modsRes.deepsteveVersion || null;
+      mcpReady = modsRes.mcpReady !== false;
     }
     catalogMods = catalogRes.mods || [];
     automations = automationsRes.automations || [];
@@ -585,6 +603,11 @@ async function _showMarketplaceModal() {
       ...cat,
       source: 'official',
       catalogVersion: cat.version,
+      // A catalog row is a remote catalog.json entry, not a manifest we can read: it has no
+      // entry/display/app/tags, so running the server's ladder over it would file every
+      // downloadable mod under Background. Not-installed is the honest answer, and it is a
+      // real section — the Install button has to live somewhere.
+      kind: 'available',
     });
   }
 
@@ -594,24 +617,41 @@ async function _showMarketplaceModal() {
   const modal = document.createElement('div');
   modal.className = 'modal marketplace-modal';
 
-  // Header
+  // Header. Built element-by-element rather than as one innerHTML string: the string form
+  // makes the modal unrenderable under a fake DOM, because header.querySelector('input')
+  // comes back null and the very next line throws.
   const header = document.createElement('div');
   header.className = 'marketplace-header';
-  header.innerHTML = `<h2>Mods</h2><div class="marketplace-search"><input type="text" placeholder="Search mods..."></div>`;
+  const title = document.createElement('h2');
+  title.textContent = 'Mods & Skills';
+  const searchWrap = document.createElement('div');
+  searchWrap.className = 'marketplace-search';
+  const searchInput = document.createElement('input');
+  searchInput.type = 'text';
+  searchInput.placeholder = 'Search mods, skills and automations...';
+  searchWrap.appendChild(searchInput);
+  header.append(title, searchWrap);
 
-  // Filters
-  const filters = document.createElement('div');
-  filters.className = 'marketplace-filters';
-  const filterNames = ['All', 'Enabled', 'Skills', 'Panel', 'Fullscreen', 'Games'];
-  for (const name of filterNames) {
-    const pill = document.createElement('button');
-    pill.className = 'filter-pill' + (name === 'All' ? ' active' : '');
-    pill.textContent = name;
-    pill.dataset.filter = name.toLowerCase();
-    filters.appendChild(pill);
-  }
+  // Navigation. The old row of pills was an EXCLUSIVE filter that mixed three axes — what a
+  // thing is (Skills), how a mod draws (Panel/Fullscreen) and whether it is on (Enabled) —
+  // so telling the kinds apart meant hiding everything else. Kind is now the grouping, which
+  // leaves the chips free to be jump-to navigation and leaves state its own control.
+  const nav = document.createElement('div');
+  nav.className = 'marketplace-nav';
+  const jump = document.createElement('div');
+  jump.className = 'marketplace-jump';
+  const enabledOnlyLabel = document.createElement('label');
+  enabledOnlyLabel.className = 'marketplace-enabled-only';
+  const enabledOnlyBox = document.createElement('input');
+  enabledOnlyBox.type = 'checkbox';
+  const enabledOnlyText = document.createElement('span');
+  enabledOnlyText.textContent = 'Enabled only';
+  enabledOnlyLabel.append(enabledOnlyBox, enabledOnlyText);
+  nav.append(jump, enabledOnlyLabel);
 
-  // List
+  // List — the one scroll container. Sticky group headings resolve their `top: 0` against
+  // this element, and the jump chips measure group.offsetTop against it, which is why it
+  // carries `position: relative` in the CSS.
   const list = document.createElement('div');
   list.className = 'marketplace-list';
 
@@ -620,73 +660,136 @@ async function _showMarketplaceModal() {
   footer.className = 'modal-buttons';
   footer.innerHTML = '<button class="btn-secondary" data-close>Close</button>';
 
-  // Automations section
+  // Automations section. Created once and re-attached on every render, because
+  // `list.innerHTML = ''` detaches it — safe, since _renderAutomationsSection rebuilds all
+  // its children and re-attaches all its listeners on every call.
   const automationsSection = document.createElement('div');
   automationsSection.className = 'automations-section';
-  _renderAutomationsSection(automations, automationsSection);
 
-  modal.appendChild(header);
-  modal.appendChild(filters);
-  modal.appendChild(automationsSection);
-  modal.appendChild(list);
-  modal.appendChild(footer);
+  modal.append(header, nav, list, footer);
   overlay.appendChild(modal);
   document.body.appendChild(overlay);
 
   // State
-  let activeFilter = 'all';
+  let enabledOnly = false;
   let searchQuery = '';
   let searchTimeout = null;
+  // Which rows are open. Held across re-renders or typing one more character would collapse
+  // whatever you had just expanded.
+  const expandedIds = new Set();
 
-  function renderCards() {
-    const q = searchQuery.toLowerCase();
-    const filtered = unifiedMods.filter(mod => {
-      // Search filter
-      if (q) {
-        const name = (mod.name || mod.id || '').toLowerCase();
-        const desc = (mod.description || '').toLowerCase();
-        const tags = (mod.tags || []).join(' ').toLowerCase();
-        if (!name.includes(q) && !desc.includes(q) && !tags.includes(q)) return false;
-      }
-      // Category filter
-      if (activeFilter === 'enabled') return mod.type === 'skill' ? mod.enabled : enabledMods.has(mod.id);
-      if (activeFilter === 'skills') return mod.type === 'skill';
-      if (activeFilter === 'panel') return mod.type !== 'skill' && mod.display === 'panel';
-      if (activeFilter === 'fullscreen') return mod.type !== 'skill' && mod.display !== 'panel';
-      if (activeFilter === 'games') return mod.tags && mod.tags.includes('games');
-      return true;
-    });
+  /** One group: sticky heading with a count, then its rows. */
+  function appendGroup(kind, label, count, body) {
+    const group = document.createElement('div');
+    group.className = 'mod-group';
+    group.dataset.kind = kind;
+    const head = document.createElement('div');
+    head.className = 'mod-group-head';
+    const headLabel = document.createElement('span');
+    headLabel.className = 'mod-group-title';
+    headLabel.textContent = label;
+    head.appendChild(headLabel);
+    // A zero count is the automations empty state — the section is present because it
+    // carries the only "create one" affordance, and "Automations 0" would just be wrong.
+    _setCount(head, 'mod-group-count', count);
+    group.append(head, body);
+    list.appendChild(group);
+    return group;
+  }
 
-    if (filtered.length === 0) {
-      list.innerHTML = '<div class="marketplace-empty">No mods match your search</div>';
-      return;
+  /** Repaint the Automations heading count and its jump chip after an in-place re-render. */
+  function _syncAutomationCount(n) {
+    const group = list.querySelector('.mod-group[data-kind="automation"]');
+    if (!group) return;
+    if (automationsSection.style.display === 'none') { group.hidden = true; return; }
+    group.hidden = false;
+    _setCount(group.querySelector('.mod-group-head'), 'mod-group-count', n);
+    _setCount(jump.querySelector('.jump-chip[data-jump="automation"]'), 'jump-chip-count', n);
+  }
+
+  /** Add, update or drop a count span — zero means no span at all, everywhere. */
+  function _setCount(host, cls, n) {
+    if (!host) return;
+    let el = host.querySelector(`.${cls}`);
+    if (n > 0) {
+      if (!el) { el = document.createElement('span'); el.className = cls; host.appendChild(el); }
+      el.textContent = String(n);
+    } else if (el) {
+      el.remove();
+    }
+  }
+
+  /** A jump chip. Navigation, not a filter — it scrolls, it never re-renders. */
+  function appendJumpChip(label, count, group) {
+    const chip = document.createElement('button');
+    chip.className = 'jump-chip';
+    chip.dataset.jump = group.dataset.kind;
+    const chipLabel = document.createElement('span');
+    chipLabel.textContent = label;
+    chip.appendChild(chipLabel);
+    // Same rule as the heading, through the same helper.
+    _setCount(chip, 'jump-chip-count', count);
+    // scrollTop against the list, not scrollIntoView, which would also scroll the page
+    // behind the modal. With a sticky heading, offsetTop lands it right under the nav.
+    chip.addEventListener('click', () => { list.scrollTop = group.offsetTop; });
+    jump.appendChild(chip);
+  }
+
+  function render() {
+    list.innerHTML = '';
+    jump.innerHTML = '';
+
+    // Automations first. They are not mods — no manifest, no enabled state, their own
+    // endpoint — so they sit alongside rather than being bucketed by groupMods(), and
+    // `Enabled only` leaves them alone: an automation is not on or off, it is runnable.
+    // The renderer reports how many chips survived the search and hides itself outright on
+    // a miss, which is what lets the section drop its heading like any other group.
+    const autoCount = _renderAutomationsSection(automations, automationsSection, searchQuery);
+    if (automationsSection.style.display !== 'none') {
+      const group = appendGroup('automation', 'Automations', autoCount, automationsSection);
+      appendJumpChip('Automations', autoCount, group);
+    }
+    // Saving or deleting an automation re-renders the section in place, from a call site
+    // that knows nothing about this modal. Without this the chips change and the heading
+    // and jump chip keep the old number.
+    automationsSection.__afterRender = (n) => _syncAutomationCount(n);
+
+    const groups = groupMods(unifiedMods, { query: searchQuery, enabledOnly, enabledIds: enabledMods });
+    for (const g of groups) {
+      const body = document.createElement('div');
+      body.className = 'mod-group-body';
+      for (const mod of g.items) body.appendChild(_createModRow(mod, overlay, { expandedIds, mcpReady }));
+      const group = appendGroup(g.kind, g.label, g.items.length, body);
+      appendJumpChip(g.label, g.items.length, group);
     }
 
-    list.innerHTML = '';
-    for (const mod of filtered) {
-      list.appendChild(_createModCard(mod, overlay));
+    // Scoped to mods and skills on purpose — the automations section speaks for itself, so
+    // this stays true whether or not an automation matched.
+    if (groups.length === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'marketplace-empty';
+      // Three different reasons for an empty list, and only the last is a real problem —
+      // saying "untick Enabled only" when the box is not ticked would send you looking for
+      // a control that is already off.
+      if (searchQuery) empty.textContent = `No mods or skills match “${searchQuery}”`;
+      else if (enabledOnly) empty.textContent = 'Nothing enabled — untick “Enabled only” to see everything';
+      else empty.textContent = 'No mods or skills found';
+      list.appendChild(empty);
     }
   }
 
   // Search input
-  const searchInput = header.querySelector('input');
   searchInput.addEventListener('input', () => {
     clearTimeout(searchTimeout);
     searchTimeout = setTimeout(() => {
       searchQuery = searchInput.value;
-      renderCards();
-      _renderAutomationsSection(automations, automationsSection, searchQuery);
+      render();
     }, 150);
   });
 
-  // Filter pills
-  filters.querySelectorAll('.filter-pill').forEach(pill => {
-    pill.addEventListener('click', () => {
-      filters.querySelector('.filter-pill.active')?.classList.remove('active');
-      pill.classList.add('active');
-      activeFilter = pill.dataset.filter;
-      renderCards();
-    });
+  enabledOnlyBox.addEventListener('change', () => {
+    enabledOnly = enabledOnlyBox.checked;
+    render();
   });
 
   // Close
@@ -697,35 +800,35 @@ async function _showMarketplaceModal() {
   document.addEventListener('keydown', onEscMods);
   new MutationObserver((_, obs) => { if (!overlay.parentNode) { document.removeEventListener('keydown', onEscMods); obs.disconnect(); } }).observe(document.body, { childList: true });
 
-  // Render initial cards
-  renderCards();
+  render();
   searchInput.focus();
 }
 
 /**
- * Create a mod card element for the marketplace.
+ * Did the row's one-line description get cut off?
+ *
+ * The detail repeats the description only when it did — otherwise the expanded row would
+ * show the same sentence twice, which is exactly the redundancy the dense row exists to
+ * remove. A row that is not in the document yet (the re-expand-after-render path) measures
+ * zero, and zero means "assume clipped": including the text is the harmless answer.
  */
-function _createSkillCard(mod, marketplaceOverlay) {
-  const card = document.createElement('div');
-  card.className = 'mod-card';
-  card.dataset.modId = mod.id;
+function _descWasClipped(row) {
+  const desc = row.querySelector('.mod-row-desc');
+  if (!desc || !desc.clientWidth) return true;
+  return desc.scrollWidth > desc.clientWidth + 1;
+}
 
-  // Extract skill ID from "skill:github-issue"
-  const skillId = mod.id.replace('skill:', '');
+/** Skill id out of the `skill:github-issue` the wire uses. */
+function _skillId(mod) {
+  return mod.id.replace('skill:', '');
+}
 
-  // Header
-  const header = document.createElement('div');
-  header.className = 'mod-card-header';
-
-  const info = document.createElement('div');
-  info.className = 'mod-card-info';
-  info.innerHTML = `<span class="mod-card-name">${mod.slashCommand || mod.name}</span>` +
-    `<span class="mod-badge skill">Skill</span>` +
-    `<span class="mod-badge built-in">Built-in</span>`;
-
-  const actions = document.createElement('div');
-  actions.className = 'mod-card-actions';
-
+/**
+ * A skill's toggle. Unlike a mod's, this one is a server round-trip — enabling installs the
+ * .md into ~/.claude/commands and generates the Codex adaptation — so it reverts the
+ * checkbox if the POST fails rather than assuming success.
+ */
+function _skillToggle(mod, row) {
   const toggle = document.createElement('label');
   toggle.className = 'mod-card-toggle';
   const checkbox = document.createElement('input');
@@ -742,58 +845,73 @@ function _createSkillCard(mod, marketplaceOverlay) {
       const res = await fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id: skillId })
+        body: JSON.stringify({ id: _skillId(mod) })
       });
       if (!res.ok) {
         const data = await res.json();
         throw new Error(data.error || 'Failed');
       }
       mod.enabled = checkbox.checked;
+      // `mod` is unifiedMods' spread copy, but _refreshCardToggles reads the live allMods
+      // entry. The server broadcast will sync it a moment later; until then a dependency
+      // cascade on some other row would repaint this checkbox from the stale value.
+      const live = allMods.find(m => m.id === mod.id);
+      if (live) live.enabled = checkbox.checked;
     } catch (e) {
       checkbox.checked = !checkbox.checked; // revert
-      _showDepNotice(card, e.message, 'error');
+      _showDepNotice(row, e.message, 'error');
     }
   });
+
+  return toggle;
+}
+
+/** The expanded body of a skill row: full description, what it is, how to call it. */
+function _buildSkillDetail(mod, row) {
+  const detail = document.createElement('div');
+  detail.className = 'mod-row-detail';
+
+  if (mod.description && _descWasClipped(row)) {
+    const desc = document.createElement('div');
+    desc.className = 'mod-card-description';
+    desc.textContent = mod.description;
+    detail.appendChild(desc);
+  }
+
+  const meta = document.createElement('div');
+  meta.className = 'mod-row-meta';
+  const badge = document.createElement('span');
+  badge.className = 'mod-badge skill';
+  badge.textContent = 'Skill';
+  const builtIn = document.createElement('span');
+  builtIn.className = 'mod-badge built-in';
+  builtIn.textContent = 'Built-in';
+  meta.append(badge, builtIn);
+  detail.appendChild(meta);
+
+  if (mod.argumentHint) {
+    const hint = document.createElement('div');
+    hint.className = 'mod-row-usage';
+    hint.textContent = `Usage: ${mod.slashCommand} ${mod.argumentHint}`;
+    detail.appendChild(hint);
+  }
 
   const viewBtn = document.createElement('button');
   viewBtn.className = 'skill-view-btn';
   viewBtn.textContent = 'View';
   viewBtn.addEventListener('click', async () => {
     try {
-      const res = await fetch(`/api/skills/${encodeURIComponent(skillId)}/content`);
+      const res = await fetch(`/api/skills/${encodeURIComponent(_skillId(mod))}/content`);
       if (!res.ok) throw new Error('Failed to load skill content');
       const { content } = await res.json();
       _showSkillContentModal(mod.slashCommand || mod.name, content);
     } catch (e) {
-      _showDepNotice(card, e.message, 'error');
+      _showDepNotice(row, e.message, 'error');
     }
   });
+  detail.appendChild(viewBtn);
 
-  actions.appendChild(viewBtn);
-  actions.appendChild(toggle);
-  header.appendChild(info);
-  header.appendChild(actions);
-  card.appendChild(header);
-
-  // Description
-  if (mod.description) {
-    const desc = document.createElement('div');
-    desc.className = 'mod-card-description';
-    desc.textContent = mod.description;
-    card.appendChild(desc);
-  }
-
-  // Argument hint
-  if (mod.argumentHint) {
-    const hint = document.createElement('div');
-    hint.className = 'mod-card-description';
-    hint.style.color = 'var(--ds-text-secondary)';
-    hint.style.fontSize = '11px';
-    hint.textContent = `Usage: ${mod.slashCommand} ${mod.argumentHint}`;
-    card.appendChild(hint);
-  }
-
-  return card;
+  return detail;
 }
 
 function _showSkillContentModal(name, content) {
@@ -858,7 +976,24 @@ async function _showAutomationsModal() {
   });
 }
 
-function _renderAutomationsSection(automations, section, searchQuery = '') {
+/**
+ * Render the automations chips into `section`.
+ *
+ * Returns how many chips it drew, which is what lets the Mods modal treat automations as a
+ * peer section: an emptied section drops its heading like every other group instead of
+ * leaving an orphan heading over nothing. The three other callers — the standalone
+ * automations modal and the two in-place re-renders after a save or a delete — ignore the
+ * return value and are otherwise untouched.
+ *
+ * A caller that re-renders in place after a save or a delete (the context menu, the edit
+ * modal) has no idea what the user had typed, so the query is remembered ON the section and
+ * reused when one is not passed — otherwise saving an edit under an active search silently
+ * widens the section back to everything. `section.__afterRender` lets the Mods modal re-sync
+ * the heading and jump-chip counts those same re-renders would otherwise leave stale. The
+ * standalone modal sets neither and behaves exactly as before.
+ */
+function _renderAutomationsSection(automations, section, searchQuery = section.__query || '') {
+  section.__query = searchQuery;
   section.innerHTML = '';
   const label = document.createElement('div');
   label.className = 'automations-label';
@@ -873,7 +1008,8 @@ function _renderAutomationsSection(automations, section, searchQuery = '') {
   // Hide section entirely if search yields no matches and there's a query
   if (q && filtered.length === 0) {
     section.style.display = 'none';
-    return;
+    section.__afterRender?.(0);
+    return 0;
   }
   section.style.display = '';
 
@@ -891,7 +1027,10 @@ function _renderAutomationsSection(automations, section, searchQuery = '') {
     empty.appendChild(btn);
     empty.appendChild(txt);
     section.appendChild(empty);
-    return;
+    // 0 chips, but the section is still VISIBLE: this is the only affordance for creating
+    // a first automation, so the modal keeps the heading and simply omits the count.
+    section.__afterRender?.(0);
+    return 0;
   }
 
   const row = document.createElement('div');
@@ -912,6 +1051,8 @@ function _renderAutomationsSection(automations, section, searchQuery = '') {
   row.appendChild(addBtn);
 
   section.appendChild(row);
+  section.__afterRender?.(filtered.length);
+  return filtered.length;
 }
 
 function _showAutomationContextMenu(e, auto, automations, section) {
@@ -1165,33 +1306,173 @@ function _showAutomationEditModal(existing, automations, section) {
   nameInput.focus();
 }
 
-function _createModCard(mod, marketplaceOverlay) {
-  // Skills get a simplified card
-  if (mod.type === 'skill') return _createSkillCard(mod, marketplaceOverlay);
+/** A `.mod-badge` pill. Text, never markup — see the note on mod.name below. */
+function _badge(cls, text) {
+  const el = document.createElement('span');
+  el.className = `mod-badge ${cls}`;
+  el.textContent = text;
+  return el;
+}
 
-  const card = document.createElement('div');
-  card.className = 'mod-card' + (mod.compatible === false ? ' mod-card-incompatible' : '');
-  card.dataset.modId = mod.id;
+/**
+ * A mod's toggle, with the dependency engine behind it: enabling pulls in whatever the mod
+ * requires, disabling cascades to whatever requires the mod. Lifted unchanged from the card
+ * era — the only edit is that it hangs its notices on the row instead of the card.
+ */
+function _modToggle(mod, row, marketplaceOverlay) {
+  const toggle = document.createElement('label');
+  toggle.className = 'mod-card-toggle';
+  const checkbox = document.createElement('input');
+  checkbox.type = 'checkbox';
+  checkbox.checked = enabledMods.has(mod.id);
+  const reqCheck = _checkRequirements(mod.id);
+  checkbox.disabled = mod.compatible === false || reqCheck.missing.length > 0;
+  const slider = document.createElement('span');
+  slider.className = 'toggle-slider';
+  toggle.appendChild(checkbox);
+  toggle.appendChild(slider);
 
-  const isInstalled = allMods.some(m => m.id === mod.id);
-  const isEnabled = enabledMods.has(mod.id);
-  const isBuiltIn = mod.source === 'built-in';
-  const hasSettings = mod.settings && mod.settings.length > 0;
-  const badgeClass = isBuiltIn ? 'built-in' : 'official';
-  const badgeText = isBuiltIn ? 'Built-in' : 'Official';
+  checkbox.addEventListener('change', () => {
+    if (checkbox.checked) {
+      // ── Enable: check dependencies first ──
+      const req = _checkRequirements(mod.id);
+      if (req.error) {
+        checkbox.checked = false;
+        _showDepNotice(row, req.error, 'error');
+        return;
+      }
+      if (req.missing.length > 0) {
+        checkbox.checked = false;
+        _showDepNotice(row, `Missing: ${req.missing.join(', ')}`, 'error');
+        return;
+      }
+      // Auto-enable disabled dependencies
+      const alsoEnabled = [];
+      for (const depId of req.disabled) {
+        const depMod = allMods.find(m => m.id === depId);
+        if (!depMod) continue;
+        enabledMods.add(depId);
+        if (depMod.display === 'panel') {
+          _loadPanelMod(depMod);
+        } else if (depMod.display !== 'tab' && depMod.entry) {
+          _createToolbarButton(depMod);
+        }
+        alsoEnabled.push(depMod.name || depId);
+      }
+      // Enable the mod itself
+      enabledMods.add(mod.id);
+      if (mod.display === 'panel') {
+        _loadPanelMod(mod);
+        _switchToPanel(mod.id);
+      } else if (mod.display !== 'tab' && mod.entry) {
+        _createToolbarButton(mod);
+      }
+      if (alsoEnabled.length > 0) {
+        _showDepNotice(row, `Also enabled: ${alsoEnabled.join(', ')}`, 'info');
+        _refreshCardToggles(marketplaceOverlay);
+      }
+    } else {
+      // ── Disable: cascade-disable dependents first ──
+      const dependents = _getDependents(mod.id);
+      const alsoDisabled = [];
+      for (const depId of dependents) {
+        const depMod = allMods.find(m => m.id === depId);
+        enabledMods.delete(depId);
+        if (depMod?.display === 'panel') {
+          _unloadPanelMod(depId);
+        } else if (depMod?.display === 'tab') {
+          if (hooks?.closeModTabs) hooks.closeModTabs(depId);
+        } else {
+          _removeToolbarButton(depId);
+          if (activeView?.id === depId) _hideMod();
+        }
+        alsoDisabled.push(depMod?.name || depId);
+      }
+      // Disable the mod itself
+      enabledMods.delete(mod.id);
+      if (mod.display === 'panel') {
+        _unloadPanelMod(mod.id);
+      } else if (mod.display === 'tab') {
+        if (hooks?.closeModTabs) hooks.closeModTabs(mod.id);
+      } else {
+        _removeToolbarButton(mod.id);
+        if (activeView?.id === mod.id) {
+          _hideMod();
+        }
+      }
+      if (alsoDisabled.length > 0) {
+        _showDepNotice(row, `Also disabled: ${alsoDisabled.join(', ')}`, 'info');
+        _refreshCardToggles(marketplaceOverlay);
+      }
+    }
+    _saveEnabledMods();
+  });
 
-  // Header row
-  const header = document.createElement('div');
-  header.className = 'mod-card-header';
+  return toggle;
+}
 
-  const info = document.createElement('div');
-  info.className = 'mod-card-info';
-  info.innerHTML = `<span class="mod-card-name">${mod.name || mod.id}</span><span class="mod-badge ${badgeClass}">${badgeText}</span>` +
-    (mod.experimental ? `<span class="mod-badge experimental">Experimental</span>` : '') +
-    `<span class="mod-card-version">v${mod.version || '?'}</span>`;
+/**
+ * One row in the Mods modal (#673) — the shared shell for a mod and for a skill.
+ *
+ * The row is ~32px: name, the badges that change a decision, a one-line description, and the
+ * controls. Everything else — the full description, the version, dependencies, the MCP tools
+ * it registers, a skill's usage line, a catalog mod's Install button — lives in a detail body
+ * that is built on first expand and never before. That is the whole browsability argument:
+ * the old card put all of it on every one of 32 entries, so four fitted on screen.
+ *
+ * `data-mod-id` lives on the ROW, not the line, so the detail can sit below the line while
+ * the row stays the single addressable unit for _refreshCardToggles, the cross-tab `storage`
+ * listener and handleSkillsChanged — all three reach a row through MOD_ROW_SELECTOR.
+ */
+function _createModRow(mod, marketplaceOverlay, { expandedIds, mcpReady = true } = {}) {
+  const isSkill = mod.type === 'skill';
+  const isInstalled = !isSkill && allMods.some(m => m.id === mod.id);
+  const hasSettings = !isSkill && mod.settings && mod.settings.length > 0;
+
+  const row = document.createElement('div');
+  row.className = 'mod-row' + (mod.compatible === false ? ' mod-row-incompatible' : '');
+  row.dataset.modId = mod.id;
+
+  const line = document.createElement('div');
+  line.className = 'mod-row-line';
+  line.tabIndex = 0;
+  line.setAttribute('role', 'button');
+  line.setAttribute('aria-expanded', 'false');
+
+  // Without a caret nothing says a row opens — and a catalog row has no toggle and no gear,
+  // so it would otherwise be completely inert with its Install button unreachable.
+  const caret = document.createElement('span');
+  caret.className = 'mod-row-caret';
+  caret.textContent = '›';
+
+  const name = document.createElement('span');
+  name.className = 'mod-row-name';
+  // textContent, not innerHTML. `mod.name` comes from a mod.json inside a tarball fetched by
+  // POST /api/mods/install — a manifest we do not write, rendered in a same-origin page.
+  name.textContent = isSkill ? (mod.slashCommand || mod.name) : (mod.name || mod.id);
+
+  // Only badges you can act on while scanning. `Built-in`/`Official`/`Skill` and the version
+  // moved into the detail: the group heading already says what kind of thing this is, and a
+  // version number on all 32 rows is noise.
+  const badges = document.createElement('span');
+  badges.className = 'mod-row-badges';
+  if (mod.experimental) badges.appendChild(_badge('experimental', 'Experimental'));
+  if (mod.updateAvailable) badges.appendChild(_badge('official', 'Update'));
+  if (mod.kind === 'available') badges.appendChild(_badge('built-in', 'Not installed'));
+  if (mod.compatible === false) {
+    // The reason is also spelled out in the detail; on a 32px row the signal has to be here,
+    // and it is a word rather than a colour because some themes collapse the hues.
+    const warn = _badge('incompatible', 'Incompatible');
+    warn.title = `Requires deepsteve v${mod.minDeepsteveVersion}+`;
+    badges.appendChild(warn);
+  }
+
+  const desc = document.createElement('span');
+  desc.className = 'mod-row-desc';
+  desc.textContent = mod.description || '';
 
   const actions = document.createElement('div');
-  actions.className = 'mod-card-actions';
+  actions.className = 'mod-row-actions';
 
   if (hasSettings && isInstalled) {
     const gearBtn = document.createElement('button');
@@ -1205,108 +1486,103 @@ function _createModCard(mod, marketplaceOverlay) {
     actions.appendChild(gearBtn);
   }
 
-  if (isInstalled) {
-    const toggle = document.createElement('label');
-    toggle.className = 'mod-card-toggle';
-    const checkbox = document.createElement('input');
-    checkbox.type = 'checkbox';
-    checkbox.checked = isEnabled;
-    const reqCheck = _checkRequirements(mod.id);
-    checkbox.disabled = mod.compatible === false || reqCheck.missing.length > 0;
-    const slider = document.createElement('span');
-    slider.className = 'toggle-slider';
-    toggle.appendChild(checkbox);
-    toggle.appendChild(slider);
+  // A catalog-only mod has nothing to turn on yet, so it gets no toggle — which also keeps
+  // _checkRequirements from ever being asked about a mod that is not in allMods.
+  if (isSkill) actions.appendChild(_skillToggle(mod, row));
+  else if (isInstalled) actions.appendChild(_modToggle(mod, row, marketplaceOverlay));
 
-    checkbox.addEventListener('change', () => {
-      if (checkbox.checked) {
-        // ── Enable: check dependencies first ──
-        const req = _checkRequirements(mod.id);
-        if (req.error) {
-          checkbox.checked = false;
-          _showDepNotice(card, req.error, 'error');
-          return;
-        }
-        if (req.missing.length > 0) {
-          checkbox.checked = false;
-          _showDepNotice(card, `Missing: ${req.missing.join(', ')}`, 'error');
-          return;
-        }
-        // Auto-enable disabled dependencies
-        const alsoEnabled = [];
-        for (const depId of req.disabled) {
-          const depMod = allMods.find(m => m.id === depId);
-          if (!depMod) continue;
-          enabledMods.add(depId);
-          if (depMod.display === 'panel') {
-            _loadPanelMod(depMod);
-          } else if (depMod.display !== 'tab' && depMod.entry) {
-            _createToolbarButton(depMod);
-          }
-          alsoEnabled.push(depMod.name || depId);
-        }
-        // Enable the mod itself
-        enabledMods.add(mod.id);
-        if (mod.display === 'panel') {
-          _loadPanelMod(mod);
-          _switchToPanel(mod.id);
-        } else if (mod.display !== 'tab' && mod.entry) {
-          _createToolbarButton(mod);
-        }
-        if (alsoEnabled.length > 0) {
-          _showDepNotice(card, `Also enabled: ${alsoEnabled.join(', ')}`, 'info');
-          _refreshCardToggles(marketplaceOverlay);
-        }
-      } else {
-        // ── Disable: cascade-disable dependents first ──
-        const dependents = _getDependents(mod.id);
-        const alsoDisabled = [];
-        for (const depId of dependents) {
-          const depMod = allMods.find(m => m.id === depId);
-          enabledMods.delete(depId);
-          if (depMod?.display === 'panel') {
-            _unloadPanelMod(depId);
-          } else if (depMod?.display === 'tab') {
-            if (hooks?.closeModTabs) hooks.closeModTabs(depId);
-          } else {
-            _removeToolbarButton(depId);
-            if (activeView?.id === depId) _hideMod();
-          }
-          alsoDisabled.push(depMod?.name || depId);
-        }
-        // Disable the mod itself
-        enabledMods.delete(mod.id);
-        if (mod.display === 'panel') {
-          _unloadPanelMod(mod.id);
-        } else if (mod.display === 'tab') {
-          if (hooks?.closeModTabs) hooks.closeModTabs(mod.id);
-        } else {
-          _removeToolbarButton(mod.id);
-          if (activeView?.id === mod.id) {
-            _hideMod();
-          }
-        }
-        if (alsoDisabled.length > 0) {
-          _showDepNotice(card, `Also disabled: ${alsoDisabled.join(', ')}`, 'info');
-          _refreshCardToggles(marketplaceOverlay);
-        }
-      }
-      _saveEnabledMods();
-    });
+  const toggleDetail = () => {
+    const open = !row.classList.contains('expanded');
+    if (open && !row._detail) {
+      row._detail = isSkill
+        ? _buildSkillDetail(mod, row)
+        : _buildModDetail(mod, row, marketplaceOverlay, mcpReady);
+      row.appendChild(row._detail);
+    }
+    row.classList.toggle('expanded', open);
+    line.setAttribute('aria-expanded', open ? 'true' : 'false');
+    if (expandedIds) open ? expandedIds.add(mod.id) : expandedIds.delete(mod.id);
+  };
 
-    actions.appendChild(toggle);
-  }
+  line.addEventListener('click', (e) => {
+    // The gear, the toggle and the View button keep their own jobs. The gear already stops
+    // propagation; this is what covers the <label>-wrapped checkbox, which fires `click` on
+    // the label itself.
+    if (e.target?.closest?.('.mod-row-actions')) return;
+    toggleDetail();
+  });
+  line.addEventListener('keydown', (e) => {
+    // Only when the LINE itself has focus. The gear and the checkbox are inside it, so
+    // without this their keydown bubbles here and preventDefault() cancels the very
+    // activation the key was pressed for: Enter on the gear would expand the row instead of
+    // opening the settings modal, and Space on the toggle would expand instead of toggling.
+    if (e.target !== line) return;
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleDetail(); }
+  });
 
-  header.appendChild(info);
-  header.appendChild(actions);
-  card.appendChild(header);
+  line.append(caret, name, badges, desc, actions);
+  row.appendChild(line);
 
-  // Description
-  if (mod.description) {
+  // Re-open a row the last render had open. Without this, typing one more character into
+  // the search box collapses whatever you had just expanded.
+  if (expandedIds?.has(mod.id)) toggleDetail();
+
+  return row;
+}
+
+/** The expanded body of a mod row. */
+function _buildModDetail(mod, row, marketplaceOverlay, mcpReady) {
+  const detail = document.createElement('div');
+  detail.className = 'mod-row-detail';
+  const isInstalled = allMods.some(m => m.id === mod.id);
+  const isBuiltIn = mod.source === 'built-in';
+
+  // Description — only when the row's one line could not hold it.
+  if (mod.description && _descWasClipped(row)) {
     const desc = document.createElement('div');
     desc.className = 'mod-card-description';
     desc.textContent = mod.description;
-    card.appendChild(desc);
+    detail.appendChild(desc);
+  }
+
+  // What it is and which version — off the line, where it does not cost 32 rows of noise.
+  const meta = document.createElement('div');
+  meta.className = 'mod-row-meta';
+  meta.appendChild(_badge(isBuiltIn ? 'built-in' : 'official', isBuiltIn ? 'Built-in' : 'Official'));
+  const version = document.createElement('span');
+  version.className = 'mod-card-version';
+  version.textContent = `v${mod.version || '?'}`;
+  meta.appendChild(version);
+  detail.appendChild(meta);
+
+  // The MCP tools this mod registers. GET /api/mods has derived them since #644 and nothing
+  // rendered them until now. `mcpReady` is the difference between "registers no tools" and
+  // "nothing has been scanned yet" — without it the row would lie for the first seconds
+  // after a restart.
+  const tools = document.createElement('div');
+  tools.className = 'mod-tools';
+  if (mod.tools?.length) {
+    const lead = document.createElement('span');
+    lead.className = 'mod-tools-note';
+    lead.textContent = 'Tools:';
+    tools.appendChild(lead);
+    for (const tool of mod.tools) {
+      const tag = document.createElement('span');
+      tag.className = 'mod-tool-tag';
+      tag.textContent = tool.name;
+      if (tool.description) tag.title = tool.description;
+      tools.appendChild(tag);
+    }
+    detail.appendChild(tools);
+  } else if (isInstalled && !mcpReady) {
+    // Nothing to list AND nothing scanned: say which one it is rather than implying the mod
+    // registers nothing. A mod that genuinely has no tools.js simply shows no line at all,
+    // and neither does one that is not installed — there is nothing here to have scanned.
+    const note = document.createElement('span');
+    note.className = 'mod-tools-note';
+    note.textContent = 'Tools not scanned yet';
+    tools.appendChild(note);
+    detail.appendChild(tools);
   }
 
   // Dependency tags
@@ -1332,7 +1608,7 @@ function _createModCard(mod, marketplaceOverlay) {
       }
       depsRow.appendChild(tag);
     }
-    card.appendChild(depsRow);
+    detail.appendChild(depsRow);
   }
 
   // Incompatible warning
@@ -1341,7 +1617,7 @@ function _createModCard(mod, marketplaceOverlay) {
     warn.className = 'mod-card-description';
     warn.style.color = 'var(--ds-accent-red)';
     warn.textContent = `Requires deepsteve v${mod.minDeepsteveVersion}+`;
-    card.appendChild(warn);
+    detail.appendChild(warn);
   }
 
   // Footer for non-built-in mods (install/uninstall/update)
@@ -1448,11 +1724,11 @@ function _createModCard(mod, marketplaceOverlay) {
     }
 
     if (footer.children.length > 0) {
-      card.appendChild(footer);
+      detail.appendChild(footer);
     }
   }
 
-  return card;
+  return detail;
 }
 
 /**
@@ -3002,15 +3278,11 @@ function handleSkillsChanged(enabledSkills) {
       mod.enabled = enabledSet.has(skillId);
     }
   }
-  // Refresh skill toggles in open marketplace modal if present
+  // Refresh toggles in the open Mods modal if present. It used to walk only
+  // `[data-mod-id^="skill:"]` rows; _refreshCardToggles now reads both state sources
+  // correctly, so there is no reason for a second, skills-only walk of the same rows.
   const overlay = document.querySelector('.modal-overlay:has(.marketplace-modal)');
-  if (overlay) {
-    for (const card of overlay.querySelectorAll('.mod-card[data-mod-id^="skill:"]')) {
-      const cb = card.querySelector('.mod-card-toggle input[type="checkbox"]');
-      const mod = allMods.find(m => m.id === card.dataset.modId);
-      if (cb && mod) cb.checked = !!mod.enabled;
-    }
-  }
+  if (overlay) _refreshCardToggles(overlay);
 }
 
 function handleModChanged(modId) {

@@ -11,18 +11,49 @@ A rule of thumb: if the thing belongs to *deepsteve*, it's a DeepSteve Mod. If i
 
 ### Enable/Disable
 
-Open the **Mods** dropdown in the toolbar to see all available mods. Toggle the checkbox to enable or disable each mod. Mods with `enabledByDefault: true` are auto-enabled on first visit.
+Open the **Mods** modal — the toolbar button, `⌘K → Mods`, or `#mods` — to see everything
+available. Toggle the switch on a row to enable or disable it. Mods with
+`enabledByDefault: true` are auto-enabled on first visit.
+
+### Browsing (#673)
+
+The modal is one scrolling list, grouped into sections with sticky headings:
+**Automations**, then **Apps · Panels · Fullscreen · Games · Tabs · Background**, then
+**Skills**, and **Available** when a catalog mod is not installed. Which section a mod lands
+in is [derived from its manifest](#how-a-mod-is-grouped-673), not chosen by hand.
+
+Three controls, and they are three different things on purpose:
+
+- The **chips** above the list are *jump-to navigation* with a count each — they scroll to a
+  section, they do not hide the others. They replaced a row of exclusive filter pills that
+  mixed what a thing *is* with how a mod *draws* and whether it is *on*, so telling the kinds
+  apart meant hiding everything else.
+- **Enabled only** is the one state control, and it is separate because state is its own axis.
+  It is not remembered between openings — a filter should never silently hide a mod you are
+  looking for. Automations are unaffected: an automation is not on or off, it is runnable.
+- **Search** spans every section at once, over names, descriptions, tags, slash commands and
+  the names of the MCP tools a mod registers. Sections that come out empty drop their heading
+  rather than standing over nothing.
+
+A row is one line: name, the badges that change a decision (`Experimental`, `Update`,
+`Incompatible`, `Not installed`), a one-line description, and its controls. **Click the row**
+to expand it in place for the full description, the version and source, its dependencies, the
+MCP tools it registers, and — depending on what it is — a skill's `Usage:` line and **View**
+button, or a catalog mod's Install / Uninstall / Update buttons. The detail is built on first
+expand and never before; putting all of it on all 32 entries is what made four fit on screen.
 
 ### Per-Mod Settings
 
-Mods can define settings (boolean or number). Click the gear icon next to a mod in the dropdown to configure it. Settings are saved immediately to localStorage.
+Mods can define settings (boolean or number). Click the gear icon on the mod's row to
+configure it. Settings are saved immediately to localStorage.
 
 ### Display Modes
 
-Mods have three display modes:
+Mods have four display modes:
 
 - **Fullscreen** — activated via a toolbar button, replaces the terminal view. Clicking a session in the mod switches back to the terminal with a back button to return. Only one fullscreen mod iframe exists at a time; it's created on show and destroyed on hide. An [App](#apps-661) has neither of those buttons — the Apps rail section and the command palette both launch it and return you to it.
 - **Panel** — docked to the right side of the terminal area, with tabs if multiple panel mods are enabled. A drag handle allows resizing. Panel iframes stay alive even when hidden, so MCP tools keep working.
+- **Tab** (`display: "tab"`) — opens as its own tab in the tab strip, offered in the new-tab menu under `tabOption.label`. `baby-browser` and `steveonardo` are the two. It gets no toolbar button.
 - **Tools-only** — no UI, no iframe, no toolbar button. Only provides MCP tools to sessions. Omit both `display` and `entry` from `mod.json`.
 
 ### Apps (#661)
@@ -87,6 +118,45 @@ The stack lives in `sessionStorage`, so it survives a reload of the same window 
 leak into a second one. That is a deliberate split from which app is *open*, which is a
 browser-wide `localStorage` preference.
 
+### How a mod is grouped (#673)
+
+The Mods modal has one section per **kind**. Kind is derived once, server-side, by
+`modKind()` in `mod-kind.js`, and served as a `kind` field on every `GET /api/mods` entry;
+the client groups by that field and never re-derives it (a guard test enforces both halves).
+The ladder, in order — the order is the substance:
+
+| Test | Kind | Section |
+|---|---|---|
+| `type: "skill"` | `skill` | Skills — stamped by the server, never derived, so a skill can't file itself under Apps |
+| no `entry` | `background` | Background — nothing to render, so nowhere else to put it |
+| `app: true` | `app` | Apps |
+| `tags` includes `"games"` | `game` | Games |
+| `display: "panel"` | `panel` | Panels |
+| `display: "tab"` | `tab` | Tabs |
+| otherwise | `fullscreen` | Fullscreen |
+
+`!entry` is checked before `app`/`display` only because it *can* be: `validate-mods.js`
+already rejects `app: true`, `display: "panel"` and `display: "tab"` without an `entry`. It
+is what gives the right answer for the one real ambiguity — a tools-only mod tagged `games`
+is not a game you can play. `app` outranks `display` because it is a stronger statement about
+what the thing is (#661), and `games` outranks `display` because Games is a kind, so a
+panel-shaped game belongs there rather than swelling Panels.
+
+`kind` sits **after** the manifest spread in the `/api/mods` push, for the same later-key-wins
+reason `tools` does: a third-party mod arrives as a tarball whose `mod.json` we do not write,
+and it must not be able to declare which section it appears in. A manifest that sets `kind` is
+ignored.
+
+**`kind` is a presentation grouping, not a behaviour predicate.** `getApps()`,
+`getNewTabItems()` and every `display === 'panel'` branch keep reading the manifest fields
+directly: they ask *how does this mount*, which is a different question from *which heading
+does it live under*, and the two answers deliberately disagree for apps and for games.
+
+A catalog mod that is not installed gets `kind: 'available'` from the **client**, not the
+server: a `/api/mods/catalog` row is a remote `catalog.json` entry with no
+`entry`/`display`/`tags` to read, so running the ladder over it would file every downloadable
+mod under Background.
+
 ### Built-in Mods
 
 | Mod | Display | Default | Description |
@@ -104,7 +174,7 @@ browser-wide `localStorage` preference.
 
 This is a highlights list, not an inventory — it names neither every mod nor the tools each one
 registers. Those are declared in the mod's `tools.js` and reported by `GET /api/mods`, which derives
-the list at runtime (#644); the Mods dropdown is the live version of this table.
+the list at runtime (#644); the Mods modal is the live version of this table.
 
 ## Creating a Mod
 
@@ -124,19 +194,23 @@ mods/<name>/
 | `name` | string | yes | Display name |
 | `version` | string | yes | Semver version (e.g. `"0.3.0"`) |
 | `minDeepsteveVersion` | string | no | Minimum compatible deepsteve version. Incompatible mods are shown but disabled. |
-| `description` | string | no | Short description shown in the Mods dropdown |
+| `description` | string | no | Short description shown on the mod's row in the Mods modal |
 | `enabledByDefault` | boolean | no | If `true`, mod is enabled on first visit without user action |
 | `entry` | string | no | HTML entry point, defaults to `"index.html"`. Omit for tools-only mods. |
-| `display` | string | no | `"panel"` for docked panel. Omit for fullscreen (default) or tools-only mods. |
+| `display` | string | no | `"panel"` for a docked panel, `"tab"` for a mod that opens as its own tab (`baby-browser`, `steveonardo`). Omit for fullscreen (default) or tools-only mods. |
 | `app` | boolean | no | `true` marks a fullscreen mod as an **App** — a place you work from. Adds an Apps rail row and a palette entry, unlocks the excursion API and quiet mode, and **suppresses both tab-strip buttons** (the toolbar launcher and the `←` back button). Requires `entry`. See [Apps](#apps-661). |
 | `panel.position` | string | no | `"right"` (only value currently supported) |
 | `panel.defaultWidth` | number | no | Initial panel width in pixels |
 | `panel.minWidth` | number | no | Minimum panel width when resizing |
 | `toolbar.label` | string | no | Display label: the toolbar button (fullscreen mods), the panel tab (panel mods), or the Apps rail row and palette entry (apps, which have no tab-strip button) |
+| `tags` | array | no | `["games"]` files the mod under the **Games** section of the Mods modal (see [How a mod is grouped](#how-a-mod-is-grouped-673)). Tags are searched too. |
+| `experimental` | boolean | no | Shows an **Experimental** badge on the mod's row |
 | `settings` | array | no | Per-mod settings (see below) |
 
 There is no `tools` field. A mod's MCP tools are declared only in `tools.js` — see
-[MCP Tools](#mcp-tools-toolsjs). `validate-mods.js` fails a manifest that declares one.
+[MCP Tools](#mcp-tools-toolsjs). `validate-mods.js` fails a manifest that declares one. There
+is no `kind` field either: it is derived (see
+[How a mod is grouped](#how-a-mod-is-grouped-673)) and a manifest that sets one is ignored.
 
 **Settings entries:**
 
@@ -446,7 +520,7 @@ The server watches mod directories with `fs.watch()`. When files change, it broa
 
 ### Version Compatibility
 
-If a mod declares `minDeepsteveVersion`, the server compares it against its own version using semver. Incompatible mods appear in the Mods dropdown but are disabled (checkbox grayed out) with a "Requires deepsteve vX.Y.Z+" warning.
+If a mod declares `minDeepsteveVersion`, the server compares it against its own version using semver. Incompatible mods appear in the Mods modal but are disabled (checkbox grayed out) with a "Requires deepsteve vX.Y.Z+" warning.
 
 ## State & Storage
 
