@@ -16,6 +16,12 @@
   --ds-context-radius: 18px;
   --ds-context-gap: 8px;
   --ds-context-shadow: inset 0 0 0 2px #777, inset 0 0 8px rgba(0,0,0,0.3);
+
+  /* The same inner highlight for the terminal monitor. It has to go through this var
+     rather than a box-shadow on #app-main: an inset shadow paints under the opaque
+     #tabs and xterm backgrounds, so the rule that used to sit in the #app-main block
+     below never drew a pixel and only the rail looked framed (#690). */
+  --ds-main-inset: inset 0 0 0 2px #777, inset 0 0 8px rgba(0,0,0,0.3);
 }
 
 /* Give tabs room to clear the rounded top corners. Horizontal only: in vertical mode #tabs is a
@@ -68,14 +74,12 @@ body {
 
 /* The CRT monitor bezel lives on #app-main (the terminal side) only, so the
    context panel to its left is a distinct, standalone monitor rather than being
-   wrapped together with the terminal. */
+   wrapped together with the terminal. The matching inner highlight is NOT declared
+   here — it is --ds-main-inset above; see the note there. */
 #app-main {
   border-radius: 18px;
   overflow: clip;
   border: 4px solid #999;
-  box-shadow:
-    inset 0 0 0 2px #777,
-    inset 0 0 8px rgba(0,0,0,0.3);
 }
 
 /* #535 — in the retro terminal theme the closed-context title is NOT shown next to

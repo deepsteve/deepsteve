@@ -75,6 +75,33 @@ standalone bezelled panel without touching a rule. `retro-monitor` and `hacker-m
 | `--ds-context-radius` | `0px` | Corner rounding; row inset/rounding is derived from it |
 | `--ds-context-gap` | `0px` | Gap between the panel and the terminal |
 | `--ds-context-shadow` | `none` | Panel shadow (inset works, for a CRT bezel) |
+| `--ds-main-inset` | `none` | The **terminal** pane's matching inner shadow — see *Panel Edges* below |
+
+### Panel Edges
+
+The app is one row: `[ #context-rail | #context-resizer | #app-main ]` — the projects panel
+and the terminal side by side. Two rules keep them reading as halves of one thing.
+
+**Frame both panes or neither.** The commonest theme bug is framing one side of that row and
+leaving the other on the base default, which makes the projects panel look boxed next to a
+borderless terminal (#690). Whenever you put a `border` on `#app-main` or `#app-container`,
+decide what the rail's edge is in the same breath.
+
+**An inset `box-shadow` on `#app-main` will not render.** An inset shadow paints *below*
+descendant backgrounds, and every child of `#app-main` — `#tabs`, the xterm canvas,
+`#panel-container` — is opaque, so it covers the shadow completely. The declaration looks
+correct and draws nothing. Use `--ds-main-inset` instead: the base stylesheet paints it as an
+`#app-main::after` overlay above the content. `test/unit/theme-pane-parity.test.js` enforces
+both rules.
+
+Two structural families exist in the shipped themes, and either is fine:
+
+- **Two standalone panels** — the frame goes on `#app-main`, and the rail gets its own
+  matching frame via `--ds-context-*` plus a `--ds-context-gap` so it reads as a separate
+  unit (`retro-monitor`, `retro-monitor-dim`, `hacker-monitor`).
+- **One window around both** — the frame goes on `#app-container`, and the two panes inside
+  it get a matching lighter treatment (`ascii-art`'s single-line boxes, `win-95`'s sunken
+  bevels).
 
 ### Context Panel Motion (#691)
 
@@ -99,7 +126,8 @@ The xterm.js terminal background automatically syncs to `--ds-bg-primary`. When 
 
 ## Example: retro-monitor.css
 
-The built-in retro theme demonstrates how to go beyond simple color changes. It adds a CRT monitor bezel effect using body padding and inset shadows:
+The built-in retro theme demonstrates how to go beyond simple color changes: a CRT monitor
+bezel built from body padding, and a second standalone bezel for the projects rail beside it.
 
 ```css
 :root {
@@ -110,38 +138,59 @@ The built-in retro theme demonstrates how to go beyond simple color changes. It 
   --ds-text-primary: #d0d0d0;
   --ds-text-secondary: #999;
   --ds-text-bright: #fff;
+
+  /* The rail as its own CRT to the LEFT of the terminal: same bezel, same rounding,
+     same inner highlight, plus a gap so it reads as a separate unit. */
+  --ds-context-bg: #2a2a2a;
+  --ds-context-border: 4px solid #999;
+  --ds-context-radius: 18px;
+  --ds-context-gap: 8px;
+  --ds-context-shadow: inset 0 0 0 2px #777, inset 0 0 8px rgba(0,0,0,0.3);
+
+  /* The terminal's half of that highlight. It CANNOT be a box-shadow on #app-main —
+     see "Panel Edges" above. */
+  --ds-main-inset: inset 0 0 0 2px #777, inset 0 0 8px rgba(0,0,0,0.3);
 }
 
-/* Give tabs room to clear the rounded top corners */
-#tabs {
+/* Give tabs room to clear the rounded top corners. Horizontal only: in vertical mode
+   #tabs is a sidebar, where this strip padding just eats 32px of its width. */
+#app-container:not(.vertical-layout) #tabs {
   padding-top: 10px !important;
   padding-left: 16px !important;
   padding-right: 16px !important;
 }
 
-/* 90s CRT monitor bezel.
- *
- * Base CSS sets body to height:100vh, overflow:hidden, box-sizing:border-box.
- * Adding padding shrinks the content area. #app-container base has height:100vh
- * so we override to flex:1 to fill remaining space. All shadows must be inset
- * since body overflow:hidden clips anything outside. */
+/* Base CSS sets body to height:100vh, overflow:hidden, box-sizing:border-box.
+   Adding padding shrinks the content area. */
 body {
-  background: #c8c0b8 !important;
+  background: #1a1a1a !important;
   display: flex !important;
   flex-direction: column !important;
   padding: 12px 25px 25px 25px;
 }
 
+/* The outer row [ #context-rail | #app-main ] carries NO bezel, so the rail stays a
+   separate panel. The gap between the two lives here, not as a rail margin, so the
+   rail's top and bottom stay flush with the terminal. #app-container base has
+   height:100vh, so override it to flex:1 to fill the space left by the padding. */
 #app-container {
   flex: 1 !important;
   min-height: 0 !important;
   height: auto !important;
+  gap: var(--ds-context-gap);
+}
+
+#context-rail { margin: 0 !important; }
+
+/* #context-resizer is a flex sibling BETWEEN the two panels, so the gap above applies
+   on both of its sides — a ~22px dead zone instead of one 8px seam. Cancel both. */
+#context-resizer { margin: 0 calc(var(--ds-context-gap) * -1) !important; }
+
+/* The bezel lives on #app-main (the terminal side) only. */
+#app-main {
   border-radius: 18px;
   overflow: clip;
   border: 4px solid #999;
-  box-shadow:
-    inset 0 0 0 2px #777,
-    inset 0 0 8px rgba(0,0,0,0.3);
 }
 ```
 
@@ -150,11 +199,12 @@ Key techniques:
 - **Body padding** creates the bezel — because `box-sizing: border-box` is set, padding shrinks the content area rather than expanding the page.
 - **`#app-container { flex: 1 }`** overrides the default `height: 100vh` so the container fills the remaining space after padding.
 - **Inset shadows only** — `body` has `overflow: hidden`, so any outset shadows or elements outside the viewport are clipped.
-- **`border-radius` on `#app-container`** rounds the screen corners. Use `overflow: clip` to ensure child content is clipped to the radius.
+- **`border-radius` on `#app-main`** rounds the screen corners. Use `overflow: clip` to ensure child content is clipped to the radius — that same clip trims the `--ds-main-inset` overlay to the inner rounded rect.
+- **The frame goes on `#app-main`, never `#app-container`,** when the rail is meant to read as its own panel: `#app-container` is the row that holds *both*.
 
 ## Tips
 
 - Use `!important` for non-variable overrides (e.g. `body { background: red !important; }`) since the base stylesheet uses specific selectors.
 - All shadows must be `inset` — `body` has `overflow: hidden`, so outset shadows are invisible.
 - When adding `body` padding, override `#app-container` height from `100vh` to `flex: 1` so the content still fills the viewport.
-- A minimal theme only needs a `:root` block with color overrides — no structural CSS required.
+- A minimal theme only needs a `:root` block with color overrides — no structural CSS required. The moment it adds a `border` to `#app-main` or `#app-container`, though, it owes the rail a `--ds-context-border` too; see **Panel Edges**.

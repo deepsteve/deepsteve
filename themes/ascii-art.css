@@ -24,6 +24,16 @@
   --ds-selected-bg: #1a3a1a;
   --ds-overlay: rgba(0, 0, 0, 0.85);
   --ds-shadow: rgba(0, 0, 0, 0.6);
+
+  /* Context panel (left rail) — a single-line box, matching the one given to #app-main
+     below, so the two panes inside the double-line app frame are drawn in the same
+     stroke. Stated explicitly rather than inherited: the base default is a 1px border
+     the terminal side had no counterpart for, which framed only the rail (#690). */
+  --ds-context-width: 200px;
+  --ds-context-border: 1px solid #555;
+  --ds-context-radius: 0px;
+  --ds-context-gap: 0px;
+  --ds-context-shadow: none;
 }
 
 /* ── Global: monospace font, no rounded corners ──────────────────────── */
@@ -57,6 +67,13 @@ body {
   border: 2px solid #888 !important;
   box-shadow: none !important;
   overflow: clip;
+}
+
+/* The terminal side gets the same single-line box as the rail (--ds-context-border
+   above), so the two panes inside the double-line frame match. Without it the rail
+   was the only boxed pane (#690). No inner ring on either, so no --ds-main-inset. */
+#app-main {
+  border: 1px solid #555;
 }
 
 /* Corner characters on app container */

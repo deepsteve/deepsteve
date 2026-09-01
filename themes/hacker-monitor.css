@@ -58,6 +58,15 @@
   --ds-context-shadow:
     inset 0 0 0 1px rgba(63, 191, 149, 0.10),
     inset 0 0 22px rgba(0, 0, 0, 0.55);
+
+  /* The terminal panel's half of that hairline. It has to go through this var rather
+     than a box-shadow on #app-main: an inset shadow paints under the opaque #tabs and
+     xterm backgrounds, so the rule that used to sit in the #app-main block below never
+     drew a pixel — the hairline this theme is built around only ever reached the rail
+     (#690). The vignette is deeper here than on the rail because the pane is wider. */
+  --ds-main-inset:
+    inset 0 0 0 1px rgba(63, 191, 149, 0.10),
+    inset 0 0 26px rgba(0, 0, 0, 0.6);
 }
 
 /* Monospace chrome. The UI reads as part of the terminal rather than as a window
@@ -113,14 +122,12 @@ body {
 /* The monitor frame lives on #app-main (the terminal side) only, so the context
    panel to its left is a distinct, standalone unit. Thin gunmetal edge plus one
    teal hairline of inner light — the whole "futuristic" read is that hairline, so
-   it stays at 10% and is never widened. */
+   it stays at 10% and is never widened. The hairline itself is NOT declared here —
+   it is --ds-main-inset above; see the note there. */
 #app-main {
   border-radius: 14px;
   overflow: clip;
   border: 1px solid #24332f;
-  box-shadow:
-    inset 0 0 0 1px rgba(63, 191, 149, 0.10),
-    inset 0 0 26px rgba(0, 0, 0, 0.6);
 }
 
 /* The active tab gets the same signal color as a 2px cap, so the eye finds it by

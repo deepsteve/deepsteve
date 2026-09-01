@@ -27,6 +27,21 @@
   --ds-reconnect-overlay: rgba(192, 192, 192, 0.85);
   --ds-reconnect-glow: rgba(0, 0, 128, 0.3);
   --ds-terminal-foreground: #000000;
+
+  /* Both client areas inside the window — the projects rail and the terminal pane —
+     get the classic sunken bevel, the Win95 treatment for content sunk into a window
+     rather than raised out of it. Stated explicitly rather than inherited: the base
+     default is a flat 1px border the terminal side had no counterpart for, so the
+     rail was the only pane with an edge (#690). --ds-main-inset carries the same
+     highlight to #app-main, where a plain box-shadow would paint under the opaque
+     tab bar and xterm canvas and never show. */
+  --ds-context-width: 200px;
+  --ds-context-bg: #c0c0c0;
+  --ds-context-border: 2px solid;
+  --ds-context-radius: 0px;
+  --ds-context-gap: 0px;
+  --ds-context-shadow: inset 1px 1px 0 #404040, inset -1px -1px 0 #fff;
+  --ds-main-inset: inset 1px 1px 0 #404040, inset -1px -1px 0 #fff;
 }
 
 /* ── Win95 font (UI chrome only — xterm keeps its monospace font) ── */
@@ -52,6 +67,19 @@ body {
   border-color: #dfdfdf #404040 #404040 #dfdfdf;
   box-shadow: inset 1px 1px 0 #fff, inset -1px -1px 0 #808080;
   border-radius: 0 !important;
+}
+
+/* ── The two client areas — sunken, the inverse of the window's raised frame ──
+ * The rail takes its width from --ds-context-border; the terminal pane needs the
+ * matching declaration here. A `border` shorthand carries only one colour, so the
+ * bevel quartet is applied to both panes together. */
+#app-main {
+  border: 2px solid;
+}
+
+#context-rail,
+#app-main {
+  border-color: #808080 #dfdfdf #dfdfdf #808080 !important;
 }
 
 /* ── Tab bar — Win95 taskbar style ── */

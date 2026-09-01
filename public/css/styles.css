@@ -55,6 +55,14 @@
   --ds-context-anim-close: 0.15s;
   --ds-context-ease-open: ease-out;
   --ds-context-ease-close: ease-in;
+
+  /* Terminal pane inner highlight — the counterpart to --ds-context-shadow above,
+     for the OTHER half of the row. It cannot be written as a box-shadow on #app-main:
+     an inset shadow paints below descendant backgrounds, and every child of #app-main
+     (#tabs, the xterm canvas, #panel-container) is opaque, so it never renders. Two
+     themes carried such a rule for months and only ever framed the rail with it (#690).
+     This var drives the #app-main::after overlay below, which paints above the content. */
+  --ds-main-inset: none;
 }
 
 * { margin: 0; box-sizing: border-box; }
@@ -66,7 +74,25 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
    vertical tab-layout switch (it is the column that #tabs + #content-row live in),
    so the context rail can sit full-height to the left of everything. */
 #app-container { display: flex; flex-direction: row; height: 100vh; }
-#app-main { display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; }
+#app-main { display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; position: relative; }
+
+/* The terminal pane's inner edge light. Painted as an overlay rather than as a
+   box-shadow on #app-main itself, for the reason spelled out at --ds-main-inset.
+   `inset: 0` resolves against the padding box, so it starts just inside the theme's
+   border — exactly where the rail's own inset shadow starts. Themes that frame
+   #app-main also set `overflow: clip`, which trims this to the inner rounded rect. */
+#app-main::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  /* Above the opaque structural children (#tabs, #content-row, #mod-container, all
+     z-index auto..2) and below every purposeful overlay: .overview-label 5,
+     .terminal-search-bar 10, .sess-hist 20, .reload-overlay 100, popups 200. */
+  z-index: 3;
+  pointer-events: none;
+  border-radius: inherit;
+  box-shadow: var(--ds-main-inset);
+}
 
 /* Tabs - horizontal layout (default) */
 #tabs { display: flex; gap: 2px; padding: 4px 8px; background: var(--ds-bg-secondary); align-items: center; flex-shrink: 0; }
