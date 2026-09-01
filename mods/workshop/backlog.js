@@ -112,9 +112,17 @@ function parseLabels(stdout) {
   return out;
 }
 
-/** `github-issue-671` → 671. Anything else → null. */
+/**
+ * `github-issue-671` → 671. Anything else → null.
+ *
+ * The optional `-<k>` tail is #689's "Start fresh": a second worktree for an issue that
+ * already had one, named `github-issue-671-2`. It is still that issue's work — dropping
+ * it here would push those sessions out of this immutable-worktree tier and down to
+ * matching on a tab name the user can rename. A NON-numeric suffix stays null, because
+ * that is somebody's own branch and not a name this daemon minted.
+ */
 function worktreeIssueNumber(worktree) {
-  const m = /^github-issue-(\d+)$/.exec(String(worktree || ''));
+  const m = /^github-issue-(\d+)(?:-\d+)?$/.exec(String(worktree || ''));
   return m ? Number(m[1]) : null;
 }
 

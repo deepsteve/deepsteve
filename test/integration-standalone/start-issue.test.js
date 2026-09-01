@@ -761,6 +761,79 @@ test('with the setting off, an omitted autopilot is still off', async () => {
   assert.equal(readState()[res.json.id].autopilot, false, 'the preference defaults to off');
 });
 
+// --- resuming an existing worktree (#689) -----------------------------------
+//
+// The only test that proves the ORDERING end to end. Detection has to happen before
+// ensureWorktree() — and, on the picker's path, before the agent creates the directory
+// itself — or the answer is always "brand new" and the whole feature is a no-op that
+// still passes every unit test.
+test('an issue whose worktree already has commits starts as a resume', async () => {
+  const NUM = 6890;
+  const wt = path.join(projDir, '.claude', 'worktrees', `github-issue-${NUM}`);
+  fs.mkdirSync(path.dirname(wt), { recursive: true });
+  execFileSync('git', ['worktree', 'add', '-q', wt], { cwd: projDir, stdio: 'ignore' });
+  fs.writeFileSync(path.join(wt, 'prior.txt'), 'work from an earlier session\n');
+  execFileSync('git', ['add', '.'], { cwd: wt, stdio: 'ignore' });
+  execFileSync('git', ['-c', 'user.email=t@example.com', '-c', 'user.name=T',
+    'commit', '-qm', 'prior work'], { cwd: wt, stdio: 'ignore' });
+  // Left uncommitted on purpose: a branch can be 0 ahead and still hold a day of work,
+  // so the dirty count is half of what makes this a resume rather than a leftover.
+  fs.writeFileSync(path.join(wt, 'wip.txt'), 'unfinished\n');
+
+  const res = await startIssueHttp({
+    number: NUM, title: 'parked across sessions', body: `RESUME-MARKER-${NUM}`,
+    cwd: projDir, windowId: 'win-1',
+  });
+  assert.equal(res.status, 200, `expected 200, got ${res.status}: ${JSON.stringify(res.json)}`);
+  opened.push(res.json.id);
+
+  // The HTTP path has no human to ask, so it resumes and reports the facts back.
+  assert.ok(res.json, 'the response body exists');
+
+  // The prompt the agent actually receives says so, with the branch read off disk.
+  const client = new SessionClient();
+  await client.connect({ id: res.json.id, cwd: projDir });
+  await waitFor(() => client.screen().includes(`RESUME-MARKER-${NUM}`), 'the issue prompt to reach the PTY', 30000, 250);
+  const screen = client.screen();
+  client.close();
+  assert.ok(screen.includes('RESUMING'), `the prompt must say it is a resume:\n${screen.slice(-600)}`);
+  assert.ok(screen.includes(`github-issue-${NUM}`), 'the prompt names the branch it read');
+  assert.ok(/1 commit ahead/.test(screen), `the prompt names the commit count:\n${screen.slice(-600)}`);
+  assert.ok(/1 uncommitted file/.test(screen), `the prompt names the dirty count:\n${screen.slice(-600)}`);
+
+  // ...and the snapshot survives to the end of the session, which is what stops an
+  // Autopilot run from merging those commits as its own work.
+  const rec = await waitFor(() => readState()[res.json.id] || null, 'the session to reach state.json');
+  assert.ok(rec.resumedWorktree, 'the resumed snapshot must be persisted (#689)');
+  assert.equal(rec.resumedWorktree.commitsBefore, 1);
+  assert.equal(rec.resumedWorktree.dirtyBefore, 1);
+  assert.ok(rec.resumedWorktree.headBefore, 'the branch tip is what names the boundary');
+
+  assert.match(await issueLogFor(res.json.id), /resume=1c\/1d@/, 'the start line records the resume (#689)');
+});
+
+test('an issue with no worktree says nothing about resuming', async () => {
+  // The overwhelmingly common path, and the one the feature must leave untouched.
+  const res = await startIssueHttp({
+    number: 6891, title: 'clean start', body: 'CLEAN-MARKER-6891',
+    cwd: projDir, windowId: 'win-1',
+  });
+  assert.equal(res.status, 200, `expected 200, got ${res.status}: ${JSON.stringify(res.json)}`);
+  opened.push(res.json.id);
+
+  const client = new SessionClient();
+  await client.connect({ id: res.json.id, cwd: projDir });
+  await waitFor(() => client.screen().includes('CLEAN-MARKER-6891'), 'the issue prompt to reach the PTY', 30000, 250);
+  const screen = client.screen();
+  client.close();
+  assert.ok(!screen.includes('RESUMING'), 'a fresh start must not claim to be a resume');
+  assert.ok(!/already exists/.test(screen), 'nor mention a worktree that is not there');
+
+  const rec = await waitFor(() => readState()[res.json.id] || null, 'the session to reach state.json');
+  assert.equal(rec.resumedWorktree, null, 'no worktree, no snapshot');
+  assert.doesNotMatch(await issueLogFor(res.json.id), /resume=/);
+});
+
 // LAST in the file: the restart leaves this suite's MCP client and reload window
 // dead, so nothing after it could use them.
 test('autopilot survives a daemon restart', async () => {

@@ -16,6 +16,7 @@ const { formatLogTimestamp, createLogRotator, defaultLogPaths } = require('./log
 const { findGitRoot } = require('./git-root');
 const { modKind } = require('./mod-kind');
 const { usableWorktree } = require('./worktree-support');
+const { worktreePath, worktreeExists, worktreeStatus, worktreeStatuses, freshWorktreeName } = require('./worktree-status');
 const { stateDir, agentHomeDir, expandTilde, spawnCwdProblem, assertSpawnCwd, tmuxSocketPath, defaultTmuxSocketPath } = require('./paths');
 const { resolveBinary, runBinary, resolveUrlOpener, resolveLoginShell } = require('./bin-path');
 const { createPendingOpens } = require('./pending-opens');
@@ -28,7 +29,7 @@ const { terminalEnv } = require('./terminal-env');
 const { readComposerDraft, isPromptStaged, isPromptOnScreen, promptDraftVerdict } = require('./composer-state');
 const { wrapRunCommand } = require('./terminal-run');
 const { isTerminalReport } = require('./terminal-input');
-const { renderIssuePrompt, issueWorktreeName, issueTabName, WORKFLOW_STAGES } = require('./issue-prompt');
+const { renderIssuePrompt, issueWorktreeName, issueTabName, resumePromptText, WORKFLOW_STAGES } = require('./issue-prompt');
 const { readRecentUserMessages, compareDelivered } = require('./prompt-delivery-check');
 const { enrichTabs, summarizeRun } = require('./timelapse-snapshot');
 // History view (#672): bytes → lines, then lines → renderable entries. Namespaced
@@ -1900,8 +1901,11 @@ function validateWorktree(value) {
 }
 
 function getWorktreePath(cwd, name) {
-  // Use the same structure as Claude Code
-  return path.join(cwd, '.claude', 'worktrees', name);
+  // Use the same structure as Claude Code. Delegated to worktree-status.js (#689) so
+  // the convention has ONE definition: that module answers "what is already in this
+  // worktree", which is worthless if its idea of where a worktree lives can drift
+  // from the code that creates one.
+  return worktreePath(cwd, name);
 }
 
 // Resolve a session's actual working directory and its owning repo checkout.
@@ -1927,23 +1931,26 @@ function sessionPaths(entry) {
 }
 
 function ensureWorktree(cwd, name) {
-  const worktreePath = getWorktreePath(cwd, name);
-  if (fs.existsSync(worktreePath)) {
-    symlinkWorktreeClaudeSettings(cwd, worktreePath);
-    return worktreePath;
+  // The local is `wtPath`, not `worktreePath`: since #689 that name belongs to the
+  // worktree-status.js helper getWorktreePath delegates to, and shadowing it here
+  // would make the line below read as a call to itself.
+  const wtPath = getWorktreePath(cwd, name);
+  if (fs.existsSync(wtPath)) {
+    symlinkWorktreeClaudeSettings(cwd, wtPath);
+    return wtPath;
   }
   try {
     log(`Creating git worktree: ${name} in ${cwd}`);
     // argv, no shell (#621): a worktree path containing a quote or a $ used to be
     // re-interpreted by zsh on its way through the command string.
-    runBinary('git', ['worktree', 'add', worktreePath], { cwd, encoding: 'utf8', timeout: 30000 });
-    symlinkWorktreeClaudeSettings(cwd, worktreePath);
-    return worktreePath;
+    runBinary('git', ['worktree', 'add', wtPath], { cwd, encoding: 'utf8', timeout: 30000 });
+    symlinkWorktreeClaudeSettings(cwd, wtPath);
+    return wtPath;
   } catch (e) {
-    log(`Failed to create worktree ${worktreePath}: ${e.message}`);
+    log(`Failed to create worktree ${wtPath}: ${e.message}`);
     // If it fails, maybe the branch already exists or it's not a git repo.
     // We attempt to return the path anyway if it was created, or fallback.
-    const result = fs.existsSync(worktreePath) ? worktreePath : cwd;
+    const result = fs.existsSync(wtPath) ? wtPath : cwd;
     if (result !== cwd) symlinkWorktreeClaudeSettings(cwd, result);
     return result;
   }
@@ -3723,8 +3730,11 @@ let stateFrozen = false;  // Set during shutdown to prevent onExit handlers from
 // for the same reason `autopilot` is: they are read at completion time, and a
 // ./restart.sh landing between a human pressing Approve and the agent calling
 // issue_complete would otherwise silently send it back to "share a result first".
+// `resumedWorktree` (#689) is here on exactly that argument: it records which commits
+// were already on the branch when this session started, it cannot be recomputed later
+// (by then they look like everyone else's), and issue_complete reads it at the end.
 function serializeShellEntry(entry) {
-  return { cwd: entry.cwd, claudeSessionId: entry.claudeSessionId, agentType: entry.agentType || 'claude', codexHomeId: entry.codexHomeId || null, configDir: entry.configDir || null, engineType: entry.engineType || 'node-pty', worktree: entry.worktree || null, name: entry.name || null, planMode: !!entry.planMode, model: entry.model || null, effort: entry.effort || null, allowedTools: Array.isArray(entry.allowedTools) && entry.allowedTools.length ? entry.allowedTools : null, forkParent: entry.forkParent || null, lastActivity: entry.lastActivity || null, createdAt: entry.createdAt || null, windowId: entry.windowId || null, scheduled: !!entry.scheduled, autopilot: !!entry.autopilot, resultItemId: entry.resultItemId || null, resultApprovedAt: entry.resultApprovedAt || null };
+  return { cwd: entry.cwd, claudeSessionId: entry.claudeSessionId, agentType: entry.agentType || 'claude', codexHomeId: entry.codexHomeId || null, configDir: entry.configDir || null, engineType: entry.engineType || 'node-pty', worktree: entry.worktree || null, name: entry.name || null, planMode: !!entry.planMode, model: entry.model || null, effort: entry.effort || null, allowedTools: Array.isArray(entry.allowedTools) && entry.allowedTools.length ? entry.allowedTools : null, forkParent: entry.forkParent || null, lastActivity: entry.lastActivity || null, createdAt: entry.createdAt || null, windowId: entry.windowId || null, scheduled: !!entry.scheduled, autopilot: !!entry.autopilot, resumedWorktree: entry.resumedWorktree || null, resultItemId: entry.resultItemId || null, resultApprovedAt: entry.resultApprovedAt || null };
 }
 
 // #561: a session record is never hard-deleted by any runtime path. Every close
@@ -6496,8 +6506,43 @@ app.delete('/api/recent-sessions/:key', (req, res) => {
 const issueCache = new Map(); // key: `${cwd}:${limit}` → { data, ts }
 const ISSUE_CACHE_TTL = 10000; // 10 seconds
 
+/**
+ * Attach `worktree` to the issue rows a response is about to carry (#689).
+ *
+ * "This issue already has work parked in it" is on disk and nothing surfaced it, so
+ * the picker gave no hint before you clicked. Three properties this has to keep:
+ *
+ * - **Bounded.** A response carries at most `perPage` rows, so this is at most five
+ *   statSyncs plus — only if one of them hit — a single `for-each-ref`. A repo with no
+ *   issue worktrees adds no subprocess at all.
+ * - **Never fatal.** The issue list has to work when git doesn't; every field is
+ *   simply absent on any error, and the whole thing is wrapped.
+ * - **Not cached.** It decorates the response, never `issueCache`'s rows: those are
+ *   the raw `gh` payload shared by every window, and writing derived state into them
+ *   would serve a stale badge for the rest of the TTL.
+ *
+ * `dirty` is deliberately NOT here — it is a `git status` per row, five subprocesses
+ * for a list. It belongs to /api/issue-worktree, which answers about one issue.
+ */
+function withWorktreeInfo(cwd, issues) {
+  try {
+    const names = issues.map(i => issueWorktreeName(i.number));
+    const statuses = worktreeStatuses({ repoRoot: cwd, names });
+    if (!statuses.size) return issues;
+    return issues.map(i => {
+      const s = statuses.get(issueWorktreeName(i.number));
+      return s ? { ...i, worktree: s } : i;
+    });
+  } catch {
+    return issues;
+  }
+}
+
 app.get('/api/issues', (req, res) => {
   let cwd = req.query.cwd || process.env.HOME;
+  // Deliberately NOT findGitRoot()'d: startIssueSession and ensureWorktree use the cwd
+  // they are given, so the badge has to describe the directory the start path will
+  // really look in. (The picker always sends a resolved git root anyway.)
   cwd = expandTilde(cwd);
   const page = Math.max(1, parseInt(req.query.page) || 1);
   const perPage = 5;
@@ -6506,7 +6551,7 @@ app.get('/api/issues', (req, res) => {
   const cached = issueCache.get(cacheKey);
   if (cached && Date.now() - cached.ts < ISSUE_CACHE_TTL) {
     const pageIssues = cached.data.slice((page - 1) * perPage);
-    return res.json({ issues: pageIssues, hasMore: pageIssues.length === perPage });
+    return res.json({ issues: withWorktreeInfo(cwd, pageIssues), hasMore: pageIssues.length === perPage });
   }
   const gh = resolveBinary('gh');
   if (!gh) return res.status(500).json({ error: 'gh not found on PATH' });
@@ -6518,11 +6563,47 @@ app.get('/api/issues', (req, res) => {
         const all = JSON.parse(stdout);
         issueCache.set(cacheKey, { data: all, ts: Date.now() });
         const pageIssues = all.slice((page - 1) * perPage);
-        res.json({ issues: pageIssues, hasMore: pageIssues.length === perPage });
+        res.json({ issues: withWorktreeInfo(cwd, pageIssues), hasMore: pageIssues.length === perPage });
       } catch (e) {
         res.status(500).json({ error: e.message });
       }
     });
+});
+
+/**
+ * The authoritative answer for ONE issue, at the moment the user clicks (#689).
+ *
+ * Everything the picker's list badge cannot afford or cannot know:
+ *
+ * - `dirty`, the uncommitted-file count. This is the discriminator that matters — a
+ *   branch can be 0 commits ahead and still hold a day of unstaged work, and without
+ *   it "Resume" and "Start fresh" are a coin flip.
+ * - `liveSessions`, because another tab already editing that worktree is the one fact
+ *   that should flip the default answer.
+ * - `freshName`, so the "Start fresh" button can name the worktree it would create.
+ *   Minted here only to LABEL the button; the name that actually gets used is minted
+ *   again server-side at spawn (see the WS create block), so nothing racy travels
+ *   through the browser.
+ *
+ * Never an error: a repo we cannot read answers `worktree: null` and the picker simply
+ * starts the session the way it always did.
+ */
+app.get('/api/issue-worktree', (req, res) => {
+  const cwd = expandTilde(req.query.cwd || process.env.HOME);
+  const number = parseInt(req.query.number, 10);
+  if (!Number.isFinite(number)) return res.status(400).json({ error: 'number is required' });
+  const name = validateWorktree(issueWorktreeName(number));
+  try {
+    const worktree = name && worktreeExists(cwd, name) ? worktreeStatus({ repoRoot: cwd, name }) : null;
+    res.json({
+      worktree,
+      freshName: worktree ? freshWorktreeName(cwd, name, { reserved: reservedWorktreeNames() }) : null,
+      liveSessions: worktree ? sessionsInWorktree(worktree.path) : [],
+    });
+  } catch (e) {
+    log(`[API] issue-worktree #${number} failed: ${e.message}`);
+    res.json({ worktree: null, freshName: null, liveSessions: [] });
+  }
 });
 
 /**
@@ -6554,14 +6635,21 @@ function autopilotLogLabel(on, explicit) {
  * the fact. `source` is a parameter, never guessed from the call stack; a caller that
  * forgets it shows up as `unknown` rather than claiming a surface it isn't.
  */
-function logIssueStart({ number, id, source, agentType, engineType, worktree, cwd, on, explicit, stages }) {
+function logIssueStart({ number, id, source, agentType, engineType, worktree, cwd, on, explicit, stages, resume }) {
   // `stages` reports whether this session was given the workflow stages (#668). "Started
   // with stages" and "started without" are different runs and the log has to say which.
   // An omitted argument reads `unknown` rather than `off`, for the same reason `source`
   // defaults to it: a caller that forgot must not be able to claim a state it never chose.
+  // `resume` (#689) names what the session walked into. Worth a clause of its own
+  // rather than a bare yes/no: "resumed a branch with 4 commits" and "resumed an empty
+  // leftover directory" produce very different first turns, and after the fact this
+  // line is the only place that distinguishes them.
+  const resumed = resume
+    ? `, resume=${resume.commits == null ? '?' : resume.commits}c/${resume.dirty == null ? '?' : resume.dirty}d@${resume.head || '?'}`
+    : '';
   log(`[issue] #${number}: id=${id}, source=${source}, agent=${agentType}, engine=${engineType}, `
     + `worktree=${worktree || 'none'}, cwd=${cwd}, autopilot=${autopilotLogLabel(on, explicit)}, `
-    + `stages=${stages == null ? 'unknown' : (stages ? 'on' : 'off')}`);
+    + `stages=${stages == null ? 'unknown' : (stages ? 'on' : 'off')}${resumed}`);
 }
 
 /**
@@ -6577,6 +6665,83 @@ function logIssueStart({ number, id, source, agentType, engineType, worktree, cw
  */
 function issueStagesText() {
   return settings.issueStagesEnabled ? WORKFLOW_STAGES : null;
+}
+
+/**
+ * The sessions currently living in a given worktree directory (#689).
+ *
+ * `shells` already knows this and nothing asked it. Two agents editing one worktree is
+ * the genuinely dangerous state a resume can walk into — far more so than stale
+ * commits — and it costs an in-memory scan. sessionPaths() is what makes the two
+ * spawn shapes comparable: a Claude session records the repo root as its cwd and works
+ * in the subdirectory, every other agent records the subdirectory itself.
+ */
+/**
+ * Worktree names live sessions are already holding (#689).
+ *
+ * `freshWorktreeName` cannot see these on disk: a Claude session creates its worktree
+ * directory *itself*, after spawn, so between "Start fresh" and the agent getting there
+ * neither the directory nor the branch exists — and a second fresh start in that window
+ * would be handed the same name and put two agents in one checkout. Only the daemon
+ * knows what it has spawned, so it is the daemon that supplies the list.
+ */
+function reservedWorktreeNames() {
+  const out = [];
+  for (const entry of shells.values()) if (entry.worktree) out.push(entry.worktree);
+  return out;
+}
+
+function sessionsInWorktree(wtPath, exceptId = null) {
+  if (!wtPath) return [];
+  const out = [];
+  for (const [id, entry] of shells) {
+    // `exceptId` is load-bearing on the picker's path, where the entry already exists
+    // by the time we ask: an agent without native --worktree records the worktree
+    // directory as its own cwd, so without this a session would report itself as the
+    // other session it must coordinate with.
+    if (id === exceptId) continue;
+    if (sessionPaths(entry).cwd === wtPath) out.push({ id, name: entry.name || null });
+  }
+  return out;
+}
+
+/**
+ * The "you are resuming" block a starting issue session gets, or null (#689).
+ *
+ * The single composer, for the same reason issueStagesText() is the single reader of
+ * `issueStagesEnabled`: `renderIssuePrompt` takes TEXT, so exactly one place decides
+ * what a resumed session is told. The wording itself lives in issue-prompt.js beside
+ * the other prompt text, where a unit test can call it without a daemon; this wrapper
+ * is only the part that needs `shells`.
+ */
+function issueResumeText(status, exceptId = null) {
+  return status ? resumePromptText(status, sessionsInWorktree(status.path, exceptId)) : null;
+}
+
+/**
+ * What a resumed session carries on its entry, for `issue_complete` to read at the
+ * very end (#689).
+ *
+ * Deliberately a SNAPSHOT of the moment this session started, never a live re-read.
+ * The question at completion time is "which of these commits are mine", and only the
+ * branch tip as it stood at spawn answers it — `headBefore` turns a vague "there was
+ * prior work" into `git log <sha>..HEAD`, which is the difference between an agent
+ * that can report its own work and one that claims someone else's.
+ *
+ * Kept small because it goes through serializeShellEntry into state.json for every
+ * resumed session, and it must survive a ./restart.sh between the resume and the
+ * completion — the same reason `autopilot` is persisted rather than held in memory.
+ */
+function resumedStamp(status) {
+  if (!status) return null;
+  return {
+    branch: status.branch || null,
+    base: status.base || null,
+    headBefore: status.head || null,
+    commitsBefore: status.commits == null ? null : status.commits,
+    dirtyBefore: status.dirty == null ? null : status.dirty,
+    at: Date.now(),
+  };
 }
 
 /**
@@ -6642,6 +6807,23 @@ function startIssueSession({ number, title, body, labels, url, cwd, agentType, c
   // Same guard as the WS path: an issue opened against a repo with no commits yet
   // must not be handed --worktree, or the tab dies before it paints (#656).
   const worktree = usableWorktree(cwd, validateWorktree(issueWorktreeName(number)), { log });
+
+  // #689: read the worktree BEFORE ensureWorktree() below can create one, or the
+  // answer is always "brand new". Captured once, like `stages`, because this function
+  // renders the prompt twice — inline body now, gh-fetched body seconds later inside a
+  // .then() — and by then ensureWorktree has run. Costs one statSync when there is no
+  // worktree, which is every ordinary start.
+  //
+  // There is deliberately no confirm and no `fresh` option on this path: HTTP and MCP
+  // have no human to ask, so they resume and report the facts back. Exposing a switch
+  // here would also hand an agent that sees an existing worktree "in the way" a way to
+  // silently fork the work onto a second branch — the same failure #653 made visible
+  // for an agent-settable `autopilot`.
+  const resumeStatus = worktree && worktreeExists(cwd, worktree)
+    ? worktreeStatus({ repoRoot: cwd, name: worktree })
+    : null;
+  const resume = issueResumeText(resumeStatus);
+
   const id = randomUUID().slice(0, 8);
   const claudeSessionId = agentType === 'codex' ? null : randomUUID();
   const codexHomeId = agentType === 'codex' ? id : null;
@@ -6666,8 +6848,8 @@ function startIssueSession({ number, title, body, labels, url, cwd, agentType, c
   // tmux to node-pty (#620), and engineType must record what happened.
   const sessionEngine = spawnSession(getDefaultEngine(), id, agentType, spawnArgs, spawnCwd, { cols: 120, rows: 40, env: sessionEnv(id, { name, worktree, windowId: windowId || null, cwd: spawnCwd, agentType, configDir, codexHomeId }) });
   const engineType = sessionEngine === tmuxEngine ? 'tmux' : 'node-pty';
-  logIssueStart({ number, id, source, agentType, engineType, worktree, cwd: spawnCwd, on: autopilotOn, explicit: autopilotExplicit, stages: !!stages });
-  shells.set(id, { clients: new Set(), cwd: spawnCwd, claudeSessionId, agentType, codexHomeId, configDir: configDir || null, engine: sessionEngine, engineType, worktree: worktree || null, windowId: windowId || null, name, planMode: !!settings.wandPlanMode, autopilot: autopilotOn, waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now(), loading: true });
+  logIssueStart({ number, id, source, agentType, engineType, worktree, cwd: spawnCwd, on: autopilotOn, explicit: autopilotExplicit, stages: !!stages, resume: resumeStatus });
+  shells.set(id, { clients: new Set(), cwd: spawnCwd, claudeSessionId, agentType, codexHomeId, configDir: configDir || null, engine: sessionEngine, engineType, worktree: worktree || null, windowId: windowId || null, name, planMode: !!settings.wandPlanMode, autopilot: autopilotOn, resumedWorktree: resumedStamp(resumeStatus), waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now(), loading: true });
   wireShellOutput(id);
   emitSessionOpen(id);
   recordRecentSession(id);
@@ -6687,24 +6869,28 @@ function startIssueSession({ number, title, body, labels, url, cwd, agentType, c
   // readiness wait or their configured delay. An inline body renders now; without
   // one, fetch from GitHub and render when it lands.
   if (body) {
-    deliverPromptWhenReady(id, renderIssuePrompt(settings.wandPromptTemplate, { number, title, labels, url, body }, { stages }));
+    deliverPromptWhenReady(id, renderIssuePrompt(settings.wandPromptTemplate, { number, title, labels, url, body }, { stages, resume }));
   } else {
     fetchIssueFromGitHub(number, cwd).then(gh => {
-      // `stages` is the const captured at the top, not a fresh read: this closure runs
-      // seconds later, after the log line already reported the decision (#668).
+      // `stages` and `resume` are the consts captured at the top, not fresh reads: this
+      // closure runs seconds later, after the log line already reported the decision
+      // (#668) and — for `resume` — after ensureWorktree may have created the very
+      // worktree whose absence it recorded (#689).
       deliverPromptWhenReady(id, renderIssuePrompt(settings.wandPromptTemplate, {
         number,
         title,
         labels: labels || (gh ? gh.labels : null),
         url: url || (gh ? gh.url : null),
         body: gh ? gh.body : null,
-      }, { stages }));
+      }, { stages, resume }));
     });
   }
 
   const tabDelivery = deliverToWindow({ type: 'open-session', id, cwd: spawnCwd, name, windowId, loading: true }, windowId, { openBrowser });
   noteSpawnDelivery(id, { tabDelivery, windowId, source: `start_issue #${number} (${source})` });
-  return { id, name, cwd: spawnCwd, worktree: worktree || null, engineType, autopilot: autopilotOn, tabDelivery };
+  // `resumed` (#689) is the facts, not a flag: the MCP path has no human to confirm
+  // with, so telling the caller what it walked into is the whole of its answer.
+  return { id, name, cwd: spawnCwd, worktree: worktree || null, engineType, autopilot: autopilotOn, resumed: resumeStatus, tabDelivery };
 }
 
 app.post('/api/start-issue', (req, res) => {
@@ -7524,6 +7710,12 @@ function handleWsConnection(ws, req) {
   cwd = expandTilde(cwd);
   const createNew = url.searchParams.get('new') === '1';
   let worktree = validateWorktree(url.searchParams.get('worktree'));
+  // "Start fresh" from the issue picker (#689): the requested worktree already has work
+  // in it and the user chose to leave it alone. The NAME is minted server-side, in the
+  // create block below, at the moment it is used — a name computed in the browser (or
+  // handed out by an earlier request) could be taken by then, and worktree naming is
+  // not something the client should know how to do.
+  const freshWorktree = url.searchParams.get('fresh') === '1';
   const planMode = url.searchParams.get('planMode') === '1';
   const name = url.searchParams.get('name');
   const windowId = url.searchParams.get('windowId') || null;
@@ -7646,7 +7838,7 @@ function handleWsConnection(ws, req) {
       }
       sessionEngine = spawnedEngine;
       restoredEngineType = spawnedEngine === tmuxEngine ? 'tmux' : 'node-pty';
-      shells.set(id, { clients: new Set(), cwd, claudeSessionId, agentType: savedAgentType, codexHomeId, configDir: restored.configDir || null, engine: sessionEngine, engineType: restoredEngineType, worktree: savedWorktree, name: restoredName, planMode: savedPlanMode, model: restored.model || null, effort: restored.effort || null, allowedTools: restored.allowedTools || null, forkParent: restored.forkParent || null, restored: true, scheduled: !!restored.scheduled, autopilot: !!restored.autopilot, resultItemId: restored.resultItemId || null, resultApprovedAt: restored.resultApprovedAt || null, waitingForInput: false, lastActivity: Date.now(), createdAt: restored.createdAt || Date.now(), windowId: restoredWindowId });
+      shells.set(id, { clients: new Set(), cwd, claudeSessionId, agentType: savedAgentType, codexHomeId, configDir: restored.configDir || null, engine: sessionEngine, engineType: restoredEngineType, worktree: savedWorktree, name: restoredName, planMode: savedPlanMode, model: restored.model || null, effort: restored.effort || null, allowedTools: restored.allowedTools || null, forkParent: restored.forkParent || null, restored: true, scheduled: !!restored.scheduled, autopilot: !!restored.autopilot, resumedWorktree: restored.resumedWorktree || null, resultItemId: restored.resultItemId || null, resultApprovedAt: restored.resultApprovedAt || null, waitingForInput: false, lastActivity: Date.now(), createdAt: restored.createdAt || Date.now(), windowId: restoredWindowId });
       wireShellOutput(id, initialCols, initialRows);
       recordRecentSession(id);  // bump recency on same-browser reconnect + cross-browser restore
       if (agentConfig.supportsSessionWatch) watchClaudeSessionDir(id);
@@ -7750,6 +7942,34 @@ function handleWsConnection(ws, req) {
     // is the last point where the request is still just a request. Restores are
     // deliberately not filtered — see worktree-support.js.
     worktree = usableWorktree(cwd, worktree, { log });
+
+    // "Start fresh" (#689): mint a numbered sibling rather than reusing the occupied
+    // name. Nothing is deleted, reset or force-checked-out — the prior worktree and its
+    // branch are left exactly as they were, which is the point: a fresh start chosen by
+    // mistake must never be the thing that loses a week of parked work. Minted HERE, at
+    // the moment of use, so nothing can claim the name in between. A `fresh=1` that
+    // arrives on a reconnect cannot mint a second worktree, because this whole block
+    // only runs for a genuine create.
+    if (freshWorktree && worktree && worktreeExists(cwd, worktree)) {
+      const alt = freshWorktreeName(cwd, worktree, { reserved: reservedWorktreeNames() });
+      if (alt) {
+        log(`[worktree] start-fresh: "${worktree}" is in use, using "${alt}" instead`);
+        worktree = alt;
+      } else {
+        log(`[worktree] start-fresh: no free name beside "${worktree}"; resuming it instead`);
+      }
+    }
+
+    // #689: the existence test has to happen HERE, before ensureWorktree() below can
+    // create the directory — and before the agent can. A Claude session creates
+    // `.claude/worktrees/<name>` ITSELF, seconds after spawn, and the picker's issue
+    // prompt is delivered later still (deliverPromptWhenReady waits for readiness), so
+    // a stat taken at prompt time reports "resuming" for a worktree this very session
+    // just made. The latch is a plain boolean read with one statSync; the expensive
+    // half runs in the `issue` handler, which is a message callback rather than this
+    // connection callback (the event loop #553 exists to protect).
+    const worktreeExisted = !!worktree && worktreeExists(cwd, worktree);
+
     const oldId = id;
     // #554: a create retry re-sends new=1 with the client-minted id — honor it so
     // repeated attempts converge on one shell instead of spawning one per retry.
@@ -7827,7 +8047,12 @@ function handleWsConnection(ws, req) {
     // detach branch key off.
     const engineType = sessionEngine === tmuxEngine ? 'tmux' : 'node-pty';
     traceSession('SPAWN', { path: spawnPath, shell: id, oldId: oldId || null, name: name || null, worktree: worktree || null, cwd: worktreeCwd, claude: sessionId, planMode: spawnedPlanMode, agent: agentType, engine: engineType, parentShell, parentClaude, parentWorktree });
-    shells.set(id, { clients: new Set(), cwd: worktreeCwd, claudeSessionId: sessionId, agentType, codexHomeId: agentType === 'codex' ? id : null, configDir: configDir || null, engine: sessionEngine, engineType, worktree: worktree || null, windowId, name: name || null, planMode: spawnedPlanMode, forkParent: parentClaude, waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now() });
+    // `worktreeExisted` (#689) is the latch, not the facts: a transient boolean, read
+    // before anything could have created the directory, and deliberately NOT in
+    // serializeShellEntry. It answers one question exactly once, for the `issue`
+    // message that arrives moments later; what survives a restart is the
+    // `resumedWorktree` snapshot that handler stamps.
+    shells.set(id, { clients: new Set(), cwd: worktreeCwd, claudeSessionId: sessionId, agentType, codexHomeId: agentType === 'codex' ? id : null, configDir: configDir || null, engine: sessionEngine, engineType, worktree: worktree || null, worktreeExisted, windowId, name: name || null, planMode: spawnedPlanMode, forkParent: parentClaude, waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now() });
     wireShellOutput(id, initialCols, initialRows);
     emitSessionOpen(id);
     recordRecentSession(id);
@@ -7909,6 +8134,17 @@ function handleWsConnection(ws, req) {
         // applies with no restart. Unlike autopilot there is no per-start override: the
         // picker offers none, and the WS message must not be able to introduce one.
         const stages = issueStagesText();
+        // #689: the create block latched whether the worktree already existed, BEFORE
+        // anything could have created it. Only now — in a message callback, where a
+        // subprocess is safe — do we spend the git calls to say what is in it. Stamped
+        // on the entry so issue_complete can read it at the far end of the session, and
+        // caught by the saveState() below, which this handler already called for
+        // autopilot.
+        const resumeStatus = entry.worktreeExisted && entry.worktree
+          ? worktreeStatus({ repoRoot: sessionPaths(entry).repoRoot, name: entry.worktree })
+          : null;
+        entry.resumedWorktree = resumedStamp(resumeStatus);
+        const resume = issueResumeText(resumeStatus, id);
         saveState();
         broadcastAutopilot(id);
         // This path never calls startIssueSession, so it logs its own start line (#653) —
@@ -7922,11 +8158,13 @@ function handleWsConnection(ws, req) {
           agentType: entry.agentType, engineType: entry.engineType,
           worktree: entry.worktree, cwd: entry.cwd,
           on: entry.autopilot, explicit: autopilotExplicit, stages: !!stages,
+          resume: resumeStatus,
         });
-        // `{ stages }` is the THIRD argument. Folding it into the second — the variable
-        // bag — would render as nothing (an unknown {{name}} is empty by design) and the
-        // picker would be the one surface silently starting a different kind of session.
-        deliverPromptWhenReady(id, renderIssuePrompt(settings.wandPromptTemplate, parsed.issue || {}, { stages }));
+        // `{ stages, resume }` is the THIRD argument. Folding either into the second —
+        // the variable bag — would render as nothing (an unknown {{name}} is empty by
+        // design) and the picker would be the one surface silently starting a different
+        // kind of session.
+        deliverPromptWhenReady(id, renderIssuePrompt(settings.wandPromptTemplate, parsed.issue || {}, { stages, resume }));
         return;
       }
       if (parsed.type === 'rename') { entry.name = parsed.name || null; return; }

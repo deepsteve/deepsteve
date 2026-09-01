@@ -162,6 +162,7 @@ Rules a change anywhere in the tree could violate. Each one has a page that expl
 
 - **A worktree-isolated session's Bash cannot reach the shared checkout.** Claude Code 2.1.222+ statically refuses `git -C <main checkout>`, `cd <main checkout> && git …`, and any command naming `git` more than once. Merge through the `merge_worktree` MCP tool, which runs server-side, outside the guard.
 - **Route every new-session worktree through `usableWorktree()`.** A repo with no commits (or no repo at all) cannot host one, and passing `--worktree` anyway makes the agent exit ~1s after spawn — the tab appears and vanishes with nothing to say why. Restores are exempt on purpose; the worktree is part of a restored session's identity.
+- **Resuming an issue is detected, never assumed, and never destructive.** Worktree existence is latched *before* anything can create the directory (the WS create block, and above `ensureWorktree()` in `startIssueSession`) and stamped on the entry as `resumedWorktree`; the branch is read off disk, not guessed from the name. No path in the feature deletes, resets or force-checks-out anything — "Start fresh" mints a sibling.
 - **Never work around a guard refusal with `git push origin <branch>:main`** — it moves the remote and leaves the local checkout behind.
 
 **Frontend** ([docs/frontend.md](docs/frontend.md))
