@@ -39,6 +39,22 @@
   --ds-context-radius: 0px;
   --ds-context-gap: 0px;
   --ds-context-shadow: none;
+
+  /* Panel open/close motion (#691). The weight comes from the ASYMMETRY — a
+     longer decelerating open, a shorter accelerating close — not from an exotic
+     curve: measured per-frame in a browser, custom cubic-beziers either sat
+     still for the first 30ms (a keyboard toggle that doesn't move on the press)
+     or spent 85% of the travel in the first 100ms and coasted. Plain ease-out
+     departs immediately and is still only ~58% along at 100ms, so the second
+     half of the slide is actually visible. Keywords also keep this file's one
+     timing vocabulary; these are only its first duration/easing TOKENS, and
+     they exist because the rail is the one piece of chrome a theme has reason
+     to retune (a bezelled panel wants a different weight than a flush column).
+     Set both durations to 0s to opt a theme out entirely. */
+  --ds-context-anim-open: 0.2s;
+  --ds-context-anim-close: 0.15s;
+  --ds-context-ease-open: ease-out;
+  --ds-context-ease-close: ease-in;
 }
 
 * { margin: 0; box-sizing: border-box; }
@@ -1575,6 +1591,66 @@ kbd {
   overflow-x: hidden;
   user-select: none;  /* rail items are buttons — a press-drag (incl. row drag-to-reorder, #532) must never become a text selection (#564) */
 }
+
+/* Open/close slide (#691). The rail is a flex SIBLING of #app-main, so animating
+   its width is what makes the terminal's left edge travel with the panel's edge
+   instead of snapping; an overlay slide would have drawn the panel over live
+   terminal output. context-views.js owns the width endpoints as inline styles —
+   this rule only supplies the timing, and only while .rail-animating is on, so a
+   re-render, a drag-resize or crossing the .collapsed threshold never animates.
+   border-width rides along because a border-box rail at width:0 is still a
+   4px-per-side sliver under the bezelled themes (retro-monitor, hacker-monitor). */
+#context-rail.rail-animating {
+  transition: width var(--ds-context-anim-open) var(--ds-context-ease-open),
+              opacity var(--ds-context-anim-open) var(--ds-context-ease-open),
+              border-width var(--ds-context-anim-open) var(--ds-context-ease-open);
+}
+/* The 6px drag handle rides the slide too. Left to pop in at full width it put a
+   visible 6px step on the terminal at one end of every toggle — 14px under the
+   bezelled themes, together with the rail's own border. */
+#context-resizer.rail-animating {
+  transition: width var(--ds-context-anim-open) var(--ds-context-ease-open),
+              background 0.15s ease;
+}
+#context-rail.rail-animating.rail-closing,
+#context-resizer.rail-animating.rail-closing {
+  transition-duration: var(--ds-context-anim-close);
+  transition-timing-function: var(--ds-context-ease-close);
+}
+/* The closed end of the slide. Deliberately NOT gated on .rail-animating: an open
+   applies it for one frame BEFORE arming the transition, to establish where the
+   slide starts from, and a rule that needed .rail-animating would simply not match
+   yet — which is how the border used to snap to full width on the first frame. */
+#context-rail.rail-hidden { opacity: 0; border-width: 0; }
+#context-resizer.rail-hidden { width: 0; }
+
+/* Contents are REVEALED by the moving edge, not squeezed by it: pinned to the
+   target content width for the duration so .context-row-label never ellipsises
+   and un-ellipsises mid-slide, and clipped by the rail's own overflow-x: hidden.
+   --ds-rail-anim-w is set inline from rail.clientWidth (content box, so a
+   vertical scrollbar doesn't push the rows into the clip). */
+#context-rail.rail-animating > * { width: var(--ds-rail-anim-w); flex-shrink: 0; }
+
+/* The 6px lag that makes the contents feel weighted against the edge. Scoped to
+   .rail-opening, which lives only for the length of one open — renderRail() also
+   runs on tab open, project switch and row drag (context-views.js applyFilter),
+   and an entrance animation left on .context-row would replay on every one. */
+#context-rail.rail-opening > * {
+  animation: rail-content-in var(--ds-context-anim-open) var(--ds-context-ease-open) both;
+}
+@keyframes rail-content-in { from { opacity: 0; transform: translateX(-6px); } }
+
+/* The JS gate in context-views.js is the load-bearing opt-out (it skips the
+   whole transition, because a transitionend that never fires would strand a
+   closing rail on screen). This is the CSS half, and the first reduced-motion
+   block in this stylesheet — same idiom the mods already use, scoped to the rail
+   rather than blanket-killing every animation in the shell. */
+@media (prefers-reduced-motion: reduce) {
+  #context-rail.rail-animating,
+  #context-resizer.rail-animating { transition: none; }
+  #context-rail.rail-opening > * { animation: none; }
+}
+
 .context-rail-header { font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--ds-text-secondary); padding: 10px 12px 6px; }
 /* Inset + round the rows proportionally to the rail's corner radius so a row's
    full-width highlight can never reach — and bleed past — the rounded bezel

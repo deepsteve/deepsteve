@@ -1006,20 +1006,153 @@ function notifyActive() {
 // railSuppressed=false on every excursion EXIT, which would put the rail back mid-quiet-mode.
 const railVisible = () => sidebarOpen && !railSuppressed && !railQuiet;
 
+// ------------------------------------------------------- open/close motion (#691)
+//
+// The rail is a flex SIBLING of #app-main, so animating its WIDTH is what carries the
+// terminal's left edge along with the panel's edge; an overlay slide would have drawn the
+// panel over live terminal output instead. display:none stays the resting closed state — a
+// themed bezel leaves a sliver at width:0, and it is what every caller reads — so an open
+// sets display first and a close clears it on settle. CSS owns the durations and easings
+// (--ds-context-anim-*); this owns the width endpoints.
+
+/**
+ * The rail and its drag handle slide as one. The handle is 6px, and left to pop in at full
+ * width it put a visible step on the terminal at one end of every toggle, so it carries the
+ * same state classes and the CSS gives it the same timing.
+ */
+const railClass = (op, ...names) => {
+  rail.classList[op](...names);
+  resizer?.classList[op](...names);
+};
+
+let railAnim = null;           // { onEnd, timer } while a transition is in flight
+let railShown = false;         // last applied visibility — an unchanged state must not replay the motion
+let railChromeApplied = false; // the page's first apply is instant: a restored-open rail must not animate on reload
+
+/**
+ * May we animate? matchMedia is the discriminator, and it is honest — no media-query support
+ * means no motion preference to read, so no motion. It is also what keeps the unit-test fake
+ * DOMs on today's synchronous display flip; requestAnimationFrame alone would not do, since
+ * two of those harnesses stub it.
+ *
+ * Reduced motion is checked HERE and not only in CSS: a close defers display:none to
+ * transitionend, and a suppressed transition never fires one.
+ */
+function railCanAnimate() {
+  const mm = window.matchMedia;
+  if (typeof mm !== 'function' || typeof window.requestAnimationFrame !== 'function') return false;
+  return !mm.call(window, '(prefers-reduced-motion: reduce)').matches;
+}
+
+/**
+ * How long the transition we just started will take, read back from CSS so a theme that
+ * retunes --ds-context-anim-* is never cut short by the fallback timer below.
+ */
+function railTransitionMs() {
+  const gcs = globalThis.getComputedStyle;
+  if (typeof gcs !== 'function') return 400;
+  const cs = gcs(rail);
+  const secs = (v) => Math.max(0, ...String(v || '').split(',').map((s) => parseFloat(s) || 0));
+  return (secs(cs.transitionDuration) + secs(cs.transitionDelay)) * 1000;
+}
+
+/** Stop any transition in flight and return the width it had reached, or null if none was. */
+function cancelRailAnim() {
+  if (!railAnim || !rail) return null;
+  clearTimeout(railAnim.timer);
+  rail.removeEventListener?.('transitionend', railAnim.onEnd);
+  railAnim = null;
+  const w = rail.getBoundingClientRect().width;
+  railClass('remove', 'rail-animating', 'rail-opening', 'rail-closing', 'rail-hidden');
+  rail.style.width = w + 'px'; // freeze, so a reversal starts from where the eye already is
+  return w;
+}
+
+/**
+ * Finish the transition just started. transitionend is the real settle; the timer only
+ * rescues a transition that never runs (a theme at 0s, a backgrounded tab), which would
+ * otherwise strand a closing rail on screen forever.
+ */
+function armRailSettle(closing) {
+  let entry = null;
+  const finish = () => {
+    if (railAnim !== entry) return; // superseded by a later toggle
+    clearTimeout(entry.timer);
+    rail.removeEventListener?.('transitionend', entry.onEnd);
+    railAnim = null;
+    railClass('remove', 'rail-animating', 'rail-opening', 'rail-closing', 'rail-hidden');
+    rail.style.removeProperty('--ds-rail-anim-w');
+    if (closing) {
+      rail.style.display = 'none';
+      if (resizer) resizer.style.display = 'none';
+      rail.style.width = ''; // the next open re-applies the saved width itself
+      updateIndicator();     // the closed-state chip belongs after the panel is gone, not on top of it
+    }
+    window.dispatchEvent(new Event('resize'));
+  };
+  const onEnd = (e) => { if (e.target === rail && e.propertyName === 'width') finish(); };
+  entry = { onEnd, timer: setTimeout(finish, railTransitionMs() + 120) };
+  railAnim = entry;
+  rail.addEventListener('transitionend', onEnd);
+}
+
+/**
+ * Grow from `startW` to the width applyRailWidth() has just established. Runs AFTER it on
+ * purpose: .collapsed is derived from a synchronous measurement, so starting the rail at zero
+ * first would latch the 48px icon rail on every open.
+ */
+function startRailOpen(startW) {
+  const targetInline = rail.style.width; // '' = theme default, else the saved drag width
+  rail.style.setProperty('--ds-rail-anim-w', rail.clientWidth + 'px'); // content box: a scrollbar must not push rows into the clip
+  railClass('add', 'rail-hidden');       // instant: .rail-hidden is not gated on .rail-animating
+  rail.style.width = startW + 'px';
+  void rail.offsetWidth;                 // flush, so the writes below read as a change
+  railClass('add', 'rail-animating', 'rail-opening');
+  railClass('remove', 'rail-hidden');
+  rail.style.width = targetInline;       // '' resolves to --ds-context-width, a length, so it still interpolates
+  armRailSettle(false);
+}
+
+/** Shrink from `startW` to nothing; display and the resizer are cleared at the settle. */
+function startRailClose(startW) {
+  rail.style.setProperty('--ds-rail-anim-w', rail.clientWidth + 'px');
+  rail.style.width = startW + 'px';
+  void rail.offsetWidth;
+  railClass('add', 'rail-animating', 'rail-closing', 'rail-hidden');
+  rail.style.width = '0px';
+  armRailSettle(true);
+}
+
 /** Everything setSidebar() does EXCEPT persisting — so suppression can reuse it. */
 function applyRailChrome() {
   const on = railVisible();
-  if (rail) rail.style.display = on ? 'flex' : 'none';
-  if (resizer) resizer.style.display = on ? 'block' : 'none';
+  const frozen = cancelRailAnim();
+  // Only a real change animates: ⌘P→A on an already-open rail, and the page's first apply,
+  // both have to land silently.
+  const animate = !!rail && railChromeApplied && on !== railShown && railCanAnimate();
+  railChromeApplied = true;
+  railShown = on;
+
   if (toggleBtn) {
-    toggleBtn.classList.toggle('active', on);
+    toggleBtn.classList.toggle('active', on); // immediate either way: it is the press feedback
     toggleBtn.title = on ? 'Hide projects (⌘P)' : 'Show projects (⌘P)';
   }
+
   if (on) {
+    if (rail) rail.style.display = 'flex';
+    if (resizer) resizer.style.display = 'block';
     renderRail();
     applyRailWidth(loadWidth()); // restore the dragged width (null → CSS/theme default)
+    if (animate) startRailOpen(frozen ?? 0);
+    updateIndicator();
+  } else if (animate) {
+    startRailClose(frozen ?? rail.getBoundingClientRect().width);
+  } else {
+    if (rail) rail.style.display = 'none';
+    if (resizer) resizer.style.display = 'none';
+    updateIndicator();
   }
-  updateIndicator();
+
   window.dispatchEvent(new Event('resize'));
 }
 

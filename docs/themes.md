@@ -12,7 +12,7 @@ Theme files are limited to 64KB. Changes are picked up via `fs.watch()` — edit
 
 ## Creating a Theme
 
-A theme file overrides any of the 25 CSS custom properties defined in `:root`. You don't need to override all of them — only the ones you want to change.
+A theme file overrides any of the CSS custom properties defined in `:root`. You don't need to override all of them — only the ones you want to change.
 
 ### Background & Surface Colors
 
@@ -61,6 +61,37 @@ A theme file overrides any of the 25 CSS custom properties defined in `:root`. Y
 | `--ds-reconnect-overlay` | `rgba(13, 17, 23, 0.75)` | Reconnecting overlay |
 | `--ds-reconnect-glow` | `rgba(240, 136, 62, 0.3)` | Reconnecting glow effect |
 | `--ds-refresh-glow` | `rgba(88, 166, 255, 0.3)` | Refresh glow effect |
+
+### Context Panel (the projects rail)
+
+The rail's whole look is driven by these, so a theme can turn a flush square column into a
+standalone bezelled panel without touching a rule. `retro-monitor` and `hacker-monitor` both do.
+
+| Variable | Default | Description |
+|---|---|---|
+| `--ds-context-width` | `200px` | Resting width (a drag overrides it per window) |
+| `--ds-context-bg` | `var(--ds-bg-secondary)` | Panel background |
+| `--ds-context-border` | `1px solid var(--ds-border)` | Full shorthand, so a theme can set a thick bezel |
+| `--ds-context-radius` | `0px` | Corner rounding; row inset/rounding is derived from it |
+| `--ds-context-gap` | `0px` | Gap between the panel and the terminal |
+| `--ds-context-shadow` | `none` | Panel shadow (inset works, for a CRT bezel) |
+
+### Context Panel Motion (#691)
+
+The panel slides open and closed, and these four are the only timing tokens in the stylesheet —
+everything else uses literals. The weight comes from the asymmetry (a longer decelerating open,
+a shorter accelerating close), so retune both halves together.
+
+| Variable | Default | Description |
+|---|---|---|
+| `--ds-context-anim-open` | `0.2s` | Open duration |
+| `--ds-context-anim-close` | `0.15s` | Close duration |
+| `--ds-context-ease-open` | `ease-out` | Open easing |
+| `--ds-context-ease-close` | `ease-in` | Close easing |
+
+**Setting both durations to `0s` opts a theme out of the motion entirely** — the panel then flips
+the way it did before #691. Viewers who have asked their OS for reduced motion already get that,
+whatever a theme sets.
 
 ### Terminal Background Sync
 
