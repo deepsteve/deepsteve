@@ -493,6 +493,54 @@ test('closing a session that is already gone is a 404, not a crash', async () =>
   assert.deepStrictEqual(ctxClosed, []);
 });
 
+test('the bench merge commits the worktree first (#688)', async () => {
+  // It used to call mergeWorktree directly, which merges COMMITTED work only — so a
+  // bench Merge on a worktree an agent had left dirty silently landed half of it and
+  // reported `merged`. It now goes through the same composed routine as every other
+  // Merge in the product.
+  //
+  // The branch deliberately carries no issue number, so `gh` is never consulted and this
+  // stays hermetic; the issue-close half is test/unit/session-merge.test.js's.
+  const { execFileSync } = require('node:child_process');
+  const git = (args, cwd) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-workshop-merge-'));
+  const repo = path.join(tmp, 'repo');
+  fs.mkdirSync(repo, { recursive: true });
+  git(['init', '-q', '-b', 'main'], repo);
+  git(['config', 'user.email', 't@example.com'], repo);
+  git(['config', 'user.name', 'T'], repo);
+  fs.writeFileSync(path.join(repo, '.gitignore'), '.claude/\n');
+  fs.writeFileSync(path.join(repo, 'a.txt'), 'one\n');
+  git(['add', '-A'], repo);
+  git(['commit', '-qm', 'init'], repo);
+  const wt = path.join(repo, '.claude', 'worktrees', 'feature');
+  git(['worktree', 'add', '-q', '-b', 'feature', wt], repo);
+  fs.writeFileSync(path.join(wt, 'committed.txt'), 'x\n');
+  git(['add', '-A'], wt);
+  git(['commit', '-qm', 'work'], wt);
+  fs.writeFileSync(path.join(wt, 'uncommitted.txt'), 'y\n');   // what used to be lost
+
+  const { shells, app, ctx } = world();
+  const id = sid();
+  shells.set(id, idleEntry(id, 'done', { worktree: 'feature' }));
+  // makeCtx's sessionPaths reports entry.cwd as BOTH cwd and repoRoot, which would make
+  // the worktree its own merge target. The route reads ctx.sessionPaths per request, so
+  // point it at the real pair the server's own sessionPaths would return.
+  ctx.sessionPaths = () => ({ cwd: wt, repoRoot: repo });
+
+  const { status, body } = await app.call('POST', '/api/workshop/sessions/:id/merge', {
+    params: { id }, body: {},
+  });
+
+  assert.strictEqual(status, 200);
+  assert.strictEqual(body.status, 'merged', JSON.stringify(body));
+  assert.strictEqual(body.committed, true);
+  assert.ok(fs.existsSync(path.join(repo, 'uncommitted.txt')),
+    'the whole worktree lands, not just the committed half');
+
+  fs.rmSync(tmp, { recursive: true, force: true });
+});
+
 test('merge refuses a session that is not in a worktree', async () => {
   // Re-checked server-side even though the panel only offers the button on a worktree
   // row: the panel's copy of the session is up to a poll old, and "merge into whatever

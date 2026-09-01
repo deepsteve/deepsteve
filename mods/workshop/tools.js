@@ -88,13 +88,15 @@
 const fs = require('fs');
 const { execFile, execFileSync } = require('child_process');
 const { z } = require('zod');
-// The one cross-mod require in this file (#682). merge-worktree.js is a pure library —
-// it takes a `git` runner and returns a status — with no ctx, no shells and no MCP, and
-// it encodes the merge semantics the bench must not have a second opinion about: refuse
-// on a dirty target, abort on conflict, leave the target untouched unless it says
-// `merged`. Reimplementing that here to avoid reaching across a mod boundary would be
-// the trade made backwards.
-const { mergeWorktree } = require('../deepsteve-core/merge-worktree');
+// The one cross-mod require in this file (#682, retargeted by #688). session-merge.js is
+// a pure library — it takes `git` and `gh` runners and returns a status — with no ctx, no
+// shells and no MCP, and it encodes the merge semantics the bench must not have a second
+// opinion about: commit what is uncommitted, refuse on a dirty target, abort on conflict,
+// leave the target untouched unless it says `merged`, close the issue only if it does.
+// Reimplementing that here to avoid reaching across a mod boundary would be the trade
+// made backwards — and it was, briefly: this route called the un-composed mergeWorktree
+// and so landed only the committed half of a dirty worktree.
+const { mergeSession } = require('../deepsteve-core/session-merge');
 const projectScope = require('../../project-scope');
 const { resolveBinary } = require('../../bin-path');
 const inbox = require('./inbox');
@@ -1332,7 +1334,7 @@ function registerRoutes(app, context) {
     res.json({ ok: true, sessionId: id });
   });
 
-  app.post('/api/workshop/sessions/:id/merge', (req, res) => {
+  app.post('/api/workshop/sessions/:id/merge', async (req, res) => {
     const id = req.params.id;
     const entry = ctx.shells.get(id);
     if (!entry) return res.status(404).json({ error: 'no-session' });
@@ -1350,11 +1352,19 @@ function registerRoutes(app, context) {
     const target = typeof req.body?.target === 'string' && req.body.target.trim()
       ? req.body.target.trim()
       : undefined;
-    const result = mergeWorktree({ git: runGit, worktreeCwd: cwd, repoRoot, target });
+    // mergeSession, not the bare mergeWorktree it used to call (#688): this route
+    // merged COMMITTED work only, so a bench Merge on a worktree an agent had left dirty
+    // silently landed half of it and said `merged`. The composed routine commits first
+    // and closes the branch's GitHub issue afterwards — the same thing every other Merge
+    // in the product now does, which is the point of there being one routine.
+    const result = await mergeSession({
+      git: runGit, gh: runGh, cwd, repoRoot, isWorktree: true, target,
+    });
     ctx.log(`[workshop] merge session=${id} ${result.branch || '?'} -> ${result.target || '?'}`
-      + ` = ${result.status}`);
-    // No auto-close on success, unlike the merge_worktree MCP tool. That one arms one
-    // because the AGENT has to be told to stop and reliably isn't; here a human is
+      + ` = ${result.status}${result.committed ? ' (committed)' : ''}`
+      + `${result.issue && result.issue.closed ? ` closed #${result.issue.number}` : ''}`);
+    // No auto-close on success, unlike the merge_session/merge_worktree MCP tools. Those
+    // arm one because the AGENT has to be told to stop and reliably isn't; here a human is
     // looking at the row, with Close one key away. Closing a session somebody did not
     // ask to close is not a thing to do on their behalf.
     // Every status other than `merged` left the target checkout untouched, and the

@@ -570,10 +570,19 @@ test('flipping the flag on a live session changes what issue_complete answers', 
   const id = res.json.id;
   opened.push(id);
 
-  assert.deepEqual(
-    { autopilot: true, next: 'merge' },
-    (({ autopilot, next }) => ({ autopilot, next }))(await issueComplete(id)),
-    'autopilot on: the tool tells the session to merge itself');
+  // Since #688 the tool MERGES rather than answering with instructions, so what
+  // distinguishes the two states is whether the daemon acted at all — a merge result on
+  // the payload, or nothing. The status here is `same-branch`: the stub `claude` does
+  // not honour --worktree, so sessionPaths falls back to the repo root, which is already
+  // on the target. That is the right fixture for this test, whose subject is the FLAG
+  // rather than the merge; a real merge end-to-end is
+  // test/integration-standalone/merge-session.test.js. It also means nothing is
+  // committed here — same-branch is checked before the auto-commit — so the shared
+  // project dir the rest of this file uses is left alone.
+  const armed = await issueComplete(id);
+  assert.equal(armed.autopilot, true);
+  assert.equal(armed.status, 'same-branch',
+    'autopilot on: the tool acts on the session rather than telling it what to do');
 
   const off = await setAutopilot(id, false);
   assert.equal(off.status, 200);
@@ -581,9 +590,11 @@ test('flipping the flag on a live session changes what issue_complete answers', 
   const stopped = await issueComplete(id);
   assert.equal(stopped.autopilot, false);
   assert.equal(stopped.next, 'stop', 'flipping off before the call must change the answer');
+  assert.equal(stopped.status, undefined,
+    'off must not attempt a merge at all, not merely decline to report one');
 
   await setAutopilot(id, true);
-  assert.equal((await issueComplete(id)).next, 'merge', 'and back on again');
+  assert.equal((await issueComplete(id)).status, 'same-branch', 'and back on again');
 
   const missing = await setAutopilot('nosuchid', true);
   assert.equal(missing.status, 404, 'an unknown session is a 404, not a silent write');

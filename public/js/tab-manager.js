@@ -109,7 +109,29 @@ function showContextMenu(x, y, sessionId, callbacks) {
       callbacks.onToggleAutopilot?.(sessionId, !autopilot);
     };
     menu.appendChild(autoEl);
+  }
 
+  // Merge (#688) — merging a finished worktree is mechanical, and the person doing it
+  // is not asking the AGENT for anything; they are asking deepsteve. Before this the
+  // only route was to type `/deepsteve:merge` at the session, which put a model (and
+  // about ten replays of its context) in the middle of a job the daemon can do alone.
+  // Omitted rather than disabled off a worktree, the Autopilot rule: there is nothing
+  // the user could do to this tab to make it apply.
+  const worktree = callbacks.getWorktree ? callbacks.getWorktree() : null;
+  if (worktree) {
+    const mergeEl = document.createElement('div');
+    mergeEl.className = 'context-menu-item';
+    // The ellipsis is a promise the Autopilot item above deliberately does not make:
+    // this one asks before it does anything.
+    mergeEl.innerHTML = '&nbsp;&nbsp; Merge…';
+    mergeEl.onclick = () => {
+      hideContextMenu();
+      callbacks.onMerge?.(sessionId);
+    };
+    menu.appendChild(mergeEl);
+  }
+
+  if ((autopilot !== null && autopilot !== undefined) || worktree) {
     const sepAuto = document.createElement('div');
     sepAuto.className = 'context-menu-separator';
     menu.appendChild(sepAuto);

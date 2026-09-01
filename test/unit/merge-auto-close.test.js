@@ -147,6 +147,87 @@ test('an older ctx without armSessionAutoClose still merges', async () => {
   fs.rmSync(tmp, { recursive: true, force: true });
 });
 
+// --- merge_session arms the same close (#688) -------------------------------------
+//
+// merge_session composes commit + merge + issue-close on top of merge_worktree, and it
+// has to end a session the same way: the reason #627 exists — an agent asked to call
+// close_session after its summary reliably doesn't — is not specific to which tool did
+// the merging. These mirror the merge_worktree cases above rather than re-testing the
+// merge, which test/unit/session-merge.test.js covers with injected runners.
+//
+// `feature` carries no issue number, so `gh` is never consulted and these stay hermetic.
+
+test('merge_session arms the close on success, worktree callers only', async () => {
+  const { tmp, repo, wt } = makeRepo();
+  const closeAt = Date.now() + 120000;
+  const { tools, armCalls } = makeContext({ cwd: wt, repoRoot: repo, armResult: { closeAt } });
+
+  const res = await tools.merge_session.handler({}, callerExtra('abc'));
+  const p = parse(res);
+
+  assert.strictEqual(p.status, 'merged', JSON.stringify(p));
+  assert.strictEqual(res.isError, undefined);
+  assert.deepStrictEqual(armCalls, [['abc', { reason: 'merged' }]]);
+  assert.strictEqual(p.autoCloseAt, closeAt);
+  assert.match(p.autoCloseMessage, /close_session/);
+
+  fs.rmSync(tmp, { recursive: true, force: true });
+});
+
+test('merge_session from a main-checkout session arms nothing', async () => {
+  // The rule merge_worktree established, and for the same reason: this is an ordinary
+  // merge — or here, a commit and push — in a long-lived tab nobody asked to end.
+  const { tmp, repo } = makeRepo();
+  fs.writeFileSync(path.join(repo, 'late.txt'), 'x\n');
+  const { tools, armCalls } = makeContext({ cwd: repo, repoRoot: repo, worktree: null });
+
+  const p = parse(await tools.merge_session.handler({}, callerExtra('abc')));
+
+  // No remote in the fixture, so the push fails — the commit is what this asserts.
+  assert.strictEqual(p.status, 'push-failed');
+  assert.strictEqual(p.committed, true);
+  assert.deepStrictEqual(armCalls, []);
+
+  fs.rmSync(tmp, { recursive: true, force: true });
+});
+
+test('merge_session reports a refusal as isError and arms nothing', async () => {
+  const { tmp, repo, wt } = makeRepo();
+  fs.writeFileSync(path.join(repo, 'wip.txt'), 'uncommitted\n'); // dirty target
+  const { tools, armCalls } = makeContext({ cwd: wt, repoRoot: repo });
+
+  const res = await tools.merge_session.handler({}, callerExtra('abc'));
+  const p = parse(res);
+  assert.strictEqual(p.status, 'target-dirty');
+  assert.strictEqual(res.isError, true);
+  assert.deepStrictEqual(armCalls, []);
+
+  fs.rmSync(tmp, { recursive: true, force: true });
+});
+
+test('merge_session commits the worktree before merging — merge_worktree does not', async () => {
+  // The difference between the two tools, stated as a test. Reaching for the primitive
+  // on a dirty worktree silently lands half the work; that is what the composed tool is
+  // for, and what the Workshop bench merge used to get wrong.
+  const bare = makeRepo();
+  fs.writeFileSync(path.join(bare.wt, 'late.txt'), 'x\n');
+  const a = makeContext({ cwd: bare.wt, repoRoot: bare.repo });
+  assert.strictEqual(parse(await a.tools.merge_worktree.handler({}, callerExtra('abc'))).status, 'merged');
+  assert.ok(!fs.existsSync(path.join(bare.repo, 'late.txt')),
+    'the primitive merges committed work only');
+  fs.rmSync(bare.tmp, { recursive: true, force: true });
+
+  const composed = makeRepo();
+  fs.writeFileSync(path.join(composed.wt, 'late.txt'), 'x\n');
+  const b = makeContext({ cwd: composed.wt, repoRoot: composed.repo });
+  const p = parse(await b.tools.merge_session.handler({}, callerExtra('abc')));
+  assert.strictEqual(p.status, 'merged');
+  assert.strictEqual(p.committed, true);
+  assert.ok(fs.existsSync(path.join(composed.repo, 'late.txt')),
+    'the composed tool commits first, so the whole worktree lands');
+  fs.rmSync(composed.tmp, { recursive: true, force: true });
+});
+
 // --- Drift guards on skills/merge.md ---------------------------------------------
 // #609 shipped a pure prompt change with no test, and #627 is the report that it
 // silently stopped working. These are the cheap guards that were missing: they cannot
