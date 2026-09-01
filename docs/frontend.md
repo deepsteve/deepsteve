@@ -108,6 +108,36 @@ const matchesShortcut = register({
 - **`shortcutsHelpShortcut` defaults to a two-item list** (`['Meta+Shift+?', 'Meta+/']`). macOS auto-assigns ⌘⇧/ to the Help menu Search field of any app with a Help menu — Firefox and Chrome both have one — and a menu key equivalent is consumed before the page sees the keydown. ⌘/ is the fallback so the overlay can't ship unreachable. It's a `custom` schema type (not `string`) because the value is a list; `sanitize` also accepts a bare string, which is what the Settings rebind button posts.
 - **Tests**: `npm run test:unit`. `test/unit/shortcuts-registry.test.js` asserts the **exact set of registered ids** — if you add or rename a binding, update that list. That is the drift guard.
 
+## Projects panel motion (`public/js/context-views.js`, #691)
+
+The rail (`#context-rail`, ⌘P) slides open and closed instead of flipping `display`. Four things
+about how, because each was a bug before it was a rule:
+
+- **It animates `width`, not a transform.** The rail is a flex *sibling* of `#app-main`, so a
+  width animation is what carries the terminal's left edge along with the panel's. An overlay
+  slide would have drawn the panel over live terminal output and snapped the terminal at t=0.
+  The terminal's refit is a 100ms-debounced ResizeObserver (`terminal.js`), and the timer resets
+  on every callback, so the whole slide costs exactly **one** `fit.fit()` after it settles.
+- **`display: none` stays the resting closed state**, so the open sets it first and the close
+  clears it on `transitionend`. The rail's drag handle and its `border-width` ride the same
+  classes — left to pop in at full size they put a visible step on the terminal at one end of
+  every toggle (6px, or 14px under a bezelled theme).
+- **Contents are pinned to the target width** (`--ds-rail-anim-w`, set inline from
+  `rail.clientWidth`) and clipped by the rail's `overflow-x: hidden`, so they are *revealed* by
+  the moving edge rather than squeezed — labels never ellipsise and un-ellipsise mid-slide. The
+  6px content parallax is scoped to a `.rail-opening` class that lives only for one open, because
+  `renderRail()` also runs on tab open, project switch and row drag.
+- **Reduced motion is gated in JS (`railCanAnimate()`), not only in CSS.** The close defers
+  `display: none` to `transitionend`, and a transition suppressed by a media query never fires
+  one — the rail would stay on screen forever. A `setTimeout` sized from the computed duration
+  is the same insurance for a theme that sets `0s` or a tab backgrounded mid-slide.
+
+`window.matchMedia` is also what the gate keys on, which is why `context-views.test.js`,
+`excursion-keys.test.js`, `apps-rail.test.js` and `quiet-mode.test.js` still see the original
+synchronous flip: their fake DOMs have no media queries. `test/unit/rail-animation.test.js` is the
+only suite that stubs it, and so the only one that exercises the animated path. Timing lives in
+four `--ds-context-*` tokens ([docs/themes.md](themes.md)); `0s` opts a theme out.
+
 ## Client-side storage
 
 - **Two-tier session storage**: `TabSessions` (sessionStorage) is the authoritative per-tab source that survives page refresh. `SessionStore` (localStorage) is for cross-tab/window coordination (orphan detection, restore modal). **Every mutation of both goes through the single write facade `public/js/session-stores.js` (#385) — `SessionStores.add/remove/rename/reorder` write both stores in one call, so they can't drift; app.js never mutates either store's session list by hand.** `TabSessions` now lives inside that module (unexported), so it can only be written via the facade; reads use `getTabSessions()` / `SessionStore.getWindowSessions()`. The facade owns *dual* writes and *all* `TabSessions` writes (incl. the TabSessions-only `updateId`/`setClaudeSessionId`/`clearTabSessions`/`addTabOnly`); `SessionStore`'s standalone window/pref writes (`addRecentDir`, `touchWindow`, `claimSessions`, dir-picker prefs) have no `TabSessions` twin and stay direct.
