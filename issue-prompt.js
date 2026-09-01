@@ -69,6 +69,82 @@ const WORKFLOW_STAGES = [
   '4. Justify before you merge. Call `share_result` with a writeup and evidence, then `issue_complete`.',
 ].join('\n');
 
+// The resume block's budget (#689). Same argument as the stages budget below it: this
+// is typed into a TUI composer on every resumed issue start, on top of a body already
+// clipped at ISSUE_BODY_LIMIT. Smaller than the stages cap because it is per-start
+// context rather than a standing workflow.
+const RESUME_TEXT_LIMIT = 700;
+
+// "3 minutes"/"2 hours"/"6 days" — spelled out, unlike the client's terse `2h ago`,
+// because an agent reads this inside a prompt rather than scanning it in a tab strip.
+// The buckets otherwise mirror relativeTime() in app.js, so the badge and the prompt
+// never disagree about how old the same worktree is.
+//
+// Floor, not round: "2 hours ago" for something touched 90 minutes back overstates the
+// gap, and this number exists to tell an agent how stale the work it inherited is.
+function humanAge(ts, now = Date.now()) {
+  const s = Math.max(0, Math.floor((now - ts) / 1000));
+  if (s < 60) return 'just now';
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m} minute${m === 1 ? '' : 's'} ago`;
+  const h = Math.floor(m / 60);
+  if (h < 48) return `${h} hour${h === 1 ? '' : 's'} ago`;
+  return `${Math.floor(h / 24)} days ago`;
+}
+
+/**
+ * What a resumed issue session is told about the worktree it landed in (#689).
+ *
+ * `status` is worktree-status.js's shape; `liveSessions` is whatever else is open in
+ * that directory. Returns null for no status, so a fresh start renders byte-for-byte
+ * what it rendered before this existed.
+ *
+ * Two variants, and the empty one is not a rounding error — it is the case that will
+ * dominate. A merged issue leaves its worktree behind (this repo has 25 such
+ * directories), so "a worktree exists" very often means "someone already finished
+ * this", and pointing an agent at `git log <base>..HEAD` for a branch with nothing on
+ * it is a worse first turn than the silence this feature replaces. Naming the zero
+ * explicitly is what keeps the block honest.
+ *
+ * Both variants name the branch and base they were READ from, never a guess: a Claude
+ * session's branch is `worktree-github-issue-N` and an `ensureWorktree` one's is
+ * `github-issue-N`, and an agent handed the wrong name runs a rev-range against
+ * nothing and concludes there was no prior work.
+ */
+function resumePromptText(status, liveSessions = [], { now = Date.now() } = {}) {
+  if (!status) return null;
+  const branch = status.branch ? `\`${status.branch}\`` : "this worktree's branch";
+  const base = status.base ? `\`${status.base}\`` : 'the base branch';
+  const touched = `last touched ${humanAge(status.lastTouched, now)}`;
+  // The most actionable fact of all, and free: two agents editing one worktree is the
+  // state a silent resume is most likely to create and least able to recover from.
+  const others = liveSessions.length
+    ? '\nAnother deepsteve session is open on this worktree right now — coordinate before you edit anything.'
+    : '';
+
+  if (status.commits === 0 && !status.dirty) {
+    return `A worktree for this issue already exists (branch ${branch}, ${touched}) but has nothing in it: `
+      + `0 commits ahead of ${base}, no uncommitted changes. Either the earlier session did nothing, or its `
+      + `work is already merged. Run \`git log --oneline -3\` to confirm before treating this as a clean `
+      + `start.${others}`;
+  }
+
+  // A missing count is omitted rather than printed as 0 — "we could not ask git" and
+  // "there is nothing on the branch" are different answers and must not look alike.
+  const facts = [
+    `branch ${branch}`,
+    status.commits == null ? null : `${status.commits} commit${status.commits === 1 ? '' : 's'} ahead of ${base}`,
+    status.dirty ? `${status.dirty} uncommitted file${status.dirty === 1 ? '' : 's'}` : null,
+    touched,
+  ].filter(Boolean).join(' · ');
+  const range = status.base ? `\`git log --oneline ${status.base}..HEAD\`` : '`git log --oneline`';
+
+  return `You are RESUMING this issue — an earlier session already worked in this worktree.\n${facts}.\n`
+    + `Read what is there before you plan anything: ${range}, then \`git status\` and \`git diff\`. Continue `
+    + `that work rather than restarting it, and when you report, be explicit about what you found already `
+    + `done versus what you did.${others}`;
+}
+
 // Labels arrive in three shapes: a comma-joined string (MCP and HTTP callers),
 // the `[{name}]` array `gh issue list --json labels` returns, or an array of
 // plain strings. All three render as one comma-joined list, and "no labels" is
@@ -88,8 +164,9 @@ function normalizeLabels(labels) {
 //
 // `stages` is TEXT, not a flag (#668): the module never reads settings, so the daemon
 // stays the one place that decides whether a session gets the stages and — once #669
-// lands — what they are allowed to name.
-function renderIssuePrompt(template, { number, title, labels, url, body } = {}, { stages } = {}) {
+// lands — what they are allowed to name. `resume` (#689) is text for the same reason,
+// and additionally because only the daemon can look at the worktree.
+function renderIssuePrompt(template, { number, title, labels, url, body } = {}, { stages, resume } = {}) {
   const vars = {
     number,
     title,
@@ -98,11 +175,18 @@ function renderIssuePrompt(template, { number, title, labels, url, body } = {}, 
     body: body ? clipBody(body, number) : '(no description)',
   };
   const rendered = String(template ?? '').replace(/\{\{(\w+)\}\}/g, (_, key) => vars[key] ?? '');
-  // Both tails are appended AFTER substitution so a user-edited template can neither
-  // drop them nor reorder them away from the end (#643, #668). Stages go LAST: stage 4
-  // already ends in issue_complete, so the completion instruction above reads as the
-  // rule the workflow then refines, and nothing is repeated after the list.
-  const out = `${rendered}\n\n${ISSUE_COMPLETE_INSTRUCTION}`;
+  // All three tails are appended AFTER substitution so a user-edited template can
+  // neither drop them nor reorder them away from the end (#643, #668, #689). Stages go
+  // LAST: stage 4 already ends in issue_complete, so the completion instruction above
+  // reads as the rule the workflow then refines, and nothing is repeated after the list.
+  //
+  // `resume` goes FIRST, straight after the issue itself, because it is context about
+  // the task — what is already in the worktree — while the two tails below are rules
+  // about how to finish. Putting it after them would separate stage 4's "…then
+  // issue_complete" from the instruction it refines, and would bury the one fact that
+  // has to change the agent's FIRST move rather than its last.
+  const head = resume ? `${rendered}\n\n${String(resume).trim()}` : rendered;
+  const out = `${head}\n\n${ISSUE_COMPLETE_INSTRUCTION}`;
   return stages ? `${out}\n\n${String(stages).trim()}` : out;
 }
 
@@ -119,4 +203,4 @@ function issueTabName(number, title, maxLen) {
   return full.length <= limit ? full : full.slice(0, limit) + '…';
 }
 
-module.exports = { renderIssuePrompt, normalizeLabels, issueWorktreeName, issueTabName, clipBody, ISSUE_BODY_LIMIT, ISSUE_COMPLETE_INSTRUCTION, WORKFLOW_STAGES };
+module.exports = { renderIssuePrompt, normalizeLabels, issueWorktreeName, issueTabName, clipBody, resumePromptText, humanAge, ISSUE_BODY_LIMIT, ISSUE_COMPLETE_INSTRUCTION, WORKFLOW_STAGES, RESUME_TEXT_LIMIT };

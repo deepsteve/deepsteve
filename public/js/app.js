@@ -1892,7 +1892,7 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
     configProfile = agentType.slice('config:'.length);
     agentType = 'claude';
   }
-  const ws = createWebSocket({ id: existingId, cwd, isNew, worktree: opts.worktree, name: opts.name, planMode: opts.planMode, agentType, configProfile, cols, rows, windowId: getWindowId(), fork: opts.fork, rcParent: opts.rcParent, noRestore: opts.noRestore });
+  const ws = createWebSocket({ id: existingId, cwd, isNew, worktree: opts.worktree, fresh: opts.fresh, name: opts.name, planMode: opts.planMode, agentType, configProfile, cols, rows, windowId: getWindowId(), fork: opts.fork, rcParent: opts.rcParent, noRestore: opts.noRestore });
 
   // Reconnect state lives on this handle, not the sessions map (#556): the map
   // entry only exists after the first {type:'session'} message, so a connect
@@ -3450,6 +3450,72 @@ function showCloseConfirmDialog() {
   });
 }
 
+/**
+ * Resume / Start fresh / Cancel for an issue that already has a worktree (#689).
+ *
+ * Resolves `'resume' | 'fresh' | null`. Escape, Cancel and a click outside all mean
+ * null, which means "do not start" rather than "go back to the picker" — the picker
+ * overlay is already gone by the time this opens, because its own Escape handler is
+ * registered on `document` and would otherwise close both at once.
+ *
+ * Everything shown is server-computed and arrives in `status`; this function formats.
+ * Resume is the primary action, EXCEPT when another session is already open on that
+ * worktree — two agents editing one checkout is the state this feature must not walk
+ * anyone into by momentum, so there the safe answer becomes the default one.
+ */
+function showResumeIssueDialog(issue, status) {
+  return new Promise(resolve => {
+    const wt = status.worktree;
+    const live = status.liveSessions || [];
+    const row = (k, v) => `<div style="display:flex;gap:10px;"><span style="min-width:104px;color:var(--ds-text-secondary);">${k}</span><span>${escapeHtml(String(v))}</span></div>`;
+    const facts = [
+      wt.branch ? row('branch', wt.branch) : '',
+      wt.commits == null ? '' : row('commits', `${wt.commits} ahead of ${wt.base || 'base'}`),
+      wt.dirty == null ? '' : row('uncommitted', wt.dirty === 0 ? 'none' : `${wt.dirty} file${wt.dirty === 1 ? '' : 's'}`),
+      wt.lastTouched ? row('last touched', relativeTime(wt.lastTouched)) : '',
+    ].join('');
+    const warning = live.length
+      ? `<p style="font-size:13px;color:var(--ds-accent-orange);margin:12px 0 0;">${live.length === 1 ? 'A session is' : `${live.length} sessions are`} already open on this worktree${live[0].name ? ` (${escapeHtml(live[0].name)})` : ''}. Resuming means two agents editing the same files.</p>`
+      : '';
+
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay';
+    overlay.innerHTML = `
+      <div class="modal modal-wide">
+        <h2>Issue #${issue.number} already has a worktree</h2>
+        <div style="font-size:13px;color:var(--ds-text-primary);display:flex;flex-direction:column;gap:4px;">${facts}</div>
+        ${warning}
+        <p style="font-size:12px;color:var(--ds-text-secondary);margin:12px 0 16px;">Starting fresh creates a second worktree${status.freshName ? ` (<code>${escapeHtml(status.freshName)}</code>)` : ''} and leaves this one exactly as it is. Nothing is deleted either way.</p>
+        <div class="modal-buttons">
+          <button class="btn-secondary" id="resume-cancel">Cancel</button>
+          <button class="${live.length ? 'btn-primary' : 'btn-secondary'}" id="resume-fresh">Start fresh</button>
+          <button class="${live.length ? 'btn-secondary' : 'btn-primary'}" id="resume-go">Resume</button>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+
+    const cleanup = (result) => {
+      document.removeEventListener('keydown', onKey, true);
+      overlay.remove();
+      resolve(result);
+    };
+    // Capture phase, like the restart confirm: a modal over the terminal must not let
+    // Escape reach the PTY. No Enter binding — the two start actions are not
+    // interchangeable enough for a blind default.
+    const onKey = (e) => {
+      if (e.key !== 'Escape') return;
+      e.stopPropagation();
+      e.preventDefault();
+      cleanup(null);
+    };
+    document.addEventListener('keydown', onKey, true);
+    overlay.querySelector('#resume-cancel').onclick = () => cleanup(null);
+    overlay.querySelector('#resume-fresh').onclick = () => cleanup('fresh');
+    overlay.querySelector('#resume-go').onclick = () => cleanup('resume');
+    overlay.onclick = (e) => { if (e.target === overlay) cleanup(null); };
+  });
+}
+
 function showCloseDisplayTabDialog() {
   return new Promise(resolve => {
     const overlay = document.createElement('div');
@@ -4691,6 +4757,27 @@ async function showIssuePicker() {
     if (link) link.addEventListener('click', e => e.stopPropagation());
   }
 
+  /**
+   * The "this issue already has work parked in it" pill (#689).
+   *
+   * Every fact here is computed by the SERVER and arrives on the row — the browser
+   * formats, it never inspects a worktree. Two states, because "a worktree exists"
+   * and "there is work in it" are genuinely different answers: a merged issue leaves
+   * its worktree behind, so an empty one is common and must not read as a resume.
+   */
+  function issueWorktreeBadge(wt) {
+    if (!wt) return '';
+    const when = wt.lastTouched ? relativeTime(wt.lastTouched) : '';
+    const empty = wt.commits === 0;
+    const label = empty
+      ? ['worktree', 'empty', when].filter(Boolean).join(' · ')
+      : ['resume', wt.commits == null ? null : `${wt.commits} commit${wt.commits === 1 ? '' : 's'}`, when].filter(Boolean).join(' · ');
+    const title = wt.branch
+      ? `Branch ${wt.branch}${wt.base ? `, ${wt.commits ?? '?'} commit(s) ahead of ${wt.base}` : ''}`
+      : 'A worktree for this issue already exists';
+    return `<span class="issue-worktree-badge${empty ? ' empty' : ''}" title="${escapeHtml(title)}">${escapeHtml(label)}</span>`;
+  }
+
   function renderIssues(issuesToRender) {
     const list = overlay.querySelector('.issue-list');
     if (!list) return;
@@ -4699,12 +4786,13 @@ async function showIssuePicker() {
       const el = document.createElement('div');
       el.className = 'issue-item';
       el.dataset.number = issue.number;
+      const badge = issueWorktreeBadge(issue.worktree);
       el.innerHTML = `
         <span class="issue-number">#${issue.number}</span>
         <div class="issue-info">
           <div class="issue-title">${escapeHtml(issue.title)}</div>
-          ${issue.labels && issue.labels.length > 0 ? `
-            <div class="issue-labels">${issue.labels.map(l => `<span class="issue-label">${escapeHtml(l.name)}</span>`).join('')}</div>
+          ${badge || (issue.labels && issue.labels.length > 0) ? `
+            <div class="issue-labels">${badge}${(issue.labels || []).map(l => `<span class="issue-label">${escapeHtml(l.name)}</span>`).join('')}</div>
           ` : ''}
         </div>
         <a class="issue-link" href="${escapeHtml(issue.url)}" target="_blank" title="Open on GitHub">&#8599;</a>
@@ -4749,27 +4837,47 @@ async function showIssuePicker() {
     }
   }
 
-  function startIssue() {
+  async function startIssue() {
     if (!selectedIssue) return;
     // Read BEFORE the overlay is torn down, and here rather than off the Start
     // button — double-clicking a row calls this directly.
     const autopilot = !!overlay.querySelector('#issue-autopilot')?.checked;
+    const issue = selectedIssue;
     overlay.remove();
+
+    // #689: the picker's row already carries a badge, but the row can be minutes old
+    // and cannot afford an uncommitted-file count. Ask the server for the authoritative
+    // answer at the moment of the click, then let the user choose. A failure here is
+    // not a reason to refuse the session — `worktree: null` starts exactly as before.
+    let fresh = false;
+    if (issue.worktree) {
+      const status = await fetchJSON(`/api/issue-worktree?cwd=${encodeURIComponent(gitRoot)}&number=${issue.number}`)
+        .catch(() => null);
+      if (status?.worktree) {
+        const choice = await showResumeIssueDialog(issue, status);
+        if (!choice) return;   // Cancel, Escape, or a click outside: do not start.
+        fresh = choice === 'fresh';
+      }
+    }
 
     // Send the issue fields, not a rendered prompt (#642): the server owns
     // wandPromptTemplate, so a user-edited template has exactly one reader and
     // this path can't drift from /api/start-issue or MCP start_issue.
     createSession(gitRoot, null, true, {
-      worktree: 'github-issue-' + selectedIssue.number,
+      worktree: 'github-issue-' + issue.number,
+      // "Start fresh" is a REQUEST, not a name (#689). The server mints the sibling
+      // worktree at the moment it spawns, so nothing here has to know the naming
+      // convention and no name can go stale between the dialog and the spawn.
+      fresh,
       issue: {
-        number: selectedIssue.number,
-        title: selectedIssue.title,
-        labels: selectedIssue.labels,
-        url: selectedIssue.url,
-        body: selectedIssue.body,
+        number: issue.number,
+        title: issue.title,
+        labels: issue.labels,
+        url: issue.url,
+        body: issue.body,
       },
       planMode: wandPlanMode,
-      name: truncateTitle(`#${selectedIssue.number} ${selectedIssue.title}`),
+      name: truncateTitle(`#${issue.number} ${issue.title}`),
       agentType: getDefaultAgentType(),
       // Seeds the session's server-side autopilot value (#643); the tab context
       // menu is what changes it afterwards.

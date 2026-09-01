@@ -64,6 +64,10 @@ export function createWebSocket(options = {}) {
   if (options.cwd) params.set('cwd', options.cwd);
   if (options.isNew) params.set('new', '1');
   if (options.worktree) params.set('worktree', options.worktree);
+  // #689: "the requested worktree already has work in it — give me a sibling instead."
+  // A request, not a name: the server mints the sibling at spawn time, so the browser
+  // never has to know the naming convention and no name can go stale in between.
+  if (options.fresh) params.set('fresh', '1');
   if (options.cols) params.set('cols', options.cols);
   if (options.rows) params.set('rows', options.rows);
   if (options.name) params.set('name', options.name);

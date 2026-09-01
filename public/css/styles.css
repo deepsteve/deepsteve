@@ -620,6 +620,12 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
 .issue-link:hover { opacity: 1; color: var(--ds-accent-green); }
 .issue-labels { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
 .issue-label { font-size: 11px; padding: 1px 6px; border-radius: 12px; background: var(--ds-bg-tertiary); color: var(--ds-text-secondary); border: 1px solid var(--ds-border); }
+/* "This issue already has a worktree" (#689). Same pill metrics as .issue-label so the
+   row reads as one strip, tinted green because it changes what the click will do. The
+   .empty variant is a leftover worktree with nothing in it — common, since a merged
+   issue leaves its directory behind — and must not look like parked work. */
+.issue-worktree-badge { font-size: 11px; padding: 1px 6px; border-radius: 12px; background: rgba(63, 185, 80, .15); color: var(--ds-accent-green); border: 1px solid rgba(63, 185, 80, .3); }
+.issue-worktree-badge.empty { background: var(--ds-bg-tertiary); color: var(--ds-text-secondary); border-color: var(--ds-border); }
 .issue-empty { padding: 16px; text-align: center; color: var(--ds-text-secondary); font-size: 13px; }
 .issue-loading { display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 40px 16px; gap: 12px; }
 .issue-loading::before { content: ''; width: 24px; height: 24px; border: 2.5px solid var(--ds-border); border-top-color: var(--ds-accent-green); border-radius: 50%; animation: spin 0.7s linear infinite; }

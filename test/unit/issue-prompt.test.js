@@ -263,6 +263,10 @@ test('every renderIssuePrompt call site decides about stages (#668)', () => {
     const call = callSlice(server, at);
     assert.match(call, /\bstages\b/,
       `a renderIssuePrompt call site does not pass stages (#668):\n${call}`);
+    // Same argument for `resume` (#689): a surface that forgets it is a surface where
+    // an agent walks into someone else's commits believing the worktree is its own.
+    assert.match(call, /\bresume\b/,
+      `a renderIssuePrompt call site does not pass resume (#689):\n${call}`);
   }
   // The COUNT matters as much as the per-site check: a refactor that inlined a site to
   // zero would pass the loop vacuously.
@@ -384,4 +388,174 @@ test('startIssueSession records the engine that actually spawned', () => {
     'startIssueSession must take its engine from spawnSession\'s return value');
   assert.ok(!/constructor\.name === 'TmuxEngine'/.test(body),
     'engineType must not be guessed from the requested engine');
+});
+
+// --- resuming an existing worktree (#689) -----------------------------------
+
+const { resumePromptText, humanAge, RESUME_TEXT_LIMIT } = require('../../issue-prompt.js');
+
+const RESUMED = {
+  name: 'x', path: '/repo/.claude/worktrees/x',
+  branch: 'worktree-x-689', base: 'main',
+  commits: 3, behind: 0, dirty: 12, head: 'a4b9061',
+  lastTouched: Date.now() - 2 * 3600 * 1000,
+};
+
+test('the resume block lands between the issue and the completion instruction', () => {
+  // It is context about the task, not a rule about finishing, so it reads before the
+  // two tails. Putting it after them would separate stage 4's "...then issue_complete"
+  // from the instruction it refines, and would bury the one fact that has to change the
+  // agent's FIRST move rather than its last.
+  const out = renderIssuePrompt('BODY', { number: 1, title: 't' }, { resume: 'RESUMING', stages: 'STAGES' });
+  assert.equal(out, `BODY\n\nRESUMING\n\n${ISSUE_COMPLETE_INSTRUCTION}\n\nSTAGES`);
+});
+
+test('no resume renders byte-for-byte what it rendered before (#689)', () => {
+  // Nearly every start is a fresh one, so the new argument must be invisible on it.
+  const fields = { number: 689, title: 'resume off', body: 'b', labels: 'x', url: 'u' };
+  for (const stages of [null, 'STAGES']) {
+    const base = renderIssuePrompt(TEMPLATE, fields, { stages });
+    for (const opts of [{ stages }, { stages, resume: null }, { stages, resume: '' }, { stages, resume: false }]) {
+      assert.equal(renderIssuePrompt(TEMPLATE, fields, opts), base,
+        `resume=${JSON.stringify(opts.resume)} must not change the prompt (#689)`);
+    }
+  }
+});
+
+test('a user-edited template can neither drop the resume block nor reorder it', () => {
+  // Same guarantee the other two tails have: appended AFTER substitution.
+  for (const template of ['', 'no variables at all', TEMPLATE, '{{body}}']) {
+    const out = renderIssuePrompt(template, { number: 1, title: 't' }, { resume: 'RESUMING' });
+    assert.ok(out.includes('RESUMING'), `template ${JSON.stringify(template)} lost the resume block`);
+    assert.ok(out.indexOf('RESUMING') < out.indexOf(ISSUE_COMPLETE_INSTRUCTION),
+      'the resume block must come before the completion instruction');
+  }
+});
+
+test('the resume text names the branch and base it was READ from', () => {
+  // A Claude session's branch is `worktree-github-issue-N` and an ensureWorktree one's
+  // is `github-issue-N`. An agent handed the wrong name runs a rev-range against
+  // nothing and concludes there was no prior work.
+  const text = resumePromptText(RESUMED);
+  assert.match(text, /RESUMING/);
+  assert.ok(text.includes('worktree-x-689'), text);
+  assert.ok(text.includes('3 commits ahead of `main`'), text);
+  assert.ok(text.includes('12 uncommitted files'), text);
+  assert.ok(text.includes('main..HEAD'), text);
+});
+
+test('an empty leftover worktree gets its own text, not a resume', () => {
+  // The case that will dominate: a merged issue leaves its worktree behind, so pointing
+  // an agent at a rev-range on a branch with nothing on it is a worse first turn than
+  // the silence this feature replaces.
+  const text = resumePromptText({ ...RESUMED, commits: 0, dirty: 0 });
+  assert.ok(!text.includes('RESUMING'), text);
+  assert.ok(text.includes('0 commits ahead'), text);
+  assert.ok(text.includes('no uncommitted changes'), text);
+});
+
+test('an uncounted branch omits the count rather than claiming zero', () => {
+  // "We could not ask git" and "there is nothing on the branch" are different answers
+  // and must not look alike — they lead to different first moves.
+  const text = resumePromptText({ ...RESUMED, commits: undefined, head: undefined });
+  assert.ok(!/\bcommits? ahead\b/.test(text), text);
+  assert.match(text, /RESUMING/, 'unknown commits with 12 dirty files is still prior work');
+});
+
+test('another live session on the worktree is called out', () => {
+  // Two agents editing one checkout is the state a silent resume is most likely to
+  // create and least able to recover from.
+  const alone = resumePromptText(RESUMED, []);
+  const shared = resumePromptText(RESUMED, [{ id: 'abc', name: '#689 thing' }]);
+  assert.ok(!alone.includes('Another deepsteve session'), alone);
+  assert.ok(shared.includes('Another deepsteve session'), shared);
+});
+
+test('no status renders nothing at all', () => {
+  assert.equal(resumePromptText(null), null);
+  assert.equal(resumePromptText(undefined), null);
+});
+
+test('the resume text stays cheap enough to paste on every resumed start', () => {
+  // Typed into a TUI composer on top of a body already clipped at ISSUE_BODY_LIMIT.
+  // A budget is the only thing that stops it growing a paragraph per release.
+  const worst = resumePromptText(
+    { ...RESUMED, branch: 'worktree-github-issue-689', base: 'main', commits: 1234, dirty: 5678 },
+    [{ id: 'a', name: 'n' }],
+  );
+  assert.ok(worst.length <= RESUME_TEXT_LIMIT,
+    `the resume block is ${worst.length} characters — keep it under ${RESUME_TEXT_LIMIT} (#689)`);
+  assert.ok(resumePromptText({ ...RESUMED, commits: 0, dirty: 0 }).length <= RESUME_TEXT_LIMIT);
+});
+
+test('ages are spelled out, floored, and never negative', () => {
+  const now = 1000000000000;
+  assert.equal(humanAge(now - 30 * 1000, now), 'just now');
+  assert.equal(humanAge(now - 60 * 1000, now), '1 minute ago');
+  // Floored: 90 minutes is "1 hour ago", not "2 hours ago". This number tells an agent
+  // how stale the work it inherited is, so overstating the gap is the wrong error.
+  assert.equal(humanAge(now - 90 * 60 * 1000, now), '1 hour ago');
+  assert.equal(humanAge(now - 6 * 86400 * 1000, now), '6 days ago');
+  // A clock that moved backwards must not produce "-3 minutes ago" in a prompt.
+  assert.equal(humanAge(now + 60000, now), 'just now');
+});
+
+test('the resume decision is made in exactly one place on the server (#689)', () => {
+  // Same rule as issueStagesEnabled: renderIssuePrompt takes TEXT, so one function
+  // decides what a resumed session is told and every surface goes through it.
+  const server = read('server.js');
+  assert.equal(server.split('resumePromptText(').length - 1, 1,
+    'resumePromptText must have one reader in server.js, issueResumeText() (#689)');
+});
+
+test('the resumed snapshot is persisted, not just held in memory (#689)', () => {
+  // It records which commits were already on the branch when this session started, it
+  // cannot be recomputed later, and issue_complete reads it at the far end of the
+  // session — so a restart in between must not erase it. Same argument as autopilot's,
+  // and the same two hand-maintained places.
+  const server = read('server.js');
+  const ser = server.slice(server.indexOf('function serializeShellEntry('));
+  assert.ok(/resumedWorktree: entry\.resumedWorktree \|\| null/.test(ser.slice(0, ser.indexOf('\n}'))),
+    'serializeShellEntry must carry resumedWorktree (#689)');
+  assert.ok(/resumedWorktree: restored\.resumedWorktree \|\| null/.test(server),
+    'the WS restore path must restore resumedWorktree onto the live entry (#689)');
+});
+
+test('the worktree is read BEFORE anything can create it (#689)', () => {
+  // The race this guards: a Claude session creates its own worktree directory seconds
+  // after spawn, and the picker's prompt is delivered later still — so a stat taken at
+  // prompt time reports "resuming" for a worktree this very session just made.
+  const server = read('server.js');
+
+  const fn = server.slice(server.indexOf('function startIssueSession('));
+  const body = fn.slice(0, fn.indexOf('\napp.post('));
+  assert.ok(body.indexOf('worktreeExists(cwd, worktree)') > 0
+    && body.indexOf('worktreeExists(cwd, worktree)') < body.indexOf('ensureWorktree(cwd, worktree)'),
+    'startIssueSession must read the worktree before ensureWorktree can create it (#689)');
+
+  // The picker's path latches a boolean in the create block and does the expensive half
+  // in the `issue` message handler.
+  assert.ok(/const worktreeExisted = !!worktree && worktreeExists\(cwd, worktree\);/.test(server),
+    'the WS create block must latch worktreeExisted (#689)');
+  assert.ok(server.indexOf('const worktreeExisted =') < server.indexOf('worktreeCwd = ensureWorktree(cwd, worktree)'),
+    'the latch must be read before ensureWorktree in the WS create block (#689)');
+  assert.ok(/entry\.worktreeExisted && entry\.worktree/.test(server),
+    'the issue handler must gate its work on the latch (#689)');
+});
+
+test('the browser never computes a fact about a worktree (#689)', () => {
+  // It may NAME one — app.js has always minted the `github-issue-<n>` string, and a
+  // comment there legitimately mentions the worktrees path — but every fact it SHOWS
+  // comes off the server's row, and "Start fresh" is a request rather than a name.
+  // Deliberately narrow: these are the strings that would mean git ran, or was
+  // reimplemented, in the client, which is the thing that must not happen.
+  const app = read('public/js/app.js');
+  for (const forbidden of ['rev-list', 'for-each-ref', '--porcelain', 'ahead-behind']) {
+    assert.ok(!app.includes(forbidden),
+      `public/js/app.js must not contain ${forbidden} — the server owns worktree facts (#689)`);
+  }
+  // The positive half: the fresh-start choice leaves as a boolean, never as a name the
+  // browser computed. A client-minted `<name>-2` could be taken by the time it arrives.
+  assert.ok(/fresh: opts\.fresh/.test(app) && !/-2['"`]/.test(app.slice(app.indexOf('async function startIssue'), app.indexOf('async function fetchAndRender'))),
+    'the picker must send fresh as a request, not a minted worktree name (#689)');
 });

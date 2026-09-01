@@ -478,7 +478,8 @@ function init(context) {
       },
     },
     start_issue: {
-      description: 'Open a new deepsteve session for a GitHub issue. Fetches the issue body from GitHub, creates a worktree, and starts an agent with the issue prompt. The new tab opens in the same browser window as the caller.',
+      description: 'Open a new deepsteve session for a GitHub issue. Fetches the issue body from GitHub, creates a worktree, and starts an agent with the issue prompt. The new tab opens in the same browser window as the caller. '
+        + 'If the issue already has a worktree, this RESUMES it — the new session lands on the existing branch, and the result\'s `resumed` field says what was already there (branch, commits ahead of the base, uncommitted files, when it was last touched). The new session is told the same thing in its prompt. Nothing is deleted or reset.',
       schema: {
         number: z.number().describe('GitHub issue number'),
         title: z.string().describe('Issue title'),
@@ -514,7 +515,20 @@ function init(context) {
           source: 'mcp',
         });
         if (result.error) return refuseCwdProblem(result.error);
-        return { content: [{ type: 'text', text: JSON.stringify({ id: result.id, name: result.name, cwd: result.cwd, worktree: result.worktree, autopilot: result.autopilot, ...tabDeliveryNote(result.tabDelivery) }) }] };
+        // `resumed` (#689): this path has no human to show a confirm to, so it resumes
+        // by default and reports what it walked into. Absent when the worktree is new,
+        // which keeps the ordinary result exactly the shape it has always been.
+        const resumed = result.resumed ? {
+          resumed: {
+            branch: result.resumed.branch || null,
+            commits: result.resumed.commits ?? null,
+            dirty: result.resumed.dirty ?? null,
+            head: result.resumed.head || null,
+            note: 'This issue already had a worktree, so the new session resumed it rather than starting clean. '
+              + 'Its prompt says so. Nothing was deleted or reset.',
+          },
+        } : {};
+        return { content: [{ type: 'text', text: JSON.stringify({ id: result.id, name: result.name, cwd: result.cwd, worktree: result.worktree, autopilot: result.autopilot, ...resumed, ...tabDeliveryNote(result.tabDelivery) }) }] };
       },
     },
     issue_complete: {
@@ -546,6 +560,34 @@ function init(context) {
         // turning autopilot off a real cancel: nothing was ever queued, so there is
         // nothing to unwind, and the flag's value right now is the whole answer.
         const on = !!caller.autopilot;
+
+        // ── Resumed work (#689) ──
+        //
+        // Stamped on the entry at spawn, read here for the same reason `autopilot` is:
+        // the value now is the whole answer. It is a SNAPSHOT and cannot be recomputed
+        // at this point — by now the earlier session's commits sit on the branch looking
+        // exactly like this one's, which is the confusion the stamp exists to prevent.
+        //
+        // `headBefore` is what makes this actionable rather than decorative: it names the
+        // exact boundary, so the agent can run one rev-range and report its own work
+        // instead of claiming a branch it merely inherited. That matters most under
+        // Autopilot, where the next step is a whole-branch merge and a `gh issue close`.
+        const resumed = caller.resumedWorktree || null;
+        const resumedBlock = resumed ? {
+          resumed: {
+            branch: resumed.branch,
+            commitsBefore: resumed.commitsBefore,
+            dirtyBefore: resumed.dirtyBefore,
+            headBefore: resumed.headBefore,
+          },
+        } : {};
+        const priorWork = resumed && (resumed.commitsBefore || resumed.dirtyBefore);
+        const priorSummary = resumed
+          ? [
+            resumed.commitsBefore == null ? null : `${resumed.commitsBefore} commit(s)`,
+            resumed.dirtyBefore ? `${resumed.dirtyBefore} uncommitted file(s)` : null,
+          ].filter(Boolean).join(' and ')
+          : '';
 
         // ── The review gate (#669) ──
         //
@@ -584,7 +626,10 @@ function init(context) {
           };
         }
         if (gate) {
-          const payload = { autopilot: on, stages: true, result: resultId, approved, ...gate };
+          // The resumed block rides the gate answers too: `share_result` is where an
+          // agent writes up what it did, and that is exactly where inherited commits
+          // get described as its own work.
+          const payload = { autopilot: on, stages: true, result: resultId, approved, ...resumedBlock, ...gate };
           log(`[MCP] issue_complete: ${callerId} autopilot=${on ? 'on' : 'off'} stages=on `
             + `result=${resultId || 'none'} -> ${payload.next}`);
           return { content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }] };
@@ -671,6 +716,31 @@ function init(context) {
             };
           }
         }
+        // The resume caution (#689), appended rather than woven in, so a session that
+        // did NOT resume gets byte-identical text to before.
+        //
+        // Since #688 the merge has already HAPPENED by the time we get here, so this is
+        // no longer a warning to act on — it is about attribution, which is the thing
+        // still in the agent's hands. The summary it is about to write, and the comment
+        // on the issue it just closed, are where four inherited commits get described as
+        // this session's work; `headBefore` is the exact boundary that stops them being.
+        // It rides EVERY outcome for that reason, `stop` and `resolve-conflict` included
+        // — a rebase is no less someone else's work for not having merged yet.
+        //
+        // Deliberately not a refusal. A branch parked mid-issue is still that issue's
+        // work and merging it is right; what would be wrong is claiming it.
+        Object.assign(payload, resumedBlock);
+        if (priorWork) {
+          const tip = resumed.headBefore ? ` (branch tip \`${resumed.headBefore}\`)` : '';
+          const range = resumed.headBefore
+            ? `Your own commits are \`git log --oneline ${resumed.headBefore}..HEAD\` — report those, and do `
+              + 'not describe the earlier work as yours.'
+            : 'Be explicit in your report about which part of the work is yours.';
+          payload.instruction += ` NOTE: this session RESUMED an existing worktree — ${priorSummary} were `
+            + `already there when you started${tip}. `
+            + (payload.next === 'merged' ? 'That earlier work went into this merge too. ' : '')
+            + range;
+        }
         // Logged on every call (#643). The feature rests on the agent actually calling
         // this, and this line is the only evidence of the call rate — which is what a
         // daemon-side backstop would have to be justified by. One line, not two: with
@@ -680,6 +750,7 @@ function init(context) {
         // which is the other thing worth being able to grep for after the fact.
         log(`[MCP] issue_complete: ${callerId} autopilot=${on ? 'on' : 'off'}`
           + (stages ? ` stages=on result=${resultId || 'none'}/approved` : '')
+          + (resumed ? ` resumed=${resumed.commitsBefore ?? '?'}c/${resumed.dirtyBefore ?? '?'}d` : '')
           + ` -> ${payload.next}`
           + (payload.branch ? ` (${payload.branch} -> ${payload.target || '?'} = ${payload.status})` : ''));
         return { content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }] };

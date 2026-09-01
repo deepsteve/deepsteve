@@ -130,6 +130,12 @@ test('the worktree tier is bound to the name startIssueSession actually mints', 
   assert.strictEqual(backlog.worktreeIssueNumber('worktree-github-issue-671'), null);
   assert.strictEqual(backlog.worktreeIssueNumber('github-issue-671-b6'), null);
   assert.strictEqual(backlog.worktreeIssueNumber(null), null);
+  // #689's "Start fresh": a second worktree for an issue that already had one. It is
+  // still that issue's work, so it stays in this immutable-worktree tier rather than
+  // dropping to the mutable-tab-name one. The `-b6` case above is the boundary — a
+  // NON-numeric suffix is somebody's own branch, not a name this daemon minted.
+  assert.strictEqual(backlog.worktreeIssueNumber('github-issue-671-2'), 671);
+  assert.strictEqual(backlog.worktreeIssueNumber('github-issue-671-13'), 671);
 });
 
 test('a renamed tab still matches, because the worktree is what carries the number', () => {

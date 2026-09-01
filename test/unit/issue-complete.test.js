@@ -471,3 +471,111 @@ test('the tool description warns about the gate, and says it merges', () => {
   assert.match(tools.issue_complete.description, /do not run a merge command afterwards/i,
     'the description is the only place a caller learns it need not do anything else');
 });
+
+// --- resumed worktrees (#689) -----------------------------------------------
+//
+// The constraint: a session that RESUMED an existing worktree must not read the prior
+// commits as its own work. Since #688 the merge happens inside this call, so the note is
+// no longer a warning to act on — it is about attribution, which is what is still in the
+// agent's hands when it writes the summary and the comment on the issue it just closed.
+//
+// The merging cases use the same real-repo recipe the #688 cases do; the gated and
+// autopilot-off cases deliberately keep the no-sessionPaths ctx, so reaching a merge
+// would throw.
+
+const RESUMED = { branch: 'feature', base: 'main', headBefore: 'a4b9061', commitsBefore: 3, dirtyBefore: 12, at: 1 };
+
+function resumedMergeTools(stamp = RESUMED, opts = {}) {
+  const t = mergeTools(opts);
+  t.shells.get('s').resumedWorktree = stamp;
+  return t;
+}
+
+// No sessionPaths, so anything that reached a merge would throw — which is what makes
+// these tests evidence that the gate and the off-switch short-circuit above it.
+function makeResumedTools({ stamp = RESUMED, stages = false } = {}) {
+  const shells = new Map([
+    ['off', { autopilot: false, agentType: 'claude', worktree: 'github-issue-689', resumedWorktree: stamp }],
+    ['on', { autopilot: true, agentType: 'claude', worktree: 'github-issue-689', resumedWorktree: stamp }],
+  ]);
+  const logs = [];
+  const tools = init({ shells, settings: { issueStagesEnabled: stages }, log: (m) => logs.push(m) });
+  return { tools, logs };
+}
+
+test('a merged resumed session is told which commits are not its own', async () => {
+  // The branch tip at spawn is the whole point: it turns a vague "there was prior work"
+  // into one rev-range the agent can actually run.
+  const { tools } = resumedMergeTools();
+  const p = parse(await tools.issue_complete.handler({}, callerExtra('s')));
+  assert.equal(p.next, 'merged', p.instruction);
+  assert.deepEqual(p.resumed, {
+    branch: 'feature', commitsBefore: 3, dirtyBefore: 12, headBefore: 'a4b9061',
+  });
+  assert.match(p.instruction, /RESUMED an existing worktree/);
+  assert.ok(p.instruction.includes('a4b9061..HEAD'), p.instruction);
+  assert.match(p.instruction, /went into this merge too/);
+  assert.match(p.instruction, /do not describe the earlier work as yours/);
+});
+
+test('the resumed note on the stop path names no merge and no close', async () => {
+  // Same rule the off answer has always had: this is the branch that means "a human
+  // takes it from here", so it must not hand the agent a way to finish by itself.
+  const { tools } = makeResumedTools();
+  const p = parse(await tools.issue_complete.handler({}, callerExtra('off')));
+  assert.equal(p.next, 'stop');
+  assert.match(p.instruction, /RESUMED an existing worktree/);
+  assert.doesNotMatch(p.instruction, /\/deepsteve:merge|\$deepsteve-merge|merge_worktree|merge_session/);
+  assert.doesNotMatch(p.instruction, /close_session/);
+  assert.doesNotMatch(p.instruction, /went into this merge/, 'nothing was merged on this path');
+});
+
+test('an empty resumed worktree gets the block but no caution', async () => {
+  // A merged issue leaves its worktree behind, so resuming an empty one is common and
+  // carries no risk of claiming anyone's work. The facts still ride along.
+  const { tools } = resumedMergeTools({ ...RESUMED, commitsBefore: 0, dirtyBefore: 0 });
+  const p = parse(await tools.issue_complete.handler({}, callerExtra('s')));
+  assert.equal(p.next, 'merged', p.instruction);
+  assert.equal(p.resumed.commitsBefore, 0);
+  assert.doesNotMatch(p.instruction, /RESUMED an existing worktree/,
+    'nothing was inherited, so there is nothing to attribute');
+});
+
+test('a session that did not resume says nothing about resuming (#689)', async () => {
+  // Nearly every session. The new field must be entirely invisible on that path.
+  const { tools } = resumedMergeTools(null);
+  const p = parse(await tools.issue_complete.handler({}, callerExtra('s')));
+  assert.equal(p.next, 'merged', p.instruction);
+  assert.equal('resumed' in p, false);
+  assert.doesNotMatch(p.instruction, /RESUMED/);
+
+  const { tools: offTools } = makeTools();
+  const off = parse(await offTools.issue_complete.handler({}, callerExtra('off')));
+  assert.equal('resumed' in off, false);
+  assert.doesNotMatch(off.instruction, /RESUMED/);
+});
+
+test('the resumed facts ride the review gate answers too', async () => {
+  // share_result is where an agent writes up what it did, which is exactly where
+  // inherited commits get described as its own work. This ctx has no sessionPaths, so
+  // the gate short-circuiting above the merge is what makes the call succeed at all.
+  const { tools } = makeResumedTools({ stages: true });
+  const p = parse(await tools.issue_complete.handler({}, callerExtra('on')));
+  assert.equal(p.next, 'share_result');
+  assert.equal(p.resumed.headBefore, 'a4b9061');
+});
+
+test('a resumed conflict still says whose work is being rebased', async () => {
+  // A rebase is no less somebody else's work for not having merged yet.
+  const { tools } = resumedMergeTools(RESUMED, { conflict: true });
+  const p = parse(await tools.issue_complete.handler({}, callerExtra('s')));
+  assert.equal(p.next, 'resolve-conflict', p.instruction);
+  assert.match(p.instruction, /RESUMED an existing worktree/);
+  assert.doesNotMatch(p.instruction, /went into this merge/, 'the merge was aborted');
+});
+
+test('the resume is logged, since the call is the only evidence it happened', async () => {
+  const { tools, logs } = resumedMergeTools();
+  await tools.issue_complete.handler({}, callerExtra('s'));
+  assert.ok(logs.some(l => l.includes('resumed=3c/12d')), logs.join('\n'));
+});

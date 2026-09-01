@@ -134,6 +134,11 @@ test('a title spanning lines is clipped to its first line', async () => {
 test('issueNumberFromBranch reads the number out of the branch, or null', () => {
   assert.strictEqual(issueNumberFromBranch('worktree-github-issue-688'), 688);
   assert.strictEqual(issueNumberFromBranch('github-issue-7'), 7);
+  // #689's "Start fresh" mints a second worktree for an issue that already had one, so
+  // the branch carries a `-<k>` tail. `\d+` stops at the hyphen, which is what keeps the
+  // suffix out of the number — the merge still closes 689, not 6892.
+  assert.strictEqual(issueNumberFromBranch('worktree-github-issue-689-2'), 689);
+  assert.strictEqual(issueNumberFromBranch('github-issue-689-13'), 689);
   assert.strictEqual(issueNumberFromBranch('spike/colors'), null);
   assert.strictEqual(issueNumberFromBranch(''), null);
   assert.strictEqual(issueNumberFromBranch(null), null);
