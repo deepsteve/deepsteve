@@ -170,6 +170,9 @@ async function executeCommand(cmd) {
       case 'history':
         callbacks.toggleHistory?.();
         break;
+      case 'merge-session':
+        callbacks.mergeActiveSession?.();
+        break;
     }
   } else if (cmd.type === 'open-app') {
     callbacks.openApp?.(cmd.appId);
@@ -238,9 +241,13 @@ async function open() {
 
   // Built-in commands from server
   for (const cmd of serverCommands) {
-    if (cmd.type === 'builtin') {
-      items.push(cmd);
-    }
+    if (cmd.type !== 'builtin') continue;
+    // Merge (#688) is the one builtin that does not apply to every tab. Hidden rather
+    // than shown-and-inert on a non-worktree tab: /api/commands is fetched fresh on each
+    // open, so "which tab is active" is a question we can answer right here, and an entry
+    // that silently does nothing is worse than an entry that isn't offered.
+    if (cmd.id === 'merge-session' && !callbacks.canMergeActiveSession?.()) continue;
+    items.push(cmd);
   }
 
   // Apps (#661). The rail is ⌘P-toggled, so a rail-only launcher is unreachable half the

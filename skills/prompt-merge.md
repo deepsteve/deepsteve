@@ -9,30 +9,25 @@ the `/deepsteve:merge` skill. **On "no"**, stop cleanly and leave the worktree i
 
 ## Procedure
 
-1. **Confirm this is a worktree session.** Run this single bash invocation and parse the
-   `key=value` lines:
+1. **Confirm this is a worktree session.** Call `mcp__deepsteve__get_session_info` with no
+   arguments — it describes the calling session. `worktree` is non-null on a worktree
+   session, and `repoRoot` is the main checkout. If `worktree` is null, tell the user this
+   isn't a worktree session so there's nothing to merge, and STOP.
 
-   ```sh
-   common=$(git rev-parse --git-common-dir)
-   gitdir=$(git rev-parse --git-dir)
-   [ "$(cd "$gitdir" && pwd)" = "$(cd "$common" && pwd)" ] && echo "in_worktree=false" || echo "in_worktree=true"
-   echo "branch=$(git branch --show-current)"
-   main_path=$(dirname "$(cd "$common" && pwd)")
-   echo "detected_target=$(git -C "$main_path" branch --show-current)"
-   echo "dirty=$(git status --porcelain | wc -l | tr -d ' ')"
-   ```
+   Do **not** try to work this out in Bash. Claude Code 2.1.222+ isolates worktree sessions
+   and refuses any command naming `git` more than once, or pointing `git -C` at the shared
+   checkout — which is what this step used to do, and it has not run since.
 
-   The `DEEPSTEVE_WORKTREE` env var is a quick hint, but this git block is authoritative and
-   also yields the target branch. If `in_worktree=false`, tell the user this isn't a worktree
-   session so there's nothing to merge, and STOP.
-
-2. **Summarize the finished work.** Keep it short and scannable:
-   - Commits on this branch since the target: `git log <detected_target>..<branch> --oneline`
+2. **Summarize the finished work.** Keep it short and scannable, using single-`git`
+   commands inside this worktree (each its own Bash call):
+   - The branch you are on: `git branch --show-current`
+   - Commits on it: `git log main..HEAD --oneline` (name the branch the user expects to
+     merge into, if it isn't `main`)
    - Any uncommitted changes: `git status --short`
 
 3. **Present the handoff and ask.** End your message with:
 
-   > I've finished this work. Would you like to merge `<branch>` into `<detected_target>`?
+   > I've finished this work. Would you like to merge `<branch>`?
 
 4. **STOP and wait** for the user's reply. End your turn here — do not merge automatically.
 

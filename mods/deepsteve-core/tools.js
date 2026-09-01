@@ -1,8 +1,10 @@
 const { z } = require('zod');
 const { randomUUID } = require('crypto');
 const path = require('path');
-const { execFileSync } = require('child_process');
+const { execFile, execFileSync } = require('child_process');
 const { mergeWorktree } = require('./merge-worktree');
+const { mergeSession } = require('./session-merge');
+const { resolveBinary } = require('../../bin-path');
 const { stateDir, spawnCwdProblem } = require('../../paths');
 const projectScope = require('../../project-scope');
 const { usableWorktree } = require('../../worktree-support');
@@ -21,6 +23,26 @@ function runGit(args, cwd) {
   } catch (e) {
     return { ok: false, stdout: e.stdout || '', stderr: e.stderr || e.message || '' };
   }
+}
+
+// `gh`, the shape server.js's fetchIssueFromGitHub and the workshop mod's runGh both
+// use: an absolute path from resolveBinary (the LaunchAgent PATH has no
+// /opt/homebrew/bin), argv and NEVER a shell, a 15s ceiling, and every failure — missing
+// binary, non-zero exit, timeout — resolving to a reason rather than rejecting.
+//
+// Async where runGit above is sync, and that asymmetry is the point: git here is local
+// and single-digit-ms, while `gh` goes to github.com. Blocking the shared Express/ws
+// event loop for up to 15s is precisely what #553 took out of this daemon.
+function runGh(argv, cwd) {
+  return new Promise((resolve) => {
+    const gh = resolveBinary('gh');
+    if (!gh) return resolve({ error: 'gh-unavailable' });
+    execFile(gh, argv, { cwd, encoding: 'utf8', timeout: 15000, maxBuffer: 4 * 1024 * 1024 },
+      (err, stdout) => {
+        if (err) return resolve({ error: `gh-failed: ${err.message.split('\n')[0]}` });
+        resolve({ stdout });
+      });
+  });
 }
 
 // What actually happened to the tab (#680). Spawning a session and opening a tab for it
@@ -151,6 +173,41 @@ function init(context) {
     return lines.slice(-n);
   }
 
+  /**
+   * Commit, merge, close the issue — and then arm the #627 deferred close (#688).
+   *
+   * Shared by the two MCP callers (`merge_session` and `issue_complete`) because they
+   * want the identical ending, and by nothing else: the two REST callers deliberately
+   * arm nothing, so they call mergeSession() directly rather than coming through here.
+   * The arming rule is `merge_worktree`'s, unchanged and for its original reason —
+   * WORKTREE CALLERS ONLY, since a merge run from a main-checkout session is an ordinary
+   * merge in a long-lived tab nobody asked to end.
+   *
+   * Returns `{ ok: false, message }` when the session has no resolvable repo, else
+   * `{ ok: true, payload }` with the merge result plus the autoClose fields.
+   */
+  async function mergeCallerSession(callerId, caller, { target, subject, body } = {}) {
+    const { cwd, repoRoot } = sessionPaths(caller);
+    if (!cwd || !repoRoot) {
+      return { ok: false, message: 'Could not resolve this session\'s working directory.' };
+    }
+    const result = await mergeSession({
+      git: runGit, gh: runGh, cwd, repoRoot, isWorktree: !!caller.worktree, target, subject, body,
+    });
+    const payload = { ...result };
+    if (result.status === 'merged' && caller.worktree && armSessionAutoClose) {
+      const armed = armSessionAutoClose(callerId, { reason: 'merged' });
+      if (armed) {
+        const seconds = Math.max(0, Math.round((armed.closeAt - Date.now()) / 1000));
+        payload.autoCloseAt = armed.closeAt;
+        payload.autoCloseInSeconds = seconds;
+        payload.autoCloseMessage = `This session is finished and will close automatically in ${describeDelay(seconds)}. `
+          + 'Call close_session once your report is written to close it now instead; typing in this tab cancels the auto-close.';
+      }
+    }
+    return { ok: true, payload };
+  }
+
   return {
     get_my_session_id: {
       description: 'Get the deepsteve session ID for the calling session. No parameters needed. Use this instead of running `echo $DEEPSTEVE_SESSION_ID`.',
@@ -164,14 +221,19 @@ function init(context) {
       },
     },
     get_session_info: {
-      description: 'Get live session metadata for a deepsteve session: tab name, cwd (your actual working directory — the worktree path for worktree sessions), repoRoot (the main repo checkout), worktree (the worktree name, or null), runningCommand (for a plain terminal session, the command running in it right now, or null if it is idle at its prompt; always null for agent sessions), state ("idle" = the agent is at its input prompt, "busy" = mid-task, "unknown" = not classifiable for this agent type), and metaControls (whether the Meta Controls setting is on, i.e. whether meta_type will type without asking the user first). Use `get_my_session_id` to get your session ID.',
+      description: 'Get live session metadata for a deepsteve session: tab name, cwd (your actual working directory — the worktree path for worktree sessions), repoRoot (the main repo checkout), worktree (the worktree name, or null), runningCommand (for a plain terminal session, the command running in it right now, or null if it is idle at its prompt; always null for agent sessions), state ("idle" = the agent is at its input prompt, "busy" = mid-task, "unknown" = not classifiable for this agent type), and metaControls (whether the Meta Controls setting is on, i.e. whether meta_type will type without asking the user first). Called with no arguments it describes the calling session, so `get_my_session_id` first is not needed.',
       schema: {
-        session_id: z.string().describe('The deepsteve session ID. Use `get_my_session_id` to get this value.'),
+        // Optional since #688. It was the last core tool that made a caller spend a whole
+        // turn on `get_my_session_id` just to name itself, and a turn is the unit that
+        // costs — a skill runs in the current conversation, so each one replays the
+        // entire context. Every other tool here already auto-detects the same way.
+        session_id: z.string().optional().describe('The deepsteve session ID. Auto-detected from the MCP request when omitted.'),
       },
-      handler: async ({ session_id }) => {
-        const entry = shells.get(session_id);
+      handler: async ({ session_id }, extra) => {
+        session_id = session_id || callerShellId(extra);
+        const entry = session_id ? shells.get(session_id) : null;
         if (!entry) {
-          return { content: [{ type: 'text', text: `Session "${session_id}" not found.` }] };
+          return { content: [{ type: 'text', text: `Session "${session_id || 'unknown'}" not found.` }] };
         }
         const fallbackName = entry.cwd ? path.basename(entry.cwd) : 'shell';
         const { cwd, repoRoot } = sessionPaths(entry);
@@ -457,19 +519,23 @@ function init(context) {
     },
     issue_complete: {
       description: 'Report that the work you were given is finished, and find out what to do next. '
-        + 'Call this when you believe the task is complete, BEFORE writing your final summary — the answer '
-        + 'may tell you to merge, which has to happen while you are still working. '
+        + 'Call this when you believe the task is complete, BEFORE writing your final summary — with Autopilot '
+        + 'on it PERFORMS the merge, and the answer reports what happened. '
         + 'The answer depends on Autopilot, a per-session setting the USER controls (from the issue picker '
         + 'and the tab context menu); it is not yours to decide. With Autopilot off you are told to stop and '
-        + 'leave the tab for review; with it on you are told how to merge this session yourself. '
+        + 'leave the tab for review; with it on this session is committed, merged, its GitHub issue closed, '
+        + 'and its tab armed to close — all inside this one call, so do not run a merge command afterwards. '
         + 'Every issue session is asked to call this, in both states. '
-        + 'When workflow stages are enabled it will also refuse to answer until you have shared a result '
-        + 'with `share_result` and a human has approved it — call it anyway and it will tell you which of '
-        + 'those two things is missing.',
+        + 'When workflow stages are enabled it will also refuse to answer — and merge nothing — until you have '
+        + 'shared a result with `share_result` and a human has approved it; call it anyway and it will tell you '
+        + 'which of those two things is missing.',
       schema: {
         session_id: z.string().optional().describe('Caller session ID (auto-detected if omitted).'),
+        target: z.string().optional().describe('Branch to merge into. Defaults to whatever the main checkout has checked out.'),
+        subject: z.string().optional().describe('Commit subject for any uncommitted work. Optional — the server derives one from the issue title. Pass one only if you have something better to say; never spend a tool call working it out.'),
+        body: z.string().optional().describe('Commit body, if the subject needs elaborating.'),
       },
-      handler: async ({ session_id }, extra) => {
+      handler: async ({ session_id, target, subject, body }, extra) => {
         const callerId = session_id || extra?.requestInfo?.url?.searchParams?.get('shellId');
         const caller = callerId ? shells.get(callerId) : null;
         if (!caller) {
@@ -533,40 +599,89 @@ function init(context) {
               + 'and leave this tab open. Do NOT merge and do NOT close the session — a human will review '
               + 'the worktree and merge it.',
           };
-        } else if ((settings.enabledSkills || []).includes('merge')) {
-          // Codex reaches the same skill under a different name — server.js rewrites
-          // /deepsteve:<id> to $deepsteve-<id> when it generates the Codex copy, so
-          // handing a Codex session the Claude form would name a command it does not have.
-          const invocation = caller.agentType === 'codex' ? '$deepsteve-merge' : '/deepsteve:merge';
-          payload = {
-            autopilot: true,
-            next: 'merge',
-            instruction: `Autopilot is on for this session: when you complete, run ${invocation}. `
-              + 'That skill commits this worktree, merges it, closes the GitHub issue and closes this tab.',
-          };
         } else {
-          // The merge skill is disabled on this install, so naming it would send the
-          // agent after a command that does not exist — and a stuck agent improvises
-          // `git push origin <branch>:main`, which moves the remote and leaves the
-          // local checkout behind (docs/sessions.md).
-          payload = {
-            autopilot: true,
-            next: 'merge',
-            instruction: 'Autopilot is on for this session, but the deepsteve "merge" skill is not enabled here, '
-              + 'so there is no merge command to run. Do it directly instead: commit everything in this worktree '
-              + '(`git add -A` then `git commit`, as separate Bash calls), then call mcp__deepsteve__merge_worktree, '
-              + 'and once it reports status "merged", call mcp__deepsteve__close_session. Never push the branch over '
-              + 'the target with `git push origin <branch>:<target>` — that moves the remote and leaves the local '
-              + 'checkout behind.',
-          };
+          // ── The merge itself (#688) ──
+          //
+          // This used to answer with INSTRUCTIONS — "run /deepsteve:merge" — and that
+          // answer was the start of about ten more assistant turns, each replaying the
+          // whole session context at the point where it is largest. The work behind
+          // those turns is mechanical and the daemon already knows every input, so it
+          // happens here instead and this call is the last one the merge needs. Net new
+          // turns: zero. The session's final message is the summary it was going to
+          // write anyway.
+          //
+          // Note where this sits: strictly BELOW the `if (gate)` return above. With
+          // `issueStagesEnabled` on and no human-written `resultApprovedAt`, control
+          // never reaches this line, so nothing here can become a second way for work
+          // to reach a target branch without passing the review gate.
+          //
+          // No `enabledSkills` check any more. The old branch existed because the answer
+          // NAMED a slash command that might not exist; a server-side merge names
+          // nothing, so whether the `merge` skill is installed is no longer a fact this
+          // tool has any reason to know. The Codex `$deepsteve-merge` rewrite goes with
+          // it — nobody is being told to invoke anything.
+          const outcome = await mergeCallerSession(callerId, caller, { target, subject, body });
+          if (!outcome.ok) {
+            return { content: [{ type: 'text', text: outcome.message }], isError: true };
+          }
+          const r = outcome.payload;
+          if (r.status === 'merged') {
+            payload = {
+              autopilot: true, next: 'merged', ...r,
+              instruction: `Merged into ${r.target}. `
+                + (r.issue && r.issue.closed ? `Issue #${r.issue.number} is closed. ` : '')
+                + (r.issue && r.issue.number != null && !r.issue.closed
+                  ? `Closing issue #${r.issue.number} failed (${r.issue.error}) — mention it in your summary. ` : '')
+                + 'Write your summary of what you did now and end your turn. There is nothing left to run: '
+                + 'do not merge again and do not open a terminal. This tab closes itself — call close_session '
+                + 'in the same message as your summary if you want it to go now.',
+            };
+          } else if (r.status === 'conflict') {
+            // The one place a model is still wanted. The working agent has the code in
+            // context, which is exactly what resolving a conflict needs.
+            payload = {
+              autopilot: true, next: 'resolve-conflict', ...r,
+              instruction: `Merging "${r.branch}" into "${r.target}" conflicted, and the merge was aborted for `
+                + `you, so ${r.target} is untouched. Rebase this worktree onto it — \`git rebase ${r.target}\`, a `
+                + 'single git inside this worktree, which the isolation guard allows — resolve the conflicts, then '
+                + 'call mcp__deepsteve__merge_worktree to retry the merge. If the rebase itself conflicts beyond '
+                + 'what you can resolve, run `git rebase --abort`, tell the user, and stop. Do NOT close this session.',
+            };
+          } else if (r.status === 'pushed' || r.status === 'push-failed') {
+            // Not a worktree session, so there was nothing to merge into. Committed and
+            // pushed on the branch it is already on — and deliberately not closed.
+            payload = {
+              autopilot: true, next: 'stop', ...r,
+              instruction: r.status === 'pushed'
+                ? `This is not a worktree session, so there was no merge to do. Your work is committed on "${r.branch}" `
+                  + 'and pushed. Write your report and leave this tab open — do NOT close the session.'
+                : `This is not a worktree session, so there was no merge to do. Your work is committed on "${r.branch}" `
+                  + 'but the push failed — show the output to the user. Do NOT close the session.',
+            };
+          } else {
+            // Every other status left the target unchanged. Report it and stop; nothing
+            // was armed, so the tab stays exactly where it is.
+            payload = {
+              autopilot: true, next: 'stop', ...r,
+              instruction: `The merge did not run — status "${r.status}". `
+                + (r.message ? `${r.message} ` : '')
+                + 'Tell the user what happened and stop. Do NOT retry blindly, do NOT work around it by pushing '
+                + 'the branch over the target (`git push origin <branch>:<target>` moves the remote and leaves the '
+                + 'local checkout behind), and do NOT close this session.',
+            };
+          }
         }
         // Logged on every call (#643). The feature rests on the agent actually calling
         // this, and this line is the only evidence of the call rate — which is what a
         // daemon-side backstop would have to be justified by. One line, not two: with
         // stages on, "started with stages" and "started without" are different runs.
+        //
+        // Since #688 it is also the record of a merge this daemon performed on its own,
+        // which is the other thing worth being able to grep for after the fact.
         log(`[MCP] issue_complete: ${callerId} autopilot=${on ? 'on' : 'off'}`
           + (stages ? ` stages=on result=${resultId || 'none'}/approved` : '')
-          + ` -> ${payload.next}`);
+          + ` -> ${payload.next}`
+          + (payload.branch ? ` (${payload.branch} -> ${payload.target || '?'} = ${payload.status})` : ''));
         return { content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }] };
       },
     },
@@ -616,6 +731,48 @@ function init(context) {
         return {
           content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }],
           ...(result.status === 'merged' ? {} : { isError: true }),
+        };
+      },
+    },
+    merge_session: {
+      description: 'Finish this session: commit anything uncommitted, merge the worktree branch into the target, '
+        + 'close the GitHub issue the branch names, and arm this tab to close — all server-side, in one call. '
+        + 'This is the whole of what `/deepsteve:merge` used to do step by step; call it instead of running those '
+        + 'steps yourself, and do NOT precede it with `git status`, `git add`, `git commit`, `gh issue view` or '
+        + '`get_session_info` — it does all of that and each extra call costs a full replay of your context. '
+        + 'The commit subject is derived from the issue title with no input from you; pass `subject` only if you '
+        + 'have something better to say. From a session that is NOT in a worktree it commits and pushes on the '
+        + 'branch you are already on, and merges and closes nothing. Statuses are `merge_worktree`\'s, unchanged: '
+        + 'only `merged` is success, `conflict` is yours to rebase and retry through `merge_worktree`, and every '
+        + 'other status left the target untouched. Use `merge_worktree` instead when you want the merge alone, '
+        + 'with no commit and no issue closed.',
+      schema: {
+        target: z.string().optional().describe('Branch to merge into. Defaults to the branch currently checked out in the main worktree.'),
+        subject: z.string().optional().describe('Commit subject for uncommitted work. Optional — the server derives `<issue title> (#<n>)` on an issue branch. Never spend a tool call working one out.'),
+        body: z.string().optional().describe('Commit body, if the subject needs elaborating.'),
+        session_id: z.string().optional().describe('Caller session ID (auto-detected if omitted).'),
+      },
+      handler: async ({ target, subject, body, session_id }, extra) => {
+        const callerId = session_id || callerShellId(extra);
+        const caller = callerId ? shells.get(callerId) : null;
+        if (!caller) {
+          return { content: [{ type: 'text', text: `Session "${callerId || 'unknown'}" not found.` }], isError: true };
+        }
+        const outcome = await mergeCallerSession(callerId, caller, { target, subject, body });
+        if (!outcome.ok) {
+          return { content: [{ type: 'text', text: outcome.message }], isError: true };
+        }
+        const payload = outcome.payload;
+        log(`[MCP] merge_session: ${payload.branch || '?'} -> ${payload.target || '?'} = ${payload.status}`
+          + `${payload.committed ? ' (committed)' : ''}`
+          + `${payload.issue && payload.issue.closed ? ` closed #${payload.issue.number}` : ''}`);
+        // `pushed` joins `merged` as a success: the non-worktree path did everything it
+        // was ever going to do. Every other status left the target unchanged and needs
+        // the caller to stop and report, which is what isError says.
+        const ok = payload.status === 'merged' || payload.status === 'pushed';
+        return {
+          content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }],
+          ...(ok ? {} : { isError: true }),
         };
       },
     },
@@ -1049,11 +1206,56 @@ function init(context) {
 
 // Read the durable record of one-shot runs (#631). Same shape as the mod's other REST
 // surfaces: a display tab or the user can render it without going through MCP.
-function registerRoutes(app) {
+function registerRoutes(app, context) {
   app.get('/api/terminal-runs', (req, res) => {
     // getRunLog() rather than the bare `runLog`: the log loads from disk when it is
     // constructed, so reading it must not depend on a run having happened this boot.
     res.json({ runs: getRunLog().list({ limit: req.query.limit, session: req.query.session }) });
+  });
+
+  /**
+   * Merge a worktree tab, with no agent involved at all (#688).
+   *
+   * The person merging here glanced at a tab, saw an agent had finished, and wants it
+   * merged. They are not asking the AGENT for anything — they are asking deepsteve — so
+   * this must not go through the session's model, and it doesn't: it reads the entry's
+   * cwd and runs git. Whether the agent in that tab is idle, mid-turn or long dead is
+   * therefore not a question this route has to ask.
+   *
+   * Two deliberate differences from the MCP path:
+   *
+   *  - It arms NO auto-close. A human is looking at this tab with Close one key away,
+   *    and closing a session somebody did not ask to close is not a thing to do on their
+   *    behalf. (The MCP path arms one because the agent has to be TOLD to stop and
+   *    reliably isn't — #627.) This is the same rule the Workshop panel's merge follows.
+   *  - It refuses a non-worktree session rather than falling through to commit-and-push.
+   *    A button labelled Merge must not push on someone's behalf, and the menu only ever
+   *    offers it on a worktree tab anyway — re-checked here because the browser's copy of
+   *    the session can be a broadcast behind.
+   */
+  app.post('/api/shells/:id/merge', async (req, res) => {
+    const id = req.params.id;
+    const entry = context.shells.get(id);
+    if (!entry) return res.status(404).json({ error: 'Shell not found' });
+    if (!entry.worktree) return res.status(400).json({ error: 'not-a-worktree' });
+
+    let cwd = '';
+    let repoRoot = '';
+    try { ({ cwd, repoRoot } = context.sessionPaths(entry)); } catch { /* reported below */ }
+    if (!cwd || !repoRoot) return res.status(400).json({ error: 'no-repo' });
+
+    const target = typeof req.body?.target === 'string' && req.body.target.trim()
+      ? req.body.target.trim()
+      : undefined;
+    const result = await mergeSession({
+      git: runGit, gh: runGh, cwd, repoRoot, isWorktree: true, target,
+    });
+    context.log(`[API] merge ${id}: ${result.branch || '?'} -> ${result.target || '?'} = ${result.status}`
+      + `${result.committed ? ' (committed)' : ''}`
+      + `${result.issue && result.issue.closed ? ` closed #${result.issue.number}` : ''}`);
+    // Not a 500 on a refusal: "the target checkout is dirty" is an answer, and the client
+    // renders which one it was. The same choice the Workshop merge route makes.
+    res.json(result);
   });
 }
 

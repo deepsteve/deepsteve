@@ -4523,6 +4523,10 @@ const BUILTIN_COMMANDS = [
   { id: 'shortcuts-help', type: 'builtin', name: 'Keyboard Shortcuts', description: 'Show all keyboard shortcuts' },
   { id: 'restore-sessions', type: 'builtin', name: 'Restore Sessions', description: 'Recover sessions from closed windows and tombstones' },
   { id: 'history', type: 'builtin', name: 'History', description: "Scroll this tab's transcript" },
+  // #688. Meaningful only on a worktree tab, and the client filters it out on any other
+  // rather than the server doing it: this list is fetched once when the palette opens and
+  // is not per-session, while which tab is active changes under it.
+  { id: 'merge-session', type: 'builtin', name: 'Merge Worktree', description: "Commit this tab's worktree, merge it, and close its GitHub issue" },
 ];
 
 function getCustomCommands() {

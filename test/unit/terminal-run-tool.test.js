@@ -342,11 +342,13 @@ test('the tool descriptions still point one-shot work away from open_terminal', 
 test('skills and docs still name run_in_terminal', () => {
   const read = (p) => fs.readFileSync(path.join(__dirname, '..', '..', p), 'utf8');
   assert.match(read('skills/terminal.md'), /run_in_terminal/);
-  // Ordering is load-bearing in merge.md: cleanup must precede step 9, whose own text
-  // warns that anything after close_session is cut off.
+  // Ordering is load-bearing in merge.md: cleanup must precede the self-close step,
+  // whose own text warns that anything after close_session is cut off. (#688 cut the
+  // skill from nine steps to four, so these are steps 3 and 4 now — the property being
+  // pinned is the order, not the numbers.)
   const merge = read('skills/merge.md');
   assert.match(merge, /run_in_terminal/);
-  assert.ok(merge.indexOf('8b.') < merge.indexOf('9. **Report and close this session'),
+  assert.ok(merge.indexOf('**Close any tab you opened**') < merge.indexOf('**Report and close this session'),
     'the cleanup step must come before the self-close step');
   assert.match(read('docs/agents.md'), /run_in_terminal/);
   // mods/deepsteve-core/mod.json used to carry a second declaration of this tool with a

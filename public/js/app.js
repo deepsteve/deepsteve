@@ -2589,6 +2589,15 @@ function initTerminal(id, ws, cwd, initialName, { hasScrollback = false, pending
       return s && s.worktree ? !!s.autopilot : null;
     },
     onToggleAutopilot: (sessionId, next) => setSessionAutopilot(sessionId, next),
+    // Merge (#688). A separate callback from getAutopilot rather than reusing its
+    // null: the two happen to be offered on the same tabs today, and tying one
+    // item's visibility to the other's applicability would make that a coincidence
+    // the next change has to preserve.
+    getWorktree: () => {
+      const s = sessions.get(id);
+      return (s && s.worktree) || null;
+    },
+    onMerge: (sessionId) => mergeSessionFromUI(sessionId),
     getModMenuItems: () => {
       return ModManager.getContextMenuItems().map(item => ({
         label: item.label,
@@ -2713,6 +2722,7 @@ function createModTab(modId, opts = {}) {
     onFork: () => {},
     getSessionType: () => 'mod-tab',
     getAutopilot: () => null,
+    getWorktree: () => null,
     getModMenuItems: () => [],
   };
 
@@ -2787,6 +2797,7 @@ function createDisplayTab(id, name, opts = {}) {
     onFork: () => {},
     getSessionType: () => 'display-tab',
     getAutopilot: () => null,
+    getWorktree: () => null,
     getModMenuItems: () => [],
   };
 
@@ -2876,6 +2887,7 @@ function createProjectModTab(mod, opts = {}) {
     onFork: () => {},
     getSessionType: () => 'project-mod',
     getAutopilot: () => null,
+    getWorktree: () => null,
     getModMenuItems: () => [],
   };
 
@@ -4483,6 +4495,83 @@ function setSessionAutopilot(sessionId, next) {
   }).catch(() => { /* offline: the tick stays where it was, which is the truth */ });
 }
 
+function showMergeConfirmDialog(worktree) {
+  return new Promise(resolve => {
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay';
+    overlay.innerHTML = `
+      <div class="modal">
+        <h2>Merge ${escapeHtml(worktree)}?</h2>
+        <p style="font-size:13px;color:var(--ds-text-secondary);margin-bottom:16px;">Anything uncommitted is committed first, then the branch is merged into whatever the main checkout has checked out. On a <code>github-issue-&lt;n&gt;</code> branch the issue is closed too. If the target checkout is dirty or the merge conflicts, nothing changes and you'll be told which. The tab stays open either way.</p>
+        <div class="modal-buttons">
+          <button class="btn-secondary" id="merge-confirm-cancel">Cancel</button>
+          <button class="btn-primary" id="merge-confirm-ok">Merge</button>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+
+    const cleanup = (result) => { overlay.remove(); resolve(result); };
+    overlay.querySelector('#merge-confirm-cancel').onclick = () => cleanup(false);
+    overlay.querySelector('#merge-confirm-ok').onclick = () => cleanup(true);
+    overlay.onclick = (e) => { if (e.target === overlay) cleanup(false); };
+  });
+}
+
+// Tabs with a merge in flight, so a second click (or the palette command on the same
+// tab) can't start a concurrent one. `git merge` on the same target twice over is not
+// something to find out about from the output.
+const merging = new Set();
+
+/**
+ * Merge a worktree tab, with no agent involved (#688).
+ *
+ * The whole point is that this costs zero model turns: the daemon knows the branch, the
+ * dirty state, the target and the issue number, so nothing is asked of the session. It
+ * therefore works the same whether that session's agent is idle, mid-turn or long dead.
+ *
+ * Unlike setSessionAutopilot above, the RESPONSE MATTERS. A refused merge — a dirty
+ * target checkout, a conflict — comes back HTTP 200 with a `status` that is not
+ * `merged`, so ignoring the body would render every refusal as a success.
+ */
+async function mergeSessionFromUI(sessionId) {
+  const session = sessions.get(sessionId);
+  const worktree = (session && session.worktree) || 'this worktree';
+  if (merging.has(sessionId)) return;
+  if (!await showMergeConfirmDialog(worktree)) return;
+
+  merging.add(sessionId);
+  try {
+    const r = await fetch(`/api/shells/${encodeURIComponent(sessionId)}/merge`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      showSessionErrorBanner(`Merge of ${worktree} failed: ${data.error || `HTTP ${r.status}`}`);
+      return;
+    }
+    if (data.status !== 'merged') {
+      // Which status it was is the difference between "commit that WIP and try again"
+      // and "go and look at the conflict", so it goes in the banner, not the 1.3s toast.
+      showSessionErrorBanner(`Merge of ${worktree} did not run (${data.status}). `
+        + (data.message || data.output || 'The target checkout is unchanged.'));
+      return;
+    }
+    const closed = data.issue && data.issue.closed ? `, closed #${data.issue.number}` : '';
+    showToast(`Merged into ${data.target}${closed}`);
+    // Reported separately: the merge really did succeed, and a failed `gh issue close`
+    // must not read as a failed merge — but it does need saying, since nobody else will.
+    if (data.issue && data.issue.number != null && !data.issue.closed) {
+      showSessionErrorBanner(`Merged into ${data.target}, but issue #${data.issue.number} was not closed (${data.issue.error}).`);
+    }
+  } catch (e) {
+    showSessionErrorBanner(`Merge of ${worktree} failed: ${e.message}`);
+  } finally {
+    merging.delete(sessionId);
+  }
+}
+
 // Guards the user-length prompts below: without it, repeated clicks stack N
 // directory pickers and then N issue modals.
 let issuePickerOpening = false;
@@ -5207,6 +5296,17 @@ async function init() {
     toggleHistory: () => {
       const s = activeId && sessions.get(activeId);
       if (s && s.agentType === 'claude') SessionHistory.toggle(activeId);
+    },
+    // #688. The predicate is what keeps the entry out of the list on a tab it cannot
+    // apply to; the action re-reads the session rather than trusting it, since the
+    // palette can be open across a tab switch.
+    canMergeActiveSession: () => {
+      const s = activeId && sessions.get(activeId);
+      return !!(s && s.worktree);
+    },
+    mergeActiveSession: () => {
+      const s = activeId && sessions.get(activeId);
+      if (s && s.worktree) mergeSessionFromUI(activeId);
     },
     focusTerminal: () => {
       if (activeId) {

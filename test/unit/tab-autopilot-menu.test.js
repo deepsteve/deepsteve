@@ -1,10 +1,13 @@
-// Headless unit test for the Autopilot item in the tab right-click menu (#643).
+// Headless unit tests for the tab right-click menu's session-lifecycle items:
+// Autopilot (#643) and Merge (#688).
 //
 // Autopilot's whole point is that it is a SERVER-side value: the menu is one of the
 // two switches that writes it, and it must show the session's real state (which the
 // server re-sends on every reconnect) rather than a browser-local guess. What this
 // file pins is the part that lives in the browser — when the item is offered at all,
 // which state the tick reflects, and that clicking it asks for the OPPOSITE value.
+// Merge, added below, is the other half of taking the model out of that path: with
+// Autopilot the session merges itself, and with this item a human merges it directly.
 //
 // No browser, no jsdom: same approach as tab-title.test.js and tab-arrows.test.js —
 // stub the globals tab-manager.js touches (it registers document listeners at module
@@ -97,6 +100,7 @@ function openMenuOn(tab) {
 
 const labelOf = (item) => (item.innerHTML || item.textContent || '');
 const findAutopilot = (items) => items.find((i) => labelOf(i).includes('Autopilot')) || null;
+const findMerge = (items) => items.find((i) => labelOf(i).includes('Merge')) || null;
 
 // ---------------------------------------------------------------- tests
 
@@ -159,6 +163,78 @@ test('the item sits in its own group, between Send to Window and Fork tab', asyn
     'Send to Window',
     '---',
     '&nbsp;&nbsp; Autopilot',
+    '---',
+    'Fork tab',
+    'History…',
+    'Close tab',
+  ]);
+});
+
+// ── Merge (#688) ─────────────────────────────────────────────────────────────
+//
+// Same menu, same harness — which is why these live here rather than in a file of their
+// own that would need its own copy of the fake DOM above.
+//
+// The point of the item is that merging a finished worktree needs no model: before it,
+// the only route was to type `/deepsteve:merge` at the session and pay ~10 turns of
+// replayed context for work the daemon can do alone.
+
+test('no Merge item when the tab is not a worktree session', async () => {
+  const { tab } = await setup({ getWorktree: () => null });
+  assert.equal(findMerge(openMenuOn(tab)), null);
+});
+
+test('no Merge item when a tab kind supplies no callback at all', async () => {
+  // The three iframe-backed tab kinds. Omitted, not disabled — the Autopilot rule.
+  const { tab } = await setup({});
+  assert.equal(findMerge(openMenuOn(tab)), null);
+});
+
+test('a worktree session gets a Merge item', async () => {
+  const { tab } = await setup({ getWorktree: () => 'github-issue-688' });
+  const item = findMerge(openMenuOn(tab));
+  assert.ok(item, 'the item must be offered on a worktree session');
+  // The ellipsis is a promise: unlike Autopilot beside it, this one asks first.
+  assert.match(labelOf(item), /^&nbsp;&nbsp; Merge…$/);
+});
+
+test('clicking Merge hands the session id to the callback', async () => {
+  const calls = [];
+  const { tab } = await setup({
+    getWorktree: () => 'github-issue-688',
+    onMerge: (id) => calls.push(id),
+  });
+  findMerge(openMenuOn(tab)).onclick();
+  assert.deepEqual(calls, ['s1']);
+});
+
+test('Merge does not depend on Autopilot being applicable, or vice versa', async () => {
+  // They are offered on the same tabs today. Deriving one's visibility from the other's
+  // would make that a coincidence the next change has to preserve, so each has its own
+  // callback and each is tested without the other.
+  const onlyMerge = await setup({ getWorktree: () => 'w' });
+  const a = openMenuOn(onlyMerge.tab);
+  assert.ok(findMerge(a), 'Merge is offered with no getAutopilot at all');
+  assert.equal(findAutopilot(a), null);
+
+  const onlyAutopilot = await setup({ getAutopilot: () => false });
+  const b = openMenuOn(onlyAutopilot.tab);
+  assert.ok(findAutopilot(b));
+  assert.equal(findMerge(b), null);
+});
+
+test('on a worktree tab both items share one group, Merge below Autopilot', async () => {
+  // One separator, not two: they are the same kind of act — what happens to this
+  // session's work — and Merge reads as the thing Autopilot would have done for you.
+  const { tab } = await setup({ getAutopilot: () => true, getWorktree: () => 'w' });
+  const menu = (tab.listeners.contextmenu({ preventDefault: () => {}, clientX: 1, clientY: 1 }), bodyChildren.at(-1));
+  const labels = menu.children.map((c) => (c.className === 'context-menu-separator' ? '---' : labelOf(c)));
+  assert.deepEqual(labels, [
+    'Rename',
+    'Send to Window',
+    '---',
+    '&#10003; Autopilot',
+    '&nbsp;&nbsp; Merge…',
     '---',
     'Fork tab',
     'History…',
