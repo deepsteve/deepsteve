@@ -46,7 +46,8 @@ test('every shipped manifest lands in exactly one section', () => {
 
   // Exact membership where it is small enough to be worth naming. If one of these fails the
   // question is not "loosen the test" — it is which section the new mod should appear under.
-  assert.deepStrictEqual(buckets.app, ['workshop']);
+  assert.deepStrictEqual((buckets.app || []).sort(), ['simeon', 'timecard', 'workshop'],
+    'Apps are the mods declaring `app: true` — a place you work from, not a way to draw');
   assert.deepStrictEqual(buckets.fullscreen, ['tower'],
     'Fullscreen holds only the non-game fullscreen mods — a game belongs under Games');
   assert.deepStrictEqual((buckets.tab || []).sort(), ['baby-browser', 'steveonardo']);
