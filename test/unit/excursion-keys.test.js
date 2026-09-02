@@ -306,12 +306,14 @@ test('the rail hides for the excursion without touching the ⌘P preference', as
   const toggleClick = byId.get('context-toggle').listeners.click;
   toggleClick();
   assert.strictEqual(railShown(rail), true);
-  assert.strictEqual(sessionMap.get('deepsteve-context-sidebar'), '1');
+  // localMap, not sessionMap: the rail's open state is a browser-wide preference, so it
+  // outlives the window (and the machine restart that empties sessionStorage).
+  assert.strictEqual(localMap.get('deepsteve-context-sidebar'), '1');
 
   ModManager.showView(WORKSHOP_VIEW);
   ds.visitSession('a');
   assert.strictEqual(railShown(rail), false, 'the app sent you; you are not browsing projects');
-  assert.strictEqual(sessionMap.get('deepsteve-context-sidebar'), '1',
+  assert.strictEqual(localMap.get('deepsteve-context-sidebar'), '1',
     'suppression is chrome, not a preference — it must not overwrite what the user chose');
 
   ds.endExcursion();

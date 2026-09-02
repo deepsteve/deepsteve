@@ -17,11 +17,16 @@ const assert = require('node:assert');
 // ---------------------------------------------------------------- fake globals
 
 const storeMap = new Map();
-globalThis.sessionStorage = {
-  getItem: (k) => (storeMap.has(k) ? storeMap.get(k) : null),
-  setItem: (k, v) => storeMap.set(k, String(v)),
-  removeItem: (k) => storeMap.delete(k),
-};
+const localMap = new Map();
+const mkStore = (m) => ({
+  getItem: (k) => (m.has(k) ? m.get(k) : null),
+  setItem: (k, v) => m.set(k, String(v)),
+  removeItem: (k) => m.delete(k),
+});
+globalThis.sessionStorage = mkStore(storeMap);
+// Both stores, because the rail's *appearance* is a browser-wide preference and its
+// *place* is per-window — the two halves live in different areas on purpose.
+globalThis.localStorage = mkStore(localMap);
 
 function fakeElement() {
   const classes = new Set();
@@ -109,8 +114,11 @@ let importCount = 0;
 
 // Fresh module + fake app.js wiring. Mirrors the app.js side of the contract:
 // tabs registry, active tab id, and the initContextViews callbacks.
-async function setup({ contexts = [CTX_A, CTX_B], tabs = {} } = {}) {
+async function setup({ contexts = [CTX_A, CTX_B], tabs = {}, session = {}, local = {} } = {}) {
   storeMap.clear();
+  localMap.clear();
+  for (const [k, v] of Object.entries(session)) storeMap.set(k, String(v));
+  for (const [k, v] of Object.entries(local)) localMap.set(k, String(v));
   tabEls.clear();
   byId.clear();
   docListeners.clear();
@@ -1019,4 +1027,60 @@ test('pressing an always-shown rail row selects its project, then opens (#647)',
   } finally {
     await reset();
   }
+});
+
+// ------------------------------------------- rail appearance is a browser preference
+
+// The rail's open state, width and Archived disclosure used to sit in sessionStorage,
+// which dies with the window. The daemon opens a *brand-new* browser tab at login, so
+// after a machine restart the rail always came back closed however you had left it.
+// They are preferences now — localStorage — while the active project and its last tab
+// stay per-window, exactly the split docs/frontend.md describes.
+
+test('a brand-new window opens the rail from the stored preference', async () => {
+  const { rail, toggle } = await setup({
+    local: { 'deepsteve-context-sidebar': '1', 'deepsteve-context-width': '260' },
+  });
+  // Nothing in sessionStorage at all — this is the login tab, freshly minted.
+  assert.strictEqual(rail.style.display, 'flex');
+  assert.strictEqual(rail.style.width, '260px', 'and at the width it was dragged to');
+  assert.strictEqual(toggle.title, 'Hide projects (⌘P)');
+});
+
+test('toggling writes the preference browser-wide, not per-window', async () => {
+  const { toggle } = await setup();
+  toggle.listeners.click();
+
+  assert.strictEqual(localMap.get('deepsteve-context-sidebar'), '1');
+  assert.strictEqual(storeMap.has('deepsteve-context-sidebar'), false,
+    'the per-window copy is what a restart throws away');
+});
+
+test('a tab still holding the old per-window value keeps it, then migrates', async () => {
+  // The upgrade case: a tab that was open before this change reloads with its state
+  // in the old home. It must not lose the rail, and the next write must move it.
+  const { rail, toggle } = await setup({
+    session: { 'deepsteve-context-sidebar': '1', 'deepsteve-context-width': '240' },
+  });
+  assert.strictEqual(rail.style.display, 'flex');
+  assert.strictEqual(rail.style.width, '240px');
+
+  toggle.listeners.click(); // close
+  assert.strictEqual(localMap.get('deepsteve-context-sidebar'), '0');
+  assert.strictEqual(storeMap.has('deepsteve-context-sidebar'), false);
+
+  toggle.listeners.click(); // and open again
+  assert.strictEqual(localMap.get('deepsteve-context-sidebar'), '1');
+});
+
+test('which project you are in stays per-window', async () => {
+  // The other half of the split: a second window must not inherit the first window's
+  // place. Only the chrome is shared.
+  const { mod } = await setup({ local: { 'deepsteve-context-active': 'ctxb' } });
+  assert.strictEqual(mod.getActiveContextId(), null);
+
+  mod.setActiveContext('ctxa');
+  assert.strictEqual(storeMap.get('deepsteve-context-active'), 'ctxa');
+  assert.strictEqual(localMap.get('deepsteve-context-active'), 'ctxb',
+    'the seeded browser-wide value is neither read nor written — it is not a preference');
 });

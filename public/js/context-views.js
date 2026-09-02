@@ -55,13 +55,18 @@ import { ModManager, appendAppRows } from './mod-manager.js';
 
 // Context definitions are server-owned (#526): they are the same entity as the
 // Scheduled Tasks "project groups", loaded from /api/contexts and kept fresh by
-// the 'contexts' WS broadcast (app.js → setContexts). Only the per-window VIEW
-// state (which context is active, whether the rail is open) stays client-side.
+// the 'contexts' WS broadcast (app.js → setContexts). Only the VIEW state stays
+// client-side, and it splits along the line docs/frontend.md draws: WHERE you are
+// is per-window sessionStorage, HOW THE RAIL LOOKS is a browser-wide preference in
+// localStorage — the same home the Apps panel's visibility and the compact-rail
+// flag already use. A preference has to outlive the window: the daemon opens a
+// brand-new browser tab at login, which has no sessionStorage at all, so a rail
+// stored per-window came back closed after every machine restart.
 const ACTIVE_KEY = nsKey('deepsteve-context-active');   // sessionStorage: active id (per window)
-const SIDEBAR_KEY = nsKey('deepsteve-context-sidebar'); // sessionStorage: open state (per window)
+const SIDEBAR_KEY = nsKey('deepsteve-context-sidebar'); // localStorage: open state (per browser)
 const LAST_TAB_KEY = nsKey('deepsteve-context-last-tab'); // sessionStorage: { [contextId]: tabId } (per window, #541)
-const WIDTH_KEY = nsKey('deepsteve-context-width');     // sessionStorage: rail width in px (per window, #569)
-const ARCHIVED_KEY = nsKey('deepsteve-context-archived'); // sessionStorage: archived section expanded (per window, #601)
+const WIDTH_KEY = nsKey('deepsteve-context-width');     // localStorage: rail width in px (per browser, #569)
+const ARCHIVED_KEY = nsKey('deepsteve-context-archived'); // localStorage: archived section expanded (per browser, #601)
 
 let enabled = true;
 let contexts = [];          // [{ id, name, dirs: [] }]
@@ -153,28 +158,48 @@ function saveActive() {
   if (activeContextId) sessionStorage.setItem(ACTIVE_KEY, activeContextId);
   else sessionStorage.removeItem(ACTIVE_KEY);
 }
+// The three rail-appearance preferences (open, width, archived disclosure) go through
+// this pair. Reads adopt a value left in the old sessionStorage home so an already-open
+// tab keeps what it had, and the legacy key is dropped only once the localStorage write
+// has actually landed — in a private window localStorage throws, and per-window
+// persistence is better than none.
+function loadPref(key) {
+  try {
+    const v = localStorage.getItem(key);
+    if (v !== null) return v;
+  } catch { /* private mode */ }
+  return sessionStorage.getItem(key);
+}
+function savePref(key, val) {
+  try {
+    localStorage.setItem(key, val);
+    sessionStorage.removeItem(key);
+  } catch {
+    sessionStorage.setItem(key, val);
+  }
+}
 function loadSidebar() {
-  return sessionStorage.getItem(SIDEBAR_KEY) === '1';
+  return loadPref(SIDEBAR_KEY) === '1';
 }
 function saveSidebar() {
-  sessionStorage.setItem(SIDEBAR_KEY, sidebarOpen ? '1' : '0');
+  savePref(SIDEBAR_KEY, sidebarOpen ? '1' : '0');
 }
-// Archived section open/closed — view state, so per-window like the rail itself (#601).
+// Archived section open/closed — part of how the rail looks, so it rides along (#601).
 function loadArchivedOpen() {
-  return sessionStorage.getItem(ARCHIVED_KEY) === '1';
+  return loadPref(ARCHIVED_KEY) === '1';
 }
 function saveArchivedOpen() {
-  sessionStorage.setItem(ARCHIVED_KEY, archivedOpen ? '1' : '0');
+  savePref(ARCHIVED_KEY, archivedOpen ? '1' : '0');
 }
 // Rail width (#569). Like the vertical-tabs sidebar (#552) the restored value is
 // guarded for SHAPE not size — no Math.max floor — so a width dragged down to the
 // rail floor (icon rail) survives a reload instead of silently re-inflating.
 function loadWidth() {
-  const n = parseFloat(sessionStorage.getItem(WIDTH_KEY));
+  const n = parseFloat(loadPref(WIDTH_KEY));
   return Number.isFinite(n) && n > 0 ? n : null;
 }
 function saveWidth(px) {
-  sessionStorage.setItem(WIDTH_KEY, String(Math.round(px)));
+  savePref(WIDTH_KEY, String(Math.round(px)));
 }
 function loadLastTabs() {
   try { return JSON.parse(sessionStorage.getItem(LAST_TAB_KEY)) || {}; } catch { return {}; }
