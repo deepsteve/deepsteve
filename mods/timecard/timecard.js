@@ -25,6 +25,7 @@ const el = {
   range: document.getElementById('tc-range'),
   views: document.getElementById('tc-views'),
   chart: document.getElementById('tc-chart'),
+  tip: document.getElementById('tc-tip'),
   axis: document.getElementById('tc-axis'),
   stats: document.getElementById('tc-stats'),
   error: document.getElementById('tc-error'),
@@ -33,6 +34,9 @@ const el = {
 let data = null;
 // Week is the default view.
 let view = 'week';
+// The bar the hover readout is currently describing, so a mousemove within one bar is
+// free and a re-render under a stationary pointer still re-anchors.
+let tipBar = null;
 
 /**
  * Copy the host's computed --ds-* values onto our own :root.
@@ -80,8 +84,43 @@ function formatStat(stat) {
   return stat.kind === 'count' ? String(Math.round(stat.value)) : Number(stat.value).toFixed(1);
 }
 
+/**
+ * Park the readout over the hovered bar.
+ *
+ * It sits just above the bar's top edge, and drops just inside the bar when a tall one
+ * leaves no room above it — the chart box is 120px and nothing may grow it, or the axis
+ * and the stat row below would shift every time the pointer crossed the chart.
+ */
+function showTip(bar) {
+  el.tip.textContent = bar.dataset.tip || '';
+  el.tip.hidden = false; // measured below, so it has to be laid out first
+
+  const chartBox = el.chart.getBoundingClientRect();
+  const barBox = bar.getBoundingClientRect();
+  const tipBox = el.tip.getBoundingClientRect();
+
+  const barTop = barBox.top - chartBox.top;
+  let top = barTop - 8 - tipBox.height;
+  if (top < 0) top = Math.min(barTop + 8, chartBox.height - tipBox.height);
+
+  const centered = (barBox.left - chartBox.left) + (barBox.width - tipBox.width) / 2;
+  const left = Math.max(0, Math.min(centered, chartBox.width - tipBox.width));
+
+  el.tip.style.top = `${top}px`;
+  el.tip.style.left = `${left}px`;
+}
+
+function hideTip() {
+  el.tip.hidden = true;
+  tipBar = null;
+}
+
 function renderChart(dataset) {
-  el.chart.replaceChildren();
+  // The readout lives inside the chart so it can be positioned against it; it is
+  // absolutely positioned, so it takes no part in the flex row and must survive the
+  // wipe that replaces the bars.
+  hideTip();
+  el.chart.replaceChildren(el.tip);
   el.axis.replaceChildren();
   dataset.values.forEach((value, i) => {
     const bar = document.createElement('div');
@@ -90,7 +129,9 @@ function renderChart(dataset) {
     // Heights scale to the dataset's max, which is a per-view constant rather than the
     // data max, so bars mean the same thing from one week to the next.
     if (!zero) bar.style.height = `${Math.min(100, (value / dataset.max) * 100)}%`;
-    bar.title = `${dataset.labels[i]} · ${value.toFixed(1)}h`;
+    // Not `title`: the native tooltip appears below and to the right of the cursor after
+    // a delay, which is neither over the bar nor immediate.
+    bar.dataset.tip = `${dataset.labels[i]} · ${value.toFixed(1)}h`;
     el.chart.appendChild(bar);
 
     const label = document.createElement('span');
@@ -153,6 +194,17 @@ async function refresh() {
     }
   }
 }
+
+// mousemove rather than mouseover, so the readout re-anchors after the 60s refresh
+// swaps the bars out from under a pointer that never moved.
+el.chart.addEventListener('mousemove', (e) => {
+  const bar = e.target.closest('.tc-bar');
+  if (!bar) { hideTip(); return; }
+  if (bar === tipBar) return;
+  tipBar = bar;
+  showTip(bar);
+});
+el.chart.addEventListener('mouseleave', hideTip);
 
 el.views.addEventListener('click', (e) => {
   const button = e.target.closest('button[data-view]');

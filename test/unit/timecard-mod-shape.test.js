@@ -145,6 +145,21 @@ test('the stat row re-renders its labels as well as its values', () => {
   assert.match(js, /toFixed\(1\)/);
 });
 
+test('the bar readout hovers over the chart instead of using the native tooltip', () => {
+  // `title` puts the browser's own tooltip below-right of the cursor after a delay —
+  // neither over the bar nor immediate — and it is invisible to every functional test.
+  assert.ok(!/\.title\s*=/.test(js), 'no bar may set a `title` attribute');
+  assert.match(js, /dataset\.tip/, 'the readout text rides on the bar it describes');
+  assert.match(html, /\.tc-chart\s*\{[^}]*position:\s*relative/,
+    'the readout is positioned against the chart box');
+  assert.match(html, /\.tc-tip\s*\{[^}]*pointer-events:\s*none/,
+    'a readout that takes the pointer flickers against the bar underneath it');
+  assert.match(html, /\.tc-bar::before\s*\{/,
+    'a 2px zero bar is unhoverable without a full-column hit area');
+  assert.match(js, /el\.chart\.replaceChildren\(el\.tip\)/,
+    'the readout is a child of the chart, so it must survive the wipe that replaces the bars');
+});
+
 test('the read route is checked before parsing — mod routes 404 briefly at boot', () => {
   assert.match(js, /if \(!res\.ok\)/,
     'client-log.js beacons every >=400 into the daemon log; parse only what came back OK');

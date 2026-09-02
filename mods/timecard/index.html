@@ -51,16 +51,47 @@
     .tc-views button.active { color: var(--ds-text-primary, #c9d1d9); }
     :focus-visible { outline: 1px solid var(--ds-text-secondary, #8b949e); outline-offset: 3px; }
 
-    .tc-chart { display: flex; align-items: flex-end; gap: 10px; height: 120px; margin-top: 30px; }
+    /* Positioned, so the hover readout can be placed against the chart box. */
+    .tc-chart { display: flex; align-items: flex-end; gap: 10px; height: 120px; margin-top: 30px; position: relative; }
     .tc-bar {
       flex: 1;
       border-radius: 3px 3px 0 0;
       background: var(--ds-text-primary, #c9d1d9);
+      position: relative;
+    }
+    /* The bar is the ink; the whole column is the hover target. A zero is a 2px hairline
+       and a quiet day is a sliver, and neither is something a pointer can land on. A
+       pseudo-element keeps the bars direct flex children, so the 10px gaps still line up
+       with the axis labels; the -5px bleed is half a gap on each side, which tiles the
+       columns edge to edge with no dead zone between them. */
+    .tc-bar::before {
+      content: '';
+      position: absolute;
+      left: -5px;
+      right: -5px;
+      bottom: 0;
+      height: 120px;
     }
     /* A zero renders as a hairline rather than a gap, so the rhythm of the period stays
        readable — a week with Sunday missing should still look like seven days. Square,
        because a 3px radius on a 2px bar is a lozenge. */
     .tc-bar.zero { height: 2px; border-radius: 0; background: var(--ds-border, #30363d); }
+
+    /* The readout hovers over the chart rather than sitting beside it, so nothing below
+       the bars moves when it appears. pointer-events: none so it can never take the
+       hover away from the bar it is describing. */
+    .tc-tip {
+      position: absolute;
+      z-index: 1;
+      pointer-events: none;
+      white-space: nowrap;
+      padding: 4px 8px;
+      border-radius: 4px;
+      font-size: 12px;
+      background: var(--ds-bg-primary, #0d1117);
+      color: var(--ds-text-primary, #c9d1d9);
+      border: 1px solid var(--ds-border, #30363d);
+    }
 
     /* Same gaps and flex:1 as the chart, so a label sits under its own bar. */
     .tc-axis {
@@ -101,7 +132,7 @@
           <button type="button" data-view="month">Month</button>
         </div>
       </div>
-      <div class="tc-chart" id="tc-chart"></div>
+      <div class="tc-chart" id="tc-chart"><div class="tc-tip" id="tc-tip" hidden></div></div>
       <div class="tc-axis" id="tc-axis"></div>
       <div class="tc-stats" id="tc-stats"></div>
       <div class="tc-error" id="tc-error" hidden></div>

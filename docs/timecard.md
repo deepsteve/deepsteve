@@ -117,6 +117,15 @@ transparent-on-transparent. Both halves are pinned by the shape test — includi
 mirror's token list covers every token the CSS paints with, which is otherwise a
 half-themed card nobody notices.
 
+Hovering a bar floats a readout — `Thu · 7.6h` — over the chart, anchored just above
+that bar's top edge and dropping just inside it when a tall bar leaves no room. It is
+positioned rather than laid out, so the fixed 120px chart never grows and the axis below
+it never shifts. The hit area is the whole column (a `::before` bleeding half a gap to
+each side), because a zero day is a 2px hairline and a quiet one is a sliver — neither is
+something a pointer can land on. The native `title` tooltip is deliberately not used: it
+appears below and to the right of the cursor after a delay, which is neither over the bar
+nor immediate.
+
 While the store is empty the card shows seeded example data and says so in the range
 line; the note disappears the moment a real sample lands. A paused sampler says
 `sampling off` there for the same reason — a frozen chart should not read as a quiet week.
