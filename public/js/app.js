@@ -3538,7 +3538,14 @@ function showCloseDisplayTabDialog() {
   });
 }
 
-function showRestartConfirmDialog() {
+/**
+ * `impact` is the server's sentence about what this restart actually costs —
+ * a tmux-backed agent keeps running through it (#620), so the old unconditional
+ * "running agents will be interrupted" was false for most tabs. The server owns
+ * the wording because it owns the session list and the shutdown predicate; the
+ * literal below is the fallback for a server that doesn't send one.
+ */
+function showRestartConfirmDialog(impact) {
   let resolve;
   const promise = new Promise(r => { resolve = r; });
 
@@ -3547,7 +3554,7 @@ function showRestartConfirmDialog() {
   overlay.innerHTML = `
     <div class="modal">
       <h2>Restart DeepSteve?</h2>
-      <p style="font-size:13px;color:var(--ds-text-secondary);margin-bottom:16px;">This will restart the server and reload the page. Running agents will be interrupted but sessions will be restored.</p>
+      <p style="font-size:13px;color:var(--ds-text-secondary);margin-bottom:16px;">This will restart the server and reload the page. ${escapeHtml(impact || 'Running agents will be interrupted but sessions will be restored.')}</p>
       <div class="modal-buttons">
         <button class="btn-secondary" id="restart-confirm-cancel">Cancel</button>
         <button class="btn-primary" id="restart-confirm-ok">Restart</button>
@@ -5358,7 +5365,7 @@ async function init() {
         dismissMetaControlsConsentDialog();
       }
     },
-    onShowRestartConfirm: () => showRestartConfirmDialog(),
+    onShowRestartConfirm: (impact) => showRestartConfirmDialog(impact),
     onShowReloadOverlay: () => showReloadOverlay()
   });
 

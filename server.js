@@ -6978,27 +6978,89 @@ app.post('/api/request-restart', (req, res) => {
     }
   };
 
-  // Send confirm-restart to all connected browsers (they elect a leader)
+  // Send confirm-restart to all connected browsers (they elect a leader). One
+  // impact sentence for the whole broadcast: every window is being asked about
+  // the same restart, so they must not read different numbers.
+  const impact = restartImpactSentence();
   for (const ws of clients) {
     log(`[restart] sending confirm-restart to windowId=${ws.windowId || 'none'}, readyState=${ws.readyState}`);
-    try { ws.send(JSON.stringify({ type: 'confirm-restart' })); } catch (e) {
+    try { ws.send(JSON.stringify({ type: 'confirm-restart', impact })); } catch (e) {
       log(`[restart] send failed: ${e.message}`);
     }
   }
 });
 
+/**
+ * Split the live sessions into the ones a restart keeps and the ones it ends.
+ *
+ * Both confirmation surfaces describe the same event, so they read the blast
+ * radius here rather than each counting for itself. The predicate is the one
+ * shutdown()'s Phase 0 partitions on — `canDetach` off the entry's actual
+ * engine, and not the `tmux-attach` pseudo-engine — deliberately not the
+ * recorded `engineType`, which says 'tmux' for a spawn that fell back to
+ * node-pty (#620). Saved and closed sessions aren't counted at all: they live
+ * in `savedState` and a restart does nothing to them.
+ */
+function restartBlastRadius() {
+  let surviving = 0;
+  let interrupted = 0;
+  for (const [, entry] of shells) {
+    const eng = entry.engine || ptyEngine;
+    if (entry.agentType !== 'tmux-attach' && eng.canDetach) surviving++;
+    else interrupted++;
+  }
+  return { surviving, interrupted, total: surviving + interrupted };
+}
+
+/** "3 sessions" / "1 session" — the count and its noun, agreeing. */
+function sessionCount(n) {
+  return `${n} session${n === 1 ? '' : 's'}`;
+}
+
+/**
+ * One line for `./restart.sh --force` (#504): it is echoed into Claude Code's
+ * permission prompt, which is the human-visible acceptance gate replacing the
+ * in-app modal, so it has to state the blast radius on its own.
+ *
+ * Since #620 "will be interrupted" is false for a tmux-backed session — the
+ * agent belongs to the tmux server and shutdown() detaches rather than kills —
+ * and a prompt that overstates what it is about to destroy trains the reader to
+ * click through it.
+ */
+function restartPromptLine() {
+  const { surviving, interrupted, total } = restartBlastRadius();
+  if (total === 0) return 'Restarting - no active sessions';
+  if (interrupted === 0) return `Restarting - ${sessionCount(total)} running under tmux, none interrupted`;
+  if (surviving === 0) return `Restarting - ${sessionCount(total)} will be interrupted`;
+  return `Restarting - ${interrupted} of ${sessionCount(total)} will be interrupted, ${surviving} running under tmux`;
+}
+
+/**
+ * The same fact as a sentence for the in-app confirm modal. The server owns
+ * this wording for the reason it owns restartPromptLine()'s: the count and the
+ * engine mix are server state, and a client that phrased it itself would need
+ * the shutdown predicate too. Shipped on the `confirm-restart` message; a
+ * client that doesn't get one falls back to its own static text.
+ */
+function restartImpactSentence() {
+  const { surviving, interrupted, total } = restartBlastRadius();
+  if (total === 0) return 'No sessions are running.';
+  if (interrupted === 0) {
+    return total === 1
+      ? 'Your session runs under tmux, so the agent keeps running and the tab reconnects.'
+      : `All ${total} sessions run under tmux, so the agents keep running and the tabs reconnect.`;
+  }
+  if (surviving === 0) return 'Running agents will be interrupted but sessions will be restored.';
+  const rest = interrupted === 1 ? 'one' : interrupted;
+  return `${surviving} of ${sessionCount(total)} run under tmux and keep running; the other ${rest} will be interrupted and restored.`;
+}
+
 // Confirmation text for the `./restart.sh --force` path (#504). The server owns
 // the wording so restart.sh can echo it back into Claude Code's permission
-// prompt — the human-visible acceptance gate that replaces the in-app modal —
-// and re-validate it before restarting. Returned as plain text because the
-// value IS the display string. `shells.size` is the active-PTY count (the
-// blast radius); saved/closed sessions live in `savedState` and aren't
-// interrupted by a restart.
+// prompt and re-validate it before restarting. Returned as plain text because
+// the value IS the display string.
 app.get('/api/restart-prompt', (req, res) => {
-  const n = shells.size;
-  res.type('text/plain').send(
-    `Restarting - ${n} active session${n === 1 ? '' : 's'} will be interrupted`
-  );
+  res.type('text/plain').send(restartPromptLine());
 });
 
 // --- Meta Controls consent (#519) ---

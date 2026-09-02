@@ -121,7 +121,7 @@ export function initLiveReload({ onMessage, onShowRestartConfirm, onShowReloadOv
             lastPingTime = Date.now();
             sock.send(JSON.stringify({ type: 'pong' }));
           } else if (msg.type === 'confirm-restart') {
-            if (state === State.CONNECTED || state === State.CONFIRMED) showConfirmInAllWindows();
+            if (state === State.CONNECTED || state === State.CONFIRMED) showConfirmInAllWindows(msg.impact);
           } else if (msg.type === 'reload') {
             // Server is about to shut down with --refresh — mark for reload
             if (state === State.CONFIRMED) {
@@ -261,11 +261,14 @@ export function initLiveReload({ onMessage, onShowRestartConfirm, onShowReloadOv
 
   // --- Show modal in every window, first response wins ---
 
-  function showConfirmInAllWindows() {
+  // `impact` is the server's one-sentence description of what this restart costs
+  // (which sessions survive it), computed from the live engine mix. Undefined
+  // from a server that predates it — the dialog has its own fallback.
+  function showConfirmInAllWindows(impact) {
     setState(State.CONFIRMING);
 
     const modal = onShowRestartConfirm
-      ? onShowRestartConfirm()
+      ? onShowRestartConfirm(impact)
       : { promise: Promise.resolve(true), dismiss: () => {} };
 
     const onBroadcast = (event) => {
