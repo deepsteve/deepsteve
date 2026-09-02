@@ -621,13 +621,23 @@ app.get('/api/proxy', async (req, res) => {
 const DROPS_DIR = path.join(os.tmpdir(), 'deepsteve-drops');
 try { fs.mkdirSync(DROPS_DIR, { recursive: true }); } catch {}
 
-app.put('/api/upload/:filename', express.raw({ type: '*/*', limit: '50mb' }), (req, res) => {
+// `type: () => true`, not the '*/*' it reads like: '*/*' is matched by type-is
+// against the Content-Type *header*, and a drop of a file macOS has no MIME type
+// for (extensionless, .jsonl, .tsx, …) gives File.type === '', so the browser
+// sends the PUT with no Content-Type at all. type-is then answers no, body-parser
+// skips the request, req.body stays the `{}` express seeded it with, and the
+// write dies on "The \"data\" argument must be ... Buffer". A function type opts
+// out of header sniffing entirely, which is what a raw byte sink wants.
+app.put('/api/upload/:filename', express.raw({ type: () => true, limit: '50mb' }), (req, res) => {
   const { filename } = req.params;
 
   const safe = path.basename(filename);
   if (safe !== filename) return res.status(400).json({ error: 'Invalid filename' });
   if (safe.length > 255) return res.status(400).json({ error: 'Filename too long' });
   if (/[\x00-\x1f]/.test(safe)) return res.status(400).json({ error: 'Invalid characters in filename' });
+  // A bodyless PUT still reaches here (body-parser leaves `{}`); say so plainly
+  // rather than letting fs.writeFileSync raise a 500 about argument types.
+  if (!Buffer.isBuffer(req.body)) return res.status(400).json({ error: 'Missing request body' });
 
   // Deduplicate: screenshot.png → screenshot-1.png, screenshot-2.png, ...
   let destPath = path.join(DROPS_DIR, safe);

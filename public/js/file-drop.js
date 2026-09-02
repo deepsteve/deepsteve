@@ -6,6 +6,7 @@
  */
 
 import { isOverviewActive } from './overview-mode.js';
+import { showToast } from './context-views.js';
 
 let getActiveSession = null;
 let getSessionByContainerId = null;
@@ -71,6 +72,11 @@ function uploadFile(file) {
     };
     xhr.onerror = () => resolve(null);
     xhr.open('PUT', `/api/upload/${encodeURIComponent(file.name)}`);
+    // Name the type ourselves. macOS has no MIME type for plenty of the files
+    // worth dropping on an agent (extensionless, .jsonl, .tsx, …); for those
+    // File.type is '' and xhr.send(file) sends no Content-Type header at all,
+    // which the server's body parser used to read as "not for me".
+    xhr.setRequestHeader('Content-Type', file.type || 'application/octet-stream');
     xhr.send(file);
   });
 }
@@ -147,14 +153,21 @@ export function initFileDrop({ getActiveSession: getter, getSessionByContainerId
 
     // Upload all files, collect paths
     const paths = [];
+    const failed = [];
     for (const file of files) {
       const p = await uploadFile(file);
       if (p) paths.push(p);
+      else failed.push(file.name);
     }
 
     // Type the paths into the terminal, space-separated
     if (paths.length > 0) {
       session.ws.send(paths.map(shellEscape).join(' '));
+    }
+    // A drop that uploads nothing types nothing, which looks exactly like a drop
+    // that missed the terminal. Say which file didn't make it.
+    if (failed.length > 0) {
+      showToast(`Couldn't attach ${failed.join(', ')}`);
     }
   });
 }
