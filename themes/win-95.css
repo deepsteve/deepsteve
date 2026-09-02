@@ -42,6 +42,10 @@
   --ds-context-gap: 0px;
   --ds-context-shadow: inset 1px 1px 0 #404040, inset -1px -1px 0 #fff;
   --ds-main-inset: inset 1px 1px 0 #404040, inset -1px -1px 0 #fff;
+
+  /* Square frame, so the padding-box radius the overlay derives is 0 either way —
+     declared anyway so the bevel stays honest if this ever gains a rounding. */
+  --ds-main-frame: 2px;
 }
 
 /* ── Win95 font (UI chrome only — xterm keeps its monospace font) ── */
@@ -74,7 +78,7 @@ body {
  * matching declaration here. A `border` shorthand carries only one colour, so the
  * bevel quartet is applied to both panes together. */
 #app-main {
-  border: 2px solid;
+  border: var(--ds-main-frame) solid;
 }
 
 #context-rail,

@@ -53,10 +53,16 @@ function ruleBody(css, selector) {
   return bodies.length ? bodies.join('\n') : null;
 }
 
+/** Declared value of `prop` in `body`, trimmed — or null when it is not declared. */
+function declValue(body, prop) {
+  const m = body.match(new RegExp(`(?:^|[\\s;])${prop}\\s*:([^;]*)`));
+  return m ? m[1].trim() : null;
+}
+
 /** True when `prop` is declared in `body` with a value that actually draws something. */
 function declaresHighlight(body, prop) {
-  const m = body.match(new RegExp(`${prop}\\s*:([^;]*)`));
-  return !!m && m[1].trim() !== 'none' && m[1].trim() !== '';
+  const v = declValue(body, prop);
+  return v !== null && v !== 'none' && v !== '';
 }
 
 const themeFiles = fs.readdirSync(THEMES_DIR).filter(f => f.endsWith('.css')).sort();
@@ -83,6 +89,21 @@ test('the base stylesheet provides the overlay themes declare against', () => {
   assert.ok(main, '#app-main base rule is gone');
   assert.match(main, /position:\s*relative/,
     '#app-main must stay positioned, or ::after escapes to the nearest positioned ancestor');
+
+  // The overlay sits at the PADDING box, so it must round at the padding-box radius —
+  // outer radius minus border width. `inherit` gives it the outer one, whose corners
+  // curve tighter than the border's inner edge and leave a gap the width of the border.
+  assert.ok(!/border-radius:\s*inherit/.test(overlay),
+    '#app-main::after must not inherit #app-main\'s radius: that is the OUTER radius, and ' +
+    'the overlay is at the padding box. It opens a gap between the frame and the ring at ' +
+    'every corner. Derive it from --ds-main-radius and --ds-main-frame instead.');
+  assert.match(overlay, /border-radius:[^;]*var\(--ds-main-radius\)[^;]*var\(--ds-main-frame\)/,
+    '#app-main::after must round at the padding-box radius, derived from both vars');
+  assert.match(main, /border-radius:\s*var\(--ds-main-radius\)/,
+    '#app-main must take its rounding from --ds-main-radius, or the overlay derives its ' +
+    'corner from a number the frame no longer uses');
+  assert.match(bare, /--ds-main-radius:\s*0px;/, '--ds-main-radius must default to 0px in :root');
+  assert.match(bare, /--ds-main-frame:\s*0px;/, '--ds-main-frame must default to 0px in :root');
 });
 
 for (const file of themeFiles) {
@@ -106,6 +127,27 @@ for (const file of themeFiles) {
     assert.match(root, /--ds-context-border\s*:/,
       `${file} sets a border on #app-main or #app-container but never declares ` +
       '--ds-context-border, so the rail keeps the base 1px default nothing else matches.');
+  });
+
+  test(`${file}: states #app-main's frame as vars, so the ring can follow it`, () => {
+    assert.strictEqual(declValue(appMain, 'border-radius'), null,
+      `${file} sets border-radius on #app-main directly. The --ds-main-inset overlay has ` +
+      'to round at the radius MINUS the border width, and it cannot read either off the ' +
+      'rule — declare --ds-main-radius in :root instead.');
+
+    const radius = declValue(root, '--ds-main-radius');
+    if (!radius || parseFloat(radius) === 0) return;   // square frames have nothing to derive
+
+    const border = declValue(appMain, 'border');
+    assert.ok(border, `${file} rounds #app-main via --ds-main-radius but puts no border on it`);
+    assert.match(border, /var\(--ds-main-frame\)/,
+      `${file} rounds #app-main but writes its border width literally. The overlay subtracts ` +
+      '--ds-main-frame to get the padding-box corner, so a literal width there re-opens the ' +
+      'gap between the frame and the ring.');
+
+    const frame = declValue(root, '--ds-main-frame');
+    assert.ok(frame && parseFloat(frame) > 0,
+      `${file} uses var(--ds-main-frame) as #app-main's border width but never declares it`);
   });
 
   test(`${file}: states both panes' inner highlight together`, () => {

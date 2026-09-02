@@ -76,6 +76,8 @@ standalone bezelled panel without touching a rule. `retro-monitor` and `hacker-m
 | `--ds-context-gap` | `0px` | Gap between the panel and the terminal |
 | `--ds-context-shadow` | `none` | Panel shadow (inset works, for a CRT bezel) |
 | `--ds-main-inset` | `none` | The **terminal** pane's matching inner shadow — see *Panel Edges* below |
+| `--ds-main-radius` | `0px` | The terminal pane's corner rounding — set it here, not on `#app-main` |
+| `--ds-main-frame` | `0px` | The width of that pane's border, so the inner shadow can follow it |
 
 ### Panel Edges
 
@@ -91,8 +93,21 @@ decide what the rail's edge is in the same breath.
 descendant backgrounds, and every child of `#app-main` — `#tabs`, the xterm canvas,
 `#panel-container` — is opaque, so it covers the shadow completely. The declaration looks
 correct and draws nothing. Use `--ds-main-inset` instead: the base stylesheet paints it as an
-`#app-main::after` overlay above the content. `test/unit/theme-pane-parity.test.js` enforces
-both rules.
+`#app-main::after` overlay above the content.
+
+**State `#app-main`'s rounding and border width as `--ds-main-radius` / `--ds-main-frame`,
+not as declarations on the rule.** That overlay is positioned at `#app-main`'s *padding* box,
+so its corners have to use the padding-box radius — the outer radius minus the border width.
+It cannot read either number off the rule, and inheriting the outer radius makes it curve
+tighter than the border's inner edge: the ring pulls away from the frame, leaving a gap that
+widens to the full border width at each corner (4px of it in `retro-monitor`). Declare both
+vars and let the base stylesheet derive the corner; write the border as
+`border: var(--ds-main-frame) solid <colour>` so there is one number, not two.
+
+The rail needs none of this — its highlight is a real `box-shadow` on the element, and an
+inset shadow gets the padding-box corner for free. Only the overlay has to be told.
+
+`test/unit/theme-pane-parity.test.js` enforces all three rules.
 
 Two structural families exist in the shipped themes, and either is fine:
 
@@ -150,6 +165,11 @@ bezel built from body padding, and a second standalone bezel for the projects ra
   /* The terminal's half of that highlight. It CANNOT be a box-shadow on #app-main —
      see "Panel Edges" above. */
   --ds-main-inset: inset 0 0 0 2px #777, inset 0 0 8px rgba(0,0,0,0.3);
+
+  /* ...and the frame it sits inside. Both stated here so the overlay can round at the
+     padding box (18px - 4px) instead of pulling away from the border at the corners. */
+  --ds-main-radius: 18px;
+  --ds-main-frame: 4px;
 }
 
 /* Give tabs room to clear the rounded top corners. Horizontal only: in vertical mode
@@ -186,11 +206,11 @@ body {
    on both of its sides — a ~22px dead zone instead of one 8px seam. Cancel both. */
 #context-resizer { margin: 0 calc(var(--ds-context-gap) * -1) !important; }
 
-/* The bezel lives on #app-main (the terminal side) only. */
+/* The bezel lives on #app-main (the terminal side) only. The rounding comes from
+   --ds-main-radius via the base stylesheet; only the colour is decided here. */
 #app-main {
-  border-radius: 18px;
   overflow: clip;
-  border: 4px solid #999;
+  border: var(--ds-main-frame) solid #999;
 }
 ```
 
@@ -199,7 +219,7 @@ Key techniques:
 - **Body padding** creates the bezel — because `box-sizing: border-box` is set, padding shrinks the content area rather than expanding the page.
 - **`#app-container { flex: 1 }`** overrides the default `height: 100vh` so the container fills the remaining space after padding.
 - **Inset shadows only** — `body` has `overflow: hidden`, so any outset shadows or elements outside the viewport are clipped.
-- **`border-radius` on `#app-main`** rounds the screen corners. Use `overflow: clip` to ensure child content is clipped to the radius — that same clip trims the `--ds-main-inset` overlay to the inner rounded rect.
+- **`--ds-main-radius`** rounds the screen corners (never `border-radius` on `#app-main` — see **Panel Edges**). Use `overflow: clip` to ensure child content is clipped to the radius — that same clip trims the `--ds-main-inset` overlay to the inner rounded rect.
 - **The frame goes on `#app-main`, never `#app-container`,** when the rail is meant to read as its own panel: `#app-container` is the row that holds *both*.
 
 ## Tips

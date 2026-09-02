@@ -63,6 +63,17 @@
      themes carried such a rule for months and only ever framed the rail with it (#690).
      This var drives the #app-main::after overlay below, which paints above the content. */
   --ds-main-inset: none;
+
+  /* The frame that highlight sits inside. A theme states its rounding and its border
+     width HERE rather than writing border-radius/border-width on #app-main, because the
+     overlay has to derive the one from the other: it is positioned at the padding box, so
+     its corners must use the PADDING-box radius — outer radius minus border width. The
+     overlay used `border-radius: inherit`, i.e. the OUTER radius, which curves tighter
+     than the border's inner edge and opened a gap between frame and ring that widened to
+     the full border width at each corner (4px in retro-monitor). Deriving both from these
+     two means the frame and the ring it holds cannot disagree. */
+  --ds-main-radius: 0px;
+  --ds-main-frame: 0px;
 }
 
 * { margin: 0; box-sizing: border-box; }
@@ -74,7 +85,7 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
    vertical tab-layout switch (it is the column that #tabs + #content-row live in),
    so the context rail can sit full-height to the left of everything. */
 #app-container { display: flex; flex-direction: row; height: 100vh; }
-#app-main { display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; position: relative; }
+#app-main { display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; position: relative; border-radius: var(--ds-main-radius); }
 
 /* The terminal pane's inner edge light. Painted as an overlay rather than as a
    box-shadow on #app-main itself, for the reason spelled out at --ds-main-inset.
@@ -85,12 +96,15 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
   content: '';
   position: absolute;
   inset: 0;
+  /* The padding-box radius, NOT `inherit`. See --ds-main-frame: an inset box-shadow on
+     the element (what the rail uses) gets this corner for free; an overlay has to be
+     told, and inheriting the outer radius leaves a gap at every corner. */
+  border-radius: max(0px, var(--ds-main-radius) - var(--ds-main-frame));
   /* Above the opaque structural children (#tabs, #content-row, #mod-container, all
      z-index auto..2) and below every purposeful overlay: .overview-label 5,
      .terminal-search-bar 10, .sess-hist 20, .reload-overlay 100, popups 200. */
   z-index: 3;
   pointer-events: none;
-  border-radius: inherit;
   box-shadow: var(--ds-main-inset);
 }
 

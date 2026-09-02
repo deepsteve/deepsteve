@@ -67,6 +67,11 @@
   --ds-main-inset:
     inset 0 0 0 1px rgba(63, 191, 149, 0.10),
     inset 0 0 26px rgba(0, 0, 0, 0.6);
+
+  /* The pane's frame — see --ds-main-frame in the base stylesheet for why the
+     rounding and the border width are vars rather than #app-main declarations. */
+  --ds-main-radius: 14px;
+  --ds-main-frame: 1px;
 }
 
 /* Monospace chrome. The UI reads as part of the terminal rather than as a window
@@ -125,9 +130,8 @@ body {
    it stays at 10% and is never widened. The hairline itself is NOT declared here —
    it is --ds-main-inset above; see the note there. */
 #app-main {
-  border-radius: 14px;
   overflow: clip;
-  border: 1px solid #24332f;
+  border: var(--ds-main-frame) solid #24332f;
 }
 
 /* The active tab gets the same signal color as a 2px cap, so the eye finds it by
