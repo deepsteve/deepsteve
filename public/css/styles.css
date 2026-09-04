@@ -1812,9 +1812,6 @@ kbd {
   text-align: center;
   font-variant-numeric: tabular-nums; /* 1- vs 2-digit counts don't jitter */
 }
-.context-empty-note { padding: 8px 12px; font-size: 11px; color: var(--ds-text-secondary); cursor: pointer; line-height: 1.4; }
-.context-empty-note:hover { color: var(--ds-text-primary); }
-.context-empty-note:active { background: var(--ds-border); }
 /* Archived contexts (#601): a muted disclosure row + its list, rendered between the
    context list and "+ New context". The rows reuse .context-row wholesale (icon, count,
    right-click menu, drag) and are just dimmed so the tier reads as secondary. */
@@ -1887,8 +1884,7 @@ kbd {
 #context-rail.collapsed .context-rail-header,
 #context-rail.collapsed .context-hint,
 #context-rail.collapsed .context-archived-toggle,
-#context-rail.collapsed .context-archived-list,
-#context-rail.collapsed .context-empty-note { display: none; }
+#context-rail.collapsed .context-archived-list { display: none; }
 
 /* Keep the base (radius-derived) .context-list inset when collapsed too, so the
    selected/hover/pressed background stays inside the rounded bezel (#577). It's 0

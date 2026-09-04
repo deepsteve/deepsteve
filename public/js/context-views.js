@@ -396,15 +396,6 @@ function renderRail() {
   }
   rail.appendChild(list);
 
-  // Empty-context helper — clickable to open a tab in the context's repo.
-  if (getActiveContext() && !activeContextHasTabs()) {
-    const note = document.createElement('div');
-    note.className = 'context-empty-note';
-    note.textContent = 'No tabs in this project — click to open one.';
-    note.onclick = () => newTabInActiveContext();
-    rail.appendChild(note);
-  }
-
   // Archived section (#601) — a muted disclosure row right above "+ New context",
   // rendered only when something is archived. Expanding lists the archived
   // contexts with the same rows (and the same right-click menu, which offers
@@ -1604,17 +1595,6 @@ export function requestNewTabInContext() {
   if (d.dirs.length === 1) cb.createSessionInDir?.(d.dirs[0]);
   else chooseDir(d.dirs).then(dir => { if (dir) cb.createSessionInDir?.(dir); });  // multiple → chooser (#522)
   return true;                           // handled — never let quickNewSession inherit a foreign cwd
-}
-
-async function newTabInActiveContext(ctx) {
-  ctx = ctx || getActiveContext();
-  if (!ctx || ctx.dirs.length === 0) return;
-  let dir = ctx.dirs[0];
-  if (ctx.dirs.length > 1) {
-    dir = await chooseDir(ctx.dirs);
-    if (!dir) return;
-  }
-  cb.createSessionInDir?.(dir);
 }
 
 function chooseDir(dirs, { title = 'Open new tab in…' } = {}) {
