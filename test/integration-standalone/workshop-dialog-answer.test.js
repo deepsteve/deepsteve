@@ -215,10 +215,19 @@ test('the mod really loaded — its tools and routes are live', async () => {
   // Non-vacuity. mcp-server.js catches a mod's load failure per-mod and logs ONE line,
   // so a require-time throw in tools.js would silently make every assertion below
   // reach a 404 and this file would fail with something unhelpful instead.
-  assert.match(
-    daemonLog, /registered tool "workshop_ask" from mod "workshop"/,
-    'the workshop mod did not load; look for `failed to load tools from mod "workshop"` '
-    + `in the daemon log:\n${daemonLog.slice(-1500)}`,
+  //
+  // WAITED for, not asserted once. The daemon is "ready" as soon as /api/version answers,
+  // which is before initMCP's dynamic import of the SDK has resolved — the same
+  // "/api/version OK is not /mcp mounted" gap #607 hit. This read as a stable pass only
+  // because initMCP was accidentally being called TWICE (a duplicated line from #670,
+  // removed when the merge-blocked state was added): the second call reused the cached
+  // import and registered in ~2ms, so a log scrape at +200ms usually found something.
+  // With one honest call the mod registers when it registers, so this polls.
+  await waitFor(
+    () => /registered tool "workshop_ask" from mod "workshop"/.test(daemonLog),
+    'the workshop mod to register its tools — look for `failed to load tools from mod '
+    + '"workshop"` in the log tail below if this times out',
+    15000,
   );
   const r = await fetch(`${BASE}/api/workshop/inbox`, { headers: authHeaders() });
   assert.strictEqual(r.status, 200);
@@ -406,13 +415,19 @@ test('a stale expect fingerprint is refused before a single key is sent', async 
   assert.ok(await blockedRow(id), 'and the row stays, so it can be answered properly');
 });
 
-test('dismissing a live dialog clears the row without touching the session', async () => {
-  // The other half of "a row leaves the inbox" (#663). Every other exit needs the
+test('dismissing a live dialog silences the row without touching the session', async () => {
+  // The other half of "a row stops asking for you" (#663). Every other exit needs the
   // human to answer or the session to die; this one is for the row nobody will ever
   // act on — and it must be provable that the agent never noticed.
+  //
+  // A mute used to REMOVE the row. It no longer can: the Agents list is every live tab,
+  // so a tab that vanished from it because you pressed a key on it would be exactly the
+  // hole the roster closes. Dismissing demotes the row to 'fyi' — off the count, out of
+  // the blocking rank, still in the picture.
   const { id } = await openBlockedSession();
   const row = await waitFor(() => blockedRow(id), 'the blocked row');
   assert.ok(row.fingerprint, 'the row must carry the fingerprint it was drawn with');
+  assert.strictEqual(row.urgency, 'blocking', 'it is shouting before the mute');
 
   const r = await fetch(`${BASE}/api/workshop/items/${encodeURIComponent(row.id)}/dismiss`, {
     method: 'POST', headers: jsonHeaders(),
@@ -422,7 +437,14 @@ test('dismissing a live dialog clears the row without touching the session', asy
   assert.strictEqual(r.status, 200, `dismiss failed: ${JSON.stringify(body)}`);
   assert.strictEqual(body.muted, true);
 
-  await waitFor(async () => (await blockedRow(id)) === null, 'the muted row to leave the inbox');
+  const quiet = await waitFor(
+    async () => {
+      const now = await blockedRow(id);
+      return now && now.urgency === 'fyi' ? now : null;
+    },
+    'the muted row to stop ranking as blocking',
+  );
+  assert.strictEqual(quiet.muted, true, 'and to say why it went quiet');
 
   // Nothing was typed, and the dialog is still standing in the real session: a mute is
   // not an Escape, and Escape is a decision Workshop does not get to make.
@@ -439,7 +461,26 @@ test('dismissing a live dialog clears the row without touching the session', asy
     'the dialog itself must be left exactly as it was',
   );
 
-  // And it stays gone rather than flickering back on the next poll.
+  // And it stays quiet rather than flickering back to blocking on the next poll.
   await new Promise((r2) => setTimeout(r2, 1200));
-  assert.strictEqual(await blockedRow(id), null, 'a mute must survive repaints');
+  assert.strictEqual((await blockedRow(id)).urgency, 'fyi', 'a mute must survive repaints');
+});
+
+test('a real permission dialog lands in the permissions log', async () => {
+  // The log is fed by the same poll that builds the blocked row, so this is the one
+  // place it can be checked against a REAL Claude Code dialog rather than a captured
+  // screen: that the subject splits into a tool and a target the way the panel needs.
+  const { id } = await openBlockedSession();
+  await waitFor(() => blockedRow(id), 'the blocked row');
+
+  const entry = await waitFor(async () => {
+    const r = await fetch(`${BASE}/api/workshop/permissions`, { headers: authHeaders() });
+    if (!r.ok) return null;
+    const { entries } = await r.json();
+    return (entries || []).find((e) => e.sessionId === id) || null;
+  }, 'the permission to reach the log');
+
+  assert.ok(entry.tool, `the subject must split into a tool: ${JSON.stringify(entry.subject)}`);
+  assert.strictEqual(entry.status, 'open', 'the dialog is still on screen');
+  assert.strictEqual(entry.answer, null, 'nothing has answered it, so nothing is claimed');
 });

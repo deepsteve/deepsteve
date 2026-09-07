@@ -1,8 +1,8 @@
 {
   "name": "Workshop",
-  "version": "0.11.0",
+  "version": "0.12.0",
   "minDeepsteveVersion": "0.4.0",
-  "description": "The bench for every agent that needs you — blocked dialogs, finished sessions waiting on their next instruction, questions and results, each with the verb it needs",
+  "description": "Every agent on this machine and what it is doing — blocked, stuck, waiting on you or working — beside the issues they came from, with the verb each one needs",
   "experimental": true,
   "enabledByDefault": false,
   "entry": "index.html",

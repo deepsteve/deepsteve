@@ -2044,8 +2044,13 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
           if (sess) {
             sess.worktree = msg.worktree || null;
             sess.autopilot = !!msg.autopilot;
+            sess.mergeBlock = msg.mergeBlock || null;
           }
         }
+        // Painted from the (re)connect payload, not only from the live event: the state
+        // is persisted server-side, so a page reload — or a ./restart.sh — must bring the
+        // glyph back rather than waiting for the next merge to fail again.
+        TabManager.updateMergeBlocked(msg.id, !!msg.mergeBlock);
         // Track engineType and claudeSessionId for session verification (after initTerminal
         // so SessionStores.add has already created the entry)
         if (msg.engineType) {
@@ -2114,6 +2119,16 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
         ModManager.handleSkillsChanged(msg.enabledSkills);
       } else if (msg.type === 'mod-changed') {
         ModManager.handleModChanged(msg.modId);
+      } else if (msg.type === 'merge-block') {
+        // Its own message rather than a field on `state`: that one is the waiting flag,
+        // which flips on every turn, and a merge outcome changes a handful of times a day.
+        const entry = [...sessions.entries()].find(([, s]) => s.ws === ws);
+        if (entry) {
+          const [sid, s] = entry;
+          s.mergeBlock = msg.mergeBlock || null;
+          TabManager.updateMergeBlocked(sid, !!msg.mergeBlock);
+          notifyTabsChanged();
+        }
       } else if (msg.type === 'state') {
         const entry = [...sessions.entries()].find(([, s]) => s.ws === ws);
         if (entry) {

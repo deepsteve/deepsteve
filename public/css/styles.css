@@ -182,6 +182,12 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
 .tab.has-history.active .tab-history,
 .tab.has-history:hover .tab-history { display: inline; }
 .tab .tab-history:hover { opacity: 1; color: var(--ds-accent-blue); }
+/* Merge blocked: this session's last merge attempt did not land. Unlike the two dot
+   states above it is about the WORK rather than the connection, so it gets its own
+   element and can show alongside either — and unlike .tab-history it stays visible on an
+   inactive, unhovered tab, because the entire point is seeing it without looking. */
+.tab .tab-merge-block { display: none; flex-shrink: 0; font-size: 11px; line-height: 1; color: var(--ds-accent-red); }
+.tab.merge-blocked .tab-merge-block { display: inline; }
 .tab .badge { width: 8px; height: 8px; background: var(--ds-accent-blue); border-radius: 50%; display: inline-block; visibility: hidden; flex-shrink: 0; }
 .tab .badge.visible { visibility: visible; }
 .tab .speaker-icon { display: none; flex-shrink: 0; width: 13px; height: 13px; color: var(--ds-accent-blue); }
@@ -442,6 +448,7 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
 #app-container.vertical-layout.icon-rail .tab .tab-label,
 #app-container.vertical-layout.icon-rail .tab .close,
 #app-container.vertical-layout.icon-rail .tab .tab-history,
+#app-container.vertical-layout.icon-rail .tab .tab-merge-block,
 #app-container.vertical-layout.icon-rail #new-btn-dropdown {
   display: none;
 }

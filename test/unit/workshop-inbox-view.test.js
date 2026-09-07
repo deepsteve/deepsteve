@@ -137,7 +137,7 @@ test('order matches the rendered list exactly, grouped or not', async () => {
 // its own: two sections computing two orders is the bug the test above describes, with
 // one more place to make it.
 //
-// Since #682 that column is a TAB — `tab: 'backlog'` — and the two sections under it are
+// Since #682 that column is a TAB — `tab: 'issues'` — and the two sections under it are
 // the reading material: agent briefings, then the project's open issues. Every test
 // below used to pass `backlog` with no tab and compose it against questions, which was
 // the arrangement that made Workshop read as informational. The composition being
@@ -145,7 +145,7 @@ test('order matches the rendered list exactly, grouped or not', async () => {
 
 const issueRow = (n) => ({ id: `issue:${n}`, kind: 'issue', number: n, title: `issue ${n}` });
 const brief = (over = {}) => item({ kind: 'briefing', urgency: 'fyi', ...over });
-const READING = { tab: 'backlog' };
+const READING = { tab: 'issues' };
 
 test('backlog ids come after briefing ids, in one order', async () => {
   const { visibleItems } = await load();
@@ -266,13 +266,57 @@ test('blockingOnly filters the bench and never the reading tab', async () => {
   );
 });
 
-test('an idle row belongs to the bench', async () => {
+test('every session row belongs to the Agents tab', async () => {
   const { tabOf } = await load();
-  assert.strictEqual(tabOf({ kind: 'idle' }), 'bench');
-  assert.strictEqual(tabOf({ kind: 'blocked' }), 'bench');
-  assert.strictEqual(tabOf({ kind: 'result' }), 'bench');
-  assert.strictEqual(tabOf({ kind: 'briefing' }), 'backlog');
-  assert.strictEqual(tabOf(null), 'bench', 'an unknown row is an obligation until proven otherwise');
+  assert.strictEqual(tabOf({ kind: 'idle' }), 'agents');
+  assert.strictEqual(tabOf({ kind: 'blocked' }), 'agents');
+  assert.strictEqual(tabOf({ kind: 'result' }), 'agents');
+  assert.strictEqual(tabOf({ kind: 'stuck' }), 'agents');
+  assert.strictEqual(tabOf({ kind: 'working' }), 'agents');
+  assert.strictEqual(tabOf({ kind: 'briefing' }), 'issues');
+  assert.strictEqual(tabOf(null), 'agents', 'an unknown row is an obligation until proven otherwise');
+});
+
+test('the old tab ids in every browser’s localStorage still land somewhere', async () => {
+  // The rename is not a migration anybody runs — the values are in localStorage on every
+  // machine that has opened Workshop, and they arrive on the next load. Mapping them is
+  // the whole compatibility story, so it is pinned.
+  const { normalizeTab, TABS } = await load();
+  assert.strictEqual(normalizeTab('bench'), 'agents');
+  assert.strictEqual(normalizeTab('backlog'), 'issues');
+  assert.strictEqual(normalizeTab('agents'), 'agents');
+  assert.strictEqual(normalizeTab('issues'), 'issues');
+  assert.strictEqual(normalizeTab('a-tab-from-the-future'), TABS[0]);
+  assert.strictEqual(normalizeTab(undefined), TABS[0]);
+});
+
+test('“needs me” hides the working rows and nothing else', async () => {
+  const { visibleItems } = await load();
+  const items = [
+    { id: 'a', kind: 'working', urgency: 'fyi', createdAt: 1 },
+    { id: 'b', kind: 'blocked', urgency: 'blocking', createdAt: 2 },
+    { id: 'c', kind: 'idle', urgency: 'normal', createdAt: 3 },
+    { id: 'd', kind: 'stuck', urgency: 'blocking', createdAt: 4 },
+  ];
+  const all = visibleItems(items, { tab: 'agents' });
+  assert.deepStrictEqual(all.list.map((i) => i.id).sort(), ['a', 'b', 'c', 'd']);
+
+  const filtered = visibleItems(items, { tab: 'agents', hideWorking: true });
+  assert.deepStrictEqual(filtered.list.map((i) => i.id).sort(), ['b', 'c', 'd']);
+  assert.ok(!filtered.order.includes('a'), 'a hidden row must leave the cursor order too');
+});
+
+test('a stuck row outranks an idle one', async () => {
+  // The ordering that makes the list readable: work that cannot land is the only state
+  // that will not resolve itself, so it sits above an agent that is merely out of
+  // instructions, which sits above one that is busy.
+  const { visibleItems } = await load();
+  const list = visibleItems([
+    { id: 'working', kind: 'working', urgency: 'fyi', createdAt: 1 },
+    { id: 'idle', kind: 'idle', urgency: 'normal', createdAt: 1 },
+    { id: 'stuck', kind: 'stuck', urgency: 'blocking', createdAt: 1 },
+  ], { tab: 'agents' }).list.map((i) => i.id);
+  assert.deepStrictEqual(list, ['stuck', 'idle', 'working']);
 });
 
 test('an issue row cannot be answered, archived or option-picked', async () => {

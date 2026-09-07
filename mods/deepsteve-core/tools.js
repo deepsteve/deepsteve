@@ -151,7 +151,7 @@ function init(context) {
     reloadClients, deliverToWindow, noteSpawnDelivery, settings, log, isShuttingDown,
     emitSessionOpen,
     stripEscapeSequences, readTerminalScreen, sessionInputState, maybeInheritRemoteControl, requestMetaControlsConsent, logRcWrite,
-    armSessionAutoClose,
+    armSessionAutoClose, recordMergeAttempt,
   } = context;
 
   // Project scoping for list_sessions (#659). `context` is this mod's whole ctx, so
@@ -194,6 +194,10 @@ function init(context) {
     const result = await mergeSession({
       git: runGit, gh: runGh, cwd, repoRoot, isWorktree: !!caller.worktree, target, subject, body,
     });
+    // The outcome becomes SESSION STATE, not just a return value. An agent that is told
+    // "target-dirty" has already been told to stop, so without this the one fact worth
+    // keeping — this work is finished and cannot land — died with the tool result.
+    recordMergeAttempt?.(callerId, result);
     const payload = { ...result };
     if (result.status === 'merged' && caller.worktree && armSessionAutoClose) {
       const armed = armSessionAutoClose(callerId, { reason: 'merged' });
@@ -221,7 +225,7 @@ function init(context) {
       },
     },
     get_session_info: {
-      description: 'Get live session metadata for a deepsteve session: tab name, cwd (your actual working directory — the worktree path for worktree sessions), repoRoot (the main repo checkout), worktree (the worktree name, or null), runningCommand (for a plain terminal session, the command running in it right now, or null if it is idle at its prompt; always null for agent sessions), state ("idle" = the agent is at its input prompt, "busy" = mid-task, "unknown" = not classifiable for this agent type), and metaControls (whether the Meta Controls setting is on, i.e. whether meta_type will type without asking the user first). Called with no arguments it describes the calling session, so `get_my_session_id` first is not needed.',
+      description: 'Get live session metadata for a deepsteve session: tab name, cwd (your actual working directory — the worktree path for worktree sessions), repoRoot (the main repo checkout), worktree (the worktree name, or null), runningCommand (for a plain terminal session, the command running in it right now, or null if it is idle at its prompt; always null for agent sessions), state ("idle" = the agent is at its input prompt, "busy" = mid-task, "unknown" = not classifiable for this agent type), mergeBlock (null normally; when your last merge attempt did not merge, the {status, message, branch, target, at} that says why — if this is set, do NOT just retry the merge: the target checkout was left untouched and something outside this session has to change first), and metaControls (whether the Meta Controls setting is on, i.e. whether meta_type will type without asking the user first). Called with no arguments it describes the calling session, so `get_my_session_id` first is not needed.',
       schema: {
         // Optional since #688. It was the last core tool that made a caller spend a whole
         // turn on `get_my_session_id` just to name itself, and a turn is the unit that
@@ -251,13 +255,17 @@ function init(context) {
             elapsedMs: entry.createdAt ? Date.now() - entry.createdAt : null,
             // Kept in lockstep with GET /api/shells/:id/info (#519).
             state: sessionInputState(entry),
+            // How a session finds out it is merge-blocked. It is genuinely something the
+            // AGENT needs: it is the one state where the right move is to stop trying and
+            // say so, and an agent that cannot read it will retry the same refused merge.
+            mergeBlock: entry.mergeBlock || null,
             metaControls: !!settings.metaControlsEnabled,
           }, null, 2) }]
         };
       },
     },
     list_sessions: {
-      description: 'List the deepsteve sessions (tabs) running right now. Defaults to YOUR project — the git repo root of the calling session — so the answer is about the work you are in rather than every tab on the machine; scope "group" adds sibling repos in the same project group, and scope "all" lists everything. Rows use get_session_info\'s field names plus `project` (the canonical repo root the row was scoped by, which differs from `repoRoot` when a session was opened in a subdirectory) and `self` (the calling session). LIVE sessions only — closed and saved tabs are not listed. A worktree session is listed under its parent repo. `runningCommand` is deliberately omitted because it costs a process lookup per row; call get_session_info for one session.',
+      description: 'List the deepsteve sessions (tabs) running right now. Defaults to YOUR project — the git repo root of the calling session — so the answer is about the work you are in rather than every tab on the machine; scope "group" adds sibling repos in the same project group, and scope "all" lists everything. Rows use get_session_info\'s field names plus `project` (the canonical repo root the row was scoped by, which differs from `repoRoot` when a session was opened in a subdirectory), `mergeBlocked` (that session\'s last merge attempt did not merge and nothing has landed since) and `self` (the calling session). LIVE sessions only — closed and saved tabs are not listed. A worktree session is listed under its parent repo. `runningCommand` is deliberately omitted because it costs a process lookup per row; call get_session_info for one session.',
       schema: {
         scope: z.enum(['project', 'group', 'all']).optional().describe('project (default), group, or all'),
         project: z.string().optional().describe('Override the project to scope to (defaults to the caller\'s).'),
@@ -305,6 +313,9 @@ function init(context) {
             windowId: entry.windowId || null,
             agentType: entry.agentType || 'claude',
             state: sessionInputState ? sessionInputState(entry) : 'unknown',
+            // A flag here, the whole record in get_session_info: this is a roster, and a
+            // merge message per row would bury the rows it is meant to pick out.
+            mergeBlocked: !!entry.mergeBlock,
             createdAt: entry.createdAt || null,
             lastActivity: entry.lastActivity || null,
             self: id === callerId,
@@ -774,6 +785,10 @@ function init(context) {
         }
         const result = mergeWorktree({ git: runGit, worktreeCwd: cwd, repoRoot, target });
         log(`[MCP] merge_worktree: ${result.branch || '?'} -> ${result.target || '?'} = ${result.status}`);
+        // The un-composed primitive records the outcome too: every merge path in the
+        // product has to leave the same session state behind, or "merge blocked" would
+        // mean "blocked, and it happened to be the panel that tried".
+        recordMergeAttempt?.(callerId, result);
         // #627: a successful merge FINISHES this worktree session, so the daemon arms
         // the close here rather than trusting the agent to remember step 9 — it doesn't
         // (30/30 in #609, and again on Opus 5 after the prose had been strengthened as

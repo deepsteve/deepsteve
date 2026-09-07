@@ -49,6 +49,11 @@ const UNRENDERED_SETTINGS = new Set([
   // Which tab is showing (#682). A settings-modal control for "which tab am I looking
   // at" would be a second, slower way to press the tab that is already on screen.
   'tab',
+  // The same argument for the three controls the panel now renders in its own header.
+  // `projects` is the +/- scope picker, `hideWorking` its neighbouring toggle and
+  // `permOpen` the log drawer — all things you change several times an afternoon, and a
+  // control you have to open a modal for is a control you use once.
+  'projects', 'hideWorking', 'permOpen',
 ]);
 
 test('the manifest passes the release-time validator', () => {

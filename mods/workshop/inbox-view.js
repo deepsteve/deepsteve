@@ -96,7 +96,25 @@ export function flattenGroups(groups) {
  * `opts.backlog` is already sorted by the caller (backlog-view.js owns that order); a
  * collapsed section contributes rows to neither `backlog` nor `order`.
  */
-export const TABS = ['bench', 'backlog'];
+export const TABS = ['agents', 'issues'];
+
+/**
+ * What the tabs used to be called, and why they are not called that any more.
+ *
+ * "Bench" and "Backlog" were both metaphors, and neither survived contact with anyone
+ * who had not read the code: a name has to say what is under it. The left tab is a list
+ * of the agents and what each one is doing; the right tab is a list of issues. So those
+ * are the names.
+ *
+ * The old ids are still in every browser's localStorage, so they are mapped rather than
+ * rejected — an unrecognised value lands on 'agents' exactly as it landed on 'bench'.
+ */
+const TAB_ALIASES = { bench: 'agents', backlog: 'issues' };
+
+export function normalizeTab(value) {
+  const t = TAB_ALIASES[value] || value;
+  return TABS.includes(t) ? t : TABS[0];
+}
 
 /**
  * Which tab a row belongs to (#682).
@@ -112,25 +130,29 @@ export const TABS = ['bench', 'backlog'];
  * with a verb on it.
  */
 export function tabOf(item) {
-  return (item && item.kind === 'briefing') ? 'backlog' : 'bench';
+  return (item && item.kind === 'briefing') ? 'issues' : 'agents';
 }
 
 export function visibleItems(items, opts = {}) {
   const {
-    tab = 'bench',
+    tab = 'agents',
     showBriefings = true, blockingOnly = false, groupByProject: grouped = false,
+    hideWorking = false,
     backlog = [], backlogCollapsed = false,
   } = opts;
-  const onBench = tab !== 'backlog';
+  const onBench = normalizeTab(tab) === 'agents';
 
   let list = (Array.isArray(items) ? items : []).filter(Boolean)
-    .filter((i) => (tabOf(i) === 'bench') === onBench);
+    .filter((i) => (tabOf(i) === 'agents') === onBench);
   if (!showBriefings) list = list.filter((i) => i.kind !== 'briefing');
   if (blockingOnly && onBench) list = list.filter((i) => i.urgency === 'blocking');
+  // "Only the ones that need me" — the old gate, kept as a CHOICE rather than as the
+  // only behaviour. A working row is scenery, and some days you want the scenery gone.
+  if (hideWorking && onBench) list = list.filter((i) => i.kind !== 'working');
 
-  // Issues live on the backlog tab only, so on the bench there is no second section
-  // and `order` is the bench list alone — which is what keeps ↓ from walking the
-  // cursor off the end of the bench into rows that are not on screen.
+  // Issues live on the issues tab only, so on the agents tab there is no second section
+  // and `order` is the agent list alone — which is what keeps ↓ from walking the
+  // cursor off the end of it into rows that are not on screen.
   const issues = (onBench || backlogCollapsed)
     ? []
     : (Array.isArray(backlog) ? backlog : []).filter(Boolean);
@@ -259,6 +281,9 @@ export function keyAction(key, { optionCount = 0, repeat = false, issue = false 
     case 'Escape': return { type: 'escape' };
     case '?': return { type: 'help' };
     case 'o': return { type: 'open' };
+    // The permissions log is about the machine, not about the selected row, so unlike
+    // every other key here it is offered on an issue row too.
+    case 'p': return { type: 'permissions' };
     case 'g': return issue ? { type: 'github' } : null;
     case 'r': return issue ? null : { type: 'focusReply' };
     // A Backlog row is a GitHub issue with no session behind it, so there is nothing to

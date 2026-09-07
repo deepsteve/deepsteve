@@ -178,8 +178,9 @@ test('rows carry get_session_info\'s field names plus project and self', async (
 
   assert.deepStrictEqual(Object.keys(row).sort(), [
     'agentType', 'cwd', 'createdAt', 'id', 'lastActivity', 'name',
-    'project', 'repoRoot', 'self', 'state', 'windowId', 'worktree',
+    'mergeBlocked', 'project', 'repoRoot', 'self', 'state', 'windowId', 'worktree',
   ].sort());
+  assert.strictEqual(row.mergeBlocked, false, 'a session that has never merged is not blocked');
   assert.strictEqual(row.state, 'idle', 'state comes from sessionInputState');
   assert.strictEqual(row.agentType, 'claude');
   assert.ok(!('runningCommand' in row), 'runningCommand costs a process lookup per row — omitted on purpose');

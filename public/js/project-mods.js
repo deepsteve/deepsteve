@@ -444,7 +444,11 @@ export function makeRailRow(mod, ownerContextId = null) {
   // an identical-looking square. The collapsed icon rail shows one either way.
   row.className = 'context-row project-mod-row' + (mod.icon ? ' has-icon' : '');
   row.dataset.projectModId = mod.id;
-  row.title = `${mod.name} — project mod · right-click for options`;
+  // The name and what it is, and nothing else. The tooltip used to end "· right-click for
+  // options", which is a caption describing the gesture you have to already be performing
+  // to read it — hovering cannot tell you to right-click, because by then you are hovering.
+  // The title's job here is the name, which the rail truncates.
+  row.title = `${mod.name} — project mod`;
 
   const { glyph, isEmoji } = modIcon(mod);
   const iconEl = document.createElement('span');

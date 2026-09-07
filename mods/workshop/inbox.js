@@ -97,6 +97,30 @@ function parseIdleId(id) {
 }
 
 /**
+ * `session:<sessionId>` — the row a live session gets when it is not asking anything.
+ *
+ * The third derived kind, and the one that changed what the panel is for. Workshop used
+ * to build rows only for sessions that were waiting on a human, so an agent doing its
+ * job appeared nowhere and the list read as "the agents that used the MCP tools". A
+ * session working is the ordinary state of the machine and belongs on the list; it just
+ * belongs at the bottom of it.
+ *
+ * A separate prefix from `idle:` rather than a flag on it, because the two carry
+ * different verbs: dismissing an idle row SNOOZES a wait, and there is no wait here to
+ * snooze.
+ */
+function sessionRowId(sessionId) {
+  return 'session:' + sessionId;
+}
+
+/** The session id inside a session-row id, or null for anything else. */
+function parseSessionRowId(id) {
+  if (typeof id !== 'string' || !id.startsWith('session:')) return null;
+  const rest = id.slice('session:'.length);
+  return rest ? rest : null;
+}
+
+/**
  * A ticket as an agent might repeat it back: 12, '12', '#12', 'w12' all mean w12.
  * The model-facing text says "#12", so all three spellings will be tried.
  */
@@ -454,6 +478,8 @@ module.exports = {
   parseBlockedId,
   idleId,
   parseIdleId,
+  sessionRowId,
+  parseSessionRowId,
   normalizeTicket,
   normalizeOptions,
   resultOptionsFor,

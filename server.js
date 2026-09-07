@@ -3212,6 +3212,61 @@ function setWaiting(e, id, waiting, via, extra = {}) {
   e.clients.forEach((c) => c.send(stateMsg));
 }
 
+/**
+ * "Merge blocked" — a first-class session state, and the single place that sets it.
+ *
+ * A merge that does not merge is the one outcome in this product that nothing was
+ * holding on to. Every merge path reported it to whoever asked and then forgot it: the
+ * MCP tools returned a status to an agent that had already been told to stop, and the
+ * panel put a red string in a corner that its next poll wiped. So work that was finished
+ * and could not land looked exactly like work in progress, from every surface.
+ *
+ * It lives on the entry rather than in the mod that noticed it, because three different
+ * things need it and none of them can ask a mod: the tab strip (a glyph, so you can see
+ * it without opening anything), `get_session_info` (so the AGENT can find out what state
+ * it is in), and the Workshop list. One writer, so those three can never disagree.
+ *
+ * PERSISTED, via serializeShellEntry. The claim is "the last merge attempt failed and
+ * none has succeeded since", which a restart does not falsify — and a state that
+ * evaporated on every `./restart.sh` would be one nobody could rely on. It is cleared by
+ * a merge that lands, by a human, or by the agent saying it is moving again.
+ *
+ * `block` is null to clear, or { status, message, branch, target, at }.
+ */
+function setMergeBlock(id, block) {
+  const entry = shells.get(id);
+  if (!entry) return false;
+
+  const next = block || null;
+  // Compared by value, not identity: this is called on every merge attempt, and a
+  // re-attempt that fails the same way must not churn state.json or repaint the strip.
+  const before = JSON.stringify(entry.mergeBlock || null);
+  if (before === JSON.stringify(next)) return false;
+
+  entry.mergeBlock = next;
+  saveState();
+  const msg = JSON.stringify({ type: 'merge-block', mergeBlock: next });
+  entry.clients.forEach((c) => { try { c.send(msg); } catch {} });
+  log(`[merge-block] ${id} ${next ? `${next.status} ${next.branch || '?'} -> ${next.target || '?'}` : 'cleared'}`);
+  return true;
+}
+
+/** The outcome of one merge attempt, recorded. Statuses other than these left the
+ *  target checkout untouched, which is exactly what "blocked" means here. */
+const MERGE_OK_STATUSES = new Set(['merged', 'pushed']);
+
+function recordMergeAttempt(id, result) {
+  if (!id || !result) return false;
+  if (MERGE_OK_STATUSES.has(result.status)) return setMergeBlock(id, null);
+  return setMergeBlock(id, {
+    status: result.status,
+    message: result.message || '',
+    branch: result.branch || null,
+    target: result.target || null,
+    at: Date.now(),
+  });
+}
+
 // Re-derive the waiting flag from the screen and apply it, then serve any armed
 // prompt delivery. 'unknown' leaves the flag as-is — only a decisive
 // 'working'/'waiting' moves it. Called on every output chunk and on the periodic
@@ -3743,6 +3798,8 @@ let stateFrozen = false;  // Set during shutdown to prevent onExit handlers from
 // snapshot must write the same shape: the final snapshot wins in the merge, so any
 // field it omits is silently wiped for every live shell on a graceful restart
 // (configDir was lost this way, breaking #537 profile resumes — #542).
+// `mergeBlock` is the merge-blocked session state: carried so a `./restart.sh` between a
+// refused merge and the fix does not silently drop it — see setMergeBlock().
 // `resultItemId` / `resultApprovedAt` are Workshop's review-gate stamps (#669), carried
 // for the same reason `autopilot` is: they are read at completion time, and a
 // ./restart.sh landing between a human pressing Approve and the agent calling
@@ -3751,7 +3808,7 @@ let stateFrozen = false;  // Set during shutdown to prevent onExit handlers from
 // were already on the branch when this session started, it cannot be recomputed later
 // (by then they look like everyone else's), and issue_complete reads it at the end.
 function serializeShellEntry(entry) {
-  return { cwd: entry.cwd, claudeSessionId: entry.claudeSessionId, agentType: entry.agentType || 'claude', codexHomeId: entry.codexHomeId || null, configDir: entry.configDir || null, engineType: entry.engineType || 'node-pty', worktree: entry.worktree || null, name: entry.name || null, planMode: !!entry.planMode, model: entry.model || null, effort: entry.effort || null, allowedTools: Array.isArray(entry.allowedTools) && entry.allowedTools.length ? entry.allowedTools : null, forkParent: entry.forkParent || null, lastActivity: entry.lastActivity || null, createdAt: entry.createdAt || null, windowId: entry.windowId || null, scheduled: !!entry.scheduled, autopilot: !!entry.autopilot, resumedWorktree: entry.resumedWorktree || null, resultItemId: entry.resultItemId || null, resultApprovedAt: entry.resultApprovedAt || null };
+  return { cwd: entry.cwd, claudeSessionId: entry.claudeSessionId, agentType: entry.agentType || 'claude', codexHomeId: entry.codexHomeId || null, configDir: entry.configDir || null, engineType: entry.engineType || 'node-pty', worktree: entry.worktree || null, name: entry.name || null, planMode: !!entry.planMode, model: entry.model || null, effort: entry.effort || null, allowedTools: Array.isArray(entry.allowedTools) && entry.allowedTools.length ? entry.allowedTools : null, forkParent: entry.forkParent || null, lastActivity: entry.lastActivity || null, createdAt: entry.createdAt || null, windowId: entry.windowId || null, scheduled: !!entry.scheduled, autopilot: !!entry.autopilot, resumedWorktree: entry.resumedWorktree || null, resultItemId: entry.resultItemId || null, resultApprovedAt: entry.resultApprovedAt || null, mergeBlock: entry.mergeBlock || null };
 }
 
 // #561: a session record is never hard-deleted by any runtime path. Every close
@@ -6047,6 +6104,7 @@ app.get('/api/shells/:id/info', (req, res) => {
     elapsedMs: entry.createdAt ? Date.now() - entry.createdAt : null,
     // Kept in lockstep with the get_session_info MCP tool (#519).
     state: sessionInputState(entry),
+    mergeBlock: entry.mergeBlock || null,
     metaControls: !!settings.metaControlsEnabled,
   });
 });
@@ -8063,7 +8121,7 @@ function handleWsConnection(ws, req) {
       }
       sessionEngine = spawnedEngine;
       restoredEngineType = spawnedEngine === tmuxEngine ? 'tmux' : 'node-pty';
-      shells.set(id, { clients: new Set(), cwd, claudeSessionId, agentType: savedAgentType, codexHomeId, configDir: restored.configDir || null, engine: sessionEngine, engineType: restoredEngineType, worktree: savedWorktree, name: restoredName, planMode: savedPlanMode, model: restored.model || null, effort: restored.effort || null, allowedTools: restored.allowedTools || null, forkParent: restored.forkParent || null, restored: true, scheduled: !!restored.scheduled, autopilot: !!restored.autopilot, resumedWorktree: restored.resumedWorktree || null, resultItemId: restored.resultItemId || null, resultApprovedAt: restored.resultApprovedAt || null, waitingForInput: false, lastActivity: Date.now(), createdAt: restored.createdAt || Date.now(), windowId: restoredWindowId });
+      shells.set(id, { clients: new Set(), cwd, claudeSessionId, agentType: savedAgentType, codexHomeId, configDir: restored.configDir || null, engine: sessionEngine, engineType: restoredEngineType, worktree: savedWorktree, name: restoredName, planMode: savedPlanMode, model: restored.model || null, effort: restored.effort || null, allowedTools: restored.allowedTools || null, forkParent: restored.forkParent || null, restored: true, scheduled: !!restored.scheduled, autopilot: !!restored.autopilot, resumedWorktree: restored.resumedWorktree || null, resultItemId: restored.resultItemId || null, resultApprovedAt: restored.resultApprovedAt || null, mergeBlock: restored.mergeBlock || null, waitingForInput: false, lastActivity: Date.now(), createdAt: restored.createdAt || Date.now(), windowId: restoredWindowId });
       wireShellOutput(id, initialCols, initialRows);
       recordRecentSession(id);  // bump recency on same-browser reconnect + cross-browser restore
       if (agentConfig.supportsSessionWatch) watchClaudeSessionDir(id);
@@ -8307,7 +8365,7 @@ function handleWsConnection(ws, req) {
   // pingPong: capability flag (#563) — clients only send {type:'ping'} probes when
   // the server advertises it, because an older server would type the raw JSON into
   // the PTY (unknown control messages fall through to the input write).
-  ws.send(JSON.stringify({ type: 'session', id, restored: entry.restored || false, cwd: entry.cwd, name: entry.name || null, agentType: entry.agentType || 'claude', configDir: entry.configDir || null, engineType: entry.engineType || 'node-pty', claudeSessionId: entry.claudeSessionId || null, worktree: entry.worktree || null, autopilot: !!entry.autopilot, scrollback: hasScrollback, existingClients, waitingForInput: entry.waitingForInput || false, pingPong: true }));
+  ws.send(JSON.stringify({ type: 'session', id, restored: entry.restored || false, cwd: entry.cwd, name: entry.name || null, agentType: entry.agentType || 'claude', configDir: entry.configDir || null, engineType: entry.engineType || 'node-pty', claudeSessionId: entry.claudeSessionId || null, worktree: entry.worktree || null, autopilot: !!entry.autopilot, scrollback: hasScrollback, existingClients, waitingForInput: entry.waitingForInput || false, mergeBlock: entry.mergeBlock || null, pingPong: true }));
 
   // Send buffered scrollback so the client can render the terminal immediately
   if (hasScrollback) {
@@ -8551,8 +8609,14 @@ function broadcastToWindow(windowId, msg) {
 }
 
 // Initialize MCP server (async, ~100ms for dynamic import)
-initMCP({ app, security, shells, wss, broadcast, broadcastToWindow, log, MODS_DIR, closeSession, tombstoneSession, handleShellGone, spawnSession, sessionEnv, getSpawnArgs, mcpConfigArgs, getAgentConfig, resolveConfigDir, validateModel, validateEffort, wireShellOutput, watchClaudeSessionDir, unwatchClaudeSessionDir, resolveForkParentSession, transcriptPath, saveState, validateWorktree, ensureWorktree, sessionPaths, submitToShell, fetchIssueFromGitHub, deliverPromptWhenReady, startIssueSession, reloadClients, deliverToWindow, noteSpawnDelivery, settings, isShuttingDown: () => shuttingDown, displayTabs, setDisplayTab, deleteDisplayTab, screenshots, setScreenshot, deleteScreenshot, getScreenshotPath, getDefaultEngine, getForegroundCommand, sessionLog, emitSessionOpen, getContexts: () => contexts, pathInside, getSavedSession: (id) => savedState[id] || null, stripEscapeSequences, readTerminalScreen, sessionInputState, maybeInheritRemoteControl, requestMetaControlsConsent, registerRestartBlocker, armSessionAutoClose, logRcWrite }).catch(e => log('MCP init failed:', e.message));
-initMCP({ app, security, shells, wss, broadcast, broadcastToWindow, log, MODS_DIR, closeSession, tombstoneSession, handleShellGone, spawnSession, sessionEnv, getSpawnArgs, mcpConfigArgs, getAgentConfig, resolveConfigDir, validateModel, validateEffort, wireShellOutput, watchClaudeSessionDir, unwatchClaudeSessionDir, resolveForkParentSession, saveState, validateWorktree, ensureWorktree, sessionPaths, submitToShell, fetchIssueFromGitHub, deliverPromptWhenReady, startIssueSession, reloadClients, deliverToWindow, noteSpawnDelivery, settings, isShuttingDown: () => shuttingDown, displayTabs, setDisplayTab, deleteDisplayTab, screenshots, setScreenshot, deleteScreenshot, getScreenshotPath, getDefaultEngine, getForegroundCommand, sessionLog, emitSessionOpen, getContexts: () => contexts, pathInside, getSavedSession: (id) => savedState[id] || null, stripEscapeSequences, readTerminalScreen, sessionInputState, maybeInheritRemoteControl, requestMetaControlsConsent, registerRestartBlocker, armSessionAutoClose, logRcWrite }).catch(e => log('MCP init failed:', e.message));
+//
+// ONE call. #670 added `transcriptPath` by duplicating this whole line rather than
+// editing it, so every boot ran initMCP twice, ~2ms apart, and the copy WITHOUT
+// transcriptPath landed last — every mod's stashed ctx came from it (`init(context)`
+// assigns unconditionally, and nothing here awaits the first call). The chat pane's
+// transcript reader was therefore dead from the day it shipped, silently falling back
+// to the workshop_say store. Adding a ctx field means editing this line, never copying it.
+initMCP({ app, security, shells, wss, broadcast, broadcastToWindow, log, MODS_DIR, closeSession, tombstoneSession, handleShellGone, spawnSession, sessionEnv, getSpawnArgs, mcpConfigArgs, getAgentConfig, resolveConfigDir, validateModel, validateEffort, wireShellOutput, watchClaudeSessionDir, unwatchClaudeSessionDir, resolveForkParentSession, transcriptPath, saveState, validateWorktree, ensureWorktree, sessionPaths, submitToShell, fetchIssueFromGitHub, deliverPromptWhenReady, startIssueSession, reloadClients, deliverToWindow, noteSpawnDelivery, settings, isShuttingDown: () => shuttingDown, displayTabs, setDisplayTab, deleteDisplayTab, screenshots, setScreenshot, deleteScreenshot, getScreenshotPath, getDefaultEngine, getForegroundCommand, sessionLog, emitSessionOpen, getContexts: () => contexts, pathInside, getSavedSession: (id) => savedState[id] || null, stripEscapeSequences, readTerminalScreen, sessionInputState, setMergeBlock, recordMergeAttempt, maybeInheritRemoteControl, requestMetaControlsConsent, registerRestartBlocker, armSessionAutoClose, logRcWrite }).catch(e => log('MCP init failed:', e.message));
 
 // Watch themes directory for changes and broadcast to clients
 let themeWatchDebounce = null;

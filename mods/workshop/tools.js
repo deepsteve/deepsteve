@@ -105,6 +105,8 @@ const transcript = require('./transcript');
 const dialogParse = require('./dialog-parse');
 const backlog = require('./backlog');
 const images = require('./images');
+const contention = require('./contention');
+const permissionLog = require('./permission-log');
 
 // Stashed by init() and shared with registerRoutes(), the mods/scheduled-tasks and
 // mods/project-mods pattern: mcp-server.js always calls init() first, and both halves
@@ -200,6 +202,18 @@ const PROJECT_CACHE_MAX = 200;
 // Written only from POST /api/workshop/items/blocked:<id>/dismiss, which no MCP tool
 // calls — see the header. An agent must never be able to silence a human's inbox.
 const mutedDialogs = new Map();
+
+// How long a merge attempt that did not merge keeps its row on the list.
+//
+// Not forever, and not until it is cleared: a refused merge is a fact about a MOMENT
+// ("the checkout was dirty at 14:02"), and by tomorrow it says nothing about whether it
+// would be refused now. It is cleared early by a successful merge, by the human, or by
+// the agent saying it is moving again — this is only the backstop for the case where
+// nobody does any of those.
+const MERGE_BLOCK_TTL_MS = 6 * 60 * 60 * 1000;
+
+// A self-declared block (workshop_blocked) on the same backstop and for the same reason.
+const BLOCK_NOTE_TTL_MS = 6 * 60 * 60 * 1000;
 
 // sessionId -> { until, idleSince } — an idle row the human has snoozed (#682).
 //
@@ -376,6 +390,90 @@ function backlogProject(query) {
   return best ? projectFor(best).project : '';
 }
 
+/**
+ * Which projects the panel is currently showing.
+ *
+ * `?projects=` is a comma-separated list of canonical repo roots; absent or empty means
+ * every project, which is both the default and the honest reading of "I have not chosen".
+ * The filter is applied to ROWS rather than folded into the collection loop so that one
+ * predicate serves the inbox and the permissions log — two lists that must agree about
+ * what "this project" means or the picker looks broken on one of them.
+ *
+ * A row with no project at all (a plain shell in a non-repo directory) is kept only when
+ * nothing is selected. Once you have said "these two repos", a stray shell in ~ is not
+ * one of them.
+ */
+function projectFilter(query) {
+  const raw = String((query && query.projects) || '').trim();
+  if (!raw) return () => true;
+  const wanted = new Set(
+    raw.split(',').map((p) => projectScope.canonicalRoot(p.trim())).filter(Boolean),
+  );
+  if (!wanted.size) return () => true;
+  return (row) => wanted.has(row && row.project);
+}
+
+/**
+ * Every project this machine is evidently working in.
+ *
+ * Two sources unioned, because neither is the answer alone: live sessions say what is
+ * happening now, and contexts.json says what the user has deliberately grouped (a repo
+ * you are between sessions on must not disappear from the picker). Names go through
+ * projectScope.disambiguate against THIS root set, so two repos with the same basename
+ * are told apart by the list that actually renders them.
+ */
+function knownProjects() {
+  const counts = new Map();
+  const bump = (root, live) => {
+    if (!root) return;
+    const hit = counts.get(root) || { project: root, sessions: 0 };
+    if (live) hit.sessions++;
+    counts.set(root, hit);
+  };
+
+  for (const [, entry] of ctx.shells) {
+    if (!entry || entry.killed || entry.agentType === 'tmux-attach') continue;
+    bump(projectFor(entry).project, true);
+  }
+  for (const c of projectScope.getContexts(ctx)) {
+    for (const dir of (Array.isArray(c && c.dirs) ? c.dirs : [])) {
+      bump(projectScope.canonicalRoot(dir), false);
+    }
+  }
+
+  const names = projectScope.disambiguate([...counts.keys()]);
+  return [...counts.values()]
+    .map((p) => ({ ...p, name: names.get(p.project) || projectScope.displayName(p.project) }))
+    .sort((a, b) => b.sessions - a.sessions || a.name.localeCompare(b.name));
+}
+
+/**
+ * One project's open issues, cached, with the live tabs already matched onto them.
+ *
+ * Factored out so the single-project and multi-project routes cannot diverge — they read
+ * the same cache under the same key, so selecting three projects and then selecting one
+ * of them costs no extra `gh` at all.
+ */
+async function backlogFor(project, label, query, now) {
+  const maxAgeMs = Math.max(MIN_MAX_AGE_MS,
+    Math.min(MAX_MAX_AGE_MS, Number(query && query.maxAgeMs) || backlog.BACKLOG_TTL_MS));
+
+  const result = await issueCache.get(`${project}\0${label}`, async () => {
+    const r = await runGh(backlog.issueListArgs(label), project);
+    if (r.error) return { error: r.error, issues: [] };
+    const issues = backlog.parseIssues(r.stdout);
+    return { issues, truncated: issues.length >= backlog.MAX_ISSUES };
+  }, { now, maxAgeMs });
+
+  return {
+    ...result,
+    // Matched on the way OUT, never cached: the issue list is minutes-stale by design
+    // but "which tab is on it" must be current, or a tab opened thirty seconds ago
+    // stays invisible for two minutes.
+    issues: backlog.matchSessions(result.issues || [], sessionsForMatch(), project),
+  };
+}
+
 /** Live sessions as backlog.js wants them: no ctx, no engines, no terminal screens. */
 function sessionsForMatch() {
   const out = [];
@@ -447,13 +545,26 @@ function serializeStored(item) {
   };
 }
 
-function scrapeFor(id, entry, now) {
+/**
+ * `wantDialog` is a COST switch, not a behaviour one.
+ *
+ * Every live session is scraped now, not just the ones waiting on a human, and a working
+ * session's screen changes on every chunk — so its outputSeq moves every poll and the
+ * cache never hits it. Running detectDialog + parseDialog + a 60-row widening retry on
+ * each of those, every two seconds, buys nothing: a session that is mid-turn is by
+ * definition not sitting on a dialog. The caller passes false there and gets the cheap
+ * half (the lines and the two fingerprints), which is all a working row needs.
+ *
+ * The entry is cached under the same key either way and carries `hadDialogRead` so a
+ * cheap read is never mistaken for "we looked and there was no dialog".
+ */
+function scrapeFor(id, entry, now, wantDialog = true) {
   const seq = entry.outputSeq != null ? entry.outputSeq : (entry.lastActivity || 0);
   const prev = scrapeCache.get(id);
-  if (prev && prev.seq === seq) return prev;
+  if (prev && prev.seq === seq && (prev.hadDialogRead || !wantDialog)) return prev;
 
   let lines = screenLines(entry, SCRAPE_ROWS);
-  let detected = dialogParse.detectDialog(lines);
+  let detected = wantDialog ? dialogParse.detectDialog(lines) : null;
   let parsed = detected ? dialogParse.parseDialog(lines) : null;
 
   // A dialog we can see but not read may simply have been cut off by the 30-row
@@ -476,7 +587,7 @@ function scrapeFor(id, entry, now) {
   // dialog whose option run it cannot walk, and those all shared one empty
   // fingerprint — every unreadable dialog on the machine inheriting one age, and
   // (since the mute below is keyed on this) one dismissal.
-  const questionFp = dialogParse.dialogFingerprint(lines);
+  const questionFp = wantDialog ? dialogParse.dialogFingerprint(lines) : '';
   // Carry the clock forward across a repaint: a status-line tick or a resize bumps
   // outputSeq without changing the question, and resetting the age there would make
   // the wait colouring meaningless.
@@ -494,7 +605,10 @@ function scrapeFor(id, entry, now) {
     ? prev.idleSince
     : now;
 
-  const fresh = { seq, lines, detected, parsed, questionFp, blockedSince, screenFp, idleSince };
+  const fresh = {
+    seq, lines, detected, parsed, questionFp, blockedSince, screenFp, idleSince,
+    hadDialogRead: wantDialog,
+  };
   scrapeCache.set(id, fresh);
   return fresh;
 }
@@ -541,21 +655,15 @@ function idleRowFor(id, entry, scrape, now, idleAfterMs) {
     snoozedSessions.delete(id);
   }
 
-  const { project, projectName } = projectFor(entry);
   const said = dialogParse.lastAgentLine(scrape.lines);
   return {
+    ...rowBase(id, entry),
     id: inbox.idleId(id),
     kind: 'idle',
-    status: 'open',
     // Deliberately NOT 'blocking'. A blocked agent cannot proceed without you; this
     // one has simply run out of instructions. Ranking them together would put every
     // finished session above a real dialog, which is how a bench stops being read.
     urgency: 'normal',
-    sessionId: id,
-    sessionName: entry.name || null,
-    project,
-    projectName,
-    worktree: entry.worktree || null,
     // Opaque to the panel, echoed back to /dismiss so a snooze cannot land on a wait
     // that started after the row was drawn.
     fingerprint: scrape.screenFp,
@@ -570,18 +678,269 @@ function idleRowFor(id, entry, scrape, now, idleAfterMs) {
     answerable: true,
     preview: scrape.lines.slice(-PREVIEW_ROWS),
     createdAt: scrape.idleSince,
+    pendingPath: 'prompt',
+    inFlight: false,
+  };
+}
+
+/**
+ * The GitHub issue a session is working on, or null.
+ *
+ * The worktree name is the only place the daemon actually records this — startIssueSession
+ * mints `github-issue-<n>` and nothing stamps a number on the entry — so the same rule
+ * backlog.js matches issues to tabs with is the rule here. A tab renamed by its agent still
+ * resolves, because the worktree cannot be renamed by one.
+ */
+function issueNumberFor(entry) {
+  return backlog.worktreeIssueNumber(entry && entry.worktree);
+}
+
+/** Live sessions in the shape contention.js wants: no ctx, no engines, no screens. */
+function liveSessionList() {
+  const out = [];
+  for (const [id, entry] of ctx.shells) {
+    if (!entry || entry.killed || entry.agentType === 'tmux-attach') continue;
+    let cwd = entry.cwd || '';
+    try { ({ cwd } = ctx.sessionPaths(entry)); } catch { /* keep the raw cwd */ }
+    out.push({ id, name: entry.name || null, cwd, worktree: entry.worktree || null });
+  }
+  return out;
+}
+
+/**
+ * Who is holding `repoRoot` dirty, answered from the live session list.
+ *
+ * Wrapped rather than called directly so both readers — the stuck row and the
+ * workshop_blocked tool result — go through one place and can never disagree about who
+ * counts as a holder.
+ */
+function holdersFor(repoRoot, exceptId) {
+  return contention.holdersOf(repoRoot, liveSessionList(), exceptId);
+}
+
+/** The fields every derived row carries, whatever kind it turns out to be. */
+function rowBase(id, entry) {
+  const { project, projectName } = projectFor(entry);
+  return {
+    sessionId: id,
+    sessionName: entry.name || null,
+    project,
+    projectName,
+    worktree: entry.worktree || null,
+    issue: issueNumberFor(entry),
+    agentType: entry.agentType || null,
+    status: 'open',
     answeredAt: null,
     answer: null,
     deliveredVia: null,
     dismissedReason: null,
-    pendingPath: 'prompt',
     sessionAlive: true,
-    // What the bench may offer beyond a prompt. Computed here because the panel has
-    // no way to know either: it sees this window's tabs, not the server's sessions.
     canClose: true,
     canMerge: !!entry.worktree,
+  };
+}
+
+/**
+ * Drop a session's stuck state.
+ *
+ * Both fields together, always: a merge that was refused because the checkout was dirty
+ * and an agent's own note about being unable to merge are two recordings of one
+ * situation, and clearing one while leaving the other is how a row half-disappears.
+ *
+ * Both live ONLY in memory. serializeShellEntry does not carry them, so a ./restart.sh
+ * forgets every block — which is right: a block is a claim about what is true right now,
+ * and a restart is exactly the point at which we stop being able to vouch for it. Retry
+ * the merge and the row comes straight back.
+ */
+function clearStuck(entry, id) {
+  if (!entry) return;
+  // Through the server's own setter, so the tab-strip glyph and state.json follow. A
+  // direct `entry.mergeBlock = null` here would clear the row and leave the glyph lit.
+  if (id && ctx.setMergeBlock) ctx.setMergeBlock(id, null);
+  else entry.mergeBlock = null;
+  entry.blockedNote = null;
+}
+
+/**
+ * "This agent is stuck, and here is on what" — the third derived kind.
+ *
+ * Two sources, one row, because they are the same statement about the machine and the
+ * human reading the list does not care which of them produced it:
+ *
+ *   entry.mergeBlock  a merge — from ANY path, not just this panel — that did not merge.
+ *                     Until #the-state-became-real that was a
+ *                     red string in the corner of the panel that vanished on the next
+ *                     poll, so the one state you most need to come back to was the one
+ *                     state Workshop could not show you.
+ *   entry.blockedNote an agent's own workshop_blocked call.
+ *
+ * Ranked 'blocking' because it is: the work is finished and cannot land. A stuck row
+ * outranks an idle one, which is the correct reading — an agent waiting for its next
+ * instruction is fine, and an agent that cannot deliver the last one is not.
+ */
+function stuckRowFor(id, entry, now) {
+  // entry.mergeBlock is the SERVER's state, set by every merge path through
+  // recordMergeAttempt — not a copy Workshop keeps. That is what makes the tab-strip
+  // glyph, get_session_info and this row incapable of disagreeing.
+  const merge = entry.mergeBlock;
+  const note = entry.blockedNote;
+
+  const mergeLive = merge && contention.isMergeBlocked(merge.status)
+    && now - (merge.at || 0) < MERGE_BLOCK_TTL_MS;
+  const noteLive = note && now - (note.at || 0) < BLOCK_NOTE_TTL_MS;
+  if (!mergeLive && !noteLive) return null;
+
+  // The agent's own words win the headline when it has said something: it knows why it
+  // is stuck and the merge status only knows that git refused.
+  const desc = mergeLive ? contention.describeMerge(merge.status) : null;
+  const headline = noteLive ? note.summary : desc.label;
+
+  // Holders are re-derived on every poll, never taken from the stamp. The stamp records
+  // what was true when the merge ran; the row has to say who is holding it NOW, or it
+  // sends you to a tab that closed an hour ago.
+  const wantHolders = (mergeLive && desc.holders) || (noteLive && note.needsCheckout);
+  let repoRoot = '';
+  try { ({ repoRoot } = ctx.sessionPaths(entry)); } catch { /* no holders, then */ }
+  const holders = wantHolders && repoRoot ? holdersFor(repoRoot, id) : [];
+
+  const detail = [];
+  if (noteLive && note.detail) detail.push(note.detail);
+  if (mergeLive) {
+    detail.push(desc.hint);
+    if (merge.message && merge.message !== desc.hint) detail.push(merge.message);
+  }
+  if (wantHolders) {
+    detail.push(contention.holderSentence(holders, repoRoot ? projectScope.displayName(repoRoot) : ''));
+  }
+
+  return {
+    ...rowBase(id, entry),
+    id: inbox.sessionRowId(id),
+    kind: 'stuck',
+    urgency: 'blocking',
+    headline: headline || 'Stuck',
+    context: detail.join('\n\n'),
+    // What the panel needs to render the verbs, rather than re-deriving them from prose.
+    stuck: {
+      source: noteLive ? 'agent' : 'merge',
+      mergeStatus: mergeLive ? merge.status : null,
+      branch: mergeLive ? (merge.branch || null) : null,
+      target: mergeLive ? (merge.target || null) : null,
+      waitingOn: noteLive ? (note.waitingOn || 'other') : 'merge',
+      holders,
+      since: Math.min(
+        mergeLive ? merge.at : Infinity,
+        noteLive ? note.at : Infinity,
+      ),
+    },
+    options: [],
+    recommendation: '',
+    cursorIndex: null,
+    multi: null,
+    // You can always say something to a stuck agent, which is usually the point.
+    answerable: true,
+    preview: null,
+    createdAt: Math.min(
+      mergeLive ? merge.at : Infinity,
+      noteLive ? note.at : Infinity,
+    ),
+    pendingPath: 'prompt',
     inFlight: false,
   };
+}
+
+/**
+ * "This agent is working" — the row that made Workshop a picture of the machine.
+ *
+ * There is nothing to do with one of these and that is the point: the list was gated on
+ * `waitingForInput` and so contained only agents that had stopped, which meant a machine
+ * running eight agents flat out showed an EMPTY panel. You could not answer "what is
+ * everything doing right now" from the surface built to answer it.
+ *
+ * Ranked 'fyi' so it sorts below every real obligation. It is scenery — but scenery you
+ * can visit, close, and send a prompt to, which is what herding actually consists of.
+ */
+function workingRowFor(id, entry, scrape, now) {
+  const state = ctx.sessionInputState(entry);
+  const said = scrape ? dialogParse.lastAgentLine(scrape.lines) : '';
+  const queued = (entry.promptQueue && entry.promptQueue.length) || 0;
+
+  return {
+    ...rowBase(id, entry),
+    id: inbox.sessionRowId(id),
+    kind: 'working',
+    urgency: 'fyi',
+    // The state the classifier can actually defend. 'unknown' is the honest answer for a
+    // plain shell (no screenMarkers) and the panel renders it as "open", not as "busy".
+    state,
+    queued,
+    headline: said || (state === 'busy' ? 'Working' : 'Open'),
+    context: '',
+    options: [],
+    recommendation: '',
+    cursorIndex: null,
+    multi: null,
+    answerable: true,
+    preview: null,
+    // The session's own age, not the scrape's: a working row has no wait to time, and
+    // showing "3s" on an agent that has been running for an hour is a lie about the one
+    // number the row carries.
+    createdAt: entry.createdAt || scrape?.idleSince || now,
+    lastActivity: entry.lastActivity || null,
+    pendingPath: 'prompt',
+    inFlight: false,
+  };
+}
+
+/**
+ * Record a permission dialog the poll just saw.
+ *
+ * Called for every detected dialog, muted or not, and de-duped inside the store on
+ * (session, fingerprint) — so the same dialog sitting on screen for a minute produces
+ * one entry, and answering it and being asked something else produces two.
+ *
+ * Only `kind === 'permission'` is logged. An AskUserQuestion is the agent asking the
+ * human a question about the work; a permission dialog is the agent asking to be allowed
+ * to DO something, and it is the second list that is worth keeping — it is the record of
+ * what the agents on this machine have wanted to run.
+ */
+function notePermission(id, entry, scrape, now) {
+  if (!scrape.detected || scrape.detected.kind !== 'permission') return;
+  const parsed = scrape.parsed;
+  const { project, projectName } = projectFor(entry);
+  const added = permissionLog.observe({
+    sessionId: id,
+    sessionName: entry.name || null,
+    project,
+    projectName,
+    fingerprint: scrape.questionFp,
+    // parsed.headline for a permission dialog is the tool line itself — "Bash(git push)",
+    // "deepsteve - read_session_screen (MCP)" — which is exactly the thing worth listing.
+    // An unparseable dialog still gets an entry, because "something asked and we could
+    // not read it" is information too; it just carries the raw question.
+    subject: parsed ? parsed.headline : 'Unreadable permission dialog',
+    question: parsed ? parsed.question : '',
+    options: parsed ? parsed.options.map((o) => o.label) : [],
+  }, now);
+  if (added) ctx.log(`[workshop] permission ${added.id} session=${id} ${added.tool}${added.target ? `(${added.target})` : ''}`);
+}
+
+/**
+ * Close permission-log entries whose dialog is no longer on screen.
+ *
+ * Runs off the same pass that builds the rows, so it sees exactly what the poll saw. A
+ * session that has no dialog up any more answered whatever it had — we cannot know WITH
+ * WHAT unless the answer came through this panel, and the store is careful not to
+ * pretend otherwise.
+ */
+function sweepPermissions(live, now) {
+  for (const e of permissionLog.all()) {
+    if (e.status !== 'open') continue;
+    if (!live.has(e.sessionId)) { permissionLog.resolve(e.sessionId, e.fingerprint, {}, now); continue; }
+    const scrape = scrapeCache.get(e.sessionId);
+    const stillUp = scrape && scrape.detected && scrape.questionFp === e.fingerprint;
+    if (!stillUp) permissionLog.resolve(e.sessionId, e.fingerprint, {}, now);
+  }
 }
 
 function derivedItems(now, { idleAfterMs = IDLE_AFTER_DEFAULT_MS } = {}) {
@@ -593,40 +952,56 @@ function derivedItems(now, { idleAfterMs = IDLE_AFTER_DEFAULT_MS } = {}) {
     if (!entry || entry.killed) continue;
     // A tmux-attach entry is somebody else's terminal; we do not drive it.
     if (entry.agentType === 'tmux-attach') continue;
-    // A cheap pre-filter, NOT the truth: sessionInputState maps 'waiting' to 'idle',
-    // and 'idle' covers a session sitting at an empty composer just as much as one
-    // showing a dialog. detectDialog below is the real membership gate.
-    if (!entry.waitingForInput) continue;
-    // Cost control: never make readTerminalScreen build an emulator from scrollback.
-    if (!entry.terminalScreen) continue;
 
-    const scrape = scrapeFor(id, entry, now);
-    if (!scrape.detected) {
-      const row = idleRowFor(id, entry, scrape, now, idleAfterMs);
-      if (row) out.push(row);
+    // A cheap pre-filter for whether a DIALOG is worth looking for, and nothing more:
+    // sessionInputState maps 'waiting' to 'idle', and 'idle' covers a session sitting at
+    // an empty composer just as much as one showing a dialog. detectDialog is still the
+    // real membership gate for a blocked row. It is no longer the gate for the LIST —
+    // that was what made a busy machine look like an empty one.
+    const wantDialog = !!entry.waitingForInput;
+    // A session with no terminal emulator still gets a row; it just gets one with
+    // nothing scraped. Never make readTerminalScreen build an emulator from scrollback.
+    const scrape = entry.terminalScreen ? scrapeFor(id, entry, now, wantDialog) : null;
+
+    // Stuck outranks everything: an agent that cannot land its work is the one row on
+    // the list that will not resolve itself, so it is checked before the states that will.
+    const stuck = stuckRowFor(id, entry, now);
+    if (stuck) { out.push(stuck); continue; }
+
+    if (!scrape || !scrape.detected) {
+      const row = (wantDialog && scrape) ? idleRowFor(id, entry, scrape, now, idleAfterMs) : null;
+      out.push(row || workingRowFor(id, entry, scrape, now));
       continue;
     }
 
-    // Dismissed, and still the same question — stay quiet. A different fingerprint
-    // means the tab moved on, so the mute expires with the dialog that earned it.
+    // Every permission dialog is recorded as it is seen, whether or not a row is built
+    // for it — a muted dialog is still one that was asked, and the log's whole value is
+    // being complete. De-duped inside on (session, fingerprint), so this runs every poll
+    // and writes once per dialog.
+    notePermission(id, entry, scrape, now);
+
+    // Dismissed, and still the same question — stop SHOUTING about it. A different
+    // fingerprint means the tab moved on, so the mute expires with the dialog that
+    // earned it.
+    //
+    // A mute used to drop the row entirely. It no longer can: the list is now every tab,
+    // and a tab that vanishes from it because you pressed a key on it is exactly the
+    // hole this panel was rebuilt to close. So a muted dialog is demoted to 'fyi' — it
+    // stops competing with real obligations and keeps its place in the picture.
     const muted = mutedDialogs.get(id);
+    let isMuted = false;
     if (muted !== undefined) {
-      if (muted === scrape.questionFp) continue;
-      mutedDialogs.delete(id);
+      if (muted === scrape.questionFp) isMuted = true;
+      else mutedDialogs.delete(id);
     }
 
-    const { project, projectName } = projectFor(entry);
     const parsed = scrape.parsed;
     out.push({
+      ...rowBase(id, entry),
       id: inbox.blockedId(id),
       kind: 'blocked',
-      status: 'open',
-      urgency: 'blocking',
-      sessionId: id,
-      sessionName: entry.name || null,
-      project,
-      projectName,
-      worktree: entry.worktree || null,
+      urgency: isMuted ? 'fyi' : 'blocking',
+      muted: isMuted,
       dialogKind: scrape.detected.kind,
       // Opaque to the panel — it only ever echoes it back to /dismiss, so that muting
       // a row can refuse when the tab has started asking something else since the poll.
@@ -645,17 +1020,15 @@ function derivedItems(now, { idleAfterMs = IDLE_AFTER_DEFAULT_MS } = {}) {
       answerable: !!(parsed && parsed.cursorIndex !== null),
       preview: parsed ? null : scrape.lines.slice(-PREVIEW_ROWS),
       createdAt: scrape.blockedSince,
-      answeredAt: null,
-      answer: null,
-      deliveredVia: null,
-      dismissedReason: null,
       pendingPath: 'dialog',
-      sessionAlive: true,
-      canClose: true,
-      canMerge: !!entry.worktree,
       inFlight: inFlightChoices.has(id),
     });
   }
+
+  // Before the scrape cache is pruned: the sweep reads it to decide whether each open
+  // permission entry's dialog is still on screen, and a pruned cache would read as
+  // "gone" for a session that is merely absent from this pass.
+  sweepPermissions(live, now);
 
   for (const id of [...scrapeCache.keys()]) {
     if (!live.has(id)) scrapeCache.delete(id);
@@ -1067,6 +1440,93 @@ function init(context) {
       },
     },
 
+    workshop_blocked: {
+      description:
+        'Say that you are STUCK and cannot make progress, and find out who is in your way. '
+        + 'This is not a question and nobody has to answer it — it puts a red row on the '
+        + 'human\'s Workshop list saying which agent is stopped and on what, so they can see '
+        + 'it without opening your tab. Use it the moment you find you cannot proceed: a '
+        + 'merge that will not land, a file another agent is holding, a credential you do not '
+        + 'have. If you say `waiting_on: "merge"` this returns THE ANSWER to "who is being a '
+        + 'hog" — the sessions currently working in the shared checkout — so do not guess at '
+        + 'that in prose, ask here. Then end your turn. Call workshop_unblocked when you are '
+        + 'moving again; a stale block on the list costs the human the trust they need to read '
+        + 'the list at all.',
+      schema: {
+        summary: z.string().describe('What you are stuck on, in one sentence, phrased so it can be understood without opening your tab. e.g. "Cannot merge — the shared checkout has uncommitted changes."'),
+        waiting_on: z.enum(['merge', 'another-agent', 'human', 'external', 'other']).optional()
+          .describe('What kind of thing you are waiting for. "merge" and "another-agent" make the reply name who is currently working in the shared checkout. Default "other".'),
+        detail: z.string().optional().describe('What you tried and what you need in order to continue. Markdown is fine.'),
+      },
+      handler: async (args, extra) => {
+        const { sessionId } = callerFields(extra);
+        const entry = sessionId ? ctx.shells.get(sessionId) : null;
+        if (!entry) {
+          return text(
+            'This session could not be identified, so there is nothing to mark as blocked. '
+            + 'Tell the user in your own words instead.',
+          );
+        }
+
+        const waitingOn = args.waiting_on || 'other';
+        // The two that are ABOUT the shared checkout. Stamped on the note so the row
+        // re-derives holders on every poll rather than freezing this moment's answer.
+        const needsCheckout = waitingOn === 'merge' || waitingOn === 'another-agent';
+
+        entry.blockedNote = {
+          summary: inbox.clampText(args.summary, 400).trim() || 'Blocked',
+          detail: inbox.clampText(args.detail, 4000).trim(),
+          waitingOn,
+          needsCheckout,
+          at: Date.now(),
+        };
+
+        let repoRoot = '';
+        try { ({ repoRoot } = ctx.sessionPaths(entry)); } catch { /* answered without holders */ }
+        const holders = needsCheckout && repoRoot ? holdersFor(repoRoot, sessionId) : [];
+
+        ctx.log(`[workshop] blocked session=${sessionId} on=${waitingOn} holders=${holders.length}`);
+
+        if (!needsCheckout) {
+          return text(
+            'Marked as blocked on the Workshop list. End your turn — the human can see it. '
+            + 'Call workshop_unblocked once you are moving again.',
+          );
+        }
+        const who = contention.holderSentence(
+          holders, repoRoot ? projectScope.displayName(repoRoot) : '',
+        );
+        return text(
+          `Marked as blocked on the Workshop list.\n\n${who}\n\n`
+          + (holders.length
+            ? 'Do NOT type into those sessions and do not commit or stash on their behalf — '
+              + 'they are mid-task. The human can see this row and will sort out the order. '
+              + 'End your turn.'
+            : 'Nothing you can do about that from here. End your turn; the human can see the row.')
+          + '\n\nCall workshop_unblocked once you are moving again.',
+        );
+      },
+    },
+
+    workshop_unblocked: {
+      description:
+        'Clear the blocked row you put on the Workshop list with workshop_blocked. Call this '
+        + 'as soon as you can make progress again — whether somebody unblocked you or you '
+        + 'found another way round. A list full of blocks that were cleared hours ago is a '
+        + 'list nobody reads.',
+      schema: {},
+      handler: async (_args, extra) => {
+        const { sessionId } = callerFields(extra);
+        const entry = sessionId ? ctx.shells.get(sessionId) : null;
+        if (!entry || (!entry.blockedNote && !entry.mergeBlock)) {
+          return text('There was no blocked row for this session.');
+        }
+        clearStuck(entry, sessionId);
+        ctx.log(`[workshop] unblocked session=${sessionId}`);
+        return text('Cleared. The row is off the Workshop list.');
+      },
+    },
+
     workshop_check: {
       description:
         'Check whether a Workshop question or result has been decided yet, by the ticket '
@@ -1272,11 +1732,110 @@ function registerRoutes(app, context) {
     }
 
     const includeClosed = req.query.all === '1';
+    const pick = projectFilter(req.query);
     const items = inbox.sortForInbox([
       ...stored.filter((i) => includeClosed || i.status === 'open').map(serializeStored),
       ...derivedItems(now, { idleAfterMs: idleAfterFrom(req.query) }),
-    ]);
-    res.json({ items, generatedAt: now });
+    ].filter(pick));
+    res.json({ items, generatedAt: now, projects: knownProjects() });
+  });
+
+  /**
+   * The projects this machine is evidently working in — what the panel's +/- picker
+   * offers.
+   *
+   * Three sources unioned, because no one of them is the answer on its own: live
+   * sessions (what is happening now), contexts.json (what the user has deliberately
+   * grouped), and recently closed sessions (what you were working on this morning and
+   * will want back). Each row carries its live session count so the picker can be read
+   * without opening anything.
+   */
+  app.get('/api/workshop/projects', (req, res) => {
+    res.json({ projects: knownProjects() });
+  });
+
+  /**
+   * The permissions log: what the agents here have asked to be allowed to do.
+   *
+   * A read-only view of a store no MCP tool can write. `?limit=` bounds the response
+   * (newest first) and `?summary=1` adds the per-tool rollup, which is the form the
+   * question is usually really being asked in — "what does Claude keep asking me for".
+   */
+  app.get('/api/workshop/permissions', (req, res) => {
+    const all = permissionLog.all();
+    const pick = projectFilter(req.query);
+    const rows = permissionLog.sortForLog(all.filter(pick));
+    const limit = Math.max(1, Math.min(500, Number(req.query.limit) || 200));
+    res.json({
+      entries: rows.slice(0, limit),
+      total: rows.length,
+      summary: req.query.summary === '1' ? permissionLog.summarize(rows) : undefined,
+      generatedAt: Date.now(),
+    });
+  });
+
+  /**
+   * Start work on an issue nobody is working on — the other half of herding.
+   *
+   * Workshop could show you the backlog and could show you the agents, and the only way
+   * to get from one to the other was to leave. This closes that: the Issues tab lists
+   * what is open, marks what already has a tab, and starts a session on what does not.
+   *
+   * It composes on startIssueSession exactly as POST /api/start-issue and the MCP
+   * start_issue tool do — worktree creation, prompt delivery, autopilot and the
+   * workflow stages are all its job, and a second implementation here would drift from
+   * it the way the three pre-#642 copies did.
+   */
+  app.post('/api/workshop/issues/start', async (req, res) => {
+    const body = req.body || {};
+    const number = Number(body.number);
+    if (!Number.isSafeInteger(number) || number < 1) {
+      return res.status(400).json({ error: 'bad-number' });
+    }
+    const project = projectScope.canonicalRoot(String(body.project || '').trim());
+    if (!project) return res.status(400).json({ error: 'no-project' });
+
+    // The title is fetched rather than taken from the request: the panel's copy is up to
+    // a backlog refresh old (minutes), and the title is what names the tab and, later,
+    // the merge commit.
+    const view = await runGh(
+      ['issue', 'view', String(number), '--json', 'number,title,body,labels,url'], project,
+    );
+    if (view.error) return res.status(502).json({ error: view.error });
+    let issue = null;
+    try { issue = JSON.parse(view.stdout); } catch { /* handled below */ }
+    if (!issue || !issue.title) return res.status(502).json({ error: 'bad-issue' });
+
+    // The window the tab should open in, inherited from the session the browser has
+    // focused — the same resolution POST /api/start-issue does. The mod bridge does not
+    // expose a windowId of its own, and guessing wrong opens the tab in somebody else's
+    // window rather than failing visibly.
+    const caller = String(body.sessionId || '').trim();
+    const windowId = String(body.windowId || '').trim()
+      || (caller && ctx.shells.get(caller)?.windowId)
+      || null;
+    const result = ctx.startIssueSession({
+      number: issue.number,
+      title: issue.title,
+      body: issue.body,
+      labels: issue.labels,
+      url: issue.url,
+      cwd: project,
+      windowId,
+      openBrowser: true,
+      source: 'workshop',
+    });
+    if (result.error) {
+      return res.status(400).json({ error: result.error.message, code: result.error.code });
+    }
+    ctx.log(`[workshop] start-issue #${issue.number} in ${project} session=${result.id}`);
+    res.json({
+      id: result.id,
+      name: result.name,
+      worktree: result.worktree || null,
+      resumed: result.resumed || null,
+      tabDelivery: result.tabDelivery || null,
+    });
   });
 
   app.post('/api/workshop/items/:id/answer', async (req, res) => {
@@ -1285,6 +1844,17 @@ function registerRoutes(app, context) {
     if (blockedSession) return answerBlocked(res, blockedSession, body);
     const idleSession = inbox.parseIdleId(req.params.id);
     if (idleSession) return answerIdle(res, idleSession, body);
+    // A `session:` row is a working or a stuck one, and both take a prompt. Answering a
+    // stuck row also CLEARS it: the human has responded to the block, so the claim "this
+    // agent is stopped and nobody has dealt with it" has stopped being true — and an
+    // agent that will not reliably call workshop_unblocked is exactly why the panel must
+    // not depend on it doing so.
+    const sessionRow = inbox.parseSessionRowId(req.params.id);
+    if (sessionRow) {
+      const entry = ctx.shells.get(sessionRow);
+      if (entry) clearStuck(entry, sessionRow);
+      return answerIdle(res, sessionRow, body);
+    }
     return answerStored(res, req.params.id, body);
   });
 
@@ -1293,6 +1863,18 @@ function registerRoutes(app, context) {
     if (blockedSession) return dismissBlocked(res, blockedSession, req.body || {});
     const idleSession = inbox.parseIdleId(req.params.id);
     if (idleSession) return snoozeIdle(res, idleSession, req.body || {});
+    // Dismissing a `session:` row means "stop telling me this one is stuck". There is
+    // nothing to snooze on a working row — it is scenery — so this only ever clears a
+    // stuck state, and says so rather than silently succeeding.
+    const sessionRow = inbox.parseSessionRowId(req.params.id);
+    if (sessionRow) {
+      const entry = ctx.shells.get(sessionRow);
+      if (!entry) return res.status(404).json({ error: 'session-gone' });
+      const had = !!(entry.mergeBlock || entry.blockedNote);
+      clearStuck(entry, sessionRow);
+      if (had) ctx.log(`[workshop] unblock session=${sessionRow} from=dismiss`);
+      return res.json({ ok: true, sessionId: sessionRow, cleared: had });
+    }
     const item = inbox.byId(req.params.id);
     if (!item) return res.status(404).json({ error: 'not-found' });
     const wasOpenResult = item.kind === 'result' && item.status === 'open';
@@ -1360,8 +1942,30 @@ function registerRoutes(app, context) {
     const result = await mergeSession({
       git: runGit, gh: runGh, cwd, repoRoot, isWorktree: true, target,
     });
+
+    // The outcome becomes SESSION STATE, through the server's own recorder rather than a
+    // field of Workshop's. A merge that did not merge used to be a red string in the
+    // corner of this panel that the next poll wiped, so the single state you most need to
+    // come back to — work that is finished and cannot land — was invisible everywhere the
+    // moment you looked away. Now it lights the tab strip, answers get_session_info and
+    // draws this row, from one writer.
+    if (ctx.recordMergeAttempt) ctx.recordMergeAttempt(id, result);
+    // The agent's own note is Workshop's, and a landed merge retires it too: the thing it
+    // was blocked on is done.
+    if (!contention.isMergeBlocked(result.status)) {
+      const live = ctx.shells.get(id);
+      if (live) live.blockedNote = null;
+    }
+
+    // A merge that landed is also the end of whatever the agents were queuing behind the
+    // shared checkout, so re-answer the contention question for the response.
+    const holders = contention.describeMerge(result.status).holders
+      ? holdersFor(repoRoot, id)
+      : [];
+
     ctx.log(`[workshop] merge session=${id} ${result.branch || '?'} -> ${result.target || '?'}`
       + ` = ${result.status}${result.committed ? ' (committed)' : ''}`
+      + `${holders.length ? ` held-by=${holders.map((h) => h.sessionId).join(',')}` : ''}`
       + `${result.issue && result.issue.closed ? ` closed #${result.issue.number}` : ''}`);
     // No auto-close on success, unlike the merge_session/merge_worktree MCP tools. Those
     // arm one because the AGENT has to be told to stop and reliably isn't; here a human is
@@ -1369,7 +1973,29 @@ function registerRoutes(app, context) {
     // ask to close is not a thing to do on their behalf.
     // Every status other than `merged` left the target checkout untouched, and the
     // panel says which one it was. Not a 500: "the target is dirty" is an answer.
-    res.json(result);
+    res.json({
+      ...result,
+      ...contention.describeMerge(result.status),
+      holders,
+      holderSentence: contention.describeMerge(result.status).holders
+        ? contention.holderSentence(holders, projectScope.displayName(repoRoot))
+        : '',
+    });
+  });
+
+  /**
+   * Clear a session's stuck row.
+   *
+   * The human's half of workshop_unblocked, and the reason a stuck row is safe to make
+   * durable: every durable row needs a way off the list that does not require the agent
+   * that put it there to cooperate.
+   */
+  app.post('/api/workshop/sessions/:id/unblock', (req, res) => {
+    const entry = ctx.shells.get(req.params.id);
+    if (!entry) return res.status(404).json({ error: 'no-session' });
+    clearStuck(entry, req.params.id);
+    ctx.log(`[workshop] unblock session=${req.params.id} from=panel`);
+    res.json({ ok: true, sessionId: req.params.id });
   });
 
   // ── backlog (#671) ──
@@ -1378,10 +2004,43 @@ function registerRoutes(app, context) {
   // puts /history first: a literal path must not be shadowed by a parameterised one.
 
   app.get('/api/workshop/backlog', async (req, res) => {
-    const project = backlogProject(req.query);
     const label = cleanLabel(req.query && req.query.label);
     const now = Date.now();
 
+    // The picker's selection, when there is one. A backlog across several repos is the
+    // whole point of being able to pick them — "fire off issues in three projects, then
+    // come here to herd" is one list or it is three visits.
+    const chosen = String((req.query && req.query.projects) || '').trim();
+    if (chosen) {
+      const roots = [...new Set(
+        chosen.split(',').map((p) => projectScope.canonicalRoot(p.trim())).filter(Boolean),
+      )];
+      if (!roots.length) {
+        return res.json({ project: '', projectName: '', label, issues: [], generatedAt: now, error: 'no-project' });
+      }
+      if (label === null) {
+        return res.json({ project: '', projectName: '', label: '', issues: [], generatedAt: now, error: 'bad-label' });
+      }
+      const names = projectScope.disambiguate(roots);
+      const parts = await Promise.all(roots.map((root) => backlogFor(root, label, req.query, now)));
+      const issues = [];
+      let error = null;
+      for (let i = 0; i < parts.length; i++) {
+        // One repo without `gh` must not empty the whole list; it contributes nothing and
+        // its reason is reported once. The backlog is an accessory and may not make the
+        // rest of the panel look broken — the same rule the single-project path follows.
+        if (parts[i].error) { error = error || parts[i].error; continue; }
+        for (const issue of parts[i].issues) {
+          issues.push({ ...issue, project: roots[i], projectName: names.get(roots[i]) || '' });
+        }
+      }
+      return res.json({
+        project: '', projectName: '', label, projects: roots,
+        issues, truncated: parts.some((p) => p.truncated), error, generatedAt: now,
+      });
+    }
+
+    const project = backlogProject(req.query);
     if (!project) {
       return res.json({ project: '', projectName: '', label, issues: [], generatedAt: now, error: 'no-project' });
     }
@@ -1395,24 +2054,12 @@ function registerRoutes(app, context) {
       });
     }
 
-    const maxAgeMs = Math.max(MIN_MAX_AGE_MS,
-      Math.min(MAX_MAX_AGE_MS, Number(req.query && req.query.maxAgeMs) || backlog.BACKLOG_TTL_MS));
-
-    const result = await issueCache.get(`${project}\0${label}`, async () => {
-      const r = await runGh(backlog.issueListArgs(label), project);
-      if (r.error) return { error: r.error, issues: [] };
-      const issues = backlog.parseIssues(r.stdout);
-      return { issues, truncated: issues.length >= backlog.MAX_ISSUES };
-    }, { now, maxAgeMs });
-
+    const result = await backlogFor(project, label, req.query, now);
     res.json({
       project,
       projectName: projectScope.displayName(project),
       label,
-      // Matched on the way OUT, never cached: the issue list is minutes-stale by design
-      // but "which tab is on it" must be current, or a tab opened thirty seconds ago
-      // stays invisible for two minutes.
-      issues: backlog.matchSessions(result.issues || [], sessionsForMatch(), project),
+      issues: result.issues,
       truncated: !!result.truncated,
       error: result.error || null,
       cached: !!result.cached,
@@ -1536,6 +2183,7 @@ function registerRoutes(app, context) {
     const stored = inbox.byId(req.params.id);
     const sessionId = inbox.parseBlockedId(req.params.id)
       || inbox.parseIdleId(req.params.id)
+      || inbox.parseSessionRowId(req.params.id)
       || (stored && stored.sessionId);
     if (!sessionId) return res.status(404).json({ error: 'not-found' });
     const entry = ctx.shells.get(sessionId);
@@ -1643,6 +2291,15 @@ async function answerBlocked(res, sessionId, body) {
       `[workshop] answer blocked:${sessionId} via=keys steps=${result.steps} `
       + `dir=${result.direction} option=${idx + 1} ${JSON.stringify(result.optionLabel)} verified=yes`,
     );
+    // The one path that can honestly say what a permission dialog was answered WITH.
+    // A human answering in the terminal just makes the dialog vanish, and the log is
+    // deliberately silent about the choice in that case rather than guessing — so this
+    // line is the difference between a list of what was asked and a list of what was
+    // decided. `body.expect` is the fingerprint the panel drew the row from, which is
+    // the same key the log entry was opened under.
+    permissionLog.resolve(sessionId, body.expect || '', {
+      answer: result.optionLabel, via: 'workshop',
+    });
     res.json({ ok: true, ...result });
   } finally {
     inFlightChoices.delete(sessionId);

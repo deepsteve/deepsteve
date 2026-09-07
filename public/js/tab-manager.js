@@ -483,6 +483,7 @@ const TAB_INNER_HTML = `
       <span class="tab-icon" aria-hidden="true"></span>
       <span class="speaker-icon" aria-hidden="true">${SPEAKER_SVG}</span>
       <span class="tab-label"></span>
+      <span class="tab-merge-block" aria-label="Merge blocked">&#9888;</span>
       <span class="tab-history" aria-label="History">&#10711;</span>
       <span class="close">&#10005;</span>
     `;
@@ -702,6 +703,20 @@ export const TabManager = {
   updateAuthBlocked(sessionId, on) {
     const tab = document.getElementById('tab-' + sessionId);
     if (tab) tab.classList.toggle('auth-blocked', !!on);
+  },
+
+  /**
+   * Mark a session whose last merge did not land.
+   *
+   * Its OWN glyph rather than the badge slot the two above share, and that is the whole
+   * reason it is a separate element: those two are connection states and are mutually
+   * exclusive with each other, while this one is about the WORK and can be true at the
+   * same time as either. A tab that is both reconnecting and merge-blocked has to say
+   * both, and a shared slot can only ever say the last one written.
+   */
+  updateMergeBlocked(sessionId, on) {
+    const tab = document.getElementById('tab-' + sessionId);
+    if (tab) tab.classList.toggle('merge-blocked', !!on);
   },
 
   /**
