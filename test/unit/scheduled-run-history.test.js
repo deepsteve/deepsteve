@@ -222,3 +222,47 @@ test('the history route is registered before the routes that could shadow it', (
   assert.ok(history >= 0 && firstParam >= 0);
   assert.ok(history < firstParam, 'history must be registered before any /:id route');
 });
+
+// --- the label endpoint (#697) ---
+// Lives here because this file already has the registerRoutes harness; the
+// describe() logic itself is covered by test/unit/cron.test.js.
+
+test('GET /api/scheduled-tasks/describe returns the same label a saved task gets', () => {
+  const routes = new Map();
+  registerRoutes({
+    get: (p, h) => routes.set(`GET ${p}`, h),
+    post: () => {}, put: () => {}, delete: () => {},
+  }, { settings: {}, log: () => {}, broadcast: () => {}, shells: new Map(), getContexts: () => [] });
+
+  const handler = routes.get('GET /api/scheduled-tasks/describe');
+  assert.ok(handler, 'the describe route should be registered');
+  const call = (cron) => {
+    let body = null;
+    handler({ query: cron === undefined ? {} : { cron } }, { json: (b) => { body = b; }, status() { return this; } });
+    return body;
+  };
+
+  assert.deepStrictEqual(call('0 */2 * * *'), { cron: '0 */2 * * *', schedule: 'Every 2 hours at :00' });
+  assert.strictEqual(call('0 9 * * 1-5').schedule, 'Every Monday, Tuesday, Wednesday, Thursday, Friday at 09:00');
+  // Half-typed input is the normal case for a live preview: echo it, never 400.
+  assert.deepStrictEqual(call('0 9 * *'), { cron: '0 9 * *', schedule: '0 9 * *' });
+  assert.deepStrictEqual(call(''), { cron: '', schedule: '' });
+  assert.deepStrictEqual(call(undefined), { cron: '', schedule: '' });
+  // A repeated ?cron= arrives as an array, not a string — it must not throw.
+  assert.deepStrictEqual(call(['0 * * * *', 'x']), { cron: '', schedule: '' });
+});
+
+test('the describe route is registered before the routes that could shadow it', () => {
+  const order = [];
+  registerRoutes({
+    get: (p) => order.push(`GET ${p}`),
+    post: (p) => order.push(`POST ${p}`),
+    put: (p) => order.push(`PUT ${p}`),
+    delete: (p) => order.push(`DELETE ${p}`),
+  }, { settings: {}, log: () => {}, broadcast: () => {}, shells: new Map(), getContexts: () => [] });
+
+  const describeAt = order.indexOf('GET /api/scheduled-tasks/describe');
+  const firstParam = order.findIndex(r => r.includes('/api/scheduled-tasks/:id'));
+  assert.ok(describeAt >= 0 && firstParam >= 0);
+  assert.ok(describeAt < firstParam, 'describe must be registered before any /:id route');
+});

@@ -1341,6 +1341,19 @@ function registerRoutes(app, context) {
     }));
   });
 
+  // The label for an arbitrary cron string, so the editor's live preview reads the
+  // same describe() that stamps `schedule` on a saved task (#697). The panel used
+  // to carry its own string-matching copy, which drifted: a custom `0 9 * * 1-5`
+  // previewed as raw cron and then saved as "Every Monday, Tuesday, …".
+  //
+  // Read-only, and deliberately never 400s — it describes half-typed input, and
+  // describe() already returns the raw string for anything it cannot parse.
+  // Registered with the other literal paths, ahead of the /:id routes.
+  app.get('/api/scheduled-tasks/describe', (req, res) => {
+    const raw = typeof req.query.cron === 'string' ? req.query.cron : '';
+    res.json({ cron: raw, schedule: cron.describe(raw) });
+  });
+
   app.post('/api/scheduled-tasks', (req, res) => {
     if (!featureEnabled()) return res.status(403).json({ error: FEATURE_OFF_MSG });
     const b = req.body || {};
