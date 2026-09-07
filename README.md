@@ -96,6 +96,7 @@ Open [http://deepsteve.localhost:3000](http://deepsteve.localhost:3000) in your 
 
 - Click **+** to create a new Claude Code or Codex session in any directory
 - Click the **GitHub icon** to pick an issue — deepsteve creates a worktree and starts a session with the issue as a prompt
+- On a first run, **Show me around** starts a guided tour — an agent session opens and builds you a tour page in a second tab. Re-run it any time from Settings → Tips
 - Right-click a tab to rename it
 - Use **Shift+Enter** for multi-line input
 

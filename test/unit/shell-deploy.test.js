@@ -257,3 +257,22 @@ test('the installer tolerates a missing auth token', () => {
   assert.ok(line, 'expected the DS_TOKEN read');
   assert.match(line, /\|\| true\)/);
 });
+
+test('every public/*.html is embedded by release.sh (#695)', () => {
+  // release.sh's public list is hand-maintained — root *.js and mods/ are globbed, but
+  // public/ names each file. A page that ships in the repo and not in install.sh is
+  // invisible to every test on a maintainer's machine, where the checkout's copy is
+  // right there, and fails only on a stranger's fresh curl install.
+  //
+  // This bites hardest for the onboarding tour, which create_display_tab reads OFF DISK
+  // by absolute path: without the embed the guide's one job fails, on the first run the
+  // page exists to serve. restart.sh (`cp -r public/*`) and package.json (`public/`) are
+  // wholesale and need no equivalent.
+  const pages = fs.readdirSync(path.join(REPO, 'public'))
+    .filter((f) => f.endsWith('.html')).sort();
+  assert.ok(pages.length > 0, 'expected at least index.html under public/');
+  for (const page of pages) {
+    assert.ok(src['release.sh'].includes(`embed_text "public/${page}"`),
+      `release.sh does not embed public/${page} — add it beside the other public/ embeds`);
+  }
+});

@@ -41,6 +41,7 @@ import { init as initTerminalSearch, attachSearchAddon, closeIfOpen as closeTerm
 import * as SessionHistory from './session-history.js';
 import { init as initContextViews, setEnabled as setContextViewsEnabled, applyFilter as refreshContextFilter, requestNewTabInContext, resolveContextRepo, chooseContextDir, setContexts as applyServerContexts, setActiveContext as setActiveContextFromPanel, getActiveContextId, getActiveContextInfo, orderRecentDirsByContext, activeContextIsEmpty, noteActiveTab, revealTabContext, showToast, setRailSuppressed, setRailQuiet } from './context-views.js';
 import * as ProjectMods from './project-mods.js';
+import * as Onboarding from './onboarding.js';
 import { nsKey } from './storage-namespace.js';
 import { formatShortcut } from './shortcuts.js';
 import { init as initWakeWatch } from './wake-watch.js';
@@ -1338,6 +1339,15 @@ settingsBtn?.addEventListener('click', async () => {
       </div>
       <div class="settings-tab-content" data-tab="tips">
       <div class="settings-section">
+        <h3>Take the Tour</h3>
+        <p style="font-size: 13px; color: var(--ds-text-secondary);">
+          Opens an agent session that builds you a guided tour of mods, projects, apps and
+          scheduled tasks — the same one a first run offers.
+        </p>
+        <button type="button" class="btn-secondary" id="tips-take-tour" style="margin-top: 8px;">Take the tour</button>
+        <p id="tips-tour-status" style="font-size: 12px; color: var(--ds-text-secondary); margin-top: 8px;"></p>
+      </div>
+      <div class="settings-section">
         <h3>Tab Switching Hold Delay</h3>
         <p style="font-size: 13px; color: var(--ds-text-secondary);">
           Lower the <kbd>\u2318</kbd> hold duration (General \u2192 Tab Switching) to press it faster
@@ -1639,6 +1649,26 @@ settingsBtn?.addEventListener('click', async () => {
   // JSON, not a comma-join: a combo can legitimately *be* a comma (Meta+,).
   wireShortcutRecorder('#shortcuts-help-shortcut-btn', '#shortcuts-help-shortcut',
     (combo) => JSON.stringify([combo]));
+
+  // Settings → Tips is the documented way back to the first-run tour (#695). It closes
+  // the modal on success, because what it does is open a tab behind this overlay — and
+  // reports the failure in place rather than closing onto nothing if the spawn is
+  // refused. Nothing to save, so it does not go through the save handler below.
+  const tourBtn = overlay.querySelector('#tips-take-tour');
+  const tourStatus = overlay.querySelector('#tips-tour-status');
+  if (tourBtn) tourBtn.onclick = async () => {
+    tourBtn.disabled = true;
+    if (tourStatus) tourStatus.textContent = 'Opening…';
+    try {
+      await Onboarding.startTour({ windowId: getWindowId() });
+      Onboarding.markOnboarded();
+      window.removeEventListener('deepsteve:version-status', versionStatusHandler);
+      overlay.remove();
+    } catch (e) {
+      if (tourStatus) tourStatus.textContent = e?.message || 'Could not start the tour.';
+      tourBtn.disabled = false;
+    }
+  };
 
   overlay.querySelector('#settings-cancel').onclick = () => {
     window.removeEventListener('deepsteve:version-status', versionStatusHandler);
@@ -4490,12 +4520,27 @@ async function promptRepoSession() {
  * the empty state is genuinely bare (a first run with no recents), where the picker is
  * onboarding rather than an obstacle. And never prompt right after the user dismissed
  * the restore modal — that is two modals in a row.
+ *
+ * #695 upgrades exactly that bare branch, and nowhere else. "No tabs, no recents, not
+ * declined" is the only state in which interrupting somebody is free, so it is the only
+ * state the welcome card appears in — a browser opened fresh against an install that
+ * already has recents is somebody who knows what this is, and gets the picker it always
+ * got. Skipping hands straight back to promptRepoSession(), so the old path is intact
+ * one click away and the two can never race: this returns without calling it, or the
+ * card calls it for us.
  */
 async function landWithNoTabs({ declined = false } = {}) {
   await recentSessionsReady;
   if (declined || recentSessions.length > 0) {
     updateEmptyState();
     document.getElementById('empty-state-btn')?.focus();  // so Enter opens a tab
+    return;
+  }
+  if (!Onboarding.hasOnboarded()) {
+    Onboarding.showWelcomeCard({
+      windowId: getWindowId(),
+      onSkip: () => promptRepoSession(),
+    });
     return;
   }
   await promptRepoSession();
