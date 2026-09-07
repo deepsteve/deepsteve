@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Welcome to Deep Steve</title>
+<!--
+  The first-run tour page (#695).
+
+  Shipped as a real file rather than emitted by a model: the agent that opens it passes
+  create_display_tab a file_path, so every new user sees this reviewed page instead of
+  whatever that run improvised, and the model spends ~15 tokens instead of a document.
+
+  Four constraints this page is written against, all of them real:
+    - A display tab iframe is sandboxed "allow-scripts allow-forms allow-same-origin".
+      There is no allow-modals and no allow-popups, so alert/confirm/prompt/window.open
+      are inert. Do not add any.
+    - Display tabs get NO window.deepsteve bridge. This page cannot toggle the rail or
+      open the Mods modal; it describes them, and the guide in the neighbouring tab is
+      the interactive half.
+    - Mod iframes receive no theme variables, so every colour here is literal. The
+      palette mirrors the shipped defaults in public/css/styles.css.
+    - Everything is inline. The page must render with no network at all.
+
+  It is also served statically at /onboarding-tour.html, because it lives under public/.
+-->
+<style>
+  :root {
+    --bg: #0d1117;
+    --panel: #161b22;
+    --panel-2: #1c2129;
+    --border: #30363d;
+    --text: #c9d1d9;
+    --dim: #8b949e;
+    --blue: #58a6ff;
+    --green: #3fb950;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    font-size: 15px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 860px; margin: 0 auto; padding: 40px 24px 72px; }
+
+  header { border-bottom: 1px solid var(--border); padding-bottom: 28px; margin-bottom: 36px; }
+  h1 { font-size: 30px; line-height: 1.2; margin: 0 0 10px; font-weight: 650; letter-spacing: -0.01em; }
+  .lede { font-size: 17px; color: var(--dim); margin: 0; max-width: 62ch; }
+  .lede strong { color: var(--text); font-weight: 600; }
+
+  h2 {
+    font-size: 13px; text-transform: uppercase; letter-spacing: 0.08em;
+    color: var(--blue); font-weight: 650; margin: 0 0 14px;
+  }
+
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 20px 22px;
+    margin-bottom: 14px;
+  }
+  .card h3 { font-size: 16px; margin: 0 0 6px; font-weight: 620; }
+  .card p { margin: 0 0 8px; color: var(--dim); }
+  .card p:last-child { margin-bottom: 0; }
+  .card p strong { color: var(--text); font-weight: 600; }
+
+  section { margin-bottom: 40px; }
+
+  .grid { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(290px, 1fr)); }
+
+  kbd {
+    display: inline-block;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-bottom-width: 2px;
+    border-radius: 5px;
+    padding: 1px 6px;
+    font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+    color: var(--text);
+    white-space: nowrap;
+  }
+  code {
+    font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+    background: var(--panel-2);
+    border-radius: 4px;
+    padding: 1px 5px;
+    color: var(--text);
+    /* Long paths must wrap rather than push the page sideways. */
+    overflow-wrap: anywhere;
+  }
+
+  ul { margin: 8px 0 0; padding-left: 20px; color: var(--dim); }
+  li { margin-bottom: 5px; }
+  li:last-child { margin-bottom: 0; }
+
+  .ask {
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--green);
+    border-radius: 0 8px 8px 0;
+    padding: 11px 16px;
+    margin-bottom: 9px;
+    font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+    color: var(--text);
+  }
+
+  footer {
+    border-top: 1px solid var(--border);
+    padding-top: 22px;
+    color: var(--dim);
+    font-size: 14px;
+  }
+  footer p { margin: 0 0 8px; }
+  footer p:last-child { margin-bottom: 0; }
+  a { color: var(--blue); }
+
+  @media (max-width: 620px) {
+    .wrap { padding: 28px 16px 56px; }
+    h1 { font-size: 25px; }
+    .lede { font-size: 16px; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <h1>Welcome to Deep Steve</h1>
+    <p class="lede">
+      You didn&rsquo;t open this tab &mdash; <strong>an agent did</strong>. It is running in the tab
+      next to this one. It read one instruction, called one tool, and painted this page
+      into a tab of its own. That is the whole product, and you just watched it happen.
+    </p>
+  </header>
+
+  <section>
+    <h2>What you are looking at</h2>
+    <div class="card">
+      <h3>A display tab</h3>
+      <p>
+        A page an agent opens beside your terminals. It behaves like any other tab &mdash;
+        closeable, renameable, grouped with the project it came from &mdash; but it is
+        <strong>one-shot</strong>: it lives for the session and closing it destroys the page.
+      </p>
+      <p>
+        Ask any agent for a chart, a dashboard or a report and it can hand you one of these
+        instead of printing text at you. For a page a project should keep, there are
+        <strong>project mods</strong> further down.
+      </p>
+    </div>
+  </section>
+
+  <section>
+    <h2>The window around you</h2>
+    <div class="grid">
+      <div class="card">
+        <h3>Tabs are sessions</h3>
+        <p>
+          Every tab in the strip is a real terminal running a real agent, with its own
+          conversation. They survive a page reload, a daemon restart and closing the
+          browser &mdash; the agent lives in a tmux pane, not in this page.
+        </p>
+      </div>
+      <div class="card">
+        <h3>Projects <kbd>&#8984;P</kbd></h3>
+        <p>
+          The rail on the left groups your tabs by the folders they are working in. A
+          <strong>project</strong> is a name plus a list of folders; a tab joins it when its
+          working directory sits inside one of them.
+        </p>
+        <p>
+          <strong>&ldquo;+ New project&rdquo;</strong> at the bottom of the rail registers one.
+          <kbd>&#8984;&uarr;</kbd> / <kbd>&#8984;&darr;</kbd> cycle between them.
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Mods &mdash; how Deep Steve grows</h2>
+    <div class="card">
+      <h3>The Mods modal</h3>
+      <p>
+        Open it from the grid button in the tab strip, or type <code>#mods</code> at the start
+        of an empty composer line. Everything installed is listed in one place, grouped by
+        what it is: <strong>Apps</strong>, Panels, Fullscreen, Games, Tabs, Background,
+        <strong>Skills</strong>, and Available (things you could install but haven&rsquo;t).
+      </p>
+      <p>
+        Enabling and disabling a mod is <strong>per browser</strong>, stored locally &mdash; it
+        never reaches the server. Two browsers on the same machine can run different sets.
+      </p>
+    </div>
+    <div class="grid">
+      <div class="card">
+        <h3>Apps</h3>
+        <p>
+          A mod that is a <strong>place you work from</strong> rather than a tool you visit.
+          Apps get their own section at the top of the projects rail, an entry in the command
+          palette, and <em>quiet mode</em> (<kbd>&#8984;\</kbd>) which takes the surrounding
+          chrome away and leaves the app alone on screen.
+        </p>
+        <p>Shipped today: <strong>Workshop</strong>, <strong>Timecard</strong> and <strong>Simeon</strong>.</p>
+      </div>
+      <div class="card">
+        <h3>Project mods</h3>
+        <p>
+          The durable sibling of a display tab: a page an agent writes for
+          <strong>one project</strong>, stored in the repo at
+          <code>.deepsteve/mods/&lt;name&gt;/</code> and meant to be committed &mdash; so it
+          survives a re-clone and reaches everyone else working on the project.
+        </p>
+        <p>
+          They are found by scanning the repos of your registered projects, so a repo has to
+          belong to a project first.
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Work that happens without you</h2>
+    <div class="grid">
+      <div class="card">
+        <h3>Scheduled tasks</h3>
+        <p>
+          Local cron for agents. The <strong>Scheduled</strong> panel docks on the right;
+          <strong>+ New</strong> takes a prompt, a project and a schedule. A run is an
+          ordinary local session, so it keeps that project&rsquo;s tools and MCP servers &mdash;
+          which is the point, and what a cloud runner cannot do.
+        </p>
+        <p>
+          Fires open in the background, report themselves finished, and tidy up their own tab.
+        </p>
+      </div>
+      <div class="card">
+        <h3>Issue sessions</h3>
+        <p>
+          The bolt button in the tab strip picks an issue from your tracker, creates a
+          worktree for it, and starts an agent already primed with the issue text. If a
+          worktree for that issue already exists it <strong>resumes</strong> it and says what
+          was already there &mdash; nothing is ever reset.
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Skills</h2>
+    <div class="card">
+      <h3>Reusable workflows, off by default</h3>
+      <p>
+        Skills are canned procedures your agents can invoke by name &mdash;
+        <code>/deepsteve:display-tab</code>, <code>/deepsteve:fork</code>,
+        <code>/deepsteve:merge</code> and others. In Codex sessions the same skill is
+        <code>$deepsteve-display-tab</code>.
+      </p>
+      <p>
+        They start <strong>disabled</strong>. Turn the ones you want on in the Skills section
+        of the Mods modal; enabling one installs it for your agents on the spot.
+      </p>
+    </div>
+  </section>
+
+  <section>
+    <h2>Try this &mdash; type it at the guide next door</h2>
+    <div class="ask">Show me a chart of something in this folder.</div>
+    <div class="ask">What can you actually do that a terminal can&rsquo;t?</div>
+    <div class="ask">Help me register my first project.</div>
+    <div class="ask">Set up a scheduled task that checks something every morning.</div>
+    <div class="ask">Explain what a project mod would be good for here.</div>
+  </section>
+
+  <footer>
+    <p>
+      You can close this tab whenever you like &mdash; closing it deletes the page, and it is
+      easy to get back.
+    </p>
+    <p>
+      <strong>To see this tour again:</strong> Settings &rarr; Tips &rarr; <em>Take the tour</em>.
+    </p>
+    <p>
+      Fuller documentation lives in the <code>docs/</code> folder of the Deep Steve repo, and
+      <kbd>&#8984;?</kbd> lists every keyboard shortcut.
+    </p>
+  </footer>
+
+</div>
+</body>
+</html>

@@ -205,8 +205,12 @@ embed_text "engines/engine.js" "engines/engine.js"
 embed_text "engines/node-pty.js" "engines/node-pty.js"
 embed_text "engines/tmux.js" "engines/tmux.js"
 
-# Public files
+# Public files. This list is hand-maintained, so test/unit/shell-deploy.test.js checks
+# every public/*.html in the tree is named here — the onboarding tour (#695) is read off
+# disk by create_display_tab, and an install.sh missing it would fail that flow on
+# exactly the fresh machine it exists to serve.
 embed_text "public/index.html" "public/index.html"
+embed_text "public/onboarding-tour.html" "public/onboarding-tour.html"
 embed_text "public/sw.js" "public/sw.js"
 embed_text "public/manifest.json" "public/manifest.json"
 

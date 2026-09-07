@@ -146,6 +146,70 @@ four `--ds-context-*` tokens ([docs/themes.md](themes.md)); `0s` opts a theme ou
 - **The projects rail's five keys straddle that line, and which side each falls on is the whole point.** *Place* is per-window: the active project (`deepsteve-context-active`) and its last tab (`deepsteve-context-last-tab`). *Appearance* is a browser-wide preference in `localStorage`: whether the rail is open (`deepsteve-context-sidebar`), how wide it was dragged (`deepsteve-context-width`), and whether Archived is expanded (`deepsteve-context-archived`) — all three through `loadPref`/`savePref` in `context-views.js`, alongside the compact-rail flag that was already there. Appearance has to outlive the window because the daemon opens a **brand-new browser tab at login**, which has no `sessionStorage` at all: a rail stored per-window came back closed after every machine restart, however you had left it. `loadPref` still reads the old `sessionStorage` home as a fallback so a tab open across the upgrade keeps its rail, and `savePref` clears that key only once the `localStorage` write has landed — in a private window it throws, and per-window persistence beats none.
 - **Recursive windows (Baby Browser)**: Opening DeepSteve inside its own Baby Browser proxy shares the same origin, so sessionStorage/localStorage/BroadcastChannel would collide. `storage-namespace.js` detects iframe nesting depth and prefixes all keys with `ds{depth}-` (e.g., `ds1-deepsteve`). Depth 0 (top-level) uses no prefix for backward compatibility. Each recursion level gets fully isolated sessions, tabs, and layout state.
 
+## First-run onboarding (`public/js/onboarding.js`, #695)
+
+On a first run DeepSteve offers a **guided tour that is itself the product doing its job**: one
+click spawns a real agent session, and that agent opens a real display tab carrying a
+checked-in tour page. It is not a modal or a slideshow.
+
+**The trigger is one branch, deliberately.** `landWithNoTabs()` already treated the directory
+picker as onboarding in the state where no tabs, no recents and no restore offer exist (#597);
+that bare branch — and only it — now shows the welcome card instead. A browser opened fresh
+against an install that already has recents is someone who knows what this is, and gets exactly
+the picker it always got. There is no race with the picker: `landWithNoTabs` either returns
+without calling it, or the card's **Skip** calls it.
+
+**The card lives in `#empty-state`**, switched by a single `.onboarding` class the way
+`.context-empty` (#534) switches the empty-context view — never the `hidden` attribute, because
+an ID+class rule outranks the UA sheet's `[hidden]{display:none}` and the two would disagree.
+
+**The flag is `nsKey('deepsteve-onboarded')` in `localStorage`.** Preference, not place: a
+second window must not ask again, and the daemon opens a brand-new browser tab at login which
+has no `sessionStorage` at all. Both buttons set it — being asked and declining still counts as
+asked — but a start the *server refused* does not, so a failed first attempt is still owed the
+card. Every access is wrapped; a private window reads as "not onboarded".
+
+**The prompt, the tour page's path and the tool grant are all server-side**, in
+`onboarding-prompt.js` and `startOnboardingSession()`. The browser only POSTs
+`/api/start-onboarding` with its window id. That split is what lets the spawn pass
+`--allowedTools` for the two MCP tools the guide needs (#612's plumbing) — on a fresh install
+nothing is pre-permitted, and a permission dialog in the first thirty seconds means the tour
+never appears. A unit test pins the grant and the prompt to the same array.
+
+**The trust dialog is the thing that actually breaks a first run, and the flow is built
+around it.** Spawned into a directory Claude Code has never been trusted in — which is every
+fresh install, since nobody has opened an agent in `~/.deepsteve` yet — the guide's first screen
+is *"Is this a project you created or one you trust?"*, whose default option is **No, exit**.
+Three consequences, each of which was an observed failure before it was a rule:
+
+- **Never submit into an unclassified screen.** The shared delivery path gives up on readiness
+  after 30s and submits anyway, reasoning that a prompt typed into an unclassifiable screen
+  beats one never delivered. That reasoning does not survive a modal: the prompt went into the
+  dialog and the trailing Enter accepted *No, exit*, so the guide killed itself 8s later. The
+  onboarding delivery passes a `skipIf` that refuses anything but an idle composer, which turns
+  deadline expiry from destructive into a no-op.
+- **The guide session is not `loading`.** Every other canned-prompt spawn sets it, which blocks
+  user keystrokes for up to 60s so nobody can interleave input with an auto-typed prompt. Here
+  that locks the one person who can answer the dialog out of answering it.
+- **The readiness window is minutes, not seconds** (`ONBOARDING_READY_DEADLINE_MS`). 30s is an
+  agent-startup budget; what is being waited on is a human reading a security prompt.
+  `deliverPromptWhenReady` takes a per-prompt `readyDeadlineMs` for this, honoured by both the
+  arm and `servePendingDelivery`'s `working` refresh. The shared 30s default is unchanged for
+  every other caller.
+
+Deepsteve deliberately does **not** pre-accept the dialog on the user's behalf. Marking a
+directory trusted is granting an agent read/edit/execute there, and that is the user's call.
+
+**The tour page is one file**, `public/onboarding-tour.html`, read off disk by
+`create_display_tab`'s `file_path` so the model emits a path rather than a document and every
+user sees the reviewed page. Because it lives under `public/` it is also served statically at
+`/onboarding-tour.html`. It is written against the display-tab contract: no
+`alert`/`confirm`/`window.open` (the iframe has no `allow-modals`/`allow-popups`), no
+`window.deepsteve` bridge, no theme variables, and no external requests.
+
+**To re-run it:** Settings → Tips → *Take the tour*. There is deliberately no keyboard binding
+and no palette entry, so `shortcuts.js`'s registry and `BUILTIN_COMMANDS` are untouched.
+
 ## Opening a WebSocket
 
 **Every socket in the client is constructed by `openGatedSocket()` in `public/js/ws-open.js`, and nowhere else.** `test/unit/ws-single-construct.test.js` asserts that `new WebSocket(` appears exactly once under `public/`.

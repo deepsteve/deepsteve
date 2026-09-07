@@ -1072,7 +1072,7 @@ kbd {
 .panel-tab { writing-mode: vertical-rl; padding: 12px 6px; background: transparent; border: none; border-left: 2px solid transparent; color: var(--ds-text-secondary); font-size: 12px; cursor: pointer; white-space: nowrap; position: relative; }
 .panel-tab:hover { color: var(--ds-text-primary); background: var(--ds-bg-tertiary); }
 .panel-tab.active { color: var(--ds-accent-blue); border-left-color: var(--ds-accent-blue); background: var(--ds-bg-tertiary); }
-.panel-tab-badge { display: none; position: absolute; top: 6px; right: 2px; min-width: 8px; height: 8px; background: var(--ds-accent-red, #f85149); border-radius: 50%; font-size: 0; }
+.panel-tab-badge { display: none; position: absolute; top: 6px; right: 2px; min-width: 8px; height: 8px; background: var(--ds-accent-red); border-radius: 50%; font-size: 0; }
 .panel-tab-badge.visible { display: block; }
 
 /* Timelapse recording circle (#667) — the FIRST child of #panel-tabs, so it sits above
@@ -1351,6 +1351,28 @@ kbd {
 #empty-state.context-empty { z-index: 12; }
 #empty-state.context-empty .empty-state-recent { display: none; }
 #empty-state.context-empty .empty-state-restore { display: none; }
+
+/* First-run onboarding card (#695). Same trick as .context-empty above: one class on
+   #empty-state swaps which of its children show, so the card has exactly one switch
+   and can never be half-shown. Deliberately NOT the `hidden` attribute — an ID+class
+   rule outranks the UA sheet's [hidden]{display:none}, which would make the two
+   mechanisms disagree. The card replaces the default row set rather than joining it:
+   on a bare first run "+ New" is the choice the card is there to reframe, and the
+   recents/restore rows are empty by definition (that is what made the run bare). */
+#empty-state #onboard-card { display: none; }
+/* DIRECT children only. The card's own buttons deliberately reuse .empty-state-btn and
+   .empty-state-restore for their styling, so a descendant selector here hides the Skip
+   button inside the very card it is meant to reveal. */
+#empty-state.onboarding > #empty-state-btn,
+#empty-state.onboarding > .empty-state-recent,
+#empty-state.onboarding > .empty-state-restore { display: none; }
+#empty-state.onboarding #onboard-card { display: flex; flex-direction: column; align-items: center; }
+#empty-state #onboard-card .onboard-pitch { margin: 24px 0 0; max-width: 380px; text-align: center; font-size: 13px; line-height: 1.6; color: var(--ds-text-secondary); }
+#empty-state #onboard-card .onboard-actions { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; justify-content: center; margin-top: 16px; }
+#empty-state #onboard-card .empty-state-btn { margin-top: 0; }
+#empty-state #onboard-card .empty-state-restore { margin-top: 0; }
+#empty-state #onboard-card .onboard-error { margin: 12px 0 0; max-width: 380px; text-align: center; font-size: 12px; color: var(--ds-accent-red); }
+#empty-state #onboard-card .onboard-error:empty { display: none; }
 
 /* Directory-picker quick-pick section: the active context's repos (#573). The
    per-session "Recent sessions" list that also used these classes was removed in #575. */

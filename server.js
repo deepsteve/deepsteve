@@ -30,6 +30,7 @@ const { readComposerDraft, isPromptStaged, isPromptOnScreen, promptDraftVerdict 
 const { wrapRunCommand } = require('./terminal-run');
 const { isTerminalReport } = require('./terminal-input');
 const { renderIssuePrompt, issueWorktreeName, issueTabName, resumePromptText, WORKFLOW_STAGES } = require('./issue-prompt');
+const { renderOnboardingPrompt, ONBOARDING_TOOLS, TOUR_PAGE_REL } = require('./onboarding-prompt');
 const { readRecentUserMessages, compareDelivered } = require('./prompt-delivery-check');
 const { enrichTabs, summarizeRun } = require('./timelapse-snapshot');
 // History view (#672): bytes → lines, then lines → renderable entries. Namespaced
@@ -2962,8 +2963,14 @@ function drainPromptQueue(id) {
     // 2nd queued prompt (inherited /rc, then the issue prompt) and for the async
     // fetchIssueFromGitHub path, which arms delivery seconds after the tab has
     // already gone idle.
-    log(`[deliverPrompt] id=${id} arming pending delivery (deadline ${PROMPT_READY_DEADLINE_MS}ms)`);
-    e.pendingDelivery = { submit: submitAndNotify, deadline: Date.now() + PROMPT_READY_DEADLINE_MS, len: prompt.length };
+    // #695: a caller may buy more ambiguous time than the shared default. The one
+    // caller that does is onboarding, where the ambiguous screen is very often Claude
+    // Code's trust dialog and the thing being waited for is a HUMAN reading it — which
+    // takes longer than any agent's startup. Carried on the pending entry so the
+    // 'working' refresh below extends by the same amount it armed with.
+    const readyMs = Number(options.readyDeadlineMs) > 0 ? Number(options.readyDeadlineMs) : PROMPT_READY_DEADLINE_MS;
+    log(`[deliverPrompt] id=${id} arming pending delivery (deadline ${readyMs}ms)`);
+    e.pendingDelivery = { submit: submitAndNotify, deadline: Date.now() + readyMs, len: prompt.length, readyMs };
   }
 }
 
@@ -2995,7 +3002,7 @@ function servePendingDelivery(e, id, state) {
   // A decisively-working screen is not the hang condition — a turn has to end
   // eventually — so only AMBIGUOUS time counts against the deadline. This also
   // stops a legitimately long turn from getting a queued prompt shoved into it.
-  if (state === 'working') { pending.deadline = Date.now() + PROMPT_READY_DEADLINE_MS; return; }
+  if (state === 'working') { pending.deadline = Date.now() + (pending.readyMs || PROMPT_READY_DEADLINE_MS); return; }
   if (Date.now() < pending.deadline) return;
   e.pendingDelivery = null;
   log(`[deliverPrompt] id=${id} readiness deadline reached (state=${state}) — submitting anyway (len=${pending.len})`);
@@ -6942,6 +6949,152 @@ app.post('/api/start-issue', (req, res) => {
   // and opening a tab for it are two events, and this endpoint used to report only the
   // first.
   res.json({ id: result.id, name: result.name, url: UI_URL, tabDelivery: result.tabDelivery });
+});
+
+/**
+ * Spawn the first-run guide session (#695).
+ *
+ * Server-side rather than a client `createSession`, for one reason that decides it:
+ * on a fresh install nothing is pre-permitted, so the guide's very first
+ * create_display_tab call would raise a permission dialog in front of somebody's first
+ * thirty seconds with the product and the tour would simply never appear. Only a
+ * server-side spawn can pass `allowedTools` (#612's plumbing, reused verbatim), and
+ * ONBOARDING_TOOLS is the same array the prompt is written from — see
+ * onboarding-prompt.js for why those two must not drift.
+ *
+ * Structurally a much shorter startIssueSession: same recipe, same order, minus the
+ * worktree, the GitHub fetch, autopilot and resume. It returns `{ error }` for a bad
+ * cwd rather than throwing, for the same reason that one does — an HTTP 400 body and
+ * an MCP isError result are not the same shape, so the caller formats it.
+ */
+// How long the guide's prompt stays armed waiting for an idle composer (#695). Minutes,
+// not seconds, because on a first run what stands between the spawn and a ready composer
+// is a human answering Claude Code's trust dialog. Expiry is harmless — the skipIf below
+// refuses to submit into anything that is not a composer — so this only sets how long the
+// tour can still arrive, never how long anything is blocked.
+const ONBOARDING_READY_DEADLINE_MS = 5 * 60 * 1000;
+
+function startOnboardingSession({ windowId, callerId, openBrowser = false } = {}) {
+  const caller = callerId ? shells.get(callerId) : null;
+  if (!windowId && caller?.windowId) windowId = caller.windowId;
+
+  // DS_DIR, not the user's home and not a repo. It is the one directory that exists on
+  // every install by definition, so spawnCwdProblem can never refuse it on the single
+  // path where a refusal would be the user's first impression — and on a fresh machine
+  // there may be no project registered to borrow a cwd from at all. It is also the
+  // subject of the tour, and already an established place to open a tab (the
+  // `new-tab-deepsteve` palette builtin). Pre-flighted anyway: "cannot happen" is not a
+  // reason to skip the check that turns a silent tmux relocation into a message (#632).
+  const cwd = DS_DIR;
+  const problem = spawnCwdProblem(cwd);
+  if (problem) {
+    log(`[onboarding] refused: ${problem.message}`);
+    return { error: problem };
+  }
+
+  // The prompt names deepsteve MCP tools, so it must not be handed to an agent that has
+  // none. claude and codex are the two that get them (docs/agents.md); any other
+  // default — including an experimental agent someone selected — falls back to claude
+  // rather than starting a guide that cannot open the page it is told to open.
+  const requested = settings.defaultAgent || 'claude';
+  const agentType = (requested === 'claude' || requested === 'codex') ? requested : 'claude';
+
+  const id = randomUUID().slice(0, 8);
+  const claudeSessionId = agentType === 'codex' ? null : randomUUID();
+  const codexHomeId = agentType === 'codex' ? id : null;
+  const agentConfig = getAgentConfig(agentType);
+  const name = 'Guide';
+
+  // allowedToolsArgs is a no-op for a config with no allowedToolsFlag, so passing this
+  // for codex is safe and simply grants nothing.
+  const spawnArgs = getSpawnArgs(agentType, {
+    sessionId: claudeSessionId,
+    shellId: id,
+    allowedTools: ONBOARDING_TOOLS,
+  });
+
+  // spawnSession returns the engine that ACTUALLY spawned — a tmux spawn can fall back
+  // to node-pty at runtime, and recording what was requested would make the entry lie.
+  const sessionEngine = spawnSession(getDefaultEngine(), id, agentType, spawnArgs, cwd, {
+    cols: 120, rows: 40,
+    env: sessionEnv(id, { name, windowId: windowId || null, cwd, agentType, codexHomeId }),
+  });
+  const engineType = sessionEngine === tmuxEngine ? 'tmux' : 'node-pty';
+  log(`[onboarding] id=${id} agent=${agentType} engine=${engineType} cwd=${cwd} tools=${ONBOARDING_TOOLS.length}`);
+  // Deliberately NOT `loading: true`, unlike every other canned-prompt spawn. `loading`
+  // sets entry.inputBlocked for up to 60s so the user cannot interleave keystrokes with
+  // a prompt being auto-typed — correct when the agent is merely booting, and exactly
+  // wrong here. On a fresh install the guide's first screen is very often Claude Code's
+  // "Is this a project you trust?" dialog, and blocking input means the one person who
+  // can answer it cannot. No block, no loading banner: the tab is usable from the
+  // moment it appears.
+  shells.set(id, {
+    clients: new Set(), cwd, claudeSessionId, agentType, codexHomeId, configDir: null,
+    engine: sessionEngine, engineType, worktree: null, windowId: windowId || null, name,
+    planMode: false, allowedTools: ONBOARDING_TOOLS,
+    waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now(),
+  });
+  wireShellOutput(id);
+  emitSessionOpen(id);
+  recordRecentSession(id);
+  if (agentConfig.supportsSessionWatch) watchClaudeSessionDir(id);
+  sessionEngine.onExit(id, () => {
+    if (agentConfig.supportsSessionWatch) unwatchClaudeSessionDir(id);
+    handleShellGone(id);
+  });
+  saveState();
+
+  // __dirname is the install root, so this is ~/.deepsteve/public/onboarding-tour.html
+  // on a real install and the checkout's copy when run from source. Absolute because
+  // resolveHtml() refuses anything else.
+  const tourPath = path.join(__dirname, TOUR_PAGE_REL);
+  // The two options are what make this survive a first run, and both were written
+  // against an observed failure rather than a guessed one. Spawned into a directory
+  // Claude Code has not been trusted in — which is every fresh install, since nobody
+  // has opened an agent in ~/.deepsteve yet — the guide's screen is a modal whose
+  // default option is "No, exit". The shared delivery path gives up on readiness after
+  // 30s and submits anyway, on the reasoning that a prompt typed into an unclassifiable
+  // screen beats one never delivered. That reasoning does not survive a modal: the
+  // prompt text went into the dialog and the trailing Enter accepted "No, exit", so the
+  // guide killed itself ~8 seconds after the prompt was written.
+  //
+  //   skipIf       — never submit unless the screen reads as an idle composer RIGHT NOW.
+  //                  Turns the deadline from destructive into a harmless no-op.
+  //   readyDeadline — the thing being waited for is a person reading a security prompt,
+  //                  not an agent booting, so buy minutes rather than seconds. Costs
+  //                  nothing while it waits: delivery is level-triggered off the screen
+  //                  classifier, which already runs on every chunk.
+  deliverPromptWhenReady(id, renderOnboardingPrompt({ tourPath }), {
+    readyDeadlineMs: ONBOARDING_READY_DEADLINE_MS,
+    skipIf: () => {
+      const live = shells.get(id);
+      return !live || !computeWaiting(live);
+    },
+    skipReason: 'screen never reached an idle composer — refusing to type into a dialog (#695)',
+  });
+
+  const tabDelivery = deliverToWindow({ type: 'open-session', id, cwd, name, windowId }, windowId, { openBrowser });
+  noteSpawnDelivery(id, { tabDelivery, windowId, source: 'onboarding' });
+  return { id, name, cwd, engineType, agentType, tabDelivery };
+}
+
+app.post('/api/start-onboarding', (req, res) => {
+  const { windowId: rawWindowId, sessionId } = req.body || {};
+  // Same pre-flight as start-issue: with several windows open and no way to tell which
+  // asked, a tab would land in an arbitrary one.
+  const windowId = rawWindowId || (sessionId && shells.get(sessionId)?.windowId) || null;
+  const readyClients = [...reloadClients].filter(c => c.readyState === 1);
+  if (!windowId && readyClients.length > 1) {
+    log(`[API] start-onboarding: multiple browser windows open but no windowId resolved`);
+    return res.status(400).json({ error: 'Multiple browser windows open. Pass sessionId or windowId to target one.' });
+  }
+
+  const result = startOnboardingSession({ windowId, callerId: sessionId || null });
+  if (result.error) {
+    return res.status(400).json({ error: result.error.message, code: result.error.code, cwd: result.error.cwd });
+  }
+  log(`[API] start-onboarding: windowId=${windowId}, sessionId=${result.id}, readyClients=${readyClients.length}`);
+  res.json({ id: result.id, name: result.name, tabDelivery: result.tabDelivery });
 });
 
 // restart.sh calls this before restarting. Server asks browser(s) for

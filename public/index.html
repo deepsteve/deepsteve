@@ -126,6 +126,17 @@
 | (_| |  __/  __/ |_) \__ \ ||  __/\ V /  __/
  \__,_|\___|\___| .__/|___/\__\___| \_/ \___|
                 |_|</pre>
+        <!-- First-run onboarding (#695). Shown only when #empty-state carries the
+             .onboarding class, which is the single switch — see public/js/onboarding.js. -->
+        <div id="onboard-card">
+          <p class="onboard-pitch">New here? DeepSteve can show you around — it opens an agent
+            session, and that agent builds you a tour.</p>
+          <div class="onboard-actions">
+            <button id="onboard-start" class="empty-state-btn">Show me around</button>
+            <button id="onboard-skip" class="empty-state-restore">Skip — pick a folder</button>
+          </div>
+          <p id="onboard-error" class="onboard-error"></p>
+        </div>
         <button id="empty-state-btn" class="empty-state-btn">+ New</button>
         <div id="empty-state-recent" class="empty-state-recent"></div>
         <button id="empty-state-restore" class="empty-state-restore">Restore sessions…</button>
