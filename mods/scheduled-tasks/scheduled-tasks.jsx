@@ -3,7 +3,6 @@ import * as ReactDOM from 'react-dom/client';
 const { useState, useEffect, useMemo, useRef, useLayoutEffect } = React;
 
 const DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-const DAY_FULL = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 // Fallback agent list, used only if GET /api/agents fails — the real list (which
 // includes codex and any custom config profiles, #537) is fetched at mount.
 const FALLBACK_AGENTS = [{ id: 'claude', name: 'claude' }, { id: 'codex', name: 'codex' }, { id: 'hermes', name: 'hermes' }, { id: 'opencode', name: 'opencode' }, { id: 'pi', name: 'pi' }];
@@ -53,27 +52,6 @@ function relTime(ms) {
 }
 function absTime(ms) { return ms ? new Date(ms).toLocaleString() : 'n/a'; }
 const pad = (n) => String(n).padStart(2, '0');
-
-// Minimal client describe for the live form preview. The saved task carries the
-// authoritative `schedule` from the server; this only powers the editor preview.
-function describeCron(str) {
-  const f = String(str || '').trim().split(/\s+/);
-  if (f.length !== 5) return str || '';
-  const [m, h, dom, mon, dow] = f;
-  const isNum = (x) => /^\d+$/.test(x);
-  if (str.trim() === '* * * * *') return 'Every minute';
-  if (isNum(m) && h === '*' && dom === '*' && mon === '*' && dow === '*') return `Every hour at :${pad(+m)}`;
-  if (isNum(m) && isNum(h) && mon === '*') {
-    const time = `${pad(+h)}:${pad(+m)}`;
-    if (dom === '*' && dow === '*') return `Every day at ${time}`;
-    if (dom === '*' && dow !== '*') {
-      const days = dow.split(',').filter(isNum).map((d) => DAY_FULL[+d % 7]);
-      return days.length ? `Every ${days.join(', ')} at ${time}` : str;
-    }
-    if (dom !== '*' && dow === '*' && isNum(dom)) return `Monthly on day ${+dom} at ${time}`;
-  }
-  return str;
-}
 
 // --- cron builder <-> form fields ---
 function buildCron(mode, fld) {
@@ -297,6 +275,23 @@ function TaskForm({ task, projects, agents, defaults = {}, onClose }) {
 
   const cronStr = useMemo(() => buildCron(mode, fld), [mode, fld]);
   const setF = (patch) => setFld((p) => ({ ...p, ...patch }));
+
+  // The preview label comes from the server's describe(), the same one that
+  // stamps `schedule` on the saved task — so what you read here is what the card
+  // will read after Save (#697). The panel used to compute this itself and drift.
+  // Seeded with the raw expression so the line is never blank, and left there if
+  // the fetch fails.
+  const [cronLabel, setCronLabel] = useState(cronStr);
+  useEffect(() => {
+    let live = true;
+    setCronLabel(cronStr);
+    const t = setTimeout(() => {
+      api('GET', `/api/scheduled-tasks/describe?cron=${encodeURIComponent(cronStr)}`)
+        .then((d) => { if (live) setCronLabel(d.schedule || cronStr); })
+        .catch(() => {});
+    }, 200); // typing in the custom field shouldn't be one request per keystroke
+    return () => { live = false; clearTimeout(t); };
+  }, [cronStr]);
   // A 'config:<id>' selection IS claude, so every claude-only control below stays
   // enabled for it.
   const { agentType, configProfile } = splitAgentSel(agentSel);
@@ -370,7 +365,7 @@ function TaskForm({ task, projects, agents, defaults = {}, onClose }) {
           <input style={input()} value={fld.raw} onChange={(e) => setF({ raw: e.target.value })} placeholder="0 9 * * 1  (min hour dom mon dow)" />
         )}
       </div>
-      <div style={{ fontSize: 12, color: C.accent, marginTop: 6 }}>{describeCron(cronStr)} — <span style={{ color: C.dim }}>cron: {cronStr} (local time)</span></div>
+      <div style={{ fontSize: 12, color: C.accent, marginTop: 6 }}>{cronLabel} — <span style={{ color: C.dim }}>cron: {cronStr} (local time)</span></div>
 
       <label style={{ fontSize: 12, color: C.dim, marginTop: 8, display: 'block' }}>
         <input type="checkbox" checked={once} onChange={(e) => setOnce(e.target.checked)} /> run once (retire after it fires)
