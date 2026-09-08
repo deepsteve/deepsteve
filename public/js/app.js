@@ -5253,6 +5253,9 @@ async function init() {
     promptNewTabDir: () => promptRepoSession(),
     showDirPicker: () => showDirectoryPicker(),
     getRecentDirs: () => SessionStore.getRecentDirs(),
+    // The built-in project's welcome tab (#696) has to land in the window that opened the
+    // project, not an arbitrary one — same targeting every other server-opened tab uses.
+    getWindowId: () => getWindowId(),
     // Bidirectional group/context sync (#526): tell the scheduled-tasks panel
     // which context is active whenever the rail changes it.
     onActiveContextChanged: (id) => ModManager.notifyActiveContextChanged(id),

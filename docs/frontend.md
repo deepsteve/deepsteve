@@ -210,6 +210,71 @@ user sees the reviewed page. Because it lives under `public/` it is also served 
 **To re-run it:** Settings → Tips → *Take the tour*. There is deliberately no keyboard binding
 and no palette entry, so `shortcuts.js`'s registry and `BUILTIN_COMMANDS` are untouched.
 
+## The built-in Deep Steve project (#696)
+
+Every other project in the rail is code you are working on. One is **Deep Steve itself**, seeded by
+the server so it needs no setup step, and it is the project you open a tab in to change the product.
+
+**It is a real context row, not a synthetic one.** `seedDeepsteveContext()` (`server.js`, beside
+`loadContexts`) pushes an ordinary record onto `contexts` with `id: 'deepsteve'` and `builtin: true`.
+That is the whole design decision: rename, edit, icon, reorder, archive, project mods and scheduled-
+task scoping all work on it for free, because there is nothing special to teach them. A synthetic
+row would have needed a branch in every one of those paths.
+
+**The default folder resolves at seed time, and only then.** `~/.deepsteve` is the *deployed* install
+and has no `.git`, so an agent there can edit the running copy but cannot commit, branch or open a
+PR. `deepsteveProjectDir()` therefore prefers the checkout named by `.install-source.json`'s
+`sourcePath` when the marker says `type: 'git'` and that directory still exists, and falls back to
+`DS_DIR` otherwise — the one directory every install has by definition. It reads the marker off disk
+rather than `versionStatus.installSource` because `loadInstallSource()` runs several hundred lines
+later; `INSTALL_SOURCE_FILE` is declared up with the other `DS_DIR` paths for that reason. After the
+seed the folder is just `dirs`, edited like any project's through right-click → **Edit**.
+
+**Hiding is Archive (#601), and Delete does not exist for it.** The mechanism is shared; only the
+wording changes — `Hide <name>` / `Show <name>`, because "Archive" reads as filing away something
+you made and nobody made this one. Dropping Delete is what makes seeding idempotent with **no marker
+file and no extra setting**: "no context with id `deepsteve`? add it" is safe forever only if the row
+cannot go away. `DELETE /api/contexts/:id` refuses it server-side too — a delete that went through
+would be re-seeded on the next restart and read as a bug.
+
+**Three surfaces reach the hide/show**, and the third is the one that matters: the row's own menu, the
+**Projects** header's right-click, and the "All" row's. Header and "All" share one builder
+(`addProjectsSectionItems`) so they cannot drift. With the project hidden *and* the `Archived`
+disclosure collapsed, the header is the only place its row can be brought back from.
+
+**`builtin` is the flag; never the name or the id.** The name is editable, and renaming the project
+(or repointing it at another checkout) must not demote it.
+
+**The welcome tab is server-side state, unlike #695's tour.** `POST /api/contexts/:id/welcome`
+checks and stamps `welcomedAt` in one synchronous turn, then opens the page — so two windows racing
+to select the row produce one tab, and the loser learns from the `contexts` broadcast. It is stamped
+**before** the open and never rolled back: the alternative turns an unreadable page into a tab
+retried on every selection, and a missed welcome beats a loop. `POST /api/contexts` never reads
+`builtin` or `welcomedAt` off the body, which is what stops a client forging a built-in or un-seeing
+the page.
+
+Why server-side where `deepsteve-onboarded` is `localStorage`: this opens a **real tab**, not a card
+in an empty pane. A per-browser flag hands a second copy to a second browser — and to the brand-new
+tab the daemon opens at login — of a page whose whole premise is that you have not seen it.
+
+**The trigger is the project becoming the active view**, not a tab being spawned in it:
+`maybeWelcomeBuiltin()` hangs off both `selectContext` (a rail press, ⌘↑/↓ cycling) and
+`setActiveContext` (the Scheduled Tasks panel, a project-mod row pressed from another project).
+Nothing fires at page load — the active project is restored straight out of `sessionStorage` without
+going through either — so the tab arrives when someone presses the row, never behind their back.
+
+**The page is `public/deepsteve-project-welcome.html`**, opened by the server rather than an agent:
+it costs no model turns and reads the same for everyone, and unlike the tour it has nothing a person
+has to be talked through. It goes through the shared `resolveHtml()` for its `replacements`, which is
+what lets a reviewed static file name the folder this install actually resolved to. Same display-tab
+contract as `onboarding-tour.html` — no `alert`/`confirm`/`window.open`, no `window.deepsteve`
+bridge, no theme variables, no external requests, and it must have a `<head>`. Living under `public/`
+means `release.sh` must embed it, which `test/unit/shell-deploy.test.js` enforces.
+
+Tests: `test/unit/context-views.test.js` (menu wording, the missing Delete, the three menus, the
+welcome POST and its once-only-ness) and `test/integration/context-builtin.test.js` (the seed, the
+refused delete, field preservation across an edit, the stamp, and the seeded icon).
+
 ## Opening a WebSocket
 
 **Every socket in the client is constructed by `openGatedSocket()` in `public/js/ws-open.js`, and nowhere else.** `test/unit/ws-single-construct.test.js` asserts that `new WebSocket(` appears exactly once under `public/`.

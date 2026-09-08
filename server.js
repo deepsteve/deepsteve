@@ -31,6 +31,10 @@ const { wrapRunCommand } = require('./terminal-run');
 const { isTerminalReport } = require('./terminal-input');
 const { renderIssuePrompt, issueWorktreeName, issueTabName, resumePromptText, WORKFLOW_STAGES } = require('./issue-prompt');
 const { renderOnboardingPrompt, ONBOARDING_TOOLS, TOUR_PAGE_REL } = require('./onboarding-prompt');
+// The display-tab / project-mod HTML resolver, reused here for the built-in project's
+// welcome page (#696) — its `replacements` are what let a reviewed static file name the
+// actual folder the project points at.
+const { resolveHtml } = require('./html-source');
 const { readRecentUserMessages, compareDelivered } = require('./prompt-delivery-check');
 const { enrichTabs, summarizeRun } = require('./timelapse-snapshot');
 // History view (#672): bytes → lines, then lines → renderable entries. Namespaced
@@ -462,6 +466,11 @@ const RECENT_SESSIONS_FILE = path.join(DS_DIR, 'recent-sessions.json');
 // (#526); read once on first load to migrate, then left in place untouched.
 const LEGACY_GROUPS_FILE = path.join(DS_DIR, 'project-groups.json');
 const RESTARTING_FLAG = path.join(DS_DIR, '.restarting');
+// Which of the three channels produced this install, and for a checkout install the
+// directory it was deployed from. Stamped by install.sh / restart.sh / bin/deepsteve.js.
+// Two readers, at opposite ends of this file: the auto-update system, and the built-in
+// project's default folder (#696) — hence the declaration here rather than beside either.
+const INSTALL_SOURCE_FILE = path.join(DS_DIR, '.install-source.json');
 const app = express();
 
 // Security layer (#536): Host allowlist, Origin allowlist, per-install token auth, and failure
@@ -3633,7 +3642,7 @@ function loadContexts() {
       const v = JSON.parse(fs.readFileSync(CONTEXTS_FILE, 'utf8'));
       contexts = (Array.isArray(v) ? v : [])
         .filter(c => c && typeof c.name === 'string')
-        .map(c => ({ id: c.id || genContextId(), name: c.name, dirs: Array.isArray(c.dirs) ? c.dirs.filter(Boolean) : [], icon: typeof c.icon === 'string' ? c.icon : '', iconImage: (c.iconImage === 'png' || c.iconImage === 'svg') ? c.iconImage : '', archived: c.archived === true, alwaysShowMods: c.alwaysShowMods !== false }));
+        .map(c => ({ id: c.id || genContextId(), name: c.name, dirs: Array.isArray(c.dirs) ? c.dirs.filter(Boolean) : [], icon: typeof c.icon === 'string' ? c.icon : '', iconImage: (c.iconImage === 'png' || c.iconImage === 'svg') ? c.iconImage : '', archived: c.archived === true, alwaysShowMods: c.alwaysShowMods !== false, builtin: c.builtin === true, welcomedAt: Number(c.welcomedAt) || 0 }));
       return;
     }
   } catch (e) {
@@ -3655,7 +3664,69 @@ function loadContexts() {
     console.error('Failed to migrate project groups:', e.message);
   }
 }
+
+// --- The built-in Deep Steve project (#696) --------------------------------
+// The one project every install has by definition: the place you open a tab to change
+// DeepSteve itself. Present in the rail out of the box, hideable, and not deletable —
+// which is what makes seeding idempotent with no marker file and no extra setting.
+const DEEPSTEVE_CONTEXT_ID = 'deepsteve';
+const DEEPSTEVE_CONTEXT_NAME = 'Deep Steve';
+
+/**
+ * The folder the built-in project points at, at seed time only.
+ *
+ * DS_DIR is the *deployed* install and has no `.git`, so an agent there can edit the
+ * running copy but cannot commit, branch or open a PR. On a checkout install the folder
+ * actually worth opening is the clone the marker names, so that wins when it is still
+ * there. Everything else — curl, npm, a clone since moved — falls back to DS_DIR, which
+ * exists on every install by definition.
+ *
+ * Read straight off disk rather than from versionStatus.installSource: loadInstallSource()
+ * runs several hundred lines below this, and the seed happens at load.
+ */
+function deepsteveProjectDir() {
+  try {
+    const marker = JSON.parse(fs.readFileSync(INSTALL_SOURCE_FILE, 'utf8'));
+    const src = marker && marker.type === 'git' ? marker.sourcePath : '';
+    if (src && fs.statSync(src).isDirectory()) return src;
+  } catch {}
+  return DS_DIR;
+}
+
+/**
+ * Add the built-in project if it isn't there. Idempotent by construction rather than by
+ * bookkeeping: the row cannot be deleted (the DELETE route refuses it and its menu has no
+ * Delete item), so "already present" is the only state a later boot can find, and no
+ * "already seeded" marker has to be kept anywhere.
+ */
+function seedDeepsteveContext() {
+  if (contexts.some(c => c.id === DEEPSTEVE_CONTEXT_ID)) return;
+  // Copied ONCE, here. Re-copying on every boot would silently undo "Clear icon".
+  // A failure is not fatal: iconImage stays '' and the rail draws the derived glyph.
+  let iconImage = '';
+  try {
+    fs.mkdirSync(ICONS_DIR, { recursive: true });
+    fs.copyFileSync(path.join(__dirname, 'public', 'icon-192.png'),
+                    path.join(ICONS_DIR, `${DEEPSTEVE_CONTEXT_ID}.png`));
+    iconImage = 'png';
+  } catch (e) {
+    log(`[deepsteve-project] icon copy failed: ${e.message}`);
+  }
+  const dir = deepsteveProjectDir();
+  contexts.unshift({
+    id: DEEPSTEVE_CONTEXT_ID, name: DEEPSTEVE_CONTEXT_NAME, dirs: [dir],
+    icon: '', iconImage, archived: false, alwaysShowMods: true,
+    builtin: true, welcomedAt: 0,
+  });
+  saveContexts();
+  log(`[deepsteve-project] seeded the built-in project at ${dir}`);
+}
+
 loadContexts();
+// Outside loadContexts() on purpose: that function returns early from inside its try when
+// contexts.json exists, so one call here is what covers the loaded, migrated and
+// nothing-on-disk paths alike.
+seedDeepsteveContext();
 
 function broadcastContexts() {
   const msg = JSON.stringify({ type: 'contexts', contexts });
@@ -4087,8 +4158,8 @@ const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, 'package.json'), 'ut
 // non-blocking. `checkForUpdates()` runs at startup and on an interval driven
 // by settings.autoUpdateCheckIntervalHours. Broadcasts to reload clients when
 // the status changes so the UI can show a badge + toast without polling.
-
-const INSTALL_SOURCE_FILE = path.join(DS_DIR, '.install-source.json');
+// INSTALL_SOURCE_FILE is declared with the other DS_DIR paths: the built-in project's
+// default folder (#696) derives from it, and that runs long before this section.
 
 let versionStatus = {
   current: pkg.version,
@@ -6387,8 +6458,14 @@ app.post('/api/contexts', (req, res) => {
   // for the same reason `archived` is: a name/dirs edit must not reset a display choice.
   // New projects start with it ON — a project mod is a dashboard, and the whole point of
   // the option is that you don't have to navigate to one to see it.
+  // `builtin` and `welcomedAt` (#696) are in that same set, and their protection is that
+  // this handler never reads either one off the request body: only seedDeepsteveContext()
+  // mints a built-in and only POST /api/contexts/:id/welcome stamps the visit, so no
+  // client can forge a built-in project or un-see the welcome tab. The `existing` branch
+  // below assigns exactly the four editable fields, which is what carries them through an
+  // edit — renaming Deep Steve or repointing its folder must not demote it.
   if (existing) { existing.name = name; existing.dirs = dirs; existing.icon = icon; existing.iconImage = iconImage; }
-  else contexts.push({ id, name, dirs, icon, iconImage, archived: false, alwaysShowMods: true });
+  else contexts.push({ id, name, dirs, icon, iconImage, archived: false, alwaysShowMods: true, builtin: false, welcomedAt: 0 });
   saveContexts();
   broadcastContexts();
   res.json({ contexts });
@@ -6397,6 +6474,13 @@ app.post('/api/contexts', (req, res) => {
 app.delete('/api/contexts/:id', (req, res) => {
   const idx = contexts.findIndex(c => c.id === req.params.id);
   if (idx === -1) return res.status(404).json({ error: 'Project not found' });
+  // The built-in project is hideable, not deletable (#696). This refusal is not merely a
+  // matching guard for the missing menu item: seedDeepsteveContext() re-adds anything
+  // absent at load, so a delete that went through would come back on the next restart and
+  // read as a bug. Hide (archive) is the non-destructive answer, and it persists.
+  if (contexts[idx].builtin) {
+    return res.status(400).json({ error: `The built-in ${contexts[idx].name} project can be hidden, not deleted.` });
+  }
   contexts.splice(idx, 1);
   removeIconFiles(req.params.id); // clean up any uploaded icon file (#579)
   saveContexts();
@@ -6509,6 +6593,31 @@ app.post('/api/contexts/:id/always-show-mods', (req, res) => {
   saveContexts();
   broadcastContexts();
   res.json({ contexts });
+});
+
+// First open of the built-in project (#696) → the welcome display tab, once ever.
+//
+// Server-side rather than a localStorage flag like #695's `deepsteve-onboarded`, for one
+// reason that decides it: this opens a real tab, not a card in an empty pane. A per-browser
+// flag means a second browser — or the brand-new tab the daemon opens at login — gets a
+// second copy of a page whose whole premise is that you have not seen it.
+//
+// The client asks; the server decides and acts. That is what makes the answer single:
+// `welcomedAt` is checked and stamped in the same synchronous turn, so two windows racing
+// to select the row produce one tab, and the loser learns why from the broadcast.
+app.post('/api/contexts/:id/welcome', (req, res) => {
+  const ctx = contexts.find(c => c.id === req.params.id);
+  if (!ctx) return res.status(404).json({ error: 'Project not found' });
+  if (!ctx.builtin) return res.status(400).json({ error: 'Not the built-in project' });
+  if (ctx.welcomedAt) return res.json({ opened: false, contexts });
+  // Stamped BEFORE the open, and never rolled back on failure. The alternative — stamp on
+  // success — turns an unreadable page into a tab that is attempted again on every single
+  // selection. A missed welcome is a page nobody reads once; a loop is a page nobody can
+  // get rid of.
+  ctx.welcomedAt = Date.now();
+  saveContexts();
+  broadcastContexts();
+  res.json({ opened: openDeepsteveWelcomeTab(ctx, req.body?.windowId || null), contexts });
 });
 
 // Reorder contexts (#532): the client sends the full id order after a rail
@@ -7690,6 +7799,41 @@ function deleteDisplayTab(id) {
   displayTabs.delete(id);
   pendingOpens.drop(id); // don't offer a deleted tab to the next browser (#596)
   try { fs.unlinkSync(path.join(DISPLAY_TABS_DIR, `${id}.html`)); } catch {}
+}
+
+// The built-in project's welcome page (#696), shipped rather than generated.
+const WELCOME_PAGE_REL = 'public/deepsteve-project-welcome.html';
+
+/**
+ * Open the welcome page as a display tab. Returns whether the page could be read.
+ *
+ * A shipped file opened by the server, not a prompt handed to an agent: the page costs no
+ * model turns, reads the same for everyone, and — unlike #695's tour, which needs an agent
+ * because meeting one *is* the tour — has nothing to say that a person has to be talked
+ * through. `replacements` is what keeps it a reviewed static file while still naming the
+ * folder this install actually resolved to.
+ */
+function openDeepsteveWelcomeTab(ctx, windowId) {
+  const dir = ctx.dirs[0] || DS_DIR;
+  const out = resolveHtml({
+    file_path: path.join(__dirname, WELCOME_PAGE_REL),
+    replacements: { '%%PROJECT_DIR%%': dir },
+  });
+  if (out.error) {
+    log(`[deepsteve-project] welcome page unavailable: ${out.error}`);
+    return false;
+  }
+  const id = randomUUID().slice(0, 8);
+  setDisplayTab(id, out.html);
+  // cwd is what scopes a display tab to a project view (#530), so the tab lands filtered
+  // under Deep Steve rather than showing in every project. deliverToWindow handles the
+  // three delivery cases, and isPendingOpenLive already knows an `open-display-tab` is
+  // still live while displayTabs has its id — so a browser that isn't open yet gets it too.
+  deliverToWindow(
+    { type: 'open-display-tab', id, name: `Welcome to ${ctx.name}`, cwd: dir, windowId },
+    windowId);
+  log(`[deepsteve-project] opened the welcome tab (${id}) for windowId=${windowId || 'any'}`);
+  return true;
 }
 
 function setScreenshot(meta, pngBuffer) {

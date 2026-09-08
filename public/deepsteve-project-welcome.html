@@ -1,0 +1,317 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The Deep Steve project</title>
+<!--
+  The built-in project's first-open page (#696).
+
+  Opened once, by the server, the first time the Deep Steve project is selected in the
+  rail — POST /api/contexts/:id/welcome stamps `welcomedAt` and hands this file to
+  setDisplayTab. No agent and no model turns: unlike #695's tour, where meeting an agent
+  IS the tour, this page has nothing that a person has to be talked through.
+
+  The project's folder is injected server-side by resolveHtml's `replacements`, so the page
+  can name the directory this install actually resolved to while staying a reviewed static
+  file. The token is spelled in the .whereis block below and nowhere else. Do not add a
+  placeholder the server does not fill: an unsubstituted one ships to the reader as
+  literal text.
+
+  Four constraints this page is written against, the same ones public/onboarding-tour.html
+  carries, all of them real:
+    - A display tab iframe is sandboxed "allow-scripts allow-forms allow-same-origin".
+      There is no allow-modals and no allow-popups, so alert/confirm/prompt/window.open
+      are inert. Do not add any.
+    - Display tabs get NO window.deepsteve bridge. This page cannot open the rail, the
+      editor modal or a new tab for you; it says where they are.
+    - Mod iframes receive no theme variables, so every colour here is literal. The palette
+      mirrors the shipped defaults in public/css/styles.css.
+    - Everything is inline. The page must render with no network at all.
+
+  It is also served statically at /deepsteve-project-welcome.html, because it lives under
+  public/ — which is also why release.sh must embed it (a unit test enforces that).
+-->
+<style>
+  :root {
+    --bg: #0d1117;
+    --panel: #161b22;
+    --panel-2: #1c2129;
+    --border: #30363d;
+    --text: #c9d1d9;
+    --dim: #8b949e;
+    --blue: #58a6ff;
+    --green: #3fb950;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    font-size: 15px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 860px; margin: 0 auto; padding: 40px 24px 72px; }
+
+  header { border-bottom: 1px solid var(--border); padding-bottom: 28px; margin-bottom: 36px; }
+  h1 { font-size: 30px; line-height: 1.2; margin: 0 0 10px; font-weight: 650; letter-spacing: -0.01em; }
+  .lede { font-size: 17px; color: var(--dim); margin: 0; max-width: 62ch; }
+  .lede strong { color: var(--text); font-weight: 600; }
+
+  h2 {
+    font-size: 13px; text-transform: uppercase; letter-spacing: 0.08em;
+    color: var(--blue); font-weight: 650; margin: 0 0 14px;
+  }
+
+  section { margin-bottom: 40px; }
+
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 20px 22px;
+    margin-bottom: 14px;
+  }
+  .card:last-child { margin-bottom: 0; }
+  .card h3 { font-size: 16px; margin: 0 0 6px; font-weight: 620; }
+  .card p { margin: 0 0 8px; color: var(--dim); }
+  .card p:last-child { margin-bottom: 0; }
+  .card p strong { color: var(--text); font-weight: 600; }
+
+  .grid { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(290px, 1fr)); }
+
+  /* The project's folder, called out once at the top. A path is the single most useful
+     fact on this page, so it gets its own block rather than a sentence to scan for. */
+  .whereis {
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--blue);
+    border-radius: 0 8px 8px 0;
+    padding: 13px 16px;
+    margin: 0 0 14px;
+  }
+  .whereis .label {
+    display: block;
+    font-size: 11px; text-transform: uppercase; letter-spacing: 0.07em;
+    color: var(--dim); margin-bottom: 4px;
+  }
+  .whereis .path {
+    font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+    color: var(--text);
+    overflow-wrap: anywhere;
+  }
+
+  kbd {
+    display: inline-block;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-bottom-width: 2px;
+    border-radius: 5px;
+    padding: 1px 6px;
+    font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+    color: var(--text);
+    white-space: nowrap;
+  }
+  code {
+    font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+    background: var(--panel-2);
+    border-radius: 4px;
+    padding: 1px 5px;
+    color: var(--text);
+    /* Long paths must wrap rather than push the page sideways. */
+    overflow-wrap: anywhere;
+  }
+
+  ol, ul { margin: 8px 0 0; padding-left: 20px; color: var(--dim); }
+  li { margin-bottom: 5px; }
+  li:last-child { margin-bottom: 0; }
+  li strong { color: var(--text); font-weight: 600; }
+
+  .ask {
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--green);
+    border-radius: 0 8px 8px 0;
+    padding: 11px 16px;
+    margin-bottom: 9px;
+    font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+    color: var(--text);
+  }
+  .ask:last-child { margin-bottom: 0; }
+
+  footer {
+    border-top: 1px solid var(--border);
+    padding-top: 22px;
+    color: var(--dim);
+    font-size: 14px;
+  }
+  footer p { margin: 0 0 8px; }
+  footer p:last-child { margin-bottom: 0; }
+  a { color: var(--blue); }
+
+  @media (max-width: 620px) {
+    .wrap { padding: 28px 16px 56px; }
+    h1 { font-size: 25px; }
+    .lede { font-size: 16px; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <h1>The Deep Steve project</h1>
+    <p class="lede">
+      Every other project in the rail is code you are working on. This one is
+      <strong>Deep Steve itself</strong> &mdash; the thing you are looking at right now. Open a
+      tab here, describe a change, and the agent rewrites the app you are reading this in.
+    </p>
+  </header>
+
+  <section>
+    <h2>Change Deep Steve itself</h2>
+
+    <div class="whereis">
+      <span class="label">This project points at</span>
+      <span class="path">%%PROJECT_DIR%%</span>
+    </div>
+
+    <div class="card">
+      <h3>Open a tab in it, and ask</h3>
+      <p>
+        With <strong>Deep Steve</strong> selected in the rail, the <strong>+</strong> button in
+        the tab strip &mdash; or <kbd>&#8984;K</kbd> &rarr; <strong>New Tab</strong> &mdash;
+        opens an agent session in the folder above. From there it is an ordinary conversation;
+        the difference is what the code does when it runs.
+      </p>
+      <ul>
+        <li>&ldquo;Add a keyboard shortcut that closes every tab in this project.&rdquo;</li>
+        <li>&ldquo;The tab strip is too tall on a laptop screen. Fix it.&rdquo;</li>
+        <li>&ldquo;Write me a theme that looks like an amber terminal.&rdquo;</li>
+      </ul>
+    </div>
+
+    <div class="card">
+      <h3>Changes land on a restart</h3>
+      <p>
+        The daemon serving this page is already running, so an edit on disk is not yet an edit
+        in your browser. Deep Steve restarts itself through <code>./restart.sh</code>, which
+        <strong>asks you to confirm in the browser first</strong> and reconnects your open
+        sessions afterwards &mdash; agents running under tmux are detached, not killed.
+      </p>
+      <p>
+        Ask the agent to restart when it is done, and it will offer you the dialog.
+      </p>
+    </div>
+
+    <div class="card">
+      <h3>Pointing it somewhere else</h3>
+      <p>
+        The folder is a normal project setting, not a fixed path. <strong>Right-click the Deep
+        Steve row &rarr; Edit</strong> to point it at a different checkout, or to add a second
+        folder alongside the first.
+      </p>
+      <p>
+        A repo checkout is the better place to work if you have one: it has the full source, the
+        tests and the version history, where <code>~/.deepsteve</code> holds only the deployed
+        copy the daemon is running from.
+      </p>
+    </div>
+  </section>
+
+  <section>
+    <h2>Or start a project of your own</h2>
+    <div class="card">
+      <h3>&ldquo;+ New project&rdquo;, at the bottom of the rail</h3>
+      <p>
+        A <strong>project</strong> in Deep Steve is a name and a list of folders. It is not a
+        scaffold and it creates nothing on disk &mdash; it groups the tabs you already have, so
+        the rail shows one piece of work at a time.
+      </p>
+      <ol>
+        <li>Press <strong>+ New project</strong> and give it a name.</li>
+        <li>
+          Add one or more folders &mdash; pick from <strong>recent folders</strong>, or
+          <strong>Browse&hellip;</strong> to walk the filesystem. The picker can create a new
+          folder too, if the project doesn&rsquo;t exist yet.
+        </li>
+        <li>Open a tab. Any tab whose working directory sits inside one of those folders joins
+          the project automatically, worktrees included.</li>
+      </ol>
+    </div>
+    <div class="grid">
+      <div class="card">
+        <h3>Moving between them</h3>
+        <p>
+          <kbd>&#8984;P</kbd> shows and hides the rail. <kbd>&#8984;&uarr;</kbd> /
+          <kbd>&#8984;&darr;</kbd> cycle projects. Selecting one filters the tab strip to it;
+          <strong>All</strong> at the top shows everything again.
+        </p>
+      </div>
+      <div class="card">
+        <h3>What a project gets you</h3>
+        <p>
+          A filtered tab strip, a folder that new tabs open in by default, a scope for scheduled
+          tasks, and a home for <strong>project mods</strong> &mdash; dashboards an agent writes
+          that live in the repo and travel with it.
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Don&rsquo;t want this project?</h2>
+    <div class="card">
+      <h3>Hide it &mdash; it is not deletable, on purpose</h3>
+      <p>
+        <strong>Right-click the Deep Steve row</strong>, or the <strong>Projects</strong> header
+        above the list, and choose <strong>Hide Deep Steve</strong>. It leaves the rail
+        immediately.
+      </p>
+      <p>
+        Nothing is thrown away: it keeps its folder, its icon and its position, and it comes back
+        from either the <strong>Archived</strong> section at the bottom of the rail or that same
+        header menu, which then reads <strong>Show Deep Steve</strong>.
+      </p>
+    </div>
+  </section>
+
+  <section>
+    <h2>Try this &mdash; in a tab opened in this project</h2>
+    <div class="ask">What are the biggest files in this repo, and what is each one for?</div>
+    <div class="ask">Add a setting that lets me turn the tab badges off.</div>
+    <div class="ask">Something feels slow when I switch tabs. Find out what.</div>
+    <div class="ask">Show me every keyboard shortcut that already exists.</div>
+  </section>
+
+  <footer>
+    <p>
+      You can close this tab whenever you like &mdash; closing it deletes the page, and it will
+      not open again.
+    </p>
+    <p>
+      Fuller documentation lives in the <code>docs/</code> folder of the Deep Steve repo, and
+      <kbd>&#8984;?</kbd> lists every keyboard shortcut.
+    </p>
+  </footer>
+
+</div>
+<script>
+  // This page has two URLs and only one of them substitutes the folder: the display tab
+  // goes through resolveHtml's `replacements`, while /deepsteve-project-welcome.html is
+  // plain static middleware under public/. Somebody who navigates straight there would
+  // otherwise be shown a raw placeholder, so say something true instead.
+  //
+  // Deliberately the only script on the page, and it touches nothing else: no network, no
+  // modals, no window.deepsteve — see the constraints in the header comment.
+  (function () {
+    var el = document.querySelector('.whereis .path');
+    if (!el || el.textContent.slice(0, 2) !== '%%') return;
+    el.textContent = 'shown when Deep Steve opens this page for you';
+    el.style.color = '#8b949e';
+  })();
+</script>
+</body>
+</html>

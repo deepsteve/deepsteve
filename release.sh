@@ -211,6 +211,7 @@ embed_text "engines/tmux.js" "engines/tmux.js"
 # exactly the fresh machine it exists to serve.
 embed_text "public/index.html" "public/index.html"
 embed_text "public/onboarding-tour.html" "public/onboarding-tour.html"
+embed_text "public/deepsteve-project-welcome.html" "public/deepsteve-project-welcome.html"
 embed_text "public/sw.js" "public/sw.js"
 embed_text "public/manifest.json" "public/manifest.json"
 

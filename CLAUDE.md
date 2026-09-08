@@ -83,7 +83,7 @@ line below is a trigger: if you are about to do that thing, read that page first
 | [docs/testing.md](docs/testing.md) | adding a suite, a daemon fixture, or anything that runs tmux from a test |
 | [docs/platform.md](docs/platform.md) | touching `service.sh`, the launchd plist / systemd unit, `paths.js`, `bin-path.js`, auth, HTTPS, or the npm package (`bin/deepsteve.js`, `package.json`'s `files`) |
 | [docs/remote.md](docs/remote.md) | reaching a deepsteve on another machine, or changing what `--bind`, a tunnel, or the listen port implies for auth |
-| [docs/frontend.md](docs/frontend.md) | adding a keyboard shortcut, a palette command, a page-level banner or tab indicator, opening a WebSocket, or touching client-side session storage |
+| [docs/frontend.md](docs/frontend.md) | adding a keyboard shortcut, a palette command, a page-level banner or tab indicator, opening a WebSocket, touching client-side session storage, or changing the projects rail / the built-in Deep Steve project |
 | [docs/timelapse.md](docs/timelapse.md) | touching timelapse recording, the shared DOM→PNG capture in `public/js/dom-capture.js`, or the panel-tab rail indicator |
 | [docs/agents.md](docs/agents.md) | assuming a feature works for a given agent, adding an agent, or using a core MCP session tool |
 | [docs/mods.md](docs/mods.md) | writing or changing a DeepSteve Mod, a Project Mod, or a display tab |

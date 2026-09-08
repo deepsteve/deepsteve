@@ -253,6 +253,12 @@ function archivedContexts() {
   return contexts.filter(c => c.archived);
 }
 
+// The built-in Deep Steve project (#696) — server-seeded, server-owned. Identified by the
+// flag rather than by name or id, because the name is editable: renaming it (or repointing
+// its folder at another checkout) must not turn it back into an ordinary project.
+const isBuiltin = (ctx) => ctx?.builtin === true;
+const builtinContext = () => contexts.find(isBuiltin) || null;
+
 function getActiveContext() {
   return contexts.find(c => c.id === activeContextId) || null;
 }
@@ -383,6 +389,15 @@ function renderRail() {
   const header = document.createElement('div');
   header.className = 'context-rail-header';
   header.textContent = 'Projects';
+  // Section-level right-click (#696): New project, and hide/show for the built-in one.
+  // The header is where you look for "something about this whole list", and it is the only
+  // affordance that still works when the project you want back is inside a collapsed
+  // Archived section.
+  header.title = 'Right-click for project options';
+  header.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    showHeaderMenu(e.clientX, e.clientY);
+  });
   rail.appendChild(header);
 
   const list = document.createElement('div');
@@ -618,7 +633,14 @@ function showRowMenu(x, y, ctx) {
     if (hasIcon) addRowMenuItem(menu, 'Clear icon', () => clearContextIcon(ctx));
     // Archive (#601) — the non-destructive alternative to Delete: the context keeps
     // its dirs/icon/position but leaves the list until it's unarchived.
-    addRowMenuItem(menu, ctx.archived ? 'Unarchive' : 'Archive', () => archiveContext(ctx, !ctx.archived));
+    //
+    // The built-in project says "Hide"/"Show" instead (#696). Same mechanism, different
+    // word: "Archive" reads as filing away something you made, and nobody made this one —
+    // what a person wants from that menu is for it to stop being in their rail.
+    addRowMenuItem(menu, isBuiltin(ctx)
+      ? `${ctx.archived ? 'Show' : 'Hide'} ${ctx.name}`
+      : (ctx.archived ? 'Unarchive' : 'Archive'),
+      () => archiveContext(ctx, !ctx.archived));
     // Compact view (#646) — the same per-browser toggle the mod rows' own right-click
     // menu carries, offered here too because the row you right-click when the rail has
     // grown too tall is as likely to be the project as one of its mods. Only shown when
@@ -637,13 +659,56 @@ function showRowMenu(x, y, ctx) {
         () => setCompactRail(!compact));
       addRowMenuSeparator(menu);
     }
-    addRowMenuItem(menu, 'Delete', () => {
-      if (confirm(`Delete project "${ctx.name}"?`)) deleteContext(ctx);
-    }, 'var(--ds-accent-red)');
+    // No Delete for the built-in Deep Steve project (#696) — Hide is its only removal, and
+    // the server refuses the delete anyway (it would be re-seeded on the next restart).
+    if (!isBuiltin(ctx)) {
+      addRowMenuItem(menu, 'Delete', () => {
+        if (confirm(`Delete project "${ctx.name}"?`)) deleteContext(ctx);
+      }, 'var(--ds-accent-red)');
+    }
   } else {
-    addRowMenuItem(menu, 'New project', () => openContextEditor(null));
+    addProjectsSectionItems(menu);
   }
 
+  presentRowMenu(menu, x, y);
+}
+
+/**
+ * The items for a right-click that named no particular project: the "All" row, and the
+ * "Projects" section header (#696). One builder for both, so the two menus that mean
+ * "nothing in particular is selected" cannot drift apart.
+ */
+function addProjectsSectionItems(menu) {
+  addRowMenuItem(menu, 'New project', () => openContextEditor(null));
+  // The built-in project's hide/show, reachable without having to find its row — which is
+  // the point when it is hidden and the row is inside a collapsed Archived section.
+  const ds = builtinContext();
+  if (ds) {
+    addRowMenuSeparator(menu);
+    addRowMenuItem(menu, `${ds.archived ? 'Show' : 'Hide'} ${ds.name}`,
+      () => archiveContext(ds, !ds.archived));
+  }
+}
+
+/** The "Projects" header's own menu (#696) — the section-level half of the same items. */
+function showHeaderMenu(x, y) {
+  hideRowMenu();
+  const menu = document.createElement('div');
+  menu.className = 'context-menu context-row-menu';
+  addProjectsSectionItems(menu);
+  presentRowMenu(menu, x, y);
+}
+
+/**
+ * Place a built menu, clamp it on-screen, and wire its dismissal. Shared by every menu in
+ * this module so there is one answer to "how does a rail menu close".
+ *
+ * `mousedown` capture rather than `click` is load-bearing: a rail row selects on mouseup →
+ * selectContext → applyFilter → renderRail(), which empties the rail and detaches the very
+ * row that was pressed, so a later `click` never reaches document and the menu would sit
+ * there forever (#546).
+ */
+function presentRowMenu(menu, x, y) {
   menu.style.left = x + 'px';
   menu.style.top = y + 'px';
   document.body.appendChild(menu);
@@ -963,6 +1028,40 @@ function selectContext(id) {
   saveActive();
   notifyActive();
   applyFilter();
+  maybeWelcomeBuiltin(id);
+}
+
+// One request per page load, whatever the server answers. The server is the authority on
+// "has this been shown" and this flag adds nothing to that — it exists so a burst of
+// selections (⌘↑/↓ held down across the built-in row) is one POST rather than a dozen.
+let welcomeRequested = false;
+
+/**
+ * First open of the built-in project → ask the server for the welcome tab (#696).
+ *
+ * "Opened" is the project becoming the active view, not a tab being spawned in it — so the
+ * hook is on the two functions that set it: selectContext (a rail press, and ⌘↑/↓ cycling)
+ * and setActiveContext (the Scheduled Tasks panel, and a project mod row pressed from
+ * another project).
+ *
+ * Nothing fires at page load: the active project is restored straight out of sessionStorage
+ * without going through selectContext, and on a genuine first run there is nothing stored
+ * anyway. So the tab arrives when someone presses the row, never behind their back.
+ *
+ * `welcomedAt` is set optimistically for the same reason archiveContext flips `archived`
+ * locally — the contexts broadcast is what confirms it, and a second window learns from
+ * that broadcast rather than from its own POST.
+ */
+function maybeWelcomeBuiltin(id) {
+  const ctx = contexts.find(c => c.id === id);
+  if (!isBuiltin(ctx) || ctx.welcomedAt || welcomeRequested) return;
+  welcomeRequested = true;
+  ctx.welcomedAt = Date.now();
+  fetch('/api/contexts/' + encodeURIComponent(id) + '/welcome', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ windowId: cb.getWindowId?.() || null }),
+  }).catch(() => {});
 }
 
 // Called by app.js's switchTo() on every tab activation: remember the tab as the
@@ -1918,6 +2017,7 @@ export function setActiveContext(id) {
   saveActive();
   notifyActive();
   applyFilter();
+  maybeWelcomeBuiltin(next); // opening the project from a panel is still opening it (#696)
 }
 
 export function getActiveContextId() {

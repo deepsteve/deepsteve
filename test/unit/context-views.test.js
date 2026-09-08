@@ -1084,3 +1084,200 @@ test('which project you are in stays per-window', async () => {
   assert.strictEqual(localMap.get('deepsteve-context-active'), 'ctxb',
     'the seeded browser-wide value is neither read nor written — it is not a preference');
 });
+
+// ------------------------------------------- the built-in Deep Steve project (#696)
+// A server-seeded project the rail treats slightly differently: its Archive item is
+// worded as Hide/Show, it has no Delete, the section header and the "All" row both offer
+// its hide/show, and opening it for the first time asks the server for a welcome tab.
+//
+// Every context here is a literal rather than the shared CTX_A/CTX_B: archiveContext()
+// mutates the object it is handed, and by this point in the file CTX_B carries
+// archived:true (spreading it would copy the mutation).
+
+const BUILTIN = { id: 'deepsteve', name: 'Deep Steve', dirs: ['/src/deepsteve'],
+  builtin: true, welcomedAt: 0 };
+const builtinContexts = (over = {}) => [
+  { ...BUILTIN, ...over },
+  { id: 'ctxa', name: 'Alpha', dirs: ['/repo/a'] },
+];
+
+// The rail's "Projects" header, and the menu its right-click appends.
+const headerMenuFor = (rail) => {
+  const [header] = railChildren(rail, 'context-rail-header');
+  assert.ok(header, 'the Projects header is rendered');
+  header.listeners.contextmenu({ preventDefault: () => {}, clientX: 0, clientY: 0 });
+  return createdEls.filter(el => el.className.includes('context-row-menu')).pop();
+};
+
+// Record every fetch a body makes, with the module's rejecting stub still underneath so
+// nothing resolves and clobbers the contexts the test set.
+async function captureFetches(fn) {
+  const calls = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (url, opts) => { calls.push({ url, opts }); return realFetch(); };
+  try { await fn(); } finally { globalThis.fetch = realFetch; }
+  return calls;
+}
+
+test('the built-in project says Hide, not Archive, and offers no Delete (#696)', async () => {
+  const { rail, toggle } = await setup({ contexts: builtinContexts() });
+  toggle.listeners.click(); // open the rail so the rows exist
+
+  const labels = rowMenuFor(rail, 'Deep Steve').children.map(i => i.textContent);
+  assert.ok(labels.includes('Hide Deep Steve'),
+    `expected a Hide item, got ${JSON.stringify(labels)}`);
+  assert.ok(!labels.includes('Archive'), 'the generic wording is replaced, not added to');
+  assert.ok(!labels.includes('Delete'),
+    'the built-in is re-seeded at load, so a delete would come back and read as a bug');
+});
+
+test('an ordinary project keeps Archive and Delete (#696)', async () => {
+  const { rail, toggle } = await setup({ contexts: builtinContexts() });
+  toggle.listeners.click();
+
+  const labels = rowMenuFor(rail, 'Alpha').children.map(i => i.textContent);
+  assert.ok(labels.includes('Archive'));
+  assert.ok(labels.includes('Delete'));
+});
+
+test('a hidden built-in offers Show, from its row in the Archived section (#696)', async () => {
+  const { rail, toggle } = await setup({ contexts: builtinContexts({ archived: true }) });
+  toggle.listeners.click();
+
+  // Archived rows only exist once the disclosure is open.
+  railChildren(rail, 'context-archived-toggle')[0].onclick();
+  const archived = railChildren(rail, 'context-archived-list')[0];
+  const row = archived.children
+    .find(r => r.children.find(c => c.className === 'context-row-label')?.textContent === 'Deep Steve');
+  assert.ok(row, 'the hidden built-in is listed under Archived');
+
+  row.listeners.contextmenu({ preventDefault: () => {}, clientX: 0, clientY: 0 });
+  const menu = createdEls.filter(el => el.className.includes('context-row-menu')).pop();
+  assert.ok(menu.children.some(i => i.textContent === 'Show Deep Steve'));
+});
+
+test('renaming the built-in carries the wording with it (#696)', async () => {
+  // `builtin` is the flag, never the name or the id — the name is editable, and renaming
+  // it must not demote the project back to an ordinary one.
+  const { rail, toggle } = await setup({ contexts: builtinContexts({ name: 'DS trunk' }) });
+  toggle.listeners.click();
+
+  const labels = rowMenuFor(rail, 'DS trunk').children.map(i => i.textContent);
+  assert.ok(labels.includes('Hide DS trunk'));
+  assert.ok(!labels.includes('Delete'));
+});
+
+test('the Projects header right-click offers New project and Hide (#696)', async () => {
+  const { rail, toggle } = await setup({ contexts: builtinContexts() });
+  toggle.listeners.click();
+
+  const labels = headerMenuFor(rail).children.map(i => i.textContent);
+  assert.ok(labels.includes('New project'));
+  assert.ok(labels.includes('Hide Deep Steve'));
+});
+
+test('the header reads Show once the built-in is hidden (#696)', async () => {
+  // The affordance that matters: with the built-in hidden and the Archived disclosure
+  // collapsed, the header is the one place its row can be brought back from.
+  const { rail, toggle } = await setup({ contexts: builtinContexts({ archived: true }) });
+  toggle.listeners.click();
+
+  const labels = headerMenuFor(rail).children.map(i => i.textContent);
+  assert.ok(labels.includes('Show Deep Steve'));
+  assert.ok(!labels.includes('Hide Deep Steve'));
+});
+
+test('the header and the All row carry the same items (#696)', async () => {
+  const { rail, toggle } = await setup({ contexts: builtinContexts() });
+  toggle.listeners.click();
+
+  assert.deepStrictEqual(
+    rowMenuFor(rail, 'All').children.map(i => i.textContent),
+    headerMenuFor(rail).children.map(i => i.textContent));
+});
+
+test('with no built-in project, neither menu invents one (#696)', async () => {
+  const { rail, toggle } = await setup({ contexts: [{ id: 'ctxa', name: 'Alpha', dirs: ['/repo/a'] }] });
+  toggle.listeners.click();
+
+  assert.deepStrictEqual(headerMenuFor(rail).children.map(i => i.textContent), ['New project']);
+});
+
+test('the header menu hides the built-in through the shared archive route (#696)', async () => {
+  const { rail, toggle } = await setup({ contexts: builtinContexts() });
+  toggle.listeners.click();
+
+  const calls = await captureFetches(async () => {
+    const hide = headerMenuFor(rail).children.find(i => i.textContent === 'Hide Deep Steve');
+    hide.onclick();
+  });
+
+  const post = calls.find(c => String(c.url).includes('/archive'));
+  assert.ok(post, 'hiding is archiving — no second mechanism');
+  assert.strictEqual(post.url, '/api/contexts/deepsteve/archive');
+  assert.deepStrictEqual(JSON.parse(post.opts.body), { archived: true });
+});
+
+test('first open of the built-in asks the server for the welcome tab (#696)', async () => {
+  const { mod } = await setup({ contexts: builtinContexts() });
+
+  const calls = await captureFetches(async () => { mod.setActiveContext('deepsteve'); });
+
+  const post = calls.find(c => String(c.url).includes('/welcome'));
+  assert.ok(post, 'the welcome endpoint is called');
+  assert.strictEqual(post.url, '/api/contexts/deepsteve/welcome');
+  assert.strictEqual(post.opts.method, 'POST');
+  // windowId targets the tab at the window that opened the project. The harness supplies
+  // no getWindowId callback, so the optional chain yields null — which is the "any window"
+  // case deliverToWindow already handles.
+  assert.deepStrictEqual(JSON.parse(post.opts.body), { windowId: null });
+});
+
+test('an already-welcomed built-in asks for nothing (#696)', async () => {
+  const { mod } = await setup({ contexts: builtinContexts({ welcomedAt: 1757000000000 }) });
+
+  const calls = await captureFetches(async () => { mod.setActiveContext('deepsteve'); });
+
+  assert.deepStrictEqual(calls.filter(c => String(c.url).includes('/welcome')), []);
+});
+
+test('opening the built-in twice asks once (#696)', async () => {
+  // The server is the authority, but a burst of selections (⌘↑/↓ held down) must not be a
+  // burst of POSTs.
+  const { mod } = await setup({ contexts: builtinContexts() });
+
+  const calls = await captureFetches(async () => {
+    mod.setActiveContext('deepsteve');
+    mod.setActiveContext('ctxa');
+    mod.setActiveContext('deepsteve');
+  });
+
+  assert.strictEqual(calls.filter(c => String(c.url).includes('/welcome')).length, 1);
+});
+
+test('opening an ordinary project asks for no welcome (#696)', async () => {
+  const { mod } = await setup({ contexts: builtinContexts() });
+
+  const calls = await captureFetches(async () => { mod.setActiveContext('ctxa'); });
+
+  assert.deepStrictEqual(calls.filter(c => String(c.url).includes('/welcome')), []);
+});
+
+test('restoring the active project at load opens no welcome tab (#696)', async () => {
+  // setup() seeds sessionStorage and imports the module, so this covers the whole boot
+  // path. A tab that comes back to the project it was left in must not be handed a page
+  // it has already read — and on a genuine first run there is nothing stored at all.
+  const calls = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (url, opts) => { calls.push({ url, opts }); return realFetch(); };
+  try {
+    const { mod } = await setup({
+      contexts: builtinContexts(),
+      session: { 'deepsteve-context-active': 'deepsteve' },
+    });
+    assert.strictEqual(mod.getActiveContextId(), 'deepsteve', 'the project is restored');
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+  assert.deepStrictEqual(calls.filter(c => String(c.url).includes('/welcome')), []);
+});
