@@ -58,6 +58,7 @@
   header { border-bottom: 1px solid var(--border); padding-bottom: 28px; margin-bottom: 36px; }
   h1 { font-size: 30px; line-height: 1.2; margin: 0 0 10px; font-weight: 650; letter-spacing: -0.01em; }
   .lede { font-size: 17px; color: var(--dim); margin: 0; max-width: 62ch; }
+  .lede + .lede { margin-top: 12px; }
   .lede strong { color: var(--text); font-weight: 600; }
 
   h2 {
@@ -125,6 +126,9 @@
   }
 
   ol, ul { margin: 8px 0 0; padding-left: 20px; color: var(--dim); }
+  /* A paragraph after a list is a closing remark, not the tail of the last item. Without
+     this it renders welded to it, because both margins collapse to zero. */
+  .card ol + p, .card ul + p { margin-top: 12px; }
   li { margin-bottom: 5px; }
   li:last-child { margin-bottom: 0; }
   li strong { color: var(--text); font-weight: 600; }
@@ -162,16 +166,46 @@
 <div class="wrap">
 
   <header>
-    <h1>The Deep Steve project</h1>
+    <h1>Deep Steve</h1>
     <p class="lede">
-      Every other project in the rail is code you are working on. This one is
-      <strong>Deep Steve itself</strong> &mdash; the thing you are looking at right now. Open a
-      tab here, describe a change, and the agent rewrites the app you are reading this in.
+      Deep Steve runs <strong>coding agents in your browser</strong>. Each tab is one agent,
+      working in one folder on this machine. Close the tab and it keeps going. Close the browser
+      and it keeps going. It is still there tomorrow.
+    </p>
+    <p class="lede">
+      Out of the box it knows about exactly one folder &mdash; <strong>its own</strong>. That is
+      this project, and on a new install it is the only row in the list on the left.
     </p>
   </header>
 
   <section>
-    <h2>Change Deep Steve itself</h2>
+    <h2>Start here</h2>
+    <div class="card">
+      <h3>Point it at your own code</h3>
+      <p>
+        A <strong>project</strong> is a name and one or more folders. It builds nothing, installs
+        nothing and writes nothing to disk. It is a filter: the tabs for one piece of work stay
+        together, and out of the way of everything else.
+      </p>
+      <ol>
+        <li><strong>+ New project</strong>, at the bottom of the list on the left. Name it.</li>
+        <li>
+          Add a folder &mdash; pick a <strong>recent</strong> one, or <strong>Browse&hellip;</strong>
+          to go find it.
+        </li>
+        <li>
+          Press <strong>+</strong> in the tab strip along the top. An agent opens in that folder
+          and waits for you to say something.
+        </li>
+      </ol>
+      <p>
+        That is the whole loop. Everything below here is optional.
+      </p>
+    </div>
+  </section>
+
+  <section>
+    <h2>Or change Deep Steve itself</h2>
 
     <div class="whereis">
       <span class="label">This project points at</span>
@@ -179,85 +213,44 @@
     </div>
 
     <div class="card">
-      <h3>Open a tab in it, and ask</h3>
+      <h3>The agent edits the app you are looking at</h3>
       <p>
-        With <strong>Deep Steve</strong> selected in the rail, the <strong>+</strong> button in
-        the tab strip &mdash; or <kbd>&#8984;K</kbd> &rarr; <strong>New Tab</strong> &mdash;
-        opens an agent session in the folder above. From there it is an ordinary conversation;
-        the difference is what the code does when it runs.
+        That folder is Deep Steve&rsquo;s own source. A tab opened in this project is talking to
+        an agent that can rewrite the sidebar, the shortcuts, the colours and the tab strip
+        &mdash; the ones on your screen, right now.
       </p>
       <ul>
-        <li>&ldquo;Add a keyboard shortcut that closes every tab in this project.&rdquo;</li>
         <li>&ldquo;The tab strip is too tall on a laptop screen. Fix it.&rdquo;</li>
         <li>&ldquo;Write me a theme that looks like an amber terminal.&rdquo;</li>
+        <li>&ldquo;Add a keyboard shortcut that closes every tab in this project.&rdquo;</li>
       </ul>
+      <p>
+        This is the fun part, not the first part. If you have just installed Deep Steve, do the
+        section above instead.
+      </p>
     </div>
 
     <div class="card">
       <h3>Changes land on a restart</h3>
       <p>
-        The daemon serving this page is already running, so an edit on disk is not yet an edit
-        in your browser. Deep Steve restarts itself through <code>./restart.sh</code>, which
+        The daemon serving this page is already running, so an edit on disk is not yet an edit in
+        your browser. Deep Steve restarts itself through <code>./restart.sh</code>, which
         <strong>asks you to confirm in the browser first</strong> and reconnects your open
-        sessions afterwards &mdash; agents running under tmux are detached, not killed.
-      </p>
-      <p>
-        Ask the agent to restart when it is done, and it will offer you the dialog.
+        sessions afterwards. Just ask the agent to restart when it is done.
       </p>
     </div>
 
     <div class="card">
       <h3>Pointing it somewhere else</h3>
       <p>
-        The folder is a normal project setting, not a fixed path. <strong>Right-click the Deep
-        Steve row &rarr; Edit</strong> to point it at a different checkout, or to add a second
-        folder alongside the first.
+        The folder is an ordinary project setting, not a fixed path. <strong>Right-click the Deep
+        Steve row &rarr; Edit</strong> to aim it at a different checkout.
       </p>
       <p>
-        A repo checkout is the better place to work if you have one: it has the full source, the
-        tests and the version history, where <code>~/.deepsteve</code> holds only the deployed
-        copy the daemon is running from.
+        A git clone is the better place to work if you have one: it has the full source, the tests
+        and the history, where <code>~/.deepsteve</code> holds only the deployed copy the daemon
+        runs from.
       </p>
-    </div>
-  </section>
-
-  <section>
-    <h2>Or start a project of your own</h2>
-    <div class="card">
-      <h3>&ldquo;+ New project&rdquo;, at the bottom of the rail</h3>
-      <p>
-        A <strong>project</strong> in Deep Steve is a name and a list of folders. It is not a
-        scaffold and it creates nothing on disk &mdash; it groups the tabs you already have, so
-        the rail shows one piece of work at a time.
-      </p>
-      <ol>
-        <li>Press <strong>+ New project</strong> and give it a name.</li>
-        <li>
-          Add one or more folders &mdash; pick from <strong>recent folders</strong>, or
-          <strong>Browse&hellip;</strong> to walk the filesystem. The picker can create a new
-          folder too, if the project doesn&rsquo;t exist yet.
-        </li>
-        <li>Open a tab. Any tab whose working directory sits inside one of those folders joins
-          the project automatically, worktrees included.</li>
-      </ol>
-    </div>
-    <div class="grid">
-      <div class="card">
-        <h3>Moving between them</h3>
-        <p>
-          <kbd>&#8984;P</kbd> shows and hides the rail. <kbd>&#8984;&uarr;</kbd> /
-          <kbd>&#8984;&darr;</kbd> cycle projects. Selecting one filters the tab strip to it;
-          <strong>All</strong> at the top shows everything again.
-        </p>
-      </div>
-      <div class="card">
-        <h3>What a project gets you</h3>
-        <p>
-          A filtered tab strip, a folder that new tabs open in by default, a scope for scheduled
-          tasks, and a home for <strong>project mods</strong> &mdash; dashboards an agent writes
-          that live in the repo and travel with it.
-        </p>
-      </div>
     </div>
   </section>
 
@@ -267,33 +260,23 @@
       <h3>Hide it &mdash; it is not deletable, on purpose</h3>
       <p>
         <strong>Right-click the Deep Steve row</strong>, or the <strong>Projects</strong> header
-        above the list, and choose <strong>Hide Deep Steve</strong>. It leaves the rail
-        immediately.
-      </p>
-      <p>
-        Nothing is thrown away: it keeps its folder, its icon and its position, and it comes back
-        from either the <strong>Archived</strong> section at the bottom of the rail or that same
-        header menu, which then reads <strong>Show Deep Steve</strong>.
+        above the list, and choose <strong>Hide Deep Steve</strong>. It leaves the list at once,
+        and nothing is thrown away: it keeps its folder, its icon and its position, and it comes
+        back from the <strong>Archived</strong> section at the bottom or that same header menu,
+        which then reads <strong>Show Deep Steve</strong>.
       </p>
     </div>
   </section>
 
-  <section>
-    <h2>Try this &mdash; in a tab opened in this project</h2>
-    <div class="ask">What are the biggest files in this repo, and what is each one for?</div>
-    <div class="ask">Add a setting that lets me turn the tab badges off.</div>
-    <div class="ask">Something feels slow when I switch tabs. Find out what.</div>
-    <div class="ask">Show me every keyboard shortcut that already exists.</div>
-  </section>
-
   <footer>
     <p>
-      You can close this tab whenever you like &mdash; closing it deletes the page, and it will
-      not open again.
+      Close this tab whenever you like &mdash; closing it deletes the page, and it will not open
+      again.
     </p>
     <p>
-      Fuller documentation lives in the <code>docs/</code> folder of the Deep Steve repo, and
-      <kbd>&#8984;?</kbd> lists every keyboard shortcut.
+      <kbd>&#8984;P</kbd> hides and shows the project list. <kbd>&#8984;&uarr;</kbd> and
+      <kbd>&#8984;&darr;</kbd> move between projects once you have a few.
+      <kbd>&#8984;?</kbd> lists every keyboard shortcut there is.
     </p>
   </footer>
 

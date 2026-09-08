@@ -212,8 +212,10 @@ and no palette entry, so `shortcuts.js`'s registry and `BUILTIN_COMMANDS` are un
 
 ## The built-in Deep Steve project (#696)
 
-Every other project in the rail is code you are working on. One is **Deep Steve itself**, seeded by
-the server so it needs no setup step, and it is the project you open a tab in to change the product.
+A project in the rail is code you are working on. One is **Deep Steve itself**, seeded by the server
+so it needs no setup step, and it is the project you open a tab in to change the product. On a new
+install it is also the *only* row, which is why its welcome page must not describe itself by contrast
+with projects the reader does not have yet.
 
 **It is a real context row, not a synthetic one.** `seedDeepsteveContext()` (`server.js`, beside
 `loadContexts`) pushes an ordinary record onto `contexts` with `id: 'deepsteve'` and `builtin: true`.
