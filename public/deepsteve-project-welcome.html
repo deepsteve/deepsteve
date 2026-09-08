@@ -183,9 +183,8 @@
     <div class="card">
       <h3>Point it at your own code</h3>
       <p>
-        A <strong>project</strong> is a name and one or more folders. It builds nothing, installs
-        nothing and writes nothing to disk. It is a filter: the tabs for one piece of work stay
-        together, and out of the way of everything else.
+        A <strong>project</strong> is a name and a folder. It does not touch your files &mdash; it
+        keeps the tabs for one piece of work together, and out of the way of everything else.
       </p>
       <ol>
         <li><strong>+ New project</strong>, at the bottom of the list on the left. Name it.</li>
@@ -231,39 +230,30 @@
     </div>
 
     <div class="card">
-      <h3>Changes land on a restart</h3>
+      <h3>Your change shows up after a restart</h3>
       <p>
-        The daemon serving this page is already running, so an edit on disk is not yet an edit in
-        your browser. Deep Steve restarts itself through <code>./restart.sh</code>, which
-        <strong>asks you to confirm in the browser first</strong> and reconnects your open
-        sessions afterwards. Just ask the agent to restart when it is done.
+        Ask the agent to restart Deep Steve when it is done. You get a confirm box first, and your
+        open tabs reconnect on the other side.
       </p>
     </div>
 
     <div class="card">
-      <h3>Pointing it somewhere else</h3>
+      <h3>Point it at a clone instead</h3>
       <p>
-        The folder is an ordinary project setting, not a fixed path. <strong>Right-click the Deep
-        Steve row &rarr; Edit</strong> to aim it at a different checkout.
-      </p>
-      <p>
-        A git clone is the better place to work if you have one: it has the full source, the tests
-        and the history, where <code>~/.deepsteve</code> holds only the deployed copy the daemon
-        runs from.
+        <strong>Right-click the Deep Steve row &rarr; Edit</strong> to change the folder. If the
+        path above is <code>~/.deepsteve</code>, that is the copy Deep Steve is running and it has
+        no history &mdash; an agent can change things there, but cannot commit them.
       </p>
     </div>
   </section>
 
   <section>
-    <h2>Don&rsquo;t want this project?</h2>
+    <h2>Don&rsquo;t want it?</h2>
     <div class="card">
-      <h3>Hide it &mdash; it is not deletable, on purpose</h3>
+      <h3>Hide it</h3>
       <p>
-        <strong>Right-click the Deep Steve row</strong>, or the <strong>Projects</strong> header
-        above the list, and choose <strong>Hide Deep Steve</strong>. It leaves the list at once,
-        and nothing is thrown away: it keeps its folder, its icon and its position, and it comes
-        back from the <strong>Archived</strong> section at the bottom or that same header menu,
-        which then reads <strong>Show Deep Steve</strong>.
+        <strong>Right-click the Deep Steve row &rarr; Hide Deep Steve.</strong> It comes back from
+        <strong>Archived</strong>, at the bottom of the list, whenever you want it.
       </p>
     </div>
   </section>
