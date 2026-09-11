@@ -12,6 +12,8 @@
 const { test } = require('node:test');
 const assert = require('node:assert');
 const { mergeSession, deriveCommitSubject, issueNumberFromBranch } = require('../../mods/deepsteve-core/session-merge.js');
+// The same instance session-merge.js required, so init() here is what its refresh() sees.
+const projectMods = require('../../mods/project-mods/tools.js');
 
 const WT = '/repo/.claude/worktrees/github-issue-688';
 const ROOT = '/repo';
@@ -441,4 +443,49 @@ test('an explicit target is honoured and named in the fallback subject', async (
   assert.strictEqual(r.mergeDir, '/repo/.claude/worktrees/rel');
   assert.strictEqual(r.subject, 'Merge spike/colors into release',
     'the subject names the branch actually merged into, not the main checkout\'s');
+});
+
+// ------------------------------------------------------------ project mods (#703)
+//
+// A merge can bring a project mod into the target checkout, and an open window only looks
+// again when it is pinged. Last in the file because it is the one test that init()s
+// project-mods: before that its refresh() is a no-op, which is why everything above runs
+// with no daemon.
+
+test('a landed merge pings project mods before closing the issue; one that did not land never does', async () => {
+  const pings = [];
+  projectMods.init({
+    settings: {},
+    log: () => {},
+    reloadClients: new Set(),
+    getContexts: () => [],   // nothing to scan — the ping is what is under test
+    broadcast: (m) => pings.push(m),
+  });
+
+  let pingsAtClose = null;
+  const gh = async (argv) => {
+    if (argv[0] === 'issue' && argv[1] === 'close') pingsAtClose = pings.length;
+    return { stdout: '' };
+  };
+  const landed = await mergeSession({ git: gitFor({ table: MERGE_OK }), gh, cwd: WT, repoRoot: ROOT, isWorktree: true });
+  assert.strictEqual(landed.status, 'merged');
+  assert.deepStrictEqual(pings, [{ type: 'project-mods' }]);
+  assert.strictEqual(pingsAtClose, 1, 'the rail does not wait on a round trip to GitHub');
+
+  pings.length = 0;
+  const conflict = await mergeSession({
+    git: gitFor({ table: [
+      ['merge ', { ok: false, stderr: 'CONFLICT (content): Merge conflict in a.txt\n' }],
+      ['rev-parse --verify MERGE_HEAD', { stdout: 'abc\n' }],
+    ] }),
+    gh: scriptedGh([]), cwd: WT, repoRoot: ROOT, isWorktree: true,
+  });
+  assert.strictEqual(conflict.status, 'conflict');
+  const dirty = await mergeSession({ git: gitFor({ rootDirty: true }), gh: scriptedGh([]), cwd: WT, repoRoot: ROOT, isWorktree: true });
+  assert.strictEqual(dirty.status, 'target-dirty');
+  const pushed = await mergeSession({
+    git: gitFor({ sessionCwd: ROOT, branch: 'main' }), gh: scriptedGh([]), cwd: ROOT, repoRoot: ROOT, isWorktree: false,
+  });
+  assert.strictEqual(pushed.status, 'pushed');
+  assert.deepStrictEqual(pings, [], 'none of those changed the target checkout, so there is nothing new to find');
 });

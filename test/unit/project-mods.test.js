@@ -632,6 +632,13 @@ test('write tools fail closed when projectModsEnabled is off; reads keep working
     const listed = await tools.list_project_mods.handler({ scope: 'all' }, {});
     assert.ok(!listed.isError);
     assert.strictEqual(payload(listed).mods.length, 1);
+
+    // refresh_project_mods writes nothing either, so it isn't gated — but it says why
+    // nothing will show up, instead of a cheerful ack (#703).
+    const refreshed = await tools.refresh_project_mods.handler({ session_id: 'sess-a' }, {});
+    assert.ok(!refreshed.isError);
+    assert.strictEqual(payload(refreshed).enabled, false);
+    assert.strictEqual(payload(refreshed).note, FEATURE_OFF_MSG);
   } finally {
     settings.projectModsEnabled = true;
   }
@@ -799,6 +806,114 @@ test('every mutation pings the browser so open surfaces re-derive', async () => 
   assert.strictEqual(broadcasts.length, 4);
   // Payload-less on purpose — the client refetches (the scheduled-tasks idiom).
   for (const b of broadcasts) assert.deepStrictEqual(b, { type: 'project-mods' });
+});
+
+// ----------------------------------------------------------- refreshing (#703)
+//
+// A mod that reaches a repo any way OTHER than the tools — an agent's own Write, a merge,
+// a git pull — is invisible to an open window until something pings it. The daemon does not
+// watch the disk, so these are the pings.
+
+/** A mod laid down the way an agent's Write tool, a merge or a git pull would leave it. */
+function handWrite(root, dirname, name) {
+  const dir = dirOf(root, dirname);
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, MANIFEST_FILE), JSON.stringify({ scope: PROJECT_SCOPE, name }));
+  fs.writeFileSync(path.join(dir, DEFAULT_ENTRY), `<p>${name}</p>`);
+  return dir;
+}
+
+test('refresh_project_mods finds a mod written straight to disk, and pings every window', async () => {
+  const sent = [];
+  const reloadClient = { readyState: 1, send: (d) => sent.push(JSON.parse(d)) };
+  ctx.reloadClients.add(reloadClient);
+  try {
+    scan();
+    const dir = handWrite(REPO_A, 'hand-made', 'Hand Made');
+    // The bug: a read inside the TTL serves the list from before the write, and nothing
+    // tells the browser to ask again once it has aged out.
+    const stale = payload(await tools.list_project_mods.handler({ scope: 'all' }, {}));
+    assert.deepStrictEqual(stale.mods, [], 'precondition: the cached scan predates the write');
+    broadcasts.length = 0;
+
+    const res = await tools.refresh_project_mods.handler({ session_id: 'sess-a' }, {});
+    assert.ok(!res.isError, res.content[0].text);
+    const out = payload(res);
+    assert.strictEqual(out.refreshed, true);
+    assert.strictEqual(out.enabled, true);
+    assert.strictEqual(out.project, REPO_A);
+    assert.deepStrictEqual(out.mods.map(m => m.name), ['Hand Made']);
+    assert.strictEqual(out.mods[0].path, path.join('.deepsteve', 'mods', 'hand-made'));
+    assert.strictEqual(out.note, undefined);
+    // Both channels: the session sockets, and the reload channel a window with no session
+    // sockets is sitting on.
+    assert.deepStrictEqual(broadcasts, [{ type: 'project-mods' }]);
+    assert.deepStrictEqual(sent, [{ type: 'project-mods' }]);
+
+    // A directory deleted on disk — checking out a branch without it — goes the same way.
+    fs.rmSync(dir, { recursive: true, force: true });
+    const gone = payload(await tools.refresh_project_mods.handler({ session_id: 'sess-a' }, {}));
+    assert.deepStrictEqual(gone.mods, []);
+    assert.strictEqual(broadcasts.length, 2, 'and pings again, so an open view or pinned tab is torn down');
+  } finally {
+    ctx.reloadClients.delete(reloadClient);
+    fs.rmSync(path.join(REPO_A, '.deepsteve'), { recursive: true, force: true });
+    scan();
+  }
+});
+
+test('refresh_project_mods says why a repo outside every project shows nothing', async () => {
+  handWrite(REPO_UNREGISTERED, 'ghost', 'Ghost');
+  try {
+    const out = payload(await tools.refresh_project_mods.handler({ project: REPO_UNREGISTERED }, {}));
+    assert.strictEqual(out.project, REPO_UNREGISTERED);
+    assert.deepStrictEqual(out.mods, []);
+    assert.match(out.note, /not part of any registered project/);
+  } finally {
+    fs.rmSync(path.join(REPO_UNREGISTERED, '.deepsteve'), { recursive: true, force: true });
+  }
+});
+
+test('refresh() — what a landed merge calls — rescans and pings', () => {
+  const app = makeApp();
+  registerRoutes(app, ctx);
+  scan();
+  handWrite(REPO_B, 'merged-in', 'Merged In');
+  try {
+    broadcasts.length = 0;
+    mod.refresh('merge feature -> main');
+    assert.deepStrictEqual(broadcasts, [{ type: 'project-mods' }]);
+    assert.deepStrictEqual(app.call('GET /api/project-mods').body.mods.map(m => m.name), ['Merged In'],
+      'the refetch that ping triggers sees the merged mod at once');
+  } finally {
+    fs.rmSync(path.join(REPO_B, '.deepsteve'), { recursive: true, force: true });
+    scan();
+  }
+});
+
+test('a repo added to a project is scanned on the very next read, not after the TTL', () => {
+  const app = makeApp();
+  registerRoutes(app, ctx);
+  const repoC = makeRepo('c');
+  handWrite(repoC, 'existing', 'Existing');
+  try {
+    scan();
+    assert.deepStrictEqual(app.call('GET /api/project-mods').body.mods, [], 'precondition: no project names it');
+
+    // The client refetches the moment the `contexts` broadcast lands — well inside SCAN_TTL_MS
+    // of the scan above, which is exactly the read a TTL-only cache would answer stale.
+    contexts.push({ id: 'ctx-3', name: 'Gamma', dirs: [repoC] });
+    assert.deepStrictEqual(app.call('GET /api/project-mods').body.mods.map(m => m.name), ['Existing']);
+
+    contexts.pop();
+    assert.deepStrictEqual(app.call('GET /api/project-mods').body.mods, [],
+      'and taking the folder out of the project drops them the same way');
+  } finally {
+    const i = contexts.findIndex(c => c.id === 'ctx-3');
+    if (i !== -1) contexts.splice(i, 1);
+    fs.rmSync(repoC, { recursive: true, force: true });
+    scan();
+  }
 });
 
 // ------------------------------------------------------------------- teardown

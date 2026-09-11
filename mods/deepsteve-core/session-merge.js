@@ -35,6 +35,9 @@
  */
 
 const { mergeWorktree } = require('./merge-worktree');
+// The same module instance mcp-server.js loaded, so refresh() reaches the live daemon's
+// context. With no context it does nothing, so this file's tests still need no daemon.
+const projectMods = require('../project-mods/tools.js');
 
 // A branch this daemon opened for a GitHub issue. Matched on the BRANCH rather than on
 // `entry.worktree` because the branch is what git reports and what skills/merge.md has
@@ -179,6 +182,11 @@ async function mergeSession({ git, gh, cwd, repoRoot, isWorktree, target, subjec
   }
 
   const result = mergeWorktree({ git, worktreeCwd: cwd, repoRoot, target });
+
+  // A merge can bring a project mod into the target checkout — one an agent wrote as plain
+  // files in its worktree — and nothing else would tell an open window to look (#703). Before
+  // the issue close, so the rail doesn't wait on a round trip to GitHub.
+  if (result.status === 'merged') projectMods.refresh(`merge ${result.branch} -> ${result.target}`);
 
   // Only a merge that actually landed may close an issue. Every other status left the
   // target untouched, so the work the issue describes is not in it.

@@ -4,6 +4,7 @@ const path = require('path');
 const { execFile, execFileSync } = require('child_process');
 const { mergeWorktree } = require('./merge-worktree');
 const { mergeSession } = require('./session-merge');
+const projectMods = require('../project-mods/tools.js');
 const { resolveBinary } = require('../../bin-path');
 const { stateDir, spawnCwdProblem } = require('../../paths');
 const projectScope = require('../../project-scope');
@@ -789,6 +790,9 @@ function init(context) {
         // product has to leave the same session state behind, or "merge blocked" would
         // mean "blocked, and it happened to be the panel that tried".
         recordMergeAttempt?.(callerId, result);
+        // And the same project-mods refresh mergeSession() does (#703): the primitive
+        // doesn't compose on that routine, so it needs its own copy of the ending.
+        if (result.status === 'merged') projectMods.refresh(`merge ${result.branch} -> ${result.target}`);
         // #627: a successful merge FINISHES this worktree session, so the daemon arms
         // the close here rather than trusting the agent to remember step 9 — it doesn't
         // (30/30 in #609, and again on Opus 5 after the prose had been strengthened as
