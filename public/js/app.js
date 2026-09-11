@@ -2864,6 +2864,14 @@ function createDisplayTab(id, name, opts = {}) {
 }
 
 /**
+ * The sandbox a project mod's page gets, as a tab and as a view — one constant so the two
+ * paths cannot drift. allow-pointer-lock is here for the same reason MOD_SANDBOX has it: a
+ * walkable 3D page needs requestPointerLock(), and without the flag it is refused silently,
+ * so the camera only turns while a mouse button is held.
+ */
+const PROJECT_MOD_SANDBOX = 'allow-scripts allow-forms allow-same-origin allow-pointer-lock';
+
+/**
  * Create a project-mod tab (#618) — an agent-authored page registered to one project.
  *
  * Shaped like a display tab (no PTY, no WebSocket, an iframe served same-origin) with
@@ -2897,7 +2905,7 @@ function createProjectModTab(mod, opts = {}) {
   // allow-same-origin is what lets the bridge be injected cross-frame (and lets the
   // page fetch /api/... with the auth cookie) — the same combination display tabs and
   // mod iframes already use. See the trust note in mods/project-mods/tools.js.
-  iframe.sandbox = 'allow-scripts allow-forms allow-same-origin';
+  iframe.sandbox = PROJECT_MOD_SANDBOX;
   iframe.allow = 'autoplay';
   container.appendChild(iframe);
   iframe.addEventListener('load', () => {
@@ -3006,7 +3014,7 @@ function showProjectModView(mod) {
     // descriptor should still describe the page honestly.
     name: projectModTabName(mod),
     src: `/api/project-mods/${mod.id}/page`,
-    sandbox: 'allow-scripts allow-forms allow-same-origin',
+    sandbox: PROJECT_MOD_SANDBOX,
     allow: 'autoplay',
     persist: false,
     dismissOnLeave: true,
