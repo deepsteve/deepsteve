@@ -228,6 +228,55 @@ test('merge_session commits the worktree before merging — merge_worktree does 
   fs.rmSync(composed.tmp, { recursive: true, force: true });
 });
 
+// --- A merge tells open windows about the project mods it brought in (#703) -------
+//
+// A mod an agent wrote as plain files in its worktree first exists in the main checkout
+// at merge time, and nothing but the merge is in a position to say so. merge_worktree
+// doesn't compose on mergeSession, so it carries its own copy of the refresh; both are
+// checked here against a real merge, and against the project-mods instance they share.
+
+test('merge_worktree and merge_session ping project mods when a mod lands, and not on a refusal', async () => {
+  const projectMods = require('../../mods/project-mods/tools.js');
+  const pings = [];
+  let registered = [];
+  const pmTools = projectMods.init({
+    settings: { projectModsEnabled: true }, log: () => {}, reloadClients: new Set(),
+    getContexts: () => registered.map((dir) => ({ id: 'p', name: 'P', dirs: [dir] })),
+    broadcast: (m) => pings.push(m),
+  });
+  // A plain read, so inside the scan TTL it answers from whatever the last scan found.
+  const listed = async () => JSON.parse((await pmTools.list_project_mods.handler({ scope: 'all' }, {})).content[0].text)
+    .mods.map((m) => m.name);
+
+  for (const tool of ['merge_worktree', 'merge_session']) {
+    const { tmp, repo, wt } = makeRepo();
+    const git = (args, cwd) => execFileSync('git', args, { cwd, stdio: ['ignore', 'pipe', 'pipe'] });
+    const modDir = path.join(wt, '.deepsteve', 'mods', 'dash');
+    fs.mkdirSync(modDir, { recursive: true });
+    fs.writeFileSync(path.join(modDir, 'mod.json'), JSON.stringify({ scope: 'project', name: 'Dash' }));
+    fs.writeFileSync(path.join(modDir, 'index.html'), '<p>dash</p>');
+    git(['add', '-A'], wt);
+    git(['commit', '-qm', 'a project mod, written as files'], wt);
+
+    registered = [repo];
+    projectMods.scan();
+    assert.deepStrictEqual(await listed(), [], `${tool}: precondition — the mod is only in the worktree`);
+
+    const { tools } = makeContext({ cwd: wt, repoRoot: repo });
+    pings.length = 0;
+    fs.writeFileSync(path.join(repo, 'wip.txt'), 'uncommitted\n'); // dirty target: refused
+    assert.strictEqual(parse(await tools[tool].handler({}, callerExtra('abc'))).status, 'target-dirty');
+    assert.deepStrictEqual(pings, [], `${tool}: a refused merge changed nothing, so it pings nothing`);
+
+    fs.rmSync(path.join(repo, 'wip.txt'));
+    assert.strictEqual(parse(await tools[tool].handler({}, callerExtra('abc'))).status, 'merged');
+    assert.deepStrictEqual(pings, [{ type: 'project-mods' }], `${tool}: a landed merge pings once`);
+    assert.deepStrictEqual(await listed(), ['Dash'], `${tool}: and the rescan it did already sees the mod`);
+
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 // --- Drift guards on skills/merge.md ---------------------------------------------
 // #609 shipped a pure prompt change with no test, and #627 is the report that it
 // silently stopped working. These are the cheap guards that were missing: they cannot

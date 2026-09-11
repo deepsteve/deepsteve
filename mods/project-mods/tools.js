@@ -36,7 +36,8 @@
  * browser persists it in a pinned tab's session entry) while two checkouts of the same repo
  * still get distinct ids. `updatedAt` is derived too — the newest mtime in the mod dir — so
  * a page edited directly with the Edit tool, or arriving via `git pull`, reloads an open tab
- * exactly like one written through update_project_mod.
+ * exactly like one written through update_project_mod, once the browser is told to refetch.
+ * The daemon does not watch the disk; see SCAN_TTL_MS for what does the telling (#703).
  *
  * Discovery is bounded by the projects you have REGISTERED: the repos named by
  * contexts.json, and nothing else. The daemon never walks the disk looking for mods. So a
@@ -100,8 +101,13 @@ const MAX_ICON_LEN = 8;   // one emoji can be several code points (ZWJ sequences
 const MAX_DIRNAME_LEN = 48;
 
 // How long a scan is reused before the next read re-walks the registered repos. Short
-// enough that a `git pull` shows up on the browser's next refresh, long enough that the
-// burst of reads one broadcast triggers costs a single walk.
+// enough that a read never serves a stale list for long, long enough that the burst of reads
+// one broadcast triggers costs a single walk.
+//
+// The TTL only bounds what a READ returns. An open window refetches only when it is pinged,
+// and the daemon does not watch the disk (#703), so a change made behind our back reaches the
+// browser through refresh(): the refresh_project_mods tool, a landed merge (session-merge.js,
+// merge_worktree), or the client refetching when a project's folders change.
 const SCAN_TTL_MS = 2000;
 
 const FEATURE_OFF_MSG =
@@ -121,6 +127,7 @@ const unregisteredProjectMsg = (proj) =>
 
 let mods = [];
 let lastScan = 0;
+let scannedRoots = '';   // the scanRoots() the cache was built from, as rootsKey()
 let ctx = null;
 
 function log(msg) {
@@ -218,10 +225,10 @@ function readMod(root, dirname) {
  * Does nothing before init() has handed us a context: with no way to ask which projects are
  * registered, an empty scan is not a fact, and caching it would hide the first real one.
  */
-function scan() {
+function scan(roots = scanRoots()) {
   if (!ctx) return;
   const out = [];
-  for (const root of scanRoots()) {
+  for (const root of roots) {
     let entries;
     try {
       entries = fs.readdirSync(projectModsDir(root), { withFileTypes: true });
@@ -236,11 +243,23 @@ function scan() {
   }
   mods = out;
   lastScan = Date.now();
+  scannedRoots = rootsKey(roots);
 }
 
-/** Scan if the cache has aged out; `force` after any write, so a caller never reads stale. */
+const rootsKey = (roots) => [...roots].join('\n');
+
+/**
+ * Scan if the cache has aged out, or if it was built from a different set of repos; `force`
+ * after any write, so a caller never reads stale.
+ *
+ * The root check is what makes adding a folder to a project show that repo's mods at once
+ * (#703). The client refetches the moment a `contexts` broadcast lands, and a cache built from
+ * the old roots can easily be under SCAN_TTL_MS old at that point.
+ */
 function ensureScanned(force = false) {
-  if (force || Date.now() - lastScan > SCAN_TTL_MS) scan();
+  if (force || Date.now() - lastScan > SCAN_TTL_MS) return scan();
+  const roots = scanRoots();
+  if (rootsKey(roots) !== scannedRoots) scan(roots);
 }
 
 // --- Validation --------------------------------------------------------------
@@ -544,6 +563,22 @@ function commit(msg) {
   broadcastMods();
 }
 
+/**
+ * The same ending, for a change that happened behind our back (#703): an agent's own
+ * Write into a mod directory, a git pull, a merge landing in the checkout. Exported because
+ * the merge paths in deepsteve-core call it, and they run with no agent turn to call the tool.
+ *
+ * Always pings, with no "did the list change" gate. A window that loaded through a TTL read can
+ * hold a list that was never broadcast, so "unchanged since the last ping" is not "unchanged
+ * for every window". A ping costs each window one cheap GET, and render() is idempotent.
+ *
+ * A no-op before init(), like scan() and broadcastMods(), which is what keeps session-merge.js's
+ * unit tests free of a daemon.
+ */
+function refresh(reason) {
+  commit(reason ? `rescanned after ${reason}` : null);
+}
+
 // --- MCP tools ---------------------------------------------------------------
 
 function init(context) {
@@ -646,7 +681,7 @@ function init(context) {
         'Update a project mod: replace its page (html or file_path) and/or its metadata (name, icon, surfaces, ' +
         'open_mode, enabled). Every field is optional — pass only what changes. An open tab or view showing this ' +
         'mod reloads. Writes to the mod\'s directory in the repo, so commit the result. For a small page change ' +
-        'you can equally well just edit the file with your own Edit tool — the daemon notices.',
+        'you can equally well edit the file with your own Edit tool, then call refresh_project_mods so open windows pick it up.',
       schema: {
         mod_id: z.string().describe('The project mod id returned by create_project_mod'),
         html: z.string().optional().describe('New page content. Mutually exclusive with file_path'),
@@ -756,6 +791,36 @@ function init(context) {
           });
         }
         return ok({ scope: 'project', project: proj, mods: mods.filter(m => m.project === proj).map(serializeForAgent) });
+      },
+    },
+
+    refresh_project_mods: {
+      description:
+        'Re-read every registered project\'s .deepsteve/mods/ from disk and tell every open window to redraw its ' +
+        'project mods (rail rows, tab-strip buttons, pinned tabs), with no page reload. The create/update/edit/delete ' +
+        'tools already do this. Call it after changing a project mod ANY OTHER WAY: writing mod.json or a page with ' +
+        'your own Edit/Write tool, or a git pull, checkout or rebase that adds, removes or renames a ' +
+        '.deepsteve/mods/<name>/ directory. (A merge through merge_worktree or issue_complete refreshes on its own.) ' +
+        'Returns the mods now found in your project. A mod missing from the list either has no valid mod.json (it ' +
+        'needs "scope": "project") or lives in a repo that is not part of a registered project.',
+      schema: {
+        session_id: z.string().optional().describe('Your DEEPSTEVE_SESSION_ID env var — scopes the returned list to your project'),
+        project: z.string().optional().describe('Absolute path to list a specific project instead of your own'),
+      },
+      handler: async ({ session_id, project }, extra) => {
+        refresh('refresh_project_mods');
+        const shellId = session_id || callerShellId(extra);
+        const proj = resolveProject(project, shellId);
+        const out = {
+          refreshed: true,
+          enabled: featureEnabled(),
+          project: proj || null,
+          mods: (proj ? mods.filter(m => m.project === proj) : mods).map(serializeForAgent),
+        };
+        // Why nothing may show up, in the order an agent would want to fix it.
+        if (!out.enabled) out.note = FEATURE_OFF_MSG;
+        else if (proj && !scanRoots().has(proj)) out.note = unregisteredProjectMsg(proj);
+        return ok(out);
       },
     },
 
@@ -886,6 +951,8 @@ module.exports = {
   // scan() is the force-rescan a test needs after writing into a repo behind our back —
   // every in-process write already forces one, but a direct fs write does not.
   scan, scanRoots, modId, slugify, resolveInMod, serialize, serializeForAgent,
+  // Not test-only: the merge paths in mods/deepsteve-core call it (#703).
+  refresh,
   SURFACES, DEFAULT_SURFACES, OPEN_MODES, DEFAULT_OPEN_MODE,
   PROJECT_SCOPE, MANIFEST_FILE, DEFAULT_ENTRY, DIRNAME_RE,
   FEATURE_OFF_MSG,

@@ -714,6 +714,23 @@ test('render() never calls back into the rail — only refresh() does', async ()
   assert.strictEqual(state.railRenders, afterInit + 1);
 });
 
+test('both contexts handlers in app.js refetch project mods (#703)', () => {
+  // A project's folders decide which repos the server scans, so adding one has to refetch
+  // the list or that repo's existing mods stay hidden until a reload. app.js has no headless
+  // harness, so this pins the wiring at the source: the session-socket branch and the reload
+  // channel's, which is the one a window with no session sockets hears.
+  const fs = require('fs');
+  const path = require('path');
+  const app = fs.readFileSync(path.join(__dirname, '..', '..', 'public', 'js', 'app.js'), 'utf8');
+  const starts = [...app.matchAll(/msg\.type === 'contexts'/g)].map(m => m.index);
+  assert.strictEqual(starts.length, 2, 'one contexts branch per channel — update this guard if that changes');
+  for (const start of starts) {
+    const next = app.indexOf('msg.type ===', start + 1);
+    const branch = app.slice(start, next === -1 ? undefined : next);
+    assert.match(branch, /ProjectMods\.refresh\(\)/, `the contexts branch at offset ${start} refetches project mods`);
+  }
+});
+
 // -------------------------------------------------------------- compact view (#646)
 // The layout branch and the per-browser preference behind it. `storeMap` is shared
 // across imports (it IS the fake localStorage), so each test seeds the key explicitly

@@ -2159,6 +2159,9 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
         // A rename/archive/reorder changes the run-history grid's row hierarchy,
         // not just its cells — so it needs this branch too (#633).
         refreshScheduledHistory();
+        // Adding a folder to a project changes which repos the server scans for project
+        // mods, so that repo's existing mods only appear once the list is refetched (#703).
+        ProjectMods.refresh();
       } else if (msg.type === 'project-mods') {
         // Payload-less ping (#618) — refetch and re-derive all three surfaces.
         ProjectMods.refresh();
@@ -5328,6 +5331,7 @@ async function init() {
       if (msg.type === 'contexts') {
         applyServerContexts(msg.contexts);
         ModManager.notifyContextsChanged(msg.contexts);
+        ProjectMods.refresh();   // a project's folders decide which repos' mods exist (#703)
       }
       // The reload channel is the one that reaches a window with no session sockets,
       // which is exactly when an unattended agent registers a project mod (#618).
