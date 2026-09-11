@@ -309,7 +309,7 @@ test('averages divide by periods with hours logged, not by period count', () => 
   const avg = week.stats.find((s) => s.label === 'Daily average');
   assert.strictEqual(avg.value, 3, '(2 + 4) / 2 days with hours, not / 7');
   const off = week.stats.find((s) => s.label === 'Days off');
-  assert.strictEqual(off.value, 5);
+  assert.strictEqual(off.value, 1, 'Wednesday has begun with nothing logged; Thu–Sun have not happened');
   assert.strictEqual(off.kind, 'count', 'counts render as integers, hours to one decimal');
 });
 
@@ -318,8 +318,33 @@ test('an empty period averages to zero rather than dividing by nothing', () => {
   const [avg, longest, off] = week.stats;
   assert.strictEqual(avg.value, 0);
   assert.strictEqual(longest.value, 0);
-  assert.strictEqual(off.value, 7);
+  assert.strictEqual(off.value, 3, 'Mon, Tue and the Wednesday in progress — not the four days ahead');
   assert.strictEqual(week.total, 0);
+});
+
+test('a day that has not happened yet is not a day off', () => {
+  const now = new Date(2026, 7, 24, 15, 0, 0).getTime(); // a Monday afternoon
+  const worked = activeRun(new Date(2026, 7, 24, 11, 0, 0).getTime(), 24);
+  const off = (samples) => buildViews(samples, now).week.stats.find((s) => s.label === 'Days off').value;
+  assert.strictEqual(off(worked), 0, 'Tue–Sun are still ahead');
+  assert.strictEqual(off([]), 1, 'but a Monday that has begun with nothing in it counts');
+});
+
+test('a week that has not started yet is not a quiet week', () => {
+  // Thu 10 Sep 2026. September starts on a Tuesday: W1 1–6, W2 7–13, then W3–W5 ahead.
+  const now = new Date(2026, 8, 10, 12, 0, 0).getTime();
+  const quiet = (samples) => buildViews(samples, now).month.stats.find((s) => s.label === 'Quiet weeks').value;
+  const w2 = activeRun(new Date(2026, 8, 8, 11, 0, 0).getTime(), 12);
+  assert.strictEqual(buildViews(w2, now).month.labels.length, 5);
+  assert.strictEqual(quiet(w2), 1, 'W1 was quiet; W3, W4 and W5 have not happened');
+  assert.strictEqual(quiet([...w2, ...activeRun(new Date(2026, 8, 2, 11, 0, 0).getTime(), 12)]), 0);
+});
+
+test('a block that has not started yet is not an idle block', () => {
+  const now = new Date(2026, 7, 26, 13, 0, 0).getTime(); // inside the 12p block
+  const samples = activeRun(new Date(2026, 7, 26, 9, 0, 0).getTime(), 12); // 8a block only
+  const idle = buildViews(samples, now).day.stats.find((s) => s.label === 'Idle blocks').value;
+  assert.strictEqual(idle, 2, '10a and the 12p in progress; 2p, 4p and 6p are still ahead');
 });
 
 test('the stat LABELS change with the view, not just the values', () => {
@@ -371,6 +396,7 @@ test('the seed borrows the real range strings, so it reads as this week', () => 
     assert.deepStrictEqual(seed[name].stats.map((s) => s.label), STAT_LABELS[name]);
   }
   assert.strictEqual(seed.week.total, 50.2, 'the headline is the sum of the seeded bars');
+  assert.strictEqual(seed.week.stats[2].value, 1, 'example data is a whole week, so its Sunday zero is a day off');
 });
 
 // ------------------------------------------------------------------ the framing

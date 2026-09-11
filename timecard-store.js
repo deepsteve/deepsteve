@@ -252,20 +252,27 @@ function hoursIn(samples, from, to) {
 /** A bucket can never hold more hours than it is long. */
 const clampHours = (h, span) => Math.min(h, span);
 
-function statsFor(name, values) {
+function statsFor(name, values, started) {
   const [avgLabel, maxLabel, zeroLabel] = STAT_LABELS[name];
   // Divide by periods with hours logged, not by period count (#666): a week with two
   // days off is not a week of five-sevenths days.
   const logged = values.filter((v) => v > 0);
   const avg = logged.length ? logged.reduce((a, b) => a + b, 0) / logged.length : 0;
+  // Only a period that has begun can be a day off. On a Monday the six days ahead are
+  // zeros because they have not happened, not because nobody worked them.
+  const off = values.filter((v, i) => started[i] && !(v > 0)).length;
   return [
     { label: avgLabel, value: round1(avg), kind: 'hours' },
     { label: maxLabel, value: values.length ? round1(Math.max(...values)) : 0, kind: 'hours' },
-    { label: zeroLabel, value: values.length - logged.length, kind: 'count' },
+    { label: zeroLabel, value: off, kind: 'count' },
   ];
 }
 
-function buildView(name, range, labels, rawValues) {
+/**
+ * `started[i]` says whether bucket i has begun by now. It defaults to every bucket, which
+ * is what the seed wants: example data describes a whole period.
+ */
+function buildView(name, range, labels, rawValues, started = rawValues.map(() => true)) {
   const values = rawValues.map(round1);
   // The headline is the sum of the bars actually on screen, so the number and the chart
   // can never disagree.
@@ -277,7 +284,7 @@ function buildView(name, range, labels, rawValues) {
     values,
     max: Math.max(VIEW_MAX[name], Math.ceil(dataMax)),
     total,
-    stats: statsFor(name, values),
+    stats: statsFor(name, values, started),
   };
 }
 
@@ -285,27 +292,31 @@ function buildDay(samples, now) {
   const start = startOfDay(now);
   const labels = [];
   const values = [];
+  const started = [];
   for (let h = DAY_START_HOUR; h < DAY_END_HOUR; h += DAY_BLOCK_HOURS) {
     const from = new Date(start); from.setHours(h);
     const to = new Date(start); to.setHours(h + DAY_BLOCK_HOURS);
     labels.push(hourLabel(h));
     values.push(clampHours(hoursIn(samples, from.getTime(), to.getTime()), DAY_BLOCK_HOURS));
+    started.push(from.getTime() <= now);
   }
-  return buildView('day', dayRange(start), labels, values);
+  return buildView('day', dayRange(start), labels, values, started);
 }
 
 function buildWeek(samples, now) {
   const start = startOfWeek(now);
   const labels = [];
   const values = [];
+  const started = [];
   for (let i = 0; i < 7; i++) {
     const from = new Date(start); from.setDate(from.getDate() + i);
     const to = new Date(start); to.setDate(to.getDate() + i + 1);
     labels.push(WEEK_LABELS[i]);
     values.push(clampHours(hoursIn(samples, from.getTime(), to.getTime()), 24));
+    started.push(from.getTime() <= now);
   }
   const end = new Date(start); end.setDate(end.getDate() + 6);
-  return buildView('week', weekRange(start, end), labels, values);
+  return buildView('week', weekRange(start, end), labels, values, started);
 }
 
 function buildMonth(samples, now) {
@@ -313,6 +324,7 @@ function buildMonth(samples, now) {
   const next = new Date(first); next.setMonth(next.getMonth() + 1);
   const labels = [];
   const values = [];
+  const started = [];
   let cursor = startOfWeek(first);
   let n = 0;
   while (cursor.getTime() < next.getTime()) {
@@ -323,9 +335,10 @@ function buildMonth(samples, now) {
     const to = Math.min(weekEnd.getTime(), next.getTime());
     labels.push(`W${++n}`);
     values.push(clampHours(hoursIn(samples, from, to), 24 * 7));
+    started.push(from <= now);
     cursor = weekEnd;
   }
-  return buildView('month', monthRange(first), labels, values);
+  return buildView('month', monthRange(first), labels, values, started);
 }
 
 /** All three datasets at once, so the card can switch views with no round trip. */

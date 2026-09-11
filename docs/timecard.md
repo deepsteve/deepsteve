@@ -95,6 +95,9 @@ Details that are deliberate rather than incidental:
 
 - **Averages divide by periods with hours logged**, not by period count. A week with two
   days off is not a week of five-sevenths days.
+- **Days off, quiet weeks and idle blocks count only periods that have begun.** The
+  current period counts once it has started with nothing logged, so every begun period is
+  either logged or off, and one still ahead is neither.
 - **A sample is credited to the bucket its minutes started in**, not the one its
   timestamp lands in — otherwise the last few minutes of every bucket spill into the
   next.
