@@ -2568,6 +2568,20 @@ function dismissLoadingBanner(sessionId) {
 /**
  * Initialize a terminal after WebSocket connection is established
  */
+/**
+ * Is there nothing to look at right now?
+ *
+ * The one escape hatch in #600's "a background open must not steal focus" rule: with no tab
+ * active, an inactive lone tab leaves a blank pane behind a hidden empty state, so the open
+ * takes focus after all. The fullscreen view slot is the other thing that can be on screen
+ * (#628) — a project mod running as a view holds no tab and never sets `activeId`, so a
+ * window showing one and nothing else reads as empty here. It isn't: a page the user is
+ * looking at, that opened a session for itself in the background, would be replaced by the
+ * terminal it just started. `activeId` alone answered "is a tab selected"; both together
+ * answer the question the rule is actually asking.
+ */
+const nothingOnScreen = () => !activeId && !ModManager.isModViewVisible();
+
 function initTerminal(id, ws, cwd, initialName, { hasScrollback = false, pendingData = [], restoreActive = false, background = false, cols, rows } = {}) {
   const container = document.createElement('div');
   container.className = 'terminal-container';
@@ -2666,10 +2680,10 @@ function initTerminal(id, ws, cwd, initialName, { hasScrollback = false, pending
   // A background open (an unattended scheduled run, #600) is the exception: the
   // tab lands inactive so the user isn't yanked out of what they were doing —
   // focusTab() would also drag the context rail to the new tab's context. It
-  // still takes focus when nothing is active yet, since an inactive lone tab
+  // still takes focus when nothing is on screen yet, since an inactive lone tab
   // would leave a blank pane behind a hidden empty state. The unseen badge is
   // what makes it discoverable; switchTo() clears it when the user visits.
-  if (!restoreActive && (!background || !activeId)) {
+  if (!restoreActive && (!background || nothingOnScreen())) {
     focusTab(id); // switch to the new tab + jump to its context / All (#547/#559)
   } else if (background) {
     const sess = sessions.get(id);
@@ -2951,9 +2965,9 @@ function createProjectModTab(mod, opts = {}) {
   updateEmptyState();
 
   // A pinned mod opens unattended, so it must not steal focus (#600's rule verbatim) —
-  // except when nothing is active yet, where an inactive lone tab would leave a blank
+  // except when nothing is on screen yet, where an inactive lone tab would leave a blank
   // pane behind a hidden empty state.
-  if (!opts.restoreActive && (!background || !activeId)) {
+  if (!opts.restoreActive && (!background || nothingOnScreen())) {
     focusTab(id);
   }
 

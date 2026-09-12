@@ -731,6 +731,24 @@ test('both contexts handlers in app.js refetch project mods (#703)', () => {
   }
 });
 
+test('a background open never steals the fullscreen view (#628)', () => {
+  // A view holds no tab, so it never sets `activeId` — and in a window with no tabs at all
+  // `activeId` is null while the view is the only thing on screen. Both background-open focus
+  // decisions read that as "nothing to look at" and called focusTab() anyway, so a session a
+  // view opened for ITSELF in the background replaced the page the user was looking at (the
+  // Yarn Story desk opens its build station that way). app.js has no headless harness, so this
+  // pins the wiring at the source: one helper, and no decision reading activeId on its own.
+  const fs = require('fs');
+  const path = require('path');
+  const app = fs.readFileSync(path.join(__dirname, '..', '..', 'public', 'js', 'app.js'), 'utf8');
+  assert.match(app, /const nothingOnScreen = \(\) => !activeId && !ModManager\.isModViewVisible\(\);/,
+    'the escape hatch counts the view slot, not just the tab strip');
+  const decisions = [...app.matchAll(/!(?:opts\.)?restoreActive && \([^)]*\)/g)].map(m => m[0]);
+  assert.strictEqual(decisions.length, 2, 'one per background-capable open — update this guard if that changes');
+  for (const d of decisions) assert.match(d, /nothingOnScreen\(\)/, d);
+  assert.ok(!/\|\| !activeId\b/.test(app), 'no focus decision may read activeId alone');
+});
+
 // -------------------------------------------------------------- compact view (#646)
 // The layout branch and the per-browser preference behind it. `storeMap` is shared
 // across imports (it IS the fake localStorage), so each test seeds the key explicitly

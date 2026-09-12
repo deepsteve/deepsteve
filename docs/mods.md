@@ -1006,6 +1006,8 @@ So `mod.json` legitimately holds `openMode: "view"` alongside a `"tab"` surface,
 
 There is exactly **one** full-content view slot in the window, shared with fullscreen DeepSteve Mods: showing a second view replaces the first.
 
+A view is **on screen** without being a tab, which every "is anything active?" test has to allow for. The one that bit: a background open (#600) focuses its new tab anyway when nothing is active, so that an inactive lone tab never leaves a blank pane — and a window whose only occupant was a view has no `activeId`, so a session a view started for itself replaced the page the user was looking at. `nothingOnScreen()` in app.js is the shared answer; see [docs/scheduled-tasks.md](scheduled-tasks.md).
+
 ### Scoping
 
 A mod belongs to a **git repo root**, resolved the same way a scheduled task's project is (`findGitRoot`, or the calling session's `repoRoot`). It shows when you are *looking at* that project:
