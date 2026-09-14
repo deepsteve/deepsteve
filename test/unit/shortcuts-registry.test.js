@@ -89,8 +89,9 @@ async function loadAll() {
   const contextViews = await import('../../public/js/context-views.js');
   const cmdTabSwitch = await import('../../public/js/cmd-tab-switch.js');
   const shortcutsHelp = await import('../../public/js/shortcuts-help.js');
+  const sessionHistory = await import('../../public/js/session-history.js');
   await import('../../public/js/terminal.js');
-  mods = { registry, commandPalette, overviewMode, terminalSearch, contextViews, cmdTabSwitch, shortcutsHelp };
+  mods = { registry, commandPalette, overviewMode, terminalSearch, contextViews, cmdTabSwitch, shortcutsHelp, sessionHistory };
   return mods;
 }
 
@@ -113,6 +114,7 @@ test('every expected shortcut is registered, and nothing extra', async () => {
     'context-cycle',
     'context-panel',
     'overview-mode',
+    'session-history',
     'shortcuts-help',
     'terminal-search',
     'terminal-shift-enter',
@@ -171,6 +173,7 @@ test('the default shortcuts render as expected', async () => {
   assert.deepStrictEqual(find(all, 'overview-mode').keys, ['⌘O']);
   assert.deepStrictEqual(find(all, 'terminal-search').keys, ['⌘F']);
   assert.deepStrictEqual(find(all, 'context-panel').keys, ['⌘P']);
+  assert.deepStrictEqual(find(all, 'session-history').keys, ['⌘H']);
   assert.deepStrictEqual(find(all, 'terminal-shift-enter').keys, ['⇧↩']);
   assert.deepStrictEqual(find(all, 'terminal-word-motion').keys, ['⌥←', '⌥→']);
 });
@@ -254,4 +257,53 @@ test('⌘F opens terminal search but Ctrl+F is left alone for the PTY', async ()
 
   fire(ev({ key: 'f', metaKey: true }));
   assert.strictEqual(opened, 1, '⌘F must open search');
+});
+
+// ------------------------------------------------ ⌘H claims the key everywhere (#704)
+//
+// macOS gives ⌘H to the browser's Hide item, and Firefox skips that item only when the
+// page called preventDefault. So the claim cannot depend on there being a History to
+// open: a press on a terminal or display tab must be a no-op, not the browser vanishing.
+
+// Fire one keydown at `handlers`, reporting whether anything called preventDefault.
+function prevented(handlers, props) {
+  let hit = false;
+  const e = ev({ ...props, preventDefault: () => { hit = true; } });
+  handlers.forEach(h => h(e));
+  return hit;
+}
+
+test('⌘H is claimed on a tab with no History, and Ctrl+H is left for the PTY', async () => {
+  const { sessionHistory } = await loadAll();
+  keydownHandlers.length = 0;
+  let asked = 0;
+  sessionHistory.init({
+    getActiveSessionId: () => 'display-1',
+    getSession: () => { asked++; return { type: 'display-tab', container: null }; },
+  });
+  assert.ok(keydownHandlers.length > 0, 'init must install a keydown listener');
+
+  assert.strictEqual(prevented(keydownHandlers, { key: 'h', metaKey: true }), true,
+    '⌘H must preventDefault even when there is nothing to open');
+  assert.ok(asked > 0, 'the press still looked at the active tab');
+  assert.strictEqual(sessionHistory.isOpen('display-1'), false, 'a non-agent tab gets no pane');
+
+  assert.strictEqual(prevented(keydownHandlers, { key: 'h', ctrlKey: true }), false,
+    'Ctrl+H is backspace in a terminal and must reach the PTY');
+  assert.strictEqual(prevented(keydownHandlers, { key: 'h', metaKey: true, shiftKey: true }), false,
+    'strict modifiers: ⌘⇧H is not ⌘H');
+});
+
+test('⌘H is claimed inside an iframe realm too, and nothing else is', async () => {
+  // A keystroke in a mod or display-tab iframe never reaches the top document's listener.
+  const { sessionHistory } = await loadAll();
+  const added = [];
+  sessionHistory.claimHistoryKey({ addEventListener: (type, fn, capture) => added.push({ type, fn, capture }) });
+  assert.deepStrictEqual(added.map(a => [a.type, a.capture]), [['keydown', true]]);
+
+  const handlers = added.map(a => a.fn);
+  assert.strictEqual(prevented(handlers, { key: 'h', metaKey: true }), true);
+  assert.strictEqual(prevented(handlers, { key: 'h' }), false, "a bare h is the app's own letter");
+  assert.strictEqual(prevented(handlers, { key: 'k', metaKey: true }), false, 'only ⌘H is claimed');
+  assert.doesNotThrow(() => sessionHistory.claimHistoryKey(null), 'a gone frame must not throw');
 });

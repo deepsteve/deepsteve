@@ -1575,6 +1575,14 @@ kbd {
 .sess-hist-caret { flex: 0 0 auto; opacity: 0.6; }
 .sess-hist-detail { margin: 2px 0 6px 20px; padding: 6px 8px; max-height: 320px; overflow: auto; background: var(--ds-bg-tertiary); border: 1px solid var(--ds-border); border-radius: 4px; font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', Menlo, monospace; font-size: 11px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .sess-hist-oneline { display: flex; align-items: baseline; gap: 8px; font-size: 12px; color: var(--ds-text-secondary); }
+/* #704: an exchange is a prompt, then its folded work lines and final answers in file order. */
+.sess-hist-exchange { padding: 2px 0 6px; }
+.sess-hist-exchange + .sess-hist-exchange { border-top: 1px solid var(--ds-border); }
+.sess-hist-work { padding: 0 14px 0 20px; }
+.sess-hist-work-body { margin: 2px 0 4px 6px; padding-left: 8px; border-left: 1px solid var(--ds-border); }
+.sess-hist-work-body .sess-hist-group { padding: 4px 0 2px; }
+.sess-hist-group.is-answer .sess-hist-text { color: var(--ds-text-bright); }
+.sess-hist-marker { padding: 2px 14px 2px 20px; font-size: 12px; font-style: italic; color: var(--ds-text-secondary); }
 
 /* Hash Commands (#) autocomplete */
 .hash-command-popup { position: absolute; bottom: 8px; left: 16px; right: 16px; max-width: 420px; background: var(--ds-bg-secondary); border: 1px solid var(--ds-border); border-radius: 6px; box-shadow: 0 4px 20px var(--ds-shadow); z-index: 200; display: flex; flex-direction: column; font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', Menlo, monospace; overflow: hidden; }

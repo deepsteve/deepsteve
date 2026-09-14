@@ -116,6 +116,10 @@ function imageOf(block) {
 function metaReasonOf(record, text) {
   if (record.isMeta) return 'isMeta';
   if (record.isSidechain) return 'sidechain';
+  // A compaction summary is a user text record with isMeta unset that nobody
+  // typed (8 of 8 sampled). Unflagged, History reads it as a prompt and hangs the
+  // post-compaction answers off it instead of the prompt they answer (#704).
+  if (record.isCompactSummary) return 'compact-summary';
   // Only user records carry machinery text; an assistant never writes these tags.
   if (record.type === 'user' && text && META_RE.test(text)) return 'machinery';
   return null;
@@ -185,6 +189,11 @@ function normalizeRecord(record, loc) {
     // its prose and its tool calls arrive as separate records sharing this id.
     groupId: msg.id || null,
     model: msg.model || null,
+    // What separates an answer from narration (#704): assistant text ending a turn
+    // carries `end_turn`, text written just before a tool call carries `tool_use`.
+    // Carried, never filtered on -- grouping by it is the client's job, for the same
+    // cursor-reproducibility reason the drop set above is unconditional.
+    stopReason: msg.stop_reason || null,
   };
 
   const out = [];

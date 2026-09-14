@@ -150,16 +150,136 @@ test('a tool line summarises the argument worth seeing at a glance', async () =>
   assert.strictEqual(toolSummary(entry({ input: JSON.stringify({}) })), '');
 });
 
-test('arrow-stepping walks conversation turns, not tool plumbing', async () => {
+test('arrow-stepping walks prompts and answers, not the work between them', async () => {
   // "Step through turns, not pixels" is the whole reason the pane owns its own
-  // viewport. Stepping onto a thinking fold or a hidden machinery record would
-  // make the arrows feel broken.
-  const { isTurnEntry } = await load();
-  assert.strictEqual(isTurnEntry(entry({ kind: 'text' })), true);
-  assert.strictEqual(isTurnEntry(entry({ kind: 'thinking' })), false);
-  assert.strictEqual(isTurnEntry(entry({ kind: 'tool_use' })), false);
-  assert.strictEqual(isTurnEntry(entry({ kind: 'text', meta: true, metaReason: 'machinery' })), false);
-  assert.strictEqual(isTurnEntry(null), false);
+  // viewport. Since #704 a step is a prompt or a final answer: landing on narration
+  // folded inside a work line would move the selection somewhere you cannot see.
+  const { isStepEntry } = await load();
+  assert.strictEqual(isStepEntry(entry({ role: 'user', kind: 'text' })), true, 'a prompt');
+  assert.strictEqual(isStepEntry(entry({ kind: 'text', stopReason: 'end_turn' })), true, 'an answer');
+  assert.strictEqual(isStepEntry(entry({ kind: 'text', stopReason: 'tool_use' })), false, 'narration before a tool call');
+  assert.strictEqual(isStepEntry(entry({ kind: 'text', stopReason: null })), false, 'no stop reason is not an answer');
+  assert.strictEqual(isStepEntry(entry({ kind: 'thinking', stopReason: 'end_turn' })), false);
+  assert.strictEqual(isStepEntry(entry({ kind: 'tool_use' })), false);
+  assert.strictEqual(isStepEntry(entry({ role: 'user', kind: 'text', meta: true, metaReason: 'machinery' })), false);
+  assert.strictEqual(isStepEntry(null), false);
+});
+
+// ---------------------------------------------------------- prompt → answer
+//
+// #704. Each exchange is a prompt, then its work and its final answers in file
+// order. The failure is quiet: an answer shown under the wrong prompt, or not at
+// all, still looks like a transcript.
+
+let at = 0;
+const ts = (sec) => new Date(Date.UTC(2026, 8, 13, 12, 0, sec)).toISOString();
+const prompt = (text, over = {}) => entry({ role: 'user', kind: 'text', text, offset: ++at, uuid: `p${at}`, ...over });
+const answer = (text, over = {}) => entry({ kind: 'text', text, stopReason: 'end_turn', offset: ++at, uuid: `a${at}`, ...over });
+const narration = (text, over = {}) => entry({ kind: 'text', text, stopReason: 'tool_use', offset: ++at, uuid: `n${at}`, ...over });
+const call = (id, over = {}) => toolUse(id, { offset: ++at, uuid: `c${at}`, ...over });
+const output = (id, over = {}) => toolResult(id, { offset: ++at, uuid: `r${at}`, ...over });
+
+// [prompt text | null, 'work:<n entries>' | 'answer:<text>', ...] per exchange.
+const shape = (exchanges) => exchanges.map((x) => [
+  x.prompt ? x.prompt.text : null,
+  ...x.items.map((i) => (i.type === 'answer' ? `answer:${i.entry.text}` : `work:${i.entries.length}`)),
+]);
+
+test('a prompt with no final answer keeps its work and says it was not answered', async () => {
+  // 57 of 166 measured prompts had no end_turn answer: interrupted, or still running.
+  const { groupByPrompt } = await load();
+  const got = groupByPrompt([prompt('run the suite'), call('t1'), output('t1'), narration('still going')]);
+  assert.deepStrictEqual(shape(got), [['run the suite', 'work:3']]);
+  assert.strictEqual(got[0].answered, false);
+});
+
+test('a prompt with one answer is prompt, work, answer', async () => {
+  const { groupByPrompt } = await load();
+  const got = groupByPrompt([
+    prompt('why is it red?'), entry({ kind: 'thinking', offset: ++at }), call('t1'), output('t1'), answer('the fixture raced'),
+  ]);
+  assert.deepStrictEqual(shape(got), [['why is it red?', 'work:3', 'answer:the fixture raced']]);
+  assert.strictEqual(got[0].answered, true);
+});
+
+test('several answers keep the work between them where it happened', async () => {
+  // Auto mode, or a background task waking the agent. 32 of ~35 measured prompts with
+  // several answers did work BETWEEN them, so hoisting it all above the first answer
+  // would misplace it. The trailing turn_duration notice is work too, not a new exchange.
+  const { groupByPrompt } = await load();
+  const got = groupByPrompt([
+    prompt('fix it'),
+    call('t1'), output('t1'),
+    answer('first pass done'),
+    prompt('<task-notification>build finished</task-notification>', { meta: true, metaReason: 'machinery' }),
+    call('t2'), output('t2'),
+    answer('all green'),
+    entry({ role: 'system', kind: 'system', meta: true, metaReason: 'system', offset: ++at }),
+  ]);
+  assert.deepStrictEqual(shape(got), [['fix it', 'work:2', 'answer:first pass done', 'work:3', 'answer:all green', 'work:1']]);
+});
+
+test('an answer with no work before it has no empty work line', async () => {
+  const { groupByPrompt } = await load();
+  assert.deepStrictEqual(shape(groupByPrompt([prompt('hi'), answer('hello')])), [['hi', 'answer:hello']]);
+});
+
+test('a prompt on an older page does not orphan its answer', async () => {
+  // The newest page starts mid-exchange. Its answer must still show, under an exchange
+  // with no prompt; loading the older page and rebuilding re-attaches it.
+  const { groupByPrompt } = await load();
+  const older = [prompt('the original ask'), narration('looking')];
+  const newest = [call('t1'), output('t1'), answer('the late answer'), prompt('next'), answer('ok')];
+
+  assert.deepStrictEqual(shape(groupByPrompt(newest)), [
+    [null, 'work:2', 'answer:the late answer'],
+    ['next', 'answer:ok'],
+  ]);
+  assert.deepStrictEqual(shape(groupByPrompt(older.concat(newest))), [
+    ['the original ask', 'work:3', 'answer:the late answer'],
+    ['next', 'answer:ok'],
+  ]);
+});
+
+test('machinery, compaction summaries and tool results never open an exchange', async () => {
+  const { groupByPrompt } = await load();
+  const got = groupByPrompt([
+    prompt('do the thing'),
+    prompt('<command-name>/compact</command-name>', { meta: true, metaReason: 'machinery' }),
+    prompt('This session is being continued from a previous conversation.', { meta: true, metaReason: 'compact-summary' }),
+    call('t1'), output('t1'),
+    answer('done'),
+  ]);
+  assert.deepStrictEqual(shape(got), [['do the thing', 'work:4', 'answer:done']]);
+});
+
+test('a work line counts what a reader sees and how long it took', async () => {
+  const { groupByPrompt, formatWorkSummary } = await load();
+  const got = groupByPrompt([
+    prompt('go', { ts: ts(0) }),
+    call('t1', { ts: ts(5) }), output('t1', { ts: ts(6) }),
+    narration('now the other file', { ts: ts(30) }),
+    call('t2', { ts: ts(40) }), output('t2', { ts: ts(41) }),
+    // A subagent's own tool call is meta: hidden by default, so not counted.
+    call('side', { ts: ts(50), meta: true, metaReason: 'sidechain' }),
+    answer('done', { ts: new Date(Date.UTC(2026, 8, 13, 12, 4, 0)).toISOString() }),
+  ]);
+  const work = got[0].items[0];
+  assert.strictEqual(work.stats.toolCalls, 2);
+  assert.strictEqual(work.stats.notes, 1);
+  // From the prompt to the answer, not from the first to the last tool call.
+  assert.strictEqual(work.stats.durationMs, 4 * 60 * 1000);
+  assert.strictEqual(formatWorkSummary(work.stats), '2 tool calls · 1 note · 4m');
+});
+
+test('the work summary reads the way a person would say it', async () => {
+  const { formatWorkSummary } = await load();
+  assert.strictEqual(formatWorkSummary({ toolCalls: 12, notes: 3, durationMs: 4 * 60 * 1000 + 10000 }), '12 tool calls · 3 notes · 4m');
+  assert.strictEqual(formatWorkSummary({ toolCalls: 1 }), '1 tool call');
+  assert.strictEqual(formatWorkSummary({ toolCalls: 1, durationMs: 72 * 60 * 1000 }), '1 tool call · 1h 12m');
+  assert.strictEqual(formatWorkSummary({ thinking: 2, durationMs: 42000 }), 'thinking · 42s');
+  assert.strictEqual(formatWorkSummary({ durationMs: 400 }), 'notices', 'meta-only work, shown with ⚙ on');
+  assert.strictEqual(formatWorkSummary(null), 'notices');
 });
 
 test('byte sizes read the way a person would say them', async () => {

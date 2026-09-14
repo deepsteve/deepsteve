@@ -182,6 +182,35 @@ test('system records are flagged by TYPE, not by isMeta', () => {
   assert.strictEqual(entries[0].subtype, 'turn_duration');
 });
 
+test('entries carry stop_reason, which is what tells an answer from narration (#704)', () => {
+  // end_turn is a final answer; tool_use is text written just before a tool call.
+  // Carried as a field and never used to drop anything -- grouping is the pane's job,
+  // for the same cursor-reproducibility reason the drop set is unconditional.
+  const said = (text, stop) => ({
+    type: 'assistant', uuid: 'a',
+    message: { id: 'm', role: 'assistant', content: [{ type: 'text', text }], stop_reason: stop },
+  });
+  const { entries } = run(
+    userRec('what broke?'),
+    said('checking the log', 'tool_use'),
+    said('the fixture raced the server', 'end_turn'),
+    said('no reason recorded', undefined),
+  );
+  assert.deepStrictEqual(entries.map((e) => e.stopReason), [null, 'tool_use', 'end_turn', null]);
+});
+
+test('a compaction summary is kept but flagged, so it never reads as a prompt (#704)', () => {
+  // Claude Code writes it as a user text record with isMeta unset. Unflagged, History
+  // would open a new exchange at it and hang every post-compaction answer off text
+  // nobody typed.
+  const { entries } = run(userRec('This session is being continued from a previous conversation.', {
+    isCompactSummary: true, isVisibleInTranscriptOnly: true,
+  }));
+  assert.strictEqual(entries.length, 1);
+  assert.strictEqual(entries[0].meta, true);
+  assert.strictEqual(entries[0].metaReason, 'compact-summary');
+});
+
 test('toolUseResult is dropped — it duplicates the tool_result block', () => {
   // 147 of 223 sampled toolUseResult records had stdout byte-identical to the
   // block's content. Shipping both roughly doubles tool payload for nothing.

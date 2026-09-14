@@ -2829,7 +2829,12 @@ function createDisplayTab(id, name, opts = {}) {
   // window got at startup, or a 401 here is invisible and unhealed (#675). Display tabs get no
   // bridge injection, so unlike mod and project-mod iframes this is their only hookup. Not
   // `{ once: true }` — an updated display tab reloads by reassigning src.
-  iframe.addEventListener('load', () => wrapRealmFetch(iframe.contentWindow, `display-tab:${id}`));
+  // ⌘H is claimed on the same hookup: a keystroke in here never reaches the top document, and
+  // unclaimed it hides the browser (#704).
+  iframe.addEventListener('load', () => {
+    wrapRealmFetch(iframe.contentWindow, `display-tab:${id}`);
+    SessionHistory.claimHistoryKey(iframe.contentWindow);
+  });
 
   const tabName = name || 'Display';
   // cwd = the spawning session's dir, so Context Views scopes this tab to the
@@ -5497,10 +5502,8 @@ async function init() {
     restoreSessions: () => reopenSessionRestore(),
     // Only meaningful on an agent tab; on any other the glyph is absent too, so
     // the palette entry quietly does nothing rather than opening an empty pane.
-    toggleHistory: () => {
-      const s = activeId && sessions.get(activeId);
-      if (s && s.agentType === 'claude') SessionHistory.toggle(activeId);
-    },
+    // ⌘H shares the rule, which is why it lives in session-history.js.
+    toggleHistory: () => SessionHistory.toggleActive(),
     // #688. The predicate is what keeps the entry out of the list on a tab it cannot
     // apply to; the action re-reads the session rather than trusting it, since the
     // palette can be open across a tab switch.
@@ -5549,9 +5552,9 @@ async function init() {
   // never sees a request.
   initTimecardPresence({ windowId: getWindowId() });
 
-  // The transcript pane (#672). No key binding of its own: it is opened from the
-  // tab's ⧗, its right-click menu, or the palette — the same shape Scheduled
-  // History has, and it keeps the shortcut registry untouched.
+  // The transcript pane (#672). Opened from the tab's ⧗, its right-click menu,
+  // the palette, or ⌘H (#704), whose registry entry and handler live in
+  // session-history.js.
   SessionHistory.init({
     getSession: (id) => sessions.get(id) || null,
     getActiveSessionId: () => activeId,

@@ -23,9 +23,15 @@
  * a jump). Rendering is a full rebuild of that range, which is what lets a
  * tool_use find the tool_result it pairs with even when a page boundary fell
  * between them — the two are separate records, joined only by tool_use_id.
+ *
+ * IT READS AS PROMPT → ANSWER (#704). Each exchange is what you typed, then the
+ * agent's final answers in full, with the work between them folded to one line.
+ * The same full rebuild is what keeps an answer attached to a prompt that sits on
+ * an older page.
  */
 
 import { nsKey } from './storage-namespace.js';
+import { register } from './shortcuts.js';
 
 // Where the reader was, per session, keyed by MESSAGE UUID rather than by a pixel
 // offset: a transcript grows and a window resizes, and both move a pixel. Session
@@ -40,6 +46,18 @@ const ANCHOR_SEARCH_PAGES = 5;
 
 const TAIL_POLL_MS = 2000;
 
+// ⌘H (#704). Claimed on EVERY tab, not only the ones with a History: macOS gives
+// ⌘H to the browser's Hide item, and Firefox skips that item only when the page
+// called preventDefault. A press on a terminal tab is therefore a no-op rather
+// than the whole browser vanishing. Strict modifiers keep Ctrl+H — backspace, to a
+// terminal — reaching the PTY.
+const matchesHistory = register({
+  id: 'session-history',
+  group: 'Terminal',
+  description: 'Toggle History: each prompt and its final answers (agent tabs)',
+  shortcut: 'Meta+h',
+});
+
 let callbacks = {};
 // sessionId -> pane. More than one can be open at a time, because a pane hides
 // with its tab instead of closing.
@@ -49,7 +67,8 @@ const panes = new Map();
 //
 // Exported for test/unit/session-history-client.test.js. The join and the
 // grouping are the two things that go silently wrong (a tool line with no output,
-// a turn split into three bubbles) and neither is visible in a screenshot.
+// a turn split into three bubbles, an answer hung off the wrong prompt) and none
+// of them is visible in a screenshot.
 
 /** tool_use_id -> the tool_result entry that answers it. */
 export function indexToolResults(entries) {
@@ -94,6 +113,125 @@ export function groupEntries(entries) {
   return groups;
 }
 
+/** Something a person typed: the head of an exchange. */
+export function isPromptEntry(e) {
+  return !!e && e.role === 'user' && e.kind === 'text' && !e.meta;
+}
+
+/**
+ * A final answer: assistant text that ended its turn. Text whose stopReason is
+ * `tool_use` is narration written just before a tool call, and belongs to the work.
+ */
+export function isAnswerEntry(e) {
+  return !!e && e.role === 'assistant' && e.kind === 'text' && !e.meta && e.stopReason === 'end_turn';
+}
+
+/** The rows a reader steps through with the arrows: prompts and answers, not the work between. */
+export function isStepEntry(e) {
+  return isPromptEntry(e) || isAnswerEntry(e);
+}
+
+/**
+ * Loaded entries -> exchanges: a prompt, then its work and its answers
+ * interleaved in file order.
+ *
+ * Interleaved, not "all the work, then all the answers": in the transcripts
+ * measured for #704, 32 of ~35 prompts with several answers did work BETWEEN
+ * them (auto mode, a background task waking the agent), and hoisting that work
+ * above the first answer would put it in the wrong place.
+ *
+ * Runs over everything loaded, unfiltered, so the ⚙ toggle changes what a work
+ * line shows and never where an exchange starts. Entries ahead of the first
+ * prompt become an exchange with `prompt: null`: at the edge of the loaded range
+ * the prompt is simply further back, and its answers must not vanish with it.
+ *
+ * @returns {Array<{key, prompt, answered, items: Array<{type:'work', key, entries, stats}|{type:'answer', entry}>}>}
+ */
+export function groupByPrompt(entries) {
+  const exchanges = [];
+  let cur = null;
+  let work = null;
+  // When the prompt or answer the open work follows was written.
+  let since = null;
+
+  const endWork = (until) => {
+    if (work) work.stats = workStats(work.entries, since, until);
+    work = null;
+  };
+
+  for (const e of entries || []) {
+    if (isPromptEntry(e)) {
+      endWork(null);
+      cur = { key: keyOf(e), prompt: e, items: [], answered: false };
+      exchanges.push(cur);
+      since = e.ts || null;
+      continue;
+    }
+    if (!cur) {
+      cur = { key: `lead:${keyOf(e)}`, prompt: null, items: [], answered: false };
+      exchanges.push(cur);
+    }
+    if (isAnswerEntry(e)) {
+      endWork(e.ts || null);
+      cur.items.push({ type: 'answer', entry: e });
+      cur.answered = true;
+      since = e.ts || null;
+      continue;
+    }
+    if (!work) {
+      work = { type: 'work', key: keyOf(e), entries: [], stats: null };
+      cur.items.push(work);
+    }
+    work.entries.push(e);
+  }
+  endWork(null);
+  return exchanges;
+}
+
+/**
+ * What one stretch of work amounts to. Counts skip meta records, which the pane
+ * hides by default; the duration runs from the step the work follows to the
+ * answer it produced, or to its own last record when nothing followed.
+ */
+function workStats(entries, since, until) {
+  let toolCalls = 0, notes = 0, thinking = 0, nonMeta = 0;
+  let first = null, last = null;
+  for (const e of entries) {
+    if (e.ts) { if (!first) first = e.ts; last = e.ts; }
+    if (e.meta) continue;
+    nonMeta++;
+    if (e.kind === 'tool_use') toolCalls++;
+    else if (e.kind === 'thinking') thinking++;
+    else if (e.kind === 'text' && e.role === 'assistant') notes++;
+  }
+  const start = Date.parse(since || first);
+  const end = Date.parse(until || last);
+  return { toolCalls, notes, thinking, nonMeta, durationMs: end > start ? end - start : 0 };
+}
+
+/** "12 tool calls · 3 notes · 4m" — what a folded work line says. */
+export function formatWorkSummary(stats) {
+  const s = stats || {};
+  const bits = [];
+  if (s.toolCalls) bits.push(plural(s.toolCalls, 'tool call'));
+  if (s.notes) bits.push(plural(s.notes, 'note'));
+  if (!bits.length) bits.push(s.thinking ? 'thinking' : 'notices');
+  const took = formatDuration(s.durationMs);
+  if (took) bits.push(took);
+  return bits.join(' · ');
+}
+
+function plural(n, word) { return `${n} ${word}${n === 1 ? '' : 's'}`; }
+
+function formatDuration(ms) {
+  const sec = Math.floor((ms || 0) / 1000);
+  if (sec < 1) return '';
+  if (sec < 60) return `${sec}s`;
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min}m`;
+  return `${Math.floor(min / 60)}h ${min % 60}m`;
+}
+
 /** A one-line summary of a tool call: the argument worth seeing at a glance. */
 export function toolSummary(entry) {
   let input = entry.input;
@@ -116,11 +254,6 @@ export function truncationNote(entry) {
   if (hidden < 1024) return `+${hidden} B`;
   if (hidden < 1024 * 1024) return `+${Math.round(hidden / 1024)} KB`;
   return `+${(hidden / (1024 * 1024)).toFixed(1)} MB`;
-}
-
-/** The rows a reader steps through with the arrows: turns, not tool plumbing. */
-export function isTurnEntry(e) {
-  return !!e && e.kind === 'text' && !e.meta;
 }
 
 // ------------------------------------------------------------------- position
@@ -194,6 +327,7 @@ function applyMeta(p, data) {
   // the new one. Drop everything and start again from its tail.
   if (p.claudeSessionId && data.claudeSessionId && p.claudeSessionId !== data.claudeSessionId) {
     p.entries = [];
+    p.open.clear();
     p.rotated = true;
   }
   p.claudeSessionId = data.claudeSessionId || null;
@@ -232,6 +366,8 @@ async function loadNewer(p, { poll = false } = {}) {
   if (p.loading || p.fwdCursor == null) return;
   if (!poll && !p.hasNewer) return;
   p.loading = true;
+  const entriesBefore = p.entries;
+  const hadNewer = p.hasNewer;
   try {
     const data = await fetchPage(p.id, { after: p.fwdCursor });
     if (!panes.has(p.id)) return;
@@ -246,7 +382,15 @@ async function loadNewer(p, { poll = false } = {}) {
     // A failed tail poll is not worth surfacing; the next tick retries.
   } finally {
     p.loading = false;
-    if (panes.has(p.id)) render(p, { scrollTo: p.stickBottom ? 'bottom' : null });
+    if (panes.has(p.id)) {
+      // An idle tail poll brings nothing. Rebuilding anyway would snap shut the
+      // work line or tool output the reader just opened, every two seconds.
+      if (p.entries !== entriesBefore || p.hasNewer !== hadNewer) {
+        render(p, { scrollTo: p.stickBottom ? 'bottom' : null });
+      } else {
+        renderHeader(p);
+      }
+    }
   }
 }
 
@@ -256,6 +400,17 @@ export function isOpen(sessionId) { return panes.has(sessionId); }
 
 export function toggle(sessionId) {
   if (panes.has(sessionId)) close(sessionId); else open(sessionId);
+}
+
+/**
+ * Toggle the active tab's pane, if it is a tab that can have one. Only Claude
+ * Code writes a transcript, so on any other tab this does nothing — the tab's ⧗
+ * glyph is absent there for the same reason.
+ */
+export function toggleActive() {
+  const id = callbacks.getActiveSessionId?.();
+  const session = id ? callbacks.getSession?.(id) : null;
+  if (session && session.agentType === 'claude') toggle(id);
 }
 
 export async function open(sessionId) {
@@ -269,6 +424,9 @@ export async function open(sessionId) {
     showMeta: false, selected: null, stickBottom: true, rotated: false,
     claudeSessionId: null, supported: true, exists: false, reason: null,
     closed: false, liveSession: false, size: 0, rows: new Map(), pollTimer: null,
+    // Keys of the work lines and tool outputs the reader opened. Kept on the pane
+    // rather than in the DOM, because every render is a full rebuild.
+    open: new Set(),
   };
   panes.set(sessionId, p);
   build(p, session.container);
@@ -348,6 +506,15 @@ function stopPolling(p) {
 // -------------------------------------------------------------------- keyboard
 
 function onKeyDown(e) {
+  // ⌘H before the focus gate below: it has to close a pane that does not hold
+  // focus, and it has to be claimed on a tab that has no pane at all.
+  if (matchesHistory(e)) {
+    e.preventDefault();
+    e.stopPropagation();
+    if (!e.repeat) toggleActive();
+    return;
+  }
+
   const p = activePane();
   if (!p || !p.panel) return;
   // Only when the pane actually holds focus, so a keystroke meant for another
@@ -368,18 +535,35 @@ function onKeyDown(e) {
   if (e.key === 'End' || e.key === 'G') { e.preventDefault(); e.stopPropagation(); loadEnd(p, 'end'); return; }
 }
 
+/**
+ * Claim ⌘H inside a same-origin iframe (a mod, a project mod, a display tab).
+ *
+ * A keystroke in an iframe never reaches the listener init() puts on the top
+ * document, so without this ⌘H hides the browser whenever an App or a display tab
+ * has focus. The claim does nothing else: none of those tabs has a History.
+ * Called on every `load`, beside wrapRealmFetch, because a reloaded page is a new
+ * realm with no listener on it.
+ */
+export function claimHistoryKey(win) {
+  try { win.addEventListener('keydown', preventHistoryKey, true); } catch { /* gone, or not same-origin */ }
+}
+
+function preventHistoryKey(e) {
+  if (matchesHistory(e)) e.preventDefault();
+}
+
 function activePane() {
   const id = callbacks.getActiveSessionId?.();
   return id ? panes.get(id) : null;
 }
 
-/** Move the selection one TURN, not one screenful. */
+/** Move the selection to the previous or next prompt or answer, not one screenful. */
 function step(p, dir) {
-  const turns = p.entries.filter(isTurnEntry);
-  if (!turns.length) return;
-  let i = turns.findIndex((e) => keyOf(e) === p.selected);
-  if (i < 0) i = dir > 0 ? -1 : turns.length;
-  const next = turns[Math.max(0, Math.min(turns.length - 1, i + dir))];
+  const steps = p.entries.filter(isStepEntry);
+  if (!steps.length) return;
+  let i = steps.findIndex((e) => keyOf(e) === p.selected);
+  if (i < 0) i = dir > 0 ? -1 : steps.length;
+  const next = steps[Math.max(0, Math.min(steps.length - 1, i + dir))];
   if (!next) return;
   p.selected = keyOf(next);
   p.stickBottom = false;
@@ -388,7 +572,7 @@ function step(p, dir) {
     el.scrollIntoView({ block: 'nearest' });
     markSelection(p);
   }
-  // Stepping off the oldest loaded turn is the natural cue to fetch more.
+  // Stepping off the oldest loaded step is the natural cue to fetch more.
   if (i + dir <= 0 && p.hasOlder) loadOlder(p);
 }
 
@@ -481,12 +665,14 @@ function render(p, { scrollTo = null } = {}) {
   // The index is built over EVERYTHING loaded, not over what is visible: a result
   // hidden by the meta filter must still fill in its tool line.
   const results = indexToolResults(p.entries);
-  const visible = foldToolResults(p.entries.filter((e) => p.showMeta || !e.meta));
-  if (!visible.length) {
+  const exchanges = groupByPrompt(p.entries);
+  let shown = 0;
+  exchanges.forEach((x, i) => {
+    const el = renderExchange(p, x, results, i === exchanges.length - 1);
+    if (el) { body.appendChild(el); shown++; }
+  });
+  if (!shown) {
     body.appendChild(note(p.loading ? 'Loading…' : 'Nothing to show in this stretch of the transcript.'));
-  }
-  for (const group of groupEntries(visible)) {
-    body.appendChild(renderGroup(p, group, results));
   }
 
   if (p.hasNewer) body.appendChild(loadMarker(p, 'newer'));
@@ -540,8 +726,8 @@ function renderHeader(p) {
 
   if (p.exists) {
     h.appendChild(button('⤒', 'Beginning', () => loadEnd(p, 'start')));
-    h.appendChild(button('↑', 'Previous message', () => step(p, -1)));
-    h.appendChild(button('↓', 'Next message', () => step(p, 1)));
+    h.appendChild(button('↑', 'Previous prompt or answer', () => step(p, -1)));
+    h.appendChild(button('↓', 'Next prompt or answer', () => step(p, 1)));
     h.appendChild(button('⤓', 'Latest', () => loadEnd(p, 'end')));
     const meta = button(p.showMeta ? '⚙' : '⚙', p.showMeta ? 'Hide tool plumbing and system notices' : 'Show tool plumbing and system notices', () => {
       p.showMeta = !p.showMeta;
@@ -550,7 +736,7 @@ function renderHeader(p) {
     if (p.showMeta) meta.classList.add('on');
     h.appendChild(meta);
   }
-  h.appendChild(button('✕', 'Close (Esc)', () => close(p.id)));
+  h.appendChild(button('✕', 'Close (⌘H or Esc)', () => close(p.id)));
 }
 
 function button(glyph, label, onClick) {
@@ -577,11 +763,100 @@ function warn(text) {
   return el;
 }
 
+function marker(text) {
+  const el = document.createElement('div');
+  el.className = 'sess-hist-marker';
+  el.textContent = text;
+  return el;
+}
+
 function loadMarker(p, dir) {
   const el = document.createElement('button');
   el.className = 'sess-hist-more';
   el.textContent = p.loading ? 'Loading…' : (dir === 'older' ? '↑ older' : '↓ newer');
   el.addEventListener('click', () => (dir === 'older' ? loadOlder(p) : loadNewer(p)));
+  return el;
+}
+
+/**
+ * One exchange: the prompt, then its work lines and answers in file order. Null
+ * when nothing in it is visible (all meta, with ⚙ off), so a stretch of pure
+ * bookkeeping draws nothing rather than an empty block.
+ */
+function renderExchange(p, x, results, isLast) {
+  const parts = [];
+  for (const item of x.items) {
+    if (item.type === 'answer') {
+      const g = renderGroup(p, { role: 'assistant', entries: [item.entry] }, results);
+      g.classList.add('is-answer');
+      parts.push(g);
+    } else {
+      const w = renderWork(p, item, results);
+      if (w) parts.push(w);
+    }
+  }
+  if (!x.prompt && !parts.length) return null;
+
+  const el = document.createElement('div');
+  el.className = 'sess-hist-exchange';
+  if (x.prompt) {
+    el.appendChild(renderGroup(p, { role: 'user', entries: [x.prompt] }, results));
+  } else if (p.hasOlder) {
+    // The loaded range starts mid-exchange. Its prompt is on an older page, and
+    // the next load older re-attaches everything below to it.
+    el.appendChild(marker('↑ the prompt for this is further back'));
+  }
+  for (const part of parts) el.appendChild(part);
+
+  if (x.prompt && !x.answered) {
+    el.appendChild(marker(isLast && p.hasNewer
+      ? '↓ the answer may be further on'
+      : 'no final answer (interrupted or still running)'));
+  }
+  return el;
+}
+
+/** A folded line summarising a stretch of work; opened, today's detailed rows. */
+function renderWork(p, work, results) {
+  const shown = work.entries.filter((e) => p.showMeta || !e.meta);
+  if (!shown.length) return null;
+  const openKey = `work:${work.key}`;
+  const isOpen = p.open.has(openKey);
+
+  const el = document.createElement('div');
+  el.className = 'sess-hist-work';
+
+  const line = document.createElement('button');
+  line.className = 'sess-hist-foldline sess-hist-workline';
+  const caret = document.createElement('span');
+  caret.className = 'sess-hist-glyph';
+  caret.textContent = isOpen ? '▾' : '▸';
+  const s = document.createElement('span');
+  s.className = 'sess-hist-summary';
+  s.textContent = formatWorkSummary(work.stats);
+  line.append(caret, s);
+  line.addEventListener('click', (ev) => {
+    ev.stopPropagation();
+    if (p.open.has(openKey)) p.open.delete(openKey); else p.open.add(openKey);
+    // A rebuild rather than a local toggle: which element stands for each entry
+    // changes with it, and p.rows has to follow.
+    render(p);
+  });
+  el.appendChild(line);
+
+  if (!isOpen) {
+    // Folded entries still have a position. Point each at this line, so the
+    // viewport anchor and a remembered reading position inside the work land here.
+    for (const e of work.entries) p.rows.set(keyOf(e), line);
+    return el;
+  }
+
+  const inner = document.createElement('div');
+  inner.className = 'sess-hist-work-body';
+  for (const group of groupEntries(foldToolResults(shown))) {
+    inner.appendChild(renderGroup(p, group, results));
+  }
+  el.appendChild(inner);
   return el;
 }
 
@@ -620,20 +895,21 @@ function renderEntry(p, e, results) {
     markSelection(p);
   });
 
+  const key = keyOf(e);
   if (e.kind === 'text') {
     row.appendChild(body(e.text, e));
   } else if (e.kind === 'thinking') {
-    row.appendChild(disclosure('⋯', 'thinking', `${wordCount(e.text)} words`, e.text, e));
+    row.appendChild(disclosure(p, key, '⋯', 'thinking', `${wordCount(e.text)} words`, e.text, e));
   } else if (e.kind === 'tool_use') {
     const result = results.get(e.toolUseId);
     const detail = [e.input, result ? `\n\n${result.isError ? '! ' : ''}${result.output}` : ''].join('');
-    const d = disclosure('⚒', e.name, toolSummary(e), detail, result && result.truncated ? result : e);
+    const d = disclosure(p, key, '⚒', e.name, toolSummary(e), detail, result && result.truncated ? result : e);
     if (result && result.isError) d.classList.add('is-error');
     row.appendChild(d);
   } else if (e.kind === 'tool_result') {
     // Only reached when the tool_use it answers is outside the loaded range;
     // otherwise it is folded into the tool line above.
-    row.appendChild(disclosure('⚒', 'result', e.isError ? 'error' : '', e.output, e));
+    row.appendChild(disclosure(p, key, '⚒', 'result', e.isError ? 'error' : '', e.output, e));
   } else if (e.kind === 'image') {
     row.appendChild(oneLine('▣', `${e.mediaType} · ${formatBytes(e.fullBytes)} (not shown)`));
   } else if (e.kind === 'oversize') {
@@ -641,7 +917,7 @@ function renderEntry(p, e, results) {
   } else if (e.kind === 'system') {
     row.appendChild(oneLine('·', `${e.subtype || 'system'}${e.text ? ' — ' + firstLine(e.text) : ''}`));
   } else {
-    row.appendChild(disclosure('?', e.name || e.kind, '', e.text || '', e));
+    row.appendChild(disclosure(p, key, '?', e.name || e.kind, '', e.text || '', e));
   }
   return row;
 }
@@ -660,10 +936,11 @@ function body(text, entry) {
   return el;
 }
 
-/** A one-line summary that opens to its detail on click. */
-function disclosure(glyph, name, summary, detail, entry) {
+/** A one-line summary that opens to its detail on click, and stays open across rebuilds. */
+function disclosure(p, key, glyph, name, summary, detail, entry) {
   const el = document.createElement('div');
   el.className = 'sess-hist-fold';
+  const startOpen = p.open.has(key);
 
   const line = document.createElement('button');
   line.className = 'sess-hist-foldline';
@@ -678,12 +955,12 @@ function disclosure(glyph, name, summary, detail, entry) {
   s.textContent = summary || '';
   const caret = document.createElement('span');
   caret.className = 'sess-hist-caret';
-  caret.textContent = '▸';
+  caret.textContent = startOpen ? '▾' : '▸';
   line.append(g, n, s, caret);
 
   const pre = document.createElement('pre');
   pre.className = 'sess-hist-detail';
-  pre.hidden = true;
+  pre.hidden = !startOpen;
   pre.textContent = detail || '';
   const cut = truncationNote(entry);
   if (cut) {
@@ -697,6 +974,7 @@ function disclosure(glyph, name, summary, detail, entry) {
     ev.stopPropagation();
     pre.hidden = !pre.hidden;
     caret.textContent = pre.hidden ? '▸' : '▾';
+    if (pre.hidden) p.open.delete(key); else p.open.add(key);
   });
 
   el.append(line, pre);

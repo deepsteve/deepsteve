@@ -14,6 +14,7 @@ import { nsKey } from './storage-namespace.js';
 import { tabIcon, TabManager } from './tab-manager.js';
 import { MOD_ROW_SELECTOR, groupMods, isModEnabled } from './mod-groups.js';
 import { wrapRealmFetch } from './client-log.js';
+import { claimHistoryKey } from './session-history.js';
 
 /**
  * The sandbox every mod iframe gets, in one place so the panel path and the
@@ -3006,6 +3007,9 @@ function _injectBridgeAPI(iframeEl, modId, tabInstanceId) {
     // here, alongside the bridge, on the same reach that makes the bridge possible at all. The
     // `load` listeners that call us are not `{ once: true }`, so a reassigned src re-wraps.
     wrapRealmFetch(iframeEl.contentWindow, `mod:${modId}`);
+    // Same reach, same reason: the host's ⌘H listener is on the top document, and a keystroke
+    // in here that nobody claims hides the browser instead (#704).
+    claimHistoryKey(iframeEl.contentWindow);
     iframeEl.contentWindow.deepsteve = {
       getDeepsteveVersion() {
         return deepsteveVersion;
