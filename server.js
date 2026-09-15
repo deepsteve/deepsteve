@@ -9,6 +9,7 @@ const os = require('os');
 const net = require('net');
 const { initMCP, getModTools, isMcpReady } = require('./mcp-server');
 const { createSecurity, UI_HOST } = require('./security');
+const { createLinks } = require('./links');
 const { createSleepWatch } = require('./sleep-watch');
 const { createPowerAssertion } = require('./power-assertion');
 const { resolveForkTip } = require('./fork-resolve');
@@ -306,6 +307,11 @@ function noteSpawnDelivery(id, { tabDelivery, windowId, source }) {
 function isPendingOpenLive(parsed) {
   switch (parsed.type) {
     case 'open-session':
+      // Discuss on a decision link whose asking session has closed (#705) asks the window
+      // to RESTORE it — an explicit human restore, so it stays worth delivering for as long
+      // as there is a saved record to restore from.
+      if (parsed.restore) return shells.has(parsed.id) || !!savedState[parsed.id];
+      return shells.has(parsed.id);
     case 'prompt-submitted':
     case 'deliver-prompt':
       return shells.has(parsed.id);
@@ -555,6 +561,16 @@ app.use((req, res, next) => {
   if (req.path.startsWith('/api/timelapse')) return next();
   express.json()(req, res, next);
 });
+
+// Typed, versioned links (#705): /v1/<type>/<id>, the address an email can point at. Behind the
+// gate like everything below it — a cross-site click that arrives without our cookie is answered
+// by authGate's link bounce, never by a route mounted above the gate. GET only renders. The POST
+// that answers additionally demands an allowlisted Origin: authentication has already happened
+// by then, so this is not auth, only "the button on our own page", which a link preview is not.
+// links.js owns the scheme and knows nothing about storage; mods register what the ids mean.
+const links = createLinks({ log, baseUrl: UI_URL });
+app.get('/v1/:type/:id', links.handleGet);
+app.post('/v1/:type/:id', security.requireAllowedOrigin, links.handlePost);
 
 // Proxy endpoint for Baby Browser — fetches URLs and strips iframe-blocking headers.
 // Resources (CSS/JS/images) load directly from origin via <base> tag — only HTML
@@ -3879,7 +3895,7 @@ let stateFrozen = false;  // Set during shutdown to prevent onExit handlers from
 // were already on the branch when this session started, it cannot be recomputed later
 // (by then they look like everyone else's), and issue_complete reads it at the end.
 function serializeShellEntry(entry) {
-  return { cwd: entry.cwd, claudeSessionId: entry.claudeSessionId, agentType: entry.agentType || 'claude', codexHomeId: entry.codexHomeId || null, configDir: entry.configDir || null, engineType: entry.engineType || 'node-pty', worktree: entry.worktree || null, name: entry.name || null, planMode: !!entry.planMode, model: entry.model || null, effort: entry.effort || null, allowedTools: Array.isArray(entry.allowedTools) && entry.allowedTools.length ? entry.allowedTools : null, forkParent: entry.forkParent || null, lastActivity: entry.lastActivity || null, createdAt: entry.createdAt || null, windowId: entry.windowId || null, scheduled: !!entry.scheduled, autopilot: !!entry.autopilot, resumedWorktree: entry.resumedWorktree || null, resultItemId: entry.resultItemId || null, resultApprovedAt: entry.resultApprovedAt || null, mergeBlock: entry.mergeBlock || null };
+  return { cwd: entry.cwd, claudeSessionId: entry.claudeSessionId, agentType: entry.agentType || 'claude', codexHomeId: entry.codexHomeId || null, configDir: entry.configDir || null, engineType: entry.engineType || 'node-pty', worktree: entry.worktree || null, name: entry.name || null, planMode: !!entry.planMode, model: entry.model || null, effort: entry.effort || null, allowedTools: Array.isArray(entry.allowedTools) && entry.allowedTools.length ? entry.allowedTools : null, forkParent: entry.forkParent || null, lastActivity: entry.lastActivity || null, createdAt: entry.createdAt || null, windowId: entry.windowId || null, scheduled: !!entry.scheduled, scheduledTaskId: entry.scheduledTaskId || null, autopilot: !!entry.autopilot, resumedWorktree: entry.resumedWorktree || null, resultItemId: entry.resultItemId || null, resultApprovedAt: entry.resultApprovedAt || null, mergeBlock: entry.mergeBlock || null };
 }
 
 // #561: a session record is never hard-deleted by any runtime path. Every close
@@ -7077,6 +7093,64 @@ function startIssueSession({ number, title, body, labels, url, cwd, agentType, c
   return { id, name, cwd: spawnCwd, worktree: worktree || null, engineType, autopilot: autopilotOn, resumed: resumeStatus, tabDelivery };
 }
 
+/**
+ * Start an agent session in a directory with a prompt, and open its tab (#705).
+ *
+ * The first shared form of the spawn recipe that open_terminal, the scheduled-tasks runner and
+ * startIssueSession each still carry inline. Only Workshop's decision links use it so far — the
+ * follow-up session an option's `then` starts, and Discuss when the asker cannot be restored.
+ * Moving those three onto it is deliberately a separate change.
+ *
+ * No worktree: a follow-up works in the project the question was about, and the asker's own
+ * worktree is the thing most likely to have been merged away by now. The tab opens in the named
+ * window, else the first connected one, else queues and opens the UI — the human just clicked a
+ * link in a browser, so bringing Deep Steve up is what they asked for.
+ *
+ * Returns { id, name, cwd, engineType, tabDelivery }, or { error } for a directory that is gone
+ * (#632): refused, never rehomed to $HOME.
+ */
+function spawnAgentSession({ cwd, agentType, configDir, name, prompt, windowId = null, source = 'unknown' }) {
+  const problem = cwd ? spawnCwdProblem(cwd) : { code: 'cwd-missing', cwd, message: 'No working directory given' };
+  if (problem) {
+    log(`[spawn] ${source} refused: ${problem.message}`);
+    return { error: problem };
+  }
+  agentType = AGENT_TYPES.includes(agentType) ? agentType : 'claude';
+  // Custom config profiles are a Claude-only surface (#537).
+  if (agentType !== 'claude') configDir = null;
+  const agentConfig = getAgentConfig(agentType);
+  const id = randomUUID().slice(0, 8);
+  const claudeSessionId = agentType === 'codex' ? null : randomUUID();
+  const codexHomeId = agentType === 'codex' ? id : null;
+  const spawnArgs = getSpawnArgs(agentType, { sessionId: claudeSessionId, shellId: id });
+
+  let sessionEngine;
+  try {
+    // spawnSession returns the engine that actually spawned — tmux can fall back to node-pty (#620).
+    sessionEngine = spawnSession(getDefaultEngine(), id, agentType, spawnArgs, cwd, { cols: 120, rows: 40, env: sessionEnv(id, { name, windowId, cwd, agentType, configDir, codexHomeId }) });
+  } catch (e) {
+    log(`[spawn] ${source} failed: ${e.message}`);
+    return { error: { code: e.code || 'spawn-failed', cwd, message: e.message } };
+  }
+  const engineType = sessionEngine === tmuxEngine ? 'tmux' : 'node-pty';
+  log(`[spawn] ${source}: id=${id} agent=${agentType} engine=${engineType} cwd=${cwd}`);
+  shells.set(id, { clients: new Set(), cwd, claudeSessionId, agentType, codexHomeId, configDir: configDir || null, engine: sessionEngine, engineType, worktree: null, windowId, name: name || null, waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now() });
+  wireShellOutput(id);
+  emitSessionOpen(id);
+  recordRecentSession(id);
+  if (prompt) deliverPromptWhenReady(id, prompt, { retryCodexEnter: agentType === 'codex' });
+  if (agentConfig.supportsSessionWatch) watchClaudeSessionDir(id);
+  sessionEngine.onExit(id, () => {
+    if (agentConfig.supportsSessionWatch) unwatchClaudeSessionDir(id);
+    handleShellGone(id);
+  });
+  saveState();
+
+  const tabDelivery = deliverToWindow({ type: 'open-session', id, cwd, name, windowId }, windowId, { openBrowser: true });
+  noteSpawnDelivery(id, { tabDelivery, windowId, source });
+  return { id, name: name || id, cwd, engineType, tabDelivery };
+}
+
 app.post('/api/start-issue', (req, res) => {
   const { number, title, body, labels, url, cwd, windowId: rawWindowId, sessionId, agentType: rawAgentType, autopilot } = req.body;
   if (!number || !title) return res.status(400).json({ error: 'number and title are required' });
@@ -8265,7 +8339,7 @@ function handleWsConnection(ws, req) {
       }
       sessionEngine = spawnedEngine;
       restoredEngineType = spawnedEngine === tmuxEngine ? 'tmux' : 'node-pty';
-      shells.set(id, { clients: new Set(), cwd, claudeSessionId, agentType: savedAgentType, codexHomeId, configDir: restored.configDir || null, engine: sessionEngine, engineType: restoredEngineType, worktree: savedWorktree, name: restoredName, planMode: savedPlanMode, model: restored.model || null, effort: restored.effort || null, allowedTools: restored.allowedTools || null, forkParent: restored.forkParent || null, restored: true, scheduled: !!restored.scheduled, autopilot: !!restored.autopilot, resumedWorktree: restored.resumedWorktree || null, resultItemId: restored.resultItemId || null, resultApprovedAt: restored.resultApprovedAt || null, mergeBlock: restored.mergeBlock || null, waitingForInput: false, lastActivity: Date.now(), createdAt: restored.createdAt || Date.now(), windowId: restoredWindowId });
+      shells.set(id, { clients: new Set(), cwd, claudeSessionId, agentType: savedAgentType, codexHomeId, configDir: restored.configDir || null, engine: sessionEngine, engineType: restoredEngineType, worktree: savedWorktree, name: restoredName, planMode: savedPlanMode, model: restored.model || null, effort: restored.effort || null, allowedTools: restored.allowedTools || null, forkParent: restored.forkParent || null, restored: true, scheduled: !!restored.scheduled, scheduledTaskId: restored.scheduledTaskId || null, autopilot: !!restored.autopilot, resumedWorktree: restored.resumedWorktree || null, resultItemId: restored.resultItemId || null, resultApprovedAt: restored.resultApprovedAt || null, mergeBlock: restored.mergeBlock || null, waitingForInput: false, lastActivity: Date.now(), createdAt: restored.createdAt || Date.now(), windowId: restoredWindowId });
       wireShellOutput(id, initialCols, initialRows);
       recordRecentSession(id);  // bump recency on same-browser reconnect + cross-browser restore
       if (agentConfig.supportsSessionWatch) watchClaudeSessionDir(id);
@@ -8760,7 +8834,7 @@ function broadcastToWindow(windowId, msg) {
 // assigns unconditionally, and nothing here awaits the first call). The chat pane's
 // transcript reader was therefore dead from the day it shipped, silently falling back
 // to the workshop_say store. Adding a ctx field means editing this line, never copying it.
-initMCP({ app, security, shells, wss, broadcast, broadcastToWindow, log, MODS_DIR, closeSession, tombstoneSession, handleShellGone, spawnSession, sessionEnv, getSpawnArgs, mcpConfigArgs, getAgentConfig, resolveConfigDir, validateModel, validateEffort, wireShellOutput, watchClaudeSessionDir, unwatchClaudeSessionDir, resolveForkParentSession, transcriptPath, saveState, validateWorktree, ensureWorktree, sessionPaths, submitToShell, fetchIssueFromGitHub, deliverPromptWhenReady, startIssueSession, reloadClients, deliverToWindow, noteSpawnDelivery, settings, isShuttingDown: () => shuttingDown, displayTabs, setDisplayTab, deleteDisplayTab, screenshots, setScreenshot, deleteScreenshot, getScreenshotPath, getDefaultEngine, getForegroundCommand, sessionLog, emitSessionOpen, getContexts: () => contexts, pathInside, getSavedSession: (id) => savedState[id] || null, stripEscapeSequences, readTerminalScreen, sessionInputState, setMergeBlock, recordMergeAttempt, maybeInheritRemoteControl, requestMetaControlsConsent, registerRestartBlocker, armSessionAutoClose, logRcWrite }).catch(e => log('MCP init failed:', e.message));
+initMCP({ app, security, shells, wss, broadcast, broadcastToWindow, log, MODS_DIR, closeSession, tombstoneSession, handleShellGone, spawnSession, sessionEnv, getSpawnArgs, mcpConfigArgs, getAgentConfig, resolveConfigDir, validateModel, validateEffort, wireShellOutput, watchClaudeSessionDir, unwatchClaudeSessionDir, resolveForkParentSession, transcriptPath, saveState, validateWorktree, ensureWorktree, sessionPaths, submitToShell, fetchIssueFromGitHub, deliverPromptWhenReady, startIssueSession, reloadClients, deliverToWindow, noteSpawnDelivery, settings, isShuttingDown: () => shuttingDown, displayTabs, setDisplayTab, deleteDisplayTab, screenshots, setScreenshot, deleteScreenshot, getScreenshotPath, getDefaultEngine, getForegroundCommand, sessionLog, emitSessionOpen, getContexts: () => contexts, pathInside, getSavedSession: (id) => savedState[id] || null, links, linkUrl: links.urlFor, spawnAgentSession, stripEscapeSequences, readTerminalScreen, sessionInputState, setMergeBlock, recordMergeAttempt, maybeInheritRemoteControl, requestMetaControlsConsent, registerRestartBlocker, armSessionAutoClose, logRcWrite }).catch(e => log('MCP init failed:', e.message));
 
 // Watch themes directory for changes and broadcast to clients
 let themeWatchDebounce = null;

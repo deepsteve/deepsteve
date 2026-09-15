@@ -401,6 +401,10 @@ function runTask(task, reason, { foreground = false } = {}) {
     // windowId-less scheduled run must not be offered up as a lost session by
     // the restore modal. See buildWindowsView() in server.js.
     scheduled: true,
+    // #705: which task this run belongs to, so a Workshop question it asks is grouped by
+    // the task — derived here, never named by the agent. Persisted by serializeShellEntry,
+    // so a run resumed across a restart keeps it.
+    scheduledTaskId: task.id,
     name, waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now(), prefill: true,
   });
   wireShellOutput(id);

@@ -1,0 +1,173 @@
+/*
+ * The decision page (#705) — /v1/decision/<id>.
+ *
+ * A plain browser tab opened from an email, not a mod iframe, so there are no host theme
+ * variables to inherit. Light by default for a page that opens beside a mail client; the dark
+ * palette is Workshop's own, so the same question looks like itself in both places.
+ */
+
+:root {
+  color-scheme: light dark;
+  --bg: #f6f5f2;
+  --card: #ffffff;
+  --sunken: #f1efea;
+  --border: #dcd9d2;
+  --hairline: #ebe8e2;
+  --text: #2a2a2c;
+  --bright: #0b0b0c;
+  --dim: #6b6862;
+  --faint: #8f8b83;
+  --blue: #2458c6;
+  --blue-soft: #edf2fc;
+  --orange: #b45309;
+  --red: #b42318;
+  --green: #1a7f37;
+  --sans: system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, monospace;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0d1117;
+    --card: #161b22;
+    --sunken: #010409;
+    --border: #30363d;
+    --hairline: #21262d;
+    --text: #c9d1d9;
+    --bright: #f0f6fc;
+    --dim: #8b949e;
+    --faint: #6e7681;
+    --blue: #58a6ff;
+    --blue-soft: #111a26;
+    --orange: #f0883e;
+    --red: #f85149;
+    --green: #2ea043;
+  }
+}
+
+* { box-sizing: border-box; }
+
+html, body { margin: 0; background: var(--bg); color: var(--text); }
+
+body { font: 16px/1.6 var(--sans); -webkit-font-smoothing: antialiased; }
+
+a { color: var(--blue); }
+
+.page { max-width: 44rem; margin: 0 auto; padding: 8vh 1.25rem 4rem; }
+
+.card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 1.75rem 2rem 1.5rem;
+}
+
+.eyebrow {
+  display: flex; flex-wrap: wrap; align-items: center; gap: .6rem;
+  margin: 0 0 .75rem;
+  font: 600 12px/1.4 var(--mono); letter-spacing: .06em; text-transform: uppercase;
+  color: var(--dim);
+}
+
+.chip {
+  font: 600 11px/1 var(--mono); color: var(--orange);
+  border: 1px solid currentColor; border-radius: 999px; padding: 3px 7px;
+}
+
+h1 { margin: 0 0 1rem; font: 600 1.5rem/1.3 var(--sans); letter-spacing: -.01em; color: var(--bright); }
+
+/* Markdown an agent wrote. Elements only, built from markdown.js's AST. */
+.md { overflow-wrap: anywhere; }
+.md p { margin: 0 0 .8rem; white-space: pre-wrap; }
+.md .heading { margin: 1.1rem 0 .4rem; font-weight: 600; color: var(--bright); }
+.md .h1 { font-size: 1.2rem; }
+.md .h2 { font-size: 1.1rem; }
+.md pre {
+  margin: .6rem 0 .9rem; padding: .7rem .9rem; overflow-x: auto;
+  background: var(--sunken); border: 1px solid var(--hairline); border-radius: 8px;
+  font: 13px/1.5 var(--mono);
+}
+.md code {
+  font: .92em var(--mono); background: var(--sunken);
+  border: 1px solid var(--hairline); border-radius: 4px; padding: 1px 5px;
+}
+.md pre code { background: none; border: 0; padding: 0; }
+.md blockquote {
+  margin: .6rem 0; padding: .1rem 0 .1rem .9rem;
+  border-left: 3px solid var(--border); color: var(--dim); white-space: pre-wrap;
+}
+.md ul, .md ol { margin: .5rem 0 .8rem; padding-left: 1.4rem; }
+.md img { max-width: 100%; border-radius: 6px; }
+.md hr { height: 1px; margin: 1rem 0; border: 0; background: var(--hairline); }
+
+.label {
+  margin: 0 0 .25rem;
+  font: 600 11px/1.4 var(--mono); letter-spacing: .08em; text-transform: uppercase;
+}
+
+.recommend { margin: 1.25rem 0; padding: .1rem 0 .1rem .8rem; border-left: 2px solid var(--blue); }
+.recommend .label { color: var(--blue); }
+.recommend p:last-child { margin: 0; }
+
+button { font: inherit; color: inherit; cursor: pointer; }
+button:disabled { cursor: progress; opacity: .6; }
+
+.answer { display: flex; flex-direction: column; gap: .7rem; margin-top: 1.5rem; }
+.options { display: flex; flex-direction: column; gap: .5rem; }
+
+.option {
+  display: flex; flex-direction: column; gap: .15rem;
+  width: 100%; padding: .75rem 1rem; text-align: left;
+  background: var(--card); border: 1px solid var(--border); border-radius: 8px;
+  transition: border-color 120ms, background 120ms;
+}
+.option:hover:not(:disabled),
+.option:focus-visible { border-color: var(--blue); background: var(--blue-soft); outline: none; }
+.option-label { font-weight: 600; color: var(--bright); }
+.option-detail { font-size: .9rem; color: var(--dim); }
+.option-then { font: 12.5px/1.5 var(--mono); color: var(--faint); }
+
+textarea {
+  width: 100%; padding: .6rem .75rem; resize: vertical;
+  font: 15px/1.5 var(--sans); color: var(--text);
+  background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
+}
+textarea:focus { outline: none; border-color: var(--blue); }
+
+.primary {
+  align-self: flex-start; padding: .55rem 1.1rem;
+  font-weight: 600; color: #fff; background: var(--blue); border: 0; border-radius: 8px;
+}
+
+.secondary {
+  padding: .45rem 1rem; font-weight: 600;
+  background: transparent; border: 1px solid var(--border); border-radius: 8px;
+}
+.secondary:hover:not(:disabled) { border-color: var(--blue); color: var(--blue); }
+
+.hint { margin: 0; font-size: .85rem; color: var(--dim); }
+
+.outcome {
+  margin-top: 1.5rem; padding: .9rem 1rem;
+  background: var(--sunken); border: 1px solid var(--hairline); border-radius: 8px;
+}
+.outcome p { margin: 0 0 .3rem; }
+.outcome p:last-child { margin: 0; }
+.outcome .label { color: var(--green); }
+.answer-label { font-weight: 600; color: var(--bright); }
+.answer-text { white-space: pre-wrap; }
+
+.flash { margin: 1rem 0 0; padding: .6rem .85rem; font-size: .92rem; border: 1px solid currentColor; border-radius: 8px; }
+.flash.ok { color: var(--green); }
+.flash.warn { color: var(--orange); }
+.flash.error { color: var(--red); }
+
+.discuss {
+  display: flex; flex-wrap: wrap; align-items: center; gap: .8rem;
+  margin-top: 1.5rem; padding-top: 1.1rem; border-top: 1px solid var(--hairline);
+}
+
+@media (max-width: 540px) {
+  .page { padding: 0 0 3rem; }
+  .card { padding: 1.25rem 1.1rem; border-width: 0 0 1px; border-radius: 0; }
+}

@@ -251,3 +251,22 @@ test('the chat pane sends through the FIFO route, never a bare prompt write', ()
     'never arm pendingDelivery directly; deliverPromptWhenReady owns that (docs/sessions.md)',
   );
 });
+
+test('the decision page never turns agent text into markup either (#705)', () => {
+  // /v1/decision/<id> is opened from an email, and every string it draws was written by an
+  // agent. Same categorical rule as the panel above: DOM APIs and markdown.js's AST, never HTML.
+  const page = read('decision-page.js');
+  for (const forbidden of ['innerHTML', 'outerHTML', 'insertAdjacentHTML', 'document.write', 'DOMParser']) {
+    assert.ok(!page.includes(forbidden), `decision-page.js references ${forbidden}`);
+  }
+  assert.match(page, /from '\.\/markdown\.js'/, 'agent markdown goes through the shared tokenizer');
+  for (const ref of [...page.matchAll(/from '(\.[^']+)'/g)].map((m) => m[1])) {
+    assert.ok(fs.existsSync(path.join(MOD_DIR, ref)), `decision-page.js imports "${ref}", which does not exist`);
+  }
+  // The page shell is rendered by tools.js; a renamed asset is a blank page, not an error.
+  const tools = read('tools.js');
+  for (const asset of ['/mods/workshop/decision-page.js', '/mods/workshop/decision-page.css']) {
+    assert.ok(tools.includes(asset), `tools.js no longer references ${asset}`);
+    assert.ok(fs.existsSync(path.join(ROOT, asset.slice(1))), `${asset} does not exist`);
+  }
+});

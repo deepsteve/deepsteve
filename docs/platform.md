@@ -108,6 +108,19 @@ DeepSteve is **localhost-first with token authentication** (#536). The server bi
 
 **The canonical browser URL is `http://deepsteve.localhost:3000`** (`UI_HOST`/`UI_URL`, #544/#545). Plain `localhost` shares one browser cookie jar with every other local dev app (cookies key on host, not port), and Firefox's per-host cap evicts the auth cookie when that jar fills — the #544 intermittent-401 bug. `deepsteve.localhost` is still loopback (RFC 6761) but gets its own jar, and makes other localhost apps cross-site so SameSite=Strict excludes them. `canonicalHostRedirect` (`security.js`) 302s browser navigations (`GET` + `Accept: text/html`, no `Authorization` header) on `localhost`/`127.0.0.1`/`::1` to `deepsteve.localhost`, preserving the original port (SSH tunnels) and never touching `--allow-host`/LAN hosts; disable with `--no-canonical-redirect` or `DEEPSTEVE_NO_CANONICAL_REDIRECT=1`. Agent/CLI traffic (`DEEPSTEVE_API_URL`, MCP config, `restart.sh` curls) deliberately stays on plain `localhost` — bearer-authed, no cookies, and must not depend on `*.localhost` resolving for non-browser resolvers. Migrating an existing install moves the UI to a new origin, so open windows lose per-origin localStorage/sessionStorage (window layout, window→session maps) once — server-side sessions are unaffected; recover tabs via recent-sessions restore.
 
+**A link clicked in webmail is bounced once, not refused (#705).** SameSite=Strict withholds the
+cookie on a cross-site navigation, so a signed-in user who clicks a `/v1/<type>/<id>` link in a
+webmail tab would otherwise get a bare 401. For exactly that request (`GET`, `Accept: text/html`,
+a loopback host, no bearer, a `/v<n>/` path), `authGate` sends a 401 **HTML** page that reloads
+itself once:
+- the page script is pinned by a CSP hash
+- `sessionStorage` allows one reload per path per 10 seconds
+- `setAuthCookie` already put the token on that response, and the reload is same-site, so it
+  carries the cookie
+
+Who is authorized does not change, and nothing moves above the gate. Every other rejection keeps
+the text/plain body that `auth-heal.js` reads. See [links.md](links.md).
+
 **The cookie's name carries our listen port** — `ds_auth_3000`, computed per instance in `createSecurity` (#675). The `deepsteve.localhost` jar is per-host, and cookies ignore ports, so a *second* DeepSteve on the same machine — an isolated test daemon on 3999 with its own `auth-token` — used to overwrite the real install's cookie the moment anything in the browser visited it. `canonicalHostRedirect` preserves the original port, so the stray daemon lands on `deepsteve.localhost` too. Every open tab then 401s on every fetch, holding a cookie no page load of its own will refresh: 1,643 rejections over 25+ minutes, through a restart and a reload. Qualified names let the two coexist. The unqualified `ds_auth` is still *read* as a fallback so tabs open across the upgrade keep working; drop that a release later. Never `clearCookie('ds_auth')` as a migration — it would delete the sibling daemon's cookie, which is the bug inverted.
 
 **A 401 heals from the fetch path, not just from a dropped socket.** `maybeHealAuth()` (`public/js/auth-heal.js`) used to be reachable only from the two WebSocket reconnect loops, so a realm whose socket was fine — or which holds none — polled 401s forever. The `window.fetch` wrapper in `public/js/client-log.js` now calls it on any 401/429 from `/api/*`, keeping the 2s probe cooldown and the 60s sessionStorage one-shot so a genuinely unauthorized page cannot reload-loop. `/api/proxy` is excluded (it passes an upstream status through, which says nothing about our cookie) and so is `/api/client-log` (a beacon that reports its own failures feeds itself).

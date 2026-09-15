@@ -351,6 +351,39 @@ function createSecurity(cfg) {
     next();
   }
 
+  // 4a. The link bounce (#705). A /v1/<type>/<id> link is meant to be clicked in an email, and a
+  //     click in webmail is a CROSS-SITE navigation: the browser withholds our SameSite=Strict
+  //     cookie, so authGate rejects a user who is signed in. The rejection body is the only thing
+  //     this changes — never who is authorized. setAuthCookie has already put the token on this
+  //     very response (loopback host, HTML GET), and a reload started by this page is same-site,
+  //     so the cookie rides it. A per-path sessionStorage stamp allows one reload in 10s, so a
+  //     browser that refuses cookies gets an explanation instead of a loop.
+  //     Scoped to versioned link paths on purpose: every other gated navigation keeps the
+  //     text/plain 401 that api-fetch.js and auth-heal.js are written against.
+  const LINK_PATH_RE = /^\/v\d+\//;
+  const LINK_BOUNCE_SCRIPT = "(function(){var s=document.getElementById('stuck');"
+    + "try{var k='ds-link-reauth:'+location.pathname;var t=Number(sessionStorage.getItem(k)||0);"
+    + "if(Date.now()-t>10000){sessionStorage.setItem(k,String(Date.now()));location.replace(location.href);return;}}"
+    + 'catch(e){}s.hidden=false;})();';
+  const LINK_BOUNCE_CSP = "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; "
+    + `frame-ancestors 'none'; script-src 'sha256-${crypto.createHash('sha256').update(LINK_BOUNCE_SCRIPT).digest('base64')}'`;
+  const LINK_BOUNCE_PAGE = '<!doctype html><html lang="en"><head><meta charset="utf-8">'
+    + '<meta name="viewport" content="width=device-width,initial-scale=1"><title>Deep Steve</title>'
+    + '<style>body{font:16px/1.55 -apple-system,system-ui,sans-serif;max-width:34rem;margin:15vh auto;padding:0 1.5rem;'
+    + 'color:#1d1d1f;background:#f6f5f2}a{color:#2458c6}@media (prefers-color-scheme:dark){body{color:#e4e2dc;'
+    + 'background:#131417}a{color:#8ab4f8}}</style></head><body><p>Opening in Deep Steve…</p>'
+    + '<p id="stuck" hidden>This browser isn’t signed in to Deep Steve. Open <a href="/">Deep Steve</a> '
+    + 'in this browser once, then open the link again.</p>'
+    + '<noscript><p>This browser isn’t signed in to Deep Steve. Open <a href="/">Deep Steve</a> '
+    + 'in this browser once, then open the link again.</p></noscript>'
+    + `<script>${LINK_BOUNCE_SCRIPT}</script></body></html>`;
+  function wantsLinkBounce(req) {
+    return req.method === 'GET'
+      && String(req.headers.accept || '').includes('text/html')
+      && LOOPBACK_HOST_SET.has(hostnameOf(req.headers.host))
+      && LINK_PATH_RE.test(String(req.originalUrl || req.url || ''));
+  }
+
   // 4. Token gate — registered as a POSITIONAL middleware before the body-parser and every route
   //    (and before the async-mounted /mcp + mod routes), giving default-deny coverage of current
   //    and future endpoints. Static files are served ahead of this and never reach it.
@@ -381,6 +414,11 @@ function createSecurity(cfg) {
     const why = bearer ? 'invalid bearer token' : cookieTok ? 'invalid auth cookie' : 'no credentials';
     logAuthReject(rejectKey(req.method, req.url, why),
       `Auth: rejected ${req.method} ${req.url} — ${why} (${status})`);
+    if (status === 401 && !bearer && wantsLinkBounce(req)) {
+      res.setHeader('Content-Security-Policy', LINK_BOUNCE_CSP);
+      res.setHeader('Cache-Control', 'no-store');
+      return res.status(401).type('html').send(LINK_BOUNCE_PAGE);
+    }
     if (status === 429) return res.status(429).type('text/plain').send('Too Many Requests');
     return res.status(401).type('text/plain').send('Unauthorized');
   }

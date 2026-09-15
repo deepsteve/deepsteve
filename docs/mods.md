@@ -621,7 +621,7 @@ its own failure, and before #663 the inbox had no way to shed one.
 
 | Kind | Leaves when |
 |---|---|
-| Question (`workshop_ask`) | answered, archived with `e`, or its session has been absent from `ctx.shells` for `EXPIRY_GRACE_MS` (5 min) |
+| Question (`workshop_ask`) | answered, archived with `e`, or its session has been absent from `ctx.shells` for `EXPIRY_GRACE_MS` (5 min). A **durable** question (`durable_days`, #705) skips that sweep: it leaves when answered, archived, or when `durableUntil` passes (`expired`). See [links.md](links.md) |
 | Briefing (`workshop_brief`) | archived with `e` — `⏎` archives it too, since there is nothing to answer |
 | Result (`share_result`) | approved, returned for changes, or archived with `e`. **Never by the dead-session sweep** — see below |
 | Blocked (derived) | the dialog resolves, the session goes, or **`e` mutes it** |
@@ -818,6 +818,7 @@ wearing an image's name.
 | The agent is holding inside `workshop_ask` (`wait_seconds`) | resolve its pending promise | **none** |
 | The agent's turn ended and it is idle at its composer | `deliverPromptWhenReady(…, { source: 'workshop' })` | via the prompt FIFO |
 | The agent is showing a live dialog | raw key writes, 250 ms apart | arrows + `\r` |
+| The asker has gone (a stored question, #705) | the picked option's `then` starts a new session in the project; with no `then`, the answer is recorded for `workshop_answers` | the new session's prompt FIFO, or none |
 
 The third is **not** `submitToShell`: its `confirmEcho` waits for the composer to echo the text,
 and a modal has no composer, so every answer would burn the full cap waiting for an echo that can
@@ -833,6 +834,20 @@ proves this through a real PTY using the `menu` policy in `test/helpers/stubs/fa
 A blocked item is answered **by option only**. Free text is refused with a 400 and a hint to open
 the tab: a permission prompt has no text field, and Escape-then-type would cancel the tool call
 the agent was asking about.
+
+### Decision links (#705)
+
+A stored question has an address. `workshop_ask` returns `url`, which is `/v1/decision/<id>`: it
+opens the question in a plain browser tab and answers it in one click.
+
+The scheme is core (`links.js`), and Workshop registers the provider that says what each item is:
+- a question resolves to `decision`
+- a briefing resolves to the reserved `markdown` type
+- a result resolves to nothing. Approve unlocks a merge, and the panel stays the only place that
+  happens.
+
+The page's answer button calls `answerStored()`, the same function the panel calls. Durable
+questions, `then` follow-ups, Discuss and `workshop_answers` are in [links.md](links.md).
 
 ### It deliberately skips the meta-controls consent gate
 
