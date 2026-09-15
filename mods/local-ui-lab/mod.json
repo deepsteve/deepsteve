@@ -1,0 +1,13 @@
+{
+  "name": "Local UI Lab",
+  "version": "0.1.0",
+  "minDeepsteveVersion": "0.4.0",
+  "description": "Experiment (#706): a small local model, served by Ollama or running in the browser on WebGPU, writes and edits an HTML page while you watch",
+  "experimental": true,
+  "enabledByDefault": false,
+  "entry": "index.html",
+  "app": true,
+  "toolbar": {
+    "label": "Local UI Lab"
+  }
+}

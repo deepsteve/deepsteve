@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Local UI Lab</title>
+  <link rel="stylesheet" href="lab.css">
+</head>
+<body>
+  <div id="lab">
+    <header id="lab-bar">
+      <span id="lab-dot" data-state="idle"></span>
+      <span id="lab-title">Local UI Lab</span>
+      <span id="lab-state">ready</span>
+      <span class="lab-spacer"></span>
+      <label class="lab-field">Model
+        <select id="lab-backend"></select>
+      </label>
+      <label class="lab-field">Mode
+        <select id="lab-mode" title="Auto writes a new page when the preview is empty, and patches it otherwise">
+          <option value="auto">Auto</option>
+          <option value="generate">New page</option>
+          <option value="patch">Edit: patch</option>
+          <option value="rewrite">Edit: rewrite</option>
+        </select>
+      </label>
+      <button id="lab-bench" type="button" title="Run the fixed suite on the selected model">Benchmark</button>
+      <button id="lab-undo" type="button">Undo</button>
+      <button id="lab-stop" type="button">Stop</button>
+      <button id="lab-clear" type="button">Clear</button>
+      <button id="lab-toggle-raw" type="button" title="Show the model's raw output as it streams">Raw</button>
+    </header>
+
+    <main id="lab-stage">
+      <div id="lab-preview-wrap">
+        <iframe id="lab-preview" sandbox="allow-scripts" title="The generated page"></iframe>
+        <div id="lab-empty">
+          <b>LOCAL UI LAB</b>
+          <span>A small model on this machine writes a page while you watch.</span>
+          <span>Describe one below. Once it exists, describe a change.</span>
+        </div>
+      </div>
+      <aside id="lab-raw">
+        <h2>Model output</h2>
+        <pre id="lab-raw-text"></pre>
+      </aside>
+    </main>
+
+    <section id="lab-console">
+      <div id="lab-metrics"></div>
+      <div id="lab-log"></div>
+      <div id="lab-input-wrap">
+        <textarea id="lab-input" rows="1" placeholder="Describe a page, or a change to this one. ⏎ to send, ⇧⏎ for a new line."></textarea>
+        <button id="lab-send" type="button">Send</button>
+      </div>
+    </section>
+  </div>
+  <script type="module" src="boot.js"></script>
+</body>
+</html>
