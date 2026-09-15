@@ -621,7 +621,7 @@ its own failure, and before #663 the inbox had no way to shed one.
 
 | Kind | Leaves when |
 |---|---|
-| Question (`workshop_ask`) | answered, archived with `e`, or its session has been absent from `ctx.shells` for `EXPIRY_GRACE_MS` (5 min). A **durable** question (`durable_days`, #705) skips that sweep: it leaves when answered, archived, or when `durableUntil` passes (`expired`). See [links.md](links.md) |
+| Question (`workshop_ask`) | answered, archived with `e`, **superseded** (below), or its session has been absent from `ctx.shells` for `EXPIRY_GRACE_MS` (5 min). A **durable** question (`durable_days`, #705) skips that sweep: it leaves when answered, archived, superseded, or when `durableUntil` passes (`expired`). See [links.md](links.md) |
 | Briefing (`workshop_brief`) | archived with `e` — `⏎` archives it too, since there is nothing to answer |
 | Result (`share_result`) | approved, returned for changes, or archived with `e`. **Never by the dead-session sweep** — see below |
 | Blocked (derived) | the dialog resolves, the session goes, or **`e` mutes it** |
@@ -631,6 +631,63 @@ and a session that comes back inside the grace clears it. `ctx.shells` is briefl
 the daemon's own boot, before sessions are restored, so an eager sweep would dismiss the whole
 inbox on every restart. `BOOT_GRACE_MS` in `tools.js` skips the sweep entirely until either a
 session shows up or a minute has passed.
+
+### Superseded questions (#710)
+
+A stored question is dismissed with reason `superseded`, and `supersededBy: { rule, at }`, once the
+daemon can see that something replaced it. That judgement is made from facts the daemon holds.
+It never depends on the asking agent, which may have been killed or closed by then.
+
+**Rule 1 (`tab-reply`): a person sent the asking session something after `createdAt`.**
+
+*What sets the stamp.* The signal is `lastHumanInputAt` on the session entry. `serializeShellEntry`
+persists it, so it survives a restart and is carried onto the closed record. Two things set it:
+- **A line submitted in the tab.** server.js calls observers registered with
+  `ctx.registerSubmitKeyObserver(name, fn)` when a WebSocket payload carries Enter
+  (`hasSubmitKey()` in `terminal-input.js`). The call comes after the terminal-report and
+  `inputBlocked` drops and before the PTY write. The observer gets the session, never the bytes.
+  Workshop ignores that Enter if its dialog detector (`scrapeFor().detected`) shows a permission
+  or AskUserQuestion dialog, because that Enter answers the dialog.
+- **A Workshop chat-pane or idle-row prompt.** It is stamped with the time it was sent, from its
+  `onDeliver`, so a prompt dropped before delivery replaces nothing.
+
+*What does not count.* Scheduled-task prompts, `initialPrompt`/`issue` messages, `meta_type`, and
+Workshop's own dialog key presses never reach either path. Neither does answering a stored question
+from the inbox or its link: that goes through `answerStored()`, which knows which item it closed.
+
+*When it is checked.* A stamp is written, and settled at once, only while the session has an open
+question older than it. Typing in an ordinary tab costs one inbox scan and no state write.
+
+*Known limits.*
+- An Enter on an empty composer counts.
+- `dialog-parse.js` knows Claude Code's dialogs only, so a Codex approval prompt answered with
+  Enter reads as a reply.
+- A fork has its own session id and never supersedes its parent's questions.
+- The stamp is lost by `?forget=1`, closed-session retention and a recents restore. That matters
+  only if nothing settled the question first.
+
+**Rule 2 (`later-run`): a later run of the same scheduled task succeeded.**
+- The run has to have **started** after the asking run, and ended `succeeded`.
+- The asking run's start is captured at ask time as `scheduledRunStartedAt`. It is read from
+  `taskSnapshot()`, which scheduled-tasks exports for this.
+- A failed, timed-out, queued or running run supersedes nothing.
+- Neither does a one-time, disabled or deleted task: its `then` may still be wanted.
+
+**Every reader computes it.** `inbox.supersession()` runs the way `isExpired` does, so the verdict
+is right on a machine where no panel has polled.
+- These readers also record it through `settleSuperseded()`: the list route, `answerStored`,
+  `workshop_check`, `workshop_answers` and `workshop_ask`. The list route runs it before the
+  dead-session sweep and without the boot gate.
+- The decision link's GET only computes. A recorded verdict is final, because its facts are not:
+  a task keeps 20 runs, and closed records are pruned.
+
+**What a superseded question does.**
+- It leaves the inbox. `all=1` carries a `closedNote`.
+- Its answer endpoint returns 409 `superseded` with a `hint`. No `then` ever runs.
+- `workshop_check` says why. `workshop_answers` never listed it, because it lists only answered
+  questions.
+- A `wait_seconds` hold on it is released at once.
+- Results and briefings are never superseded.
 
 **`e` on a blocked row is a mute, not a dismissal.** Nothing is written, no tombstone is minted,
 and the dialog is left exactly as it stands — Escape *is* a decision and Workshop still never makes

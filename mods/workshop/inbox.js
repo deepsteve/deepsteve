@@ -236,6 +236,12 @@ function makeItem(fields = {}, { id, now = Date.now() } = {}) {
     // #705: the scheduled task whose run asked, derived server-side from the calling
     // session — never named by the agent. What workshop_answers groups a job's answers by.
     scheduledTaskId: fields.scheduledTaskId || null,
+    // #710: when the asking run started, read off the task's run history at ask time. It is
+    // the lower bound of "a later run replaced this question", and the run history only keeps
+    // the last 20 runs, so it has to be captured while the asking run is still in it.
+    scheduledRunStartedAt: fields.scheduledTaskId && Number.isFinite(fields.scheduledRunStartedAt)
+      ? fields.scheduledRunStartedAt
+      : null,
     urgency,
     headline: clampText(fields.headline, MAX_HEADLINE).trim(),
     context: clampText(fields.context, MAX_CONTEXT),
@@ -261,6 +267,8 @@ function makeItem(fields = {}, { id, now = Date.now() } = {}) {
     // #705: the session an option's `then` started, when the asker had already gone.
     followUpSessionId: null,
     dismissedReason: null,
+    // #710: { rule, at } — what replaced this question, once a sweep has recorded it.
+    supersededBy: null,
     missingSince: null,
   };
 }
@@ -275,17 +283,82 @@ function isExpired(item, now = Date.now()) {
 }
 
 /**
+ * Has something replaced this question (#710)? null, or `{ rule, at }` where `at` is when.
+ *
+ * Computed on every read for isExpired's reason, and derived only from facts the daemon holds.
+ * By the time a question stops mattering the agent that asked it may have been killed, crashed
+ * or closed, so nothing here can wait for that agent to say so. The facts arrive as callbacks,
+ * the way isAlive does, because this file never sees ctx:
+ *
+ *   humanInputAt(sessionId)  when a person last sent that session something (a line submitted
+ *                            at its prompt, or a Workshop chat or idle-row prompt), or null
+ *   task(taskId)             a scheduled task's { enabled, once, deleted, runs }, or null
+ *
+ * 'tab-reply': a person sent the asking session something after the question was asked.
+ * Deliberately blunt: "wait, check X first" counts too, because whoever is in the tab talking to
+ * the agent has made the inbox copy the stale one.
+ *
+ * 'later-run': a run of the same scheduled task that STARTED after the asking run has ENDED
+ * `succeeded`. That run had its chance to read the answers and ask again. A failed, timed-out,
+ * queued or running run supersedes nothing (a crashed run must not take yesterday's question
+ * down with it), and neither does a one-time, disabled or deleted task, whose `then` may still
+ * be wanted.
+ *
+ * Questions only: a result gates a merge, and a briefing has nothing to answer.
+ */
+function supersession(item, facts) {
+  if (!item || item.kind !== 'question' || item.status !== 'open' || !facts) return null;
+  const found = [];
+
+  const replied = item.sessionId && typeof facts.humanInputAt === 'function'
+    ? facts.humanInputAt(item.sessionId)
+    : null;
+  // Strictly after. Both clocks are the daemon's, and a line typed before the question existed
+  // was not a reply to it.
+  if (Number.isFinite(replied) && replied > item.createdAt) found.push({ rule: 'tab-reply', at: replied });
+
+  const task = item.scheduledTaskId && typeof facts.task === 'function' ? facts.task(item.scheduledTaskId) : null;
+  if (task && !task.deleted && task.enabled !== false && !task.once && Array.isArray(task.runs)) {
+    const asking = item.sessionId ? task.runs.find((r) => r && r.sessionId === item.sessionId) : null;
+    const since = item.scheduledRunStartedAt || (asking && asking.startedAt) || item.createdAt;
+    let at = null;
+    for (const run of task.runs) {
+      if (!run || run.status !== 'succeeded' || !Number.isFinite(run.endedAt)) continue;
+      if (item.sessionId && run.sessionId === item.sessionId) continue;
+      if (!(run.startedAt > since)) continue;
+      if (at === null || run.endedAt < at) at = run.endedAt;
+    }
+    if (at !== null) found.push({ rule: 'later-run', at });
+  }
+
+  if (!found.length) return null;
+  return found.reduce((a, b) => (b.at < a.at ? b : a));
+}
+
+/** Why a question was superseded, as one sentence (#710). ISO time: agents and logs read it. */
+function supersededNote(sup) {
+  if (!sup) return '';
+  const at = Number.isFinite(sup.at) ? new Date(sup.at).toISOString() : 'an unknown time';
+  return sup.rule === 'later-run'
+    ? `A later run of the same scheduled task finished successfully at ${at}.`
+    : `A person replied in the asking session at ${at}, after this was asked.`;
+}
+
+/**
  * Record a human's answer on an item. Returns a status string rather than throwing,
  * so the REST layer can map it to a code and the caller can say something useful.
  *
  * 'not-open' is the two-browsers race: first writer wins, mirroring
- * /api/meta-controls-consent's { stale: true }.
+ * /api/meta-controls-consent's { stale: true }. A question something replaced (#710) says
+ * 'superseded' instead, whether or not a sweep has recorded it yet — `facts` is what lets
+ * this see the unrecorded case, and without it only the recorded one is refused.
  */
-function applyAnswer(item, { text, optionIndex } = {}, now = Date.now()) {
+function applyAnswer(item, { text, optionIndex } = {}, now = Date.now(), facts = null) {
   if (!item) return 'not-found';
   if (item.kind === 'briefing') return 'not-answerable';
-  if (item.status !== 'open') return 'not-open';
+  if (item.status !== 'open') return item.dismissedReason === 'superseded' ? 'superseded' : 'not-open';
   if (isExpired(item, now)) return 'expired';
+  if (supersession(item, facts)) return 'superseded';
 
   const body = typeof text === 'string' ? text.trim() : '';
   const hasIndex = optionIndex !== undefined && optionIndex !== null && optionIndex !== '';
@@ -399,6 +472,28 @@ function sweepDeadSessions(items, isAlive, now = Date.now(), graceMs = EXPIRY_GR
     }
   }
   return changed;
+}
+
+/**
+ * Record what supersession() computes (#710): dismiss every open question something has
+ * replaced, with reason 'superseded' and the rule that fired. Returns the items it dismissed,
+ * so the caller can release a hold on each and saves only on a real change.
+ *
+ * No reader waits for this; each one computes supersession() itself. But a recorded verdict
+ * is final, and the facts behind it are not: a task keeps only its last 20 runs, and a closed
+ * session's record is pruned by retention.
+ */
+function sweepSuperseded(items, facts, now = Date.now()) {
+  if (!Array.isArray(items)) return [];
+  const dismissed = [];
+  for (const item of items) {
+    const sup = supersession(item, facts);
+    if (!sup) continue;
+    applyDismiss(item, 'superseded', now);
+    item.supersededBy = sup;
+    dismissed.push(item);
+  }
+  return dismissed;
 }
 
 /**
@@ -568,10 +663,13 @@ module.exports = {
   resultOptionsFor,
   makeItem,
   isExpired,
+  supersession,
+  supersededNote,
   applyAnswer,
   applyDismiss,
   retain,
   sweepDeadSessions,
+  sweepSuperseded,
   compareItems,
   sortForInbox,
   // store

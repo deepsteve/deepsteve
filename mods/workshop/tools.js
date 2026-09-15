@@ -98,7 +98,8 @@
 const fs = require('fs');
 const { execFile, execFileSync } = require('child_process');
 const { z } = require('zod');
-// The one cross-mod require in this file (#682, retargeted by #688). session-merge.js is
+// A cross-mod require (#682, retargeted by #688). The only other one is scheduledTask()'s
+// lazy read of scheduled-tasks' run history (#710). session-merge.js is
 // a pure library — it takes `git` and `gh` runners and returns a status — with no ctx, no
 // shells and no MCP, and it encodes the merge semantics the bench must not have a second
 // opinion about: commit what is uncommitted, refuse on a dirty target, abort on conflict,
@@ -343,6 +344,104 @@ function callerFields(extra) {
   };
 }
 
+// ── superseded questions (#710) ──────────────────────────────────────────────
+//
+// A stored question stays open until something closes it. What nothing used to notice is a
+// question that had stopped being the current one: you answered in the tab instead, or the
+// next run of the same scheduled task already did its job. inbox.supersession() decides;
+// this section gathers the facts it decides from and records its verdicts. Every fact is the
+// daemon's own. None depends on the asking agent, which may be long gone by then.
+
+/** A read-only copy of a scheduled task's run history, or null. */
+function scheduledTask(taskId) {
+  if (!taskId) return null;
+  try {
+    // Lazy, and the same module instance the mod loader already holds, so this reads the
+    // live run history. Never throws: a Workshop read must not fail because of another mod.
+    return require('../scheduled-tasks/tools.js').taskSnapshot(taskId);
+  } catch {
+    return null;
+  }
+}
+
+/** When the calling scheduled run started, while its row is certainly still in the history. */
+function askingRunStartedAt(caller) {
+  const task = scheduledTask(caller.scheduledTaskId);
+  const run = task && caller.sessionId ? task.runs.find((r) => r.sessionId === caller.sessionId) : null;
+  return (run && run.startedAt) || null;
+}
+
+/** What supersession() decides from. Build one per pass, so each task is copied once. */
+function supersedeFacts() {
+  const tasks = new Map();
+  return {
+    // The live entry, else the saved record: that is how a reply made just before the session
+    // closed, or just before a restart, still counts once the entry is gone.
+    humanInputAt: (sid) => {
+      const entry = ctx.shells.get(sid) || (ctx.getSavedSession ? ctx.getSavedSession(sid) : null);
+      return (entry && entry.lastHumanInputAt) || null;
+    },
+    task: (taskId) => {
+      if (!tasks.has(taskId)) tasks.set(taskId, scheduledTask(taskId));
+      return tasks.get(taskId);
+    },
+  };
+}
+
+/**
+ * Record every supersession the facts support, and release any agent holding in workshop_ask on
+ * one of them — a `wait_seconds` hold ends the moment its question is replaced. Returns how
+ * many questions it closed.
+ */
+function settleSuperseded(now = Date.now()) {
+  const dismissed = inbox.sweepSuperseded(inbox.all(), supersedeFacts(), now);
+  for (const item of dismissed) {
+    inbox.releaseWait(item.id, null);
+    ctx.log(`[workshop] superseded ${item.id} rule=${item.supersededBy.rule} at=${new Date(item.supersededBy.at).toISOString()}`);
+  }
+  if (dismissed.length) inbox.save();
+  return dismissed.length;
+}
+
+/** Does this session have an open question asked before `at`? Only those can be superseded by it. */
+function hasOpenQuestionBefore(sessionId, at) {
+  return !!sessionId && inbox.all().some((i) =>
+    i.kind === 'question' && i.status === 'open' && i.sessionId === sessionId && i.createdAt < at);
+}
+
+/**
+ * A person sent this session something at `at`. Stamped on the session entry, where
+ * serializeShellEntry carries it into state.json and onto the closed record, and settled at once.
+ *
+ * Only when it can matter. A stamp supersedes questions asked before it, so with none open
+ * there is nothing to record, and typing in an ordinary tab costs one scan of the inbox and
+ * never a state write.
+ */
+function recordHumanInput(sessionId, at) {
+  if (!hasOpenQuestionBefore(sessionId, at)) return false;
+  const entry = ctx.shells.get(sessionId);
+  if (!entry) return false;
+  entry.lastHumanInputAt = Math.max(entry.lastHumanInputAt || 0, at);
+  settleSuperseded();
+  if (ctx.saveState) ctx.saveState();
+  return true;
+}
+
+/**
+ * server.js calls this when a person submits a line in a session tab.
+ *
+ * An Enter on a permission or AskUserQuestion dialog answers the dialog, not the conversation,
+ * so it is not a reply. That is read the way derived blocked rows read it, off the screen as it
+ * stands before the key reaches the PTY. Workshop's own dialog answers never arrive here: they
+ * are written straight to the engine, not sent over the tab's socket.
+ */
+function onSubmitKey(sessionId, entry) {
+  const now = Date.now();
+  if (!entry || !hasOpenQuestionBefore(sessionId, now)) return;
+  if (scrapeFor(sessionId, entry, now).detected) return;
+  recordHumanInput(sessionId, now);
+}
+
 // ── backlog: the project's open issues (#671) ────────────────────────────────
 
 const issueCache = backlog.createCache({ ttlMs: backlog.BACKLOG_TTL_MS });
@@ -555,6 +654,8 @@ function serializeStored(item) {
     pendingPath: pendingPathFor(item),
     sessionAlive: !!entry,
     answerable: item.kind !== 'briefing' && item.status === 'open',
+    // #710: why a superseded question closed, for the archive (`all=1`).
+    closedNote: item.supersededBy ? inbox.supersededNote(item.supersededBy) : null,
     // The session verbs (#682), on every row that has a live session behind it — not
     // just the derived idle ones. A question from an agent that has since finished its
     // work is exactly as closable as any other, and the panel cannot work either of
@@ -1255,6 +1356,11 @@ function resultHeadline(summary) {
 
 function init(context) {
   ctx = context;
+  // #710: a line a person submits in a tab supersedes the questions that session asked. Guarded
+  // like the link registry below, for a context that has no such hook.
+  if (typeof ctx.registerSubmitKeyObserver === 'function') {
+    ctx.registerSubmitKeyObserver('workshop', onSubmitKey);
+  }
   // #705: what `/v1/<type>/w<n>` means. Guarded, so a context without the link registry (an
   // older fake ctx in a test) still loads every tool.
   if (ctx.links && typeof ctx.links.registerProvider === 'function') {
@@ -1292,6 +1398,8 @@ function init(context) {
         durable_days: z.number().int().min(0).max(inbox.MAX_DURABLE_DAYS).optional().describe(`Keep the question open after this session closes, for up to N days (1-${inbox.MAX_DURABLE_DAYS}); after that it expires unanswered. 0 or omitted: it is archived a few minutes after this session goes.`),
       },
       handler: async (args, extra) => {
+        // #710: before the count, so a question something already replaced doesn't hold a slot.
+        settleSuperseded();
         if (inbox.openCount() >= inbox.MAX_OPEN) {
           return text(
             `The Workshop inbox already has ${inbox.MAX_OPEN} unanswered items, so this question `
@@ -1300,9 +1408,12 @@ function init(context) {
           );
         }
 
+        const caller = callerFields(extra);
         const item = inbox.add({
           kind: 'question',
-          ...callerFields(extra),
+          ...caller,
+          // #710: the lower bound of "a later run of this task replaced the question".
+          scheduledRunStartedAt: askingRunStartedAt(caller),
           urgency: args.urgency,
           headline: args.question,
           context: args.context,
@@ -1331,6 +1442,13 @@ function init(context) {
         // #705: the link is what an email carries. Absolute, on the canonical browser origin,
         // because it is opened from outside Deep Steve.
         const url = typeof ctx.linkUrl === 'function' ? ctx.linkUrl('decision', item.id) : null;
+        // #710: the hold was released because something replaced the question while it waited —
+        // a person replied in this session instead. Same keys; only what the agent is told differs.
+        if (item.supersededBy) {
+          const superseded = `Question ${item.id} is no longer open: ${inbox.supersededNote(item.supersededBy)} `
+            + 'Do not wait on it. End your turn; whatever the person sent arrives as a new message.';
+          return text(JSON.stringify({ id: item.id, url, message: superseded }, null, 2));
+        }
         const message = `Question ${item.id} is on the Workshop inbox. The answer will arrive as a new `
           + 'message — end your turn now rather than polling.'
           + (item.durableUntil
@@ -1584,10 +1702,17 @@ function init(context) {
         if (!id) {
           return text(`"${rawId}" is not a Workshop item id. Use the id workshop_ask or share_result returned.`);
         }
+        // #710: record any supersession first, so the answer below reflects it even when no panel
+        // has polled.
+        settleSuperseded();
         const item = inbox.byId(id);
         if (!item) return text(`There is no Workshop item ${id}.`);
         const isResult = item.kind === 'result';
 
+        if (item.status === 'dismissed' && item.supersededBy) {
+          return text(`Question ${item.id} was superseded: ${inbox.supersededNote(item.supersededBy)} `
+            + 'It can no longer be answered. Do not wait on it.');
+        }
         if (item.status === 'dismissed') {
           const why = item.dismissedReason ? ` (${item.dismissedReason})` : '';
           return text(isResult
@@ -1626,6 +1751,9 @@ function init(context) {
       },
       handler: async ({ since } = {}, extra) => {
         const LIMIT = 50;
+        // #710: a superseded question was never answered, so the filter below already leaves
+        // it out. Settling here only records the verdict while its facts still exist.
+        settleSuperseded();
         let sinceMs = null;
         if (since != null && String(since).trim()) {
           sinceMs = Date.parse(String(since).trim());
@@ -1810,6 +1938,12 @@ function registerRoutes(app, context) {
   app.get('/api/workshop/inbox', (req, res) => {
     const now = Date.now();
     const stored = inbox.all();
+
+    // #710. Not gated on boot like the sweep below, because its facts include saved session
+    // records as well as live shells, so an empty ctx.shells cannot make it wrong. And it runs
+    // first, so a question you replied to before its tab closed reads as superseded, not
+    // session-gone.
+    settleSuperseded(now);
 
     // Skip the sweep entirely while ctx.shells might still be filling up after boot,
     // or every restart dismisses the whole inbox.
@@ -2252,6 +2386,10 @@ function registerRoutes(app, context) {
     const onStorePath = !transcriptFor(entry);
     const stored = onStorePath ? chatStore.append(sessionId, { role: 'human', text: body }) : null;
 
+    // #710: a person sending this session a message supersedes the questions it asked before
+    // that moment. Stamped with when they SENT it, but only once it is delivered, so a message
+    // dropped because the session went away first replaces nothing.
+    const sentAt = Date.now();
     // The FIFO, never submitToShell and never e.pendingDelivery — the queue is what
     // sequences this behind whatever the agent is already mid-way through, which is the
     // whole difference between asking a question and interrupting one.
@@ -2259,7 +2397,10 @@ function registerRoutes(app, context) {
       source: 'workshop-chat',
       skipIf: (sid) => !ctx.shells.has(sid),
       skipReason: 'session gone before the Workshop chat message could be delivered',
-      onDeliver: (sid) => ctx.log(`[workshop] chat -> ${sid} ${body.length}ch`),
+      onDeliver: (sid) => {
+        ctx.log(`[workshop] chat -> ${sid} ${body.length}ch`);
+        recordHumanInput(sid, sentAt);
+      },
     });
     // Length, never content — the same rule the answer log follows.
     ctx.log(`[workshop] chat queued session=${sessionId} ${body.length}ch path=${onStorePath ? 'store' : 'transcript'}`);
@@ -2310,11 +2451,15 @@ function decisionView(item) {
   const out = {};
   for (const k of DECISION_FIELDS) out[k] = item[k] === undefined ? null : item[k];
   out.sessionAlive = !!(item.sessionId && ctx.shells.has(item.sessionId));
+  // #710: computed, never swept, because the page is a GET. A recorded verdict wins; otherwise
+  // the page works it out from the facts, so a question replaced on a machine where nothing has
+  // settled it yet still refuses to show its buttons.
+  out.supersededBy = item.supersededBy || inbox.supersession(item, supersedeFacts());
   out.postUrl = `/${links.LINK_VERSION}/decision/${encodeURIComponent(item.id)}`;
   return out;
 }
 
-/** GET. Writes nothing — an expired question is computed as expired, never swept here. */
+/** GET. Writes nothing. An expired or superseded question is computed as such here, never swept. */
 function renderDecisionPage(res, item) {
   const title = 'Decision';
   res.status(200).type('html').send(
@@ -2487,12 +2632,22 @@ function answerStored(res, id, body) {
   const item = inbox.byId(id);
   if (!item) return res.status(404).json({ error: 'not-found' });
 
-  const status = inbox.applyAnswer(item, { text: body.text, optionIndex: body.optionIndex });
+  const status = inbox.applyAnswer(
+    item, { text: body.text, optionIndex: body.optionIndex }, Date.now(), supersedeFacts(),
+  );
   if (status !== 'ok') {
-    // 409 for the two-browsers race and for a durable question whose time ran out (#705) —
-    // both mean "this can no longer take an answer" — and 400 for a malformed one.
-    return res.status(status === 'not-open' || status === 'expired' ? 409 : 400)
-      .json({ error: status, item: serializeStored(item) });
+    // #710: record the supersession this refusal is about, so the page and the panel redraw
+    // from the stored verdict. A POST may write; only a link's GET may not.
+    if (status === 'superseded' && item.status === 'open') settleSuperseded();
+    // 409 for the two-browsers race, for a durable question whose time ran out (#705), and for
+    // one something replaced (#710). All three mean "this can no longer take an answer". 400 is
+    // for a malformed one.
+    const refused = status === 'not-open' || status === 'expired' || status === 'superseded';
+    const hint = status === 'superseded' && item.supersededBy
+      ? `${inbox.supersededNote(item.supersededBy)} It can no longer be answered.`
+      : null;
+    return res.status(refused ? 409 : 400)
+      .json({ error: status, ...(hint ? { hint } : {}), item: serializeStored(item) });
   }
 
   const isResult = item.kind === 'result';
@@ -2699,7 +2854,13 @@ function answerIdle(res, sessionId, body) {
     });
   }
 
-  ctx.deliverPromptWhenReady(sessionId, text, { source: 'workshop-bench' });
+  // #710: the chat pane's rule. A person's prompt supersedes the questions asked before it was
+  // sent, once it is actually delivered.
+  const sentAt = Date.now();
+  ctx.deliverPromptWhenReady(sessionId, text, {
+    source: 'workshop-bench',
+    onDeliver: (sid) => recordHumanInput(sid, sentAt),
+  });
   // The row is about to stop being true, and the panel should not have to wait a poll
   // to find that out: a delivered prompt makes the session busy, which is the one
   // state idleRowFor refuses. Dropping the snooze keeps a stale one from suppressing

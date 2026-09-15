@@ -376,3 +376,59 @@ test('Discuss on the closed asker asks a window to restore it', async () => {
   assert.strictEqual(r.json.sessionId, asker);
   assert.strictEqual(r.json.tabDelivery, 'queued', 'no browser is connected, so it waits for one');
 });
+
+test('a line a person submits in the asking tab supersedes its question, and the link stops offering the then (#710)', async () => {
+  // The unit tests call Workshop's observer directly. This is the part only a daemon has: a
+  // person's Enter arriving on the session WebSocket, server.js recognising it as a submit key
+  // and handing it to the observer the mod registered, before the key reaches the PTY.
+  const c = new Client();
+  clients.push(c);
+  const s = await c.connect({ cwd: projDir, new: '1', agentType: 'claude' });
+  await waitFor(() => events(s.id).some((e) => e.event === 'boot'), 'the asking session to boot');
+
+  const mcp = await mcpFor(s.id);
+  const asked = JSON.parse(toolText(await mcp.callTool({
+    name: 'workshop_ask',
+    arguments: {
+      question: 'Send the report as CSV?',
+      options: [{ label: 'Yes', then: 'Send the CSV report.' }, { label: 'No' }],
+      durable_days: 2,
+    },
+  })));
+  const listed = async () => {
+    const all = await (await fetch(`${BASE}/api/workshop/inbox?all=1`, { headers: authHeaders() })).json();
+    return all.items.find((i) => i.id === asked.id);
+  };
+  assert.strictEqual((await listed()).status, 'open');
+
+  // Typed the way xterm sends it: the characters, then Enter as its own payload.
+  c.ws.send('no, send JSON instead');
+  await waitFor(
+    () => readJsonl(path.join(LOGS, `${s.id}.stdin.jsonl`)).some((e) => (e.text || '').includes('send JSON')),
+    'the typed characters to reach the session',
+  );
+  c.ws.send('\r');
+  await waitFor(
+    () => events(s.id).some((e) => e.event === 'submit' && e.text.includes('send JSON')),
+    'the reply to be submitted to the agent, like any line typed in a tab',
+  );
+
+  const item = await waitFor(async () => {
+    const it = await listed();
+    return it && it.status === 'dismissed' ? it : null;
+  }, 'the question to be superseded by the reply in its tab');
+  assert.strictEqual(item.dismissedReason, 'superseded');
+  assert.strictEqual(item.supersededBy.rule, 'tab-reply');
+  assert.match(item.closedNote, /replied in the asking session/);
+  assert.match(daemonLog, new RegExp(`\\[workshop\\] superseded ${asked.id} rule=tab-reply`));
+  // Written through serializeShellEntry, so a restart or the session closing keeps it.
+  const state = JSON.parse(fs.readFileSync(path.join(HOME, '.deepsteve', 'state.json'), 'utf8'));
+  assert.strictEqual(state[s.id].lastHumanInputAt, item.supersededBy.at, 'the stamp is persisted with the session');
+
+  const shown = await page(`/v1/decision/${asked.id}`);
+  assert.match(shown.text, /"supersededBy":\{"rule":"tab-reply"/, 'the page is handed why');
+  const r = await act(asked.id, { action: 'answer', optionIndex: 0 });
+  assert.strictEqual(r.status, 409, r.text);
+  assert.strictEqual(r.json.error, 'superseded');
+  assert.ok(!daemonLog.includes(`workshop then ${asked.id}`), 'the option\'s then never ran');
+});

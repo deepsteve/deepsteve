@@ -275,6 +275,29 @@ function findRunByShell(shellId) {
   return null;
 }
 
+// A read-only copy of one task's run history, for Workshop (#710): a question a scheduled run
+// asked is superseded once a later run of the same task has succeeded. The full `tasks`,
+// tombstones included, so the caller can see a deleted task for what it is; and never ctx,
+// because Workshop requires this module directly and nothing may have called init() yet.
+// Copies, so no caller can write a run record through it.
+function taskSnapshot(taskId) {
+  if (!taskId) return null;
+  const task = tasks.find(t => t.id === taskId);
+  if (!task) return null;
+  return {
+    id: task.id,
+    enabled: task.enabled !== false,
+    once: !!task.once,
+    deleted: !!task.deleted,
+    runs: (task.runs || []).map(r => ({
+      sessionId: r.sessionId || null,
+      startedAt: r.startedAt || null,
+      endedAt: r.endedAt || null,
+      status: r.status || null,
+    })),
+  };
+}
+
 // The previous run still occupying this task, or null. A run that has self-reported
 // terminal (succeeded/failed) no longer blocks the next fire, even though its idle
 // tab may still be alive. Shared by runTask's overlap guard and the Run-now route,
@@ -1429,4 +1452,4 @@ function registerRoutes(app, context) {
 
 // The mod loader only uses init/registerRoutes; the extra named exports are for
 // unit tests (test/unit/scheduled-worktree.test.js).
-module.exports = { init, registerRoutes, cleanupWorktree, isGitRepo, scheduledRunPrompt, worktreeContract, enforceRunTimeouts, CONTRACT_TOOLS, purgeTombstonedTasks, TOMBSTONE_TTL_MS, buildRunHistory, disambiguate };
+module.exports = { init, registerRoutes, cleanupWorktree, isGitRepo, scheduledRunPrompt, worktreeContract, enforceRunTimeouts, CONTRACT_TOOLS, purgeTombstonedTasks, TOMBSTONE_TTL_MS, buildRunHistory, disambiguate, taskSnapshot };
