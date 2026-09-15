@@ -1086,9 +1086,10 @@ test('which project you are in stays per-window', async () => {
 });
 
 // ------------------------------------------- the built-in Deep Steve project (#696)
-// A server-seeded project the rail treats slightly differently: its Archive item is
-// worded as Hide/Show, it has no Delete, the section header and the "All" row both offer
-// its hide/show, and opening it for the first time asks the server for a welcome tab.
+// A server-seeded project the rail treats slightly differently: it archives with the same
+// Archive/Unarchive wording as any project (#709) but has no Delete, the section header and
+// the "All" row both offer "Archive <name>", and opening it for the first time asks the
+// server for a welcome tab.
 //
 // Every context here is a literal rather than the shared CTX_A/CTX_B: archiveContext()
 // mutates the object it is handed, and by this point in the file CTX_B carries
@@ -1119,14 +1120,14 @@ async function captureFetches(fn) {
   return calls;
 }
 
-test('the built-in project says Hide, not Archive, and offers no Delete (#696)', async () => {
+test('the built-in project says Archive like any other, and offers no Delete (#696, #709)', async () => {
   const { rail, toggle } = await setup({ contexts: builtinContexts() });
   toggle.listeners.click(); // open the rail so the rows exist
 
   const labels = rowMenuFor(rail, 'Deep Steve').children.map(i => i.textContent);
-  assert.ok(labels.includes('Hide Deep Steve'),
-    `expected a Hide item, got ${JSON.stringify(labels)}`);
-  assert.ok(!labels.includes('Archive'), 'the generic wording is replaced, not added to');
+  assert.ok(labels.includes('Archive'),
+    `expected an Archive item, got ${JSON.stringify(labels)}`);
+  assert.ok(!labels.includes('Hide Deep Steve'), 'no wording of its own (#709)');
   assert.ok(!labels.includes('Delete'),
     'the built-in is re-seeded at load, so a delete would come back and read as a bug');
 });
@@ -1140,7 +1141,7 @@ test('an ordinary project keeps Archive and Delete (#696)', async () => {
   assert.ok(labels.includes('Delete'));
 });
 
-test('a hidden built-in offers Show, from its row in the Archived section (#696)', async () => {
+test('an archived built-in offers Unarchive, from its row in the Archived section (#696, #709)', async () => {
   const { rail, toggle } = await setup({ contexts: builtinContexts({ archived: true }) });
   toggle.listeners.click();
 
@@ -1149,42 +1150,42 @@ test('a hidden built-in offers Show, from its row in the Archived section (#696)
   const archived = railChildren(rail, 'context-archived-list')[0];
   const row = archived.children
     .find(r => r.children.find(c => c.className === 'context-row-label')?.textContent === 'Deep Steve');
-  assert.ok(row, 'the hidden built-in is listed under Archived');
+  assert.ok(row, 'the archived built-in is listed under Archived');
 
   row.listeners.contextmenu({ preventDefault: () => {}, clientX: 0, clientY: 0 });
   const menu = createdEls.filter(el => el.className.includes('context-row-menu')).pop();
-  assert.ok(menu.children.some(i => i.textContent === 'Show Deep Steve'));
+  assert.ok(menu.children.some(i => i.textContent === 'Unarchive'));
 });
 
-test('renaming the built-in carries the wording with it (#696)', async () => {
+test('renaming the built-in keeps it built-in (#696)', async () => {
   // `builtin` is the flag, never the name or the id — the name is editable, and renaming
-  // it must not demote the project back to an ordinary one.
+  // it must not demote the project back to an ordinary one. The header menu is where the
+  // name appears in a label; the row still offers no Delete.
   const { rail, toggle } = await setup({ contexts: builtinContexts({ name: 'DS trunk' }) });
   toggle.listeners.click();
 
-  const labels = rowMenuFor(rail, 'DS trunk').children.map(i => i.textContent);
-  assert.ok(labels.includes('Hide DS trunk'));
-  assert.ok(!labels.includes('Delete'));
+  assert.ok(headerMenuFor(rail).children.map(i => i.textContent).includes('Archive DS trunk'));
+  assert.ok(!rowMenuFor(rail, 'DS trunk').children.map(i => i.textContent).includes('Delete'));
 });
 
-test('the Projects header right-click offers New project and Hide (#696)', async () => {
+test('the Projects header right-click offers New project and Archive (#696, #709)', async () => {
   const { rail, toggle } = await setup({ contexts: builtinContexts() });
   toggle.listeners.click();
 
   const labels = headerMenuFor(rail).children.map(i => i.textContent);
   assert.ok(labels.includes('New project'));
-  assert.ok(labels.includes('Hide Deep Steve'));
+  assert.ok(labels.includes('Archive Deep Steve'));
 });
 
-test('the header reads Show once the built-in is hidden (#696)', async () => {
-  // The affordance that matters: with the built-in hidden and the Archived disclosure
+test('the header reads Unarchive once the built-in is archived (#696, #709)', async () => {
+  // The affordance that matters: with the built-in archived and the Archived disclosure
   // collapsed, the header is the one place its row can be brought back from.
   const { rail, toggle } = await setup({ contexts: builtinContexts({ archived: true }) });
   toggle.listeners.click();
 
   const labels = headerMenuFor(rail).children.map(i => i.textContent);
-  assert.ok(labels.includes('Show Deep Steve'));
-  assert.ok(!labels.includes('Hide Deep Steve'));
+  assert.ok(labels.includes('Unarchive Deep Steve'));
+  assert.ok(!labels.includes('Archive Deep Steve'));
 });
 
 test('the header and the All row carry the same items (#696)', async () => {
@@ -1203,17 +1204,17 @@ test('with no built-in project, neither menu invents one (#696)', async () => {
   assert.deepStrictEqual(headerMenuFor(rail).children.map(i => i.textContent), ['New project']);
 });
 
-test('the header menu hides the built-in through the shared archive route (#696)', async () => {
+test('the header menu archives the built-in through the shared archive route (#696)', async () => {
   const { rail, toggle } = await setup({ contexts: builtinContexts() });
   toggle.listeners.click();
 
   const calls = await captureFetches(async () => {
-    const hide = headerMenuFor(rail).children.find(i => i.textContent === 'Hide Deep Steve');
-    hide.onclick();
+    const archive = headerMenuFor(rail).children.find(i => i.textContent === 'Archive Deep Steve');
+    archive.onclick();
   });
 
   const post = calls.find(c => String(c.url).includes('/archive'));
-  assert.ok(post, 'hiding is archiving — no second mechanism');
+  assert.ok(post, 'one archive route — no second mechanism');
   assert.strictEqual(post.url, '/api/contexts/deepsteve/archive');
   assert.deepStrictEqual(JSON.parse(post.opts.body), { archived: true });
 });

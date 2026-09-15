@@ -3683,7 +3683,7 @@ function loadContexts() {
 
 // --- The built-in Deep Steve project (#696) --------------------------------
 // The one project every install has by definition: the place you open a tab to change
-// DeepSteve itself. Present in the rail out of the box, hideable, and not deletable —
+// DeepSteve itself. Present in the rail out of the box, archivable, and not deletable —
 // which is what makes seeding idempotent with no marker file and no extra setting.
 const DEEPSTEVE_CONTEXT_ID = 'deepsteve';
 const DEEPSTEVE_CONTEXT_NAME = 'Deep Steve';
@@ -6490,12 +6490,12 @@ app.post('/api/contexts', (req, res) => {
 app.delete('/api/contexts/:id', (req, res) => {
   const idx = contexts.findIndex(c => c.id === req.params.id);
   if (idx === -1) return res.status(404).json({ error: 'Project not found' });
-  // The built-in project is hideable, not deletable (#696). This refusal is not merely a
+  // The built-in project is archivable, not deletable (#696). This refusal is not merely a
   // matching guard for the missing menu item: seedDeepsteveContext() re-adds anything
   // absent at load, so a delete that went through would come back on the next restart and
-  // read as a bug. Hide (archive) is the non-destructive answer, and it persists.
+  // read as a bug. Archive is the non-destructive answer, and it persists.
   if (contexts[idx].builtin) {
-    return res.status(400).json({ error: `The built-in ${contexts[idx].name} project can be hidden, not deleted.` });
+    return res.status(400).json({ error: `The built-in ${contexts[idx].name} project can be archived, not deleted.` });
   }
   contexts.splice(idx, 1);
   removeIconFiles(req.params.id); // clean up any uploaded icon file (#579)

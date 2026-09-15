@@ -238,16 +238,18 @@ rather than `versionStatus.installSource` because `loadInstallSource()` runs sev
 later; `INSTALL_SOURCE_FILE` is declared up with the other `DS_DIR` paths for that reason. After the
 seed the folder is just `dirs`, edited like any project's through right-click → **Edit**.
 
-**Hiding is Archive (#601), and Delete does not exist for it.** The mechanism is shared; only the
-wording changes — `Hide <name>` / `Show <name>`, because "Archive" reads as filing away something
-you made and nobody made this one. Dropping Delete is what makes seeding idempotent with **no marker
+**It archives like any project (#601), and Delete does not exist for it.** The row menu says
+**Archive** / **Unarchive**, the same words as every other project's (#709). #696 had worded it
+`Hide <name>` / `Show <name>`, but nothing is hidden: the item archives it and it lists under
+**Archived**. Dropping Delete is what makes seeding idempotent with **no marker
 file and no extra setting**: "no context with id `deepsteve`? add it" is safe forever only if the row
 cannot go away. `DELETE /api/contexts/:id` refuses it server-side too — a delete that went through
 would be re-seeded on the next restart and read as a bug.
 
-**Three surfaces reach the hide/show**, and the third is the one that matters: the row's own menu, the
-**Projects** header's right-click, and the "All" row's. Header and "All" share one builder
-(`addProjectsSectionItems`) so they cannot drift. With the project hidden *and* the `Archived`
+**Three surfaces reach its archive/unarchive**, and the third is the one that matters: the row's own
+menu, the **Projects** header's right-click, and the "All" row's. The last two belong to no row, so
+their item names the project (`Archive <name>` / `Unarchive <name>`). Header and "All" share one
+builder (`addProjectsSectionItems`) so they cannot drift. With the project archived *and* the `Archived`
 disclosure collapsed, the header is the only place its row can be brought back from.
 
 **`builtin` is the flag; never the name or the id.** The name is editable, and renaming the project

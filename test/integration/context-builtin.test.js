@@ -69,7 +69,7 @@ describe('The built-in Deep Steve project (#696)', () => {
   it('refuses to be deleted, and is still there afterwards', async () => {
     const r = await del(`/api/contexts/${BUILTIN_ID}`);
     assert.strictEqual(r.status, 400);
-    assert.match((await r.json()).error, /hidden, not deleted/);
+    assert.match((await r.json()).error, /archived, not deleted/);
     assert.ok(await readBuiltin(), 'the refusal left it in place');
   });
 

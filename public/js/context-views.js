@@ -389,7 +389,7 @@ function renderRail() {
   const header = document.createElement('div');
   header.className = 'context-rail-header';
   header.textContent = 'Projects';
-  // Section-level right-click (#696): New project, and hide/show for the built-in one.
+  // Section-level right-click (#696): New project, and archive/unarchive for the built-in one.
   // The header is where you look for "something about this whole list", and it is the only
   // affordance that still works when the project you want back is inside a collapsed
   // Archived section.
@@ -634,12 +634,9 @@ function showRowMenu(x, y, ctx) {
     // Archive (#601) — the non-destructive alternative to Delete: the context keeps
     // its dirs/icon/position but leaves the list until it's unarchived.
     //
-    // The built-in project says "Hide"/"Show" instead (#696). Same mechanism, different
-    // word: "Archive" reads as filing away something you made, and nobody made this one —
-    // what a person wants from that menu is for it to stop being in their rail.
-    addRowMenuItem(menu, isBuiltin(ctx)
-      ? `${ctx.archived ? 'Show' : 'Hide'} ${ctx.name}`
-      : (ctx.archived ? 'Unarchive' : 'Archive'),
+    // The built-in project says the same (#709). It once read "Hide"/"Show" (#696), but
+    // the item archives it, and it then sits under Archived like any other project.
+    addRowMenuItem(menu, ctx.archived ? 'Unarchive' : 'Archive',
       () => archiveContext(ctx, !ctx.archived));
     // Compact view (#646) — the same per-browser toggle the mod rows' own right-click
     // menu carries, offered here too because the row you right-click when the rail has
@@ -659,7 +656,7 @@ function showRowMenu(x, y, ctx) {
         () => setCompactRail(!compact));
       addRowMenuSeparator(menu);
     }
-    // No Delete for the built-in Deep Steve project (#696) — Hide is its only removal, and
+    // No Delete for the built-in Deep Steve project (#696) — Archive is its only removal, and
     // the server refuses the delete anyway (it would be re-seeded on the next restart).
     if (!isBuiltin(ctx)) {
       addRowMenuItem(menu, 'Delete', () => {
@@ -680,12 +677,13 @@ function showRowMenu(x, y, ctx) {
  */
 function addProjectsSectionItems(menu) {
   addRowMenuItem(menu, 'New project', () => openContextEditor(null));
-  // The built-in project's hide/show, reachable without having to find its row — which is
-  // the point when it is hidden and the row is inside a collapsed Archived section.
+  // The built-in project's archive/unarchive, reachable without having to find its row —
+  // which is the point when it is archived and the row is inside a collapsed Archived
+  // section. The label names the project because this menu belongs to no row.
   const ds = builtinContext();
   if (ds) {
     addRowMenuSeparator(menu);
-    addRowMenuItem(menu, `${ds.archived ? 'Show' : 'Hide'} ${ds.name}`,
+    addRowMenuItem(menu, `${ds.archived ? 'Unarchive' : 'Archive'} ${ds.name}`,
       () => archiveContext(ds, !ds.archived));
   }
 }
