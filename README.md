@@ -6,7 +6,7 @@
 
 https://deepsteve.com
 
-Change your dev environment as fast as you change your code. Deep Steve is a hackable web UI for your **Claude Code** and **Codex** agents: it runs on your machine, and your agents build what you ask for right into it.
+A UI around your **Claude Code** and **Codex** terminals that your agents build, so the only model in your head is yours.
 
 Run agent sessions side-by-side in browser tabs, each a real PTY with full terminal capabilities and persistent conversation history. OpenCode, Pi, and Hermes also run, as experimental integrations — [docs/agents.md](docs/agents.md) is the per-agent breakdown of what each one actually gets.
 

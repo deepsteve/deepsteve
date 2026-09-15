@@ -2,7 +2,7 @@
   "name": "deepsteve",
   "version": "0.25.1",
   "private": true,
-  "description": "Change your dev environment as fast as you change your code. A hackable web UI for your Claude Code and Codex agents: it runs on your machine, and your agents build what you ask for right into it.",
+  "description": "A UI around your Claude Code and Codex terminals that your agents build, so the only model in your head is yours.",
   "license": "MIT",
   "author": "Fncore, Inc",
   "repository": {
