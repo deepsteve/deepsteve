@@ -68,7 +68,8 @@ and no remote images. That last part stops a question from doubling as a trackin
 ## Safety rules
 
 - **Opening a link never changes anything.** Link previews and prefetchers open links too. The
-  decision page computes "expired" at render time instead of sweeping, so even that writes nothing.
+  decision page computes "expired" and "superseded" at render time instead of sweeping, so even
+  those write nothing.
 - **Answering takes a POST behind the auth gate plus `requireAllowedOrigin`.** A missing or
   foreign Origin is a 403, even with a valid cookie. By that point the request is authenticated,
   so the Origin check isn't auth. It only proves the request came from the button on our own page.
@@ -110,6 +111,10 @@ AST.
 - isn't dismissed when its session goes; it expires after N days instead (`durableUntil`)
 - once closed, it is kept in its own retention bucket, so a busy inbox can't evict an answer the
   next run hasn't read yet
+- is **superseded** (#710) once something replaces it: you replied in the asking session, or a
+  later run of the same scheduled task succeeded. The page then explains which, and an answer
+  gets 409 `superseded`, so an option's `then` never starts work the conversation already
+  moved past. The rules are in [mods.md](mods.md#superseded-questions-710)
 
 **Grouping answers by job.** A question asked from a scheduled run records the task that asked
 (`scheduledTaskId`). Scheduled tasks stamp it on the run's session, it is persisted across

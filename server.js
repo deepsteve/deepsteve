@@ -29,7 +29,7 @@ const { TerminalScreen } = require('./terminal-screen');
 const { terminalEnv } = require('./terminal-env');
 const { readComposerDraft, isPromptStaged, isPromptOnScreen, promptDraftVerdict } = require('./composer-state');
 const { wrapRunCommand } = require('./terminal-run');
-const { isTerminalReport } = require('./terminal-input');
+const { isTerminalReport, hasSubmitKey } = require('./terminal-input');
 const { renderIssuePrompt, issueWorktreeName, issueTabName, resumePromptText, WORKFLOW_STAGES } = require('./issue-prompt');
 const { renderOnboardingPrompt, ONBOARDING_TOOLS, TOUR_PAGE_REL } = require('./onboarding-prompt');
 // The display-tab / project-mod HTML resolver, reused here for the built-in project's
@@ -3894,8 +3894,12 @@ let stateFrozen = false;  // Set during shutdown to prevent onExit handlers from
 // `resumedWorktree` (#689) is here on exactly that argument: it records which commits
 // were already on the branch when this session started, it cannot be recomputed later
 // (by then they look like everyone else's), and issue_complete reads it at the end.
+// `lastHumanInputAt` (#710) is when a person last replied in the session. It is kept
+// separately from `lastInputTime` because every programmatic prompt stamps that one. Workshop
+// reads it off the live entry or the closed record to see that a question was overtaken, so it
+// has to outlive both a restart and the session closing.
 function serializeShellEntry(entry) {
-  return { cwd: entry.cwd, claudeSessionId: entry.claudeSessionId, agentType: entry.agentType || 'claude', codexHomeId: entry.codexHomeId || null, configDir: entry.configDir || null, engineType: entry.engineType || 'node-pty', worktree: entry.worktree || null, name: entry.name || null, planMode: !!entry.planMode, model: entry.model || null, effort: entry.effort || null, allowedTools: Array.isArray(entry.allowedTools) && entry.allowedTools.length ? entry.allowedTools : null, forkParent: entry.forkParent || null, lastActivity: entry.lastActivity || null, createdAt: entry.createdAt || null, windowId: entry.windowId || null, scheduled: !!entry.scheduled, scheduledTaskId: entry.scheduledTaskId || null, autopilot: !!entry.autopilot, resumedWorktree: entry.resumedWorktree || null, resultItemId: entry.resultItemId || null, resultApprovedAt: entry.resultApprovedAt || null, mergeBlock: entry.mergeBlock || null };
+  return { cwd: entry.cwd, claudeSessionId: entry.claudeSessionId, agentType: entry.agentType || 'claude', codexHomeId: entry.codexHomeId || null, configDir: entry.configDir || null, engineType: entry.engineType || 'node-pty', worktree: entry.worktree || null, name: entry.name || null, planMode: !!entry.planMode, model: entry.model || null, effort: entry.effort || null, allowedTools: Array.isArray(entry.allowedTools) && entry.allowedTools.length ? entry.allowedTools : null, forkParent: entry.forkParent || null, lastActivity: entry.lastActivity || null, createdAt: entry.createdAt || null, windowId: entry.windowId || null, scheduled: !!entry.scheduled, scheduledTaskId: entry.scheduledTaskId || null, autopilot: !!entry.autopilot, resumedWorktree: entry.resumedWorktree || null, resultItemId: entry.resultItemId || null, resultApprovedAt: entry.resultApprovedAt || null, mergeBlock: entry.mergeBlock || null, lastHumanInputAt: entry.lastHumanInputAt || null };
 }
 
 // #561: a session record is never hard-deleted by any runtime path. Every close
@@ -4325,6 +4329,21 @@ function restartBlockedBy() {
     } catch (e) { log(`[auto-update] restart blocker threw: ${e.message}`); }
   }
   return null;
+}
+
+// Who wants to know that a PERSON submitted a line in a session tab (#710). Workshop does: a
+// reply typed in the tab supersedes the questions that session left in the inbox. Keyed by
+// name rather than a list, because initMCP has run twice in one boot before (#670), and a
+// second registration must replace the first rather than double every call. An observer gets
+// the session and never the bytes, so this cannot become a keylogger.
+const submitKeyObservers = new Map();
+function registerSubmitKeyObserver(name, fn) {
+  if (typeof name === 'string' && name && typeof fn === 'function') submitKeyObservers.set(name, fn);
+}
+function notifySubmitKey(id, entry) {
+  for (const [name, fn] of submitKeyObservers) {
+    try { fn(id, entry); } catch (e) { log(`[submit-key] observer ${name} threw: ${e.message}`); }
+  }
 }
 
 const AUTO_APPLY_GRACE_MS = 60 * 1000;
@@ -8339,7 +8358,7 @@ function handleWsConnection(ws, req) {
       }
       sessionEngine = spawnedEngine;
       restoredEngineType = spawnedEngine === tmuxEngine ? 'tmux' : 'node-pty';
-      shells.set(id, { clients: new Set(), cwd, claudeSessionId, agentType: savedAgentType, codexHomeId, configDir: restored.configDir || null, engine: sessionEngine, engineType: restoredEngineType, worktree: savedWorktree, name: restoredName, planMode: savedPlanMode, model: restored.model || null, effort: restored.effort || null, allowedTools: restored.allowedTools || null, forkParent: restored.forkParent || null, restored: true, scheduled: !!restored.scheduled, scheduledTaskId: restored.scheduledTaskId || null, autopilot: !!restored.autopilot, resumedWorktree: restored.resumedWorktree || null, resultItemId: restored.resultItemId || null, resultApprovedAt: restored.resultApprovedAt || null, mergeBlock: restored.mergeBlock || null, waitingForInput: false, lastActivity: Date.now(), createdAt: restored.createdAt || Date.now(), windowId: restoredWindowId });
+      shells.set(id, { clients: new Set(), cwd, claudeSessionId, agentType: savedAgentType, codexHomeId, configDir: restored.configDir || null, engine: sessionEngine, engineType: restoredEngineType, worktree: savedWorktree, name: restoredName, planMode: savedPlanMode, model: restored.model || null, effort: restored.effort || null, allowedTools: restored.allowedTools || null, forkParent: restored.forkParent || null, restored: true, scheduled: !!restored.scheduled, scheduledTaskId: restored.scheduledTaskId || null, autopilot: !!restored.autopilot, resumedWorktree: restored.resumedWorktree || null, resultItemId: restored.resultItemId || null, resultApprovedAt: restored.resultApprovedAt || null, mergeBlock: restored.mergeBlock || null, lastHumanInputAt: restored.lastHumanInputAt || null, waitingForInput: false, lastActivity: Date.now(), createdAt: restored.createdAt || Date.now(), windowId: restoredWindowId });
       wireShellOutput(id, initialCols, initialRows);
       recordRecentSession(id);  // bump recency on same-browser reconnect + cross-browser restore
       if (agentConfig.supportsSessionWatch) watchClaudeSessionDir(id);
@@ -8750,6 +8769,11 @@ function handleWsConnection(ws, req) {
         entry._auditInputBurst = (entry._auditInputBurst || 0) + 1;
       }
     }
+    // #710: a person submitting a line. Observers get the session, never the bytes, and run
+    // BEFORE the key reaches the PTY, so a dialog this Enter is about to answer is still on
+    // screen for them to see. Mods register ~100ms after this server starts taking sockets;
+    // an Enter in that window is simply not observed.
+    if (submitKeyObservers.size && hasSubmitKey(str)) notifySubmitKey(id, entry);
     getEngine(id).write(id, str);
   });
 
@@ -8834,7 +8858,7 @@ function broadcastToWindow(windowId, msg) {
 // assigns unconditionally, and nothing here awaits the first call). The chat pane's
 // transcript reader was therefore dead from the day it shipped, silently falling back
 // to the workshop_say store. Adding a ctx field means editing this line, never copying it.
-initMCP({ app, security, shells, wss, broadcast, broadcastToWindow, log, MODS_DIR, closeSession, tombstoneSession, handleShellGone, spawnSession, sessionEnv, getSpawnArgs, mcpConfigArgs, getAgentConfig, resolveConfigDir, validateModel, validateEffort, wireShellOutput, watchClaudeSessionDir, unwatchClaudeSessionDir, resolveForkParentSession, transcriptPath, saveState, validateWorktree, ensureWorktree, sessionPaths, submitToShell, fetchIssueFromGitHub, deliverPromptWhenReady, startIssueSession, reloadClients, deliverToWindow, noteSpawnDelivery, settings, isShuttingDown: () => shuttingDown, displayTabs, setDisplayTab, deleteDisplayTab, screenshots, setScreenshot, deleteScreenshot, getScreenshotPath, getDefaultEngine, getForegroundCommand, sessionLog, emitSessionOpen, getContexts: () => contexts, pathInside, getSavedSession: (id) => savedState[id] || null, links, linkUrl: links.urlFor, spawnAgentSession, stripEscapeSequences, readTerminalScreen, sessionInputState, setMergeBlock, recordMergeAttempt, maybeInheritRemoteControl, requestMetaControlsConsent, registerRestartBlocker, armSessionAutoClose, logRcWrite }).catch(e => log('MCP init failed:', e.message));
+initMCP({ app, security, shells, wss, broadcast, broadcastToWindow, log, MODS_DIR, closeSession, tombstoneSession, handleShellGone, spawnSession, sessionEnv, getSpawnArgs, mcpConfigArgs, getAgentConfig, resolveConfigDir, validateModel, validateEffort, wireShellOutput, watchClaudeSessionDir, unwatchClaudeSessionDir, resolveForkParentSession, transcriptPath, saveState, validateWorktree, ensureWorktree, sessionPaths, submitToShell, fetchIssueFromGitHub, deliverPromptWhenReady, startIssueSession, reloadClients, deliverToWindow, noteSpawnDelivery, settings, isShuttingDown: () => shuttingDown, displayTabs, setDisplayTab, deleteDisplayTab, screenshots, setScreenshot, deleteScreenshot, getScreenshotPath, getDefaultEngine, getForegroundCommand, sessionLog, emitSessionOpen, getContexts: () => contexts, pathInside, getSavedSession: (id) => savedState[id] || null, links, linkUrl: links.urlFor, spawnAgentSession, stripEscapeSequences, readTerminalScreen, sessionInputState, setMergeBlock, recordMergeAttempt, maybeInheritRemoteControl, requestMetaControlsConsent, registerRestartBlocker, registerSubmitKeyObserver, armSessionAutoClose, logRcWrite }).catch(e => log('MCP init failed:', e.message));
 
 // Watch themes directory for changes and broadcast to clients
 let themeWatchDebounce = null;

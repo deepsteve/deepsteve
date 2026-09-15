@@ -418,6 +418,9 @@ wired — in practice `claude` and `codex`. Mods add more; see [mods.md](mods.md
   - `workshop_answers({ since })` reads answered questions back. From a scheduled run it covers
     every run of the same task (the server records which task asked); from any other session,
     that session's own questions. It is how the next run of a scheduled job hears a "no".
+  - A question is **superseded** (#710) when a person replies in the asking session, or when a
+    later run of the same scheduled task succeeds. `workshop_check` says so and why; the agent
+    never has to close its own questions. See [mods.md](mods.md#superseded-questions-710).
   - An unattended agent needs `workshop_ask` in its allowed tools, or it stalls on a permission
     prompt.
   - See [links.md](links.md).

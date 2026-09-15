@@ -23,7 +23,7 @@ const postUrl = initial.postUrl;
 const FIELDS = [
   'id', 'seq', 'kind', 'status', 'headline', 'context', 'recommendation', 'options', 'urgency',
   'answer', 'answeredAt', 'dismissedReason', 'deliveredVia', 'sessionName', 'projectName',
-  'sessionAlive', 'durableUntil', 'createdAt', 'followUpSessionId',
+  'sessionAlive', 'durableUntil', 'createdAt', 'followUpSessionId', 'supersededBy',
 ];
 
 let item = pick(initial);
@@ -46,7 +46,17 @@ const CLOSED = {
   'session-gone': 'This was archived without an answer: the session that asked it closed before anyone replied.',
   expired: 'This question expired without an answer.',
   archived: 'This was archived in Workshop without an answer.',
+  superseded: 'Something replaced this question before anyone answered it, so it can no longer be answered here.',
 };
+
+// #710. The server computes `supersededBy` on every render, since only it can see the facts
+// behind it: whether you replied in the asking session, and how a scheduled task's later
+// runs ended.
+function supersededText(sup) {
+  return sup.rule === 'later-run'
+    ? `Replaced by the scheduled task's run that finished ${when(sup.at)}. It can no longer be answered here.`
+    : `You replied in the session that asked this on ${when(sup.at)}, so this copy was out of date. It can no longer be answered here.`;
+}
 
 function pick(source) {
   const out = {};
@@ -155,6 +165,8 @@ async function answer(payload) {
     flash = { tone: 'warn', text: 'This was already answered. Here is what was recorded.' };
   } else if (r.status === 409 && r.json && r.json.error === 'expired') {
     flash = { tone: 'warn', text: 'This question expired before your answer arrived.' };
+  } else if (r.status === 409 && r.json && r.json.error === 'superseded') {
+    flash = { tone: 'warn', text: 'Something replaced this question before your answer arrived. Nothing was sent.' };
   } else {
     flash = { tone: 'error', text: failure(r) };
   }
@@ -237,6 +249,9 @@ function outcomeSection() {
       DELIVERED[item.deliveredVia] ? el('p', { className: 'hint', text: DELIVERED[item.deliveredVia] }) : null,
     ]);
   }
+  if (item.supersededBy) {
+    return el('section', { className: 'outcome' }, [el('p', { text: supersededText(item.supersededBy) })]);
+  }
   if (isExpired(item)) {
     return el('section', { className: 'outcome' }, [
       el('p', { text: `This question expired ${when(item.durableUntil)} without an answer.` }),
@@ -248,7 +263,7 @@ function outcomeSection() {
 }
 
 function render() {
-  const open = item.status === 'open' && !isExpired(item);
+  const open = item.status === 'open' && !isExpired(item) && !item.supersededBy;
   const eyebrow = ['Decision', item.projectName, item.sessionName].filter(Boolean).join(' · ');
   const children = [
     el('p', { className: 'eyebrow' }, [

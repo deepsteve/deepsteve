@@ -627,3 +627,151 @@ test('an OPEN result survives retention regardless of either cap', () => {
   const kept = inbox.retain([open, ...closed], 0, 0);
   assert.deepStrictEqual(kept.map((i) => i.headline), ['awaiting review']);
 });
+
+// ── superseded questions (#710) ──────────────────────────────────────────────
+//
+// The decision alone, fed facts directly. workshop-superseded.test.js drives the same rules
+// through the mod: the submit-key observer, the Workshop sends, every reader, and a real
+// scheduled-task run history.
+
+const facts = ({ replied = null, task = null } = {}) => ({ humanInputAt: () => replied, task: () => task });
+const run = (sessionId, startedAt, status, endedAt = null) => ({ sessionId, startedAt, status, endedAt });
+const recurring = (runs, over = {}) => ({ enabled: true, once: false, deleted: false, runs, ...over });
+// A question from scheduled run `run1`, which started 100ms before it asked.
+const scheduledQuestion = (n = 1) =>
+  mk({ sessionId: 'run1', scheduledTaskId: 't', scheduledRunStartedAt: NOW - 100 }, n, NOW);
+
+test('makeItem records the asking run only for a scheduled question, and starts unsuperseded', () => {
+  const plain = mk({ scheduledRunStartedAt: NOW - 5 });
+  assert.strictEqual(plain.scheduledRunStartedAt, null, 'no task, so no run');
+  assert.strictEqual(plain.supersededBy, null);
+  assert.strictEqual(mk({ scheduledTaskId: 't', scheduledRunStartedAt: NOW - 5 }).scheduledRunStartedAt, NOW - 5);
+  assert.strictEqual(mk({ scheduledTaskId: 't', scheduledRunStartedAt: 'soon' }).scheduledRunStartedAt, null);
+});
+
+test('a person replying in the asking session supersedes the question, but only after it was asked', () => {
+  const q = mk({ sessionId: 's1' }, 1, NOW);
+  assert.strictEqual(inbox.supersession(q, facts()), null);
+  assert.strictEqual(inbox.supersession(q, facts({ replied: NOW - 1 })), null, 'typed before the question existed');
+  assert.strictEqual(inbox.supersession(q, facts({ replied: NOW })), null, 'strictly after');
+  assert.deepStrictEqual(inbox.supersession(q, facts({ replied: NOW + 1 })), { rule: 'tab-reply', at: NOW + 1 });
+  assert.strictEqual(inbox.supersession(q, null), null, 'no facts, no verdict');
+});
+
+test('only an open question is ever superseded — never a result or a briefing', () => {
+  const replied = facts({ replied: NOW + 10 });
+  assert.strictEqual(inbox.supersession(mk({ kind: 'result', sessionId: 's1' }), replied), null, 'a result gates a merge');
+  assert.strictEqual(inbox.supersession(mk({ kind: 'briefing', sessionId: 's1' }), replied), null);
+  const answered = mk({ sessionId: 's1' });
+  inbox.applyAnswer(answered, { text: 'yes' }, NOW + 1);
+  assert.strictEqual(inbox.supersession(answered, replied), null);
+});
+
+test('a durable question is superseded like any other — it is the case this exists for', () => {
+  const q = mk({ sessionId: 'gone', durableDays: 7 }, 1, NOW);
+  assert.deepStrictEqual(inbox.supersession(q, facts({ replied: NOW + 5 })), { rule: 'tab-reply', at: NOW + 5 });
+});
+
+test('an item stored before #705 takes the reply rule, and the run rule cannot apply to it', () => {
+  const legacy = inbox.makeItem({ headline: 'old', sessionId: 's-old' }, { id: 'w3', now: NOW });
+  const task = recurring([run('other', NOW + 1, 'succeeded', NOW + 2)]);
+  assert.strictEqual(inbox.supersession(legacy, facts({ task })), null, 'no scheduledTaskId, no run to compare');
+  assert.deepStrictEqual(inbox.supersession(legacy, facts({ replied: NOW + 3, task })), { rule: 'tab-reply', at: NOW + 3 });
+});
+
+test('only a later run that SUCCEEDED supersedes a scheduled question', () => {
+  const q = scheduledQuestion();
+  const asking = run('run1', NOW - 100, 'running');
+  for (const status of ['failed', 'timed-out', 'ended', 'completed']) {
+    const task = recurring([run('run2', NOW + 10, status, NOW + 20), asking]);
+    assert.strictEqual(inbox.supersession(q, facts({ task })), null, `a later run that ended ${status}`);
+  }
+  for (const status of ['queued', 'running']) {
+    const task = recurring([run('run2', NOW + 10, status), asking]);
+    assert.strictEqual(inbox.supersession(q, facts({ task })), null, `a later run still ${status}`);
+  }
+  const task = recurring([run('run2', NOW + 10, 'succeeded', NOW + 20), asking]);
+  assert.deepStrictEqual(inbox.supersession(q, facts({ task })), { rule: 'later-run', at: NOW + 20 });
+});
+
+test('an overlapping run counts only if it started after the asking run', () => {
+  const q = scheduledQuestion();
+  // A "run now" that began before the asking run, and finished after the question was asked.
+  const before = run('run0', NOW - 150, 'succeeded', NOW + 30);
+  assert.strictEqual(inbox.supersession(q, facts({ task: recurring([before]) })), null);
+  // One that began after the asking run, but before the question was asked.
+  const after = run('run2', NOW - 50, 'succeeded', NOW + 30);
+  assert.deepStrictEqual(inbox.supersession(q, facts({ task: recurring([after, before]) })), { rule: 'later-run', at: NOW + 30 });
+});
+
+test('the asking run itself, or a run with no end time, never supersedes', () => {
+  const q = scheduledQuestion();
+  assert.strictEqual(inbox.supersession(q, facts({ task: recurring([run('run1', NOW + 1, 'succeeded', NOW + 5)]) })), null);
+  assert.strictEqual(inbox.supersession(q, facts({ task: recurring([run('run2', NOW + 1, 'succeeded', null)]) })), null);
+});
+
+test('a one-time, disabled or deleted task supersedes nothing', () => {
+  const q = scheduledQuestion();
+  const runs = [run('run2', NOW + 1, 'succeeded', NOW + 5)];
+  assert.ok(inbox.supersession(q, facts({ task: recurring(runs) })), 'the control: a recurring task does');
+  assert.strictEqual(inbox.supersession(q, facts({ task: recurring(runs, { once: true }) })), null, 'one-time');
+  assert.strictEqual(inbox.supersession(q, facts({ task: recurring(runs, { enabled: false }) })), null, 'disabled');
+  assert.strictEqual(inbox.supersession(q, facts({ task: recurring(runs, { deleted: true }) })), null, 'deleted');
+  assert.strictEqual(inbox.supersession(q, facts({ task: null })), null, 'no such task');
+});
+
+test('with no recorded start, the bound is the asking run\'s row, and then when it asked', () => {
+  const unstamped = (n) => mk({ sessionId: 'run1', scheduledTaskId: 't' }, n, NOW);
+  const withRow = recurring([run('run2', NOW - 90, 'succeeded', NOW + 50), run('run1', NOW - 100, 'running')]);
+  assert.ok(inbox.supersession(unstamped(1), facts({ task: withRow })), 'bound is the row: NOW - 100');
+
+  const rowAgedOut = recurring([run('run2', NOW - 90, 'succeeded', NOW + 50)]);
+  assert.strictEqual(inbox.supersession(unstamped(2), facts({ task: rowAgedOut })), null, 'bound is createdAt: NOW');
+  const laterStill = recurring([run('run2', NOW + 1, 'succeeded', NOW + 50)]);
+  assert.ok(inbox.supersession(unstamped(3), facts({ task: laterStill })));
+});
+
+test('when several things replaced a question, the earliest is the one recorded', () => {
+  const q = scheduledQuestion();
+  const task = recurring([run('run3', NOW + 5, 'succeeded', NOW + 90), run('run2', NOW + 1, 'succeeded', NOW + 40)]);
+  assert.deepStrictEqual(inbox.supersession(q, facts({ task })), { rule: 'later-run', at: NOW + 40 });
+  assert.deepStrictEqual(inbox.supersession(q, facts({ task, replied: NOW + 20 })), { rule: 'tab-reply', at: NOW + 20 });
+});
+
+test('a superseded question refuses an answer before any sweep has run', () => {
+  const q = mk({ sessionId: 's1', options: [{ label: 'Yes', then: 'go' }] }, 1, NOW);
+  assert.strictEqual(inbox.applyAnswer(q, { optionIndex: 0 }, NOW + 2, facts({ replied: NOW + 1 })), 'superseded');
+  assert.strictEqual(q.status, 'open', 'a refused answer changes nothing');
+  assert.strictEqual(inbox.applyAnswer(q, { optionIndex: 0 }, NOW + 2), 'ok', 'without facts, only a recorded verdict refuses');
+});
+
+test('sweepSuperseded records the verdict and the rule, once, and it is final', () => {
+  const a = mk({ sessionId: 's1' }, 1, NOW);
+  const b = mk({ sessionId: 's1' }, 2, NOW + 1);
+  const other = mk({ sessionId: 's2' }, 3, NOW);
+  const f = { humanInputAt: (sid) => (sid === 's1' ? NOW + 10 : null), task: () => null };
+
+  const dismissed = inbox.sweepSuperseded([a, b, other], f, NOW + 20);
+  assert.deepStrictEqual(dismissed.map((i) => i.id), ['w1', 'w2'], 'every question that session asked before the reply');
+  for (const item of [a, b]) {
+    assert.strictEqual(item.status, 'dismissed');
+    assert.strictEqual(item.dismissedReason, 'superseded');
+    assert.deepStrictEqual(item.supersededBy, { rule: 'tab-reply', at: NOW + 10 });
+    assert.strictEqual(item.answeredAt, NOW + 20);
+  }
+  assert.strictEqual(other.status, 'open');
+  assert.deepStrictEqual(inbox.sweepSuperseded([a, b, other], f, NOW + 30), [], 'nothing left to record');
+  assert.strictEqual(inbox.applyAnswer(a, { text: 'late' }, NOW + 40), 'superseded', 'not "not-open": the page says why');
+});
+
+test('supersededNote says what replaced the question, and when', () => {
+  assert.strictEqual(inbox.supersededNote(null), '');
+  assert.match(
+    inbox.supersededNote({ rule: 'tab-reply', at: Date.parse('2026-09-15T14:02:00Z') }),
+    /^A person replied in the asking session at 2026-09-15T14:02:00\.000Z/,
+  );
+  assert.match(
+    inbox.supersededNote({ rule: 'later-run', at: Date.parse('2026-09-15T09:15:00Z') }),
+    /^A later run of the same scheduled task finished successfully at 2026-09-15T09:15:00\.000Z/,
+  );
+});

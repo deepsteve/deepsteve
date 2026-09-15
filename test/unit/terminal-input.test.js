@@ -7,7 +7,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert');
 
-const { isTerminalReport } = require('../../terminal-input');
+const { isTerminalReport, hasSubmitKey } = require('../../terminal-input');
 
 // The replies @xterm/headless 6.0.0 actually produces, plus the two the browser build
 // can produce that headless cannot (it has no theme service and no window services).
@@ -112,5 +112,34 @@ test('every reply xterm 6 emits is recognized as a report', async () => {
     assert.strictEqual(isTerminalReport(reply), true,
       `xterm 6 replies ${JSON.stringify(reply)} and the classifier would call it a keystroke — ` +
       'every run_in_terminal tab leaks again until this reply is added to REPORT_PATTERNS');
+  }
+});
+
+// --- hasSubmitKey (#710) ------------------------------------------------------------
+//
+// Whether a person SUBMITTED something. Workshop treats that as a reply that supersedes the
+// session's open questions, so a newline that is not Enter must not count.
+
+test('an Enter a person pressed is a submit key', () => {
+  for (const bytes of ['\r', 'ls -l\r', '\x1b[A\r', '\x1b[200~pasted\x1b[201~\r']) {
+    assert.strictEqual(hasSubmitKey(bytes), true, JSON.stringify(bytes));
+  }
+});
+
+test('newlines that are not Enter, and keys that are not Enter, are not submit keys', () => {
+  const NOT = {
+    'a keystroke':                     'x',
+    'Shift+Enter (CSI u)':             '\x1b[13;2u',
+    'Alt+Enter':                       '\x1b\r',
+    'Ctrl+J':                          '\n',
+    'an arrow':                        '\x1b[B',
+    'a bracketed paste with newlines': '\x1b[200~one\rtwo\r\x1b[201~',
+    'an unterminated bracketed paste': '\x1b[200~one\rtwo\r',
+    'a terminal report':               '\x1b[?1;2c',
+    'nothing at all':                  '',
+    'not a string':                    13,
+  };
+  for (const [what, bytes] of Object.entries(NOT)) {
+    assert.strictEqual(hasSubmitKey(bytes), false, `${what}: ${JSON.stringify(bytes)}`);
   }
 });

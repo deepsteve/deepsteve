@@ -176,6 +176,38 @@ test('an expired question renders, is not swept by the GET, and refuses an answe
   assert.strictEqual(w.deliveries.length, 0);
 });
 
+test('a superseded question renders why, is not swept by the GET, and never runs its then (#710)', async () => {
+  const { w, sid, id } = await liveQuestion({ ask: {
+    question: 'Supersede me from the tab?', options: [{ label: 'Yes', then: 'do the thing' }], durable_days: 2,
+  } });
+  assert.strictEqual(pageData(get(w, 'decision', id).body).supersededBy, null, 'an open question says nothing replaced it');
+
+  // The person replied in the tab and the session then closed. Nothing settled it, so the
+  // stamp on the closed record is all there is to go on, and the link must be right anyway.
+  const repliedAt = inbox.byId(id).createdAt + 1000;
+  w.shells.delete(sid);
+  w.saved.set(sid, { cwd: inbox.byId(id).project, agentType: 'claude', closed: true, lastHumanInputAt: repliedAt });
+
+  const before = JSON.stringify(inbox.byId(id));
+  const page = get(w, 'decision', id);
+  assert.strictEqual(page.statusCode, 200);
+  assert.deepStrictEqual(pageData(page.body).supersededBy, { rule: 'tab-reply', at: repliedAt });
+  assert.strictEqual(JSON.stringify(inbox.byId(id)), before, 'computed on a GET, never written');
+
+  const r = post(w, 'decision', id, { action: 'answer', optionIndex: 0 });
+  assert.strictEqual(r.statusCode, 409);
+  assert.strictEqual(r.body.error, 'superseded');
+  assert.match(r.body.hint, /replied in the asking session/);
+  assert.deepStrictEqual(r.body.item.supersededBy, { rule: 'tab-reply', at: repliedAt }, 'the page redraws from this');
+  assert.strictEqual(w.spawns.length, 0, 'the option\'s then never runs');
+  assert.strictEqual(w.deliveries.length, 0);
+  assert.strictEqual(inbox.byId(id).dismissedReason, 'superseded', 'a POST records it');
+
+  const again = post(w, 'decision', id, { action: 'answer', optionIndex: 0 });
+  assert.strictEqual(again.statusCode, 409);
+  assert.strictEqual(again.body.error, 'superseded', 'a second click is told why, not "already answered"');
+});
+
 test('the stored item decides the link type', async () => {
   const w = world();
   const sid = newSid();

@@ -85,4 +85,37 @@ function isTerminalReport(data) {
   return true;
 }
 
-module.exports = { isTerminalReport };
+// Bracketed paste (#710). A terminal whose program has turned the mode on wraps pasted text in
+// these, and a newline inside a paste is text, not Enter.
+const PASTE_START = '\x1b[200~';
+const PASTE_END = '\x1b[201~';
+
+/**
+ * Does this WebSocket payload SUBMIT something — carry an Enter a person pressed (#710)?
+ *
+ * xterm sends Enter as `\r`, on its own for a keypress or at the end of a payload a mobile or
+ * IME keyboard sends whole. Two `\r`s are not Enter: one inside a bracketed paste (an
+ * unterminated paste runs to the end of the payload), and one straight after ESC, which is
+ * Alt+Enter — a newline in the composer. Shift+Enter is `ESC[13;2u` and never contains `\r`.
+ *
+ * Deliberately about bytes only. Whether that Enter answered a dialog rather than the agent's
+ * prompt is a question about the screen, and the observer server.js hands it to answers that.
+ */
+function hasSubmitKey(data) {
+  const s = typeof data === 'string' ? data : '';
+  if (!s.includes('\r')) return false;
+  let i = 0;
+  while (i < s.length) {
+    if (s.startsWith(PASTE_START, i)) {
+      const end = s.indexOf(PASTE_END, i + PASTE_START.length);
+      if (end < 0) return false;
+      i = end + PASTE_END.length;
+      continue;
+    }
+    if (s.charCodeAt(i) === 0x0d && (i === 0 || s.charCodeAt(i - 1) !== 0x1b)) return true;
+    i++;
+  }
+  return false;
+}
+
+module.exports = { isTerminalReport, hasSubmitKey };
