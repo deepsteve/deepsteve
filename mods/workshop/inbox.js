@@ -10,10 +10,18 @@
  * ctx.shells in tools.js and never stored: they exist exactly as long as the session
  * is waiting, so there is nothing to reconcile, no tombstone question, and no stale
  * row when a dialog resolves itself.
+ *
+ * Item ids are random UUIDs the server mints (#705). They used to be `w<seq>` from a
+ * counter kept inside workshop.json, and an id is now an address that can sit in someone's
+ * email (/v1/decision/<id>): a short sequential id invites an agent to guess or assume the
+ * next one, and a store that is wiped or corrupted restarts the counter and hands a new
+ * question the link of an old one. A UUID has neither problem and needs no counter at all.
+ * Items stored before #705 keep the `w<seq>` ids they were minted with.
  */
 
 const fs = require('fs');
 const path = require('path');
+const { randomUUID } = require('crypto');
 const { statePath } = require('../../paths');
 
 const FILE_VERSION = 1;
@@ -27,6 +35,12 @@ const RETENTION_CAP = 200;
 // a chatty week of workshop_brief quietly deletes the writeup for the change that broke
 // production. Two caps still bound the file — this is a second bucket, not an exemption.
 const RESULT_RETENTION_CAP = 200;
+
+// Durable questions (#705) get a third bucket, for the #669 reason. A durable question
+// exists to be answered after its session has gone, and its answer is read LATER — by the
+// next run of a scheduled task, through workshop_answers. A busy afternoon of briefings must
+// not evict yesterday's "no" before that run reads it.
+const DURABLE_RETENTION_CAP = 200;
 
 // The other direction, which retention cannot cap: an agent in a loop posting
 // questions nobody answers. workshop_ask refuses past this.
@@ -44,10 +58,23 @@ const MAX_SECTION = 8000;     // a result's before / after / caveats, each on it
 const MAX_OPTIONS = 9;        // the inbox binds keys 1-9
 const MAX_LABEL = 400;
 const MAX_DETAIL = 1000;
+const MAX_THEN = 2000;        // #705: an option's instruction for a follow-up session
+const MAX_TAG = 120;
+
+// #705. How long a durable question may wait for its answer. Bounded because a durable item
+// is exempt from the dead-session sweep, so this is the ONLY thing that ever closes one
+// nobody answers; 30 matches closedSessionRetentionDays' default, the horizon over which a
+// session can still be restored to discuss it.
+const MAX_DURABLE_DAYS = 30;
+const DAY_MS = 24 * 60 * 60 * 1000;
 
 const KINDS = ['question', 'briefing', 'result'];
 const URGENCIES = ['fyi', 'normal', 'blocking'];
 const URGENCY_RANK = { blocking: 0, normal: 1, fyi: 2 };
+
+// What the server mints now, and what items stored before #705 carry.
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const LEGACY_ID_RE = /^w[1-9]\d*$/;
 
 /**
  * A result's options are MINTED, never supplied (#669).
@@ -121,14 +148,24 @@ function parseSessionRowId(id) {
 }
 
 /**
- * A ticket as an agent might repeat it back: 12, '12', '#12', 'w12' all mean w12.
- * The model-facing text says "#12", so all three spellings will be tried.
+ * Is this, exactly, a stored item's id? Canonical spellings only — a LINK names an item
+ * exactly, and letting `/v1/decision/W7` resolve would give one item two addresses.
  */
-function normalizeTicket(raw) {
+function isItemId(id) {
+  return typeof id === 'string' && (UUID_RE.test(id) || LEGACY_ID_RE.test(id));
+}
+
+/**
+ * An id as an agent might repeat it back. A UUID in any case; and, for an item stored
+ * before #705, the forgiving spellings of its old ticket — 12, '#12', 'w12'.
+ */
+function normalizeId(raw) {
   if (raw == null) return null;
-  const s = String(raw).trim().replace(/^[#w]+/i, '');
-  if (!/^\d+$/.test(s)) return null;
-  const n = Number(s);
+  const s = String(raw).trim().toLowerCase();
+  if (UUID_RE.test(s)) return s;
+  const digits = s.replace(/^[#w]+/, '');
+  if (!/^\d+$/.test(digits)) return null;
+  const n = Number(digits);
   if (!Number.isSafeInteger(n) || n < 1) return null;
   return 'w' + n;
 }
@@ -140,8 +177,19 @@ function normalizeOptions(raw) {
     const out = { label: clampText(opt.label, MAX_LABEL).trim() };
     const detail = clampText(opt.detail, MAX_DETAIL).trim();
     if (detail) out.detail = detail;
+    // #705: what to do if this option is picked after the asker has gone. Carried on the
+    // option, not the item, because "yes" and "no" rarely share a follow-up.
+    const then = clampText(opt.then, MAX_THEN).trim();
+    if (then) out.then = then;
     return out;
   }).filter((o) => o.label);
+}
+
+/** 0 means "not durable" (the pre-#705 behaviour); anything else is whole days, capped. */
+function clampDurableDays(raw) {
+  const n = Math.floor(Number(raw));
+  if (!Number.isFinite(n) || n <= 0) return 0;
+  return Math.min(MAX_DURABLE_DAYS, n);
 }
 
 /**
@@ -160,10 +208,11 @@ function resultOptionsFor(kind, fields) {
 }
 
 /**
- * Build one item. Pure: `seq` and `now` are supplied by the caller, so a test can
- * assert exact ids without reaching into module state. add() is the impure wrapper.
+ * Build one item. Pure: `id` and `now` are supplied by the caller, so a test can assert
+ * exact ids without reaching into module state. add() is the impure wrapper, and the only
+ * place an id is minted.
  */
-function makeItem(fields = {}, { seq, now = Date.now() } = {}) {
+function makeItem(fields = {}, { id, now = Date.now() } = {}) {
   const kind = KINDS.includes(fields.kind) ? fields.kind : 'question';
   // A result is deliberately NOT 'blocking'. The agent parked on one is stopped, so the
   // temptation is real — but every finished issue pulsing red at the top of the inbox is
@@ -171,10 +220,12 @@ function makeItem(fields = {}, { seq, now = Date.now() } = {}) {
   const urgency = URGENCIES.includes(fields.urgency)
     ? fields.urgency
     : (kind === 'briefing' ? 'fyi' : 'normal');
+  // Questions only: a result already outlives its session (#669) and a briefing has
+  // nothing to answer.
+  const durableDays = kind === 'question' ? clampDurableDays(fields.durableDays) : 0;
 
   return {
-    id: 'w' + seq,
-    seq,
+    id,
     kind,
     status: 'open',
     sessionId: fields.sessionId || null,
@@ -182,12 +233,15 @@ function makeItem(fields = {}, { seq, now = Date.now() } = {}) {
     project: fields.project || '',
     projectName: fields.projectName || '',
     worktree: fields.worktree || null,
+    // #705: the scheduled task whose run asked, derived server-side from the calling
+    // session — never named by the agent. What workshop_answers groups a job's answers by.
+    scheduledTaskId: fields.scheduledTaskId || null,
     urgency,
     headline: clampText(fields.headline, MAX_HEADLINE).trim(),
     context: clampText(fields.context, MAX_CONTEXT),
     options: resultOptionsFor(kind, fields),
     recommendation: clampText(fields.recommendation, MAX_LABEL).trim(),
-    tag: clampText(fields.tag, 120).trim(),
+    tag: clampText(fields.tag, MAX_TAG).trim(),
     // #669 — a result's evidence. Empty strings on every other kind, so the panel and
     // the store never have to branch on kind to read them.
     before: kind === 'result' ? clampText(fields.before, MAX_SECTION).trim() : '',
@@ -198,12 +252,26 @@ function makeItem(fields = {}, { seq, now = Date.now() } = {}) {
     // PNG in there is fatal to the panel's refresh interval.
     images: [],
     createdAt: now,
+    // #705: past this instant an unanswered durable question is expired rather than open.
+    // null for every non-durable item, which keeps the dead-session sweep's behaviour.
+    durableUntil: durableDays ? now + durableDays * DAY_MS : null,
     answeredAt: null,
     answer: null,
     deliveredVia: null,
+    // #705: the session an option's `then` started, when the asker had already gone.
+    followUpSessionId: null,
     dismissedReason: null,
     missingSince: null,
   };
+}
+
+/**
+ * An open durable question whose time is up. Computed rather than only swept, because the
+ * sweep runs on the panel's poll — Workshop is off by default, so a link can be opened on a
+ * machine where nothing has swept for days, and it must still refuse the answer.
+ */
+function isExpired(item, now = Date.now()) {
+  return !!(item && item.status === 'open' && item.durableUntil && now >= item.durableUntil);
 }
 
 /**
@@ -217,6 +285,7 @@ function applyAnswer(item, { text, optionIndex } = {}, now = Date.now()) {
   if (!item) return 'not-found';
   if (item.kind === 'briefing') return 'not-answerable';
   if (item.status !== 'open') return 'not-open';
+  if (isExpired(item, now)) return 'expired';
 
   const body = typeof text === 'string' ? text.trim() : '';
   const hasIndex = optionIndex !== undefined && optionIndex !== null && optionIndex !== '';
@@ -255,24 +324,30 @@ function applyDismiss(item, reason, now = Date.now()) {
  * the other half of the bound. Output is in createdAt order, the file's canonical
  * ordering.
  *
- * Closed RESULTS are counted in their own bucket (#669). Sharing one cap would let a
- * week of briefings evict the writeups, which is the one thing a durable record must
- * not do; two buckets keep the file bounded without that. Newest-first inside each.
+ * Closed RESULTS are counted in their own bucket (#669), and so are closed DURABLE
+ * questions (#705). Sharing one cap would let a week of briefings evict the writeups —
+ * or the answer a scheduled task's next run has not read yet — which is the one thing a
+ * durable record must not do; separate buckets keep the file bounded without that.
+ * Newest-first inside each.
  */
-function retain(items, cap = RETENTION_CAP, resultCap = RESULT_RETENTION_CAP) {
+function retain(items, cap = RETENTION_CAP, resultCap = RESULT_RETENTION_CAP, durableCap = DURABLE_RETENTION_CAP) {
   if (!Array.isArray(items)) return [];
   const newestFirst = (a, b) =>
     (b.answeredAt || b.createdAt || 0) - (a.answeredAt || a.createdAt || 0);
 
   const open = items.filter((i) => i && i.status === 'open');
-  const closedResults = items.filter((i) => i && i.status !== 'open' && i.kind === 'result');
-  const closedOther = items.filter((i) => i && i.status !== 'open' && i.kind !== 'result');
+  const closed = items.filter((i) => i && i.status !== 'open');
+  const closedResults = closed.filter((i) => i.kind === 'result');
+  const closedDurable = closed.filter((i) => i.kind !== 'result' && i.durableUntil);
+  const closedOther = closed.filter((i) => i.kind !== 'result' && !i.durableUntil);
   closedResults.sort(newestFirst);
+  closedDurable.sort(newestFirst);
   closedOther.sort(newestFirst);
 
   return [
     ...open,
     ...closedResults.slice(0, Math.max(0, resultCap)),
+    ...closedDurable.slice(0, Math.max(0, durableCap)),
     ...closedOther.slice(0, Math.max(0, cap)),
   ].sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
 }
@@ -292,12 +367,25 @@ function retain(items, cap = RETENTION_CAP, resultCap = RESULT_RETENTION_CAP) {
  * purpose is to outlive the tab that produced it — the writeup is what you read *after*
  * the agent has finished and the session has been closed. They are not even stamped
  * with `missingSince`, so a result can never age into the dismissal branch later.
+ *
+ * DURABLE QUESTIONS ARE EXEMPT TOO (#705), for the same reason: the agent asked for its
+ * question to outlive the session. They leave by their own clock instead — dismissed as
+ * 'expired' once `durableUntil` passes, whether or not the session is still around, since
+ * the asker said how long the answer was worth waiting for.
  */
 function sweepDeadSessions(items, isAlive, now = Date.now(), graceMs = EXPIRY_GRACE_MS) {
   if (!Array.isArray(items)) return 0;
   let changed = 0;
   for (const item of items) {
-    if (!item || item.status !== 'open' || !item.sessionId) continue;
+    if (!item || item.status !== 'open') continue;
+    if (item.durableUntil) {
+      if (now >= item.durableUntil) {
+        applyDismiss(item, 'expired', now);
+        changed++;
+      }
+      continue;
+    }
+    if (!item.sessionId) continue;
     if (item.kind === 'result') continue;
     if (isAlive(item.sessionId)) {
       if (item.missingSince) { item.missingSince = null; changed++; }
@@ -346,29 +434,22 @@ function inboxFile() {
 }
 
 let items = [];
-let nextSeq = 1;
 let loaded = false;
 
 function load() {
   items = [];
-  nextSeq = 1;
   loaded = true;
   try {
     const file = inboxFile();
     if (!fs.existsSync(file)) return items;
     const data = JSON.parse(fs.readFileSync(file, 'utf8'));
+    // A pre-#705 file also carries `nextSeq`; ids are no longer counted, so it is ignored.
     if (data && Array.isArray(data.items)) items = data.items.filter(Boolean);
-    const seqs = items.map((i) => Number(i.seq) || 0);
-    const fromFile = Number(data && data.nextSeq) || 0;
-    // max() of both: a hand-edited file that lost nextSeq must still never reissue
-    // an id that is already on an item.
-    nextSeq = Math.max(1, fromFile, ...seqs.map((s) => s + 1));
   } catch {
     // A corrupt file is an empty inbox, never a throw: this module is required at
     // daemon boot, and a throw here drops the whole mod (mcp-server.js catches
     // per-mod and logs one line).
     items = [];
-    nextSeq = 1;
   }
   return items;
 }
@@ -385,7 +466,7 @@ function save() {
     // tmp + rename, not a bare writeFileSync: a torn workshop.json loses open
     // obligations, which is the one thing this store exists to not do.
     const tmp = file + '.tmp';
-    fs.writeFileSync(tmp, JSON.stringify({ version: FILE_VERSION, nextSeq, items }, null, 2));
+    fs.writeFileSync(tmp, JSON.stringify({ version: FILE_VERSION, items }, null, 2));
     fs.renameSync(tmp, file);
   } catch {}
 }
@@ -402,10 +483,10 @@ function openCount() {
   return ensureLoaded().filter((i) => i.status === 'open').length;
 }
 
-/** Mint and store one item. The impure wrapper around makeItem. */
+/** Mint and store one item. The impure wrapper around makeItem, and the only minter of ids. */
 function add(fields, now = Date.now()) {
   ensureLoaded();
-  const item = makeItem(fields, { seq: nextSeq++, now });
+  const item = makeItem(fields, { id: randomUUID(), now });
   items.push(item);
   items = retain(items);
   return item;
@@ -480,10 +561,13 @@ module.exports = {
   parseIdleId,
   sessionRowId,
   parseSessionRowId,
-  normalizeTicket,
+  isItemId,
+  normalizeId,
   normalizeOptions,
+  clampDurableDays,
   resultOptionsFor,
   makeItem,
+  isExpired,
   applyAnswer,
   applyDismiss,
   retain,
@@ -506,12 +590,16 @@ module.exports = {
   // constants
   RETENTION_CAP,
   RESULT_RETENTION_CAP,
+  DURABLE_RETENTION_CAP,
   MAX_OPEN,
   EXPIRY_GRACE_MS,
   MAX_OPTIONS,
   MAX_HEADLINE,
   MAX_CONTEXT,
   MAX_SECTION,
+  MAX_THEN,
+  MAX_DURABLE_DAYS,
+  DAY_MS,
   KINDS,
   URGENCY_RANK,
   APPROVE_INDEX,

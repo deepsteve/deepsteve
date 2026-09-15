@@ -38,8 +38,9 @@ const MAX_BYTES = 8 * 1024 * 1024;
 // <img> in a same-origin, allow-same-origin iframe that carries the user's authority.
 const ALLOWED_EXT = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp']);
 
-// Only ever files WE named — `<itemId>-<n><ext>`, and item ids are `w<seq>`.
-const SERVABLE_RE = /^w\d+-\d+\.(png|jpg|jpeg|gif|webp)$/;
+// Only ever files WE named — `<itemId>-<n><ext>`. Item ids are server-minted UUIDs since
+// #705; items stored before that keep their `w<seq>` ids, and so do their images.
+const SERVABLE_RE = /^(?:w\d+|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})-\d+\.(png|jpg|jpeg|gif|webp)$/;
 
 // Resolved lazily, never at module scope: paths.js says so, and a unit test that
 // repoints HOME before requiring this file must still land on a scratch path.

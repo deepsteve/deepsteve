@@ -1169,7 +1169,7 @@ test('an agent holding inside workshop_ask is resolved with NO PTY write at all'
   });
   assert.strictEqual(r.body.deliveredVia, 'inline');
   assert.strictEqual(ctxDeliveries.length, 0, 'nothing is written to the PTY on this path');
-  assert.match(said(await pending), /^Answer to #\d+: Yes$/);
+  assert.match(said(await pending), /^Answer to [0-9a-f-]{36}: Yes$/);
 });
 
 test('a hold that timed out degrades to the prompt path', async () => {
@@ -1257,7 +1257,7 @@ test('workshop_check reports open, answered and archived, and keeps discouraging
   }, extraFor(id));
   const item = itemNamed('Checkable?');
 
-  const open = said(await tools.workshop_check.handler({ ticket: String(item.seq) }));
+  const open = said(await tools.workshop_check.handler({ id: item.id }));
   assert.match(open, /still open/);
   assert.match(
     open, /end your turn/,
@@ -1265,10 +1265,11 @@ test('workshop_check reports open, answered and archived, and keeps discouraging
   );
 
   inbox.applyAnswer(item, { optionIndex: 0 });
-  assert.match(said(await tools.workshop_check.handler({ ticket: '#' + item.seq })), /^Answer to #\d+: Yes$/);
-  assert.match(said(await tools.workshop_check.handler({ ticket: 'w' + item.seq })), /^Answer to #\d+: Yes$/);
-  assert.match(said(await tools.workshop_check.handler({ ticket: 'nonsense' })), /not a ticket number/);
-  assert.match(said(await tools.workshop_check.handler({ ticket: '999999' })), /no Workshop item/);
+  const answered = new RegExp(`^Answer to ${item.id}: Yes$`);
+  assert.match(said(await tools.workshop_check.handler({ id: item.id })), answered);
+  assert.match(said(await tools.workshop_check.handler({ id: ` ${item.id.toUpperCase()} ` })), answered);
+  assert.match(said(await tools.workshop_check.handler({ id: 'nonsense' })), /not a Workshop item id/);
+  assert.match(said(await tools.workshop_check.handler({ id: '999999' })), /no Workshop item/);
 });
 
 // ── listing hygiene ──────────────────────────────────────────────────────────
@@ -1542,7 +1543,11 @@ test('images are attached by reference and reported when refused', async () => {
   const { body } = await app.call('GET', '/api/workshop/inbox');
   const item = body.items.find((i) => i.id === entry.resultItemId);
   assert.strictEqual(item.images.length, 2, 'the two legitimate refs landed');
-  assert.ok(item.images.every((i) => /^w\d+-\d+\.png$/.test(i.file)), 'stored as filenames');
+  // `<itemId>-<n>.png`, and item ids are server-minted UUIDs since #705.
+  assert.ok(
+    item.images.every((i) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}-\d+\.png$/.test(i.file)),
+    'stored as filenames',
+  );
 
   const wire = JSON.stringify(body);
   assert.ok(!/base64|data:image/i.test(wire),
@@ -1699,15 +1704,14 @@ test('workshop_check reports a result decision in a result vocabulary', async ()
   const entry = liveSession(shells, id);
   await tools.share_result.handler({ summary: 'done' }, extraFor(id));
   const itemId = entry.resultItemId;
-  const seq = itemId.slice(1);
 
-  const open = await tools.workshop_check.handler({ ticket: seq });
+  const open = await tools.workshop_check.handler({ id: itemId });
   assert.match(open.content[0].text, /awaiting review/i);
 
   await app.call('POST', '/api/workshop/items/:id/answer', {
     params: { id: itemId }, body: { optionIndex: 0 },
   });
-  const done = await tools.workshop_check.handler({ ticket: seq });
+  const done = await tools.workshop_check.handler({ id: itemId });
   assert.match(done.content[0].text, /APPROVED/);
   assert.match(done.content[0].text, /issue_complete/);
 });

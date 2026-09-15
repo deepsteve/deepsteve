@@ -116,6 +116,9 @@ const PATH_HINT = {
   // A result outlives its session on purpose, so this is a normal end state and the
   // human has to know BEFORE clicking, not from a note afterwards.
   gone: 'that session is gone — this records your decision and tells nobody',
+  // #705: a durable question outlives its session too, and what an answer does then depends
+  // on the option picked — so the hint has to say both halves.
+  'gone-durable': 'that session is gone — an option with a follow-up starts a new session; anything else is kept for the next run',
 };
 
 // ─── Small pieces ────────────────────────────────────────────────────────────
@@ -2601,6 +2604,13 @@ function Workshop() {
                           }}>{opt.label}</span>
                           {opt.detail && (
                             <div style={{ font: `12px/1.5 ${SANS}`, color: C.dim, marginTop: 3 }}>{opt.detail}</div>
+                          )}
+                          {opt.then && (
+                            // #705: what picking this does if the asker has gone. Shown before
+                            // the click, because on that path the click starts a session.
+                            <div style={{ font: `11.5px/1.5 ${MONO}`, color: C.dimmer, marginTop: 3 }}>
+                              if the session has closed: {opt.then}
+                            </div>
                           )}
                         </span>
                       </button>

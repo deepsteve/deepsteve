@@ -83,6 +83,16 @@
  * thread via callerFields, and reaches no PTY. An agent can put text on the human's screen,
  * which workshop_ask and workshop_brief already could; it cannot put text in another
  * agent's session, which is the thing being guarded.
+ *
+ * ── Decision links (#705) ──
+ *
+ * A question now has an address, /v1/decision/<id>, served by the core link scheme in links.js
+ * with this file as its provider. The link's POST answers through answerStored() — the panel's
+ * own path — behind the auth gate plus a mandatory allowlisted Origin, so the line above holds
+ * unchanged: it is a human pressing a button, on a page now as well as in the panel. The one new
+ * thing it can do is START a session when the asker has gone (an option's `then`, or Discuss).
+ * That text was written by an agent, but it runs only on a human's click, and an agent could
+ * already start a session with any prompt it liked through open_terminal.
  */
 
 const fs = require('fs');
@@ -98,6 +108,10 @@ const { z } = require('zod');
 // and so landed only the committed half of a dirty worktree.
 const { mergeSession } = require('../deepsteve-core/session-merge');
 const projectScope = require('../../project-scope');
+// #705: the /v1 link scheme's page helpers — escaping and the JSON-in-a-script encoder. The
+// scheme itself is core (links.js); Workshop only registers what its ids mean.
+const links = require('../../links');
+const { spawnCwdProblem } = require('../../paths');
 const { resolveBinary } = require('../../bin-path');
 const inbox = require('./inbox');
 const chatStore = require('./chat-store');
@@ -321,6 +335,9 @@ function callerFields(extra) {
     sessionId: shellId,
     sessionName: (entry && entry.name) || null,
     worktree: (entry && entry.worktree) || null,
+    // #705: the scheduled task this session is a run of, stamped by the scheduled-tasks mod.
+    // Derived, never supplied: it is what groups a recurring job's questions and answers.
+    scheduledTaskId: (entry && entry.scheduledTaskId) || null,
     project,
     projectName: projectScope.displayName(project),
   };
@@ -525,6 +542,9 @@ function pendingPathFor(item) {
   // the panel has to say so before the human clicks Approve rather than after. Scoped to
   // results: for a question this state resolves itself when the sweep dismisses the row.
   if (item.kind === 'result' && item.status === 'open') return 'gone';
+  // A durable question (#705) outlives its session the same way, and what an answer does
+  // then depends on which option is picked — so it gets its own hint rather than 'gone'.
+  if (item.kind === 'question' && item.status === 'open' && item.durableUntil) return 'gone-durable';
   return null;
 }
 
@@ -1145,7 +1165,7 @@ async function sendChoice(sessionId, targetIndex, expectFp) {
 
 function answerSubject(item) {
   const raw = (item.headline || item.question || '').split('\n')[0].trim();
-  return raw ? raw.slice(0, 200) : `question #${item.seq}`;
+  return raw ? raw.slice(0, 200) : `question ${item.id}`;
 }
 
 function formatAnswer(answer) {
@@ -1189,10 +1209,10 @@ function isApproval(item) {
 function resultPrompt(item) {
   const note = (item.answer && item.answer.text) || '';
   if (isApproval(item)) {
-    return `[Workshop] Result #${item.seq} approved.${note ? `\n\n${note}` : ''}\n\n`
+    return `[Workshop] Result ${item.id} approved.${note ? `\n\n${note}` : ''}\n\n`
       + 'Call mcp__deepsteve__issue_complete now to find out whether to merge.';
   }
-  return `[Workshop] Changes requested on result #${item.seq}.${note ? `\n\n${note}` : ''}\n\n`
+  return `[Workshop] Changes requested on result ${item.id}.${note ? `\n\n${note}` : ''}\n\n`
     + 'Address this, then call share_result again with what changed. issue_complete will '
     + 'refuse until a result is approved.';
 }
@@ -1235,6 +1255,11 @@ function resultHeadline(summary) {
 
 function init(context) {
   ctx = context;
+  // #705: what `/v1/<type>/w<n>` means. Guarded, so a context without the link registry (an
+  // older fake ctx in a test) still loads every tool.
+  if (ctx.links && typeof ctx.links.registerProvider === 'function') {
+    ctx.links.registerProvider(linkProvider());
+  }
 
   return {
     workshop_ask: {
@@ -1247,17 +1272,24 @@ function init(context) {
         + 'human answers a menu far faster than a paragraph — and say which one you would pick '
         + 'in `recommendation`. Set `wait_seconds` only when you truly cannot proceed and a '
         + 'quick yes unblocks you. You never identify yourself: session, project and worktree '
-        + 'are attached automatically.',
+        + 'are attached automatically. The result carries a `url` that opens the question in a '
+        + 'browser and answers it in one click — put it in any email or report you send about the '
+        + 'decision. If this session may close before the answer arrives (a scheduled run that '
+        + 'ends by emailing a report, say), set `durable_days` so the question survives it, give '
+        + 'each option a `then` saying what a new session should do if it is picked after you are '
+        + 'gone. A later run of the same scheduled task reads the answer with workshop_answers.',
       schema: {
         question: z.string().describe('The decision you need, in one sentence, phrased so it can be answered without opening your tab.'),
         context: z.string().optional().describe('What the human needs in order to answer: what you tried, what is at stake, the file or command involved. Markdown is fine.'),
         options: z.array(z.object({
           label: z.string().describe('Short and pickable — a button caption, not a sentence.'),
           detail: z.string().optional().describe('One line on what choosing this means.'),
+          then: z.string().optional().describe('What to do if this option is picked AFTER this session has closed. A new session in this project starts with the question, the answer and this instruction; it does the work, reports the outcome, and closes itself, so write a complete action rather than the start of a conversation. Omit it and a late answer is only recorded, for workshop_answers.'),
         })).max(9).optional().describe('The choices, in the order to show them. Max 9 — the inbox binds keys 1-9.'),
         recommendation: z.string().optional().describe('Which option you would pick and why, in one line.'),
         urgency: z.enum(['fyi', 'normal', 'blocking']).optional().describe('"blocking" means you are stopped until this is answered; it sorts to the top of the inbox. Default "normal".'),
         wait_seconds: z.number().int().min(1).max(MAX_WAIT_SEC).optional().describe(`Hold this call open up to N seconds waiting for an answer (1-${MAX_WAIT_SEC}). Omit unless you cannot continue — the MCP request itself dies at 60s.`),
+        durable_days: z.number().int().min(0).max(inbox.MAX_DURABLE_DAYS).optional().describe(`Keep the question open after this session closes, for up to N days (1-${inbox.MAX_DURABLE_DAYS}); after that it expires unanswered. 0 or omitted: it is archived a few minutes after this session goes.`),
       },
       handler: async (args, extra) => {
         if (inbox.openCount() >= inbox.MAX_OPEN) {
@@ -1276,11 +1308,15 @@ function init(context) {
           context: args.context,
           options: args.options,
           recommendation: args.recommendation,
+          // Clamped again in inbox.js, for the reason wait_seconds is below.
+          durableDays: args.durable_days,
         });
         inbox.save();
         ctx.log(
           `[workshop] ask ${item.id} session=${item.sessionId || '?'} urgency=${item.urgency} `
-          + `options=${item.options.length} wait=${args.wait_seconds || 0}`,
+          + `options=${item.options.length} wait=${args.wait_seconds || 0}`
+          + ` durable=${item.durableUntil ? `${inbox.clampDurableDays(args.durable_days)}d` : 'no'}`
+          + (item.scheduledTaskId ? ` task=${item.scheduledTaskId}` : ''),
         );
 
         // Re-clamped even though the schema bounds it: `schema` is a raw Zod shape and
@@ -1289,13 +1325,19 @@ function init(context) {
         if (seconds > 0) {
           const ms = Math.min(MAX_WAIT_SEC, Math.max(1, Math.floor(seconds))) * 1000;
           const answer = await inbox.holdForAnswer(item, ms);
-          if (answer) return text(`Answer to #${item.seq}: ${formatAnswer(answer)}`);
+          if (answer) return text(`Answer to ${item.id}: ${formatAnswer(answer)}`);
         }
 
-        return text(
-          `Question #${item.seq} is on the Workshop inbox. The answer will arrive as a new `
-          + 'message — end your turn now rather than polling.',
-        );
+        // #705: the link is what an email carries. Absolute, on the canonical browser origin,
+        // because it is opened from outside Deep Steve.
+        const url = typeof ctx.linkUrl === 'function' ? ctx.linkUrl('decision', item.id) : null;
+        const message = `Question ${item.id} is on the Workshop inbox. The answer will arrive as a new `
+          + 'message — end your turn now rather than polling.'
+          + (item.durableUntil
+            ? ` If this session has closed by then, the question stays open until ${new Date(item.durableUntil).toISOString()}: `
+              + 'an option with a `then` starts a new session, and any other answer is kept for workshop_answers.'
+            : '');
+        return text(JSON.stringify({ id: item.id, url, message }, null, 2));
       },
     },
 
@@ -1321,7 +1363,7 @@ function init(context) {
         });
         inbox.save();
         ctx.log(`[workshop] brief ${item.id} session=${item.sessionId || '?'} tag=${item.tag || '-'}`);
-        return text(`Briefing #${item.seq} is on the Workshop inbox. No reply is needed.`);
+        return text(`Briefing ${item.id} is on the Workshop inbox. No reply is needed.`);
       },
     },
 
@@ -1397,7 +1439,7 @@ function init(context) {
           : '';
 
         return text(
-          `Result #${item.seq} is on the Workshop inbox awaiting review. End your turn now — `
+          `Result ${item.id} is on the Workshop inbox awaiting review. End your turn now — `
           + 'the decision will arrive as a new message. Do not call issue_complete until this '
           + `is approved, and do not merge or close this session.${skipNote}`,
         );
@@ -1529,18 +1571,18 @@ function init(context) {
 
     workshop_check: {
       description:
-        'Check whether a Workshop question or result has been decided yet, by the ticket '
-        + 'number workshop_ask or share_result returned. Only needed if you chose to keep '
+        'Check whether a Workshop question or result has been decided yet, by the id '
+        + 'workshop_ask or share_result returned. Only needed if you chose to keep '
         + 'working instead of ending your turn; the normal path is to end your turn and let '
         + 'the answer arrive as a new message. Returns the answer if one is in, otherwise says '
         + 'it is still open.',
       schema: {
-        ticket: z.string().describe('The ticket workshop_ask or share_result returned, e.g. "12" or "#12".'),
+        id: z.string().describe('The id workshop_ask or share_result returned.'),
       },
-      handler: async ({ ticket }) => {
-        const id = inbox.normalizeTicket(ticket);
+      handler: async ({ id: rawId }) => {
+        const id = inbox.normalizeId(rawId);
         if (!id) {
-          return text(`"${ticket}" is not a ticket number. Use the number workshop_ask returned, e.g. "12".`);
+          return text(`"${rawId}" is not a Workshop item id. Use the id workshop_ask or share_result returned.`);
         }
         const item = inbox.byId(id);
         if (!item) return text(`There is no Workshop item ${id}.`);
@@ -1549,25 +1591,70 @@ function init(context) {
         if (item.status === 'dismissed') {
           const why = item.dismissedReason ? ` (${item.dismissedReason})` : '';
           return text(isResult
-            ? `Result #${item.seq} was archived without a decision${why}, so it does not count `
+            ? `Result ${item.id} was archived without a decision${why}, so it does not count `
               + 'as approved. Share a fresh result if you still need to complete.'
-            : `#${item.seq} was archived without an answer${why}. Do not wait on it.`);
+            : `Question ${item.id} was archived without an answer${why}. Do not wait on it.`);
         }
         if (item.status !== 'answered') {
           return text(isResult
-            ? `Result #${item.seq} is still awaiting review. Rather than checking again, end your `
+            ? `Result ${item.id} is still awaiting review. Rather than checking again, end your `
               + 'turn — the decision will arrive as a new message when the human gets to it.'
-            : `#${item.seq} is still open. Rather than checking again, end your turn — the answer `
+            : `Question ${item.id} is still open. Rather than checking again, end your turn — the answer `
               + 'will arrive as a new message in this session when the human gets to it.');
         }
         if (isResult) {
           const note = (item.answer && item.answer.text) ? `\n\n${item.answer.text}` : '';
           return text(isApproval(item)
-            ? `Result #${item.seq} was APPROVED.${note}\n\nCall issue_complete now.`
-            : `Result #${item.seq} was returned for CHANGES.${note}\n\nAddress it and call `
+            ? `Result ${item.id} was APPROVED.${note}\n\nCall issue_complete now.`
+            : `Result ${item.id} was returned for CHANGES.${note}\n\nAddress it and call `
               + 'share_result again.');
         }
-        return text(`Answer to #${item.seq}: ${formatAnswer(item.answer)}`);
+        return text(`Answer to ${item.id}: ${formatAnswer(item.answer)}`);
+      },
+    },
+
+    workshop_answers: {
+      description:
+        'Read the answers a human has given to Workshop questions — including ones answered from a '
+        + 'link after the asking session had closed. From a scheduled task run it returns the answers '
+        + 'to questions asked by ANY run of that same task, so a recurring job should call it at the '
+        + 'start of every run (with `since` set to its previous run) and a "no" or a written reply '
+        + 'reaches this run without anyone editing the job. From any other session it returns that '
+        + 'session\'s own questions. Returns JSON, newest first, at most 50.',
+      schema: {
+        since: z.string().optional().describe('Only answers given at or after this ISO date or date-time, e.g. "2026-09-14" or "2026-09-14T08:00:00Z".'),
+      },
+      handler: async ({ since } = {}, extra) => {
+        const LIMIT = 50;
+        let sinceMs = null;
+        if (since != null && String(since).trim()) {
+          sinceMs = Date.parse(String(since).trim());
+          if (!Number.isFinite(sinceMs)) {
+            return text(`"${since}" is not a date. Pass an ISO date such as "2026-09-14" or "2026-09-14T08:00:00Z".`);
+          }
+        }
+        // Scoped by who is calling, never by a name the agent supplies: the task a scheduled run
+        // belongs to, or else the calling session itself — so two jobs cannot read each other's
+        // answers by happening to pick the same word.
+        const caller = callerFields(extra);
+        const mine = caller.scheduledTaskId
+          ? (i) => i.scheduledTaskId === caller.scheduledTaskId
+          : (i) => !!caller.sessionId && i.sessionId === caller.sessionId;
+        const rows = inbox.all()
+          .filter((i) => i.kind === 'question' && i.status === 'answered' && i.answer)
+          .filter(mine)
+          .filter((i) => sinceMs === null || (i.answeredAt || 0) >= sinceMs)
+          .sort((a, b) => (b.answeredAt || 0) - (a.answeredAt || 0))
+          .slice(0, LIMIT)
+          .map((i) => ({
+            id: i.id,
+            question: i.headline,
+            answer: { optionLabel: i.answer.optionLabel || '', text: i.answer.text || '' },
+            answeredAt: new Date(i.answeredAt).toISOString(),
+            deliveredVia: i.deliveredVia || null,
+            ...(i.followUpSessionId ? { followUpSessionId: i.followUpSessionId } : {}),
+          }));
+        return text(JSON.stringify(rows, null, 2));
       },
     },
   };
@@ -2193,14 +2280,218 @@ function registerRoutes(app, context) {
   });
 }
 
+// ── decision links (#705) ────────────────────────────────────────────────────
+//
+// `/v1/decision/<id>` is owned by links.js, which knows nothing about Workshop. This section is
+// Workshop's side of it: resolving an id to a link type, drawing the page, and acting on the
+// page's two buttons. Everything the page does goes through the paths the panel already uses
+// — an answer is answerStored(), so a link and the panel can never disagree about what an
+// answer does — plus the two things only a link needs: acting when the asker has gone, and
+// Discuss.
+//
+// Neither moves the line the header draws. A follow-up session is started from text an agent
+// wrote (`then`), but only after a human clicks, and an agent could already start a session
+// with any prompt it liked through open_terminal.
+
+// The stored item decides the type, not the link: a briefing is `markdown` (reserved, so its
+// link explains itself), and a result is not linkable at all — Approve on a result unlocks a
+// merge, and the panel stays the only place that decision is made.
+const LINK_TYPE_OF_KIND = { question: 'decision', briefing: 'markdown' };
+
+// What the page is given. A subset on purpose: the page needs to draw the question, not to
+// know the session id or the project path.
+const DECISION_FIELDS = [
+  'id', 'kind', 'status', 'headline', 'context', 'recommendation', 'options', 'urgency',
+  'answer', 'answeredAt', 'dismissedReason', 'deliveredVia', 'sessionName', 'projectName',
+  'durableUntil', 'createdAt', 'followUpSessionId',
+];
+
+function decisionView(item) {
+  const out = {};
+  for (const k of DECISION_FIELDS) out[k] = item[k] === undefined ? null : item[k];
+  out.sessionAlive = !!(item.sessionId && ctx.shells.has(item.sessionId));
+  out.postUrl = `/${links.LINK_VERSION}/decision/${encodeURIComponent(item.id)}`;
+  return out;
+}
+
+/** GET. Writes nothing — an expired question is computed as expired, never swept here. */
+function renderDecisionPage(res, item) {
+  const title = 'Decision';
+  res.status(200).type('html').send(
+    '<!doctype html><html lang="en"><head><meta charset="utf-8">'
+    + '<meta name="viewport" content="width=device-width,initial-scale=1">'
+    + `<title>${links.escapeHtml(title)} · Deep Steve</title>`
+    + '<link rel="stylesheet" href="/mods/workshop/decision-page.css">'
+    + '</head><body><main id="decision" class="page">'
+    + `<noscript><h1>${links.escapeHtml(item.headline)}</h1><p>Answering needs JavaScript.</p></noscript>`
+    + '</main>'
+    + `<script type="application/json" id="decision-data">${links.jsonForScript(decisionView(item))}</script>`
+    + '<script type="module" src="/mods/workshop/decision-page.js"></script>'
+    + '</body></html>',
+  );
+}
+
+/** POST. `answer` is the panel's own path; `discuss` is the link's. */
+function actOnDecision(req, res, item) {
+  const body = req.body || {};
+  const action = body.action || 'answer';
+  if (action === 'discuss') return discussItem(res, item);
+  if (action !== 'answer') return res.status(400).json({ error: 'bad-action' });
+  return answerStored(res, item.id, { optionIndex: body.optionIndex, text: body.text });
+}
+
+function linkProvider() {
+  return {
+    name: 'workshop',
+    owns: (id) => inbox.isItemId(id),
+    resolve: (id) => {
+      const item = inbox.byId(id);
+      // A random id cannot say whether a missing item was cleared out or never existed, so
+      // both resolve to null, and links.js words its not-found page to cover either.
+      return item ? { type: LINK_TYPE_OF_KIND[item.kind] || null, item } : null;
+    },
+    render: { decision: (req, res, resolved) => renderDecisionPage(res, resolved.item) },
+    act: { decision: (req, res, resolved) => actOnDecision(req, res, resolved.item) },
+  };
+}
+
+/** The `then` of the option the human picked, or '' — only ever read after applyAnswer. */
+function chosenThen(item) {
+  const idx = item.answer ? item.answer.optionIndex : null;
+  const opt = idx === null || idx === undefined ? null : item.options[idx];
+  return (opt && opt.then) || '';
+}
+
+/** The question as a new session needs it: nothing in the new session saw it asked. */
+function questionBrief(item) {
+  const parts = [`Question: ${item.headline}`];
+  if (item.context) parts.push(`Context:\n${item.context}`);
+  if (item.options.length) {
+    parts.push('Options:\n' + item.options
+      .map((o, i) => `${i + 1}. ${o.label}${o.detail ? ` — ${o.detail}` : ''}`).join('\n'));
+  }
+  if (item.recommendation) parts.push(`Recommendation: ${item.recommendation}`);
+  return parts.join('\n\n');
+}
+
+// A follow-up is a one-shot, not a tab someone has to find and close — the first real click
+// left one doing nothing. Nothing else closes it (no merge arms an auto-close, and no
+// scheduled-run contract applies), so the prompt says to, and how. A timer is deliberately not
+// the backstop: the auto-close only waits while a session is BUSY, and a follow-up sitting on
+// a permission prompt reads as idle, so a timer would close exactly the session still waiting
+// on a human.
+const FOLLOW_UP_CLOSE = [
+  'When you are done:',
+  '1. Post the outcome in a sentence or two with mcp__deepsteve__workshop_brief, so it outlives this session. If the instruction says to tell someone else or another session, do that too.',
+  '2. Then call mcp__deepsteve__close_session with no arguments, on its own, as your very last action. It closes this session, and nothing after it is delivered.',
+  'If you cannot finish without the human, say what you need here and leave the session open instead.',
+].join('\n');
+
+function thenPrompt(item, then) {
+  const a = item.answer || {};
+  const chosen = item.options[a.optionIndex] || {};
+  return [
+    '[Workshop] A decision was answered after the session that asked it had closed'
+      + `${item.sessionName ? ` (${item.sessionName})` : ''}. You are picking up where it left off.`,
+    questionBrief(item),
+    `The human chose: ${chosen.label}${chosen.detail ? ` — ${chosen.detail}` : ''}`,
+    ...(a.text ? [`Their note: ${a.text}`] : []),
+    `What the asking session said to do on this answer:\n${then}`,
+    FOLLOW_UP_CLOSE,
+  ].join('\n\n');
+}
+
+function discussPrompt(item) {
+  return [
+    '[Workshop] The human wants to talk through a decision'
+      + `${item.sessionName ? `, which ${item.sessionName} asked` : ''}. That session can't be reopened, `
+      + 'so you are starting from what it left behind.',
+    questionBrief(item),
+    ...(item.status === 'answered' && item.answer ? [`Already answered: ${formatAnswer(item.answer)}`] : []),
+    'Discuss it with them. Do not act on any option until they tell you to.',
+  ].join('\n\n');
+}
+
+/**
+ * Start a session in the asker's project. The project, not its worktree: the worktree was the
+ * asker's, and is the thing most likely to have been merged and removed by now. The asker's
+ * agent and config profile carry over from its saved record.
+ */
+function startFollowUp(item, { prompt, name, source }) {
+  if (typeof ctx.spawnAgentSession !== 'function') return { error: 'this daemon cannot start sessions for Workshop' };
+  const saved = item.sessionId && ctx.getSavedSession ? ctx.getSavedSession(item.sessionId) : null;
+  const cwd = item.project || (saved && saved.cwd) || '';
+  if (!cwd) return { error: 'the question has no project to start in' };
+  const result = ctx.spawnAgentSession({
+    cwd,
+    agentType: (saved && saved.agentType) || 'claude',
+    configDir: (saved && saved.configDir) || null,
+    name,
+    prompt,
+    source,
+  });
+  if (!result || result.error) {
+    const err = result && result.error;
+    return { error: (err && (err.message || String(err))) || 'the session did not start' };
+  }
+  ctx.log(`[workshop] ${source} ${item.id} -> session=${result.id} cwd=${cwd}`);
+  return result;
+}
+
+/** A windowId only if that window is connected now — otherwise the open would reach nobody. */
+function connectedWindow(windowId) {
+  if (!windowId || !ctx.reloadClients) return null;
+  for (const client of ctx.reloadClients) {
+    if (client.readyState === 1 && client.windowId === windowId) return windowId;
+  }
+  return null;
+}
+
+/**
+ * Discuss: resume the asker if it is live or restorable, otherwise start a fresh session
+ * seeded with the question. Changes nothing about the item.
+ *
+ * A live asker gets a `repair` open (a no-op for a window that already has the tab) plus
+ * `focus`. A closed one gets `restore`, the single case in which the browser is asked to
+ * resurrect a tombstone from a server push — see the open-session handler in app.js.
+ */
+function discussItem(res, item) {
+  const sid = item.sessionId;
+  const entry = sid ? ctx.shells.get(sid) : null;
+  if (entry) {
+    const target = connectedWindow(entry.windowId);
+    const tabDelivery = ctx.deliverToWindow({
+      type: 'open-session', id: sid, cwd: entry.cwd, name: entry.name, windowId: target, repair: true, focus: true,
+    }, target, { openBrowser: true });
+    ctx.log(`[workshop] discuss ${item.id} -> focus ${sid} (${tabDelivery})`);
+    return res.json({ opened: 'focused', sessionId: sid, name: entry.name || sid, tabDelivery });
+  }
+
+  const saved = sid && ctx.getSavedSession ? ctx.getSavedSession(sid) : null;
+  if (saved && saved.cwd && !spawnCwdProblem(saved.cwd)) {
+    const tabDelivery = ctx.deliverToWindow({
+      type: 'open-session', id: sid, cwd: saved.cwd, name: saved.name, windowId: null, restore: true,
+    }, null, { openBrowser: true });
+    ctx.log(`[workshop] discuss ${item.id} -> restore ${sid} (${tabDelivery})`);
+    return res.json({ opened: 'restored', sessionId: sid, name: saved.name || sid, tabDelivery });
+  }
+
+  const spawned = startFollowUp(item, {
+    prompt: discussPrompt(item), name: 'Discuss decision', source: 'workshop discuss',
+  });
+  if (spawned.error) return res.status(409).json({ error: 'cannot-open', message: spawned.error });
+  return res.json({ opened: 'fresh', sessionId: spawned.id, name: spawned.name || spawned.id, tabDelivery: spawned.tabDelivery });
+}
+
 function answerStored(res, id, body) {
   const item = inbox.byId(id);
   if (!item) return res.status(404).json({ error: 'not-found' });
 
   const status = inbox.applyAnswer(item, { text: body.text, optionIndex: body.optionIndex });
   if (status !== 'ok') {
-    // 409 for the two-browsers race, 400 for a malformed answer.
-    return res.status(status === 'not-open' ? 409 : 400)
+    // 409 for the two-browsers race and for a durable question whose time ran out (#705) —
+    // both mean "this can no longer take an answer" — and 400 for a malformed one.
+    return res.status(status === 'not-open' || status === 'expired' ? 409 : 400)
       .json({ error: status, item: serializeStored(item) });
   }
 
@@ -2213,6 +2504,7 @@ function answerStored(res, id, body) {
   // Path 1 BEFORE path 2, and only after applyAnswer, so a concurrent workshop_check
   // can never observe "answered, but no answer".
   let via;
+  let note;
   if (inbox.releaseWait(item.id, item.answer)) {
     via = 'inline';
   } else if (item.sessionId && ctx.shells.has(item.sessionId)) {
@@ -2225,9 +2517,28 @@ function answerStored(res, id, body) {
       onDeliver: (sid) => ctx.log(`[workshop] delivered ${item.id} -> ${sid}`),
     });
     via = 'prompt';
+  } else if (!isResult) {
+    // The asker has gone (#705). An option can carry `then` — what the asking session wanted
+    // done on this answer — and that starts a follow-up session in its project, so a question
+    // from a run that closed itself can still act on a click. Any other answer is recorded,
+    // and workshop_answers is how the next run of a recurring job hears it.
+    const then = chosenThen(item);
+    const spawned = then
+      ? startFollowUp(item, { prompt: thenPrompt(item, then), name: 'Decision follow-up', source: 'workshop then' })
+      : null;
+    if (spawned && !spawned.error) {
+      via = 'then';
+      item.followUpSessionId = spawned.id;
+      note = `The asking session had closed, so its follow-up started in a new session (${spawned.name || spawned.id}).`;
+    } else {
+      // Say so rather than swallowing it. An inbox that silently drops an answer is
+      // worse than one that admits it went nowhere.
+      via = 'undelivered';
+      note = spawned
+        ? `Recorded, but the follow-up could not start: ${spawned.error}. A later run can still read this answer with workshop_answers.`
+        : 'Recorded. The asking session is gone, so nothing was typed anywhere — a later run can read this answer with workshop_answers.';
+    }
   } else {
-    // Say so rather than swallowing it. An inbox that silently drops an answer is
-    // worse than one that admits it went nowhere.
     via = 'undelivered';
   }
 
@@ -2239,16 +2550,17 @@ function answerStored(res, id, body) {
     `[workshop] answer ${item.id} via=${via} option=${opt} `
     + `${item.answer.optionLabel ? JSON.stringify(item.answer.optionLabel) : ''} `
     + `text=${item.answer.text.length}ch`
-    + (isResult ? ` decision=${isApproval(item) ? 'approved' : 'changes'} stamped=${stamped ? 'yes' : 'no'}` : ''),
+    + (isResult ? ` decision=${isApproval(item) ? 'approved' : 'changes'} stamped=${stamped ? 'yes' : 'no'}` : '')
+    + (via === 'then' ? ` followUp=${item.followUpSessionId}` : ''),
   );
 
   // A result whose session has gone is a decision worth RECORDING and impossible to
   // deliver — the record is the whole point of the kind, so it is written either way and
   // the panel is told plainly that the agent was never informed. Nothing was written to
   // any PTY on this path; `via` already says undelivered.
-  const note = (isResult && !stamped)
-    ? 'Recorded. That session is gone, so the agent was not told — nothing was typed anywhere.'
-    : undefined;
+  if (isResult && !stamped) {
+    note = 'Recorded. That session is gone, so the agent was not told — nothing was typed anywhere.';
+  }
   res.json({ item: serializeStored(item), deliveredVia: via, ...(note ? { note } : {}) });
 }
 

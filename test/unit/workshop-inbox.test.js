@@ -40,21 +40,25 @@ test('the scratch HOME really took — this suite must not touch a real inbox', 
 });
 
 const NOW = 1_000_000_000;
-const mk = (fields, seq = 1, now = NOW) => inbox.makeItem(fields, { seq, now });
+// makeItem is id-agnostic: add() is the only minter (a random UUID since #705), so a pure test
+// hands it a readable one.
+const mk = (fields, n = 1, now = NOW) => inbox.makeItem(fields, { id: `w${n}`, now });
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 // ── makeItem: defaults, coercion, clamping ───────────────────────────────────
 
-test('makeItem fills defaults and mints a w-prefixed id', () => {
-  const a = mk({ kind: 'question', headline: 'Which retry policy?' }, 1);
-  assert.strictEqual(a.id, 'w1');
-  assert.strictEqual(a.seq, 1);
+test('makeItem fills defaults and keeps the id it is given', () => {
+  const a = inbox.makeItem({ kind: 'question', headline: 'Which retry policy?' }, { id: 'given-id', now: NOW });
+  assert.strictEqual(a.id, 'given-id');
+  assert.ok(!('seq' in a), 'ids are not counted any more (#705)');
+  assert.strictEqual(a.scheduledTaskId, null);
+  assert.strictEqual(mk({ scheduledTaskId: 'task-a' }).scheduledTaskId, 'task-a');
   assert.strictEqual(a.status, 'open');
   assert.strictEqual(a.urgency, 'normal');
   assert.strictEqual(a.createdAt, NOW);
   assert.strictEqual(a.answeredAt, null);
   assert.strictEqual(a.answer, null);
   assert.strictEqual(a.missingSince, null);
-  assert.strictEqual(mk({}, 12).id, 'w12');
 });
 
 test('a briefing defaults to fyi and carries no options', () => {
@@ -223,6 +227,85 @@ test('the sweep never touches closed items or items with no session', () => {
   assert.strictEqual(orphan.status, 'open');
 });
 
+// ── durable questions and follow-ups (#705) ──────────────────────────────────
+
+test('an option keeps its `then`, clamped, and a blank one is dropped', () => {
+  const [yes, no] = inbox.normalizeOptions([
+    { label: 'Yes', then: '  File the issue.  ' },
+    { label: 'No', then: '   ' },
+  ]);
+  assert.deepStrictEqual(yes, { label: 'Yes', then: 'File the issue.' });
+  assert.deepStrictEqual(no, { label: 'No' });
+  const [long] = inbox.normalizeOptions([{ label: 'x', then: 't'.repeat(inbox.MAX_THEN + 10) }]);
+  assert.strictEqual(long.then.length, inbox.MAX_THEN);
+});
+
+test('a result cannot be handed a `then` — its options are minted', () => {
+  const r = mk({ kind: 'result', options: [{ label: 'Approve', then: 'merge it' }] }, 1);
+  assert.ok(r.options.every((o) => !('then' in o)));
+});
+
+test('durable days become durableUntil, clamped, and only on questions', () => {
+  assert.strictEqual(mk({ durableDays: 3 }, 1).durableUntil, NOW + 3 * inbox.DAY_MS);
+  assert.strictEqual(mk({ durableDays: 999 }, 1).durableUntil, NOW + inbox.MAX_DURABLE_DAYS * inbox.DAY_MS);
+  for (const raw of [0, -2, 'soon', null, undefined]) {
+    assert.strictEqual(mk({ durableDays: raw }, 1).durableUntil, null, `durableDays ${JSON.stringify(raw)}`);
+  }
+  assert.strictEqual(mk({ kind: 'briefing', durableDays: 3 }, 1).durableUntil, null);
+  assert.strictEqual(mk({ kind: 'result', durableDays: 3 }, 1).durableUntil, null);
+  assert.strictEqual(mk({ tag: '  daily-report ' }, 1).tag, 'daily-report');
+});
+
+test('a durable question outlives its session and leaves by its own clock', () => {
+  const item = mk({ sessionId: 'gone', durableDays: 1 }, 1, NOW);
+  const dead = () => false;
+  assert.strictEqual(inbox.sweepDeadSessions([item], dead, NOW, 5000), 0, 'never even stamped');
+  assert.strictEqual(inbox.sweepDeadSessions([item], dead, NOW + 60 * 60 * 1000, 5000), 0);
+  assert.strictEqual(item.status, 'open');
+  assert.strictEqual(item.missingSince, null);
+
+  assert.strictEqual(inbox.sweepDeadSessions([item], dead, NOW + inbox.DAY_MS, 5000), 1);
+  assert.strictEqual(item.status, 'dismissed');
+  assert.strictEqual(item.dismissedReason, 'expired');
+});
+
+test('a durable question expires even while its session is alive', () => {
+  const item = mk({ sessionId: 'here', durableDays: 1 }, 1, NOW);
+  assert.strictEqual(inbox.sweepDeadSessions([item], () => true, NOW + inbox.DAY_MS + 1, 5000), 1);
+  assert.strictEqual(item.dismissedReason, 'expired');
+});
+
+test('an expired question refuses an answer before any sweep has run', () => {
+  // The sweep runs on the panel's poll, and Workshop is off by default — a link can be
+  // clicked on a machine where nothing has swept for days.
+  const item = mk({ durableDays: 1, options: [{ label: 'Yes' }] }, 1, NOW);
+  assert.ok(!inbox.isExpired(item, NOW + inbox.DAY_MS - 1));
+  assert.ok(inbox.isExpired(item, NOW + inbox.DAY_MS));
+  assert.strictEqual(inbox.applyAnswer(item, { optionIndex: 0 }, NOW + inbox.DAY_MS), 'expired');
+  assert.strictEqual(item.status, 'open', 'a refused answer changes nothing');
+  assert.strictEqual(inbox.applyAnswer(item, { optionIndex: 0 }, NOW + 5), 'ok');
+});
+
+test('closed durable questions have their own retention bucket', () => {
+  // The answer to a durable question is read LATER, by the next run of a recurring job. A
+  // storm of newer briefings must not evict it first.
+  const list = [];
+  for (let i = 1; i <= 10; i++) {
+    const durable = mk({ headline: 'd' + i, durableDays: 7 }, i, NOW + i);
+    inbox.applyAnswer(durable, { text: 'no' }, NOW + 100 + i);
+    list.push(durable);
+  }
+  for (let i = 11; i <= 40; i++) {
+    const brief = mk({ kind: 'briefing', headline: 'b' + i }, i, NOW + i);
+    inbox.applyDismiss(brief, 'archived', NOW + 1000 + i);
+    list.push(brief);
+  }
+  const kept = inbox.retain(list, 5, 5, 4);
+  assert.strictEqual(kept.filter((i) => i.durableUntil).length, 4);
+  assert.deepStrictEqual(kept.filter((i) => i.durableUntil).map((i) => i.headline), ['d7', 'd8', 'd9', 'd10']);
+  assert.strictEqual(kept.filter((i) => i.kind === 'briefing').length, 5);
+});
+
 // ── ordering ─────────────────────────────────────────────────────────────────
 
 test('sort is blocking, then normal, then fyi; oldest first inside a rank', () => {
@@ -265,12 +348,26 @@ test('sortForInbox does not mutate its input', () => {
 
 // ── ids and tickets ──────────────────────────────────────────────────────────
 
-test('a ticket is accepted in every spelling an agent might use', () => {
-  for (const raw of [12, '12', '#12', 'w12', 'W12', ' #12 ']) {
-    assert.strictEqual(inbox.normalizeTicket(raw), 'w12', `ticket ${JSON.stringify(raw)}`);
+test('an id is accepted as an agent might repeat it back', () => {
+  const uuid = '3f9c2a10-5b7e-4d21-9a8b-0c1d2e3f4a5b';
+  for (const raw of [uuid, uuid.toUpperCase(), ` ${uuid} `]) {
+    assert.strictEqual(inbox.normalizeId(raw), uuid, `id ${JSON.stringify(raw)}`);
   }
-  for (const bad of ['', '  ', 'abc', '../x', 'w', '#', null, undefined, '0', '-3', '1.5']) {
-    assert.strictEqual(inbox.normalizeTicket(bad), null, `ticket ${JSON.stringify(bad)}`);
+  // An item stored before #705 keeps its w<n> id, and the old ticket spellings still find it.
+  for (const raw of [12, '12', '#12', 'w12', 'W12', ' #12 ']) {
+    assert.strictEqual(inbox.normalizeId(raw), 'w12', `legacy ticket ${JSON.stringify(raw)}`);
+  }
+  for (const bad of ['', '  ', 'abc', '../x', 'w', '#', null, undefined, '0', '-3', '1.5', `${uuid}x`]) {
+    assert.strictEqual(inbox.normalizeId(bad), null, `id ${JSON.stringify(bad)}`);
+  }
+});
+
+test('a link names an item by its exact id only', () => {
+  const uuid = '3f9c2a10-5b7e-4d21-9a8b-0c1d2e3f4a5b';
+  assert.ok(inbox.isItemId(uuid));
+  assert.ok(inbox.isItemId('w12'));
+  for (const loose of [uuid.toUpperCase(), 'W12', 'w012', '12', '#12', 'blocked:abc']) {
+    assert.ok(!inbox.isItemId(loose), `${loose} would give one item two addresses`);
   }
 });
 
@@ -284,18 +381,19 @@ test('derived ids round-trip and do not collide with stored ones', () => {
 
 // ── persistence ──────────────────────────────────────────────────────────────
 
-test('save/load round-trips and never reissues an id', () => {
+test('save/load round-trips, and every minted id is a fresh UUID (#705)', () => {
   inbox.load();
   const a = inbox.add({ headline: 'first', sessionId: 's1' }, NOW);
   const b = inbox.add({ headline: 'second', sessionId: 's1' }, NOW + 1);
-  assert.strictEqual(a.id, 'w1');
-  assert.strictEqual(b.id, 'w2');
+  assert.match(a.id, UUID_RE);
+  assert.match(b.id, UUID_RE);
+  assert.notStrictEqual(a.id, b.id);
   inbox.save();
 
   inbox.load();
-  assert.deepStrictEqual(inbox.all().map((i) => i.headline), ['first', 'second']);
+  assert.deepStrictEqual(inbox.all().map((i) => i.id), [a.id, b.id]);
   const c = inbox.add({ headline: 'third' }, NOW + 2);
-  assert.strictEqual(c.id, 'w3', 'nextSeq must survive a reload, or a ticket points at two items');
+  assert.ok(![a.id, b.id].includes(c.id));
 });
 
 test('save leaves no .tmp behind', () => {
@@ -309,16 +407,22 @@ test('a corrupt file is an empty inbox, not a thrown mod', () => {
   fs.writeFileSync(inbox.inboxFile(), '{ this is not json');
   assert.doesNotThrow(() => inbox.load());
   assert.deepStrictEqual(inbox.all(), []);
-  assert.strictEqual(inbox.add({ headline: 'after' }).id, 'w1');
+  // Nothing to rewind: ids are random, so a wiped or corrupt store can never hand a new
+  // question the address of one already sitting in someone's email (#705).
+  assert.match(inbox.add({ headline: 'after' }).id, UUID_RE);
 });
 
-test('nextSeq recovers from a file that lost it', () => {
+test('a file written before #705 loads, and its items keep their w<n> ids', () => {
   fs.writeFileSync(inbox.inboxFile(), JSON.stringify({
     version: 1,
-    items: [{ id: 'w7', seq: 7, status: 'answered', createdAt: NOW }],
+    nextSeq: 71,
+    items: [{ id: 'w70', seq: 70, kind: 'question', status: 'open', headline: 'old', createdAt: NOW }],
   }));
   inbox.load();
-  assert.strictEqual(inbox.add({ headline: 'next' }).id, 'w8');
+  assert.strictEqual(inbox.byId('w70').headline, 'old');
+  assert.match(inbox.add({ headline: 'new' }).id, UUID_RE, 'new items are UUIDs regardless');
+  inbox.save();
+  assert.ok(!('nextSeq' in JSON.parse(fs.readFileSync(inbox.inboxFile(), 'utf8'))), 'the counter is gone from the file');
 });
 
 // ── the pending-wait registry ────────────────────────────────────────────────

@@ -5376,14 +5376,20 @@ async function init() {
         // noRestore (#596): the server just told us this session exists, so this is
         // never a restore request. If it died in the meantime (a queued unattended
         // run that finished before this window connected), we want a clean "gone",
-        // not a resurrected tombstone.
+        // not a resurrected tombstone. The one exception is `restore` (#705): a human
+        // pressed Discuss on a decision link whose asking session has closed, which IS an
+        // explicit restore — the same request the restore modal makes.
         if (msg.windowId && msg.windowId !== getWindowId()) return;
         // A repair re-emit from the server's orphan sweep (#680) says "you should have
         // a tab for this" — which is only news if we don't. The normal path keeps
         // allowDuplicate: true, so without this guard every sweep would stack a second
-        // tab-<id> node on a window that was fine all along.
-        if (msg.repair && sessions.has(msg.id)) return;
-        createSession(msg.cwd, msg.id, false, { name: msg.name, allowDuplicate: true, initialPrompt: msg.initialPrompt, loading: msg.loading, background: msg.background, noRestore: true });
+        // tab-<id> node on a window that was fine all along. `focus` (#705) rides on a
+        // repair: Discuss on a live session brings its existing tab forward.
+        if (msg.repair && sessions.has(msg.id)) {
+          if (msg.focus) userJumpTo(msg.id);
+          return;
+        }
+        createSession(msg.cwd, msg.id, false, { name: msg.name, allowDuplicate: true, initialPrompt: msg.initialPrompt, loading: msg.loading, background: msg.background, noRestore: !msg.restore });
         // A background open (unattended scheduled run, #600) stays silent — the
         // top-of-page progress bar is ambient interruption for work the user
         // didn't just start.
