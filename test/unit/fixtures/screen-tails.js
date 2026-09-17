@@ -24,7 +24,7 @@ const PERMISSION_TAIL = [
   'Do you want to proceed?',
   '❯ 1. Yes',
   "2. Yes, and don't ask again for deepsteve - read_session_screen commands in",
-  '/Users/michael/github/deepsteve-experimental/.claude/worktrees/github-issue-568',
+  '/Users/you/github/deepsteve-experimental/.claude/worktrees/github-issue-568',
   '3. No',
   'Esc to cancel · Tab to amend',
   '❯Yes',

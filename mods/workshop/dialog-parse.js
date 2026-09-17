@@ -190,7 +190,7 @@ function detectDialog(lines) {
  *
  *     ❯ 1. Yes
  *       2. Yes, and don't ask again for deepsteve - read_session_screen commands in
- *          /Users/michael/github/deepsteve-experimental/.claude/worktrees/…
+ *          /Users/you/github/deepsteve-experimental/.claude/worktrees/…
  *       3. No
  *
  * The trailing run there is `3. No` alone — one option, unparseable, and every

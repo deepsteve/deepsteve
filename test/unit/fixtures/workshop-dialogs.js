@@ -22,7 +22,7 @@ const PERMISSION_WRAPPED = [
   'Do you want to proceed?',
   '❯ 1. Yes',
   "  2. Yes, and don't ask again for deepsteve - read_session_screen commands in",
-  '     /Users/michael/github/deepsteve-experimental/.claude/worktrees/github-issue-568',
+  '     /Users/you/github/deepsteve-experimental/.claude/worktrees/github-issue-568',
   '  3. No',
   'Esc to cancel · Tab to amend',
 ];
@@ -31,7 +31,7 @@ const PERMISSION_CURSOR_MID = [
   'Bash(rm -rf node_modules)',
   'Do you want to proceed?',
   '  1. Yes',
-  "❯ 2. Yes, and don't ask again for rm commands in /Users/michael/x",
+  "❯ 2. Yes, and don't ask again for rm commands in /Users/you/x",
   '  3. No',
   'Esc to cancel · Tab to amend',
 ];
@@ -40,7 +40,7 @@ const PERMISSION_CURSOR_LAST = [
   'Bash(rm -rf node_modules)',
   'Do you want to proceed?',
   '  1. Yes',
-  "  2. Yes, and don't ask again for rm commands in /Users/michael/x",
+  "  2. Yes, and don't ask again for rm commands in /Users/you/x",
   '❯ 3. No',
   'Esc to cancel · Tab to amend',
 ];

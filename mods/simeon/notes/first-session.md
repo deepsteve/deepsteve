@@ -7,7 +7,7 @@ tool. This is what that session actually did, why it was replaced by
 Kept because the failure is not obvious in advance and is very obvious in hindsight: every
 individual thing the agent did was reasonable, and the aggregate was useless.
 
-**Raw transcript:** `~/.claude/projects/-Users-michael-github-deepsteve-experimental/11492905-cf48-44ba-b3ef-cc8ee5f2dcfb.jsonl`
+**Raw transcript:** `~/.claude/projects/-Users-you-github-deepsteve-experimental/11492905-cf48-44ba-b3ef-cc8ee5f2dcfb.jsonl`
 (claudeSessionId `11492905-cf48-44ba-b3ef-cc8ee5f2dcfb`, deepsteve session `5a6fcb01`, 2026-08-30).
 Not committed: it is ~740 KB and includes `env` dumps naming `DEEPSTEVE_API_TOKEN`. The
 distilled per-turn counts are in [`first-session-turns.json`](first-session-turns.json), which
