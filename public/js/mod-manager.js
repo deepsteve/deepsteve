@@ -79,11 +79,52 @@ let modContainer = null;
 let backBtn = null;
 let quietBtn = null;       // quiet mode's toggle (#662) — lives IN the slot, see _paintQuietBtn
 let hooks = null;
-let sessionCallbacks = [];
+
+/**
+ * Every bridge subscription the host fans events out to, one list per kind.
+ *
+ * One object rather than nineteen module variables because three paths have to drop a mod's
+ * entries — a panel unloading, a view being replaced, and a mod whose page changed being
+ * re-injected — and each used to name the lists by hand. Those three hand-written lists had
+ * drifted to 17, 5 and 13 of the 19, so a fullscreen mod subscribed to tasks or screenshots
+ * kept a callback alive against a destroyed iframe realm. A registry makes forgetCallbacks()
+ * total by construction: a kind added here is dropped by every path for free.
+ *
+ * A list is REPLACED rather than spliced on removal, so a callback that unsubscribes itself
+ * while being notified cannot shorten the array its own notify loop is walking.
+ */
+const CALLBACKS = {
+  session: [],           // [{modId, cb}] — callbacks for session-list changes
+  activeSession: [],     // [{modId, cb}] — callbacks for active session changes
+  userActivity: [],      // [{modId, cb}] — fired when the user types into a terminal
+  settings: [],          // [{modId, cb}] — notified on settings change
+  excursionChanged: [],  // [{modId, cb}] — fired when the excursion stack or the view changes
+  task: [],              // [{modId, cb}] — callbacks for task broadcasts
+  scheduledTask: [],     // [{modId, cb}] — callbacks for scheduled-task broadcasts
+  agentChat: [],         // [{modId, cb}] — callbacks for agent-chat broadcasts
+  context: [],           // [{modId, cb}] — fired when the shared contexts (#526) change
+  activeContext: [],     // [{modId, cb}] — fired when the active context changes
+  browserEval: [],       // [{modId, cb}] — callbacks for browser-eval-request
+  browserConsole: [],    // [{modId, cb}] — callbacks for browser-console-request
+  screenshotCapture: [], // [{modId, cb}] — callbacks for screenshot-capture-request
+  screenshotEvent: [],   // [{modId, cb}] — callbacks for screenshot-added/deleted broadcasts
+  sceneUpdate: [],       // [{modId, cb}] — callbacks for scene-update-request
+  sceneQuery: [],        // [{modId, cb}] — callbacks for scene-query-request
+  sceneSnapshot: [],     // [{modId, cb}] — callbacks for scene-snapshot-request
+  babyBrowser: [],       // [{modId, cb}] — callbacks for baby-browser-request
+  wsReconnected: [],     // [{modId, cb}] — fired when any session WS reconnects
+};
+
+/** Drop every subscription `modId` registered, of every kind. */
+function forgetCallbacks(modId) {
+  for (const kind of Object.keys(CALLBACKS)) {
+    CALLBACKS[kind] = CALLBACKS[kind].filter(e => e.modId !== modId);
+  }
+}
+
 let modViewVisible = false;
 let toolbarButtons = new Map(); // modId → button element
 let appRows = new Map();        // modId → the Apps rail row, for the .active sweep (#661)
-let settingsCallbacks = [];     // [{modId, cb}] — notified on settings change
 
 // Panel mode state — multi-panel
 let panelContainer = null;
@@ -94,22 +135,6 @@ let panelTabsContainer = null;   // #panel-tabs DOM element
 let panelTabs = new Map();       // modId → tab button element
 let railIndicator = null;        // host-owned element pinned above the panel tabs (#667)
 let railIndicatorVisible = true; // ...and whether its owner is currently showing it
-let taskCallbacks = [];          // [{modId, cb}] — callbacks for task broadcasts
-let scheduledTaskCallbacks = []; // [{modId, cb}] — callbacks for scheduled-task broadcasts
-let agentChatCallbacks = [];     // [{modId, cb}] — callbacks for agent-chat broadcasts
-let browserEvalCallbacks = [];   // [{modId, cb}] — callbacks for browser-eval-request
-let browserConsoleCallbacks = []; // [{modId, cb}] — callbacks for browser-console-request
-let screenshotCaptureCallbacks = []; // [{modId, cb}] — callbacks for screenshot-capture-request
-let screenshotEventCallbacks = [];   // [{modId, cb}] — callbacks for screenshot-added/deleted broadcasts
-let sceneUpdateCallbacks = [];       // [{modId, cb}] — callbacks for scene-update-request
-let sceneQueryCallbacks = [];        // [{modId, cb}] — callbacks for scene-query-request
-let sceneSnapshotCallbacks = [];     // [{modId, cb}] — callbacks for scene-snapshot-request
-let babyBrowserCallbacks = [];       // [{modId, cb}] — callbacks for baby-browser-request
-let wsReconnectedCallbacks = [];     // [{modId, cb}] — fired when any session WS reconnects
-let activeSessionCallbacks = [];     // [{modId, cb}] — callbacks for active session changes
-let userActivityCallbacks = [];      // [{modId, cb}] — fired when the user types into a terminal
-let contextCallbacks = [];           // [{modId, cb}] — fired when the shared contexts (#526) change
-let activeContextCallbacks = [];     // [{modId, cb}] — fired when the active context changes
 // ─── Excursions (#661) ───────────────────────────────────────────────
 // An APP — a mod with "app": true — can lend you out to a session, let you wander, and take
 // you back with one key. The stack lives HERE, next to the one view slot it describes, because
@@ -129,7 +154,6 @@ let excursion = null;                // { appId, chrome, stack: [{ sessionId, la
 // One view slot means one cycle handler; an array would need sweeping and a stale entry would
 // permanently disable the fall-back to cycling projects, which is worse than leaking it.
 let excursionCycleHandler = null;    // { viewId, cb }
-let excursionChangedCallbacks = [];  // [{modId, cb}]
 // visitSession() calls hooks.focusSession() itself, and that is a user-jump path which pushes.
 // Without this the ⌘↑/⌘↓ replace would immediately push on top of itself and the stack would
 // grow one frame per queue step — the exact thing the replace rule exists to prevent.
@@ -424,7 +448,7 @@ function _notifySettingsChanged(modId) {
   const mod = allMods.find(m => m.id === modId);
   if (!mod) return;
   const settings = _loadModSettings(mod);
-  for (const entry of settingsCallbacks) {
+  for (const entry of CALLBACKS.settings) {
     if (entry.modId === modId) {
       try { entry.cb(settings); } catch (e) { console.error('Settings callback error:', e); }
     }
@@ -2049,24 +2073,8 @@ function _unloadPanelMod(modId) {
   // Remove tab
   _removePanelTab(modId);
 
-  // Filter out callbacks for this mod
-  taskCallbacks = taskCallbacks.filter(e => e.modId !== modId);
-  scheduledTaskCallbacks = scheduledTaskCallbacks.filter(e => e.modId !== modId);
-  agentChatCallbacks = agentChatCallbacks.filter(e => e.modId !== modId);
-  browserEvalCallbacks = browserEvalCallbacks.filter(e => e.modId !== modId);
-  browserConsoleCallbacks = browserConsoleCallbacks.filter(e => e.modId !== modId);
-  screenshotCaptureCallbacks = screenshotCaptureCallbacks.filter(e => e.modId !== modId);
-  sceneUpdateCallbacks = sceneUpdateCallbacks.filter(e => e.modId !== modId);
-  sceneQueryCallbacks = sceneQueryCallbacks.filter(e => e.modId !== modId);
-  sceneSnapshotCallbacks = sceneSnapshotCallbacks.filter(e => e.modId !== modId);
-  babyBrowserCallbacks = babyBrowserCallbacks.filter(e => e.modId !== modId);
-  wsReconnectedCallbacks = wsReconnectedCallbacks.filter(e => e.modId !== modId);
-  settingsCallbacks = settingsCallbacks.filter(e => e.modId !== modId);
-  sessionCallbacks = sessionCallbacks.filter(e => e.modId !== modId);
-  activeSessionCallbacks = activeSessionCallbacks.filter(e => e.modId !== modId);
-  userActivityCallbacks = userActivityCallbacks.filter(e => e.modId !== modId);
-  contextCallbacks = contextCallbacks.filter(e => e.modId !== modId);
-  activeContextCallbacks = activeContextCallbacks.filter(e => e.modId !== modId);
+  // Its iframe is gone, so every subscription it holds is against a dead realm.
+  forgetCallbacks(modId);
 
   // If it was the visible panel, switch to another or collapse
   if (visiblePanelId === modId) {
@@ -2189,19 +2197,24 @@ function _loadQuiet() {
 let quietApps = _loadQuiet();
 
 /**
- * Is the chrome down RIGHT NOW? Derived on every read, never mirrored into a variable — the
- * same shape as _setModViewVisible() and _paintBackBtn(). The `modViewVisible` term is what
- * makes excursions free: while you are out the slot is down and so is quiet mode, so the strip
- * and the rail — and with them the Apps row that is your way home — are on screen; coming home
- * re-derives it as true, with nothing persisted, suspended or restored in between.
+ * Is there an app on screen for quiet mode to apply to? Drives the ⌘\ entry's isEnabled.
+ *
+ * The `modViewVisible` term is what makes excursions free: while you are out the slot is down
+ * and so is quiet mode, so the strip and the rail — and with them the Apps row that is your
+ * way home — are on screen; coming home re-derives it, with nothing persisted, suspended or
+ * restored in between.
  */
-function isQuietMode() {
-  return !!(modViewVisible && activeView && quietApps.has(activeView.id) && _isApp(activeView.id));
-}
-
-/** Is there an app on screen for quiet mode to apply to? Drives the ⌘\ entry's isEnabled. */
 function isQuietAvailable() {
   return !!(modViewVisible && activeView && _isApp(activeView.id));
+}
+
+/**
+ * Is the chrome down RIGHT NOW? Derived on every read, never mirrored into a variable — the
+ * same shape as _setModViewVisible() and _paintBackBtn(). Stated in terms of availability
+ * rather than repeating its three terms: "on" is "could be on, and you asked for it".
+ */
+function isQuietMode() {
+  return isQuietAvailable() && quietApps.has(activeView.id);
 }
 
 /**
@@ -2451,11 +2464,7 @@ function _showMod(mod) {
 /** Drop every bridge callback registered by the page that occupied the slot under `id`. */
 function _forgetViewCallbacks(id) {
   if (!id) return;
-  sessionCallbacks = sessionCallbacks.filter(e => e.modId !== id);
-  activeSessionCallbacks = activeSessionCallbacks.filter(e => e.modId !== id);
-  userActivityCallbacks = userActivityCallbacks.filter(e => e.modId !== id);
-  settingsCallbacks = settingsCallbacks.filter(e => e.modId !== id);
-  excursionChangedCallbacks = excursionChangedCallbacks.filter(e => e.modId !== id);
+  forgetCallbacks(id);
   // Not merely a leak: a cycle handler left pointing at a destroyed iframe realm would keep
   // requestExcursionCycle() reporting "handled", so ⌘↑/⌘↓ would stop falling back to cycling
   // projects and would simply do nothing, forever.
@@ -2486,8 +2495,9 @@ function _hideMod() {
   // Show content row, hide mod container and back button
   document.getElementById('content-row').style.display = '';
   modContainer.style.display = 'none';
-  backBtn.style.display = 'none';
   _setModViewVisible(false);
+  // activeView is already null, so this hides the button — there is no view to go back to.
+  _paintBackBtn();
   // The app is gone, so the chrome comes back. The PREFERENCE is untouched: quiet mode is
   // remembered per app, and opening this one again should land you where you left off.
   _applyQuietChrome();
@@ -2528,9 +2538,10 @@ function showModView() {
   if (!activeView) return;
   document.getElementById('content-row').style.display = 'none';
   modContainer.style.display = 'flex';
-  backBtn.style.display = 'none';
-  backBtn.classList.remove('excursion');
   _setModViewVisible(true);
+  // The slot is up, so there is nothing to go back TO: the paint hides the button and drops
+  // its excursion styling. After _setModViewVisible, which is the input it reads.
+  _paintBackBtn();
   // AFTER _setModViewVisible: isQuietMode() reads modViewVisible, so asserting the chrome
   // before the flip would compute it against the state we just left. This is also the reload
   // path — the restore inside loadAvailableMods() ends here — so quiet mode comes back with
@@ -2539,7 +2550,7 @@ function showModView() {
   _focusIframe(iframe);
   // An app that spent the excursion in a display:none iframe has laid nothing out — its
   // selected row cannot have been scrolled into view. Tell it it is on screen again.
-  if (excursionChangedCallbacks.length) _notifyExcursion();
+  if (CALLBACKS.excursionChanged.length) _notifyExcursion();
 }
 
 // ─── Excursions (#661) ─────────────────────────────────────────────────────────────────────
@@ -2586,7 +2597,7 @@ function _excursionChanged() {
 
 function _notifyExcursion() {
   const state = getExcursion();
-  for (const entry of excursionChangedCallbacks) {
+  for (const entry of CALLBACKS.excursionChanged) {
     try { entry.cb(state); } catch (e) { console.error('Excursion callback error:', e); }
   }
 }
@@ -2620,10 +2631,17 @@ function endExcursion({ goHome = true } = {}) {
  * `viewId` guards it: another view's teardown must not end this view's excursion.
  */
 function _abandonExcursion(viewId = null) {
-  if (!excursion) return;
-  if (viewId && excursion.appId !== viewId) return;
-  excursion = null;
-  _excursionChanged();
+  if (viewId && excursion?.appId !== viewId) return;
+  endExcursion({ goHome: false });
+}
+
+/**
+ * Push a frame, honouring the depth cap. Both pushers go through here so the cap is one fact
+ * rather than two copies that could drift apart.
+ */
+function _pushFrame(frame) {
+  excursion.stack.push(frame);
+  if (excursion.stack.length > MAX_EXCURSION_DEPTH) excursion.stack.shift();
 }
 
 /**
@@ -2647,8 +2665,7 @@ function visitSession(id, opts = {}) {
   } else if (opts.replace) {
     excursion.stack[excursion.stack.length - 1] = frame;
   } else {
-    excursion.stack.push(frame);
-    if (excursion.stack.length > MAX_EXCURSION_DEPTH) excursion.stack.shift();
+    _pushFrame(frame);
   }
 
   _excursionChanged();
@@ -2667,8 +2684,7 @@ function visitSession(id, opts = {}) {
 function noteExcursionDrill(id) {
   if (suppressExcursionPush || !id || !isExcursionActive()) return;
   if (excursion.stack[excursion.stack.length - 1].sessionId === id) return;  // already there
-  excursion.stack.push({ sessionId: id, label: null, reason: 'drill', at: Date.now() });
-  if (excursion.stack.length > MAX_EXCURSION_DEPTH) excursion.stack.shift();
+  _pushFrame({ sessionId: id, label: null, reason: 'drill', at: Date.now() });
   _excursionChanged();
 }
 
@@ -2718,7 +2734,13 @@ function requestExcursionCycle(delta) {
  * variables, so anything built inside one is stuck on hardcoded fallback colours (#633).
  */
 function _paintBackBtn() {
-  if (!backBtn || !activeView) return;
+  if (!backBtn) return;
+  // The ONE writer of this button, visibility included — the same shape _paintQuietBtn() uses
+  // for the toggle in the slot, so the two halves of "is there a ← and what does it say" can
+  // never disagree. It shows exactly when the slot is DOWN with a view still backgrounded in
+  // it, which is the whole meaning of the button; callers just repaint after they flip either
+  // input, rather than unhiding it and leaving the suppression below to hide it again.
+  //
   // An App is never chrome in the strip — the other half of #662's rule. That issue dropped an
   // app's launcher button on the grounds that the Apps rail row is how you reach a place; this
   // button is the same launcher pointing the other way, so it goes for the same reason, and
@@ -2728,9 +2750,9 @@ function _paintBackBtn() {
   // this used to carry is the strip's own selected tab. Non-app mods keep theirs: they have no
   // rail row to be the way back.
   //
-  // This is the ONE place that decides whether there is a ← right now — _backgroundView()
-  // unhides first and then calls here, so the suppression cannot be routed around.
-  if (_isApp(activeView.id)) { backBtn.style.display = 'none'; return; }
+  const shown = !!activeView && !modViewVisible && !_isApp(activeView.id);
+  backBtn.style.display = shown ? '' : 'none';
+  if (!shown) { backBtn.classList.remove('excursion'); return; }
   if (!isExcursionActive()) {
     backBtn.classList.remove('excursion');
     backBtn.textContent = `← ${activeView.name || 'Back'}`;
@@ -2815,17 +2837,14 @@ function _backgroundView() {
     _showPanel();
   }
 
-  if (activeView) {
-    backBtn.style.display = '';
-    _paintBackBtn();          // — which hides it again for an App
-  }
+  _paintBackBtn();
 }
 
 /**
  * Notify mods that the active session has changed.
  */
 function notifyActiveSessionChanged(id) {
-  for (const entry of activeSessionCallbacks) {
+  for (const entry of CALLBACKS.activeSession) {
     try { entry.cb(id); } catch (e) { console.error('Active session callback error:', e); }
   }
 }
@@ -2834,7 +2853,7 @@ function notifyActiveSessionChanged(id) {
  * Notify mods that sessions have changed.
  */
 function notifySessionsChanged(sessionList) {
-  for (const entry of sessionCallbacks) {
+  for (const entry of CALLBACKS.session) {
     try { entry.cb(sessionList); } catch (e) { console.error('Mod callback error:', e); }
   }
   // The retry half of the reload reconciler (#661): on a fresh page the restored excursion
@@ -2847,13 +2866,13 @@ function notifySessionsChanged(sessionList) {
  * Used by the action-required mod to block auto-cycle while the user is interacting.
  */
 function notifyUserActivity(sessionId) {
-  for (const entry of userActivityCallbacks) {
+  for (const entry of CALLBACKS.userActivity) {
     try { entry.cb(sessionId); } catch (e) { console.error('User activity callback error:', e); }
   }
 }
 
 function notifyTasksChanged(tasks) {
-  for (const entry of taskCallbacks) {
+  for (const entry of CALLBACKS.task) {
     try { entry.cb(tasks); } catch (e) { console.error('Task callback error:', e); }
   }
 }
@@ -2864,9 +2883,9 @@ function notifyTasksChanged(tasks) {
  * fan the fresh state out to every subscriber.
  */
 function notifyScheduledTasksChanged() {
-  if (scheduledTaskCallbacks.length === 0) return;
+  if (CALLBACKS.scheduledTask.length === 0) return;
   fetch('/api/scheduled-tasks').then(r => r.json()).then(data => {
-    for (const entry of scheduledTaskCallbacks) {
+    for (const entry of CALLBACKS.scheduledTask) {
       try { entry.cb(data); } catch (e) { console.error('Scheduled-task callback error:', e); }
     }
   }).catch(() => {});
@@ -2877,7 +2896,7 @@ function notifyScheduledTasksChanged() {
  * on the `contexts` WS broadcast, which carries the full list. Fan it out directly.
  */
 function notifyContextsChanged(contexts) {
-  for (const entry of contextCallbacks) {
+  for (const entry of CALLBACKS.context) {
     try { entry.cb(contexts || []); } catch (e) { console.error('Contexts callback error:', e); }
   }
 }
@@ -2887,7 +2906,7 @@ function notifyContextsChanged(contexts) {
  * bidirectional sync. Called from app.js when the Context View rail switches context.
  */
 function notifyActiveContextChanged(id) {
-  for (const entry of activeContextCallbacks) {
+  for (const entry of CALLBACKS.activeContext) {
     try { entry.cb(id || null); } catch (e) { console.error('Active-context callback error:', e); }
   }
 }
@@ -2896,7 +2915,7 @@ function notifyActiveContextChanged(id) {
  * Notify panel mods that agent chat has changed (called from app.js on WS broadcast).
  */
 function notifyAgentChatChanged(channels) {
-  for (const entry of agentChatCallbacks) {
+  for (const entry of CALLBACKS.agentChat) {
     try { entry.cb(channels); } catch (e) { console.error('Agent chat callback error:', e); }
   }
 }
@@ -2905,7 +2924,7 @@ function notifyAgentChatChanged(channels) {
  * Notify panel mods of a browser-eval request (called from app.js on WS broadcast).
  */
 function notifyBrowserEvalRequest(req) {
-  for (const entry of browserEvalCallbacks) {
+  for (const entry of CALLBACKS.browserEval) {
     try { entry.cb(req); } catch (e) { console.error('Browser eval callback error:', e); }
   }
 }
@@ -2914,7 +2933,7 @@ function notifyBrowserEvalRequest(req) {
  * Notify panel mods of a browser-console request (called from app.js on WS broadcast).
  */
 function notifyBrowserConsoleRequest(req) {
-  for (const entry of browserConsoleCallbacks) {
+  for (const entry of CALLBACKS.browserConsole) {
     try { entry.cb(req); } catch (e) { console.error('Browser console callback error:', e); }
   }
 }
@@ -2923,7 +2942,7 @@ function notifyBrowserConsoleRequest(req) {
  * Notify panel mods of a screenshot-capture request (called from app.js on WS broadcast).
  */
 function notifyScreenshotCaptureRequest(req) {
-  for (const entry of screenshotCaptureCallbacks) {
+  for (const entry of CALLBACKS.screenshotCapture) {
     try { entry.cb(req); } catch (e) { console.error('Screenshot capture callback error:', e); }
   }
 }
@@ -2932,7 +2951,7 @@ function notifyScreenshotCaptureRequest(req) {
  * Notify panel mods of a screenshot collection change (screenshot-added / screenshot-deleted).
  */
 function notifyScreenshotEvent(msg) {
-  for (const entry of screenshotEventCallbacks) {
+  for (const entry of CALLBACKS.screenshotEvent) {
     try { entry.cb(msg); } catch (e) { console.error('Screenshot event callback error:', e); }
   }
 }
@@ -2941,14 +2960,14 @@ function notifyScreenshotEvent(msg) {
  * Notify mods of a baby-browser request (called from app.js on WS broadcast).
  */
 function notifyBabyBrowserRequest(req) {
-  for (const entry of babyBrowserCallbacks) {
+  for (const entry of CALLBACKS.babyBrowser) {
     if (req.targetTabId && entry.tabInstanceId !== req.targetTabId) continue;
     try { entry.cb(req); } catch (e) { console.error('Baby browser callback error:', e); }
   }
 }
 
 function notifyWSReconnected() {
-  for (const entry of wsReconnectedCallbacks) {
+  for (const entry of CALLBACKS.wsReconnected) {
     try { entry.cb(); } catch (e) { console.error('WS reconnected callback error:', e); }
   }
 }
@@ -2957,7 +2976,7 @@ function notifyWSReconnected() {
  * Notify panel mods of a scene-update request (called from app.js on WS broadcast).
  */
 function notifySceneUpdateRequest(req) {
-  for (const entry of sceneUpdateCallbacks) {
+  for (const entry of CALLBACKS.sceneUpdate) {
     try { entry.cb(req); } catch (e) { console.error('Scene update callback error:', e); }
   }
 }
@@ -2966,7 +2985,7 @@ function notifySceneUpdateRequest(req) {
  * Notify panel mods of a scene-query request (called from app.js on WS broadcast).
  */
 function notifySceneQueryRequest(req) {
-  for (const entry of sceneQueryCallbacks) {
+  for (const entry of CALLBACKS.sceneQuery) {
     try { entry.cb(req); } catch (e) { console.error('Scene query callback error:', e); }
   }
 }
@@ -2975,7 +2994,7 @@ function notifySceneQueryRequest(req) {
  * Notify panel mods of a scene-snapshot request (called from app.js on WS broadcast).
  */
 function notifySceneSnapshotRequest(req) {
-  for (const entry of sceneSnapshotCallbacks) {
+  for (const entry of CALLBACKS.sceneSnapshot) {
     try { entry.cb(req); } catch (e) { console.error('Scene snapshot callback error:', e); }
   }
 }
@@ -3050,10 +3069,10 @@ function _injectBridgeAPI(iframeEl, modId, tabInstanceId) {
       },
       onExcursionChanged(cb) {
         const entry = { modId, cb };
-        excursionChangedCallbacks.push(entry);
+        CALLBACKS.excursionChanged.push(entry);
         try { cb(getExcursion()); } catch {}
         return () => {
-          excursionChangedCallbacks = excursionChangedCallbacks.filter(e => e !== entry);
+          CALLBACKS.excursionChanged = CALLBACKS.excursionChanged.filter(e => e !== entry);
         };
       },
       // Host → app: "move your cursor". The app owns the queue because it is the only thing
@@ -3067,10 +3086,10 @@ function _injectBridgeAPI(iframeEl, modId, tabInstanceId) {
       },
       onSessionsChanged(cb) {
         const entry = { modId, cb };
-        sessionCallbacks.push(entry);
+        CALLBACKS.session.push(entry);
         try { cb(hooks.getSessions()); } catch {}
         return () => {
-          sessionCallbacks = sessionCallbacks.filter(e => e !== entry);
+          CALLBACKS.session = CALLBACKS.session.filter(e => e !== entry);
         };
       },
       getWindowId() {
@@ -3081,20 +3100,20 @@ function _injectBridgeAPI(iframeEl, modId, tabInstanceId) {
       },
       onActiveSessionChanged(cb) {
         const entry = { modId, cb };
-        activeSessionCallbacks.push(entry);
+        CALLBACKS.activeSession.push(entry);
         // Fire immediately with current value
         if (getActiveSessionIdFn) {
           try { cb(getActiveSessionIdFn()); } catch {}
         }
         return () => {
-          activeSessionCallbacks = activeSessionCallbacks.filter(e => e !== entry);
+          CALLBACKS.activeSession = CALLBACKS.activeSession.filter(e => e !== entry);
         };
       },
       onUserActivity(cb) {
         const entry = { modId, cb };
-        userActivityCallbacks.push(entry);
+        CALLBACKS.userActivity.push(entry);
         return () => {
-          userActivityCallbacks = userActivityCallbacks.filter(e => e !== entry);
+          CALLBACKS.userActivity = CALLBACKS.userActivity.filter(e => e !== entry);
         };
       },
       showAutoCycleToast(opts) {
@@ -3122,56 +3141,56 @@ function _injectBridgeAPI(iframeEl, modId, tabInstanceId) {
       },
       onSettingsChanged(cb) {
         const entry = { modId, cb };
-        settingsCallbacks.push(entry);
+        CALLBACKS.settings.push(entry);
         // Fire immediately with current values
         const mod = allMods.find(m => m.id === modId);
         if (mod) try { cb(_loadModSettings(mod)); } catch {}
         return () => {
-          settingsCallbacks = settingsCallbacks.filter(e => e !== entry);
+          CALLBACKS.settings = CALLBACKS.settings.filter(e => e !== entry);
         };
       },
       onTasksChanged(cb) {
         const entry = { modId, cb };
-        taskCallbacks.push(entry);
+        CALLBACKS.task.push(entry);
         // Fire immediately with current tasks from server
         fetch('/api/tasks').then(r => r.json()).then(data => {
           try { cb(data.tasks || []); } catch {}
         }).catch(() => {});
         return () => {
-          taskCallbacks = taskCallbacks.filter(e => e !== entry);
+          CALLBACKS.task = CALLBACKS.task.filter(e => e !== entry);
         };
       },
       onScheduledTasksChanged(cb) {
         const entry = { modId, cb };
-        scheduledTaskCallbacks.push(entry);
+        CALLBACKS.scheduledTask.push(entry);
         // Fire immediately with the full current state from the server
         fetch('/api/scheduled-tasks').then(r => r.json()).then(data => {
           try { cb(data); } catch {}
         }).catch(() => {});
         return () => {
-          scheduledTaskCallbacks = scheduledTaskCallbacks.filter(e => e !== entry);
+          CALLBACKS.scheduledTask = CALLBACKS.scheduledTask.filter(e => e !== entry);
         };
       },
       // --- Shared contexts / groups (#526) ---
       // The named groups the panel scopes by ARE the Context View's contexts.
       onContextsChanged(cb) {
         const entry = { modId, cb };
-        contextCallbacks.push(entry);
+        CALLBACKS.context.push(entry);
         // Fire immediately with the current list from the server.
         fetch('/api/contexts').then(r => r.json()).then(d => {
           try { cb(d.contexts || []); } catch {}
         }).catch(() => {});
         return () => {
-          contextCallbacks = contextCallbacks.filter(e => e !== entry);
+          CALLBACKS.context = CALLBACKS.context.filter(e => e !== entry);
         };
       },
       onActiveContextChanged(cb) {
         const entry = { modId, cb };
-        activeContextCallbacks.push(entry);
+        CALLBACKS.activeContext.push(entry);
         // Fire immediately with the current active context id.
         if (getActiveContextIdFn) { try { cb(getActiveContextIdFn()); } catch {} }
         return () => {
-          activeContextCallbacks = activeContextCallbacks.filter(e => e !== entry);
+          CALLBACKS.activeContext = CALLBACKS.activeContext.filter(e => e !== entry);
         };
       },
       setActiveContext(id) {
@@ -3179,76 +3198,76 @@ function _injectBridgeAPI(iframeEl, modId, tabInstanceId) {
       },
       onAgentChatChanged(cb) {
         const entry = { modId, cb };
-        agentChatCallbacks.push(entry);
+        CALLBACKS.agentChat.push(entry);
         // Fire immediately with current data from server
         fetch('/api/agent-chat').then(r => r.json()).then(d => {
           try { cb(d.channels || {}); } catch {}
         }).catch(() => {});
         return () => {
-          agentChatCallbacks = agentChatCallbacks.filter(e => e !== entry);
+          CALLBACKS.agentChat = CALLBACKS.agentChat.filter(e => e !== entry);
         };
       },
       onBrowserEvalRequest(cb) {
         const entry = { modId, cb };
-        browserEvalCallbacks.push(entry);
+        CALLBACKS.browserEval.push(entry);
         return () => {
-          browserEvalCallbacks = browserEvalCallbacks.filter(e => e !== entry);
+          CALLBACKS.browserEval = CALLBACKS.browserEval.filter(e => e !== entry);
         };
       },
       onBrowserConsoleRequest(cb) {
         const entry = { modId, cb };
-        browserConsoleCallbacks.push(entry);
+        CALLBACKS.browserConsole.push(entry);
         return () => {
-          browserConsoleCallbacks = browserConsoleCallbacks.filter(e => e !== entry);
+          CALLBACKS.browserConsole = CALLBACKS.browserConsole.filter(e => e !== entry);
         };
       },
       onScreenshotCaptureRequest(cb) {
         const entry = { modId, cb };
-        screenshotCaptureCallbacks.push(entry);
+        CALLBACKS.screenshotCapture.push(entry);
         return () => {
-          screenshotCaptureCallbacks = screenshotCaptureCallbacks.filter(e => e !== entry);
+          CALLBACKS.screenshotCapture = CALLBACKS.screenshotCapture.filter(e => e !== entry);
         };
       },
       onScreenshotEvent(cb) {
         const entry = { modId, cb };
-        screenshotEventCallbacks.push(entry);
+        CALLBACKS.screenshotEvent.push(entry);
         return () => {
-          screenshotEventCallbacks = screenshotEventCallbacks.filter(e => e !== entry);
+          CALLBACKS.screenshotEvent = CALLBACKS.screenshotEvent.filter(e => e !== entry);
         };
       },
       onSceneUpdateRequest(cb) {
         const entry = { modId, cb };
-        sceneUpdateCallbacks.push(entry);
+        CALLBACKS.sceneUpdate.push(entry);
         return () => {
-          sceneUpdateCallbacks = sceneUpdateCallbacks.filter(e => e !== entry);
+          CALLBACKS.sceneUpdate = CALLBACKS.sceneUpdate.filter(e => e !== entry);
         };
       },
       onSceneQueryRequest(cb) {
         const entry = { modId, cb };
-        sceneQueryCallbacks.push(entry);
+        CALLBACKS.sceneQuery.push(entry);
         return () => {
-          sceneQueryCallbacks = sceneQueryCallbacks.filter(e => e !== entry);
+          CALLBACKS.sceneQuery = CALLBACKS.sceneQuery.filter(e => e !== entry);
         };
       },
       onSceneSnapshotRequest(cb) {
         const entry = { modId, cb };
-        sceneSnapshotCallbacks.push(entry);
+        CALLBACKS.sceneSnapshot.push(entry);
         return () => {
-          sceneSnapshotCallbacks = sceneSnapshotCallbacks.filter(e => e !== entry);
+          CALLBACKS.sceneSnapshot = CALLBACKS.sceneSnapshot.filter(e => e !== entry);
         };
       },
       onBabyBrowserRequest(cb) {
         const entry = { modId, tabInstanceId, cb };
-        babyBrowserCallbacks.push(entry);
+        CALLBACKS.babyBrowser.push(entry);
         return () => {
-          babyBrowserCallbacks = babyBrowserCallbacks.filter(e => e !== entry);
+          CALLBACKS.babyBrowser = CALLBACKS.babyBrowser.filter(e => e !== entry);
         };
       },
       onWSReconnected(cb) {
         const entry = { modId, cb };
-        wsReconnectedCallbacks.push(entry);
+        CALLBACKS.wsReconnected.push(entry);
         return () => {
-          wsReconnectedCallbacks = wsReconnectedCallbacks.filter(e => e !== entry);
+          CALLBACKS.wsReconnected = CALLBACKS.wsReconnected.filter(e => e !== entry);
         };
       },
       setPanelBadge(text) {
@@ -3303,19 +3322,7 @@ function handleModChanged(modId) {
   const panelEntry = panelMods.get(modId);
   if (panelEntry) {
     // Clear stale callbacks for this mod before reload triggers re-injection
-    taskCallbacks = taskCallbacks.filter(e => e.modId !== modId);
-    scheduledTaskCallbacks = scheduledTaskCallbacks.filter(e => e.modId !== modId);
-    agentChatCallbacks = agentChatCallbacks.filter(e => e.modId !== modId);
-    browserEvalCallbacks = browserEvalCallbacks.filter(e => e.modId !== modId);
-    browserConsoleCallbacks = browserConsoleCallbacks.filter(e => e.modId !== modId);
-    screenshotCaptureCallbacks = screenshotCaptureCallbacks.filter(e => e.modId !== modId);
-    babyBrowserCallbacks = babyBrowserCallbacks.filter(e => e.modId !== modId);
-    wsReconnectedCallbacks = wsReconnectedCallbacks.filter(e => e.modId !== modId);
-    settingsCallbacks = settingsCallbacks.filter(e => e.modId !== modId);
-    sessionCallbacks = sessionCallbacks.filter(e => e.modId !== modId);
-    activeSessionCallbacks = activeSessionCallbacks.filter(e => e.modId !== modId);
-    contextCallbacks = contextCallbacks.filter(e => e.modId !== modId);
-    activeContextCallbacks = activeContextCallbacks.filter(e => e.modId !== modId);
+    forgetCallbacks(modId);
 
     panelEntry.iframe.src = panelEntry.iframe.src.replace(/(\?v=\d+)?$/, `?v=${Date.now()}`);
   }
