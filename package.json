@@ -1,6 +1,6 @@
 {
   "name": "deepsteve",
-  "version": "0.25.1",
+  "version": "0.26.0",
   "private": true,
   "description": "A UI around your Claude Code and Codex terminals that your agents build, so the only model in your head is yours.",
   "license": "MIT",
