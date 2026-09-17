@@ -16,6 +16,7 @@ const { resolveForkTip } = require('./fork-resolve');
 const { formatLogTimestamp, createLogRotator, defaultLogPaths } = require('./logging');
 const { findGitRoot } = require('./git-root');
 const { modKind } = require('./mod-kind');
+const { isValidReleaseTag, installShUrl, safeReleaseUrl } = require('./release-check');
 const { usableWorktree } = require('./worktree-support');
 const { worktreePath, worktreeExists, worktreeStatus, worktreeStatuses, freshWorktreeName } = require('./worktree-status');
 const { stateDir, agentHomeDir, expandTilde, spawnCwdProblem, assertSpawnCwd, tmuxSocketPath, defaultTmuxSocketPath } = require('./paths');
@@ -4263,22 +4264,23 @@ async function checkForUpdates() {
     });
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     const release = await resp.json();
-    const latest = (release.tag_name || '').replace(/^v/, '');
-    const updateAvailable = latest ? compareSemver(pkg.version, latest) < 0 : false;
-    let installShUrl = null;
-    if (Array.isArray(release.assets)) {
-      const asset = release.assets.find(a => a.name === 'install.sh');
-      if (asset?.browser_download_url) installShUrl = asset.browser_download_url;
+    // A malformed tag fails the whole check rather than being cleaned up field by field, so
+    // "everything in versionStatus came from a release we recognise" stays an invariant for
+    // the updater and for every renderer downstream. The previous status survives untouched.
+    const tag = typeof release.tag_name === 'string' ? release.tag_name : '';
+    if (!isValidReleaseTag(tag)) {
+      throw new Error(`unexpected release tag ${JSON.stringify(tag).slice(0, 80)}`);
     }
-    if (!installShUrl && release.tag_name) {
-      installShUrl = `https://github.com/deepsteve/deepsteve/releases/download/${release.tag_name}/install.sh`;
-    }
-    versionStatus.latest = latest || null;
+    const latest = tag.replace(/^v/, '');
+    const updateAvailable = compareSemver(pkg.version, latest) < 0;
+    versionStatus.latest = latest;
     versionStatus.updateAvailable = updateAvailable;
     versionStatus.releaseNotes = truncateNotes(release.body);
-    versionStatus.releaseUrl = release.html_url || null;
-    versionStatus.releaseTag = release.tag_name || null;
-    versionStatus.installSh = installShUrl;
+    versionStatus.releaseUrl = safeReleaseUrl(release.html_url);
+    versionStatus.releaseTag = tag;
+    // Derived from the validated tag, never read off the response's asset list — see
+    // release-check.js. applyCurlReinstall() runs this file under bash.
+    versionStatus.installSh = installShUrl(tag);
     versionStatus.checkedAt = new Date().toISOString();
     versionStatus.checkError = null;
     log(`Version check: current=${pkg.version} latest=${latest} updateAvailable=${updateAvailable}`);

@@ -750,7 +750,7 @@ function showAutoApplyToast(tag, deadline) {
   autoApplyToastEl.className = 'auto-apply-toast';
   autoApplyToastEl.innerHTML = `
     <div class="auto-apply-toast-body">
-      <strong>Updating to ${tag || 'latest'}</strong>
+      <strong>Updating to ${escapeHtml(tag || 'latest')}</strong>
       <span class="auto-apply-toast-countdown">in <span id="auto-apply-remaining">…</span>s</span>
     </div>
     <div class="auto-apply-toast-actions">
@@ -1481,6 +1481,7 @@ settingsBtn?.addEventListener('click', async () => {
   function renderUpdates() {
     const s = currentStatus || {};
     const src = s.installSource || { type: 'unknown' };
+    const releaseHref = safeHref(s.releaseUrl);
     const srcLabel =
       src.type === 'git' ? `git checkout${src.sourcePath ? ` (${escapeHtml(src.sourcePath)})` : ''}` :
       src.type === 'curl' ? 'curl install' :
@@ -1524,7 +1525,7 @@ settingsBtn?.addEventListener('click', async () => {
         ${statusPill}
       </div>
       <div style="font-size: 11px; color: var(--ds-text-secondary); margin-top: 4px;">Installed via: ${srcLabel}${checkedLabel}</div>
-      ${s.updateAvailable && s.releaseUrl ? `<div style="font-size: 11px; margin-top: 4px;"><a href="${escapeHtml(s.releaseUrl)}" target="_blank" style="color: var(--ds-accent-blue);">View on GitHub</a></div>` : ''}
+      ${s.updateAvailable && releaseHref ? `<div style="font-size: 11px; margin-top: 4px;"><a href="${escapeHtml(releaseHref)}" target="_blank" rel="noopener noreferrer" style="color: var(--ds-accent-blue);">View on GitHub</a></div>` : ''}
       ${notesBlock}
       ${commandBlock}
     `;
@@ -4596,6 +4597,18 @@ async function landWithNoTabs({ declined = false } = {}) {
  */
 function escapeHtml(str) {
   return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+// escapeHtml() makes a value safe to sit INSIDE an attribute; it says nothing about what the
+// attribute then means. For `href` the scheme is the payload — `javascript:` needs no quote,
+// no angle bracket and no escape to survive. Anything that isn't plain http(s) renders as no
+// link at all rather than a link that runs.
+function safeHref(url) {
+  if (typeof url !== 'string') return null;
+  try {
+    const u = new URL(url, window.location.href);
+    return (u.protocol === 'https:' || u.protocol === 'http:') ? u.href : null;
+  } catch { return null; }
 }
 
 // cwd → git root. Successes only, page lifetime: a `null` must stay retryable
