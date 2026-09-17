@@ -173,10 +173,10 @@ PREAMBLE
 # Validate all mods before embedding
 node validate-mods.js || exit 1
 
-# Generate mkdir for each mod directory
-for moddir in mods/*/; do
-  modname=$(basename "$moddir")
-  echo "mkdir -p \"\$INSTALL_DIR/mods/$modname\"" >> "$OUT"
+# Generate mkdir for each mod directory, and every directory inside one (a mod's data, a scene
+# library, a helper it runs). Hidden directories are local state, never shipped.
+find mods -mindepth 1 -type d -not -path '*/.*' | LC_ALL=C sort | while IFS= read -r moddir; do
+  echo "mkdir -p \"\$INSTALL_DIR/$moddir\"" >> "$OUT"
 done
 echo "" >> "$OUT"
 
@@ -189,6 +189,23 @@ embed_text() {
   echo "cat > \"\$INSTALL_DIR/$dest\" << 'DEEPSTEVE_FILE_EOF'" >> "$OUT"
   cat "$src" >> "$OUT"
   echo "DEEPSTEVE_FILE_EOF" >> "$OUT"
+  echo "" >> "$OUT"
+}
+
+# --- Embed binary files as base64 ---
+
+embed_binary() {
+  local src="$1"
+  local dest="$2"
+  echo "base64 -d << 'DEEPSTEVE_B64_EOF' > \"\$INSTALL_DIR/$dest\"" >> "$OUT"
+  # Normalize the line wrapping: macOS base64 emits one unwrapped line, GNU wraps at 76.
+  # `base64 -d` reads either, so this was never a correctness problem — but it meant the
+  # same commit produced a byte-different install.sh depending on which OS generated it,
+  # which would defeat any future reproducibility check. Now that release.sh can run on
+  # Linux at all (#621), that matters. `fold` emits no trailing newline, hence the echo.
+  base64 < "$src" | tr -d '\n' | fold -w 76 >> "$OUT"
+  echo "" >> "$OUT"
+  echo "DEEPSTEVE_B64_EOF" >> "$OUT"
   echo "" >> "$OUT"
 }
 
@@ -228,11 +245,15 @@ for theme in themes/*.css; do
   embed_text "$theme" "$theme"
 done
 
-# Mod files
-for moddir in mods/*/; do
-  for f in "$moddir"*; do
-    [ -f "$f" ] && embed_text "$f" "$f"
-  done
+# Mod files, at any depth. Text goes in as a heredoc; anything else as base64: a binary file (an
+# image, a 3D model's vertex data) can't survive a heredoc, and neither can a text file without a
+# final newline, whose last line would swallow the heredoc's end marker.
+find mods -type f -not -path '*/.*' | LC_ALL=C sort | while IFS= read -r f; do
+  if grep -qI . "$f" && [ -z "$(tail -c 1 "$f")" ]; then
+    embed_text "$f" "$f"
+  else
+    embed_binary "$f" "$f"
+  fi
 done
 
 # Skill files. A skill whose frontmatter carries `maintainer: true` drives this repo's
@@ -253,23 +274,6 @@ for skill in skills/*.md; do
   fi
   embed_text "$skill" "$skill"
 done
-
-# --- Embed binary files as base64 ---
-
-embed_binary() {
-  local src="$1"
-  local dest="$2"
-  echo "base64 -d << 'DEEPSTEVE_B64_EOF' > \"\$INSTALL_DIR/$dest\"" >> "$OUT"
-  # Normalize the line wrapping: macOS base64 emits one unwrapped line, GNU wraps at 76.
-  # `base64 -d` reads either, so this was never a correctness problem — but it meant the
-  # same commit produced a byte-different install.sh depending on which OS generated it,
-  # which would defeat any future reproducibility check. Now that release.sh can run on
-  # Linux at all (#621), that matters. `fold` emits no trailing newline, hence the echo.
-  base64 < "$src" | tr -d '\n' | fold -w 76 >> "$OUT"
-  echo "" >> "$OUT"
-  echo "DEEPSTEVE_B64_EOF" >> "$OUT"
-  echo "" >> "$OUT"
-}
 
 embed_binary "public/favicon.png" "public/favicon.png"
 embed_binary "public/icon-192.png" "public/icon-192.png"
