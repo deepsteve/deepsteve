@@ -7,3 +7,7 @@ deepsteve-*.tgz
 .DS_Store
 scratch/
 .token
+
+# Fly TikTok phone bridge: the helper app it builds, and its log, PID and time on task
+mods/fly-tiktok/phone/.build/
+mods/fly-tiktok/phone/.run/

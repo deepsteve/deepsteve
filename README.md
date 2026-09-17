@@ -138,6 +138,8 @@ Customize the UI with CSS theme files. See the [Themes Guide](docs/themes.md) fo
 
 Extend deepsteve with visual mods — alternative views, panels, and MCP tools for your sessions. See the [Mods Guide](docs/mods.md) for details.
 
+**Fly TikTok** is an app built on the **Connectome** mod: a fruit fly brain from the connectome, simulated live, watches your iPhone's TikTok feed over USB and swipes when something startles it — see [mods/fly-tiktok/README.md](mods/fly-tiktok/README.md).
+
 ### Skills
 
 Skills enabled in the Mods panel are installed for Claude Code and Codex from the canonical prompts in `skills/*.md`. The experimental agents (OpenCode, Pi, Hermes) get no skills at all — enabling one in the Mods panel does nothing for those sessions.

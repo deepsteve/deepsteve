@@ -163,7 +163,9 @@ mod under Background.
 |---|---|---|---|
 | **Action Required** | panel | on | Auto-cycle through tabs needing input |
 | **Agent Chat** | panel | off | Shared message bus for agent-to-agent communication |
+| **Connectome** | tools-only | off | Fruit fly circuits from the connectome as spiking neural networks, for pages to import — see [its README](../mods/connectome/README.md) |
 | **Console** | panel | off | Browser console passthrough for Agents |
+| **Fly TikTok** | app | off | A fly brain from the connectome watches your iPhone's TikTok feed over USB and swipes — see [its README](../mods/fly-tiktok/README.md) |
 | **Go Karts** | fullscreen | off | 3D go-kart racing with your Claude sessions |
 | **Screenshots** | panel | off | Capture terminal screenshots as PNG |
 | **Session Info** | tools-only | on | Sessions discover their own identity and tab name |

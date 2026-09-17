@@ -1,0 +1,7 @@
+{
+  "name": "Connectome",
+  "version": "0.1.0",
+  "minDeepsteveVersion": "0.25.0",
+  "description": "Fruit fly circuits from the connectome as spiking neural networks, for apps and mods to run live. Used by Fly TikTok",
+  "enabledByDefault": false
+}

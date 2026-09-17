@@ -1,0 +1,182 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>connectome · raster example</title>
+<style>
+  :root { color-scheme: dark; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    display: flex; flex-direction: column;
+    font: 13px/1.4 -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+    background: #0e1116; color: #d7dde5;
+  }
+  header { padding: 10px 16px 6px; }
+  h1 { font-size: 15px; font-weight: 600; margin: 0; }
+  .sub { color: #8a96a6; }
+  .controls {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 10px 22px;
+    padding: 6px 16px 10px; border-bottom: 1px solid #222a35;
+  }
+  label { display: flex; align-items: center; gap: 8px; color: #aab4c2; }
+  output { min-width: 3ch; color: #e8edf3; font-variant-numeric: tabular-nums; }
+  select, button { font: inherit; color: #e8edf3; background: #1b222c; border: 1px solid #2f3a48; border-radius: 6px; padding: 3px 8px; }
+  button { cursor: pointer; background: #1f6feb; border-color: #1f6feb; }
+  main { flex: 1; min-height: 0; display: grid; grid-template-columns: 1fr 390px; }
+  #plot { position: relative; overflow: hidden; }
+  #raster { position: absolute; inset: 0; width: 100%; height: 100%; }
+  aside { border-left: 1px solid #222a35; overflow: auto; padding: 10px 12px; }
+  h2 { font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: #6e7b8c; margin: 4px 0 6px; }
+  pre { margin: 0 0 16px; white-space: pre-wrap; font: 11.5px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; color: #a9b7c6; }
+</style>
+</head>
+<body>
+<header>
+  <h1>connectome · DNge104 raster</h1>
+  <div class="sub" id="summary">loading circuit…</div>
+</header>
+<div class="controls">
+  <label>min synapses per connection <input id="weight" type="range" max="60" step="1"> <output id="weightOut"></output></label>
+  <label>input R·I (mV) <input id="drive" type="range" min="0" max="30" step="0.5" value="10"> <output id="driveOut"></output></label>
+  <label>synapse sign from <select id="nt"></select></label>
+  <button id="save">Save PNG</button>
+  <span id="saveStatus" class="sub"></span>
+</div>
+<main>
+  <div id="plot"><canvas id="raster"></canvas></div>
+  <aside>
+    <h2>This run</h2>
+    <pre id="runlog"></pre>
+    <h2>Circuit file</h2>
+    <pre id="source"></pre>
+  </aside>
+</main>
+
+<script type="module">
+// An example consumer of the connectome component: hold input on DNge104's upstream partners
+// for 200 ms and draw every spike. It imports by the absolute URL the daemon serves, exactly as
+// a mod or page in another repo would.
+import {
+  MAX_NEURONS, loadCircuit, selectCircuit, fitThreshold, group, createNetwork, record, drawRaster,
+} from '/mods/connectome/index.js';
+
+const $ = id => document.getElementById(id);
+const PROTOCOL = { before: 50, during: 200, after: 150 };
+const DURATION = PROTOCOL.before + PROTOCOL.during + PROTOCOL.after;
+const ROLES = ['upstream', 'both', 'seed', 'downstream'];
+
+let data;
+try {
+  data = await loadCircuit('circuits/dnge104.json');
+} catch (err) {
+  $('summary').textContent = `couldn't load the circuit: ${err.message}`;
+  throw err;
+}
+
+$('weight').min = data.minWeight;
+$('weight').value = fitThreshold(data, MAX_NEURONS);
+for (const f of data.ntFields) $('nt').add(new Option(f, f));
+$('nt').add(new Option('none (all excitatory)', ''));
+const src = data.source;
+$('summary').textContent = `${src.dataset} · fetched ${src.fetchedAt.slice(0, 10)} · ` +
+  `${src.neurons} neurons and ${src.connections} connections at ≥ ${data.minWeight} synapses`;
+$('source').textContent = JSON.stringify(src, null, 2);
+
+let last = null;
+let frame = 0;
+const schedule = () => { cancelAnimationFrame(frame); frame = requestAnimationFrame(run); };
+
+function run() {
+  const minWeight = +$('weight').value;
+  const drive = +$('drive').value;
+  const ntField = $('nt').value || null;
+  $('weightOut').textContent = minWeight;
+  $('driveOut').textContent = drive;
+
+  const circuit = selectCircuit(data, minWeight);
+  const net = createNetwork(circuit, { ntField });
+  const inputs = group(circuit, ['upstream', 'both']);
+  const spikes = record(net);
+  const t0 = performance.now();
+  net.step(PROTOCOL.before);
+  net.setInput(inputs, drive);
+  net.step(PROTOCOL.during);
+  net.setInput(inputs, 0);
+  net.step(PROTOCOL.after);
+  spikes.stop();
+  last = { circuit, net, spikes, drive, inputs: inputs.length, ms: performance.now() - t0 };
+  draw();
+  report();
+}
+
+function report() {
+  const { circuit: c, net, spikes, drive, inputs, ms } = last;
+  const n = c.neurons.length;
+  const inhibitory = net.compiled.sign.filter(s => s < 0).length;
+  const lines = [
+    `weight ≥ ${c.minWeight}: ${n} neurons, ${c.pre.length} connections, ${c.synapses} synapses` +
+      (n > MAX_NEURONS ? `\n  (over the ~${MAX_NEURONS} budget)` : ''),
+    `  ${ROLES.map(k => `${k === 'seed' ? c.seedType : k} ${c.roles[k]}`).join(' · ')}`,
+    `signs from ${net.compiled.ntField ?? 'nothing'}: ${n - inhibitory} excitatory, ${inhibitory} inhibitory`,
+    `input ${drive} mV on ${inputs} upstream partners, ${PROTOCOL.before}–${PROTOCOL.before + PROTOCOL.during} ms`,
+    `${spikes.t.length} spikes over ${DURATION} ms, simulated in ${ms.toFixed(0)} ms`,
+    '',
+    'mean rate per neuron, Hz: before / during / after',
+  ];
+  const windows = [PROTOCOL.before, PROTOCOL.during, PROTOCOL.after].map(w => w / 1000);
+  const stats = Object.fromEntries(ROLES.map(k => [k, { fired: new Set(), spikes: [0, 0, 0] }]));
+  for (let k = 0; k < spikes.t.length; k++) {
+    const s = stats[c.neurons[spikes.i[k]].role];
+    const t = spikes.t[k];
+    s.fired.add(spikes.i[k]);
+    s.spikes[t < PROTOCOL.before ? 0 : t < PROTOCOL.before + PROTOCOL.during ? 1 : 2]++;
+  }
+  for (const k of ROLES) {
+    const m = c.roles[k];
+    if (!m) continue;
+    const rates = stats[k].spikes.map((s, w) => (s / m / windows[w]).toFixed(1)).join(' / ');
+    lines.push(`  ${(k === 'seed' ? c.seedType : k).padEnd(11)} ${rates.padEnd(18)} ${stats[k].fired.size}/${m} fired`);
+  }
+  $('runlog').textContent = lines.join('\n');
+}
+
+function draw() {
+  if (!last) return;
+  const { circuit: c, net, spikes, drive } = last;
+  drawRaster($('raster'), {
+    network: net,
+    spikes,
+    duration: DURATION,
+    stimulus: { from: PROTOCOL.before, to: PROTOCOL.before + PROTOCOL.during },
+    title: `${c.seedType} circuit · ${src.dataset} · ≥ ${c.minWeight} synapses · ${c.neurons.length} neurons · ${c.synapses} synapses`,
+    subtitle: `LIF, Shiu et al. parameters · ${drive} mV input on upstream partners, ` +
+      `${PROTOCOL.before}–${PROTOCOL.before + PROTOCOL.during} ms · signs from ${net.compiled.ntField ?? 'nothing (all excitatory)'}`,
+  });
+}
+
+// Save the plot into Deep Steve's Screenshots. A browser download isn't available: Deep Steve's
+// iframes are sandboxed without allow-downloads.
+$('save').addEventListener('click', async () => {
+  $('save').disabled = true;
+  try {
+    const res = await fetch('/api/screenshots', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ dataUrl: $('raster').toDataURL('image/png') }),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const { id } = await res.json();
+    $('saveStatus').textContent = `saved to Screenshots as ${id} (≥ ${last.circuit.minWeight} synapses)`;
+  } catch (err) {
+    $('saveStatus').textContent = `save failed (${err.message}); right-click the plot → Save Image As`;
+  } finally {
+    $('save').disabled = false;
+  }
+});
+
+for (const id of ['weight', 'drive', 'nt']) $(id).addEventListener('input', schedule);
+new ResizeObserver(draw).observe($('plot'));
+run();
+</script>
+</body>
+</html>

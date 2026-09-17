@@ -1,0 +1,796 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Fly TikTok</title>
+<!-- three.js from the CDN, as the threejs-scene mod does, at the version this was built against. -->
+<script type="importmap">{ "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.186.0/build/three.module.js" } }</script>
+<style>
+  :root { color-scheme: dark; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    font: 14px/1.35 -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+    background: #07090c; color: #d7dde5; overflow: hidden;
+  }
+  #app { height: 100vh; display: grid; grid-template-columns: minmax(0, 1fr) auto auto; grid-template-rows: 100vh; }
+  /* DeepSteve's mark, between the brain and the phone. The logo is Deep Steve's own icon
+     (public/icon-512.png in the install), copied so the page doesn't reach into the daemon. */
+  #brand { display: grid; align-content: center; justify-items: center; gap: 12px; padding: 0 4px 0 10px; }
+  #brand img { width: 76px; height: 76px; display: block; }
+  #brand span { font: 700 19px/1 -apple-system, BlinkMacSystemFont, system-ui, sans-serif; color: #e8edf3; letter-spacing: 0.01em; }
+  #brain { position: relative; display: grid; grid-template-rows: auto minmax(0, 1fr) auto; min-width: 0; container-type: inline-size; }
+  /* What it's doing, the count, time on task. Sized to the column (cqw), and the first slot is as
+     wide as the longest state, "PAUSED → NEXT", so a flash never runs into the count. */
+  #hud {
+    position: relative; z-index: 1; pointer-events: none; display: grid; align-items: start; padding: 22px 26px 14px;
+    font: 800 clamp(22px, 5.2cqw, 46px)/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+    grid-template-columns: 14ch minmax(0, 1fr) auto;
+  }
+  #state { font: inherit; letter-spacing: 0.02em; color: #58a6ff; white-space: nowrap; }
+  #state.escape { color: #ffd166; }
+  #timer { font: 600 20px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace; color: #7d8896; margin-top: 8px; }
+  #count { text-align: center; }
+  #count b {
+    display: block; color: #e8edf3; font: 700 clamp(48px, 11cqw, 128px)/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-variant-numeric: tabular-nums; letter-spacing: -0.02em;
+  }
+  #count b.tick { animation: tick 0.35s ease-out; } /* a small jump as it ticks, with the fly's */
+  /* Time on task, added up across runs: bright while the fly is on and working, dim while it isn't
+     (fly.mjs status says why). */
+  #task {
+    justify-self: end; margin-top: 4px; color: #e8edf3; transition: color 0.4s ease;
+    font: 700 clamp(16px, 3.9cqw, 40px)/1 ui-monospace, SFMono-Regular, Menlo, monospace; font-variant-numeric: tabular-nums;
+  }
+  #task.paused { color: #3a4452; }
+  @keyframes tick { from { transform: scale(1.1); } }
+  /* The spikes over time in a strip on the left; the same spikes in space, in the brain, as big as
+     the rest of the column allows. The brain's canvas lies under the whole column, so turning or
+     zooming it never cuts it off at a box's edge, and everything above it lets the mouse through. */
+  #activity { position: relative; z-index: 1; pointer-events: none; min-height: 0; display: grid; grid-template-columns: minmax(260px, 0.6fr) minmax(0, 1.4fr); }
+  #rasterBox, #cnsFrame { position: relative; min-width: 0; min-height: 0; }
+  #raster { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+  #cns { position: absolute; inset: 0; z-index: 0; }
+  #cnsCanvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; cursor: grab; touch-action: none; }
+  #credit {
+    position: relative; z-index: 1; pointer-events: none;
+    padding: 8px 26px 10px; color: #4f5a69; font-size: 11px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  #phone { position: relative; display: grid; place-items: center; padding: 0 22px; }
+  #device { position: relative; width: var(--phone-w, 326px); height: var(--phone-h, 720px); }
+  #screen, #fly { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+  #fly { pointer-events: none; z-index: 2; }
+
+  /* Compact: the phone, with a smaller brain see-through over its video, and the state, count and
+     time on task stacked beside it; no raster. The switch for it is in the top right corner. */
+  #compactBtn {
+    position: fixed; top: 10px; right: 12px; z-index: 20; padding: 5px 11px; border-radius: 999px;
+    border: 1px solid #243041; background: rgba(12, 16, 22, 0.85); color: #8a96a6; cursor: pointer;
+    font: 600 12px/1 -apple-system, BlinkMacSystemFont, system-ui, sans-serif; opacity: 0.45; transition: opacity 0.2s;
+  }
+  #compactBtn:hover, #compactBtn:focus-visible { opacity: 1; }
+  #compactBtn[aria-pressed="true"] { color: #e8edf3; border-color: #3b4d66; }
+  body.compact #app { grid-template-columns: 300px auto auto; justify-content: center; }
+  body.compact #brain { grid-template-rows: auto; align-content: center; }
+  body.compact #activity, body.compact #credit { display: none; }
+  body.compact #hud { grid-template-columns: 1fr; align-content: center; row-gap: 26px; font-size: 32px; padding: 0 26px 120px; }
+  body.compact #count { text-align: left; }
+  body.compact #count b { font-size: 104px; }
+  body.compact #task { justify-self: start; font-size: 30px; }
+  /* Over the video, under the fly. The dark edge keeps it readable on a bright frame without
+     dimming the video itself. */
+  #device > #cns { z-index: 1; filter: drop-shadow(0 0 1.5px rgba(0, 0, 0, 0.95)) drop-shadow(0 0 6px rgba(0, 0, 0, 0.55)); }
+  #device > #cnsFrame { position: absolute; left: 8%; right: 8%; top: 9%; height: 46%; pointer-events: none; }
+  #phone.empty #screen { visibility: hidden; }
+  /* On the phone, while there's no phone to show: what to do next. In the top of the screen, clear
+     of the fly, which stands below its middle. */
+  #phoneEmpty {
+    position: absolute; inset: 0; z-index: 3; display: none; align-content: start; justify-items: center; gap: 12px;
+    padding: 17% 26px 0; text-align: center; color: #8a96a6; font-size: 14px; line-height: 1.45;
+  }
+  #phoneEmpty strong { color: #e8edf3; font-size: 16px; line-height: 1.35; }
+  #phoneEmpty code {
+    display: block; width: 100%; box-sizing: border-box; padding: 9px 10px; border-radius: 6px; background: #121821;
+    color: #d7dde5; font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; user-select: all; /* breaks only after a slash, at the <wbr>s */
+  }
+  #phoneEmpty a { color: #58a6ff; }
+  /* Says, on the phone itself, when the cable or the agent on the other end of it is missing, so a
+     recording can't quietly be of a fly that has nothing to touch. */
+  #badge {
+    position: absolute; top: 14px; left: 50%; transform: translateX(-50%) translateY(-6px);
+    padding: 7px 14px; border-radius: 999px; white-space: nowrap; z-index: 6;
+    background: rgba(28, 10, 10, 0.92); border: 1px solid #7d2b2b; color: #ff8f8f;
+    font: 600 12px/1 -apple-system, BlinkMacSystemFont, system-ui, sans-serif; letter-spacing: 0.02em;
+    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.5);
+    opacity: 0; pointer-events: none; transition: opacity 0.3s ease, transform 0.3s ease;
+  }
+  #badge.on { opacity: 1; transform: translateX(-50%) translateY(0); }
+  #phone.empty #phoneEmpty { display: grid; }
+  /* The switch that lets the fly touch the phone: a real one, so it reads on camera. Three
+     seconds after it goes on it fades back, and comes back on hover. */
+  #power { position: absolute; right: 26px; bottom: 46px; z-index: 5; transition: opacity 1.4s ease; }
+  #power.faded { opacity: 0.1; }
+  #power.faded:hover, #power:focus-within { opacity: 1; transition-duration: 0.18s; }
+  .housing {
+    padding: 10px; border-radius: 999px; background: linear-gradient(180deg, #6b6a66, #2a2926);
+    box-shadow: inset 0 2px 0 rgba(255, 255, 255, 0.35), inset 0 -2px 0 rgba(0, 0, 0, 0.6), 0 16px 32px rgba(0, 0, 0, 0.65);
+  }
+  .well {
+    padding: 6px; border-radius: 999px; background: #121110;
+    box-shadow: inset 0 4px 10px rgba(0, 0, 0, 0.9), inset 0 -1px 0 rgba(255, 255, 255, 0.08);
+  }
+  .feature-btn {
+    display: inline-flex; align-items: center; gap: 14px; padding: 15px 24px 17px;
+    font: 700 21px/1 -apple-system, BlinkMacSystemFont, system-ui, sans-serif; letter-spacing: 0.01em;
+    color: #3b3730; text-shadow: 0 1px 0 rgba(255, 255, 255, 0.7);
+    border: 0; border-radius: 999px; cursor: pointer;
+    background:
+      radial-gradient(120% 80% at 50% 0%, rgba(255, 255, 255, 0.9), transparent 55%),
+      linear-gradient(180deg, #f3efe6 0%, #c9c3b5 100%);
+    box-shadow:
+      inset 0 2px 1px rgba(255, 255, 255, 0.9), inset 0 -5px 0 #8f8878,
+      0 5px 0 #5a5449, 0 9px 16px rgba(0, 0, 0, 0.7);
+    transition: transform 0.12s ease, box-shadow 0.12s ease;
+  }
+  .feature-btn:hover { filter: brightness(1.03); }
+  .feature-btn:disabled { cursor: default; filter: grayscale(0.6) brightness(0.75); }
+  .label { display: inline-block; min-width: 4.2em; text-align: center; } /* so the cap keeps its size */
+  .lamp {
+    width: 18px; height: 18px; border-radius: 50%;
+    background: radial-gradient(circle at 35% 30%, #7a4a20, #4a2a12 70%);
+    box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.7), 0 1px 0 rgba(255, 255, 255, 0.6);
+    transition: background 0.25s, box-shadow 0.35s;
+  }
+  .feature-btn.is-on, .feature-btn:not(:disabled):active {
+    transform: translateY(5px);
+    box-shadow:
+      inset 0 2px 1px rgba(255, 255, 255, 0.7), inset 0 -2px 0 #8f8878,
+      0 0 0 #5a5449, 0 2px 6px rgba(0, 0, 0, 0.6);
+  }
+  .feature-btn.is-on .lamp {
+    background: radial-gradient(circle at 35% 30%, #fff2c8, #ffb340 55%, #e07a10 100%);
+    box-shadow:
+      inset 0 -1px 3px rgba(0, 0, 0, 0.25), 0 0 12px 4px rgba(255, 160, 40, 0.75),
+      0 0 40px 8px rgba(255, 140, 20, 0.35);
+  }
+  @media (prefers-reduced-motion: reduce) { #power, .feature-btn, .lamp { transition: none; } #count b { animation: none; } }
+  .controls {
+    z-index: 6;
+    position: absolute; left: 16px; right: 16px; bottom: 36px; display: none; flex-wrap: wrap; align-items: center;
+    gap: 8px 18px; padding: 9px 12px; background: rgba(12, 16, 22, 0.94); border: 1px solid #1d2430;
+    border-radius: 8px; color: #8a96a6; font-size: 12px;
+  }
+  body.controls-on .controls { display: flex; }
+  .controls label { display: flex; align-items: center; gap: 6px; }
+  .controls output { min-width: 3.5ch; color: #d7dde5; font-variant-numeric: tabular-nums; }
+</style>
+</head>
+<body>
+<button id="compactBtn" aria-pressed="false">Compact</button>
+<div id="app">
+  <div id="brain">
+    <div id="cns"><canvas id="cnsCanvas"></canvas></div>
+    <div id="hud">
+      <div><div id="state">WATCHING</div><div id="timer">0.0 s</div></div>
+      <div id="count"><b id="videos">0</b></div>
+      <div id="task" class="paused"></div>
+    </div>
+    <div id="activity">
+      <div id="rasterBox"><canvas id="raster"></canvas></div>
+      <div id="cnsFrame"></div>
+    </div>
+    <div id="credit"></div>
+    <div id="power"><div class="housing"><div class="well">
+      <button class="feature-btn" id="powerBtn" aria-pressed="false" disabled>
+        <span class="lamp"></span><span class="label" id="powerLabel">Turn on</span>
+      </button>
+    </div></div></div>
+    <div class="controls">
+      <span id="bridgeText">bridge: connecting…</span>
+      <label>gain <input id="gain" type="range" min="0" max="200" step="1"> <output id="gainOut"></output></label>
+      <label>adaptation, s <input id="adapt" type="range" min="0" max="10" step="0.5"> <output id="adaptOut"></output></label>
+      <label>spikes to escape <input id="need" type="range" min="1" max="10" step="1"> <output id="needOut"></output></label>
+      <label><input id="simulate" type="checkbox"> simulated screen</label>
+      <label><input id="inFly" type="checkbox"> brain in the fly</label>
+      <span>H hides this</span>
+    </div>
+  </div>
+  <div id="brand"><img src="/icon-512.png" alt=""><span>DeepSteve</span></div>
+  <div id="phone" class="empty">
+    <div id="device">
+      <img id="screen" alt="">
+      <div id="phoneEmpty"></div>
+      <div id="badge"></div>
+      <canvas id="fly"></canvas>
+    </div>
+  </div>
+</div>
+
+<script type="module">
+// Fly TikTok, a Deep Steve app: a fruit fly's escape circuit, from the connectome, watches an
+// iPhone's TikTok feed and swipes to the next video when something startles it. brain.js decides;
+// this page feeds it, draws it and asks the phone bridge to swipe. README.md says how to set it up.
+//
+// The phone is reached over its USB cable through phone/phone-usb.mjs, which runs on the Mac: the
+// phone's screen arrives as a capture device, and WebDriverAgent, running on the phone as a UI
+// test, injects each swipe as a real touch. The Mac synthesizes no input, so nothing can leak into
+// another app. The badge on the phone says which piece is missing.
+//
+// ?simulate stands in for the phone; ?t=0.4 holds the takeoff at that point, to check the poses.
+// The page reloads itself when a deploy changes it.
+//
+// The brain beside the phone is the same network in space: every neuron at its soma's position in
+// the connectome, at true scale, lit when it spikes. cns.js places them and says where every part
+// comes from; cns-view.js draws them, there and inside the fly ("brain in the fly", under H).
+import * as THREE from 'three';
+import { loadCircuit } from '../connectome/index.js';
+import { createBrain, GRID_COLUMNS, GRID_ROWS, SEED } from './brain.js';
+import { layoutCns } from './cns.js';
+import { createCnsModel, createCnsView, cnsInFly } from './cns-view.js';
+
+const BRIDGE = 'http://127.0.0.1:3717';
+const FLY = 'node ~/.deepsteve/mods/fly-tiktok/phone/fly.mjs'; // the phone bridge's command, for any install
+const WINDOW_MS = 3000; // raster span
+const STALE_MS = 250;   // no frame for this long means nothing on screen is moving
+const RATE_MS = 200;
+const JUMP_MS = 1100;   // the takeoff
+const FONT = '-apple-system, BlinkMacSystemFont, system-ui, sans-serif';
+
+const $ = id => document.getElementById(id);
+const params = new URLSearchParams(location.search);
+const FREEZE = params.has('t') ? Number(params.get('t')) : null;
+const STORAGE = 'fly-tiktok-settings';
+const saved = JSON.parse(localStorage.getItem(STORAGE) ?? '{}');
+const TUNING = ['gain', 'adapt', 'need'];
+const simulate = { on: saved.simulate === true || params.has('simulate') };
+const brainInFly = { on: saved.inFly !== false };
+const compact = { on: saved.compact === true };
+
+const [data, flyMeta] = await Promise.all([
+  loadCircuit('circuits/dnp01.json'),
+  fetch('fly.json').then(r => r.json()),
+]);
+const brain = createBrain(data, Object.fromEntries(TUNING.filter(k => typeof saved[k] === 'number').map(k => [k, saved[k]])));
+const save = () => localStorage.setItem(STORAGE, JSON.stringify({
+  ...Object.fromEntries(TUNING.map(k => [k, brain.settings[k]])), simulate: simulate.on, inFly: brainInFly.on, compact: compact.on,
+}));
+$('credit').textContent = `${brain.neurons.length} neurons of the fruit fly's escape circuit, from the connectome ` +
+  `(neuPrint ${data.source.dataset}), simulated live · 3D fly: flybody`;
+
+const BANDS = [
+  { label: 'eyes', color: '#39c5b4' },
+  { label: 'inputs', color: '#58a6ff' },
+  { label: data.seedType, color: '#ffd166' },
+  { label: 'outputs', color: '#3fb950' },
+];
+
+// Every spike, for the raster.
+const CAP = 1 << 16;
+const spikeT = new Float64Array(CAP);
+const spikeI = new Int32Array(CAP);
+let spikeEnd = 0;
+brain.net.onSpike((i, t) => {
+  spikeT[spikeEnd % CAP] = t;
+  spikeI[spikeEnd % CAP] = i;
+  spikeEnd++;
+});
+
+// The same spikes, in the brain.
+const cnsModel = createCnsModel(layoutCns(brain.circuit, flyMeta), {
+  band: brain.band,
+  colors: BANDS.map(b => b.color),
+  emphasis: i => (brain.band[i] === SEED ? 2.6 : 1), // the two giant fibres, big enough to find
+});
+brain.net.onSpike(i => cnsModel.spike(i));
+const cnsView = createCnsView($('cnsCanvas'), cnsModel, { frame: $('cnsFrame') });
+const cnsFly = cnsInFly(cnsModel);
+cnsFly.group.visible = brainInFly.on;
+
+let flash = null;
+let jumpStart = -Infinity;
+
+// The headline number, with a small jump when it ticks.
+function showCount(ticked = false) {
+  const el = $('videos');
+  el.textContent = brain.videos;
+  el.classList.remove('tick');
+  if (ticked) {
+    void el.offsetWidth; // so the animation restarts
+    el.classList.add('tick');
+  }
+}
+
+function react({ reason }) {
+  const now = performance.now();
+  showCount(true);
+  jumpStart = now;
+  flash = { until: now + 900, text: reason === 'escape' ? 'ESCAPE!' : reason === 'bored' ? 'BORED → NEXT' : 'PAUSED → NEXT' };
+  if (simulate.on) sim.nextVideo();
+  // Only ever a scroll. A tap looked like a way to restart a paused video, but taps in TikTok open
+  // profiles and search, which slide in sideways, and a frozen screen made it fire again and
+  // again. Nothing here may navigate.
+  else if (bridge.window) fetch(`${BRIDGE}/swipe?direction=up`, { method: 'POST' }).catch(() => {});
+}
+
+// ---- What it sees: the bridge's motion grid, or a stand-in ----
+
+const seen = new Float64Array(GRID_COLUMNS * GRID_ROWS);
+let seenAt = 0;
+const sim = {
+  level: 0.02,
+  blob: null,
+  grid: new Float64Array(GRID_COLUMNS * GRID_ROWS),
+  nextVideo() { this.level = 0.02 + Math.random() * 0.1; },
+  frame(now) {
+    if (!this.blob && Math.random() < 0.01) {
+      this.blob = { c: Math.random() * GRID_COLUMNS, r: Math.random() * GRID_ROWS, until: now + 600 };
+    }
+    for (let r = 0; r < GRID_ROWS; r++) {
+      for (let c = 0; c < GRID_COLUMNS; c++) {
+        const near = this.blob && Math.hypot(c - this.blob.c, r - this.blob.r) < 2.5;
+        this.grid[r * GRID_COLUMNS + c] = this.level * (0.5 + Math.random()) + (near ? 0.35 : 0);
+      }
+    }
+    if (this.blob && now > this.blob.until) this.blob = null;
+    return this.grid;
+  },
+};
+
+// ---- The bridge ----
+
+const bridge = {
+  connected: false, window: null, screen: null, armed: false, error: null,
+  transport: null, device: null, wda: null, locked: null, // over USB: the phone on the cable, its agent, its lock
+};
+
+// Over the cable, what has to be true before the fly can touch anything, and which one is missing.
+function usbTrouble() {
+  if (bridge.transport !== 'usb') return null;
+  // The phone's screen is a camera to macOS; until the helper may use one, there is no phone.
+  if (!bridge.device && bridge.error?.includes('camera')) return 'Mac needs camera permission';
+  if (!bridge.device) return 'USB not connected';
+  if (!bridge.wda) return 'WebDriverAgent not running';
+  if (bridge.locked) return 'Phone locked';
+  return null;
+}
+
+const PAGE_ID = crypto.randomUUID();
+document.addEventListener('visibilitychange', () => {
+  fetch(`${BRIDGE}/page?id=${PAGE_ID}&visible=${document.visibilityState === 'visible' ? 1 : 0}`, { method: 'POST' }).catch(() => {});
+});
+
+// hh:mm:ss, hours past 99 as they come. The same as phone/task-clock.mjs, which runs in Node.
+function formatDuration(seconds) {
+  const s = Math.max(0, Math.floor(seconds));
+  const pad = n => String(n).padStart(2, '0');
+  return `${pad(Math.floor(s / 3600))}:${pad(Math.floor(s / 60) % 60)}:${pad(s % 60)}`;
+}
+
+// What to do next, shown on the phone while there's no phone to show. Only rewritten when it
+// changes, so the link and the command stay clickable and selectable.
+let setupShown = null;
+function showSetup(trouble) {
+  const guide = '<a href="README.md" target="_blank" rel="noopener">Setup guide</a>';
+  const html = !bridge.connected
+    ? `<strong>Connect your iPhone to your MacBook with a USB cable</strong>
+       <span>Then start the phone bridge in a terminal:</span><code>${FLY.replaceAll('/', '/<wbr>')} start</code>
+       <span>First time? Read the ${guide}. No phone? Press H for a simulated screen.</span>`
+    : trouble ? `<strong>${trouble}</strong><span>${guide}</span>`
+    : '<span>Waiting for the phone…</span>';
+  if (html === setupShown) return;
+  setupShown = html;
+  $('phoneEmpty').innerHTML = html;
+}
+
+function showBridge() {
+  const ok = bridge.connected && bridge.window;
+  const trouble = usbTrouble();
+  $('bridgeText').textContent = !bridge.connected ? `bridge not running (${FLY} start)`
+    : trouble ? trouble.toLowerCase()
+    : !bridge.window ? 'bridge running, no phone'
+    : `phone connected · swipes ${bridge.armed ? 'on' : 'off'}`;
+  showSetup(trouble);
+  $('phone').classList.toggle('empty', !ok);
+  $('badge').textContent = trouble ?? '';
+  $('badge').classList.toggle('on', Boolean(trouble));
+  showPower();
+  if (!ok) {
+    $('screen').removeAttribute('src');
+    return;
+  }
+  // The panel takes the phone's shape.
+  if (bridge.window.w > 0 && bridge.window.h > 0) { // a size that isn't one would collapse the phone
+    document.documentElement.style.setProperty('--phone-w', `${bridge.window.w}px`);
+    document.documentElement.style.setProperty('--phone-h', `${bridge.window.h}px`);
+  }
+  if (!$('screen').getAttribute('src')) $('screen').src = `${BRIDGE}/screen`;
+}
+
+// The switch. Arming is the bridge's, not the page's: this asks, and the bridge says whether it
+// took, so the button matches the phone even when it's armed from the terminal.
+const fade = { timer: null, armed: null };
+$('powerBtn').addEventListener('click', () => {
+  const next = !bridge.armed;
+  bridge.armed = next; // show it now; the bridge's own message confirms or corrects it
+  if (next) { // the count and the clock start when the fly is let loose
+    brain.videoStart = performance.now();
+    brain.videos = 0;
+    showCount();
+  }
+  showBridge();
+  fetch(`${BRIDGE}/${next ? 'arm' : 'disarm'}`, { method: 'POST' }).catch(() => {});
+});
+
+function showPower() {
+  $('powerBtn').disabled = !bridge.connected;
+
+  if (bridge.armed === fade.armed) return; // only a real change restarts the fade
+  fade.armed = bridge.armed;
+  $('powerBtn').classList.toggle('is-on', bridge.armed);
+  $('powerBtn').setAttribute('aria-pressed', String(bridge.armed));
+  $('powerLabel').textContent = bridge.armed ? 'On' : 'Turn on';
+  clearTimeout(fade.timer);
+  if (bridge.armed) fade.timer = setTimeout(() => $('power').classList.add('faded'), 3000);
+  else $('power').classList.remove('faded');
+}
+
+function connect() {
+  // The page says whether it can be seen: a hidden page's timers are throttled, the brain with
+  // them, so time on task doesn't count while it is.
+  const visible = () => (document.visibilityState === 'visible' ? 1 : 0);
+  const events = new EventSource(`${BRIDGE}/events?page=${PAGE_ID}&visible=${visible()}`);
+  events.onopen = () => { bridge.connected = true; showBridge(); };
+  events.onerror = () => {
+    bridge.connected = false;
+    bridge.window = null;
+    showBridge();
+    // A browser retries a dropped stream by itself, but gives up on one that was refused (the
+    // bridge wasn't running yet), so start over.
+    if (events.readyState === EventSource.CLOSED) setTimeout(connect, 2000);
+  };
+  events.onmessage = e => {
+    const msg = JSON.parse(e.data);
+    if (msg.type === 'frame') {
+      if (msg.grid?.length === seen.length) {
+        seen.set(msg.grid);
+        seenAt = performance.now();
+      }
+      return;
+    }
+    if (msg.type === 'screen') bridge.screen = { w: msg.w, h: msg.h };
+    else if (msg.type === 'window') bridge.window = msg.window;
+    else if (msg.type === 'armed') bridge.armed = msg.armed;
+    else if (msg.type === 'task') {
+      $('task').textContent = formatDuration(msg.seconds);
+      $('task').classList.toggle('paused', !msg.counting);
+      return;
+    }
+    else if (msg.type === 'usb') {
+      bridge.transport = msg.transport;
+      bridge.device = msg.device;
+      if (msg.device) bridge.error = null;
+      bridge.wda = msg.wda;
+      bridge.locked = msg.locked ?? null;
+      if (msg.window !== undefined) bridge.window = msg.window;
+    }
+    else if (msg.type === 'error') bridge.error = msg.message;
+    showBridge();
+  };
+}
+connect();
+
+// Reload when a deploy changes this page or the brain, so edits show up without touching the tab.
+const versions = {};
+setInterval(async () => {
+  for (const file of ['index.html', 'brain.js', 'cns.js', 'cns-view.js']) {
+    try {
+      const res = await fetch(file, { method: 'HEAD', cache: 'no-store' });
+      const version = res.headers.get('etag') ?? res.headers.get('last-modified');
+      if (versions[file] && version && versions[file] !== version) location.reload();
+      versions[file] = version;
+    } catch { /* the daemon restarting, say */ }
+  }
+}, 1500);
+
+// ---- Controls, hidden until H ----
+
+for (const key of TUNING) {
+  $(key).value = brain.settings[key];
+  $(`${key}Out`).textContent = brain.settings[key];
+  $(key).addEventListener('input', () => {
+    brain.settings[key] = +$(key).value;
+    $(`${key}Out`).textContent = $(key).value;
+    save();
+  });
+}
+$('simulate').checked = simulate.on;
+$('simulate').addEventListener('change', () => { simulate.on = $('simulate').checked; save(); });
+// Compact moves the brain's canvas onto the phone, over the video and under the fly, and back.
+// The frame it fills moves with it, since the view follows that element wherever it is.
+function showCompact() {
+  document.body.classList.toggle('compact', compact.on);
+  $('compactBtn').setAttribute('aria-pressed', String(compact.on));
+  if (compact.on) {
+    $('device').insertBefore($('cns'), $('fly'));
+    $('device').insertBefore($('cnsFrame'), $('fly'));
+  } else {
+    $('brain').prepend($('cns'));
+    $('activity').append($('cnsFrame'));
+  }
+}
+$('compactBtn').addEventListener('click', () => {
+  compact.on = !compact.on;
+  showCompact();
+  save();
+});
+showCompact();
+
+$('inFly').checked = brainInFly.on;
+$('inFly').addEventListener('change', () => {
+  brainInFly.on = $('inFly').checked;
+  cnsFly.group.visible = brainInFly.on;
+  save();
+});
+addEventListener('keydown', e => {
+  if (e.key === 'h' || e.key === 'H') document.body.classList.toggle('controls-on');
+});
+
+// ---- The fly, standing on the phone ----
+
+// The camera looks straight at the phone screen, which is the ground the fly stands on, with the
+// fly's head pointing up the screen. Lengths are cm, like the fly model.
+const CAMERA_HEIGHT = 4;
+const VIEW_HEIGHT = 1.8;                // cm of screen from the panel's top to its bottom
+const HOME = { up: -0.3, right: 0.04 }; // where the fly stands, from the screen's center
+const flyCanvas = $('fly');
+const renderer = new THREE.WebGLRenderer({ canvas: flyCanvas, antialias: true, alpha: true });
+renderer.setPixelRatio(Math.min(2, devicePixelRatio));
+renderer.setClearColor(0x000000, 0);
+renderer.shadowMap.enabled = true;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera((2 * Math.atan(VIEW_HEIGHT / 2 / CAMERA_HEIGHT) * 180) / Math.PI, 326 / 720, 0.1, 20);
+camera.position.set(0, CAMERA_HEIGHT, 0);
+camera.up.set(1, 0, 0); // three.js +x, the fly's forward, is up the screen; +z is right
+camera.lookAt(0, 0, 0);
+scene.add(new THREE.HemisphereLight(0xffffff, 0x3a3027, 1.4));
+const keyLight = new THREE.DirectionalLight(0xfff2e0, 2.6);
+keyLight.position.set(1.2, 3, -1.2); // from the screen's top left, so the shadow falls down and right
+keyLight.castShadow = true;
+keyLight.shadow.mapSize.set(1024, 1024);
+Object.assign(keyLight.shadow.camera, { left: -1.4, right: 1.4, top: 1.4, bottom: -1.4, near: 0.1, far: 10 });
+keyLight.shadow.camera.updateProjectionMatrix();
+scene.add(keyLight);
+const ground = new THREE.Mesh(new THREE.PlaneGeometry(6, 6), new THREE.ShadowMaterial({ opacity: 0.4 }));
+ground.rotation.x = -Math.PI / 2;
+ground.receiveShadow = true;
+scene.add(ground);
+const flyGroup = new THREE.Group(); // stands on the screen, and is what takes off
+scene.add(flyGroup);
+
+let fly = null;
+loadFly().then(f => {
+  fly = f;
+  flyGroup.add(f.root);
+  pose({});
+  f.root.updateMatrixWorld(true);
+  const box = new THREE.Box3().setFromObject(f.root);
+  f.root.position.set(-(box.min.x + box.max.x) / 2, -box.min.y, -(box.min.z + box.max.z) / 2);
+  f.bodies[0].add(cnsFly.group); // after measuring the fly, which the brain must not change
+}).catch(err => console.error('fly model', err));
+
+// flybody's fly, from fly.json and fly.bin (converted from flybody's model): a group per body part,
+// placed as in MuJoCo, with a mesh per material.
+async function loadFly() {
+  const meta = flyMeta;
+  const buffer = await fetch('fly.bin').then(r => r.arrayBuffer());
+  const values = new Uint16Array(buffer);
+  const materials = {};
+  for (const [name, m] of Object.entries(meta.materials)) {
+    const seeThrough = m.opacity < 1;
+    materials[name] = new THREE.MeshStandardMaterial({
+      color: new THREE.Color().setRGB(...m.color, THREE.SRGBColorSpace),
+      roughness: 0.85 - 0.5 * m.shininess, metalness: 0,
+      transparent: seeThrough, opacity: m.opacity, depthWrite: !seeThrough,
+      side: seeThrough ? THREE.DoubleSide : THREE.FrontSide,
+    });
+  }
+  const bodies = meta.bodies.map(b => {
+    const body = new THREE.Group();
+    body.name = b.name;
+    body.position.set(...b.pos);
+    body.userData.rest = new THREE.Quaternion(b.quat[1], b.quat[2], b.quat[3], b.quat[0]);
+    return body;
+  });
+  const root = new THREE.Group();
+  meta.bodies.forEach((b, i) => (b.parent < 0 ? root : bodies[b.parent]).add(bodies[i]));
+  for (const p of meta.parts) {
+    const positions = new Float32Array(p.vertexCount * 3);
+    for (let i = 0; i < positions.length; i++) {
+      positions[i] = p.min[i % 3] + (values[p.vertexOffset + i] / 65535) * (p.max[i % 3] - p.min[i % 3]);
+    }
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geometry.setIndex(new THREE.BufferAttribute(values.slice(p.indexOffset, p.indexOffset + p.indexCount), 1));
+    geometry.computeVertexNormals();
+    const mesh = new THREE.Mesh(geometry, materials[p.material] ?? materials.body);
+    mesh.castShadow = !materials[p.material]?.transparent;
+    bodies[p.body].add(mesh);
+  }
+  const joints = new Map(meta.joints.map(j => [j.name, { ref: j.ref, body: bodies[j.body], axis: new THREE.Vector3(...j.axis) }]));
+  root.rotation.x = -Math.PI / 2; // MuJoCo's z up is three.js's y up
+  const outer = new THREE.Group();
+  outer.add(root);
+  return { root: outer, bodies, joints, materials };
+}
+
+// Joint angles, radians, by MuJoCo joint name; any not given rests at its spring's angle.
+const turn = new THREE.Quaternion();
+function pose(angles) {
+  for (const body of fly.bodies) body.quaternion.copy(body.userData.rest);
+  for (const [name, joint] of fly.joints) {
+    const angle = angles[name] ?? joint.ref;
+    if (angle) joint.body.quaternion.multiply(turn.setFromAxisAngle(joint.axis, angle));
+  }
+}
+
+const clamp01 = v => Math.max(0, Math.min(1, v));
+const smooth = v => v * v * (3 - 2 * v);
+
+function renderFly(now, drive, seedRate) {
+  const w = flyCanvas.clientWidth;
+  const h = flyCanvas.clientHeight;
+  if (w && h && (flyCanvas.width !== Math.round(w * renderer.getPixelRatio()) || flyCanvas.height !== Math.round(h * renderer.getPixelRatio()))) {
+    renderer.setSize(w, h, false);
+    camera.aspect = w / h;
+    camera.updateProjectionMatrix();
+  }
+  const seconds = FREEZE === null ? now / 1000 : 0.37;
+  const t = FREEZE ?? (now - jumpStart) / JUMP_MS;
+  const jumping = t >= 0 && t < 1;
+  // The takeoff: a crouch, then up the screen and toward you with wings beating, then back down.
+  const crouch = jumping && t < 0.08 ? Math.sin((Math.PI * t) / 0.08) : 0;
+  const out = jumping ? (t < 0.45 ? smooth(clamp01((t - 0.06) / 0.39)) : 1 - smooth(clamp01((t - 0.45) / 0.55))) : 0;
+  const flying = jumping && t > 0.05 && t < 0.9;
+
+  if (fly) {
+    const angles = {};
+    const beat = Math.sin(seconds * 2 * Math.PI * 22);
+    for (const side of ['left', 'right']) {
+      if (flying) {
+        angles[`wing_yaw_${side}`] = 0.2 + 1.1 * beat;
+        angles[`wing_roll_${side}`] = 0.1;
+        angles[`wing_pitch_${side}`] = 0.9 * Math.cos(seconds * 2 * Math.PI * 22);
+      }
+      const antenna = fly.joints.get(`antenna_${side}`);
+      if (antenna) angles[`antenna_${side}`] = antenna.ref + 0.08 * Math.sin(seconds * (side === 'left' ? 3.1 : 2.6));
+    }
+    pose(angles);
+    flyGroup.position.set(HOME.up + out * 0.75, out * 0.5 - crouch * 0.01, HOME.right);
+    // Standing, it turns a little now and then; taking off, it pitches nose up.
+    flyGroup.rotation.set(0, 0.12 * Math.sin(seconds * 0.5) * (1 - out), out * 0.4);
+    // The eyes glow with what the fly sees, and flare when DNp01 fires.
+    fly.materials.red.emissive.setRGB(1, 0.12, 0.04);
+    fly.materials.red.emissiveIntensity = Math.min(2, drive / 10 + seedRate / 40);
+  }
+  cnsFly.fit(renderer, camera);
+  renderer.render(scene, camera);
+}
+
+// ---- The loop: see and think on a timer, which keeps running while the tab is hidden; draw on
+// animation frames, which don't ----
+
+window.__fly = { brain, bridge, seen, sim, cns: cnsView, cnsModel }; // for looking at the live numbers from outside
+
+function think() {
+  const now = performance.now();
+  const grid = simulate.on ? sim.frame(now) : now - seenAt < STALE_MS ? seen : null;
+  const onPhone = !simulate.on && Boolean(bridge.window); // only a real screen can be paused or boring
+  const decision = brain.step(now, grid, { stillCounts: onPhone, boredCounts: onPhone });
+  if (decision) react(decision);
+}
+
+function draw(now) {
+  const flashing = flash && now < flash.until;
+  $('state').classList.toggle('escape', Boolean(flashing));
+  $('state').textContent = flashing ? flash.text : 'WATCHING';
+  $('timer').textContent = `${(Math.max(0, now - brain.videoStart) / 1000).toFixed(1)} s`;
+  drawRaster();
+  cnsModel.fade(now);
+  cnsView.render(now);
+  renderFly(now, brain.drive, brain.net.rate(brain.seeds, RATE_MS));
+  requestAnimationFrame(draw);
+}
+
+// ---- The raster: the last few seconds of every neuron's spikes ----
+
+const canvas = $('raster');
+const ctx = canvas.getContext('2d');
+let layout = null;
+
+function computeLayout(W, H) {
+  const T = 6, B = 6, L = 84, R = 26, GAP = 4;
+  const { band, order } = brain;
+  const N = band.length;
+  const counts = [0, 0, 0, 0];
+  for (let i = 0; i < N; i++) counts[band[i]]++;
+  const used = counts.filter(Boolean).length;
+  const usable = H - T - B - GAP * (used - 1);
+  const seedH = counts[SEED] ? Math.min(usable * 0.3, Math.max(24, counts[SEED] * 14)) : 0;
+  const rowH = (usable - seedH) / Math.max(1, N - counts[SEED]);
+  const top = new Float64Array(N);
+  const height = new Float64Array(N);
+  const boxes = [];
+  let y = T;
+  let k = 0;
+  for (let b = 0; b < BANDS.length; b++) {
+    if (!counts[b]) continue;
+    const y0 = y;
+    const h = b === SEED ? seedH / counts[SEED] : rowH;
+    for (let c = 0; c < counts[b]; c++, k++) {
+      top[order[k]] = y;
+      height[order[k]] = h;
+      y += h;
+    }
+    boxes.push({ b, y0, y1: y });
+    y += GAP;
+  }
+  return { W, H, T, B, L, R, top, height, boxes };
+}
+
+function drawRaster() {
+  const box = canvas.getBoundingClientRect();
+  if (!box.width || !box.height) return; // hidden, in compact
+  const dpr = devicePixelRatio || 1;
+  const W = Math.max(300, box.width);
+  const H = Math.max(60, box.height);
+  if (!layout || layout.W !== W || layout.H !== H) {
+    canvas.width = Math.round(W * dpr);
+    canvas.height = Math.round(H * dpr);
+    layout = computeLayout(W, H);
+  }
+  const { T, B, L, R, top, height, boxes } = layout;
+  const { band, swipesAt, settings } = brain;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, W, H); // clear, so a zoomed-in brain shows through
+
+  const t1 = brain.net.t;
+  const t0 = t1 - WINDOW_MS;
+  const x = t => L + ((t - t0) / WINDOW_MS) * (W - L - R);
+  while (swipesAt.length && swipesAt[0] < t0 - settings.transitionMs) swipesAt.shift();
+
+  ctx.font = `600 12px ${FONT}`;
+  ctx.textBaseline = 'middle';
+  ctx.textAlign = 'right';
+  for (const { b, y0, y1 } of boxes) {
+    ctx.fillStyle = BANDS[b].color;
+    ctx.fillRect(L - 8, y0, 2, Math.max(1, y1 - y0));
+    ctx.fillText(BANDS[b].label, L - 14, (y0 + y1) / 2);
+  }
+
+  const markW = Math.max(1.5, ((W - L - R) / WINDOW_MS) * 1.5);
+  const paths = BANDS.map(() => new Path2D());
+  for (let k = spikeEnd - 1; k >= Math.max(0, spikeEnd - CAP); k--) {
+    const t = spikeT[k % CAP];
+    if (t < t0) break;
+    const i = spikeI[k % CAP];
+    paths[band[i]].rect(x(t) - markW / 2, top[i] + height[i] * 0.1, markW, Math.max(1, height[i] * 0.8));
+  }
+  BANDS.forEach(({ color }, b) => { ctx.fillStyle = color; ctx.fill(paths[b]); });
+
+  ctx.strokeStyle = 'rgba(255, 209, 102, 0.6)';
+  for (const s of swipesAt) {
+    if (s < t0) continue;
+    ctx.beginPath();
+    ctx.moveTo(x(s) + 0.5, T);
+    ctx.lineTo(x(s) + 0.5, H - B);
+    ctx.stroke();
+  }
+}
+
+showBridge();
+setInterval(think, 1000 / 60);
+requestAnimationFrame(draw);
+</script>
+</body>
+</html>

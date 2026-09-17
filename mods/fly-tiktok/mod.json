@@ -1,0 +1,11 @@
+{
+  "name": "Fly TikTok",
+  "version": "0.1.0",
+  "minDeepsteveVersion": "0.25.0",
+  "description": "A fruit fly's escape circuit from the connectome, simulated live, watches your iPhone's TikTok feed over USB and swipes when something startles it",
+  "experimental": true,
+  "enabledByDefault": false,
+  "entry": "index.html",
+  "app": true,
+  "toolbar": { "label": "Fly TikTok" }
+}
