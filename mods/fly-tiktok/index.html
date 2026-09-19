@@ -62,13 +62,15 @@
   #fly { pointer-events: none; z-index: 2; }
 
   /* Compact: the phone, with a smaller brain see-through over its video, and the state, count and
-     time on task stacked beside it; no raster. The switch for it is in the top right corner. */
-  #compactBtn {
+     time on task stacked beside it; no raster. The switch for it is in the top right corner, where
+     Start Recording sits beside it in the same pill. */
+  #compactBtn, #recordBtn {
     position: fixed; top: 10px; right: 12px; z-index: 20; padding: 5px 11px; border-radius: 999px;
     border: 1px solid #243041; background: rgba(12, 16, 22, 0.85); color: #8a96a6; cursor: pointer;
     font: 600 12px/1 -apple-system, BlinkMacSystemFont, system-ui, sans-serif; opacity: 0.45; transition: opacity 0.2s;
   }
-  #compactBtn:hover, #compactBtn:focus-visible { opacity: 1; }
+  #recordBtn { right: 92px; }
+  #compactBtn:hover, #compactBtn:focus-visible, #recordBtn:hover, #recordBtn:focus-visible { opacity: 1; }
   #compactBtn[aria-pressed="true"] { color: #e8edf3; border-color: #3b4d66; }
   body.compact #app { grid-template-columns: 300px auto auto; justify-content: center; }
   body.compact #brain { grid-template-rows: auto; align-content: center; }
@@ -163,10 +165,46 @@
   body.controls-on .controls { display: flex; }
   .controls label { display: flex; align-items: center; gap: 6px; }
   .controls output { min-width: 3.5ch; color: #d7dde5; font-variant-numeric: tabular-nums; }
+  /* The opening title card: the retro terminal from the Synth Lab intro (ff817c5, the synth-lab
+     branch) — 18px corners, a 4px grey frame, scanlines — centered over the app while it *runs*.
+     Start Recording arms the fly first, so the phone's video and the brain are already moving
+     behind the panel and the take never opens on a still. There is no scrim over the rest on
+     purpose: the action stays visible either side of the terminal. Both pills go for the take. */
+  #intro {
+    position: fixed; inset: 0; z-index: 30; pointer-events: none; display: grid; place-items: center;
+    opacity: 0; visibility: hidden; transition: opacity 1.5s ease, visibility 0s linear 1.5s;
+  }
+  body.intro-on #intro { opacity: 1; visibility: visible; transition: opacity 0.4s ease; }
+  body.recording #compactBtn, body.recording #recordBtn { display: none; }
+  #introTerm {
+    /* A fixed size, not one that grows: the long line wraps to four rows part-way through typing,
+       and an auto-height panel would jump on the character that wrapped it. */
+    position: relative; overflow: hidden; box-sizing: border-box;
+    width: min(46vw, 780px); height: min(38vh, 300px);
+    display: grid; align-content: center; padding: 30px 34px;
+    border: 4px solid #999; border-radius: 18px; background: #2a2a2a;
+    box-shadow: inset 0 0 0 2px #777, inset 0 0 8px rgba(0, 0, 0, 0.3), 0 18px 50px rgba(0, 0, 0, 0.65);
+  }
+  #introTerm::after { /* scanlines over the text, inside the frame */
+    content: ''; position: absolute; inset: 0; pointer-events: none;
+    background: repeating-linear-gradient(180deg, rgba(0, 0, 0, 0.22) 0 1px, transparent 1px 3px);
+  }
+  /* One line at a time, cleared between — the terminal reads as one voice, not a wall of text. */
+  #introLine {
+    margin: 0; color: #d0d0d0; letter-spacing: -0.01em;
+    font: 500 clamp(19px, 2vw, 30px)/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  #introLine::after {
+    content: ''; display: inline-block; width: 0.55ch; height: 1.02em; vertical-align: -0.16em;
+    margin-left: 0.1em; background: #d0d0d0;
+  }
+  #introLine.blink::after { animation: caret 1s steps(1, end) infinite; }
+  @keyframes caret { 50% { opacity: 0; } }
 </style>
 </head>
 <body>
 <button id="compactBtn" aria-pressed="false">Compact</button>
+<button id="recordBtn">Start Recording</button>
 <div id="app">
   <div id="brain">
     <div id="cns"><canvas id="cnsCanvas"></canvas></div>
@@ -205,6 +243,7 @@
     </div>
   </div>
 </div>
+<div id="intro" aria-hidden="true"><div id="introTerm"><p id="introLine"></p></div></div>
 
 <script type="module">
 // Fly TikTok, a Deep Steve app: a fruit fly's escape circuit, from the connectome, watches an
@@ -531,8 +570,94 @@ $('inFly').addEventListener('change', () => {
   cnsFly.group.visible = brainInFly.on;
   save();
 });
+// ---- The opening title card ----
+//
+// Start Recording (or R) arms the fly and then types over the running app, so the video and the
+// brain are already moving behind the first character instead of opening on a still. The pills
+// hide for the rest of the take; Escape aborts a bad take and brings them back.
+//
+// charMs and holdMs per line, the way the Synth Lab intro paced it: the opening line slowest, the
+// long explanatory line quickest, and a hold afterwards long enough to read it back.
+const INTRO_LINES = [
+  { text: 'A fruit fly is watching TikTok.', charMs: 40, holdMs: 1000 },
+  { text: 'This is its brain. When the escape circuit fires — the part that would make a real fly take off — it swipes.', charMs: 30, holdMs: 3000 },
+  { text: 'I built this in Deep Steve and connected it to my phone.', charMs: 35, holdMs: 3000 },
+];
+const INTRO_FADE_MS = 1500; // matches #intro's transition
+const INTRO_SOUND = true;   // keystroke clicks; they reach the file only if the Mac's output is looped back
+
+let introRunning = false;
+let introAudio = null;
+const introWait = ms => new Promise(r => setTimeout(r, ms));
+
+// One keystroke: a 12 ms noise burst through a bandpass that lands somewhere in 3–5 kHz, so no two
+// keys sound alike. Spaces are silent, which is what makes it read as typing rather than a rattle.
+// The button's own click is the gesture that lets the context start, so this only runs after one.
+function introClick() {
+  introAudio ||= new AudioContext();
+  const dur = 0.012;
+  const buf = introAudio.createBuffer(1, Math.ceil(introAudio.sampleRate * dur), introAudio.sampleRate);
+  const d = buf.getChannelData(0);
+  for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+  const src = introAudio.createBufferSource();
+  src.buffer = buf;
+  const bp = introAudio.createBiquadFilter();
+  bp.type = 'bandpass';
+  bp.frequency.value = 3000 + Math.random() * 2000;
+  bp.Q.value = 1.5;
+  const gain = introAudio.createGain();
+  const t = introAudio.currentTime;
+  gain.gain.setValueAtTime(0.06, t);
+  gain.gain.exponentialRampToValueAtTime(0.001, t + dur);
+  src.connect(bp).connect(gain).connect(introAudio.destination);
+  src.start(t);
+  src.stop(t + dur);
+}
+
+async function playIntro() {
+  if (introRunning) return;
+  introRunning = true;
+  $('introLine').textContent = '';
+  document.body.classList.add('recording', 'intro-on');
+  // The fly first, so there is something moving behind the terminal. Already on (a second take):
+  // leave it armed and just restart the count and the clock, the way the switch itself would.
+  if (!bridge.armed && !$('powerBtn').disabled) $('powerBtn').click();
+  else { brain.videoStart = performance.now(); brain.videos = 0; showCount(); }
+
+  for (const line of INTRO_LINES) {
+    if (!introRunning) break;
+    $('introLine').textContent = '';   // the terminal clears between lines
+    $('introLine').classList.remove('blink');
+    for (const ch of line.text) {
+      if (!introRunning) break;
+      $('introLine').textContent += ch;
+      if (INTRO_SOUND && ch !== ' ') introClick();
+      await introWait(line.charMs);
+    }
+    if (!introRunning) break;
+    $('introLine').classList.add('blink');
+    await introWait(line.holdMs);
+  }
+  endIntro();
+}
+
+// The terminal lifts; the app is already running underneath it. The last line stays up until the
+// fade has finished, or it would blink out before the panel had gone.
+function endIntro() {
+  introRunning = false;
+  document.body.classList.remove('intro-on');
+  setTimeout(() => { if (!introRunning) $('introLine').textContent = ''; }, INTRO_FADE_MS);
+}
+
+$('recordBtn').addEventListener('click', playIntro);
+
 addEventListener('keydown', e => {
   if (e.key === 'h' || e.key === 'H') document.body.classList.toggle('controls-on');
+  if (e.key === 'r' || e.key === 'R') playIntro();
+  if (e.key === 'Escape') { // abort a take: the card goes, and so does the hiding of the pills
+    endIntro();
+    document.body.classList.remove('recording');
+  }
 });
 
 // ---- The fly, standing on the phone ----
