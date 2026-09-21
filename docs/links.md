@@ -11,6 +11,7 @@ http://deepsteve.localhost:3000/v1/<type>/<id>
 | Type | What it is | State |
 |---|---|---|
 | `decision` | A Workshop question: options, context, a recommendation | built |
+| `project-mod` | A project mod's page ([mods.md](mods.md#project-mods)) | built |
 | `markdown` | Structured text or notes | reserved: "not available yet" page (501) |
 | `html` | A page an agent wrote | reserved: "not available yet" page (501) |
 
@@ -21,7 +22,8 @@ links already sent.
 The scheme lives in `links.js` at the repo root, mounted in `server.js` after the auth gate. It
 knows nothing about storage: a mod registers a **provider** (`owns(id)`, `resolve(id)`, and
 per-type `render`/`act` handlers), and the link format stays the same whatever the provider does.
-Workshop's provider is in `mods/workshop/tools.js`, under "decision links".
+Workshop's provider is in `mods/workshop/tools.js`, under "decision links". Project Mods' is in
+`mods/project-mods/tools.js`, under "Links".
 
 ## The four rules
 
@@ -78,6 +80,9 @@ and no remote images. That last part stops a question from doubling as a trackin
 - **`html` items, when built, render isolated.** They get an iframe sandbox *without*
   `allow-same-origin` and no `window.deepsteve` bridge, so a page opened from a link cannot act as
   the user. That is deliberately stricter than display tabs and project mods, whose pages can.
+- **A `project-mod` link adds no authority.** It opens a page the user already runs from the
+  rail, on the same origin. The id only resolves to a mod that the scan found in a registered
+  project, and nothing in the link is rendered.
 
 ## Signing in from a link
 
@@ -94,6 +99,30 @@ bounce" in `security.js`) instead of `Unauthorized`:
 
 The bounce changes what the rejection says, never who is authorized, and nothing was added above
 the gate (`test/unit/auth-exempt-routes.test.js` still pins that set).
+
+**A pasted `localhost` address arrives without the cookie too, in Firefox (#711).** This was
+measured in Firefox 156 with a fresh profile and the cookie present in the jar:
+
+| Navigation | Cookie sent | Result |
+|---|---|---|
+| `http://deepsteve.localhost:3000/<gated page>`, typed or pasted | yes | 200 |
+| `http://localhost:3000/<gated page>`, typed or pasted | no | 401 |
+| a click from another site (webmail) | no | 401 |
+| a reload after that click | no | 401 |
+
+The `localhost` row goes through `canonicalHostRedirect`'s 302 to `deepsteve.localhost`. Those
+are two sites, so it is a cross-site redirect, and Firefox withholds Strict cookies after one. It
+still reports `Sec-Fetch-Site: none` on the second hop. Agents address the daemon as plain
+`localhost`, so an agent that builds a link by hand builds this row.
+
+A `/v1` link recovers from every row, because the bounce's reload starts on `deepsteve.localhost`
+itself. Raw gated pages don't recover, and they aren't meant to be linked. That includes
+`/api/project-mods/<id>/page` and `/api/display-tab/<id>`, which keep the plain 401 their own
+iframe loads get. Give an email the tool-returned `url` instead.
+
+`authGate` adds the browser's `Sec-Fetch-Site` to each first-sighting rejection line, as
+`[Sec-Fetch-Site: cross-site]` or `[Sec-Fetch-Site: none]`, so the log separates a click from a
+paste. It echoes only the four values the spec defines.
 
 ## The `decision` type
 
@@ -160,6 +189,24 @@ who is calling:
 
 A recurring job calls it at the start of each run, so a "no" or a free-text reply reaches the next
 run without anyone editing the job by hand.
+
+## The `project-mod` type
+
+`/v1/project-mod/<id>` is how an email links to a [project mod](mods.md#project-mods) (#711).
+`create_project_mod`, `list_project_mods` and `refresh_project_mods` return it as `url`, and an
+agent puts that in its email. The browser's `GET /api/project-mods` doesn't carry it.
+
+- **A GET 302s to `/api/project-mods/<id>/page`**, the same page the rail loads. The page keeps
+  one URL, so its relative `./assets` still resolve.
+- **Opened this way, the page is a top-level tab**, not the rail's iframe. So `window.deepsteve`
+  is absent, because only the Deep Steve UI injects it. A mod that should also work from a link
+  checks for the bridge before using it.
+- **The id is exactly the 8 lowercase hex characters `modId()` derives.** It is derived from the
+  repo root and the directory name, never stored. So moving or renaming a mod's directory changes
+  its link, and the old link then gets the "Nothing found" page, as a deleted mod's does.
+- **Nothing gates it but auth.** Neither `enabled: false` nor `projectModsEnabled` stops it, the
+  same as the page route: turning a mod off must not make it un-inspectable.
+- **There is no `act`**, so a POST is refused.
 
 ## Limits
 

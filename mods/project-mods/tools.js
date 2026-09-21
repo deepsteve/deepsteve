@@ -530,12 +530,45 @@ const serialize = (m) => ({
 });
 
 // What an AGENT sees. Same fields plus where the mod actually lives — the point of #638 is
-// that these are repo files, so an agent can open, diff and commit them like any other.
+// that these are repo files, so an agent can open, diff and commit them like any other — and
+// the link to put in an email (#711), which the browser never needs.
 const serializeForAgent = (m) => ({
   ...serialize(m),
   path: path.relative(m.root, m.dir),
   entry: m.entry,
+  url: linkUrl(m.id),
 });
+
+// --- Links (#711) ------------------------------------------------------------
+
+// A mod's page lives at /api/project-mods/<id>/page, and that address cannot go in an email.
+// A click in webmail is a cross-site navigation, so the browser withholds our SameSite=Strict
+// cookie and the page answers a plain 401. So does a pasted `localhost:3000` copy of it, in
+// Firefox: the canonical-host 302 to deepsteve.localhost is a cross-site redirect, and Firefox
+// drops Strict cookies after one. /v1 paths get authGate's link bounce, which recovers from
+// both, so /v1/project-mod/<id> is the address an email points at. It redirects to the page
+// rather than serving it, so the page keeps one URL and its relative ./assets still resolve.
+const LINK_TYPE = 'project-mod';
+// Exactly the shape modId() mints. A link names a mod exactly, so no other spelling resolves.
+const MOD_ID_RE = /^[0-9a-f]{8}$/;
+
+const pageUrl = (id) => `/api/project-mods/${encodeURIComponent(id)}/page`;
+const linkUrl = (id) => (ctx && typeof ctx.linkUrl === 'function' ? ctx.linkUrl(LINK_TYPE, id) : null);
+
+function linkProvider() {
+  return {
+    name: 'project-mods',
+    owns: (id) => MOD_ID_RE.test(id),
+    // Neither `enabled` nor projectModsEnabled gates this, as neither gates the page route the
+    // link redirects to: turning a mod off must not make it un-inspectable.
+    resolve: (id) => {
+      const found = findMod(id);
+      return found ? { type: LINK_TYPE, mod: found } : null;
+    },
+    // GET only. There is no `act`, so a POST gets links.js's refusal.
+    render: { [LINK_TYPE]: (req, res, resolved) => res.redirect(302, pageUrl(resolved.mod.id)) },
+  };
+}
 
 // Registering a mod now dirties the working tree, and an uncommitted one is invisible to
 // everyone else — including the merge tool, which refuses a dirty target checkout.
@@ -584,6 +617,11 @@ function refresh(reason) {
 function init(context) {
   if (context) ctx = context;
   ensureScanned(true);
+  // What `/v1/project-mod/<id>` means. Guarded like Workshop's, so a context without the link
+  // registry (a test's fake ctx) still loads every tool.
+  if (ctx && ctx.links && typeof ctx.links.registerProvider === 'function') {
+    ctx.links.registerProvider(linkProvider());
+  }
 
   const tools = {
     create_project_mod: {
@@ -601,7 +639,10 @@ function init(context) {
         'already exists on disk — via file_path, which the server reads itself. The page is served from the deepsteve ' +
         'origin, so use relative /api/... URLs to call back into deepsteve (never a hard-coded port), and window.deepsteve ' +
         'is injected into it (getSessions, focusSession, createSession, onActiveContextChanged, …) so it can drive the UI. ' +
-        'It may load sibling files from its own directory with relative URLs (./style.css), so a mod can be more than one page.',
+        'It may load sibling files from its own directory with relative URLs (./style.css), so a mod can be more than one page. ' +
+        'The result carries `url`, the link to put in an email or anywhere else outside Deep Steve: it opens the page in a ' +
+        'browser tab of its own, where window.deepsteve is absent (only the Deep Steve UI injects it). Use that `url`, never a ' +
+        'hand-built /api/project-mods/... or localhost address, which a click from an email answers with 401 Unauthorized.',
       schema: {
         name: z.string().describe('Display name, e.g. "Build Dashboard". Also the basis for the directory name'),
         session_id: z.string().optional().describe('Your DEEPSTEVE_SESSION_ID env var — the project is inferred from your session\'s repo root. Omit only if you pass project'),
@@ -671,6 +712,7 @@ function init(context) {
           // question this field answers. Reachable from create only since the default moved
           // to 'view': `surfaces:['rail','tab']` with no open_mode now stores a pinned view.
           surfaces: mod.surfaces, openMode: effectiveOpenMode(mod), storedOpenMode: mod.openMode,
+          url: linkUrl(mod.id),
           commitReminder: commitReminder(mod),
         });
       },
@@ -770,7 +812,8 @@ function init(context) {
     list_project_mods: {
       description:
         'List project mods. Defaults to the ones registered to YOUR project; scope:"all" lists every project\'s. ' +
-        'Each result carries the path its directory lives at inside the repo. ' +
+        'Each result carries the path its directory lives at inside the repo, and `url`: the link that opens the mod\'s page ' +
+        'from an email or anywhere else outside Deep Steve. ' +
         'Read-only, and never gated by the projectModsEnabled setting.',
       schema: {
         session_id: z.string().optional().describe('Your DEEPSTEVE_SESSION_ID env var — scopes the listing to your project'),

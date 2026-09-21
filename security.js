@@ -353,11 +353,13 @@ function createSecurity(cfg) {
 
   // 4a. The link bounce (#705). A /v1/<type>/<id> link is meant to be clicked in an email, and a
   //     click in webmail is a CROSS-SITE navigation: the browser withholds our SameSite=Strict
-  //     cookie, so authGate rejects a user who is signed in. The rejection body is the only thing
-  //     this changes — never who is authorized. setAuthCookie has already put the token on this
-  //     very response (loopback host, HTML GET), and a reload started by this page is same-site,
-  //     so the cookie rides it. A per-path sessionStorage stamp allows one reload in 10s, so a
-  //     browser that refuses cookies gets an explanation instead of a loop.
+  //     cookie, so authGate rejects a user who is signed in. A pasted `localhost` copy of a link
+  //     arrives the same way in Firefox, which drops Strict cookies after canonicalHostRedirect's
+  //     cross-site 302 (#711). The rejection body is the only thing this changes — never who is
+  //     authorized. setAuthCookie has already put the token on this very response (loopback
+  //     host, HTML GET), and a reload started by this page is same-site, so the cookie rides it.
+  //     A per-path sessionStorage stamp allows one reload in 10s, so a browser that refuses
+  //     cookies gets an explanation instead of a loop.
   //     Scoped to versioned link paths on purpose: every other gated navigation keeps the
   //     text/plain 401 that api-fetch.js and auth-heal.js are written against.
   const LINK_PATH_RE = /^\/v\d+\//;
@@ -383,6 +385,8 @@ function createSecurity(cfg) {
       && LOOPBACK_HOST_SET.has(hostnameOf(req.headers.host))
       && LINK_PATH_RE.test(String(req.originalUrl || req.url || ''));
   }
+
+  const SEC_FETCH_SITES = new Set(['none', 'same-origin', 'same-site', 'cross-site']);
 
   // 4. Token gate — registered as a POSITIONAL middleware before the body-parser and every route
   //    (and before the async-mounted /mcp + mod routes), giving default-deny coverage of current
@@ -412,8 +416,14 @@ function createSecurity(cfg) {
     // from "credentials present but wrong" (rotated token, forged cookie) —
     // they point at completely different failures.
     const why = bearer ? 'invalid bearer token' : cookieTok ? 'invalid auth cookie' : 'no credentials';
+    // How the browser got here, when it says (#711): `cross-site` is a click from another site
+    // (webmail), whose SameSite=Strict withholding is by design; `none` is typed, pasted or
+    // bookmarked. A `none` with no credentials usually means the address was `localhost`: the
+    // canonical-host 302 is a cross-site redirect, and Firefox drops Strict cookies after one
+    // while still reporting `none`. Only the four spec values, so a client can't write the log.
+    const site = SEC_FETCH_SITES.has(req.headers['sec-fetch-site']) ? ` [Sec-Fetch-Site: ${req.headers['sec-fetch-site']}]` : '';
     logAuthReject(rejectKey(req.method, req.url, why),
-      `Auth: rejected ${req.method} ${req.url} — ${why} (${status})`);
+      `Auth: rejected ${req.method} ${req.url} — ${why} (${status})${site}`);
     if (status === 401 && !bearer && wantsLinkBounce(req)) {
       res.setHeader('Content-Security-Policy', LINK_BOUNCE_CSP);
       res.setHeader('Cache-Control', 'no-store');

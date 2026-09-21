@@ -35,6 +35,7 @@ const LINK_VERSION = 'v1';
 // this one still explains itself.
 const TYPE_STATES = Object.freeze({
   decision: 'active',
+  'project-mod': 'active',
   markdown: 'reserved',
   html: 'reserved',
 });
@@ -176,7 +177,7 @@ function explain(decision, { type, id }) {
       return { title: 'Not available yet', paragraphs: [`"${type}" links are planned but this version of Deep Steve can't open them yet. Updating Deep Steve may help.`] };
     case 'unavailable':
     default:
-      return { title: 'Not available right now', paragraphs: ['The part of Deep Steve that opens this link isn\'t running. If Deep Steve just started, reload in a moment; otherwise check that the Workshop mod loaded.'] };
+      return { title: 'Not available right now', paragraphs: [`The part of Deep Steve that opens "${type}" links isn't running. If Deep Steve just started, reload in a moment; otherwise check the Deep Steve log for a mod that failed to load.`] };
   }
 }
 

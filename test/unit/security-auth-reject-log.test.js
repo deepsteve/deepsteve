@@ -93,6 +93,32 @@ describe('auth rejection logging collapses repeats', () => {
     assert.match(t.rejections()[1], /no credentials/);
   });
 
+  it('says how the browser got there when it tells us, without splitting the key (#711)', () => {
+    // A click from webmail (`cross-site`) and a pasted address (`none`) look identical as
+    // "no credentials". Sec-Fetch-Site tells them apart; only the four spec values are echoed,
+    // so a client cannot write arbitrary text into the log.
+    const t = fresh();
+    const res = { status: () => res, type: () => res, send: () => {}, setHeader: () => {} };
+    const nav = (url, site) => t.security.authGate(
+      { method: 'GET', url, headers: site === undefined ? {} : { 'sec-fetch-site': site } },
+      res, () => { throw new Error('must not authenticate'); });
+    nav('/api/project-mods/015dd1f5/page', 'cross-site');
+    nav('/api/version', 'none');
+    nav('/api/settings');
+    nav('/api/agents', 'evil\n[fake] line');
+    const [cross, none, absent, forged] = t.rejections();
+    assert.match(cross, /no credentials \(401\) \[Sec-Fetch-Site: cross-site\]$/);
+    assert.match(none, /\[Sec-Fetch-Site: none\]$/);
+    assert.match(absent, /no credentials \(401\)$/);
+    assert.match(forged, /no credentials \(401\)$/);
+    assert.ok(!forged.includes('fake'));
+
+    // The header is detail on the first line, not part of the key: a later cross-site hit on
+    // the same page still collapses into that line's rollup.
+    nav('/api/version', 'cross-site');
+    assert.strictEqual(t.rejections().length, 4);
+  });
+
   it('collapses one poller across its query strings', () => {
     // /api/git-root?cwd=A and ?cwd=B are one caller and one bug. Keying on the full URL would mint
     // a fresh line per distinct cwd and defeat the whole point.
