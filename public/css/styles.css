@@ -1486,8 +1486,11 @@ kbd {
 .sched-hist-row { display: flex; align-items: center; gap: 10px; padding: 2px 16px 2px 28px; min-width: min-content; }
 .sched-hist-row.dim { opacity: 0.55; }
 /* Sticky label column. The opaque background is load-bearing: without it the run
-   cells scroll visibly through the task titles. */
-.sched-hist-label { position: sticky; left: 16px; z-index: 1; flex: 0 0 260px; padding: 3px 8px 3px 0; background: var(--ds-bg-secondary); }
+   cells scroll visibly through the task titles. min-width: 0 is what lets the title
+   and sub lines ellipsize at 260px — a flex item's default min-width is its
+   min-content, so a long nowrap line (a status note, #712) widened only its own row
+   and threw that row's run cells out of line with every other row's. */
+.sched-hist-label { position: sticky; left: 16px; z-index: 1; flex: 0 0 260px; min-width: 0; padding: 3px 8px 3px 0; background: var(--ds-bg-secondary); }
 .sched-hist-task-title { font-size: 13px; color: var(--ds-text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sched-hist-task-sub { font-size: 11px; color: var(--ds-text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sched-hist-runs { display: flex; align-items: center; gap: 3px; }

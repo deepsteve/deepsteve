@@ -53,6 +53,24 @@ function relTime(ms) {
 function absTime(ms) { return ms ? new Date(ms).toLocaleString() : 'n/a'; }
 const pad = (n) => String(n).padStart(2, '0');
 
+// Who changed a task (#712) — the actor object the server stamps on disabledBy and on
+// each change-log entry. Mirrors actorLabel() in tools.js, in the panel's own voice.
+function actorText(by) {
+  if (!by) return null;
+  if (by.type === 'user') return 'you';
+  if (by.type === 'session') return by.name ? `${by.name} (${by.id})` : `session ${by.id}`;
+  if (by.type === 'system') return 'deepsteve';
+  return 'an agent';
+}
+// Change-log field names are the stored ones; these few read badly as-is.
+const FIELD_LABELS = { statusNote: 'status note', supersededBy: 'superseded by', maxRuntimeMinutes: 'time limit', isolateWorktree: 'worktree', keepOpenOnFailure: 'keep open on failure', keepOpen: 'keep open', planMode: 'plan mode', agentType: 'agent', configProfile: 'config profile' };
+// One change-log value, short enough for a 380px panel.
+function changeValue(v) {
+  if (v === null || v === undefined) return '—';
+  const s = typeof v === 'string' ? v : String(v);
+  return s.length > 60 ? `${s.slice(0, 59)}…` : s;
+}
+
 // --- cron builder <-> form fields ---
 function buildCron(mode, fld) {
   const [h, m] = (fld.time || '09:00').split(':').map((x) => parseInt(x, 10) || 0);
@@ -137,9 +155,13 @@ function StatusBadge({ status }) {
   return <span style={{ color: map[status] || C.dim, fontSize: 11, border: `1px solid ${map[status] || C.dim}`, borderRadius: 4, padding: '0 5px' }}>{label}</span>;
 }
 
-function TaskCard({ task, onEdit }) {
+function TaskCard({ task, onEdit, titleOf }) {
   const [open, setOpen] = useState(false);
   const last = task.runs && task.runs[0];
+  // State metadata (#712): the change log reads newest-first, like run history.
+  const changes = Array.isArray(task.changeLog) ? task.changeLog.slice().reverse() : [];
+  const meta = Object.entries(task.metadata || {});
+  const runs = task.runs || [];
   // A one-shot that has fired is retired ("done"): keep the row + history, but it will
   // never run again, so hide the schedule/run controls and just offer Delete (#528).
   const done = isRetired(task);
@@ -193,6 +215,19 @@ function TaskCard({ task, onEdit }) {
         <StatusBadge status={last && last.status} />
       </div>
       <div style={{ fontSize: 12, color: C.dim, marginTop: 3 }}>{task.schedule || task.cron}</div>
+      {/* Why the task is in its state (#712) — beside it, instead of packed into its title. */}
+      {!done && !task.enabled && task.disabledAt ? (
+        <div style={{ fontSize: 11, color: C.amber, marginTop: 3 }} title={absTime(task.disabledAt)}>
+          Paused {relTime(task.disabledAt)}{task.disabledBy ? ` by ${actorText(task.disabledBy)}` : ''}
+        </div>
+      ) : null}
+      {task.statusNote ? <div style={{ fontSize: 12, color: task.enabled ? C.dim : C.amber, marginTop: 3, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{task.statusNote}</div> : null}
+      {task.supersededBy ? <div style={{ fontSize: 11, color: C.dim, marginTop: 3 }}>Superseded by <b>{titleOf(task.supersededBy)}</b></div> : null}
+      {meta.length ? (
+        <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginTop: 4 }}>
+          {meta.map(([k, v]) => <span key={k} style={{ fontSize: 10, color: C.dim, border: `1px solid ${C.border}`, borderRadius: 4, padding: '0 4px', overflowWrap: 'anywhere' }}>{k}: {v}</span>)}
+        </div>
+      ) : null}
       <div style={{ fontSize: 12, marginTop: 4, display: 'flex', gap: 12, flexWrap: 'wrap' }}>
         {!done ? <span title={absTime(task.nextRun)}>next: <b>{task.enabled ? relTime(task.nextRun) : 'paused'}</b></span> : null}
         {task.lastRun ? <span title={absTime(task.lastRun)}>last: {relTime(task.lastRun)}</span> : null}
@@ -202,12 +237,12 @@ function TaskCard({ task, onEdit }) {
         {!done ? <button onClick={toggle} style={btn()}>{task.enabled ? 'Pause' : 'Resume'}</button> : null}
         {!done ? <button onClick={onEdit} style={btn()}>Edit</button> : null}
         <button onClick={del} style={btn(C.red)}>Delete</button>
-        {task.runs && task.runs.length ? <button onClick={() => setOpen(!open)} style={btn()}>{open ? 'Hide' : 'History'}</button> : null}
+        {runs.length || changes.length ? <button onClick={() => setOpen(!open)} style={btn()}>{open ? 'Hide' : 'History'}</button> : null}
       </div>
       {note ? <div style={{ fontSize: 11, color: note.color, marginTop: 6 }}>{note.text}</div> : null}
-      {open && task.runs && (
+      {open && (
         <div style={{ marginTop: 8, borderTop: `1px solid ${C.border}`, paddingTop: 6 }}>
-          {task.runs.map((r, i) => (
+          {runs.map((r, i) => (
             <div key={i} style={{ padding: '1px 0' }}>
               <div style={{ fontSize: 11, color: C.dim, display: 'flex', gap: 8 }}>
                 <span>{absTime(r.startedAt)}</span>
@@ -221,6 +256,24 @@ function TaskCard({ task, onEdit }) {
               {r.summary ? <div style={{ fontSize: 11, color: C.dim, opacity: 0.85, marginLeft: 2 }}>{r.summary}</div> : null}
             </div>
           ))}
+          {changes.length ? (
+            <div style={{ marginTop: runs.length ? 8 : 0 }}>
+              <div style={{ fontSize: 10, color: C.dim, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 2 }}>Changes</div>
+              {changes.map((e, i) => (
+                <div key={i} style={{ padding: '1px 0' }}>
+                  <div style={{ fontSize: 11, color: C.dim, display: 'flex', gap: 8 }}>
+                    <span>{absTime(e.at)}</span>
+                    {e.by ? <span style={{ opacity: 0.6 }}>{actorText(e.by)}</span> : null}
+                  </div>
+                  <div style={{ fontSize: 11, color: C.dim, opacity: 0.85, marginLeft: 2, overflowWrap: 'anywhere' }}>
+                    {(e.changes || []).map((c) => ('from' in c || 'to' in c)
+                      ? `${FIELD_LABELS[c.field] || c.field}: ${changeValue(c.from)} → ${changeValue(c.to)}`
+                      : `${FIELD_LABELS[c.field] || c.field} changed`).join(' · ')}
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : null}
         </div>
       )}
     </div>
@@ -253,7 +306,10 @@ function TaskForm({ task, projects, agents, defaults = {}, onClose }) {
   const initForm = cronToForm(initial.cron || '0 9 * * 1');
   const [title, setTitle] = useState(initial.title || '');
   const [prompt, setPrompt] = useState(initial.prompt || '');
-  const [project, setProject] = useState(initial.project || (projects[0] && projects[0].root) || '');
+  // Only a NEW task defaults to the first known repo. An existing task keeps its own,
+  // including '' (No repo) — defaulting that too silently moved a no-repo task on any
+  // Save, which the change log (#712) then recorded as an edit nobody made.
+  const [project, setProject] = useState(task ? (initial.project || '') : ((projects[0] && projects[0].root) || ''));
   const [customPath, setCustomPath] = useState('');
   const [agentSel, setAgentSel] = useState(agentSelValue(initial));
   // A stored model may be an alias we offer, or a pinned full id — the latter
@@ -268,6 +324,7 @@ function TaskForm({ task, projects, agents, defaults = {}, onClose }) {
   const [isolateWorktree, setIsolateWorktree] = useState(initial.isolateWorktree !== false); // default on (#565)
   const [maxRuntime, setMaxRuntime] = useState(initial.maxRuntimeMinutes != null ? String(initial.maxRuntimeMinutes) : '60'); // #596
   const [once, setOnce] = useState(!!initial.once);
+  const [statusNote, setStatusNote] = useState(initial.statusNote || ''); // #712
   const [mode, setMode] = useState(initForm.mode);
   const [fld, setFld] = useState(initForm.fld);
   const [saving, setSaving] = useState(false);
@@ -308,7 +365,7 @@ function TaskForm({ task, projects, agents, defaults = {}, onClose }) {
     if (!title.trim()) return setErr('Title is required');
     if (!prompt.trim()) return setErr('Prompt is required');
     const proj = project === '__custom__' ? customPath.trim() : project;
-    const body = { title: title.trim(), prompt: prompt.trim(), cron: cronStr, once, project: proj, agentType, configProfile, model: model === '__custom__' ? customModel.trim() : model, effort, planMode, keepOpen, keepOpenOnFailure, isolateWorktree, maxRuntimeMinutes: Number(maxRuntime) || 0 };
+    const body = { title: title.trim(), prompt: prompt.trim(), cron: cronStr, once, project: proj, agentType, configProfile, model: model === '__custom__' ? customModel.trim() : model, effort, planMode, keepOpen, keepOpenOnFailure, isolateWorktree, maxRuntimeMinutes: Number(maxRuntime) || 0, statusNote: statusNote.trim() };
     setSaving(true);
     try {
       if (task && task.id) await api('PUT', `/api/scheduled-tasks/${task.id}`, body);
@@ -440,6 +497,11 @@ function TaskForm({ task, projects, agents, defaults = {}, onClose }) {
         Note: {agentType} has no deepsteve MCP tools, so it cannot self-report — runs end as
         “ended” rather than succeeded/failed, and the tab never auto-closes.
       </div>}
+
+      {/* #712: why the task is in its current state, so the title can stay its name. */}
+      <label style={label()}>Status note (optional)</label>
+      <input style={input()} value={statusNote} maxLength={500} onChange={(e) => setStatusNote(e.target.value)} placeholder="Why it's paused or what it's waiting on, e.g. on hold until the launch" />
+      <div style={{ fontSize: 11, color: C.dim, marginTop: 4 }}>Shown on the card. Resuming a paused task clears it; the change history keeps it.</div>
 
       {err && <div style={{ color: C.red, fontSize: 12, marginTop: 8 }}>{err}</div>}
       <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
@@ -573,6 +635,10 @@ function App() {
     return data.tasks;
   }, [data, contexts, filter]);
 
+  // A superseded task names its replacement by id (#712). A replacement that has been
+  // deleted is no longer in the payload, so it falls back to the id.
+  const titleOf = (id) => { const t = data.tasks.find((x) => x.id === id); return t ? t.title : `#${id}`; };
+
   // group visible tasks by project for display
   const sections = useMemo(() => {
     const byProj = new Map();
@@ -692,7 +758,7 @@ function App() {
             <div key={t.id} data-task-id={t.id}>
               {editingId === t.id
                 ? <TaskForm task={t} projects={data.projects} agents={agents} defaults={data.defaults || {}} onClose={closeEditor} />
-                : <TaskCard task={t} onEdit={() => openEdit(t.id)} />}
+                : <TaskCard task={t} onEdit={() => openEdit(t.id)} titleOf={titleOf} />}
             </div>
           ))}
         </div>

@@ -75,6 +75,15 @@ const DEFAULT_MAX_RUNTIME_MINUTES = 60;
 // every value still goes through ctx.validateEffort before it reaches argv.
 const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'];
 
+// Bounds on a task's state metadata (#712). The change log is bounded like run
+// history; the rest are caps on what a caller may write, enforced with an error
+// rather than a silent truncation.
+const MAX_CHANGELOG = 50;
+const MAX_STATUS_NOTE = 500;
+const MAX_METADATA_KEYS = 32;
+const MAX_METADATA_KEY = 64;
+const MAX_METADATA_VALUE = 500;
+
 // --- Persistent state (load on start, write-through on mutate) ---
 // Tasks live here; the named groups that drive scope:'group' are now the shared
 // server-owned "contexts" (#526), read live via ctx.getContexts() — this mod no
@@ -100,6 +109,19 @@ function writeJson(file, data) {
 function saveTasks() { writeJson(TASKS_FILE, tasks); }
 function broadcastTasks() { if (ctx) ctx.broadcast({ type: 'scheduled-tasks' }); }
 
+// One-time migration of the title-prefix convention ("OFF <date> (<reason>) — <title>")
+// into structured state (#712). Idempotent — see migrateLegacyTitle. The log lines wait
+// for init(), since there is no ctx to log through at require time.
+const migrationLog = [];
+if (Array.isArray(tasks)) {
+  const now = Date.now();
+  for (const t of tasks) {
+    const from = t && t.title;
+    if (migrateLegacyTitle(t, now)) migrationLog.push(`migrated legacy title of ${t.id}: "${from}" → "${t.title}" (status note: "${t.statusNote}")`);
+  }
+  if (migrationLog.length) saveTasks();
+}
+
 // --- Live tasks vs tombstones (#614) --------------------------------------
 //
 // `tasks` holds two kinds of row: real schedules, and tombstones — tasks that have
@@ -115,6 +137,182 @@ function broadcastTasks() { if (ctx) ctx.broadcast({ type: 'scheduled-tasks' });
 function liveTasks() { return tasks.filter(t => !t.deleted); }
 function findLiveTask(id) { return liveTasks().find(t => t.id === id); }
 function activeRunOf(task) { return (task.runs || []).find(r => ACTIVE_STATUSES.has(r.status)); }
+
+// --- State metadata (#712) ------------------------------------------------
+//
+// Why a task is in the state it is in lives in fields, not in its title:
+//   statusNote   — short free text, set by the caller
+//   disabledAt/disabledBy — stamped on every true→false of `enabled`; never accepted
+//                  from a caller, so nothing can claim "the user turned this off"
+//   supersededBy — the replacement's id; setting it turns the task off
+//   metadata     — free-form string key/values
+//   changeLog    — one bounded, append-only entry per update that changed anything
+// Before this, the convention was to rewrite the title ("OFF <date> (<reason>) —
+// <title>"), which buried the name, could not be queried, and kept only the latest
+// reason. Every field is optional: rows written before #712 have none of them.
+
+// Who made a change. REST's only client is the panel, so a REST write is the user's.
+// An MCP write names the calling session, its name snapshotted because the session
+// may be long gone by the time anyone reads the log (see actorFor in init).
+const USER_ACTOR = Object.freeze({ type: 'user' });
+
+function actorLabel(by) {
+  if (!by || typeof by !== 'object') return 'unknown';
+  if (by.type === 'user') return 'the user';
+  if (by.type === 'session') return `session ${by.id}${by.name ? ` ("${by.name}")` : ''}`;
+  if (by.type === 'system') return `deepsteve (${by.reason || 'automatic'})`;
+  return 'an MCP client with no session';
+}
+
+// When a task was turned off, for display. A stamp with no actor can only have come
+// from the legacy-title migration, whose titles carried a date and no time — so it
+// prints as a date rather than inventing a midnight.
+function disabledWhen(task) {
+  if (task.disabledAt == null) return null;
+  const d = new Date(task.disabledAt);
+  return task.disabledBy ? d.toLocaleString() : d.toLocaleDateString();
+}
+
+// null / '' clears the note. Too long is an error, not a truncation: the caller
+// should learn its reason didn't fit rather than find half of it stored.
+function cleanStatusNote(v) {
+  if (v === undefined || v === null) return null;
+  const s = String(v).trim();
+  if (!s) return null;
+  if (s.length > MAX_STATUS_NOTE) throw new Error(`status note is ${s.length} characters; the limit is ${MAX_STATUS_NOTE}`);
+  return s;
+}
+
+// Merge a metadata patch onto `current`. A null or '' value removes its key; a null
+// patch clears everything. Returns null for an empty result so an unused field stays
+// absent from listings. Throws on anything the caps reject.
+function mergeMetadata(current, patch) {
+  if (patch === undefined) return current || null;
+  if (patch === null) return null;
+  if (typeof patch !== 'object' || Array.isArray(patch)) throw new Error('metadata must be an object of string values');
+  const next = { ...(current || {}) };
+  for (const [rawKey, v] of Object.entries(patch)) {
+    const key = String(rawKey).trim();
+    if (!key || key === '__proto__') throw new Error(`"${rawKey}" is not a usable metadata key`);
+    if (key.length > MAX_METADATA_KEY) throw new Error(`metadata key "${key.slice(0, 20)}…" is over ${MAX_METADATA_KEY} characters`);
+    if (v === null || v === undefined || v === '') { delete next[key]; continue; }
+    if (typeof v !== 'string') throw new Error(`metadata value for "${key}" must be a string`);
+    if (v.length > MAX_METADATA_VALUE) throw new Error(`metadata value for "${key}" is over ${MAX_METADATA_VALUE} characters`);
+    next[key] = v;
+  }
+  if (Object.keys(next).length > MAX_METADATA_KEYS) throw new Error(`a task can hold at most ${MAX_METADATA_KEYS} metadata keys`);
+  return Object.keys(next).length ? next : null;
+}
+
+// Task ids are printed as "#abcd1234" everywhere, so accept them that way too.
+function normalizeTaskId(v) { return String(v).trim().replace(/^#/, ''); }
+
+// undefined = not being set; null = clear. A replacement must be a live task — a
+// pointer to nothing would read as "replaced" while nothing replaced it.
+function cleanSupersededBy(v, selfId) {
+  if (v === undefined) return undefined;
+  if (v === null || v === '') return null;
+  const id = normalizeTaskId(v);
+  if (id === selfId) throw new Error('a task cannot supersede itself');
+  if (!findLiveTask(id)) throw new Error(`no scheduled task #${id} exists to supersede this one`);
+  return id;
+}
+
+function appendChangeLog(task, by, changes, at = Date.now()) {
+  if (!changes.length) return;
+  const log = Array.isArray(task.changeLog) ? task.changeLog : [];
+  log.push({ at, by: by || null, changes });
+  task.changeLog = log.length > MAX_CHANGELOG ? log.slice(-MAX_CHANGELOG) : log;
+}
+
+// One change-log entry as a line of text for list_scheduled_tasks.
+function formatChangeEntry(entry) {
+  const show = (v) => {
+    if (v === null || v === undefined) return '(none)';
+    if (typeof v !== 'string') return String(v);
+    return JSON.stringify(v.length > 80 ? `${v.slice(0, 79)}…` : v);
+  };
+  const parts = (entry.changes || []).map(c => ('from' in c || 'to' in c)
+    ? `${c.field}: ${show(c.from)} → ${show(c.to)}`
+    : `${c.field} changed`);
+  return `${new Date(entry.at).toLocaleString()} · ${actorLabel(entry.by)} · ${parts.join('; ')}`;
+}
+
+// `disabled_since`: a bare date means local midnight, like every other time this mod
+// shows; anything else goes through Date.parse. null = not a date.
+function parseSince(s) {
+  const str = String(s).trim();
+  const d = /^(\d{4})-(\d{2})-(\d{2})$/.exec(str);
+  if (d) return new Date(+d[1], +d[2] - 1, +d[3]).getTime();
+  const t = Date.parse(str);
+  return Number.isFinite(t) ? t : null;
+}
+
+// --- Legacy-title migration (#712) ----------------------------------------
+//
+// The shapes the title convention took before there were fields for it:
+//   OFF 2026-09-21 (<reason>) — <title>      RETIRED 2026-09-18 (<reason>) — <title>
+//   OFF 2026-09-18 — <title>                 PAUSED — <title>
+//   <title> — DISABLED: <reason>             <title> — DONE: <reason>
+// Returns { word, date, reason, title } or null. Deliberately narrow: uppercase
+// keywords only, and a prefix needs whitespace around its dash, so "Off-site backup"
+// or "OFFICE hours" never match. The reason's parentheses are scanned for balance by
+// hand, since a reason may itself contain a "(…)".
+function parseLegacyTitle(title) {
+  if (typeof title !== 'string') return null;
+  const m = /^(OFF|RETIRED|PAUSED|DISABLED)\b/.exec(title);
+  if (m) {
+    let rest = title.slice(m[0].length);
+    let date = null;
+    let reason = null;
+    const d = /^\s+(\d{4})-(\d{2})-(\d{2})\b/.exec(rest);
+    if (d) { date = [+d[1], +d[2], +d[3]]; rest = rest.slice(d[0].length); }
+    const open = /^\s*\(/.exec(rest);
+    if (open) {
+      let depth = 0;
+      let end = -1;
+      for (let i = open[0].length - 1; i < rest.length; i++) {
+        if (rest[i] === '(') depth++;
+        else if (rest[i] === ')' && --depth === 0) { end = i; break; }
+      }
+      if (end < 0) return null; // unbalanced — not the convention, so leave it alone
+      reason = rest.slice(open[0].length, end).trim() || null;
+      rest = rest.slice(end + 1);
+    }
+    const sep = /^\s+[—–-]\s+([\s\S]+)$/.exec(rest);
+    if (!sep) return null;
+    return { word: m[1], date, reason, title: sep[1].trim() };
+  }
+  const s = /^([\s\S]+?)\s+[—–]\s+(DISABLED|DONE|OFF|RETIRED|PAUSED):\s*([\s\S]*)$/.exec(title);
+  if (s) return { word: s[2], date: null, reason: s[3].trim() || null, title: s[1].trim() };
+  return null;
+}
+
+// Move one task's title-encoded state into fields. Only a turned-off, live task with
+// no status note yet is touched — so this is idempotent, and an enabled task whose
+// title happens to start "OFF" is never rewritten. The original title survives in the
+// change log. disabledBy stays null: nothing recorded who did it. Never throws; it
+// runs at require time, where a throw would take the whole mod down.
+function migrateLegacyTitle(task, now = Date.now()) {
+  if (!task || task.enabled !== false || task.deleted || task.statusNote) return false;
+  const parsed = parseLegacyTitle(task.title);
+  if (!parsed || !parsed.title) return false;
+  const label = { OFF: 'Turned off', RETIRED: 'Retired', PAUSED: 'Paused', DISABLED: 'Disabled', DONE: 'Done' }[parsed.word];
+  const note = (parsed.reason ? `${label}: ${parsed.reason}` : label).slice(0, MAX_STATUS_NOTE);
+  const from = task.title;
+  task.title = parsed.title;
+  task.statusNote = note;
+  if (parsed.date && task.disabledAt == null) {
+    const [y, mo, d] = parsed.date;
+    const at = new Date(y, mo - 1, d).getTime();
+    if (Number.isFinite(at)) task.disabledAt = at;
+  }
+  appendChangeLog(task, { type: 'system', reason: 'legacy-title-migration' }, [
+    { field: 'title', from, to: task.title },
+    { field: 'statusNote', from: null, to: note },
+  ], now);
+  return true;
+}
 
 // --- Project resolution ---------------------------------------------------
 //
@@ -828,8 +1026,11 @@ function settingsObj() { return (ctx && ctx.settings) || {}; }
 function defaultModel() { return cleanModel(settingsObj().scheduledDefaultModel); }
 function defaultEffort() { return cleanEffort(settingsObj().scheduledDefaultEffort); }
 
-function createTask({ title, prompt, cron: cronStr, once, project, agentType, configProfile, model, effort, planMode, enabled, createdBy, keepOpen, keepOpenOnFailure, isolateWorktree, maxRuntimeMinutes }) {
+function createTask({ title, prompt, cron: cronStr, once, project, agentType, configProfile, model, effort, planMode, enabled, createdBy, keepOpen, keepOpenOnFailure, isolateWorktree, maxRuntimeMinutes, statusNote, metadata, by }) {
   cron.parseCron(cronStr); // throws on invalid — caller catches (a one-shot still uses a cron)
+  // #712: validated before anything is built, so a rejected note creates nothing.
+  const note = cleanStatusNote(statusNote);
+  const meta = mergeMetadata(null, metadata);
   const now = Date.now();
   const agent = splitAgentSelection(agentType, configProfile);
   const task = {
@@ -866,6 +1067,14 @@ function createTask({ title, prompt, cron: cronStr, once, project, agentType, co
     enabled: enabled !== false,
     createdAt: now,
     createdBy: createdBy || null,
+    // State metadata (#712) — see the section comment above actorLabel. A task
+    // created off is stamped like one turned off later.
+    statusNote: note,
+    disabledAt: enabled === false ? now : null,
+    disabledBy: enabled === false ? (by || null) : null,
+    supersededBy: null,
+    metadata: meta,
+    changeLog: [],
     lastRun: null,
     nextRun: null,
     runs: [],
@@ -878,34 +1087,96 @@ function createTask({ title, prompt, cron: cronStr, once, project, agentType, co
   return task;
 }
 
-function updateTask(id, fields) {
+// A field's value as it behaves, for change detection (#712): a legacy row with no
+// `isolateWorktree` isolates, one with no `maxRuntimeMinutes` has the default limit.
+// Comparing raw stored values instead would log "null → true" the first time the
+// panel saved any pre-existing task, since its form sends every field on each save.
+function effectiveValue(task, field) {
+  switch (field) {
+    case 'isolateWorktree': return task.isolateWorktree !== false;
+    case 'maxRuntimeMinutes': return sanitizeMaxRuntime(task.maxRuntimeMinutes);
+    case 'planMode': case 'keepOpen': case 'keepOpenOnFailure': case 'once': case 'enabled': return !!task[field];
+    default: return task[field] == null ? null : task[field];
+  }
+}
+
+// `by` is who is asking (see actorLabel) — recorded on the change log, and on
+// disabledBy when this call turns the task off.
+function updateTask(id, fields, { by = null } = {}) {
   const task = findLiveTask(id); // a tombstone is not a schedule — nothing to edit
   if (!task) return null;
-  if (fields.cron !== undefined) { cron.parseCron(fields.cron); task.cron = fields.cron.trim(); }
-  if (fields.title !== undefined) task.title = String(fields.title);
-  if (fields.prompt !== undefined) task.prompt = String(fields.prompt);
-  if (fields.project !== undefined) task.project = fields.project || '';
+  // Everything is computed into `next` before the task is touched, so a call that
+  // throws partway (a bad cron, an over-long note, an unknown superseded_by) changes
+  // nothing at all.
+  const next = {};
+  if (fields.cron !== undefined) { cron.parseCron(fields.cron); next.cron = fields.cron.trim(); }
+  if (fields.title !== undefined) next.title = String(fields.title);
+  if (fields.prompt !== undefined) next.prompt = String(fields.prompt);
+  if (fields.project !== undefined) next.project = fields.project || '';
   // Agent + config profile move together: switching to a non-claude agent must drop
   // the profile, and a 'config:<id>' agentType carries the profile inside it.
   if (fields.agentType !== undefined || fields.configProfile !== undefined) {
     const agent = splitAgentSelection(
       fields.agentType !== undefined ? fields.agentType : task.agentType,
       fields.configProfile !== undefined ? fields.configProfile : task.configProfile);
-    task.agentType = agent.agentType;
-    task.configProfile = agent.configProfile;
+    next.agentType = agent.agentType;
+    next.configProfile = agent.configProfile;
   }
-  if (fields.model !== undefined) task.model = cleanModel(fields.model);
-  if (fields.effort !== undefined) task.effort = cleanEffort(fields.effort);
-  if (fields.planMode !== undefined) task.planMode = !!fields.planMode;
-  if (fields.keepOpen !== undefined) task.keepOpen = !!fields.keepOpen;
-  if (fields.keepOpenOnFailure !== undefined) task.keepOpenOnFailure = !!fields.keepOpenOnFailure;
-  if (fields.isolateWorktree !== undefined) task.isolateWorktree = !!fields.isolateWorktree;
-  if (fields.maxRuntimeMinutes !== undefined) task.maxRuntimeMinutes = sanitizeMaxRuntime(fields.maxRuntimeMinutes);
-  if (fields.once !== undefined) task.once = !!fields.once;
-  if (fields.enabled !== undefined) task.enabled = !!fields.enabled;
+  if (fields.model !== undefined) next.model = cleanModel(fields.model);
+  if (fields.effort !== undefined) next.effort = cleanEffort(fields.effort);
+  if (fields.planMode !== undefined) next.planMode = !!fields.planMode;
+  if (fields.keepOpen !== undefined) next.keepOpen = !!fields.keepOpen;
+  if (fields.keepOpenOnFailure !== undefined) next.keepOpenOnFailure = !!fields.keepOpenOnFailure;
+  if (fields.isolateWorktree !== undefined) next.isolateWorktree = !!fields.isolateWorktree;
+  if (fields.maxRuntimeMinutes !== undefined) next.maxRuntimeMinutes = sanitizeMaxRuntime(fields.maxRuntimeMinutes);
+  if (fields.once !== undefined) next.once = !!fields.once;
+  if (fields.enabled !== undefined) next.enabled = !!fields.enabled;
+  if (fields.statusNote !== undefined) next.statusNote = cleanStatusNote(fields.statusNote);
+  const supersededBy = cleanSupersededBy(fields.supersededBy, task.id);
+  if (supersededBy !== undefined) next.supersededBy = supersededBy;
+  const metadata = fields.metadata !== undefined ? mergeMetadata(task.metadata, fields.metadata) : undefined;
+
+  // A superseded task is a task that no longer runs, so naming a replacement turns
+  // it off. Asking for both in one call contradicts itself.
+  if (next.supersededBy) {
+    if (next.enabled === true) throw new Error('superseded_by turns a task off, so it cannot be combined with enabled: true');
+    next.enabled = false;
+  }
+  const wasEnabled = !!task.enabled;
+  const willEnable = next.enabled !== undefined ? next.enabled : wasEnabled;
+  // Turning a task back on leaves the state its note and replacement described, so
+  // both clear — unless this same call sets them. The change log keeps the old ones.
+  if (!wasEnabled && willEnable) {
+    if (!('statusNote' in next)) next.statusNote = null;
+    if (!('supersededBy' in next)) next.supersededBy = null;
+  }
+
+  const changes = [];
+  for (const [field, value] of Object.entries(next)) {
+    const prev = effectiveValue(task, field);
+    // A prompt is logged as changed without its text — prompts are long, and the
+    // current one is on the task anyway.
+    if (prev !== value) changes.push(field === 'prompt' ? { field } : { field, from: prev, to: value });
+    task[field] = value;
+  }
+  if (metadata !== undefined) {
+    const before = task.metadata || {};
+    const after = metadata || {};
+    for (const key of new Set([...Object.keys(before), ...Object.keys(after)])) {
+      const from = Object.hasOwn(before, key) ? before[key] : null;
+      const to = Object.hasOwn(after, key) ? after[key] : null;
+      if (from !== to) changes.push({ field: `metadata.${key}`, from, to });
+    }
+    task.metadata = metadata;
+  }
+
+  const now = Date.now();
+  if (wasEnabled && !task.enabled) { task.disabledAt = now; task.disabledBy = by || null; }
+  else if (!wasEnabled && task.enabled) { task.disabledAt = null; task.disabledBy = null; }
+  appendChangeLog(task, by, changes, now);
   // Recompute next run from any schedule/enable change. A one-shot that has already
   // fired stays retired (nextRunFor returns null via its firedAt guard).
-  task.nextRun = task.enabled ? nextRunFor(task, Date.now()) : null;
+  task.nextRun = task.enabled ? nextRunFor(task, now) : null;
   saveTasks();
   broadcastTasks();
   return task;
@@ -983,6 +1254,11 @@ function taskView(task) {
     isolateWorktree: task.isolateWorktree !== false,
     maxRuntimeMinutes: sanitizeMaxRuntime(task.maxRuntimeMinutes),
     enabled: !!task.enabled,
+    statusNote: task.statusNote || null,
+    disabledAt: task.disabledAt || null,
+    disabledBy: task.disabledBy || null,
+    supersededBy: task.supersededBy || null,
+    metadata: task.metadata || null,
     nextRun: task.nextRun,
     lastRun: task.lastRun,
     lastStatus: lastRun ? lastRun.status : null,
@@ -1054,6 +1330,9 @@ function historyTaskView(task) {
     nextRun: task.nextRun || null,
     lastRun: task.lastRun || null,
     deleted: !!task.deleted,
+    // #712: why a paused task is paused, shown beside it instead of in its title.
+    statusNote: task.statusNote || null,
+    supersededBy: task.supersededBy || null,
     // Passed through whole, never sliced: trimRuns() can leave more than
     // MAX_RUNS rows, and the ones it keeps past the cap — runs whose session is
     // still live — are appended at the END. Slicing to 20 would drop exactly the
@@ -1148,7 +1427,31 @@ function buildRunHistory({ tasks: taskList = [], contexts: contextList = [], exi
   return { enabled: !!enabled, generatedAt: now, groups };
 }
 
-function formatTaskLines(list) {
+// The state lines (#712), each printed only when there is something to say, so a
+// task nobody has annotated lists exactly as it did before.
+function stateLines(task, { changes = false } = {}) {
+  const lines = [];
+  if (!task.enabled && task.disabledAt != null) {
+    lines.push(`disabled: ${disabledWhen(task)}${task.disabledBy ? ` by ${actorLabel(task.disabledBy)}` : ''}`);
+  }
+  if (task.statusNote) lines.push(`status: ${task.statusNote}`);
+  if (task.supersededBy) {
+    // Full `tasks`: the replacement may itself have been deleted since.
+    const repl = tasks.find(x => x.id === task.supersededBy);
+    lines.push(`superseded by: #${task.supersededBy}${repl ? ` "${repl.title}"` : ''}${!repl || repl.deleted ? ' (deleted)' : ''}`);
+  }
+  const meta = Object.entries(task.metadata || {});
+  if (meta.length) lines.push(`metadata: ${meta.map(([k, v]) => `${k}=${v}`).join(', ')}`);
+  if (changes) {
+    const log = Array.isArray(task.changeLog) ? task.changeLog : [];
+    lines.push(log.length
+      ? `changes (newest first):${log.slice().reverse().map(e => `\n    ${formatChangeEntry(e)}`).join('')}`
+      : 'changes: none recorded');
+  }
+  return lines;
+}
+
+function formatTaskLines(list, { changes = false } = {}) {
   if (list.length === 0) return 'No scheduled tasks.';
   return list.map(t => {
     const v = taskView(t);
@@ -1159,7 +1462,8 @@ function formatTaskLines(list) {
     const lastLine = v.lastRun
       ? `\n  last run: ${new Date(v.lastRun).toLocaleString()} [${v.lastStatus}]${v.lastSummary ? ` — ${v.lastSummary}` : ''}`
       : '';
-    return `#${v.id} "${v.title}"${state}\n  ${v.schedule} (cron: ${v.cron})\n  project: ${v.project || 'none'}${nextLine}${lastLine}`;
+    const extra = stateLines(t, { changes }).map(l => `\n  ${l}`).join('');
+    return `#${v.id} "${v.title}"${state}\n  ${v.schedule} (cron: ${v.cron})\n  project: ${v.project || 'none'}${extra}${nextLine}${lastLine}`;
   }).join('\n\n');
 }
 
@@ -1236,10 +1540,19 @@ const AGENT_TUNING_SCHEMA = () => ({
 
 function init(context) {
   ctx = context;
+  for (const line of migrationLog.splice(0)) log_(line);
   startScheduler();
   if (ctx.registerRestartBlocker) ctx.registerRestartBlocker(unattendedRunInFlight);
 
   const callerShellId = (extra) => extra?.requestInfo?.url?.searchParams?.get('shellId') || null;
+  // Who is making this call, for the change log and disabledBy (#712). The session's
+  // name is copied now, while it still exists to be read.
+  const actorFor = (extra) => {
+    const id = callerShellId(extra);
+    if (!id) return { type: 'agent' };
+    const entry = ctx.shells && ctx.shells.get(id);
+    return { type: 'session', id, name: (entry && entry.name) || null };
+  };
 
   const tools = {
     schedule_task: {
@@ -1258,8 +1571,18 @@ function init(context) {
         isolate_worktree: z.boolean().optional().describe('Run each fire in a disposable git worktree/branch (scheduled-<runId>) so it never touches the main checkout; cleaned up after the run when clean/merged. Only applies to claude on a git-repo project. Default true.'),
         max_runtime_minutes: z.number().optional().describe('Close a run that has not reported finished after this many minutes, so a stuck run cannot block future fires. Default 60; 0 disables the limit.'),
         enabled: z.boolean().optional().describe('Whether the schedule is active (default true).'),
+        status_note: z.string().optional().describe(`Short free-text note on the task's state, shown beside it in listings and the panel (max ${MAX_STATUS_NOTE} characters). Keep \`title\` as the task's actual name.`),
+        metadata: z.record(z.string()).optional().describe('Free-form string key/value pairs for anything else worth recording, e.g. {"issue": "#712"}. Filterable with list_scheduled_tasks\' `metadata`.'),
+        supersedes: z.string().optional().describe('Id of an existing task this one replaces. That task is marked superseded_by this one and turned off, in the same call.'),
       },
-      handler: async ({ title, prompt, cron: cronStr, once, project, agent_type, model, effort, config_profile, plan_mode, keep_open, keep_open_on_failure, isolate_worktree, max_runtime_minutes, enabled }, extra) => {
+      handler: async ({ title, prompt, cron: cronStr, once, project, agent_type, model, effort, config_profile, plan_mode, keep_open, keep_open_on_failure, isolate_worktree, max_runtime_minutes, enabled, status_note, metadata, supersedes }, extra) => {
+        const by = actorFor(extra);
+        // Checked before anything is created: a bad id must not leave a new task
+        // behind while the one it was meant to replace keeps firing.
+        const old = supersedes ? findLiveTask(normalizeTaskId(supersedes)) : null;
+        if (supersedes && !old) {
+          return { content: [{ type: 'text', text: `Could not schedule task: no scheduled task #${normalizeTaskId(supersedes)} exists to supersede. Nothing was created.` }] };
+        }
         let task;
         try {
           task = createTask({
@@ -1270,23 +1593,38 @@ function init(context) {
             keepOpen: keep_open, keepOpenOnFailure: keep_open_on_failure,
             isolateWorktree: isolate_worktree,
             maxRuntimeMinutes: max_runtime_minutes,
-            createdBy: callerShellId(extra),
+            statusNote: status_note, metadata,
+            createdBy: callerShellId(extra), by,
           });
         } catch (e) {
           return { content: [{ type: 'text', text: `Could not schedule task: ${e.message}` }] };
         }
+        let supersedeText = '';
+        if (old) {
+          try {
+            updateTask(old.id, { supersededBy: task.id }, { by });
+            supersedeText = ` #${old.id} "${old.title}" is now superseded by it and turned off.`;
+          } catch (e) {
+            supersedeText = ` Could not mark #${old.id} superseded (${e.message}) — it is still scheduled.`;
+          }
+        }
         const v = taskView(task);
-        return { content: [{ type: 'text', text: `Scheduled #${v.id} "${v.title}": ${v.schedule} in ${v.project || 'no project'}. Next run: ${v.nextRun ? new Date(v.nextRun).toLocaleString() : 'n/a'}.` }] };
+        return { content: [{ type: 'text', text: `Scheduled #${v.id} "${v.title}": ${v.schedule} in ${v.project || 'no project'}. Next run: ${v.nextRun ? new Date(v.nextRun).toLocaleString() : 'n/a'}.${supersedeText}` }] };
       },
     },
 
     list_scheduled_tasks: {
-      description: 'List locally-scheduled agent tasks. By default lists tasks for the calling session\'s project; scope "group" adds sibling repos in the same project group; scope "all" lists everything.',
+      description: 'List locally-scheduled agent tasks. By default lists tasks for the calling session\'s project; scope "group" adds sibling repos in the same project group; scope "all" lists everything. The filters below narrow whichever scope you pick — questions like "what was turned off this week" or "what did task X replace" usually want scope "all".',
       schema: {
         scope: z.enum(['project', 'group', 'all']).optional().describe('project (default), group, or all'),
         project: z.string().optional().describe('Override the project to scope to (defaults to the caller\'s).'),
+        enabled: z.boolean().optional().describe('Only enabled tasks (true) or only turned-off tasks (false).'),
+        superseded_by: z.string().optional().describe('Only tasks superseded by this task id.'),
+        disabled_since: z.string().optional().describe('Only tasks turned off at or after this time: YYYY-MM-DD (local midnight) or an ISO timestamp. Tasks turned off before this was recorded have no date and never match.'),
+        metadata: z.record(z.string()).optional().describe('Only tasks whose metadata has every one of these key/value pairs.'),
+        include_changes: z.boolean().optional().describe('Also print each task\'s change log (what changed, when, and who changed it), newest first.'),
       },
-      handler: async ({ scope, project }, extra) => {
+      handler: async ({ scope, project, enabled, superseded_by, disabled_since, metadata, include_changes }, extra) => {
         const effScope = scope || 'project';
         const proj = resolveProject(project, callerShellId(extra));
         let list = liveTasks(); // tombstones are not schedules — never listed (#614)
@@ -1296,15 +1634,39 @@ function init(context) {
           const dirs = groupScopeDirs(proj);
           list = list.filter(t => dirs.some(d => pathInside(t.project, d)));
         }
-        const header = effScope === 'all' ? 'All scheduled tasks:'
-          : effScope === 'group' ? `Scheduled tasks in ${displayName(proj)}'s group:`
-          : `Scheduled tasks for ${displayName(proj)}:`;
-        return { content: [{ type: 'text', text: `${header}\n\n${formatTaskLines(list)}` }] };
+        // State filters (#712). Listed back in the header, so an empty result can't be
+        // mistaken for "no tasks at all".
+        const applied = [];
+        if (enabled !== undefined) {
+          list = list.filter(t => !!t.enabled === enabled);
+          applied.push(enabled ? 'enabled' : 'turned off');
+        }
+        if (superseded_by) {
+          const id = normalizeTaskId(superseded_by);
+          list = list.filter(t => t.supersededBy === id);
+          applied.push(`superseded by #${id}`);
+        }
+        if (disabled_since) {
+          const since = parseSince(disabled_since);
+          if (since == null) return { content: [{ type: 'text', text: `Could not list: "${disabled_since}" is not a date. Use YYYY-MM-DD or an ISO timestamp.` }] };
+          list = list.filter(t => !t.enabled && t.disabledAt != null && t.disabledAt >= since);
+          applied.push(`turned off since ${new Date(since).toLocaleString()}`);
+        }
+        if (metadata && Object.keys(metadata).length) {
+          const want = Object.entries(metadata);
+          list = list.filter(t => want.every(([k, v]) => t.metadata && Object.hasOwn(t.metadata, k) && t.metadata[k] === v));
+          applied.push(`metadata ${want.map(([k, v]) => `${k}=${v}`).join(', ')}`);
+        }
+        const where = effScope === 'all' ? 'All scheduled tasks'
+          : effScope === 'group' ? `Scheduled tasks in ${displayName(proj)}'s group`
+          : `Scheduled tasks for ${displayName(proj)}`;
+        const header = `${where}${applied.length ? ` (${applied.join('; ')})` : ''}:`;
+        return { content: [{ type: 'text', text: `${header}\n\n${formatTaskLines(list, { changes: !!include_changes })}` }] };
       },
     },
 
     update_scheduled_task: {
-      description: 'Update fields of an existing scheduled task by id.',
+      description: 'Update fields of an existing scheduled task by id. Keep `title` as the task\'s actual name: to turn a task off, retire it or replace it, set `enabled: false` with a `status_note` saying why (or `superseded_by` with the replacement\'s id) — do not rewrite the title with an "OFF <date> — …" style prefix. Turning a task off records when and by whom automatically, and every change is kept in the task\'s change log (list_scheduled_tasks include_changes: true).',
       schema: {
         id: z.string().describe('Task id'),
         title: z.string().optional(),
@@ -1319,9 +1681,12 @@ function init(context) {
         keep_open_on_failure: z.boolean().optional().describe('Keep the tab open when a run fails, even if auto-close is on.'),
         isolate_worktree: z.boolean().optional().describe('Run each fire in a disposable git worktree/branch that is cleaned up after the run when clean/merged (claude + git-repo projects only).'),
         max_runtime_minutes: z.number().optional().describe('Close a run that has not reported finished after this many minutes (0 disables the limit).'),
-        enabled: z.boolean().optional(),
+        enabled: z.boolean().optional().describe('false turns the task off, recording when and by which session. true turns it back on and clears status_note and superseded_by, unless you set them in the same call.'),
+        status_note: z.string().optional().describe(`Short free-text reason for the task's current state, e.g. "turned off: the product it watches was cancelled" (max ${MAX_STATUS_NOTE} characters). "" clears it.`),
+        superseded_by: z.string().optional().describe('Id of the task that replaced this one. Setting it also turns this task off. "" clears it.'),
+        metadata: z.record(z.string().nullable()).optional().describe('Key/value pairs merged into the task\'s metadata; a null or "" value removes that key.'),
       },
-      handler: async ({ id, title, prompt, cron: cronStr, once, project, agent_type, model, effort, config_profile, plan_mode, keep_open, keep_open_on_failure, isolate_worktree, max_runtime_minutes, enabled }, extra) => {
+      handler: async ({ id, title, prompt, cron: cronStr, once, project, agent_type, model, effort, config_profile, plan_mode, keep_open, keep_open_on_failure, isolate_worktree, max_runtime_minutes, enabled, status_note, superseded_by, metadata }, extra) => {
         const fields = {};
         if (title !== undefined) fields.title = title;
         if (prompt !== undefined) fields.prompt = prompt;
@@ -1338,12 +1703,18 @@ function init(context) {
         if (isolate_worktree !== undefined) fields.isolateWorktree = isolate_worktree;
         if (max_runtime_minutes !== undefined) fields.maxRuntimeMinutes = max_runtime_minutes;
         if (enabled !== undefined) fields.enabled = enabled;
+        if (status_note !== undefined) fields.statusNote = status_note;
+        if (superseded_by !== undefined) fields.supersededBy = superseded_by;
+        if (metadata !== undefined) fields.metadata = metadata;
         let task;
-        try { task = updateTask(id, fields); }
+        try { task = updateTask(normalizeTaskId(id), fields, { by: actorFor(extra) }); }
         catch (e) { return { content: [{ type: 'text', text: `Could not update: ${e.message}` }] }; }
         if (!task) return { content: [{ type: 'text', text: `Task #${id} not found.` }] };
         const v = taskView(task);
-        return { content: [{ type: 'text', text: `Updated #${v.id} "${v.title}": ${v.schedule}. Next run: ${v.nextRun ? new Date(v.nextRun).toLocaleString() : 'n/a'}.` }] };
+        const state = v.enabled
+          ? `Next run: ${v.nextRun ? new Date(v.nextRun).toLocaleString() : 'n/a'}.`
+          : `Turned off${v.supersededBy ? `, superseded by #${v.supersededBy}` : ''}${v.statusNote ? ` — ${v.statusNote}` : ''}.`;
+        return { content: [{ type: 'text', text: `Updated #${v.id} "${v.title}": ${v.schedule}. ${state}` }] };
       },
     },
 
@@ -1505,6 +1876,8 @@ function registerRoutes(app, context) {
         keepOpen: b.keepOpen, keepOpenOnFailure: b.keepOpenOnFailure,
         isolateWorktree: b.isolateWorktree,
         maxRuntimeMinutes: b.maxRuntimeMinutes,
+        statusNote: b.statusNote, metadata: b.metadata,
+        by: USER_ACTOR,
       });
       res.json({ task });
     } catch (e) {
@@ -1518,7 +1891,9 @@ function registerRoutes(app, context) {
     const fields = { ...b };
     if (b.project !== undefined) fields.project = b.project ? resolveProject(b.project, null) : '';
     try {
-      const task = updateTask(req.params.id, fields);
+      // updateTask reads only the fields it knows, so a body carrying disabledBy or
+      // changeLog cannot forge either (#712).
+      const task = updateTask(req.params.id, fields, { by: USER_ACTOR });
       if (!task) return res.status(404).json({ error: 'Task not found' });
       res.json({ task });
     } catch (e) {
@@ -1550,10 +1925,19 @@ function registerRoutes(app, context) {
     res.json({ started: true, sessionId: shellId });
   });
 
+  // The panel's Pause/Resume. An optional `statusNote` rides along so a caller can say
+  // why in the same write (#712).
   app.post('/api/scheduled-tasks/:id/enabled', (req, res) => {
-    const task = updateTask(req.params.id, { enabled: !!(req.body && req.body.enabled) });
-    if (!task) return res.status(404).json({ error: 'Task not found' });
-    res.json({ task });
+    const b = req.body || {};
+    const fields = { enabled: !!b.enabled };
+    if (b.statusNote !== undefined) fields.statusNote = b.statusNote;
+    try {
+      const task = updateTask(req.params.id, fields, { by: USER_ACTOR });
+      if (!task) return res.status(404).json({ error: 'Task not found' });
+      res.json({ task });
+    } catch (e) {
+      res.status(400).json({ error: e.message });
+    }
   });
 
   // Named groups moved to server core as the shared "contexts" (#526):
@@ -1561,9 +1945,11 @@ function registerRoutes(app, context) {
 }
 
 // The mod loader only uses init/registerRoutes; the extra named exports are for
-// unit tests (test/unit/scheduled-worktree.test.js, scheduled-run-prompt.test.js).
+// unit tests (test/unit/scheduled-worktree.test.js, scheduled-run-prompt.test.js,
+// scheduled-task-metadata.test.js).
 module.exports = {
   init, registerRoutes, cleanupWorktree, isGitRepo, scheduledRunPrompt, worktreeContract, enforceRunTimeouts,
   CONTRACT_TOOLS, purgeTombstonedTasks, TOMBSTONE_TTL_MS, buildRunHistory, disambiguate, taskSnapshot,
   FRAGMENTS, PROMPT_VARS, readProjectContext, CONTEXT_MAX_BYTES,
+  parseLegacyTitle, migrateLegacyTitle, MAX_CHANGELOG,
 };

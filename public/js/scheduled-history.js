@@ -343,8 +343,11 @@ function renderTask(task) {
     : task.once && task.firedAt ? 'retired'
       : !task.enabled ? 'paused'
         : task.nextRun ? `next ${relTime(task.nextRun)}` : 'no next run';
-  sub.textContent = `${task.schedule || task.cron} · ${next}`;
-  sub.title = task.schedule || task.cron;
+  // #712: why it is paused, beside it rather than packed into its title. The line
+  // ellipsizes, so the tooltip carries the whole note.
+  const note = task.statusNote ? ` · ${task.statusNote}` : '';
+  sub.textContent = `${task.schedule || task.cron} · ${next}${note}`;
+  sub.title = `${task.schedule || task.cron}${note}`;
   label.appendChild(sub);
   row.appendChild(label);
 
