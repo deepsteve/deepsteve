@@ -157,6 +157,19 @@ function projectModsDir(repoRoot) {
 }
 
 /**
+ * A REPO's own guidance for its unattended scheduled runs (#708): an optional committed
+ * file the scheduled-tasks mod reads at fire time and inserts after Deep Steve's prefix.
+ *
+ * Sibling of projectModsDir() and for the same reasons: it belongs to the project, so it is
+ * rooted at the repo and travels with the checkout, and it is NOT derived from stateDir() —
+ * DEEPSTEVE_HOME must never move where a user's repo keeps its files. The `scheduled/`
+ * directory leaves room for repo-defined tasks as siblings of CONTEXT.md later.
+ */
+function projectScheduledContextPath(repoRoot) {
+  return path.join(repoRoot, DEFAULT_STATE_DIRNAME, 'scheduled', 'CONTEXT.md');
+}
+
+/**
  * The home whose AGENT-CONFIG dirs (~/.claude, ~/.agents) this daemon manages (#641).
  *
  * Derived from stateDir(), never from os.homedir(). With no override the two are the
@@ -251,6 +264,6 @@ function logDir({ platform = process.platform, env = process.env, homedir = os.h
 
 module.exports = {
   expandTilde, spawnCwdProblem, assertSpawnCwd,
-  stateDir, statePath, projectModsDir, agentHomeDir, tmuxSocketPath, defaultTmuxSocketPath, logDir,
+  stateDir, statePath, projectModsDir, projectScheduledContextPath, agentHomeDir, tmuxSocketPath, defaultTmuxSocketPath, logDir,
   DEFAULT_STATE_DIRNAME,
 };

@@ -344,6 +344,17 @@ function callerFields(extra) {
   };
 }
 
+// #708: what a scheduled run is told in place of "end your turn". Nothing ever sends an
+// unattended run a new message, so a run that ends its turn to wait never calls
+// scheduled_task_finished: it sits in `running` and blocks every later fire of its task until
+// maxRuntimeMinutes reaps it. The tool's reply is read after the prompt, so it has to agree
+// with the prompt. "The way your prompt says" rather than "now", because an isolated run must
+// still merge its worktree before it finishes.
+const SCHEDULED_RUN_FINISH =
+  'This is a scheduled run and nothing is waiting on this session, so do not end your turn to '
+  + 'wait for a reply: carry on and finish the run the way your prompt says, ending with '
+  + 'scheduled_task_finished.';
+
 // ── superseded questions (#710) ──────────────────────────────────────────────
 //
 // A stored question stays open until something closes it. What nothing used to notice is a
@@ -1449,12 +1460,22 @@ function init(context) {
             + 'Do not wait on it. End your turn; whatever the person sent arrives as a new message.';
           return text(JSON.stringify({ id: item.id, url, message: superseded }, null, 2));
         }
-        const message = `Question ${item.id} is on the Workshop inbox. The answer will arrive as a new `
-          + 'message — end your turn now rather than polling.'
-          + (item.durableUntil
-            ? ` If this session has closed by then, the question stays open until ${new Date(item.durableUntil).toISOString()}: `
-              + 'an option with a `then` starts a new session, and any other answer is kept for workshop_answers.'
-            : '');
+        // #708: a scheduled run is never sent the answer as a new message — its session closes
+        // when it finishes — so it is told where the answer goes instead of to wait for it.
+        const message = caller.scheduledTaskId
+          ? `Question ${item.id} is on the Workshop inbox.`
+            + (item.durableUntil
+              ? ` It stays open after this session closes, until ${new Date(item.durableUntil).toISOString()}: `
+                + 'an option with a `then` starts a new session, and any other answer is kept for '
+                + 'workshop_answers, which later runs of this task read.'
+              : ' It has no durable_days, so it is archived a few minutes after this session closes.')
+            + ` ${SCHEDULED_RUN_FINISH}`
+          : `Question ${item.id} is on the Workshop inbox. The answer will arrive as a new `
+            + 'message — end your turn now rather than polling.'
+            + (item.durableUntil
+              ? ` If this session has closed by then, the question stays open until ${new Date(item.durableUntil).toISOString()}: `
+                + 'an option with a `then` starts a new session, and any other answer is kept for workshop_answers.'
+              : '');
         return text(JSON.stringify({ id: item.id, url, message }, null, 2));
       },
     },
@@ -1555,6 +1576,16 @@ function init(context) {
             + ingested.skipped.map((s) => `${s.ref} (${s.reason})`).join('; ')
             + '.'
           : '';
+
+        // #708: from a scheduled run a result is a deliverable, not a park. The stamp above is
+        // still written (it only ever refuses a merge), but nobody reviews it inside this run,
+        // and the result outlives the session by design — so the run is told to finish.
+        if (fields.scheduledTaskId) {
+          return text(
+            `Result ${item.id} is on the Workshop inbox, and it stays there after this session `
+            + `closes. ${SCHEDULED_RUN_FINISH}${skipNote}`,
+          );
+        }
 
         return text(
           `Result ${item.id} is on the Workshop inbox awaiting review. End your turn now — `

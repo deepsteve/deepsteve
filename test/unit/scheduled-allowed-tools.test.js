@@ -1,5 +1,5 @@
-// #612: a scheduled fire pre-permits the two MCP tools its own prompt contract
-// REQUIRES it to call (scheduled_task_started / scheduled_task_finished).
+// #612: a scheduled fire pre-permits the MCP tools its own prompt contract tells it to
+// call — the self-report pair, plus since #708 the Workshop tools prefix.md names.
 //
 // Without this, whether an unattended run can honor the contract deepsteve imposed on
 // it depends on whatever settings.json allowlist happens to exist in the target
@@ -31,7 +31,9 @@ process.env.HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-sched-allowed-home-
 
 const { init, CONTRACT_TOOLS } = require('../../mods/scheduled-tasks/tools.js');
 
-const CONTRACT_VALUE = 'mcp__deepsteve__scheduled_task_started,mcp__deepsteve__scheduled_task_finished';
+// One comma-joined argv value. The list itself is pinned against the prompt fragments by
+// the last test in this file, so it is not restated here.
+const CONTRACT_VALUE = CONTRACT_TOOLS.join(',');
 
 // ---------------------------------------------------------------------------
 // Part 1: the real argv builders, evaluated out of server.js source (requiring
@@ -237,17 +239,33 @@ test('an agent with no deepsteve MCP gets no grant (it gets no contract either)'
   assert.strictEqual(shells.get(spawn.opts.shellId).allowedTools, null);
 });
 
-test('the granted list is exactly the tools the prompt contract demands', () => {
-  const { scheduledRunPrompt } = require('../../mods/scheduled-tasks/tools.js');
-  const prompt = scheduledRunPrompt({ title: 't', id: 'abc', prompt: 'p' }, null);
-  // Drift guard: if the contract ever names a third tool, this list must grow with it,
-  // or that tool becomes the new thing an unattended run wedges on.
-  assert.deepStrictEqual(CONTRACT_TOOLS, [
-    'mcp__deepsteve__scheduled_task_started',
-    'mcp__deepsteve__scheduled_task_finished',
-  ]);
-  for (const tool of CONTRACT_TOOLS) {
-    const bare = tool.replace('mcp__deepsteve__', '');
-    assert.ok(prompt.includes(bare), `contract prompt never mentions ${bare}`);
+// Every tool name deepsteve registers that a fragment could plausibly name: this mod's own
+// (off the init() result above) plus Workshop's, read from source rather than required —
+// Workshop's init() wants a far richer ctx than this harness has. A tool key there is a
+// 4-space-indented `name: {` whose next line opens its description.
+function deepsteveToolNames() {
+  const workshopSrc = fs.readFileSync(path.join(__dirname, '..', '..', 'mods', 'workshop', 'tools.js'), 'utf8');
+  const workshop = [...workshopSrc.matchAll(/^ {4}(\w+): \{\n\s+description:/gm)].map((m) => m[1]);
+  assert.ok(workshop.includes('workshop_ask') && workshop.includes('share_result'),
+    `the Workshop tool scan found ${JSON.stringify(workshop)} — has its layout changed?`);
+  return new Set([...Object.keys(tools), ...workshop]);
+}
+
+test('the granted list is exactly the deepsteve tools the prompt fragments name (#612, #708)', () => {
+  const { FRAGMENTS } = require('../../mods/scheduled-tasks/tools.js');
+  // Drift guard, derived rather than hardcoded: a tool the prompt tells the agent to call
+  // that is not pre-permitted is the next thing an unattended run wedges on; a grant the
+  // prompt never asks for is permission widening for nothing. Backticked names only —
+  // `summary` and `durable_days` are parameters, and the registry intersection drops them.
+  const known = deepsteveToolNames();
+  const named = new Set();
+  for (const text of Object.values(FRAGMENTS)) {
+    for (const [, name] of text.matchAll(/`(\w+)`/g)) if (known.has(name)) named.add(name);
   }
+  const granted = CONTRACT_TOOLS.map((t) => t.replace(/^mcp__deepsteve__/, ''));
+  assert.ok(CONTRACT_TOOLS.every((t) => t.startsWith('mcp__deepsteve__')), 'every grant is a deepsteve tool');
+  assert.deepStrictEqual([...named].sort(), [...granted].sort(),
+    'CONTRACT_TOOLS must be exactly the deepsteve tools the fragments name in backticks');
+  // The names are real ids, not near-misses: each is registered by some deepsteve mod.
+  for (const name of granted) assert.ok(known.has(name), `${name} is not a registered deepsteve tool`);
 });

@@ -134,14 +134,14 @@ test('scheduledRunPrompt: isolation contract present only with iso', () => {
   const task = { id: 'ab12cd34', title: 'Nightly report', prompt: 'Generate the report.' };
   const iso = { path: '/repo/.claude/worktrees/scheduled-ef56', branch: 'worktree-scheduled-ef56', repoRoot: '/repo' };
 
-  const plain = scheduledRunPrompt(task);
+  const plain = scheduledRunPrompt(task, { mcpWired: true });
   assert.ok(plain.includes('scheduled_task_started'));
   assert.ok(plain.includes('scheduled_task_finished'));
   assert.ok(plain.includes(task.prompt));
   assert.ok(!plain.includes('DISPOSABLE'), 'no worktree text without iso');
   assert.ok(!plain.includes('worktree'), 'no worktree text without iso');
 
-  const isolated = scheduledRunPrompt(task, iso);
+  const isolated = scheduledRunPrompt(task, { mcpWired: true, iso });
   assert.ok(isolated.includes(iso.path));
   assert.ok(isolated.includes(iso.branch));
   assert.ok(isolated.includes(iso.repoRoot));

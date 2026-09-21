@@ -1187,6 +1187,8 @@ A project mod's page is agent-authored HTML served same-origin, in an iframe wit
 
 Storing the mod in the repo (#638) *improves* this rather than widening it. The page used to appear in a home directory where nothing would ever show it to you; now it arrives in a diff, is reviewed like any other code, and its history is `git log`. The thing to be careful about is the other direction — a project mod is code that runs with the host's authority as soon as you look at its project, so **a mod that arrives in a repo you pulled is a mod you should read before opening the project**. That is the same judgement you already make about a repo's build scripts, and the reason it is worth stating is that a `.deepsteve/` directory is easy to skim past in a diff.
 
+The same goes for a pulled `.deepsteve/scheduled/CONTEXT.md` (#708). It is not code, but it is read into every unattended scheduled run of that repo, and those runs have the project's MCP servers and nobody watching them. It grants nothing a `CLAUDE.md` in the same repo doesn't already, and it is just as easy to skim past. See [scheduled-tasks.md](scheduled-tasks.md).
+
 ### Implementation notes (#618, #628)
 
 Everything above is what a project mod *is*; this is what you need before changing how it

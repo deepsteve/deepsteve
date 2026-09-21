@@ -198,7 +198,9 @@ path. What Codex does *not* have is ongoing idle/busy classification: `state` fr
 - ⚠️ **Scheduled-run contract tools are not pre-permitted.** A scheduled Codex run *is*
   given the self-report contract (the `mcpWired` probe is true for Codex), but the
   `--allowedTools` pre-permit from #612 is a no-op, because that flag lives only on
-  `AGENT_CONFIGS.claude`. So an unattended Codex run can block on a permission prompt,
+  `AGENT_CONFIGS.claude`. Since #708 the contract also names `workshop_answers`,
+  `workshop_ask` and `share_result`, which Claude gets pre-permitted and Codex does not,
+  so there are more tools to stall on. So an unattended Codex run can block on a permission prompt,
   never call `scheduled_task_finished`, and leave its run stuck at `running` — which
   makes the overlap guard skip **every subsequent fire of that task** until
   `maxRuntimeMinutes` reaps it. This is the single sharpest gap in the matrix.
@@ -422,7 +424,9 @@ wired — in practice `claude` and `codex`. Mods add more; see [mods.md](mods.md
     later run of the same scheduled task succeeds. `workshop_check` says so and why; the agent
     never has to close its own questions. See [mods.md](mods.md#superseded-questions-710).
   - An unattended agent needs `workshop_ask` in its allowed tools, or it stalls on a permission
-    prompt.
+    prompt. A scheduled Claude run has it (and `workshop_answers` and `share_result`)
+    pre-permitted since #708, because its prompt names them; see
+    [scheduled-tasks.md](scheduled-tasks.md).
   - See [links.md](links.md).
 - **`share_result` (#669, Workshop mod)**: the other half of `issue_complete`'s gate. An agent posts a writeup — `summary` (what changed and *why this shape*), `before`/`after`, `images`, `caveats` — to the Workshop inbox, and it **returns immediately**: the human's Approve or Request-changes arrives later as a new message, so the agent ends its turn rather than polling. It is an approval gate, not a status update: with `issueStagesEnabled` on, `issue_complete` answers `share_result` (nothing shared) or `await_review` (shared, undecided) instead of `merge` until a result has been approved. Two fields on the shell entry carry the state — `resultItemId`, written by the tool itself and which by itself *refuses* a merge, and `resultApprovedAt`, written only from the panel's answer endpoint. `images` are references, never base64: a screenshot id or a path inside the caller's own project, copied into a Workshop-owned store at share time (a screenshot would otherwise vanish under the 7-day sweep) and served from `/api/workshop/images/<file>`. See [mods.md](mods.md#workshop) for the store and the retention rules.
 - **Browser Console / Screenshots**: these operate on the deepsteve UI tab only — they do NOT access your project's website or any other browser tab. `screenshot_capture` and `scene_snapshot` save PNGs to disk and return the file path; use the `Read` tool on that path to view the image. Do NOT try to base64-decode or re-save — the bytes are already on disk at the returned path. All three return an immediate `isError` when no browser window is connected, rather than broadcasting into the void.

@@ -1502,6 +1502,47 @@ test('share_result posts a result and parks the agent without approving anything
   assert.ok(ctxSaveStates > 0, 'the stamp is persisted, or a restart loses the park');
 });
 
+test('from a scheduled run, share_result and workshop_ask say finish, not wait (#708)', async () => {
+  // Nothing ever sends an unattended run a new message. A run that obeys "end your turn" never
+  // calls scheduled_task_finished, sits in `running`, and blocks every later fire of its task
+  // until maxRuntimeMinutes — so the reply has to agree with the scheduled-run prompt.
+  const { shells, tools } = world();
+  // One session per call: the inbox is module state shared by the whole file, and a result
+  // and a durable question both outlive their session — two open items on one session id
+  // would be two rows for it in every later test's roster.
+  const scheduledRun = () => {
+    const id = sid();
+    const entry = liveSession(shells, id);
+    entry.scheduledTaskId = 'task0708';
+    return { id, entry };
+  };
+
+  const { id, entry } = scheduledRun();
+  const shared = said(await tools.share_result.handler({ summary: 'Weekly report: all green.' }, extraFor(id)));
+  assert.match(shared, /stays there after this session closes/);
+  assert.match(shared, /scheduled_task_finished/);
+  assert.match(shared, /the way your prompt says/, 'not "now": an isolated run must still merge first');
+  assert.doesNotMatch(shared, /End your turn now/i);
+  assert.doesNotMatch(shared, /do not merge or close this session/i);
+  assert.ok(entry.resultItemId, 'the stamp is still written');
+  assert.strictEqual(entry.resultApprovedAt, null, 'and sharing still approves nothing');
+
+  const durable = JSON.parse(said(await tools.workshop_ask.handler({
+    question: 'Rotate the expiring key?',
+    options: [{ label: 'Yes', then: 'Rotate it and report the new fingerprint.' }, { label: 'No' }],
+    durable_days: 3,
+  }, extraFor(scheduledRun().id)))).message;
+  assert.match(durable, /stays open after this session closes/);
+  assert.match(durable, /workshop_answers, which later runs of this task read/);
+  assert.match(durable, /scheduled_task_finished/);
+  assert.doesNotMatch(durable, /end your turn now/i);
+
+  const fleeting = JSON.parse(said(await tools.workshop_ask.handler(
+    { question: 'Not durable?' }, extraFor(scheduledRun().id)))).message;
+  assert.match(fleeting, /no durable_days/, 'the run is told its question will not outlive it');
+  assert.match(fleeting, /scheduled_task_finished/);
+});
+
 test('the shared item is a result, with the summary as body and its first line as subject', async () => {
   const { shells, tools, app } = world();
   const id = sid();

@@ -13,9 +13,9 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { stateDir, spawnCwdProblem } = require('../../paths');
+const { stateDir, spawnCwdProblem, projectScheduledContextPath } = require('../../paths');
 const { runBinary } = require('../../bin-path');
-const { randomUUID } = require('crypto');
+const { randomUUID, createHash } = require('crypto');
 const { z } = require('zod');
 const cron = require('./cron');
 // Resolves to ~/.deepsteve/git-root.js once deployed — mods sit at ~/.deepsteve/mods/<id>/.
@@ -39,13 +39,23 @@ const CATCHUP_DELAY_MS = 10 * 1000; // let the daemon settle before the overdue 
 // Legacy 'started'/'completed' rows (pre-#525) still render in the UI badge.
 const ACTIVE_STATUSES = new Set(['queued', 'running', 'started']);
 
-// #612: the exact tools scheduledRunPrompt() *requires* the agent to call. deepsteve
+// #612: the exact tools the scheduled-run prompt tells the agent to call. deepsteve
 // imposes that contract, so deepsteve pre-permits it: an unattended run has nobody to
 // answer "Do you want to proceed?", and blocking on it wedges the run in `running`
 // forever, which makes the overlap guard skip every subsequent fire of the task.
-// Narrow by design — the self-report tools only, not a blanket permission widening.
+// Narrow by design: exactly the deepsteve tools prefix.md names (#708 added the three
+// Workshop ones, since a run that needs a human now asks through the inbox), never a
+// blanket permission widening. None of them can approve anything — share_result only
+// ever *refuses* a merge. test/unit/scheduled-allowed-tools.test.js derives the names
+// from the fragment files and fails if this list and the prompt disagree.
 // `deepsteve` is the MCP server key hardcoded in server.js's mcpConfigArgs().
-const CONTRACT_TOOLS = ['mcp__deepsteve__scheduled_task_started', 'mcp__deepsteve__scheduled_task_finished'];
+const CONTRACT_TOOLS = [
+  'mcp__deepsteve__scheduled_task_started',
+  'mcp__deepsteve__scheduled_task_finished',
+  'mcp__deepsteve__workshop_answers',
+  'mcp__deepsteve__workshop_ask',
+  'mcp__deepsteve__share_result',
+];
 
 // How long a tombstoned task (#614, see deleteTask) is kept once its last run has
 // stopped looking active. Normally the purge fires as soon as no run is ACTIVE; this
@@ -226,39 +236,131 @@ function nextRunFor(task, from) {
   return safeNextRun(task.cron, from);
 }
 
-// Isolation contract (#565): tell the agent its work area is disposable and
-// that keeping work requires merging/pushing BEFORE it self-reports finished.
-function worktreeContract(iso) {
-  return [
-    `You are working in a DISPOSABLE git worktree created just for this run:`,
-    `- working directory (worktree): ${iso.path}`,
-    `- branch: ${iso.branch} (branched from the repo's current HEAD)`,
-    `- main checkout: ${iso.repoRoot} — never edit files there directly.`,
-    ``,
-    `When this run ends the worktree is removed and the branch deleted, unless there is`,
-    `uncommitted work (worktree kept) or unmerged commits (branch kept).`,
-    `If this run produces anything worth keeping, commit it and merge it back into the`,
-    `repo's main branch (or push the branch / open a PR) BEFORE you finish.`,
-  ].join('\n');
+// --- The scheduled-run prompt (#525, #565, #708) ---------------------------
+//
+// The text an unattended run is handed lives in shipped files next to this one, not in
+// string literals here:
+//   prefix.md        the self-report + unattended contract, for an agent with deepsteve MCP
+//   worktree.md      the per-run isolation contract (#565), for any isolated run
+//   worktree-mcp.md  the merge-before-scheduled_task_finished line: isolated AND MCP only
+// Which of them a run gets is decided HERE, by choosing files. The files carry
+// `{{placeholders}}` and nothing else, so the template language never grows conditionals,
+// and a non-MCP agent can never be told to call an MCP tool.
+//
+// `<!-- -->` comments are stripped so each file can document itself for its next editor
+// without spending prompt tokens. Read once, at require time: a missing fragment fails
+// the mod load loudly instead of delivering a run with no contract, which would never
+// self-report and would wedge its task until maxRuntimeMinutes.
+function loadFragment(name) {
+  return fs.readFileSync(path.join(__dirname, name), 'utf8').replace(/<!--[\s\S]*?-->/g, '').trim();
+}
+const FRAGMENTS = {
+  prefix: loadFragment('prefix.md'),
+  worktree: loadFragment('worktree.md'),
+  worktreeMcp: loadFragment('worktree-mcp.md'),
+};
+
+// Every name a fragment may use. The unit test fails on a `{{name}}` outside this list,
+// because the renderer below turns an unknown name into '' — a typo would otherwise
+// silently delete a task title or a worktree path from the prompt.
+const PROMPT_VARS = ['title', 'taskId', 'worktreePath', 'branch', 'repoRoot'];
+
+// `{{name}}` substitution with renderIssuePrompt's semantics (issue-prompt.js): one pass,
+// and an unknown name renders as ''. One pass matters: a title that itself contains
+// `{{taskId}}` is inserted as text and never re-expanded.
+function renderFragment(text, vars) {
+  return text.replace(/\{\{(\w+)\}\}/g, (_, key) => (vars[key] ?? ''));
 }
 
-// Wrap a task's prompt with the scheduled-run contract: tell the agent this is an
-// automated scheduled run and have it self-report via the MCP tools so the run
-// record reflects real work rather than the session lifecycle (#525). When the
-// run is isolated in a per-run worktree (#565), `iso` adds the merge-back contract.
-function scheduledRunPrompt(task, iso) {
-  return [
-    `⏰ This is an automated scheduled task run: "${task.title}" (task ${task.id}).`,
-    ``,
-    ...(iso ? [worktreeContract(iso), ``] : []),
-    `Before you start, call the \`scheduled_task_started\` tool to mark this run as started.`,
-    `When you're done, call \`scheduled_task_finished\` with a one-line \`summary\` of what you did`,
-    `(pass \`success: false\` if the task could not be completed). These record that the work actually ran.`,
-    ...(iso ? [`Merge/push anything worth keeping BEFORE calling \`scheduled_task_finished\` — the tab may auto-close and the worktree is reclaimed right after.`] : []),
-    ``,
-    `Your task:`,
-    task.prompt,
-  ].join('\n');
+// Isolation contract (#565): tell the agent its work area is disposable and that keeping
+// work requires merging/pushing before it finishes. `iso` is { path, branch, repoRoot }.
+function worktreeContract(iso) {
+  return renderFragment(FRAGMENTS.worktree, { worktreePath: iso.path, branch: iso.branch, repoRoot: iso.repoRoot });
+}
+
+// The repo's own section (#708). Named by its repo-relative path: the absolute one points
+// into the main checkout, which an isolated run is told never to touch.
+function contextSection(context) {
+  return `Project context for scheduled runs, from ${context.relPath || context.path} in this repo:\n${context.text}`;
+}
+
+/**
+ * The whole prompt a scheduled run is handed. Pure: every input is injected.
+ *
+ *   mcpWired  the agent has deepsteve MCP, so it gets the self-report contract (#525).
+ *             Deliberately no default — a caller that forgets it gets the raw prompt,
+ *             which is the safe direction.
+ *   iso       { path, branch, repoRoot } when the run is in a per-run worktree (#565).
+ *   context   readProjectContext()'s result, or null (#708).
+ *
+ * Order: prefix → worktree → worktree-mcp → project context → `Your task:`. The task prompt
+ * and the project context are appended AFTER rendering, so a `{{x}}` in either stays
+ * literal. A run that gets no fragment and no context receives exactly `task.prompt`, as
+ * every non-MCP run always has.
+ */
+function scheduledRunPrompt(task, { mcpWired, iso = null, context = null } = {}) {
+  const vars = {
+    title: task.title, taskId: task.id,
+    worktreePath: iso ? iso.path : '', branch: iso ? iso.branch : '', repoRoot: iso ? iso.repoRoot : '',
+  };
+  const fragments = [];
+  if (mcpWired) fragments.push(FRAGMENTS.prefix);
+  if (iso) fragments.push(FRAGMENTS.worktree);
+  if (iso && mcpWired) fragments.push(FRAGMENTS.worktreeMcp);
+  const parts = fragments.map(f => renderFragment(f, vars));
+  if (context && context.text) parts.push(contextSection(context));
+  if (!parts.length) return task.prompt;
+  return `${parts.join('\n\n')}\n\nYour task:\n${task.prompt}`;
+}
+
+// --- Project context: <repoRoot>/.deepsteve/scheduled/CONTEXT.md (#708) ----
+//
+// Guidance that only matters when nobody is watching ("the weekly report goes in Y") would
+// otherwise live in CLAUDE.md/AGENTS.md, where every interactive turn pays for it. This file
+// is read only into scheduled runs, for any agent, MCP or not.
+
+// Skipped, never truncated, above this: half a file of instructions is worse than none, and
+// this text is typed into a TUI composer on every fire, on top of the prefix and the task.
+const CONTEXT_MAX_BYTES = 8192;
+
+// The id `git hash-object` would print for these bytes. Recorded on the run row, so a past
+// run's context can be recovered with `git log --find-object=<sha>` — computed here rather
+// than by running git, and identical for an uncommitted file.
+function gitBlobSha(buf) {
+  return createHash('sha1').update(`blob ${buf.length}\0`).update(buf).digest('hex');
+}
+
+/**
+ * Read a repo's CONTEXT.md from its working tree. Returns { path, relPath, sha, text }, or
+ * null when there is nothing to use. Never throws: runTask is called from tick(), whose one
+ * try/catch would abandon every other task due that tick.
+ *
+ * Missing is the normal case and logs nothing. Everything else that makes the file unusable
+ * logs one line, so "why didn't my context apply" has an answer.
+ *
+ * lstat, not stat: only a regular file is read. A symlink is refused, so a CONTEXT.md that
+ * arrives in a pulled repo cannot pull some other file on this machine into the prompt.
+ */
+function readProjectContext(repoRoot, { log = log_, maxBytes = CONTEXT_MAX_BYTES } = {}) {
+  if (!repoRoot) return null;
+  const file = projectScheduledContextPath(repoRoot);
+  let st;
+  try {
+    st = fs.lstatSync(file);
+  } catch (e) {
+    if (e.code !== 'ENOENT' && e.code !== 'ENOTDIR') log(`CONTEXT.md skipped — unreadable (${e.code}): ${file}`);
+    return null;
+  }
+  if (!st.isFile()) { log(`CONTEXT.md skipped — not a regular file: ${file}`); return null; }
+  const tooBig = (n) => { log(`CONTEXT.md skipped — ${n} bytes, over the ${maxBytes}-byte cap: ${file}`); return null; };
+  if (st.size > maxBytes) return tooBig(st.size);
+  let buf;
+  try { buf = fs.readFileSync(file); }
+  catch (e) { log(`CONTEXT.md skipped — unreadable (${e.code || e.message}): ${file}`); return null; }
+  if (buf.length > maxBytes) return tooBig(buf.length); // grew between the stat and the read
+  const text = buf.toString('utf8').trim();
+  if (!text) return null;
+  return { path: file, relPath: path.relative(repoRoot, file), sha: gitBlobSha(buf), text };
 }
 
 // Find the task + run for a calling session's shellId, mirroring the run<->session
@@ -363,7 +465,7 @@ function runTask(task, reason, { foreground = false } = {}) {
     task.runs.unshift({
       startedAt: at, sessionId: null, status: 'ended', endedAt: at, agentStartedAt: null,
       success: false, summary: cwdProblem.message, worktree: null,
-      model: null, effort: null, configDir: null,
+      model: null, effort: null, configDir: null, context: null,
     });
     trimRuns(task);
     // Retire a one-shot in place rather than retrying a directory that is gone —
@@ -404,12 +506,17 @@ function runTask(task, reason, { foreground = false } = {}) {
   // AGENT_CONFIGS.claude, so allowedToolsArgs is a no-op for codex.
   const mcpWired = ctx.mcpConfigArgs(agentType, id).length > 0;
   const allowedTools = mcpWired ? CONTRACT_TOOLS : null;
+  // #708: the repo's own guidance for unattended runs, read from the main checkout's working
+  // tree at fire time — for MCP and non-MCP agents alike. Only when the task names a project:
+  // a project-less task runs in $HOME, where the same relative path would land inside Deep
+  // Steve's own ~/.deepsteve. findGitRoot because a task's project can be a subdirectory.
+  const projectContext = task.prompt && task.project ? readProjectContext(findGitRoot(cwd) || cwd) : null;
   const spawnArgs = getSpawnArgs(agentType, { sessionId: claudeSessionId, shellId: id, planMode: !!task.planMode, worktree, model, effort, allowedTools });
   const sessionEngine = getDefaultEngine();
   const engineType = sessionEngine.constructor.name === 'TmuxEngine' ? 'tmux' : 'node-pty';
   const name = `⏰ ${task.title}`;
 
-  log(`[scheduled] running "${task.title}" (${task.id}) id=${id} agent=${agentType} model=${model || 'default'} effort=${effort || 'default'} profile=${task.configProfile || 'none'} engine=${engineType} cwd=${cwd} worktree=${worktree || 'none'} allowedTools=${allowedTools ? 'contract' : 'none'} reason=${reason}`);
+  log(`[scheduled] running "${task.title}" (${task.id}) id=${id} agent=${agentType} model=${model || 'default'} effort=${effort || 'default'} profile=${task.configProfile || 'none'} engine=${engineType} cwd=${cwd} worktree=${worktree || 'none'} allowedTools=${allowedTools ? 'contract' : 'none'} context=${projectContext ? projectContext.sha.slice(0, 7) : 'none'} reason=${reason}`);
   spawnSession(sessionEngine, id, agentType, spawnArgs, cwd, {
     cols: 120, rows: 40, env: sessionEnv(id, { name, windowId: null, cwd, agentType, worktree, codexHomeId, configDir }),
   });
@@ -435,16 +542,15 @@ function runTask(task, reason, { foreground = false } = {}) {
   // Deliver the task prompt. For MCP-capable agents (Claude Code and Codex), wrap it with
   // the scheduled-run contract so the agent self-reports start/finish (#525);
   // agents without deepsteve MCP get the raw prompt as before — except that an
-  // isolated run must always be told its work area is disposable (#565).
+  // isolated run must always be told its work area is disposable (#565), and a repo's
+  // CONTEXT.md reaches every agent (#708). scheduledRunPrompt picks the fragments.
   if (task.prompt) {
     const iso = worktree ? {
       path: path.join(cwd, '.claude', 'worktrees', worktree),
       branch: `worktree-${worktree}`, repoRoot: cwd,
     } : null;
-    deliverPromptWhenReady(id, mcpWired
-      ? scheduledRunPrompt(task, iso)
-      : (iso ? `${worktreeContract(iso)}\n\n${task.prompt}` : task.prompt),
-    { retryCodexEnter: agentType === 'codex' })
+    deliverPromptWhenReady(id, scheduledRunPrompt(task, { mcpWired, iso, context: projectContext }),
+      { retryCodexEnter: agentType === 'codex' });
   }
   if (agentConfig.supportsSessionWatch) watchClaudeSessionDir(id);
   sessionEngine.onExit(id, () => {
@@ -483,7 +589,10 @@ function runTask(task, reason, { foreground = false } = {}) {
   // Record the *effective* model/effort/config dir on the run row (#592). Nothing
   // else stores them: reconstructing what a past run actually used previously meant
   // digging through Claude transcripts, and effort isn't in there at all.
-  task.runs.unshift({ startedAt: now, sessionId: id, status: 'queued', endedAt: null, agentStartedAt: null, success: null, summary: null, worktree, model, effort, configDir });
+  // `context` (#708) says which CONTEXT.md this run was given: its path and git blob id,
+  // or null when none was used (absent, oversized, or a project-less task).
+  const context = projectContext ? { path: projectContext.path, sha: projectContext.sha } : null;
+  task.runs.unshift({ startedAt: now, sessionId: id, status: 'queued', endedAt: null, agentStartedAt: null, success: null, summary: null, worktree, model, effort, configDir, context });
   trimRuns(task);
   saveTasks();
   broadcastTasks();
@@ -914,7 +1023,7 @@ function dirExists(root, now = Date.now()) {
 }
 
 // One run row, trimmed to what the grid renders. Every field is optional:
-// worktree/model/effort arrived with #565/#592, so older rows lack them.
+// worktree/model/effort arrived with #565/#592 and context with #708, so older rows lack them.
 function runView(r) {
   return {
     startedAt: r.startedAt || null,
@@ -928,6 +1037,7 @@ function runView(r) {
     worktreeRemoved: !!r.worktreeRemoved,
     model: r.model || null,
     effort: r.effort || null,
+    context: r.context || null,
   };
 }
 
@@ -1451,5 +1561,9 @@ function registerRoutes(app, context) {
 }
 
 // The mod loader only uses init/registerRoutes; the extra named exports are for
-// unit tests (test/unit/scheduled-worktree.test.js).
-module.exports = { init, registerRoutes, cleanupWorktree, isGitRepo, scheduledRunPrompt, worktreeContract, enforceRunTimeouts, CONTRACT_TOOLS, purgeTombstonedTasks, TOMBSTONE_TTL_MS, buildRunHistory, disambiguate, taskSnapshot };
+// unit tests (test/unit/scheduled-worktree.test.js, scheduled-run-prompt.test.js).
+module.exports = {
+  init, registerRoutes, cleanupWorktree, isGitRepo, scheduledRunPrompt, worktreeContract, enforceRunTimeouts,
+  CONTRACT_TOOLS, purgeTombstonedTasks, TOMBSTONE_TTL_MS, buildRunHistory, disambiguate, taskSnapshot,
+  FRAGMENTS, PROMPT_VARS, readProjectContext, CONTEXT_MAX_BYTES,
+};

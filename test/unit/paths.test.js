@@ -11,7 +11,10 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
-const { expandTilde, stateDir, statePath, agentHomeDir, tmuxSocketPath, logDir, DEFAULT_STATE_DIRNAME } = require('../../paths');
+const {
+  expandTilde, stateDir, statePath, agentHomeDir, tmuxSocketPath, logDir, DEFAULT_STATE_DIRNAME,
+  projectModsDir, projectScheduledContextPath,
+} = require('../../paths');
 
 const REPO = path.join(__dirname, '..', '..');
 const HOME = '/home/tester';
@@ -71,6 +74,23 @@ test('tmuxSocketPath tracks the state dir, so HOME isolation is socket isolation
   // And it is short. A Unix socket's sun_path is 104 bytes including the NUL, and the
   // old `$TMPDIR/tmux-<uid>/default` regularly came within a couple of bytes of it.
   assert.ok(Buffer.byteLength(tmuxSocketPath()) < 100, tmuxSocketPath());
+});
+
+// --- repo-rooted paths (#638, #708) ---------------------------------------
+
+test('a repo\'s own .deepsteve paths are rooted at the repo, never at the state dir', () => {
+  assert.strictEqual(projectModsDir('/src/app'), '/src/app/.deepsteve/mods');
+  assert.strictEqual(projectScheduledContextPath('/src/app'), '/src/app/.deepsteve/scheduled/CONTEXT.md');
+  // DEEPSTEVE_HOME relocates the daemon's own state for tests and second instances; it must
+  // never move where a user's repo keeps its files, or a test daemon and the real one would
+  // disagree about the same checkout.
+  const saved = process.env.DEEPSTEVE_HOME;
+  process.env.DEEPSTEVE_HOME = '/scratch/iso/.deepsteve';
+  try {
+    assert.strictEqual(projectScheduledContextPath('/src/app'), '/src/app/.deepsteve/scheduled/CONTEXT.md');
+  } finally {
+    if (saved === undefined) delete process.env.DEEPSTEVE_HOME; else process.env.DEEPSTEVE_HOME = saved;
+  }
 });
 
 // --- agentHomeDir ---------------------------------------------------------
@@ -188,6 +208,24 @@ test('nobody builds the state dir inline any more — use paths.stateDir() (#621
     assert.ok(
       !/homedir\(\)\s*,\s*['"]\.deepsteve['"]/.test(src),
       `${rel} still builds the state dir inline — use stateDir()/statePath() from paths.js`,
+    );
+  }
+});
+
+test('nobody spells the .deepsteve dirname as a literal — use a paths.js helper (#638, #708)', () => {
+  // The regex above only catches the STATE dir (`homedir(), '.deepsteve'`). A repo-rooted
+  // path built inline — `path.join(repoRoot, '.deepsteve', 'scheduled', 'CONTEXT.md')` —
+  // slipped past it, which is why projectModsDir() and projectScheduledContextPath() were
+  // "covered" only by convention. An exact '.deepsteve' string literal is what every such
+  // path.join has to contain; prose like "~/.deepsteve/themes" in a tool description does
+  // not match, because the quote has to close right after the dirname. Quotes only, not
+  // backticks: comments use `.deepsteve` as markdown, and a path segment is a plain string.
+  for (const rel of GUARDED) {
+    const src = fs.readFileSync(path.join(REPO, rel), 'utf8');
+    assert.ok(
+      !/['"]\.deepsteve['"]/.test(src),
+      `${rel} spells '.deepsteve' as a literal path segment — use stateDir()/statePath(), `
+      + 'projectModsDir() or projectScheduledContextPath() from paths.js',
     );
   }
 });

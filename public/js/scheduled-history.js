@@ -436,6 +436,9 @@ function renderDetail(task, run, v) {
     ['Model', [run.model, run.effort].filter(Boolean).join(' · ') || '—'],
   ];
   if (run.worktree) rows.push(['Worktree', run.worktree + (run.worktreeRemoved ? '' : ' (kept)')]);
+  // #708: which .deepsteve/scheduled/CONTEXT.md the run was given, as a git blob id —
+  // `git log --find-object=<sha>` finds the commit that had it. Older rows have none.
+  if (run.context && run.context.sha) rows.push(['Context', `CONTEXT.md @ ${run.context.sha.slice(0, 7)}`]);
   if (run.summary) rows.push(['Summary', run.summary]);
 
   for (const [k, val] of rows) {
