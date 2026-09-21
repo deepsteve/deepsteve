@@ -29,9 +29,18 @@ const req = (type, id, body = {}) => ({ params: { type, id }, body });
 
 // ── the scheme itself ────────────────────────────────────────────────────────
 
-test('the v1 type table is what #705 specified', () => {
+test('the v1 type table is what #705 specified, plus project-mod (#711)', () => {
   assert.strictEqual(links.LINK_VERSION, 'v1');
-  assert.deepStrictEqual({ ...links.TYPE_STATES }, { decision: 'active', markdown: 'reserved', html: 'reserved' });
+  assert.deepStrictEqual({ ...links.TYPE_STATES },
+    { decision: 'active', 'project-mod': 'active', markdown: 'reserved', html: 'reserved' });
+});
+
+test('the unavailable page names the link type, not one particular mod', () => {
+  // Two providers exist since #711, so "check that Workshop loaded" would misdirect a
+  // project-mod link.
+  const page = links.explain({ kind: 'unavailable' }, { type: 'project-mod', id: 'abc12345' });
+  assert.match(page.paragraphs.join(' '), /"project-mod" links/);
+  assert.doesNotMatch(page.paragraphs.join(' '), /Workshop/);
 });
 
 test('a type is never both live and removed', () => {

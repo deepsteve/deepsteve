@@ -83,6 +83,13 @@ describe('authGate link bounce', () => {
     assert.ok(!/unsafe-inline'[^;]*script|script-src[^;]*unsafe-inline/.test(out.headers['content-security-policy']));
   });
 
+  it('a project-mod link bounces like a decision link (#711)', () => {
+    const out = call(fresh(), { url: '/v1/project-mod/015dd1f5' });
+    assert.strictEqual(out.status, 401);
+    assert.strictEqual(out.type, 'html');
+    assert.match(out.body, /location\.replace\(location\.href\)/);
+  });
+
   it('a stale cookie bounces too — the reload carries the fresh one', () => {
     const security = fresh();
     const out = call(security, { cookie: `${security.cookieName}=deadbeef` });
@@ -101,6 +108,9 @@ describe('authGate link bounce', () => {
     const cases = [
       { what: 'an API path', url: '/api/version' },
       { what: 'the gated display-tab page', url: '/api/display-tab/abc' },
+      // #711 chose this on purpose: an email links to /v1/project-mod/<id>, and the raw page
+      // keeps the plain 401 that its own iframe loads get.
+      { what: 'the raw project-mod page', url: '/api/project-mods/015dd1f5/page' },
       { what: 'a fetch (Accept */*)', accept: '*/*' },
       { what: 'no Accept at all', accept: null },
       { what: 'a POST', method: 'POST' },
