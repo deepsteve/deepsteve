@@ -41,6 +41,7 @@ import { init as initTerminalSearch, attachSearchAddon, closeIfOpen as closeTerm
 import * as SessionHistory from './session-history.js';
 import { init as initContextViews, setEnabled as setContextViewsEnabled, applyFilter as refreshContextFilter, requestNewTabInContext, resolveContextRepo, chooseContextDir, setContexts as applyServerContexts, setActiveContext as setActiveContextFromPanel, getActiveContextId, getActiveContextInfo, orderRecentDirsByContext, activeContextIsEmpty, noteActiveTab, revealTabContext, showToast, setRailSuppressed, setRailQuiet } from './context-views.js';
 import * as ProjectMods from './project-mods.js';
+import * as DecisionMode from './decision-mode.js';
 import * as Onboarding from './onboarding.js';
 import { nsKey } from './storage-namespace.js';
 import { formatShortcut } from './shortcuts.js';
@@ -381,7 +382,8 @@ function updateEmptyState() {
   if (!el) return;
   const noSessions = sessions.size === 0;
   const contextEmpty = !noSessions && activeContextIsEmpty();
-  const show = noSessions || contextEmpty;
+  // Decision Tab mode (#716) has its own empty screen, the empty inbox.
+  const show = !DecisionMode.isDecisionModeActive() && (noSessions || contextEmpty);
   const wasHidden = el.classList.contains('hidden');
   el.classList.toggle('hidden', !show);
   el.classList.toggle('context-empty', contextEmpty);
@@ -394,11 +396,13 @@ function updateEmptyState() {
 // where the full set matters: applying the context filter). getVisibleTabIds()
 // drops tabs the active context hides — so tab navigation stays in-context —
 // and equals getAllTabIds() whenever no context filter is active (the "All"
-// view / disabled feature un-hide every tab).
+// view / disabled feature un-hide every tab). Decision Tab mode (#716) hides everything
+// but decision tabs the same way, with .decision-hidden, so every navigator built on
+// getVisibleTabIds() steps through decisions only while it is on.
 const getAllTabIds = () =>
   [...document.querySelectorAll('#tabs-list .tab')].map(t => t.id.replace('tab-', ''));
 const getVisibleTabIds = () =>
-  [...document.querySelectorAll('#tabs-list .tab:not(.context-hidden)')].map(t => t.id.replace('tab-', ''));
+  [...document.querySelectorAll('#tabs-list .tab:not(.context-hidden):not(.decision-hidden)')].map(t => t.id.replace('tab-', ''));
 
 // --- Recent sessions (issue #533): a server-side ring buffer of the last N
 // session configs, restorable from any browser/window/tab. See renderEmptyStateRecent
@@ -487,6 +491,9 @@ function getSessionList() {
  */
 function notifyTabsChanged() {
   ModManager.notifySessionsChanged(getSessionList());
+  // Before the context filter: it reads DecisionMode as its suspend switch, and a closed
+  // decision tab must be resolved (next decision, or the empty inbox) before it settles.
+  DecisionMode.sync();
   refreshContextFilter();
   // refreshContextFilter() normally drives this via onContextViewApplied, but it
   // early-returns when context views are disabled — and a persisted grid still
@@ -3102,6 +3109,16 @@ window.addEventListener('message', (e) => {
   TabManager.updateSpeakerIcon(d.tabId, s.emittingAudio);
 });
 
+// Decision Tab mode (#716) re-reads the active tab after every switch — for its n/m pager, and
+// to leave the mode when focus moves to a tab that is not a decision. On a microtask, never
+// inline: the reconcile may itself switch tabs, and that must not nest inside this switch.
+let decisionSyncQueued = false;
+function scheduleDecisionSync() {
+  if (decisionSyncQueued) return;
+  decisionSyncQueued = true;
+  queueMicrotask(() => { decisionSyncQueued = false; DecisionMode.sync(); });
+}
+
 /**
  * Switch to a specific session tab
  */
@@ -3132,6 +3149,7 @@ function switchTo(id) {
   noteActiveTab(id); // remember as the active context's last-viewed tab (#541)
   updateOverviewFocus(id);
   ModManager.notifyActiveSessionChanged(id);
+  scheduleDecisionSync();
   const session = sessions.get(id);
   if (session) {
     session.container.classList.add('active');
@@ -5289,6 +5307,7 @@ async function init() {
     },
     switchToTab: switchTo,
     updateEmptyState,
+    isFilterSuspended: () => DecisionMode.isDecisionModeActive(),
     createSessionInDir: (cwd) => createSession(cwd, null, true, { agentType: getDefaultAgentType() }),
     // Empty context (no dirs) new-tab: prompt the directory picker instead of
     // inheriting the last-active tab's (foreign) cwd (#581). promptRepoSession
@@ -5456,6 +5475,7 @@ async function init() {
       if (msg.type === 'close-display-tab') {
         if (sessions.has(msg.id)) killSession(msg.id);
       }
+      if (msg.type === 'decision-tabs') DecisionMode.setDecisionTabs(msg.tabs);
       if (msg.type === 'version-status') {
         setUpdateAvailableBadge(!!msg.status?.updateAvailable);
         window.dispatchEvent(new CustomEvent('deepsteve:version-status', { detail: msg.status }));
@@ -5628,6 +5648,20 @@ async function init() {
         if (s?.term) s.term.focus();
       }
     },
+  });
+
+  // Decision Tab mode (#716). The server pushes the list of waiting decision tabs on the
+  // control socket (on connect, and on every change); see public/js/decision-mode.js.
+  DecisionMode.init({
+    getAllTabIds,
+    getActiveTabId: () => activeId,
+    // The pager is a deliberate jump; landing on a decision after a close is not.
+    switchToTab: userJumpTo,
+    activateTab: switchTo,
+    // Overview's grid shows every visible tab at once, which is not an inbox.
+    beforeEnter: () => { if (isOverviewActive()) toggleOverviewMode(); },
+    // The filter's suspend switch just flipped: re-settle the strip, arrows and empty screens.
+    onModeChanged: () => { notifyTabsChanged(); updateEmptyState(); },
   });
 
   // Initialize Terminal Search (Cmd+F)

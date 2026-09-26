@@ -60,6 +60,18 @@
         <span class="btn-icon" aria-hidden="true"><svg viewBox="0 0 16 16"><path d="M9 1.5 3.5 9h4l-.5 5.5L12.5 7h-4z" fill="currentColor"/></svg></span>
         <span class="btn-label">New issue</span>
       </button>
+      <!-- Decision Tab mode (#716). Shown only while a decision tab is open (or the mode is on);
+           decision-mode.js owns its display, the count and the ‹ n/m › pager. -->
+      <button id="decision-mode-btn" class="nav-btn" aria-label="Decision Tab mode" aria-pressed="false" title="Decision Tab mode" style="display:none;">
+        <span class="btn-icon" aria-hidden="true"><svg viewBox="0 0 16 16"><path d="M1.5 9.5 3.5 3h9l2 6.5V13a.5.5 0 0 1-.5.5H2a.5.5 0 0 1-.5-.5z" stroke="currentColor" fill="none" stroke-width="1.4" stroke-linejoin="round"/><path d="M1.5 9.5h3.5l1 1.5h4l1-1.5h3.5" stroke="currentColor" fill="none" stroke-width="1.4" stroke-linejoin="round"/></svg></span>
+        <span class="btn-label">Decisions</span>
+        <span id="decision-mode-count" class="decision-mode-count hidden"></span>
+      </button>
+      <span id="decision-pager" style="display:none;">
+        <button id="decision-prev" class="decision-pager-btn" aria-label="Previous decision" title="Previous decision">&#8249;</button>
+        <span id="decision-pos"></span>
+        <button id="decision-next" class="decision-pager-btn" aria-label="Next decision" title="Next decision">&#8250;</button>
+      </span>
       <button id="overview-layout-btn" title="Switch overview layout" tabindex="-1" style="display:none;">&#8862;</button>
       <button id="overview-exit-btn" title="Exit overview mode" tabindex="-1" style="display:none;">&#10005;</button>
       <div id="tabs-spacer"></div>
@@ -97,6 +109,14 @@
     </div>
     <div id="sidebar-resizer"></div>
     <div id="terminals">
+      <!-- Decision Tab mode's empty inbox (#716): shown by decision-mode.js once no decision
+           tab is waiting, covering whatever tab killSession fell back to. -->
+      <div id="decision-inbox-empty" class="hidden">
+        <div class="decision-inbox-icon" aria-hidden="true"><svg viewBox="0 0 16 16"><path d="M1.5 9.5 3.5 3h9l2 6.5V13a.5.5 0 0 1-.5.5H2a.5.5 0 0 1-.5-.5z" stroke="currentColor" fill="none" stroke-width="1" stroke-linejoin="round"/><path d="M1.5 9.5h3.5l1 1.5h4l1-1.5h3.5" stroke="currentColor" fill="none" stroke-width="1" stroke-linejoin="round"/></svg></div>
+        <div class="decision-inbox-title">Inbox zero</div>
+        <div class="decision-inbox-sub">No decisions are waiting. New decision tabs from your agents show up here.</div>
+        <button id="decision-inbox-exit" class="decision-inbox-btn">Leave Decision Tab mode</button>
+      </div>
       <div id="empty-state">
         <pre class="empty-state-icon">
                ▄▄▄▄▄▄▄▄▄▄▄

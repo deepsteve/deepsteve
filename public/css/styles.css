@@ -1625,6 +1625,32 @@ kbd {
 #overview-exit-btn { font-size: 14px; line-height: 1; padding: 4px 6px; background: transparent; border: 1px solid var(--ds-border); color: var(--ds-text-secondary); border-radius: 4px; cursor: pointer; }
 #overview-exit-btn:hover { background: var(--ds-bg-tertiary); color: var(--ds-text-primary); }
 
+/* ---- Decision Tab mode (#716) ---- */
+/* Every tab but the decisions leaves the strip; app.js's getVisibleTabIds() skips them too,
+   so the prev/next arrows and the ⌘-hold switcher step through decisions only. */
+.tab.decision-hidden { display: none !important; }
+#decision-mode-btn { padding: 4px 8px; background: var(--ds-bg-tertiary); border: 1px solid var(--ds-border); color: var(--ds-text-secondary); border-radius: 4px; cursor: pointer; font-size: 13px; line-height: 1; flex-shrink: 0; margin-left: 6px; }
+#decision-mode-btn:hover { background: var(--ds-border); color: var(--ds-text-primary); }
+#decision-mode-btn.active { color: var(--ds-accent-blue); border-color: var(--ds-accent-blue); }
+#decision-mode-btn .decision-mode-count { min-width: 16px; padding: 1px 5px; border-radius: 8px; background: var(--ds-accent-blue); color: #fff; font-size: 11px; text-align: center; }
+#decision-mode-btn .decision-mode-count.hidden { display: none; }
+#decision-pager { display: inline-flex; align-items: center; gap: 4px; margin-left: 6px; flex-shrink: 0; color: var(--ds-text-secondary); font-size: 12px; font-variant-numeric: tabular-nums; }
+.decision-pager-btn { padding: 2px 8px; background: transparent; border: 1px solid var(--ds-border); color: var(--ds-text-secondary); border-radius: 4px; cursor: pointer; font-size: 15px; line-height: 1; }
+.decision-pager-btn:hover:not(:disabled) { background: var(--ds-bg-tertiary); color: var(--ds-text-primary); }
+.decision-pager-btn:disabled { opacity: 0.3; cursor: default; }
+#app-container.vertical-layout #decision-mode-btn { margin: 6px 0 0 0; }
+#app-container.vertical-layout #decision-pager { width: 100%; justify-content: center; margin: 4px 0 0 0; }
+/* The empty inbox: lifted over the absolutely-positioned .terminal-container siblings the same
+   way #empty-state.context-empty is, because killSession has already fallen back to some tab. */
+#decision-inbox-empty { position: absolute; inset: 0; z-index: 12; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; background: var(--ds-bg-primary); color: var(--ds-text-secondary); user-select: none; }
+#decision-inbox-empty.hidden { display: none; }
+#decision-inbox-empty .decision-inbox-icon { width: 64px; height: 64px; color: var(--ds-accent-blue); opacity: 0.6; }
+#decision-inbox-empty .decision-inbox-icon svg { width: 100%; height: 100%; display: block; }
+#decision-inbox-empty .decision-inbox-title { font-size: 18px; color: var(--ds-text-primary); }
+#decision-inbox-empty .decision-inbox-sub { font-size: 13px; opacity: 0.8; }
+#decision-inbox-empty .decision-inbox-btn { margin-top: 8px; padding: 6px 16px; font-size: 13px; font-family: inherit; color: var(--ds-text-primary); background: var(--ds-bg-tertiary); border: 1px solid var(--ds-border); border-radius: 6px; cursor: pointer; }
+#decision-inbox-empty .decision-inbox-btn:hover { background: var(--ds-bg-secondary); }
+
 /* ---- Context Views (#522) ---- */
 #context-toggle.active { color: var(--ds-accent-blue); background: var(--ds-bg-tertiary); }
 

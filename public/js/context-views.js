@@ -263,6 +263,14 @@ function getActiveContext() {
   return contexts.find(c => c.id === activeContextId) || null;
 }
 
+// Decision Tab mode (#716) sets the filter aside: an inbox that hides the decisions of the
+// project you are not looking at is not an inbox. While suspended the view filters as "All",
+// never selects a different context, and never records a last-viewed tab, so leaving the
+// mode lands you back on exactly the project you left.
+function filterSuspended() {
+  return !!cb.isFilterSuspended?.();
+}
+
 function activeContextHasTabs() {
   const ctx = getActiveContext();
   if (!ctx) return true;
@@ -290,12 +298,12 @@ function contextTabCount(ctx) {
 // welcome screen (nice ASCII branding + "+ New") covers the stale terminal
 // instead of a separate bland placeholder (#534). "All" / disabled → never empty.
 export function activeContextIsEmpty() {
-  return enabled && !!getActiveContext() && !activeContextHasTabs();
+  return enabled && !filterSuspended() && !!getActiveContext() && !activeContextHasTabs();
 }
 
 export function applyFilter() {
   if (!enabled) return;
-  const ctx = getActiveContext();
+  const ctx = filterSuspended() ? null : getActiveContext();
   const ids = cb.getOrderedTabIds ? cb.getOrderedTabIds() : [];
   let firstVisible = null;
 
@@ -1068,7 +1076,7 @@ function maybeWelcomeBuiltin(id) {
 // activation (e.g. the close-fallback picking a context-hidden neighbor before
 // applyFilter corrects it) must not clobber the memory.
 export function noteActiveTab(tabId) {
-  if (!enabled || !tabId) return;
+  if (!enabled || !tabId || filterSuspended()) return;
   const ctx = getActiveContext();
   if (!ctx) return;
   if (!tabInContext(cb.getTabCwd?.(tabId), ctx)) return;
@@ -1087,7 +1095,7 @@ export function noteActiveTab(tabId) {
 // restores/background tabs (not called), and before context definitions load
 // (getActiveContext() → null).
 export function revealTabContext(tabId) {
-  if (!enabled) return;
+  if (!enabled || filterSuspended()) return;
   const ctx = getActiveContext();
   if (!ctx) return;
   const cwd = cb.getTabCwd?.(tabId);

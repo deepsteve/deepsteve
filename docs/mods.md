@@ -1214,3 +1214,42 @@ A **display tab** is a one-shot agent-authored page that lives for the session �
 sibling of a project mod. `create_display_tab` / `update_display_tab` build one.
 
 **They take `file_path`, not just inline HTML (#599).** The tools accept **exactly one** of `html` or `file_path` (both or neither → `isError`). `file_path` must be absolute (a leading `~/` is expanded), ≤5MB, and is read **once, as a snapshot** — the HTML is copied into `~/.deepsteve/display-tabs/<id>.html` exactly as an inline string would be, so later edits to the source file need another `update_display_tab`. Prefer it whenever the page already exists on disk: the model emits ~15 tokens instead of the whole document. An optional `replacements` map (`{"%%CHANNEL%%": "slot-ab3f9c12"}`) is applied server-side as **literal** find→replace (split/join, longest key first — `$&` in a value stays literal), so a file on disk can stay a reusable template. Display tabs are served same-origin (`GET /api/display-tab/:id`), so pages call back into deepsteve via `window.location.origin` or a relative `/api/...` URL — **never** a hard-coded port, and no port substitution is needed. Shared resolver: `resolveHtml()` in **`html-source.js`** (repo root, so it ships automatically); tests in `test/unit/display-tab-source.test.js`.
+
+### Decision tabs (#716)
+
+A display tab created or updated with a `decision` param gets a row of buttons along the bottom
+whose click is typed into the **owning session** as a new prompt. The skill is
+`skills/decision-tab.md`; the code is `mods/display-tab/` — `decision.js` (config normalizer,
+prompt text, and a store at `statePath('display-tab-decisions.json')`), `tools.js` (the tools and
+routes), and `decision-bar.js` (the in-page bar).
+
+- **Owner.** `create_display_tab`'s `session_id` is recorded as the owner, and a decision is
+  refused when it is not a live shell. `update_display_tab` with a `decision` replaces the buttons
+  and re-arms the tab (`status: 'open'`) — the follow-up path; it needs `session_id` only to turn
+  a plain tab into a decision tab.
+- **The bar is injected at serve time**, through `registerDisplayTabHooks(name, { inject,
+  onDelete, onConnect })` in `server.js`: `inject` rewrites the HTML on `GET /api/display-tab/:id`
+  (after the audio detector), so `edit_display_tab` can never strip it; `onDelete` fires from
+  `deleteDisplayTab`, which is how a user's ✕ (`DELETE /api/display-tab/:id`, owned by no mod)
+  drops the record; `onConnect` returns a message for each control socket as it connects, sent
+  **before** the pending-opens flush.
+- **Routes.** `GET /api/display-tab/:id/decision` (read-only: config, status, `ownerAlive`),
+  `POST /api/display-tab/:id/decide {index, note?}` (behind `requireAllowedOrigin`), and
+  `GET /api/decision-tabs` — deliberately not under `/api/display-tab/`, where server.js's `:id`
+  route would take the word for an id.
+- **Delivery** goes through `deliverPromptWhenReady` with `source: 'decision-tab'`, never
+  `submitToShell`. `decide` refuses first, as Workshop's chat endpoint does: 409 `session-gone`
+  (the FIFO drops a missing shell silently), 409 `session-blocked` when Workshop's `detectDialog`
+  sees a modal (the choice would be typed into it), 409 `already-decided`. The bar renders each
+  state; an unanswered tab whose session ended stays open and says so — close paths are untouched.
+- **Decision Tab mode** (`public/js/decision-mode.js`). The server pushes `{type:'decision-tabs',
+  tabs}` — tabs still waiting on an answer — on connect and on every change; `create_display_tab`
+  sends it **before** the open, so a window already in the mode sees the new tab as a decision.
+  `#decision-mode-btn` shows only while this window has one open. The mode marks every other tab
+  `.decision-hidden` (which `getVisibleTabIds()` skips, so the strip's arrows and the ⌘-hold
+  switcher step through decisions only), suspends the context filter via
+  `isFilterSuspended`, and shows `#decision-inbox-empty` when none are left. Focus moving to a tab
+  that is not a decision (a new terminal, a jump from a panel) leaves the mode, so nothing the
+  user opened is ever hidden.
+- **Not a human-approval gate.** Anything that can reach the daemon can POST a decision. Never
+  gate a merge on one — that is `resultApprovedAt`'s job.
