@@ -215,6 +215,7 @@ body {
 #issue-btn       .btn-icon::before { content: '\26A1'; }  /* ⚡ */
 #settings-btn    .btn-icon::before { content: '\2699'; }  /* ⚙ */
 #context-toggle  .btn-icon::before { content: '\25E7'; }  /* ◧ */
+#decision-mode-btn .btn-icon::before { content: '\2709'; }  /* ✉ */
 /* ▤/▥ rather than the ▤/⬜ the JS used to set: the pair has to read as one axis flipped, and ⬜ is
    not the other half of anything — it renders as a blank square, i.e. as tofu (#552). */
 #layout-toggle .icon-layout-h::before { content: '\25A4'; }  /* ▤ */
@@ -233,6 +234,7 @@ body {
 .dropdown-btn,
 .layout-btn,
 #issue-btn,
+#decision-mode-btn,
 .empty-state-btn,
 .recent-session-btn,
 .mod-toolbar-btn {

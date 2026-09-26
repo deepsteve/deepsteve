@@ -4348,6 +4348,23 @@ function notifySubmitKey(id, entry) {
   }
 }
 
+// Mods that decorate display tabs (#716: decision tabs). `inject(html, id)` rewrites the page as
+// it is SERVED, never as stored, so an agent's edit_display_tab cannot strip what a mod adds;
+// `onDelete(id)` hears every deletion, including the user's ✕ through DELETE
+// /api/display-tab/:id, which no mod owns; `onConnect()` returns a message for each browser
+// window's control socket as it connects. Keyed by name for the same double-init reason.
+const displayTabHooks = new Map();
+function registerDisplayTabHooks(name, hooks) {
+  if (typeof name === 'string' && name && hooks && typeof hooks === 'object') displayTabHooks.set(name, hooks);
+}
+function runDisplayTabInjectors(html, id) {
+  for (const [name, h] of displayTabHooks) {
+    if (typeof h.inject !== 'function') continue;
+    try { html = h.inject(html, id); } catch (e) { log(`[display-tab] injector ${name} threw: ${e.message}`); }
+  }
+  return html;
+}
+
 const AUTO_APPLY_GRACE_MS = 60 * 1000;
 const AUTO_APPLY_DEFER_MS = 10 * 60 * 1000;
 const AUTO_APPLY_MAX_DEFERS = 6; // ~1h of waiting, then update anyway rather than starve
@@ -5541,6 +5558,7 @@ app.get('/api/display-tab/:id', (req, res) => {
   if (!html) return res.status(404).send('Not found');
   if (req.method === 'HEAD') return res.type('html').end();
   if (settings.displayTabAudioIndicator) html = injectAudioDetector(html, req.params.id);
+  html = runDisplayTabInjectors(html, req.params.id);
   res.type('html').send(html);
 });
 
@@ -7894,6 +7912,10 @@ function deleteDisplayTab(id) {
   displayTabs.delete(id);
   pendingOpens.drop(id); // don't offer a deleted tab to the next browser (#596)
   try { fs.unlinkSync(path.join(DISPLAY_TABS_DIR, `${id}.html`)); } catch {}
+  for (const [name, h] of displayTabHooks) {
+    if (typeof h.onDelete !== 'function') continue;
+    try { h.onDelete(id); } catch (e) { log(`[display-tab] onDelete ${name} threw: ${e.message}`); }
+  }
 }
 
 // The built-in project's welcome page (#696), shipped rather than generated.
@@ -8068,6 +8090,15 @@ function handleWsConnection(ws, req) {
         }
       } catch {}
     });
+    // Display-tab mods' connect-time state (#716: the open decision tabs), sent before the
+    // pending opens below so a tab opened by that flush arrives already classified.
+    for (const [name, h] of displayTabHooks) {
+      if (typeof h.onConnect !== 'function') continue;
+      try {
+        const msg = h.onConnect();
+        if (msg && ws.readyState === 1) ws.send(JSON.stringify(msg));
+      } catch (e) { log(`[display-tab] onConnect ${name} threw: ${e.message}`); }
+    }
     // Flush pending open-session messages that match this window (or have no
     // windowId). Anything whose session/display tab is gone, or that has aged out,
     // is discarded rather than delivered (#596).
@@ -8860,7 +8891,7 @@ function broadcastToWindow(windowId, msg) {
 // assigns unconditionally, and nothing here awaits the first call). The chat pane's
 // transcript reader was therefore dead from the day it shipped, silently falling back
 // to the workshop_say store. Adding a ctx field means editing this line, never copying it.
-initMCP({ app, security, shells, wss, broadcast, broadcastToWindow, log, MODS_DIR, closeSession, tombstoneSession, handleShellGone, spawnSession, sessionEnv, getSpawnArgs, mcpConfigArgs, getAgentConfig, resolveConfigDir, validateModel, validateEffort, wireShellOutput, watchClaudeSessionDir, unwatchClaudeSessionDir, resolveForkParentSession, transcriptPath, saveState, validateWorktree, ensureWorktree, sessionPaths, submitToShell, fetchIssueFromGitHub, deliverPromptWhenReady, startIssueSession, reloadClients, deliverToWindow, noteSpawnDelivery, settings, isShuttingDown: () => shuttingDown, displayTabs, setDisplayTab, deleteDisplayTab, screenshots, setScreenshot, deleteScreenshot, getScreenshotPath, getDefaultEngine, getForegroundCommand, sessionLog, emitSessionOpen, getContexts: () => contexts, pathInside, getSavedSession: (id) => savedState[id] || null, links, linkUrl: links.urlFor, spawnAgentSession, stripEscapeSequences, readTerminalScreen, sessionInputState, setMergeBlock, recordMergeAttempt, maybeInheritRemoteControl, requestMetaControlsConsent, registerRestartBlocker, registerSubmitKeyObserver, armSessionAutoClose, logRcWrite }).catch(e => log('MCP init failed:', e.message));
+initMCP({ app, security, shells, wss, broadcast, broadcastToWindow, log, MODS_DIR, closeSession, tombstoneSession, handleShellGone, spawnSession, sessionEnv, getSpawnArgs, mcpConfigArgs, getAgentConfig, resolveConfigDir, validateModel, validateEffort, wireShellOutput, watchClaudeSessionDir, unwatchClaudeSessionDir, resolveForkParentSession, transcriptPath, saveState, validateWorktree, ensureWorktree, sessionPaths, submitToShell, fetchIssueFromGitHub, deliverPromptWhenReady, startIssueSession, reloadClients, deliverToWindow, noteSpawnDelivery, settings, isShuttingDown: () => shuttingDown, displayTabs, setDisplayTab, deleteDisplayTab, screenshots, setScreenshot, deleteScreenshot, getScreenshotPath, getDefaultEngine, getForegroundCommand, sessionLog, emitSessionOpen, getContexts: () => contexts, pathInside, getSavedSession: (id) => savedState[id] || null, links, linkUrl: links.urlFor, spawnAgentSession, stripEscapeSequences, readTerminalScreen, sessionInputState, setMergeBlock, recordMergeAttempt, maybeInheritRemoteControl, requestMetaControlsConsent, registerRestartBlocker, registerSubmitKeyObserver, registerDisplayTabHooks, armSessionAutoClose, logRcWrite }).catch(e => log('MCP init failed:', e.message));
 
 // Watch themes directory for changes and broadcast to clients
 let themeWatchDebounce = null;
