@@ -95,3 +95,32 @@ test('resize preserves readable content and applies the new width', async () => 
   assert.deepStrictEqual(await screen.lines(4), ['interpreted', 'terminal', 'width-after-resize-is-wide'])
   screen.dispose()
 })
+
+// The composer rows as Claude Code 2.1.283 drew them (tmux capture-pane -e): a suggested
+// next prompt is SGR 2 (faint); a typed draft and a paste marker are not.
+const RULE_BYTES = '\x1b[38;5;244m' + '─'.repeat(60) + '\x1b[39m\r\n'
+const composerFrame = (row) => '⏺ Done.\r\n' + RULE_BYTES + row + '\r\n' + RULE_BYTES + '  \x1b[38;5;220m⏵⏵ auto mode on\x1b[39m'
+
+test('skipDim drops a faint suggestion and keeps what was typed or pasted', async () => {
+  const cases = [
+    ['\x1b[39m❯ \x1b[2myes, run it\x1b[0m', '❯', '❯ yes, run it'],
+    ['\x1b[39m❯ typed by hand', '❯ typed by hand', '❯ typed by hand'],
+    ['\x1b[39m❯ [Pasted text #1 +40 lines]', '❯ [Pasted text #1 +40 lines]', '❯ [Pasted text #1 +40 lines]'],
+  ]
+  for (const [row, withoutDim, plain] of cases) {
+    const screen = new TerminalScreen({ cols: 80, rows: 10 })
+    screen.write(composerFrame(row))
+    await screen.lines(10)
+    assert.strictEqual(screen.linesSync(10, { skipDim: true })[2], withoutDim)
+    assert.strictEqual(screen.linesSync(10)[2], plain, 'the default read is unchanged')
+    screen.dispose()
+  }
+})
+
+test('skipDim keeps wide characters and trims the blanked tail', async () => {
+  const screen = new TerminalScreen({ cols: 40, rows: 4 })
+  screen.write('漢字 ok \x1b[2mfaint\x1b[22m')
+  await screen.lines(4)
+  assert.deepStrictEqual(screen.linesSync(4, { skipDim: true }), ['漢字 ok'])
+  screen.dispose()
+})

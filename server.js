@@ -3045,8 +3045,12 @@ function servePendingDelivery(e, id, state) {
     // top of a draft merged a person's half-sentence into the answer. null is a
     // dialog, whose cursor would take our keystrokes as its answer, or a screen we
     // cannot read: that holds, with no deadline.
+    // The draft is read with faint text dropped: after a turn ends Claude Code draws a
+    // suggested next prompt in the empty composer, and read as a draft it made every
+    // click after a turn wait until the person sent something. The stash indicator is
+    // read off the full screen, so how it is styled can never hide it.
     const lines = e.terminalScreen ? e.terminalScreen.linesSync(SUBMIT_TIMINGS.screenLines) : [];
-    const draft = readComposerDraft(lines);
+    const draft = readComposerDraft(e.terminalScreen ? e.terminalScreen.linesSync(SUBMIT_TIMINGS.screenLines, { skipDim: true }) : []);
     if (draft === '') {
       e.pendingDelivery = null;
       if (state === 'waiting') setWaiting(e, id, false, 'deliver-level');

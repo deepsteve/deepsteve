@@ -1257,7 +1257,9 @@ routes), and `decision-bar.js` (the in-page bar).
   submits. Once per delivery, and only into an empty slot (`hasStashedDraft`, the `› stashed`
   indicator) — a second stash replaces the first. A draft with the slot taken, a stash that did
   not empty the box, and `null` (a dialog, whose cursor would take the keystrokes) all hold, with
-  no deadline. The queued-messages hint Claude Code shows in an emptied composer counts as empty,
+  no deadline. The draft is read with `linesSync(n, { skipDim: true })`: after a turn Claude Code
+  draws a suggested next prompt in the empty composer in faint text, which as plain text is
+  indistinguishable from a typed draft (typed text and paste markers are never faint). The queued-messages hint Claude Code shows in an emptied composer counts as empty,
   or back-to-back answers would stall on each other.
 - **Why not a Claude Code channel.** `notifications/claude/channel` from our MCP server does
   reach a session mid-turn, including an HTTP server from `--mcp-config` — measured on 2.1.283.

@@ -68,12 +68,26 @@ class TerminalScreen {
   // where going async would reorder the prompt queue it feeds. The cost is that a
   // chunk still in xterm's parse queue is not reflected yet, so a caller gets the
   // screen as of a few ms ago rather than a stale-by-minutes byte tail.
-  linesSync(count) {
+  //
+  // `skipDim` blanks every cell drawn with SGR 2 (faint). Claude Code draws its
+  // suggested next prompt in the empty composer that way ("❯ yes, run it"), and as
+  // plain text it is indistinguishable from a draft someone typed — which is not dim.
+  linesSync(count, { skipDim = false } = {}) {
     if (this.disposed) return []
     const buffer = this.terminal.buffer.active
+    const cell = skipDim ? buffer.getNullCell() : null
     const read = (i) => {
       const line = buffer.getLine(i)
-      return line ? line.translateToString(true).replace(/\s+$/g, '') : ''
+      if (!line) return ''
+      if (!skipDim) return line.translateToString(true).replace(/\s+$/g, '')
+      let text = ''
+      for (let x = 0; x < line.length; x++) {
+        if (!line.getCell(x, cell)) break
+        const width = cell.getWidth()
+        if (width === 0) continue   // the trailing half of a wide character
+        text += cell.isDim() ? ' '.repeat(width) : (cell.getChars() || ' ')
+      }
+      return text.replace(/\s+$/g, '')
     }
     let last = buffer.length - 1
     while (last >= 0 && read(last) === '') last--

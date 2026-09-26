@@ -389,3 +389,21 @@ test('without midTurn a working session still holds the prompt for the turn to e
   for (let i = 0; i < 5; i++) { h.advance(1000); h.setScreen('working'); h.sweep(); await h.runDue(); }
   assert.strictEqual(h.submits.length, 0);
 });
+
+test('midTurn: a suggested prompt in the composer is not a draft — no stash, typed at once', async () => {
+  // Real emulator, real bytes: after a turn Claude Code draws its suggestion faint.
+  // Read as a draft it drew a ctrl+s that moved nothing ("the stash did not empty the
+  // composer") and held the answer until the person sent something themselves.
+  const { TerminalScreen } = require('../../terminal-screen');
+  const rule = '\x1b[38;5;244m' + '─'.repeat(60) + '\x1b[39m\r\n';
+  const screen = new TerminalScreen({ cols: 80, rows: 10 });
+  screen.write('⏺ Want me to run it?\r\n' + rule + '\x1b[39m❯ \x1b[2myes, run it\x1b[0m\r\n' + rule + '  ⏵⏵ auto mode on');
+  await screen.lines(10);
+  const h = makeHarness({ waitingForInput: true, screen: 'waiting' });
+  h.entry.terminalScreen = screen;
+  h.deliverPromptWhenReady(ID, 'decision answer', { midTurn: true });
+  await h.runDue();
+  assert.deepStrictEqual(h.entry.keys, [], 'pressed ctrl+s on a suggestion');
+  assert.deepStrictEqual(h.submits.map((s) => s.text), ['decision answer']);
+  screen.dispose();
+});
