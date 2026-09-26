@@ -3,7 +3,7 @@
 // A link that has been sent is a promise: it must open, redirect or explain itself for as long
 // as it could still be sitting in someone's inbox. Every branch of decide() is one of the ways
 // that promise is kept, so each is pinned here. The handlers are driven with a fake req/res, so
-// this runs in the bare `unit` CI job with no daemon and no Workshop.
+// this runs in the bare `unit` CI job with no daemon and no Inbox.
 //
 // Run: node --test test/unit/links.test.js
 
@@ -36,11 +36,11 @@ test('the v1 type table is what #705 specified, plus project-mod (#711)', () => 
 });
 
 test('the unavailable page names the link type, not one particular mod', () => {
-  // Two providers exist since #711, so "check that Workshop loaded" would misdirect a
+  // Two providers exist since #711, so "check that Inbox loaded" would misdirect a
   // project-mod link.
   const page = links.explain({ kind: 'unavailable' }, { type: 'project-mod', id: 'abc12345' });
   assert.match(page.paragraphs.join(' '), /"project-mod" links/);
-  assert.doesNotMatch(page.paragraphs.join(' '), /Workshop/);
+  assert.doesNotMatch(page.paragraphs.join(' '), /Inbox/);
 });
 
 test('a type is never both live and removed', () => {
@@ -75,7 +75,7 @@ test('an unknown type and a malformed id are 404s', () => {
 });
 
 test('with no provider registered at all the link is unavailable, not missing', () => {
-  // Mods mount asynchronously, and a Workshop that failed to load must not tell someone their
+  // Mods mount asynchronously, and an Inbox that failed to load must not tell someone their
   // decision does not exist.
   const d = links.decide({ ...base, owned: false, providerCount: 0, resolved: null });
   assert.deepStrictEqual(d, { kind: 'unavailable', status: 503 });
@@ -219,7 +219,7 @@ test('a provider that throws while resolving yields a 404 page, not a crash', ()
 
 test('re-registering a provider by name replaces it', () => {
   const registry = links.createLinks();
-  const p = { name: 'workshop', owns: () => false, resolve: () => null };
+  const p = { name: 'inbox', owns: () => false, resolve: () => null };
   registry.registerProvider(p);
   registry.registerProvider({ ...p });
   assert.strictEqual(registry._providers.length, 1, 'a re-run init must not stack providers');

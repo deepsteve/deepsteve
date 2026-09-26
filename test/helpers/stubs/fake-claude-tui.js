@@ -162,7 +162,7 @@ function draftRows() {
 }
 
 // #660 — the permission-dialog frame. Deliberately replaces the composer entirely,
-// like the real modal does: that absence is why Workshop cannot answer one with
+// like the real modal does: that absence is why Inbox cannot answer one with
 // submitToShell (its confirmEcho would wait forever for a composer echo) and has to
 // move the cursor with raw keys instead.
 function menuLines() {
@@ -175,7 +175,7 @@ function menuLines() {
     // #664 — the rule a real AskUserQuestion draws above its escape hatches. It is
     // DECORATION, not a row: menuCursor below stays an index into the flat `options`
     // array and one arrow still moves one option, which is precisely the assumption
-    // Workshop's relative key dance makes and the unit fixtures cannot check.
+    // Inbox's relative key dance makes and the unit fixtures cannot check.
     if (m.divider && i === options.length - 1) rows.push('─'.repeat(60));
     rows.push(`${i === menuCursor ? '❯' : ' '} ${i + 1}. ${label}`);
   });
@@ -373,7 +373,7 @@ function handleKeys(s) {
 
   // #660 — while the modal is up it owns every key, and it obeys Ink's rule: an arrow
   // counts only when its escape sequence arrives as its OWN read, which is precisely
-  // what Workshop's 250ms-per-byte loop produces.
+  // what Inbox's 250ms-per-byte loop produces.
   if (menuUp) {
     const options = (CFG.menu && CFG.menu.options) || ['Yes', 'No'];
     if (s === '\x1b[B') { menuCursor = Math.min(options.length - 1, menuCursor + 1); ev('menu-move', { cursor: menuCursor }); render(); return; }
@@ -477,6 +477,6 @@ process.on('SIGTERM', () => { ev('exit', { via: 'sigterm' }); process.exit(0); }
 // footer:'late' needs one scheduled frame or the footer would never appear.
 if (CFG.footer === 'late') setTimeout(render, CFG.footerLateMs + 50).unref?.();
 // #660 — menuOnBoot puts the session straight into "blocked" with no prompt round
-// trip, which is all a Workshop inbox test needs.
+// trip, which is all an Inbox test needs.
 if (CFG.menu && CFG.menuOnBoot) { menuUp = true; menuCursor = Number(CFG.menu.cursor) || 0; }
 render();

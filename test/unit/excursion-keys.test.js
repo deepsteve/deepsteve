@@ -113,7 +113,7 @@ let prevMM = null;   // the shared mod-manager, so each setup can put its slot d
 
 const CTX_A = { id: 'ctxa', name: 'Alpha', dirs: ['/repo/a'] };
 const CTX_B = { id: 'ctxb', name: 'Beta', dirs: ['/repo/b'] };
-const WORKSHOP_VIEW = { id: 'workshop', name: 'Workshop', src: '/mods/workshop/index.html' };
+const INBOX_VIEW = { id: 'inbox', name: 'Inbox', src: '/mods/inbox/index.html' };
 
 /**
  * context-views + mod-manager, wired the way app.js wires the pair.
@@ -201,7 +201,7 @@ async function setup() {
   };
   // The bridge object a mod's iframe would receive, without an iframe.
   const api = {};
-  ModManager.injectBridgeAPI({ contentWindow: api }, 'workshop', null);
+  ModManager.injectBridgeAPI({ contentWindow: api }, 'inbox', null);
 
   return { cv, ModManager, ds: api.deepsteve, state, rail, tabs, pressKey };
 }
@@ -220,7 +220,7 @@ test('⌘↑/⌘↓ cycles projects at home', async () => {
 test('on an excursion, ⌘↑/⌘↓ go to the app and leave the projects alone', async () => {
   const { cv, ModManager, ds, pressKey } = await setup();
   cv.setActiveContext('ctxa');
-  ModManager.showView(WORKSHOP_VIEW);
+  ModManager.showView(INBOX_VIEW);
 
   const seen = [];
   ds.onExcursionCycle(({ delta }) => seen.push(delta));
@@ -237,7 +237,7 @@ test('with no cycle handler the keys fall back to projects rather than going dea
   // A key that silently does nothing is worse than one that does its old job.
   const { cv, ModManager, ds, pressKey } = await setup();
   cv.setActiveContext('ctxa');
-  ModManager.showView(WORKSHOP_VIEW);
+  ModManager.showView(INBOX_VIEW);
   ds.visitSession('a');
 
   pressKey({ code: 'ArrowDown' });
@@ -246,7 +246,7 @@ test('with no cycle handler the keys fall back to projects rather than going dea
 
 test('⌘← pops a frame, and the last one goes home', async () => {
   const { ModManager, ds, state, pressKey } = await setup();
-  ModManager.showView(WORKSHOP_VIEW);
+  ModManager.showView(INBOX_VIEW);
   ds.visitSession('a');
   ModManager.noteExcursionDrill('b');
 
@@ -263,7 +263,7 @@ test('⌘← is left to the ⌘-hold tab switcher once that has armed itself', a
   // the same node — so without this check a held ⌘ then ← would pop the excursion AND switch
   // tabs.
   const { ModManager, ds, tabs, pressKey } = await setup();
-  ModManager.showView(WORKSHOP_VIEW);
+  ModManager.showView(INBOX_VIEW);
   ds.visitSession('a');
 
   tabs.classList.add('tab-switch-mode');
@@ -276,7 +276,7 @@ test('⌘← still works with the projects feature turned off', async () => {
   // An excursion belongs to the app, not to context views. Handling it below the `enabled`
   // guard would strand you out on one with no way back.
   const { cv, ModManager, ds, pressKey } = await setup();
-  ModManager.showView(WORKSHOP_VIEW);
+  ModManager.showView(INBOX_VIEW);
   ds.visitSession('a');
   cv.setEnabled(false);
 
@@ -289,7 +289,7 @@ test('⌘↓ reaches the app even when no projects exist to cycle', async () => 
   // above that or the app never hears the key.
   const { cv, ModManager, ds, pressKey } = await setup();
   cv.setContexts([]);
-  ModManager.showView(WORKSHOP_VIEW);
+  ModManager.showView(INBOX_VIEW);
   const seen = [];
   ds.onExcursionCycle(({ delta }) => seen.push(delta));
   ds.visitSession('a');
@@ -310,7 +310,7 @@ test('the rail hides for the excursion without touching the ⌘P preference', as
   // outlives the window (and the machine restart that empties sessionStorage).
   assert.strictEqual(localMap.get('deepsteve-context-sidebar'), '1');
 
-  ModManager.showView(WORKSHOP_VIEW);
+  ModManager.showView(INBOX_VIEW);
   ds.visitSession('a');
   assert.strictEqual(railShown(rail), false, 'the app sent you; you are not browsing projects');
   assert.strictEqual(localMap.get('deepsteve-context-sidebar'), '1',
@@ -324,7 +324,7 @@ test('⌘P during an excursion gives the rail back and ends the excursion', asyn
   // Asking for the rail wins. The alternative is a dead key, or a half-state where the rail is
   // on screen but its own ⌘↑/⌘↓ still belong to the app.
   const { cv, ModManager, ds, rail, pressKey } = await setup();
-  ModManager.showView(WORKSHOP_VIEW);
+  ModManager.showView(INBOX_VIEW);
   ds.visitSession('a');
   assert.strictEqual(railShown(rail), false);
 
@@ -341,7 +341,7 @@ test('⌘P during an excursion gives the rail back and ends the excursion', asyn
 test('turning the projects feature off mid-excursion cannot strand the rail hidden', async () => {
   const { cv, ModManager, ds, rail } = await setup();
   byId.get('context-toggle').listeners.click();     // rail open
-  ModManager.showView(WORKSHOP_VIEW);
+  ModManager.showView(INBOX_VIEW);
   ds.visitSession('a');
   assert.strictEqual(railShown(rail), false);
 

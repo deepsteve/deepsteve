@@ -7,7 +7,7 @@
 // it looks wrong in a screenshot of a page that rendered *something*.
 //
 // Both modules are browser ES modules with no DOM and no imports beyond each other, driven
-// here with `await import()` from CommonJS — the test/unit/workshop-inbox-view.test.js
+// here with `await import()` from CommonJS — the test/unit/inbox-view.test.js
 // pattern. No stubs at all, which is why this survives the bare `unit` CI job.
 //
 // Run: node --test test/unit/simeon-rows.test.js

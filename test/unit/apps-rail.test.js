@@ -99,7 +99,7 @@ globalThis.requestAnimationFrame = (fn) => fn();
 let importCount = 0;
 
 const MODS = [
-  { id: 'workshop', name: 'Workshop', description: 'One inbox', entry: 'index.html', app: true, toolbar: { label: 'Workshop' } },
+  { id: 'inbox', name: 'Inbox', description: 'One inbox', entry: 'index.html', app: true, toolbar: { label: 'Inbox' } },
   { id: 'tower', name: 'Tower', entry: 'index.html' },                       // fullscreen, not an app
   { id: 'tasks', name: 'Tasks', entry: 'index.html', display: 'panel' },
   { id: 'core', name: 'Core' },                                              // tools-only
@@ -107,7 +107,7 @@ const MODS = [
 ];
 
 /** mod-manager, loaded with the mod list above and every mod enabled. */
-async function setup({ enabled = ['workshop', 'tower', 'tasks', 'core'] } = {}) {
+async function setup({ enabled = ['inbox', 'tower', 'tasks', 'core'] } = {}) {
   allElements = [];
   storeMap.clear();
   storeMap.set('deepsteve-enabled-mods', JSON.stringify(enabled));
@@ -163,7 +163,7 @@ test('an enabled "app": true mod gets a rail row under an Apps header', async ()
   assert.strictEqual(header.className, 'context-rail-header',
     'reuse the projects header class, so the collapsed icon rail hides it for free');
   assert.strictEqual(header.textContent, 'Apps');
-  assert.deepStrictEqual([...rowsOf(rail)].map(labelOf), ['Workshop']);
+  assert.deepStrictEqual([...rowsOf(rail)].map(labelOf), ['Inbox']);
 });
 
 test('the rows are context-view rows, so hover/active/collapsed all come for free', async () => {
@@ -177,7 +177,7 @@ test('the rows are context-view rows, so hover/active/collapsed all come for fre
   // collapses to 48px squares.
   assert.strictEqual(row.classList.contains('has-icon'), true);
   assert.ok(row.children.find(c => c.className.includes('context-row-icon')), 'a derived glyph');
-  assert.strictEqual(row.dataset.appId, 'workshop');
+  assert.strictEqual(row.dataset.appId, 'inbox');
 });
 
 test('the list is NOT a .context-list, so the projects list keeps its identity', async () => {
@@ -201,8 +201,8 @@ test('a disabled app is not listed, and neither is a skill that claims the flag'
   const { ModManager } = await setup({ enabled: ['tower'] });
   assert.deepStrictEqual(ModManager.getApps().map(m => m.id), []);
 
-  const { ModManager: m2 } = await setup({ enabled: ['workshop', 'skill:merge'] });
-  assert.deepStrictEqual(m2.getApps().map(m => m.id), ['workshop'],
+  const { ModManager: m2 } = await setup({ enabled: ['inbox', 'skill:merge'] });
+  assert.deepStrictEqual(m2.getApps().map(m => m.id), ['inbox'],
     'GET /api/mods appends skills to the same array; they are never a place to work from');
 });
 
@@ -211,10 +211,10 @@ test('an app has NO toolbar button — the rail and the palette are its two entr
   // app without another decision, and the palette entry stops being optional: it is the
   // keyboard route that replaces the button when the ⌘P rail is closed.
   const { tabs } = await setup();
-  assert.strictEqual(tabs.children.find(c => c.dataset?.modId === 'workshop'), undefined,
+  assert.strictEqual(tabs.children.find(c => c.dataset?.modId === 'inbox'), undefined,
     'an app is a place, and a third launcher in the strip says nothing the rail row does not');
 
-  // The suppression is the flag's, not Workshop's: an ordinary fullscreen mod still gets one.
+  // The suppression is the flag's, not Inbox's: an ordinary fullscreen mod still gets one.
   const towerBtn = tabs.children.find(c => c.dataset?.modId === 'tower');
   assert.ok(towerBtn, 'a non-app fullscreen mod keeps its button');
   assert.strictEqual(towerBtn.classList.contains('mod-toolbar-btn'), true);
@@ -224,7 +224,7 @@ test('an app has NO ← button in the strip either, in both states (#662)', asyn
   // The other half of #662's rule. The ← IS the launcher pointing the other way — same
   // element, same strip — so an app that is a place you reach from the Apps rail is a place
   // you RETURN to from the Apps rail. In the 48px vertical strip the button was worse than
-  // redundant: "← Workshop" has no room to wrap and rendered as a clipped "← / Works".
+  // redundant: "← Inbox" has no room to wrap and rendered as a clipped "← / Works".
   const { mod, ModManager, tabs } = await setup();
   const backBtn = tabs.children.find(c => c.classList.contains('mod-back-btn'));
   assert.ok(backBtn, 'init() still builds one — non-app mods are what it is for');
@@ -236,13 +236,13 @@ test('an app has NO ← button in the strip either, in both states (#662)', asyn
   // 1. Backgrounded by a plain tab click.
   ModManager.showTerminalForSession('sess-a');
   assert.strictEqual(ModManager.isModViewVisible(), false, 'the slot came down');
-  assert.strictEqual(backBtn.style.display, 'none', 'and left no ← Workshop behind');
+  assert.strictEqual(backBtn.style.display, 'none', 'and left no ← Inbox behind');
   assert.strictEqual(rowsOf(rail)[0].classList.contains('active'), true,
     'the rail row stays lit while you are away — that is what makes it the way back');
 
   // 2. Out on an excursion, where the same button doubles as the trail bar.
   const api = {};
-  ModManager.injectBridgeAPI({ contentWindow: api }, 'workshop', null);
+  ModManager.injectBridgeAPI({ contentWindow: api }, 'inbox', null);
   api.deepsteve.visitSession('sess-b', { label: 'needs a decision' });
   assert.strictEqual(ModManager.getExcursion().depth, 1, 'we really are out');
   assert.strictEqual(backBtn.style.display, 'none', 'no trail bar either — ⌘← is the route home');
@@ -268,7 +268,7 @@ test('clicking the row opens the app, and marks itself active', async () => {
   mod.appendAppRows(rail);
   rowsOf(rail)[0].onclick();
 
-  assert.strictEqual(ModManager.getActiveViewId(), 'workshop');
+  assert.strictEqual(ModManager.getActiveViewId(), 'inbox');
   assert.strictEqual(ModManager.isModViewVisible(), true);
 
   // Swept live on the row that is already on screen, not only painted on the next render —
@@ -281,7 +281,7 @@ test('clicking the row opens the app, and marks itself active', async () => {
   mod.appendAppRows(rail2);
   assert.strictEqual(rowsOf(rail2)[0].classList.contains('active'), true);
 
-  ModManager.hideView('workshop');
+  ModManager.hideView('inbox');
   assert.strictEqual(rowsOf(rail2)[0].classList.contains('active'), false, 'and unpainted on close');
 });
 
@@ -299,7 +299,7 @@ test('clicking a BACKGROUNDED app raises it instead of destroying it', async () 
   assert.strictEqual(ModManager.isModViewVisible(), false);
 
   open();
-  assert.strictEqual(ModManager.getActiveViewId(), 'workshop', 'the iframe survived');
+  assert.strictEqual(ModManager.getActiveViewId(), 'inbox', 'the iframe survived');
   assert.strictEqual(ModManager.isModViewVisible(), true);
 
   open();                                            // and now it really does close
@@ -308,8 +308,8 @@ test('clicking a BACKGROUNDED app raises it instead of destroying it', async () 
 
 test('openApp is the command palette entry point', async () => {
   const { ModManager } = await setup();
-  ModManager.openApp('workshop');
-  assert.strictEqual(ModManager.getActiveViewId(), 'workshop');
+  ModManager.openApp('inbox');
+  assert.strictEqual(ModManager.getActiveViewId(), 'inbox');
   ModManager.openApp('tower');   // not an app: the palette never offers it
-  assert.strictEqual(ModManager.getActiveViewId(), 'workshop');
+  assert.strictEqual(ModManager.getActiveViewId(), 'inbox');
 });

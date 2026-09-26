@@ -208,7 +208,7 @@ test('merge_session reports a refusal as isError and arms nothing', async () => 
 test('merge_session commits the worktree before merging — merge_worktree does not', async () => {
   // The difference between the two tools, stated as a test. Reaching for the primitive
   // on a dirty worktree silently lands half the work; that is what the composed tool is
-  // for, and what the Workshop bench merge used to get wrong.
+  // for, and what the Inbox bench merge used to get wrong.
   const bare = makeRepo();
   fs.writeFileSync(path.join(bare.wt, 'late.txt'), 'x\n');
   const a = makeContext({ cwd: bare.wt, repoRoot: bare.repo });

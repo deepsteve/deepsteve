@@ -10,7 +10,7 @@ http://deepsteve.localhost:3000/v1/<type>/<id>
 
 | Type | What it is | State |
 |---|---|---|
-| `decision` | A Workshop question: options, context, a recommendation | built |
+| `decision` | An Inbox question: options, context, a recommendation | built |
 | `project-mod` | A project mod's page ([mods.md](mods.md#project-mods)) | built |
 | `markdown` | Structured text or notes | reserved: "not available yet" page (501) |
 | `html` | A page an agent wrote | reserved: "not available yet" page (501) |
@@ -22,7 +22,7 @@ links already sent.
 The scheme lives in `links.js` at the repo root, mounted in `server.js` after the auth gate. It
 knows nothing about storage: a mod registers a **provider** (`owns(id)`, `resolve(id)`, and
 per-type `render`/`act` handlers), and the link format stays the same whatever the provider does.
-Workshop's provider is in `mods/workshop/tools.js`, under "decision links". Project Mods' is in
+Inbox's provider is in `mods/inbox/tools.js`, under "decision links". Project Mods' is in
 `mods/project-mods/tools.js`, under "Links".
 
 ## The four rules
@@ -37,7 +37,7 @@ Workshop's provider is in `mods/workshop/tools.js`, under "decision links". Proj
    - A decision that is no longer stored gets the "Nothing found" page, worded to cover both
      "cleared out" and "belongs to another computer".
    - Moving to `v2`, or dropping the prefix, must keep `v1` redirecting.
-3. **Ids are never reused, and never chosen by an agent.** A Workshop item's id is a random UUID
+3. **Ids are never reused, and never chosen by an agent.** An Inbox item's id is a random UUID
    minted by the server. It isn't a short sequential ticket (`w18`), which an agent could guess or
    assume and which a wiped store would reissue. Items stored before #705 keep the `w<n>` ids they
    were minted with, and their links still resolve.
@@ -61,7 +61,7 @@ order:
 | 8 | the owner has no handler for this type and method | 503 |
 
 In step 5, `{ gone }` is for a provider that can tell a cleared item from one it never issued.
-Workshop's random ids can't, so a missing Workshop item is null.
+Inbox's random ids can't, so a missing Inbox item is null.
 
 GET only ever calls `render`, and POST only ever calls `act`. Every `/v1` response is
 `Cache-Control: no-store` and carries a CSP with `script-src 'self'`, `frame-ancestors 'none'`,
@@ -126,13 +126,13 @@ paste. It echoes only the four values the spec defines.
 
 ## The `decision` type
 
-`workshop_ask` returns `{ id, url, message }`, and the agent puts `url` in its email. The page shows
+`inbox_ask` returns `{ id, url, message }`, and the agent puts `url` in its email. The page shows
 the question, its context and the recommendation, with:
 - one button per option, showing the option's `then` when it has one
 - an optional note
 - **Discuss**
 
-It is `mods/workshop/decision-page.js` and `decision-page.css`, served from `/mods` like any mod
+It is `mods/inbox/decision-page.js` and `decision-page.css`, served from `/mods` like any mod
 file. Agent text reaches the DOM only as `textContent` or as elements built from `markdown.js`'s
 AST.
 
@@ -154,14 +154,14 @@ picked the same word would read each other's answers.
 
 | Asker state | Delivery | `deliveredVia` |
 |---|---|---|
-| holding in `workshop_ask` (`wait_seconds`) | resolves the pending call | `inline` |
+| holding in `inbox_ask` (`wait_seconds`) | resolves the pending call | `inline` |
 | still running | typed into it through the prompt FIFO | `prompt` |
 | gone, and the option has `then` | new session in the asker's **project root** (no worktree), with the asker's agent and config profile, prompted with the question, context, the choice, the note, `then`, and the closing instructions below | `then` (plus `followUpSessionId`) |
-| gone, no `then` | recorded only, readable with `workshop_answers` | `undelivered` |
+| gone, no `then` | recorded only, readable with `inbox_answers` | `undelivered` |
 
 **A follow-up closes itself.** A `then` session is a one-shot, not a tab someone has to find and
 close. Its prompt ends with:
-1. report the outcome with `workshop_brief`, so the report outlives the session, and tell anyone
+1. report the outcome with `inbox_brief`, so the report outlives the session, and tell anyone
    else the instruction names
 2. call `close_session` with no arguments, as its very last action
 3. if it can't finish without the human, say so and stay open instead
@@ -182,7 +182,7 @@ in it:
 - **Otherwise** it starts a fresh session in the project, seeded with the question and told not
   to act until asked.
 
-**`workshop_answers({ since? })`** returns answered questions, newest first, up to 50, scoped by
+**`inbox_answers({ since? })`** returns answered questions, newest first, up to 50, scoped by
 who is calling:
 - **from a scheduled run:** every question asked by any run of the same task
 - **from any other session:** that session's own questions
@@ -212,7 +212,7 @@ agent puts that in its email. The browser's `GET /api/project-mods` doesn't carr
 
 - **Same machine only.** The cookie is issued only on a loopback host ([remote.md](remote.md)),
   so the link won't open from a phone.
-- **Workshop is experimental and off by default in the browser**, but its tools and the provider
+- **Inbox is experimental and off by default in the browser**, but its tools and the provider
   register server-side regardless.
-- An unattended agent also needs `workshop_ask` in its allowed tools, or it stalls on a permission
+- An unattended agent also needs `inbox_ask` in its allowed tools, or it stalls on a permission
   prompt before it ever gets to send the email.

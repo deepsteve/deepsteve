@@ -1,6 +1,6 @@
 // The daemon's record that a PERSON replied in a session (#710).
 //
-// Workshop supersedes a question the moment someone replies in the asking tab, and later from
+// Inbox supersedes a question the moment someone replies in the asking tab, and later from
 // the stamp that reply leaves on the session entry. Keeping that stamp is server.js's job, and
 // these tests pin the server half:
 //   - where the observer sits in the WebSocket input path
@@ -64,8 +64,8 @@ test('the registry is keyed by name, and an observer that throws does not stop t
   const context = { log: (m) => logs.push(m) };
   vm.runInNewContext(`${code}
 const calls = [];
-registerSubmitKeyObserver('workshop', (id) => calls.push('first:' + id));
-registerSubmitKeyObserver('workshop', (id) => calls.push('second:' + id));
+registerSubmitKeyObserver('inbox', (id) => calls.push('first:' + id));
+registerSubmitKeyObserver('inbox', (id) => calls.push('second:' + id));
 registerSubmitKeyObserver('broken', () => { throw new Error('boom'); });
 registerSubmitKeyObserver('later', (id, entry) => calls.push('later:' + entry.name));
 registerSubmitKeyObserver('', () => calls.push('nameless'));

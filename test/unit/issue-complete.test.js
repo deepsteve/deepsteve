@@ -308,7 +308,7 @@ test('every call is logged, and a merge says which one it did', async () => {
 
 // ── The review gate (#669) ───────────────────────────────────────────────────
 //
-// Two fields on the shell entry, stamped by Workshop the way the picker stamps
+// Two fields on the shell entry, stamped by Inbox the way the picker stamps
 // `autopilot` and read here for the same reason: the value RIGHT NOW is the whole
 // answer. The important property is that the gate fails OPEN — every install that has
 // never turned `issueStagesEnabled` on must get byte-identical answers to before it
@@ -335,7 +335,7 @@ function gateTools({ stages = true } = {}) {
       autopilot: false, agentType: 'claude', worktree: 'w',
       resultItemId: 'w42', resultApprovedAt: 1_700_000_000_000,
     }],
-    // The state Workshop leaves behind when a human requests changes: it clears BOTH.
+    // The state Inbox leaves behind when a human requests changes: it clears BOTH.
     ['rejected', { autopilot: true, agentType: 'claude', worktree: 'w', resultItemId: null, resultApprovedAt: null }],
   ]);
   const logs = [];
@@ -410,7 +410,7 @@ test('a rejected result is back to "share a result first"', async () => {
   const { tools } = gateTools();
   const p = parse(await tools.issue_complete.handler({}, callerExtra('rejected')));
   assert.equal(p.next, 'share_result',
-    'Workshop clears both stamps on Request changes, so the last result no longer stands');
+    'Inbox clears both stamps on Request changes, so the last result no longer stands');
 });
 
 test('stages OFF: neither field is consulted, in any combination', async () => {

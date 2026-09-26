@@ -44,7 +44,7 @@ const ACTIVE_STATUSES = new Set(['queued', 'running', 'started']);
 // answer "Do you want to proceed?", and blocking on it wedges the run in `running`
 // forever, which makes the overlap guard skip every subsequent fire of the task.
 // Narrow by design: exactly the deepsteve tools prefix.md names (#708 added the three
-// Workshop ones, since a run that needs a human now asks through the inbox), never a
+// Inbox ones, since a run that needs a human now asks through the inbox), never a
 // blanket permission widening. None of them can approve anything — share_result only
 // ever *refuses* a merge. test/unit/scheduled-allowed-tools.test.js derives the names
 // from the fragment files and fails if this list and the prompt disagree.
@@ -52,8 +52,8 @@ const ACTIVE_STATUSES = new Set(['queued', 'running', 'started']);
 const CONTRACT_TOOLS = [
   'mcp__deepsteve__scheduled_task_started',
   'mcp__deepsteve__scheduled_task_finished',
-  'mcp__deepsteve__workshop_answers',
-  'mcp__deepsteve__workshop_ask',
+  'mcp__deepsteve__inbox_answers',
+  'mcp__deepsteve__inbox_ask',
   'mcp__deepsteve__share_result',
 ];
 
@@ -575,10 +575,10 @@ function findRunByShell(shellId) {
   return null;
 }
 
-// A read-only copy of one task's run history, for Workshop (#710): a question a scheduled run
+// A read-only copy of one task's run history, for Inbox (#710): a question a scheduled run
 // asked is superseded once a later run of the same task has succeeded. The full `tasks`,
 // tombstones included, so the caller can see a deleted task for what it is; and never ctx,
-// because Workshop requires this module directly and nothing may have called init() yet.
+// because Inbox requires this module directly and nothing may have called init() yet.
 // Copies, so no caller can write a run record through it.
 function taskSnapshot(taskId) {
   if (!taskId) return null;
@@ -729,7 +729,7 @@ function runTask(task, reason, { foreground = false } = {}) {
     // windowId-less scheduled run must not be offered up as a lost session by
     // the restore modal. See buildWindowsView() in server.js.
     scheduled: true,
-    // #705: which task this run belongs to, so a Workshop question it asks is grouped by
+    // #705: which task this run belongs to, so an Inbox question it asks is grouped by
     // the task — derived here, never named by the agent. Persisted by serializeShellEntry,
     // so a run resumed across a restart keeps it.
     scheduledTaskId: task.id,

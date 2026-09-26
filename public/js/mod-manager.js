@@ -343,6 +343,8 @@ function init(appHooks) {
 
   _setupPanelResizer();
 
+  _migrateRenamedMods();
+
   // Load enabled mods from localStorage
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
@@ -417,6 +419,39 @@ function _saveEnabledMods() {
 /**
  * Load mod settings, merging stored values with schema defaults.
  */
+// Mods renamed in place, old id → new id. Every browser still holds the old id in its
+// enabled set, its settings and its active view/panel, and nothing else maps it: without
+// this a renamed mod comes up disabled (Inbox is off by default) with its settings reset.
+// An entry stays for good — a browser can be opened for the first time in months.
+const RENAMED_MODS = { workshop: 'inbox' };
+
+function _migrateRenamedMods() {
+  const swapList = (key) => {
+    try {
+      const list = JSON.parse(localStorage.getItem(key));
+      if (!Array.isArray(list) || !list.some(id => RENAMED_MODS[id])) return;
+      const next = [...new Set(list.map(id => RENAMED_MODS[id] || id))];
+      localStorage.setItem(key, JSON.stringify(next));
+    } catch {}
+  };
+  swapList(STORAGE_KEY);
+  swapList(KNOWN_MODS_KEY);
+  swapList(QUIET_KEY);
+  for (const key of [ACTIVE_VIEW_KEY, ACTIVE_PANEL_KEY]) {
+    const id = localStorage.getItem(key);
+    if (RENAMED_MODS[id]) localStorage.setItem(key, RENAMED_MODS[id]);
+  }
+  for (const [from, to] of Object.entries(RENAMED_MODS)) {
+    const oldKey = nsKey(`deepsteve-mod-settings-${from}`);
+    const newKey = nsKey(`deepsteve-mod-settings-${to}`);
+    const saved = localStorage.getItem(oldKey);
+    if (saved === null) continue;
+    // The new id's settings win if both exist; either way the old key goes.
+    if (localStorage.getItem(newKey) === null) localStorage.setItem(newKey, saved);
+    localStorage.removeItem(oldKey);
+  }
+}
+
 function _loadModSettings(mod) {
   const defaults = {};
   for (const s of (mod.settings || [])) {
@@ -3021,7 +3056,7 @@ function isModActive() {
 function _injectBridgeAPI(iframeEl, modId, tabInstanceId) {
   try {
     // A mod iframe is same-origin but a separate JS realm, so it has its own untouched
-    // window.fetch — which is why the workshop panel could 401 on every poll for half an hour
+    // window.fetch — which is why the inbox panel could 401 on every poll for half an hour
     // without producing a single client-side line or triggering the auth heal (#675). Wrap it from
     // here, alongside the bridge, on the same reach that makes the bridge possible at all. The
     // `load` listeners that call us are not `{ once: true }`, so a reassigned src re-wraps.

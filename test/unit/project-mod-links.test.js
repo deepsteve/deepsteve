@@ -5,7 +5,7 @@
 // copy (Firefox drops Strict cookies after the canonical-host 302 to deepsteve.localhost). /v1
 // paths get authGate's link bounce, so the link is what an email points at. links.js is tested on
 // its own in links.test.js; this drives the Project Mods provider THROUGH a real link registry,
-// with a fake ctx and scratch repos, the way workshop-decision-links.test.js drives Workshop's.
+// with a fake ctx and scratch repos, the way inbox-decision-links.test.js drives Inbox's.
 //
 // Run: node --test test/unit/project-mod-links.test.js
 
@@ -20,7 +20,7 @@ process.env.HOME = HOME;
 delete process.env.DEEPSTEVE_HOME;
 
 const projectMods = require('../../mods/project-mods/tools.js');
-const inbox = require('../../mods/workshop/inbox.js');
+const inbox = require('../../mods/inbox/inbox.js');
 const { createLinks } = require('../../links.js');
 
 // A real directory with a .git marker, so findGitRoot() canonicalizes to it. realpath because
@@ -120,7 +120,7 @@ test('a mod that no longer exists explains itself instead of a bare 404', async 
   assert.match(res.body, /Nothing found/);
 });
 
-test('only the exact id modId() mints is owned, and it is disjoint from Workshop ids', () => {
+test('only the exact id modId() mints is owned, and it is disjoint from Inbox ids', () => {
   const provider = registry._providers.find((p) => p.name === 'project-mods');
   assert.strictEqual(provider.owns('015dd1f5'), true);
   for (const id of ['015DD1F5', '015dd1f', '015dd1f5a', 'w12', '4b0c4d1e-0000-4000-8000-000000000000']) {

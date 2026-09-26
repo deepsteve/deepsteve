@@ -1,7 +1,7 @@
 // The error beacon has to see every realm's fetch, and a 401 has to heal.
 //
 // #675: a mod iframe is same-origin but a separate JS realm with its own untouched window.fetch, so
-// wrapping only the shell's left the workshop panel invisible — it polled a stale cookie every 2s
+// wrapping only the shell's left the inbox panel invisible — it polled a stale cookie every 2s
 // for 29 minutes, producing 660 daemon-log rejections, zero client-side lines, and no heal, because
 // the heal was reachable only from the two WebSocket reconnect loops and this realm holds no socket.
 // These tests pin the two halves of the fix: any realm can be wrapped, and a 401 from any of them
@@ -62,9 +62,9 @@ test('client-log realm coverage', async (t) => {
   await t.test('wraps a child realm without disturbing its responses', async () => {
     const realm = fakeRealm(ok);
     const original = realm.win.fetch;
-    wrapRealmFetch(realm.win, 'mod:workshop');
+    wrapRealmFetch(realm.win, 'mod:inbox');
     assert.notStrictEqual(realm.win.fetch, original, 'the realm must actually be wrapped');
-    const res = await realm.win.fetch('/api/workshop/inbox');
+    const res = await realm.win.fetch('/api/inbox/items');
     assert.strictEqual(res.status, 200, 'the wrapper must pass the response straight through');
     assert.strictEqual(realm.calls.length, 1, 'and must make exactly one underlying call');
   });
@@ -74,9 +74,9 @@ test('client-log realm coverage', async (t) => {
     // src is reassigned has to be re-wrapped. That makes double-wrapping the normal case, and a
     // stacked wrapper would double-record every failure.
     const realm = fakeRealm(ok);
-    wrapRealmFetch(realm.win, 'mod:workshop');
+    wrapRealmFetch(realm.win, 'mod:inbox');
     const once = realm.win.fetch;
-    wrapRealmFetch(realm.win, 'mod:workshop');
+    wrapRealmFetch(realm.win, 'mod:inbox');
     assert.strictEqual(realm.win.fetch, once, 'a second wrap must be a no-op');
   });
 
@@ -101,12 +101,12 @@ test('client-log realm coverage', async (t) => {
   });
 
   await t.test('a 401 in a child realm triggers the heal', async () => {
-    // The whole point: the workshop iframe holds no socket, so before this nothing it did could
+    // The whole point: the inbox iframe holds no socket, so before this nothing it did could
     // ever reach maybeHealAuth — its 401s just repeated at 2s forever.
     probes.length = 0;
     const realm = fakeRealm(unauthorized);
-    wrapRealmFetch(realm.win, 'mod:workshop');
-    await realm.win.fetch('/api/workshop/inbox');
+    wrapRealmFetch(realm.win, 'mod:inbox');
+    await realm.win.fetch('/api/inbox/items');
     await new Promise(r => setTimeout(r, 10));
     assert.deepStrictEqual(probes, ['/api/version'],
       'a 401 from a mod iframe must reach the shell heal probe');
@@ -119,7 +119,7 @@ test('client-log realm coverage', async (t) => {
     probes.length = 0;
     const realm = fakeRealm(unauthorized);
     wrapRealmFetch(realm.win, 'mod:tasks');
-    for (let i = 0; i < 10; i++) await realm.win.fetch('/api/workshop/inbox');
+    for (let i = 0; i < 10; i++) await realm.win.fetch('/api/inbox/items');
     await new Promise(r => setTimeout(r, 10));
     assert.strictEqual(probes.length, 0,
       'the previous test just probed — 10 more 401s inside the cooldown must add none');
@@ -182,7 +182,7 @@ test('client-log transport selection', async (t) => {
 
   await t.test('falls back to HTTP once the socket has clearly gone for good', () => {
     socketState = 0;
-    clientLog('fetch-401', 'GET /api/workshop/inbox');
+    clientLog('fetch-401', 'GET /api/inbox/items');
     for (let i = 0; i < 6; i++) flushClientLog();
     assert.strictEqual(posts.length, 1, 'a realm that will never get a socket must still report');
     assert.strictEqual(posts[0].url, '/api/client-log');

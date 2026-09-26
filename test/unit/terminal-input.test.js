@@ -117,7 +117,7 @@ test('every reply xterm 6 emits is recognized as a report', async () => {
 
 // --- hasSubmitKey (#710) ------------------------------------------------------------
 //
-// Whether a person SUBMITTED something. Workshop treats that as a reply that supersedes the
+// Whether a person SUBMITTED something. Inbox treats that as a reply that supersedes the
 // session's open questions, so a newline that is not Enter must not count.
 
 test('an Enter a person pressed is a submit key', () => {

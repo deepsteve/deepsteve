@@ -429,7 +429,7 @@ test('a missing cwd is refused with 400 and a code, not a 500', async () => {
 
 // --- workflow stages (#668) -------------------------------------------------
 
-test('with the stages setting off, the prompt says nothing about Workshop', async () => {
+test('with the stages setting off, the prompt says nothing about Inbox', async () => {
   // Default off. The stages change what EVERY issue session is asked to do, and stage 4
   // names a tool #669 has not built — so the off path is the one that has to be exact.
   const res = await startIssueHttp({
@@ -443,9 +443,9 @@ test('with the stages setting off, the prompt says nothing about Workshop', asyn
   await client.connect({ id: res.json.id, cwd: projDir });
   await waitFor(() => client.screen().includes('STAGES-OFF-6680'), 'the issue prompt to reach the PTY', 30000, 250);
   // issue_complete is unconditional (#643) and lands in the same paste, so seeing the
-  // body means the whole prompt arrived — an absent workshop_brief is a real absence.
+  // body means the whole prompt arrived — an absent inbox_brief is a real absence.
   assert.ok(client.screen().includes('issue_complete'), 'the completion instruction still ships');
-  assert.ok(!client.screen().includes('workshop_brief'), 'the stages must not ship with the setting off');
+  assert.ok(!client.screen().includes('inbox_brief'), 'the stages must not ship with the setting off');
   client.close();
 
   assert.match(await issueLogFor(res.json.id), /stages=off/,
@@ -464,7 +464,7 @@ test('with the stages setting on, every start path delivers them', async () => {
     opened.push(res.json.id);
     const client = new SessionClient();
     await client.connect({ id: res.json.id, cwd: projDir });
-    await waitFor(() => client.screen().includes('workshop_brief'),
+    await waitFor(() => client.screen().includes('inbox_brief'),
       'the workflow stages to reach the PTY', 30000, 250);
     assert.ok(client.screen().includes('STAGES-ON-6681'), 'the issue body still ships alongside them');
     client.close();
@@ -481,7 +481,7 @@ test('with the stages setting on, every start path delivers them', async () => {
       type: 'issue', loading: true,
       issue: { number: 6681, title: 'stages on, picker', body: 'PICKER-STAGES-6681' },
     }));
-    await waitFor(() => tab.screen().includes('workshop_brief'),
+    await waitFor(() => tab.screen().includes('inbox_brief'),
       'the picker path to deliver the stages too', 30000, 250);
     tab.close();
     assert.match(await issueLogFor(tab.session.id), /source=ws-issue,.*stages=on/,

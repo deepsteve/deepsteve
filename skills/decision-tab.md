@@ -34,4 +34,4 @@ Reach for it while you work, whenever a choice is easier to make by looking than
 
 - The **Decisions** button in the tab strip appears while any decision tab is open. It switches the window into Decision Tab mode: only decision tabs are shown, across every project, with ‹ › arrows to step between them, and an empty inbox once all are answered.
 - If your session ends before they answer, the tab stays open and its bar says the session that asked has ended — nothing is delivered. If your session is showing a permission dialog when they click, the bar asks them to answer that first.
-- A click is not proof a person made it (anything that can reach the daemon can post one). Never use a decision tab as the gate for a merge or anything else that requires human approval — Workshop's result approval exists for that.
+- A click is not proof a person made it (anything that can reach the daemon can post one). Never use a decision tab as the gate for a merge or anything else that requires human approval — Inbox's result approval exists for that.

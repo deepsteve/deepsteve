@@ -1044,7 +1044,7 @@ kbd {
    whole job is to take #tabs away and it has to survive that: it is the only way back out.
 
    It gets a GUTTER rather than floating over the page. An overlay in the top-left corner lands
-   on whatever the app draws there — on Workshop it sat on the "I" of "Inbox" and read as a
+   on whatever the app draws there — on Inbox it sat on the "I" of "Inbox" and read as a
    rendering fault, not a control — and every app has that corner. Thirty pixels of the ~1200
    an app has is a cheap price for a control that never obscures anything and never has to
    fade, and quiet mode is still +230px net once the 200px rail and the strip are gone. */

@@ -26,7 +26,7 @@ function runGit(args, cwd) {
   }
 }
 
-// `gh`, the shape server.js's fetchIssueFromGitHub and the workshop mod's runGh both
+// `gh`, the shape server.js's fetchIssueFromGitHub and the inbox mod's runGh both
 // use: an absolute path from resolveBinary (the LaunchAgent PATH has no
 // /opt/homebrew/bin), argv and NEVER a shell, a 15s ceiling, and every failure — missing
 // binary, non-zero exit, timeout — resolving to a reason rather than rejecting.
@@ -603,11 +603,11 @@ function init(context) {
 
         // ── The review gate (#669) ──
         //
-        // Both fields are stamped by Workshop on this same shell entry, the way the
+        // Both fields are stamped by Inbox on this same shell entry, the way the
         // issue picker stamps `autopilot`, and read here for the same reason: the value
         // right now is the whole answer. `resultItemId` says a result was shared;
         // `resultApprovedAt` says a HUMAN approved it, and is written on exactly one
-        // line in mods/workshop/tools.js, downstream of a keypress in the panel.
+        // line in mods/inbox/tools.js, downstream of a keypress in the panel.
         //
         // Gated on the SAME setting #668's stage text is, deliberately — stage 4 is what
         // tells an agent share_result exists, and a gate that could be on while the stage
@@ -1317,7 +1317,7 @@ function registerRoutes(app, context) {
    *  - It arms NO auto-close. A human is looking at this tab with Close one key away,
    *    and closing a session somebody did not ask to close is not a thing to do on their
    *    behalf. (The MCP path arms one because the agent has to be TOLD to stop and
-   *    reliably isn't — #627.) This is the same rule the Workshop panel's merge follows.
+   *    reliably isn't — #627.) This is the same rule the Inbox panel's merge follows.
    *  - It refuses a non-worktree session rather than falling through to commit-and-push.
    *    A button labelled Merge must not push on someone's behalf, and the menu only ever
    *    offers it on a worktree tab anyway — re-checked here because the browser's copy of
@@ -1344,7 +1344,7 @@ function registerRoutes(app, context) {
       + `${result.committed ? ' (committed)' : ''}`
       + `${result.issue && result.issue.closed ? ` closed #${result.issue.number}` : ''}`);
     // Not a 500 on a refusal: "the target checkout is dirty" is an answer, and the client
-    // renders which one it was. The same choice the Workshop merge route makes.
+    // renders which one it was. The same choice the Inbox merge route makes.
     res.json(result);
   });
 }

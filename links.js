@@ -15,7 +15,7 @@
  *      is REMOVED by moving it into REMOVED_TYPES — which answers 410 with a page saying so —
  *      and never by deleting its entry, which would turn every link in every inbox into a bare
  *      404. An id that was issued and is no longer stored is a 410 page for the same reason.
- *   3. Ids are never reused. That is the provider's promise (Workshop keeps a high-water mark
+ *   3. Ids are never reused. That is the provider's promise (Inbox keeps a high-water mark
  *      outside its store); this file only relies on it.
  *   4. Answers go to the same versioned address, so a removed version or type cannot be
  *      answered. POST runs the same decide() as GET.
@@ -44,7 +44,7 @@ const TYPE_STATES = Object.freeze({
 // TYPE_STATES, never deleting it: see rule 2 above.
 const REMOVED_TYPES = Object.freeze({});
 
-// Ids are short opaque tokens (Workshop's are `w<seq>`). Anything else is refused before any
+// Ids are short opaque tokens (Inbox's are `w<seq>`). Anything else is refused before any
 // provider sees it, so no provider has to be defensive about a path segment.
 const ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 
@@ -122,7 +122,7 @@ const HOME_LINK = { href: '/', label: 'Open Deep Steve' };
  *   2. unknown type
  *   3. malformed id
  *   4. no provider owns the id — 503 while none has registered (mods mount asynchronously,
- *      and a failed Workshop load must read as "unavailable", not "no such decision")
+ *      and a failed Inbox load must read as "unavailable", not "no such decision")
  *   5. resolved: null → 404; { gone } → 410; { type: null } → exists but is not linkable
  *   6. resolved type ≠ link type → redirect (GET) / refuse (POST)
  *   7. reserved type → 501
@@ -172,7 +172,7 @@ function explain(decision, { type, id }) {
     case 'gone':
       return { title: 'No longer stored', paragraphs: [`${id} existed, but Deep Steve no longer keeps it. Older items are cleared out once enough newer ones have been answered.`] };
     case 'not-linkable':
-      return { title: "This can't be opened from a link", paragraphs: [`${id} exists, but it is not something a link can open. Look for it in Workshop instead.`] };
+      return { title: "This can't be opened from a link", paragraphs: [`${id} exists, but it is not something a link can open. Look for it in Inbox instead.`] };
     case 'reserved':
       return { title: 'Not available yet', paragraphs: [`"${type}" links are planned but this version of Deep Steve can't open them yet. Updating Deep Steve may help.`] };
     case 'unavailable':

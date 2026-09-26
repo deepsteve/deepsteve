@@ -1,0 +1,765 @@
+// Unit test for mods/inbox/inbox-view.js — the parts of the Inbox panel that
+// break invisibly (#660).
+//
+// Why these five behaviours and not the rest of the panel: the panel re-reads the
+// server every two seconds and rewrites the list under a live cursor. A comparator
+// that is not a TOTAL order makes the list jitter; a selection rule that follows the
+// index instead of the item makes the cursor wander; a typing guard that is too loose
+// makes the letter `e` archive the item you were describing. None of those look wrong
+// in a screenshot, and all of them are infuriating in use. Everything else in
+// inbox.jsx is layout, which you verify by looking at it.
+//
+// The module is a browser ES module with zero imports, driven here with `await
+// import()` from CommonJS — the test/unit/village-layout.test.js pattern, which Node
+// resolves by detecting module syntax. No DOM stubs at all, which is the point of
+// keeping it pure and is why this survives the bare `unit` CI job.
+//
+// Run: node --test test/unit/inbox-view.test.js
+
+const { test } = require('node:test');
+const assert = require('node:assert');
+
+let view;
+async function load() {
+  if (!view) view = await import('../../mods/inbox/inbox-view.js');
+  return view;
+}
+
+const NOW = 1_700_000_000_000;
+
+const item = (over = {}) => ({
+  id: over.id || 'w1',
+  kind: 'question',
+  urgency: 'normal',
+  createdAt: NOW,
+  project: '/repo/a',
+  projectName: 'a',
+  headline: 'Something',
+  context: '',
+  options: [],
+  ...over,
+});
+
+// ── ordering ─────────────────────────────────────────────────────────────────
+
+test('blocking, then normal, then fyi', async () => {
+  const { sortItems } = await load();
+  const list = [
+    item({ id: 'w1', urgency: 'fyi', createdAt: NOW + 1 }),
+    item({ id: 'w2', urgency: 'normal', createdAt: NOW + 2 }),
+    item({ id: 'w3', urgency: 'blocking', createdAt: NOW + 3 }),
+    item({ id: 'w4', urgency: 'normal', createdAt: NOW + 4 }),
+    item({ id: 'w5', urgency: 'blocking', createdAt: NOW + 5 }),
+  ];
+  assert.deepStrictEqual(sortItems(list).map((i) => i.id), ['w3', 'w5', 'w2', 'w4', 'w1']);
+});
+
+test('oldest first inside a rank — the longest wait is the top of the queue', async () => {
+  const { sortItems } = await load();
+  const list = [
+    item({ id: 'w1', urgency: 'blocking', createdAt: NOW + 900 }),
+    item({ id: 'w2', urgency: 'blocking', createdAt: NOW + 100 }),
+    item({ id: 'w3', urgency: 'blocking', createdAt: NOW + 500 }),
+  ];
+  assert.deepStrictEqual(sortItems(list).map((i) => i.id), ['w2', 'w3', 'w1']);
+});
+
+test('an unknown urgency ranks as normal rather than falling off the list', async () => {
+  const { sortItems } = await load();
+  const list = [
+    item({ id: 'w1', urgency: 'fyi', createdAt: NOW }),
+    item({ id: 'w2', urgency: 'URGENT!!', createdAt: NOW }),
+    item({ id: 'w3', urgency: 'blocking', createdAt: NOW }),
+  ];
+  assert.deepStrictEqual(sortItems(list).map((i) => i.id), ['w3', 'w2', 'w1']);
+});
+
+test('the sort is a TOTAL order, so a poll cannot reshuffle the list', async () => {
+  const { sortItems } = await load();
+  // Identical urgency AND timestamp is the common case for derived rows: the server
+  // rebuilds them per request, so array order carries no information and JS sort
+  // stability buys nothing.
+  const base = Array.from({ length: 9 }, (_, i) =>
+    item({ id: 'blocked:s' + i, urgency: 'blocking', createdAt: NOW }));
+  const expected = sortItems(base).map((i) => i.id);
+  for (let round = 0; round < 20; round++) {
+    const shuffled = base.slice().sort(() => Math.random() - 0.5);
+    assert.deepStrictEqual(
+      sortItems(shuffled).map((i) => i.id), expected,
+      'compareItems needs the id tiebreak — without it the list jitters under the '
+      + 'cursor at every 2s poll, which is unusable and looks like a rendering bug',
+    );
+  }
+});
+
+test('sortItems does not mutate its input', async () => {
+  const { sortItems } = await load();
+  const list = [item({ id: 'w1', urgency: 'fyi' }), item({ id: 'w2', urgency: 'blocking' })];
+  sortItems(list);
+  assert.deepStrictEqual(list.map((i) => i.id), ['w1', 'w2']);
+});
+
+// ── grouping, and the render order the cursor walks ──────────────────────────
+
+test('grouping keeps every item and floats the most urgent project up', async () => {
+  const { groupByProject, flattenGroups } = await load();
+  const list = [
+    item({ id: 'w1', project: '/repo/a', projectName: 'a', urgency: 'normal', createdAt: NOW }),
+    item({ id: 'w2', project: '/repo/b', projectName: 'b', urgency: 'blocking', createdAt: NOW }),
+    item({ id: 'w3', project: '/repo/a', projectName: 'a', urgency: 'fyi', createdAt: NOW }),
+  ];
+  const groups = groupByProject(list);
+  assert.deepStrictEqual(groups.map((g) => g.name), ['b', 'a']);
+  assert.deepStrictEqual(flattenGroups(groups).map((i) => i.id).sort(), ['w1', 'w2', 'w3']);
+});
+
+test('order matches the rendered list exactly, grouped or not', async () => {
+  const { visibleItems } = await load();
+  const list = [
+    item({ id: 'w1', project: '/repo/a', projectName: 'a' }),
+    item({ id: 'w2', project: '/repo/b', projectName: 'b', urgency: 'blocking' }),
+    item({ id: 'w3', project: '/repo/a', projectName: 'a' }),
+  ];
+  for (const grouped of [false, true]) {
+    const v = visibleItems(list, { groupByProject: grouped });
+    assert.deepStrictEqual(
+      v.order, v.list.map((i) => i.id),
+      'the cursor indexes into `order` while the DOM renders `list`/`groups`. If they '
+      + 'ever disagree, arrow keys select a different row from the one highlighted.',
+    );
+  }
+});
+
+// ── the Backlog section (#671) ───────────────────────────────────────────────
+//
+// The Backlog renders BELOW the briefings in the same scrolling column, and one cursor
+// walks both. That is why it comes through visibleItems rather than keeping an order of
+// its own: two sections computing two orders is the bug the test above describes, with
+// one more place to make it.
+//
+// Since #682 that column is a TAB — `tab: 'issues'` — and the two sections under it are
+// the reading material: agent briefings, then the project's open issues. Every test
+// below used to pass `backlog` with no tab and compose it against questions, which was
+// the arrangement that made Inbox read as informational. The composition being
+// checked is unchanged; what it composes against moved.
+
+const issueRow = (n) => ({ id: `issue:${n}`, kind: 'issue', number: n, title: `issue ${n}` });
+const brief = (over = {}) => item({ kind: 'briefing', urgency: 'fyi', ...over });
+const READING = { tab: 'issues' };
+
+test('backlog ids come after briefing ids, in one order', async () => {
+  const { visibleItems } = await load();
+  const v = visibleItems([brief({ id: 'w1' }), brief({ id: 'w2' })], {
+    ...READING, backlog: [issueRow(671), issueRow(664)],
+  });
+  assert.deepStrictEqual(v.order, ['w1', 'w2', 'issue:671', 'issue:664']);
+  assert.deepStrictEqual(
+    v.order, [...v.list.map((i) => i.id), ...v.backlog.map((i) => i.id)],
+    'render order is briefings-then-backlog, and `order` must be exactly that concatenation',
+  );
+});
+
+test('backlog order is preserved, never re-sorted here', async () => {
+  // backlog-view.js owns that order (freshest first, number as the total-order
+  // tiebreak). Re-sorting it here would make two modules disagree about the same list.
+  const { visibleItems } = await load();
+  const v = visibleItems([], { ...READING, backlog: [issueRow(3), issueRow(99), issueRow(1)] });
+  assert.deepStrictEqual(v.order, ['issue:3', 'issue:99', 'issue:1']);
+});
+
+test('a collapsed backlog is absent from both the order and the rows', async () => {
+  const { visibleItems } = await load();
+  const v = visibleItems([brief({ id: 'w1' })], {
+    ...READING, backlog: [issueRow(671)], backlogCollapsed: true,
+  });
+  assert.deepStrictEqual(v.order, ['w1']);
+  assert.deepStrictEqual(v.backlog, []);
+});
+
+test('grouping does not disturb the backlog tail', async () => {
+  const { visibleItems } = await load();
+  const v = visibleItems([
+    brief({ id: 'w1', project: '/repo/a', projectName: 'a' }),
+    brief({ id: 'w2', project: '/repo/b', projectName: 'b' }),
+  ], { ...READING, groupByProject: true, backlog: [issueRow(671)] });
+  assert.strictEqual(v.order[v.order.length - 1], 'issue:671');
+  assert.strictEqual(v.order.length, 3);
+});
+
+test('an omitted backlog leaves the list exactly as it was', async () => {
+  const { visibleItems } = await load();
+  const v = visibleItems([brief({ id: 'w1' })], READING);
+  assert.deepStrictEqual(v.order, ['w1']);
+  assert.deepStrictEqual(v.backlog, []);
+});
+
+test('junk in the backlog does not corrupt the order', async () => {
+  const { visibleItems } = await load();
+  const v = visibleItems([brief({ id: 'w1' })], {
+    ...READING, backlog: [null, issueRow(5), undefined],
+  });
+  assert.deepStrictEqual(v.order, ['w1', 'issue:5']);
+  const v2 = visibleItems([brief({ id: 'w1' })], { ...READING, backlog: 'not an array' });
+  assert.deepStrictEqual(v2.order, ['w1']);
+});
+
+test('collapsing the backlog moves the cursor out of it, not to nothing', async () => {
+  // The composition that matters: nextSelection sees an id that has vanished from the
+  // order and falls back to the same INDEX, which lands on the last briefing row. A
+  // null here would blank the reading pane every time you collapsed the section.
+  const { visibleItems, nextSelection } = await load();
+  const items = [brief({ id: 'w1' }), brief({ id: 'w2' })];
+  const open = visibleItems(items, { ...READING, backlog: [issueRow(671)] });
+  const shut = visibleItems(items, {
+    ...READING, backlog: [issueRow(671)], backlogCollapsed: true,
+  });
+  assert.strictEqual(nextSelection('issue:671', open.order, shut.order), 'w2');
+});
+
+test('an empty reading tab with a full backlog selects the first issue', async () => {
+  // A deliberate change to the old empty state: with nothing to read, the thing worth
+  // looking at is the top of the backlog — which is the "sat down to start new work"
+  // case the feature exists for.
+  const { visibleItems, nextSelection } = await load();
+  const v = visibleItems([], { ...READING, backlog: [issueRow(671), issueRow(664)] });
+  assert.strictEqual(nextSelection(null, [], v.order), 'issue:671');
+});
+
+// ── the tab split itself (#682) ──────────────────────────────────────────────
+
+test('the bench carries obligations and the backlog tab carries reading material', async () => {
+  const { visibleItems } = await load();
+  const items = [
+    item({ id: 'w1', kind: 'blocked', urgency: 'blocking' }),
+    item({ id: 'w2', kind: 'idle' }),
+    item({ id: 'w3', kind: 'question' }),
+    item({ id: 'w4', kind: 'result' }),
+    brief({ id: 'w5' }),
+  ];
+  const bench = visibleItems(items, { backlog: [issueRow(671)] });
+  assert.deepStrictEqual(
+    bench.list.map((i) => i.id).sort(), ['w1', 'w2', 'w3', 'w4'],
+    'a briefing has nothing to answer and must not sit among the rows that do',
+  );
+  assert.deepStrictEqual(
+    bench.backlog, [],
+    'the whole point of the split: an issue list must never be what the bench shows '
+    + 'when nothing is waiting on you',
+  );
+  assert.deepStrictEqual(bench.order, ['w1', 'w2', 'w3', 'w4']);
+
+  const reading = visibleItems(items, { ...READING, backlog: [issueRow(671)] });
+  assert.deepStrictEqual(reading.list.map((i) => i.id), ['w5']);
+  assert.deepStrictEqual(reading.order, ['w5', 'issue:671']);
+});
+
+test('blockingOnly filters the bench and never the reading tab', async () => {
+  // A briefing is 'fyi' by construction, so applying the bench's urgency filter to the
+  // reading tab would empty it and read as "the backlog is broken".
+  const { visibleItems } = await load();
+  const items = [item({ id: 'w1', kind: 'blocked', urgency: 'blocking' }), brief({ id: 'w2' })];
+  assert.deepStrictEqual(
+    visibleItems(items, { blockingOnly: true }).list.map((i) => i.id), ['w1'],
+  );
+  assert.deepStrictEqual(
+    visibleItems(items, { ...READING, blockingOnly: true }).list.map((i) => i.id), ['w2'],
+  );
+});
+
+test('every session row belongs to the Agents tab', async () => {
+  const { tabOf } = await load();
+  assert.strictEqual(tabOf({ kind: 'idle' }), 'agents');
+  assert.strictEqual(tabOf({ kind: 'blocked' }), 'agents');
+  assert.strictEqual(tabOf({ kind: 'result' }), 'agents');
+  assert.strictEqual(tabOf({ kind: 'stuck' }), 'agents');
+  assert.strictEqual(tabOf({ kind: 'working' }), 'agents');
+  assert.strictEqual(tabOf({ kind: 'briefing' }), 'issues');
+  assert.strictEqual(tabOf(null), 'agents', 'an unknown row is an obligation until proven otherwise');
+});
+
+test('the old tab ids in every browser’s localStorage still land somewhere', async () => {
+  // The rename is not a migration anybody runs — the values are in localStorage on every
+  // machine that has opened Inbox, and they arrive on the next load. Mapping them is
+  // the whole compatibility story, so it is pinned.
+  const { normalizeTab, TABS } = await load();
+  assert.strictEqual(normalizeTab('bench'), 'agents');
+  assert.strictEqual(normalizeTab('backlog'), 'issues');
+  assert.strictEqual(normalizeTab('agents'), 'agents');
+  assert.strictEqual(normalizeTab('issues'), 'issues');
+  assert.strictEqual(normalizeTab('a-tab-from-the-future'), TABS[0]);
+  assert.strictEqual(normalizeTab(undefined), TABS[0]);
+});
+
+test('“needs me” hides the working rows and nothing else', async () => {
+  const { visibleItems } = await load();
+  const items = [
+    { id: 'a', kind: 'working', urgency: 'fyi', createdAt: 1 },
+    { id: 'b', kind: 'blocked', urgency: 'blocking', createdAt: 2 },
+    { id: 'c', kind: 'idle', urgency: 'normal', createdAt: 3 },
+    { id: 'd', kind: 'stuck', urgency: 'blocking', createdAt: 4 },
+  ];
+  const all = visibleItems(items, { tab: 'agents' });
+  assert.deepStrictEqual(all.list.map((i) => i.id).sort(), ['a', 'b', 'c', 'd']);
+
+  const filtered = visibleItems(items, { tab: 'agents', hideWorking: true });
+  assert.deepStrictEqual(filtered.list.map((i) => i.id).sort(), ['b', 'c', 'd']);
+  assert.ok(!filtered.order.includes('a'), 'a hidden row must leave the cursor order too');
+});
+
+test('a stuck row outranks an idle one', async () => {
+  // The ordering that makes the list readable: work that cannot land is the only state
+  // that will not resolve itself, so it sits above an agent that is merely out of
+  // instructions, which sits above one that is busy.
+  const { visibleItems } = await load();
+  const list = visibleItems([
+    { id: 'working', kind: 'working', urgency: 'fyi', createdAt: 1 },
+    { id: 'idle', kind: 'idle', urgency: 'normal', createdAt: 1 },
+    { id: 'stuck', kind: 'stuck', urgency: 'blocking', createdAt: 1 },
+  ], { tab: 'agents' }).list.map((i) => i.id);
+  assert.deepStrictEqual(list, ['stuck', 'idle', 'working']);
+});
+
+test('an issue row cannot be answered, archived or option-picked', async () => {
+  // keyAction returns null rather than the JSX ignoring the action later. The difference
+  // matters: send()/archive() look up in the inbox list and would no-op anyway, so
+  // without this the right outcome would happen for the wrong reason and break the day
+  // someone made those lookups span both sections.
+  const { keyAction } = await load();
+  for (const key of ['e', 'Enter', '1', '9', 'r']) {
+    assert.strictEqual(keyAction(key, { optionCount: 3, issue: true }), null, `${key} must be inert on an issue`);
+  }
+});
+
+test('an issue row still moves, opens and helps', async () => {
+  const { keyAction } = await load();
+  assert.deepStrictEqual(keyAction('j', { issue: true }), { type: 'move', delta: 1 });
+  assert.deepStrictEqual(keyAction('k', { issue: true }), { type: 'move', delta: -1 });
+  assert.deepStrictEqual(keyAction('Home', { issue: true }), { type: 'first' });
+  assert.deepStrictEqual(keyAction('o', { issue: true }), { type: 'open' });
+  assert.deepStrictEqual(keyAction('?', { issue: true }), { type: 'help' });
+  assert.deepStrictEqual(keyAction('Escape', { issue: true }), { type: 'escape' });
+});
+
+test('`g` is the pop-out, and ONLY on an issue', async () => {
+  const { keyAction } = await load();
+  assert.deepStrictEqual(keyAction('g', { issue: true }), { type: 'github' });
+  assert.strictEqual(keyAction('g', {}), null, '`g` must stay unbound in the inbox');
+});
+
+test('the inbox keys are unchanged by the new flag defaulting to false', async () => {
+  const { keyAction } = await load();
+  assert.deepStrictEqual(keyAction('e', {}), { type: 'archive' });
+  assert.deepStrictEqual(keyAction('Enter', {}), { type: 'send' });
+  assert.deepStrictEqual(keyAction('r', {}), { type: 'focusReply' });
+  assert.deepStrictEqual(keyAction('1', { optionCount: 2 }), { type: 'pick', index: 0 });
+});
+
+test('showBriefings:false drops briefings and only briefings', async () => {
+  // Since #682 a briefing is only ever on the reading tab, so that is where the toggle
+  // has to be observed. The bench is unaffected either way — which is the assertion
+  // that matters, because a setting that could empty the bench would be a way to hide
+  // an agent that is waiting on you.
+  const { visibleItems } = await load();
+  const list = [
+    item({ id: 'w1', kind: 'briefing', urgency: 'fyi' }),
+    item({ id: 'w2', kind: 'question' }),
+    item({ id: 'w3', kind: 'blocked', urgency: 'blocking' }),
+  ];
+  assert.deepStrictEqual(visibleItems(list, { ...READING, showBriefings: false }).order, []);
+  assert.deepStrictEqual(visibleItems(list, { ...READING, showBriefings: true }).order, ['w1']);
+  for (const showBriefings of [true, false]) {
+    assert.deepStrictEqual(visibleItems(list, { showBriefings }).order, ['w3', 'w2']);
+  }
+});
+
+test('blockingOnly filters on urgency, not kind', async () => {
+  const { visibleItems } = await load();
+  const list = [
+    item({ id: 'w1', kind: 'question', urgency: 'blocking' }),
+    item({ id: 'w2', kind: 'blocked', urgency: 'blocking' }),
+    item({ id: 'w3', kind: 'question', urgency: 'normal' }),
+  ];
+  assert.deepStrictEqual(
+    visibleItems(list, { blockingOnly: true }).order.sort(), ['w1', 'w2'],
+    'a inbox_ask question can be blocking too — filtering on kind would hide it',
+  );
+});
+
+test('an empty or junk list is an empty render, not a throw', async () => {
+  const { visibleItems } = await load();
+  for (const bad of [null, undefined, [], [null, undefined]]) {
+    const v = visibleItems(bad, {});
+    assert.deepStrictEqual(v.order, []);
+    assert.deepStrictEqual(v.list, []);
+  }
+});
+
+// ── age ──────────────────────────────────────────────────────────────────────
+
+test('formatAge covers seconds through days', async () => {
+  const { formatAge } = await load();
+  const cases = [
+    [0, '0s'], [999, '0s'], [1000, '1s'], [42_000, '42s'], [59_999, '59s'],
+    [60_000, '1m'], [185_000, '3m 5s'], [420_000, '7m'],
+    [3_600_000, '1h'], [3_840_000, '1h 4m'],
+    [86_400_000, '1d'], [200_000_000, '2d'],
+  ];
+  for (const [ms, want] of cases) assert.strictEqual(formatAge(ms), want, `formatAge(${ms})`);
+  assert.strictEqual(formatAge(NaN), '0s');
+  assert.strictEqual(formatAge(-5), '0s');
+});
+
+test('age colour boundaries match Action Required exactly', async () => {
+  const { ageColor, AGE_WARN_MS, AGE_ALERT_MS } = await load();
+  assert.strictEqual(AGE_WARN_MS, 30_000);
+  assert.strictEqual(AGE_ALERT_MS, 60_000);
+  const msg = 'these thresholds and hexes are Action Required\'s (action-required.jsx '
+    + '`urgency`); the two surfaces describe the same wait — change both or neither';
+  assert.strictEqual(ageColor(0, 'normal'), '#8b949e', msg);
+  assert.strictEqual(ageColor(29_999, 'normal'), '#8b949e', msg);
+  assert.strictEqual(ageColor(30_001, 'normal'), '#f0883e', msg);
+  assert.strictEqual(ageColor(59_999, 'normal'), '#f0883e', msg);
+  assert.strictEqual(ageColor(60_001, 'normal'), '#f85149', msg);
+});
+
+test('an fyi never turns orange — a day-old briefing is not urgent', async () => {
+  const { ageColor } = await load();
+  assert.strictEqual(ageColor(999_999, 'fyi'), '#6e7681');
+});
+
+// ── the row subject ──────────────────────────────────────────────────────────
+
+test('a generic permission headline folds in the tool line above it', async () => {
+  const { itemSubject } = await load();
+  const subject = itemSubject(item({
+    headline: 'Do you want to proceed?',
+    context: 'deepsteve - read_session_screen (MCP)',
+  }));
+  assert.match(
+    subject, /read_session_screen/,
+    'eight rows all reading "Do you want to proceed?" is no improvement on Action '
+    + "Required's tab names, which is the entire premise of this feature",
+  );
+});
+
+test('a specific headline is left alone', async () => {
+  const { itemSubject } = await load();
+  assert.strictEqual(
+    itemSubject(item({ headline: 'Which retry policy?', context: 'chatter' })),
+    'Which retry policy?',
+  );
+});
+
+test('a missing headline falls back rather than rendering blank', async () => {
+  const { itemSubject } = await load();
+  assert.strictEqual(itemSubject(item({ headline: '', context: 'Bash(rm -rf x)' })), 'Bash(rm -rf x)');
+  assert.strictEqual(itemSubject(item({ headline: '', context: '', question: 'Go?' })), 'Go?');
+  assert.strictEqual(itemSubject(null), '');
+});
+
+// ── the keyboard ─────────────────────────────────────────────────────────────
+
+test('isTypingTarget is true for fields and false for buttons', async () => {
+  const { isTypingTarget } = await load();
+  for (const tag of ['TEXTAREA', 'INPUT', 'SELECT']) {
+    assert.strictEqual(isTypingTarget({ tagName: tag }), true, tag);
+  }
+  assert.strictEqual(isTypingTarget({ tagName: 'DIV', isContentEditable: true }), true);
+  const why = 'a false negative means typing `e` in the reply box archives the item; a '
+    + 'false positive means 1-9 die the moment you click an option, which is exactly '
+    + 'when you would reach for them';
+  for (const tag of ['DIV', 'BUTTON', 'A', 'PRE', 'SPAN']) {
+    assert.strictEqual(isTypingTarget({ tagName: tag }), false, `${tag}: ${why}`);
+  }
+  assert.strictEqual(isTypingTarget(null), false);
+});
+
+test('the key map', async () => {
+  const { keyAction } = await load();
+  const opts = { optionCount: 3 };
+  assert.deepStrictEqual(keyAction('ArrowDown', opts), { type: 'move', delta: 1 });
+  assert.deepStrictEqual(keyAction('j', opts), { type: 'move', delta: 1 });
+  assert.deepStrictEqual(keyAction('ArrowUp', opts), { type: 'move', delta: -1 });
+  assert.deepStrictEqual(keyAction('k', opts), { type: 'move', delta: -1 });
+  assert.deepStrictEqual(keyAction('Home', opts), { type: 'first' });
+  assert.deepStrictEqual(keyAction('End', opts), { type: 'last' });
+  assert.deepStrictEqual(keyAction('Enter', opts), { type: 'send' });
+  assert.deepStrictEqual(keyAction('e', opts), { type: 'archive' });
+  assert.deepStrictEqual(keyAction('o', opts), { type: 'open' });
+  assert.deepStrictEqual(keyAction('r', opts), { type: 'focusReply' });
+  assert.deepStrictEqual(keyAction('c', opts), { type: 'toggleChat' });
+  assert.deepStrictEqual(keyAction('?', opts), { type: 'help' });
+  assert.deepStrictEqual(keyAction('Escape', opts), { type: 'escape' });
+});
+
+test('digits stage an option, and only one that exists', async () => {
+  const { keyAction } = await load();
+  assert.deepStrictEqual(keyAction('1', { optionCount: 3 }), { type: 'pick', index: 0 });
+  assert.deepStrictEqual(keyAction('3', { optionCount: 3 }), { type: 'pick', index: 2 });
+  assert.strictEqual(keyAction('4', { optionCount: 3 }), null, 'no fourth option to pick');
+  assert.strictEqual(keyAction('1', { optionCount: 0 }), null);
+  assert.strictEqual(keyAction('0', { optionCount: 3 }), null);
+});
+
+test('shifted letters and unknown keys do nothing', async () => {
+  const { keyAction } = await load();
+  for (const k of ['E', 'O', 'R', 'J', 'K', 'X', 'M', 'q', 'z', 'F1', 'Tab', ' ', '']) {
+    assert.strictEqual(keyAction(k, { optionCount: 3 }), null, `key ${JSON.stringify(k)}`);
+  }
+});
+
+test('the two session verbs are bound, repeat-blocked, and dead on an issue (#682)', async () => {
+  // Repeat is the one that matters: holding a key must not close five sessions. Both
+  // are also gated behind a confirm in the panel — these are the only keys in Inbox
+  // whose effect a second press cannot undo.
+  const { keyAction } = await load();
+  assert.deepStrictEqual(keyAction('x', {}), { type: 'closeSession' });
+  assert.deepStrictEqual(keyAction('m', {}), { type: 'mergeWorktree' });
+  for (const k of ['x', 'm']) {
+    assert.strictEqual(keyAction(k, { repeat: true }), null, `held ${k} must not repeat`);
+    assert.strictEqual(keyAction(k, { issue: true }), null, `${k} on a GitHub issue row`);
+  }
+});
+
+test('typingAction: exactly two keys are ours inside a text box (#670)', async () => {
+  const { typingAction } = await load();
+
+  // Cmd-Enter means a different thing in each of the two boxes, and that is the ONLY
+  // difference between them. The branch is on which box has focus, not on a new key.
+  assert.strictEqual(typingAction('Enter', { meta: true, chat: false }), 'send-answer');
+  assert.strictEqual(typingAction('Enter', { meta: true, chat: true }), 'send-chat');
+  assert.strictEqual(typingAction('Escape', {}), 'blur');
+  assert.strictEqual(typingAction('Escape', { chat: true }), 'blur');
+
+  // A bare Enter belongs to the box. In the reply box it is a newline; the chat composer
+  // handles and stops its own, so it never reaches this at all.
+  assert.strictEqual(typingAction('Enter', {}), null);
+  assert.strictEqual(typingAction('Enter', { chat: true }), null);
+});
+
+test('typingAction: every other key belongs to the textarea', async () => {
+  const { typingAction } = await load();
+  // This is the machine-readable form of "the inbox ate my letter e". Walking the whole
+  // alphabet plus the digits is what keeps a future case from being added quietly.
+  const keys = [
+    ...'abcdefghijklmnopqrstuvwxyz'.split(''),
+    ...'0123456789'.split(''),
+    'ArrowUp', 'ArrowDown', 'Home', 'End', 'Tab', '?', ' ', 'Backspace',
+  ];
+  for (const key of keys) {
+    for (const meta of [false, true]) {
+      for (const chat of [false, true]) {
+        assert.strictEqual(typingAction(key, { meta, chat }), null,
+          `${key} (meta=${meta}, chat=${chat}) must belong to the text box`);
+      }
+    }
+  }
+});
+
+test('auto-repeat navigates but never commits', async () => {
+  const { keyAction } = await load();
+  const held = { optionCount: 3, repeat: true };
+  assert.deepStrictEqual(keyAction('ArrowDown', held), { type: 'move', delta: 1 });
+  assert.strictEqual(keyAction('Enter', held), null, 'holding Enter must not fire ten answers');
+  assert.strictEqual(keyAction('e', held), null, 'holding `e` must not archive the whole inbox');
+});
+
+// ── the cursor across a poll ─────────────────────────────────────────────────
+
+test('the cursor follows the item, not the index', async () => {
+  const { nextSelection } = await load();
+  // A row can change rank between polls with the human doing nothing at all.
+  assert.strictEqual(nextSelection('w2', ['w1', 'w2', 'w3'], ['w3', 'w2', 'w1']), 'w2');
+});
+
+test('when the selected item goes, its place is taken', async () => {
+  const { nextSelection } = await load();
+  // Answered here, or resolved in its own terminal — either way the next thing should
+  // already be selected rather than the cursor jumping home.
+  assert.strictEqual(nextSelection('w2', ['w1', 'w2', 'w3'], ['w1', 'w3']), 'w3');
+  assert.strictEqual(nextSelection('w3', ['w1', 'w2', 'w3'], ['w1', 'w2']), 'w2', 'clamped to the last row');
+  assert.strictEqual(nextSelection('w1', ['w1'], []), null);
+});
+
+test('nothing selected plus a non-empty list selects the first row', async () => {
+  const { nextSelection } = await load();
+  assert.strictEqual(nextSelection(null, [], ['w1', 'w2']), 'w1');
+  assert.strictEqual(nextSelection('gone', [], ['w1', 'w2']), 'w1');
+});
+
+// ── what gets POSTed ─────────────────────────────────────────────────────────
+
+test('a picked option wins, and carries text along for a question', async () => {
+  const { answerPayload } = await load();
+  const q = item({ kind: 'question', options: [{ label: 'A' }, { label: 'B' }] });
+  assert.deepStrictEqual(answerPayload(q, { picked: 1, draft: ' because ' }),
+    { optionIndex: 1, text: 'because' });
+  assert.deepStrictEqual(answerPayload(q, { picked: 0 }), { optionIndex: 0 });
+  assert.deepStrictEqual(answerPayload(q, { draft: 'freeform' }), { text: 'freeform' });
+});
+
+test('nothing staged is nothing to send', async () => {
+  const { answerPayload } = await load();
+  const q = item({ kind: 'question', options: [{ label: 'A' }] });
+  assert.strictEqual(answerPayload(q, {}), null);
+  assert.strictEqual(answerPayload(q, { draft: '   ' }), null);
+  assert.strictEqual(answerPayload(q, { picked: 5 }), null, 'an out-of-range pick is not a pick');
+  assert.strictEqual(answerPayload(item({ kind: 'briefing' }), { draft: 'x' }), null);
+  assert.strictEqual(answerPayload(null, { draft: 'x' }), null);
+});
+
+test('a blocked item posts an option and a fingerprint, never text', async () => {
+  const { answerPayload, fingerprint } = await load();
+  const blocked = item({ kind: 'blocked', options: [{ label: 'Yes' }, { label: '  No  ' }] });
+  assert.deepStrictEqual(
+    answerPayload(blocked, { picked: 1, draft: 'please just do it' }),
+    { optionIndex: 1, expect: fingerprint('No') },
+    'a live modal has no text field, and the fingerprint is what stops a swapped '
+    + 'dialog being answered by index',
+  );
+  assert.strictEqual(
+    answerPayload(blocked, { draft: 'do the second one' }), null,
+    'text alone against a dialog must not even be attempted — the server 400s it',
+  );
+});
+
+test('the fingerprint matches dialog-parse.js byte for byte', async () => {
+  // Both sides of the verify step must normalize identically, or the server compares
+  // the clicked label against the live one, never matches, and refuses every answer.
+  const { fingerprint } = await load();
+  const server = require('../../mods/inbox/dialog-parse.js').fingerprint;
+  for (const label of [
+    'Yes', '  Yes,   and   don\'t ask ', 'NO', '', null, undefined,
+    'x'.repeat(500), 'Retry 3. times, then give up',
+  ]) {
+    assert.strictEqual(
+      fingerprint(label), server(label),
+      `fingerprint drift on ${JSON.stringify(label)} — the client's expect value would `
+      + 'never match the server\'s live read, and every dialog answer would be refused',
+    );
+  }
+});
+
+// ── results (#669) ───────────────────────────────────────────────────────────
+
+test('a result approves on the option alone, with no text required', async () => {
+  const view = await load();
+  const result = { kind: 'result', options: [{ label: 'Approve' }, { label: 'Request changes' }] };
+  assert.deepStrictEqual(
+    view.answerPayload(result, { picked: view.APPROVE_INDEX, draft: '' }),
+    { optionIndex: 0 },
+    'demanding a sentence to say yes is how a review gate becomes a thing people turn off',
+  );
+  assert.deepStrictEqual(
+    view.answerPayload(result, { picked: view.APPROVE_INDEX, draft: '  nice  ' }),
+    { optionIndex: 0, text: 'nice' },
+    'but a note is carried through when there is one',
+  );
+});
+
+test('Request changes with an empty draft sends nothing', async () => {
+  const view = await load();
+  const result = { kind: 'result', options: [{ label: 'Approve' }, { label: 'Request changes' }] };
+  assert.strictEqual(
+    view.answerPayload(result, { picked: 1, draft: '   ' }), null,
+    'an agent told only that it was wrong, and not how, writes the same result again — '
+    + 'refusing here makes that a design rather than an error message',
+  );
+  assert.deepStrictEqual(
+    view.answerPayload(result, { picked: 1, draft: 'the empty case' }),
+    { optionIndex: 1, text: 'the empty case' },
+  );
+});
+
+test('text alone is not a decision on a result', async () => {
+  const view = await load();
+  const result = { kind: 'result', options: [{ label: 'Approve' }, { label: 'Request changes' }] };
+  assert.strictEqual(
+    view.answerPayload(result, { picked: null, draft: 'why this way?' }), null,
+    'the server reads bare text as a request for changes, so a human who typed a note '
+    + 'meaning to approve would be surprised. Make them press the button.',
+  );
+});
+
+test('a result still sorts and filters like every other stored item', async () => {
+  const view = await load();
+  const items = [
+    { id: 'w1', kind: 'result', urgency: 'normal', createdAt: 10 },
+    { id: 'w2', kind: 'briefing', urgency: 'fyi', createdAt: 5 },
+    { id: 'b1', kind: 'blocked', urgency: 'blocking', createdAt: 20 },
+  ];
+  assert.deepStrictEqual(
+    view.sortItems(items).map((i) => i.id), ['b1', 'w1', 'w2'],
+    'urgency first: a result is normal, so it sits under a blocked agent and above a briefing',
+  );
+  for (const showBriefings of [true, false]) {
+    assert.deepStrictEqual(
+      view.visibleItems(items, { showBriefings }).order, ['b1', 'w1'],
+      'a result is an obligation, so it is on the bench and the briefing toggle — which '
+      + 'only ever reaches the reading tab — cannot touch it',
+    );
+  }
+  assert.deepStrictEqual(
+    view.visibleItems(items, { blockingOnly: true }).order, ['b1'],
+  );
+});
+
+test('itemBody drops the headline a result derived from its own first line', async () => {
+  const view = await load();
+  const item = {
+    kind: 'result',
+    headline: 'Wheel events no longer walk history.',
+    context: 'Wheel events no longer walk history.\n\nThe alt-buffer branch is gone.',
+  };
+  assert.strictEqual(
+    view.itemBody(item), 'The alt-buffer branch is gone.',
+    'the H1 and the first line of the body were the same sentence, twice on screen',
+  );
+});
+
+test('itemBody leaves the record alone when there is nothing to drop', async () => {
+  const view = await load();
+  // A one-line summary: the H1 carries all of it and the body is empty.
+  assert.strictEqual(
+    view.itemBody({ kind: 'result', headline: 'Done.', context: 'Done.' }), '',
+  );
+  // A headline that is NOT the first line (clamped, edited, whatever) keeps everything.
+  assert.strictEqual(
+    view.itemBody({ kind: 'result', headline: 'Something else', context: 'First line\nSecond' }),
+    'First line\nSecond',
+  );
+  assert.strictEqual(view.itemBody({ kind: 'result', headline: '', context: 'body' }), 'body');
+});
+
+test('itemBody is scoped to results — it never edits another kind\'s context', async () => {
+  const view = await load();
+  for (const kind of ['question', 'briefing', 'blocked']) {
+    assert.strictEqual(
+      view.itemBody({ kind, headline: 'same', context: 'same\nmore' }), 'same\nmore',
+      `a ${kind}'s headline is its own argument; any overlap is the agent's doing`,
+    );
+  }
+  assert.strictEqual(view.itemBody(null), '');
+  assert.strictEqual(view.itemBody({ kind: 'result' }), '');
+});
+
+test('an idle row is not measured against a blocked row’s clock (#682)', async () => {
+  // The bug this pins: on the shared scale a session that finished ninety seconds ago
+  // was already alarm-red, so every row on the bench went red within a minute and the
+  // colour stopped carrying information.
+  const { ageColor } = await load();
+  const twoMinutes = 120_000;
+  assert.notStrictEqual(
+    ageColor(twoMinutes, 'normal', 'idle'), ageColor(twoMinutes, 'normal', 'blocked'),
+    'two minutes is an emergency for a stopped agent and unremarkable for a finished one',
+  );
+  assert.strictEqual(ageColor(twoMinutes, 'normal', 'idle'), ageColor(0, 'normal'), 'still calm');
+  assert.strictEqual(ageColor(20 * 60_000, 'normal', 'idle'), ageColor(45_000, 'normal'), 'warn');
+  assert.strictEqual(ageColor(60 * 60_000, 'normal', 'idle'), ageColor(90_000, 'normal'), 'alert');
+  assert.strictEqual(
+    ageColor(60 * 60_000, 'fyi', 'idle'), ageColor(0, 'fyi'),
+    'fyi still outranks the scale — that rule is unchanged',
+  );
+  // Every existing caller passed two arguments and must keep the behaviour it had.
+  assert.strictEqual(ageColor(90_000, 'normal'), ageColor(90_000, 'normal', 'blocked'));
+});

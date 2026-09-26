@@ -164,7 +164,7 @@ function compareDelivered(expected, candidates) {
   return unknown;
 }
 
-// messageText and MACHINERY_RE are exported for mods/workshop/transcript.js (#670), which
+// messageText and MACHINERY_RE are exported for mods/inbox/transcript.js (#670), which
 // reads the SAME transcripts for a different purpose. "What counts as machinery rather than
 // conversation" was surveyed once, here, against the real files on a real machine; a second
 // copy in the chat pane would drift and start showing slash-command plumbing as chat.

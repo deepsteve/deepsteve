@@ -104,7 +104,7 @@ globalThis.window.parent = globalThis.window;
 
 let importCount = 0;
 
-const WORKSHOP_VIEW = { id: 'workshop', name: 'Workshop', src: '/mods/workshop/index.html' };
+const INBOX_VIEW = { id: 'inbox', name: 'Inbox', src: '/mods/inbox/index.html' };
 const TOWER_VIEW = { id: 'tower', name: 'Tower', src: '/mods/tower/index.html' };
 
 /**
@@ -182,16 +182,16 @@ function bridgeFor(ModManager, modId) {
 
 test('visitSession pushes a frame and backgrounds the app', async () => {
   const { ModManager, state, backBtn } = await setup();
-  ModManager.showView(WORKSHOP_VIEW);
+  ModManager.showView(INBOX_VIEW);
   assert.strictEqual(ModManager.isModViewVisible(), true);
 
-  bridgeFor(ModManager, 'workshop').visitSession('b', { label: 'needs a decision' });
+  bridgeFor(ModManager, 'inbox').visitSession('b', { label: 'needs a decision' });
 
   assert.strictEqual(ModManager.isModViewVisible(), false, 'the slot must come down');
   assert.strictEqual(ModManager.getExcursion().depth, 1);
   assert.strictEqual(state.focused.at(-1), 'b');
   assert.strictEqual(state.railSuppressed, true, 'the app sent you; you are not browsing projects');
-  assert.match(backBtn.textContent, /^← Workshop · deepsteve \/ tab b$/);
+  assert.match(backBtn.textContent, /^← Inbox · deepsteve \/ tab b$/);
   assert.strictEqual(backBtn.classList.contains('excursion'), true);
 });
 
@@ -199,8 +199,8 @@ test('a queue walk replaces the top frame instead of deepening the stack', async
   // THE load-bearing rule. Without it, walking a 20-item inbox builds a 20-deep stack and
   // "back" costs 20 presses — which is the whole reason the shell exists.
   const { ModManager, state } = await setup();
-  ModManager.showView(WORKSHOP_VIEW);
-  const ds = bridgeFor(ModManager, 'workshop');
+  ModManager.showView(INBOX_VIEW);
+  const ds = bridgeFor(ModManager, 'inbox');
 
   ds.visitSession('a');
   ds.visitSession('b', { replace: true });
@@ -213,8 +213,8 @@ test('a queue walk replaces the top frame instead of deepening the stack', async
 
 test('drilling from a visited session into another pushes, so back costs two presses', async () => {
   const { ModManager, state } = await setup();
-  ModManager.showView(WORKSHOP_VIEW);
-  bridgeFor(ModManager, 'workshop').visitSession('a');
+  ModManager.showView(INBOX_VIEW);
+  bridgeFor(ModManager, 'inbox').visitSession('a');
 
   // A tab click while out — app.js's onTabStripClick.
   ModManager.noteExcursionDrill('b');
@@ -228,13 +228,13 @@ test('drilling from a visited session into another pushes, so back costs two pre
   ModManager.popExcursion();
   assert.strictEqual(ModManager.getExcursion().depth, 0);
   assert.strictEqual(ModManager.isModViewVisible(), true, 'an emptied stack goes home');
-  assert.strictEqual(ModManager.getActiveViewId(), 'workshop', 'and the iframe was never destroyed');
+  assert.strictEqual(ModManager.getActiveViewId(), 'inbox', 'and the iframe was never destroyed');
 });
 
 test('re-selecting the session you are already on is not a drill', async () => {
   const { ModManager } = await setup();
-  ModManager.showView(WORKSHOP_VIEW);
-  bridgeFor(ModManager, 'workshop').visitSession('a');
+  ModManager.showView(INBOX_VIEW);
+  bridgeFor(ModManager, 'inbox').visitSession('a');
   ModManager.noteExcursionDrill('a');
   ModManager.noteExcursionDrill('a');
   assert.strictEqual(ModManager.getExcursion().depth, 1);
@@ -245,8 +245,8 @@ test('back skips a frame whose session is gone', async () => {
   // closed tab and a tab sent to another window with one loop, and none of those paths has to
   // know the stack exists.
   const { ModManager, state } = await setup();
-  ModManager.showView(WORKSHOP_VIEW);
-  bridgeFor(ModManager, 'workshop').visitSession('a');
+  ModManager.showView(INBOX_VIEW);
+  bridgeFor(ModManager, 'inbox').visitSession('a');
   ModManager.noteExcursionDrill('b');
   ModManager.noteExcursionDrill('c');
   assert.strictEqual(ModManager.getExcursion().depth, 3);
@@ -260,8 +260,8 @@ test('back skips a frame whose session is gone', async () => {
 
 test('a stack of nothing but dead sessions lands you home, not nowhere', async () => {
   const { ModManager, state } = await setup();
-  ModManager.showView(WORKSHOP_VIEW);
-  bridgeFor(ModManager, 'workshop').visitSession('a');
+  ModManager.showView(INBOX_VIEW);
+  bridgeFor(ModManager, 'inbox').visitSession('a');
   ModManager.noteExcursionDrill('b');
 
   state.live.clear();               // every session you looked at is gone
@@ -273,8 +273,8 @@ test('a stack of nothing but dead sessions lands you home, not nowhere', async (
 
 test('endExcursion comes home and clears', async () => {
   const { ModManager, state } = await setup();
-  ModManager.showView(WORKSHOP_VIEW);
-  const ds = bridgeFor(ModManager, 'workshop');
+  ModManager.showView(INBOX_VIEW);
+  const ds = bridgeFor(ModManager, 'inbox');
   ds.visitSession('a');
   ds.endExcursion();
 
@@ -285,8 +285,8 @@ test('endExcursion comes home and clears', async () => {
 
 test('the stack survives a reload of the same window', async () => {
   const first = await setup();
-  first.ModManager.showView(WORKSHOP_VIEW);
-  bridgeFor(first.ModManager, 'workshop').visitSession('a');
+  first.ModManager.showView(INBOX_VIEW);
+  bridgeFor(first.ModManager, 'inbox').visitSession('a');
   first.ModManager.noteExcursionDrill('b');
   assert.strictEqual(first.ModManager.getExcursion().depth, 2);
 
@@ -295,7 +295,7 @@ test('the stack survives a reload of the same window', async () => {
   // has to put it back down, because on a real reload whether the mod list or the session
   // restore finishes first is a race nobody may depend on.
   const second = await setup({ keepStorage: true });
-  second.ModManager.showView(WORKSHOP_VIEW);
+  second.ModManager.showView(INBOX_VIEW);
   assert.strictEqual(second.ModManager.getExcursion().depth, 2, 'the trail came back');
   second.ModManager.syncExcursion();
   assert.strictEqual(second.ModManager.isModViewVisible(), false, 'and you are still out on it');
@@ -309,8 +309,8 @@ test('a window that restores a DIFFERENT view drops the stack instead of inherit
   // ACTIVE_VIEW_KEY is localStorage and shared by every window at this recursion depth, so
   // another window opening Tower can leave us holding a stack for a view we do not have.
   const first = await setup();
-  first.ModManager.showView(WORKSHOP_VIEW);
-  bridgeFor(first.ModManager, 'workshop').visitSession('a');
+  first.ModManager.showView(INBOX_VIEW);
+  bridgeFor(first.ModManager, 'inbox').visitSession('a');
 
   const second = await setup({ keepStorage: true });
   second.ModManager.showView(TOWER_VIEW);
@@ -321,12 +321,12 @@ test('a window that restores a DIFFERENT view drops the stack instead of inherit
 
 test('syncExcursion waits for the visited session to have a tab', async () => {
   const first = await setup();
-  first.ModManager.showView(WORKSHOP_VIEW);
-  bridgeFor(first.ModManager, 'workshop').visitSession('a');
+  first.ModManager.showView(INBOX_VIEW);
+  bridgeFor(first.ModManager, 'inbox').visitSession('a');
 
   const second = await setup({ keepStorage: true });
   second.state.live.clear();                    // tabs have not been restored yet
-  second.ModManager.showView(WORKSHOP_VIEW);
+  second.ModManager.showView(INBOX_VIEW);
   second.ModManager.syncExcursion();
   assert.strictEqual(second.ModManager.isModViewVisible(), true, 'nothing to show yet: stay put');
   assert.strictEqual(second.ModManager.isExcursionActive(), true, 'and do not throw the trail away');
@@ -339,8 +339,8 @@ test('syncExcursion waits for the visited session to have a tab', async () => {
 
 test('a different page taking the slot ends the excursion', async () => {
   const { ModManager, state } = await setup();
-  ModManager.showView(WORKSHOP_VIEW);
-  bridgeFor(ModManager, 'workshop').visitSession('a');
+  ModManager.showView(INBOX_VIEW);
+  bridgeFor(ModManager, 'inbox').visitSession('a');
 
   ModManager.showView(TOWER_VIEW);   // another app's rail row, or a project mod
   assert.strictEqual(ModManager.isExcursionActive(), false);
@@ -349,10 +349,10 @@ test('a different page taking the slot ends the excursion', async () => {
 
 test('hiding the app ends the excursion — there is nothing left to go back to', async () => {
   const { ModManager, state } = await setup();
-  ModManager.showView(WORKSHOP_VIEW);
-  bridgeFor(ModManager, 'workshop').visitSession('a');
+  ModManager.showView(INBOX_VIEW);
+  bridgeFor(ModManager, 'inbox').visitSession('a');
 
-  ModManager.hideView('workshop');   // toolbar toggle-off, disabled elsewhere, uninstall
+  ModManager.hideView('inbox');   // toolbar toggle-off, disabled elsewhere, uninstall
   assert.strictEqual(ModManager.isExcursionActive(), false);
   assert.strictEqual(state.railSuppressed, false);
   assert.strictEqual(ModManager.getActiveViewId(), null);
@@ -360,8 +360,8 @@ test('hiding the app ends the excursion — there is nothing left to go back to'
 
 test('the queue-cycle handler is asked, and its absence is reported so ⌘↑/⌘↓ can fall back', async () => {
   const { ModManager } = await setup();
-  ModManager.showView(WORKSHOP_VIEW);
-  const ds = bridgeFor(ModManager, 'workshop');
+  ModManager.showView(INBOX_VIEW);
+  const ds = bridgeFor(ModManager, 'inbox');
   ds.visitSession('a');
 
   assert.strictEqual(ModManager.requestExcursionCycle(1), false,
@@ -382,31 +382,31 @@ test('a torn-down view leaves no cycle handler behind', async () => {
   // Worse than a leak: a stale handler keeps requestExcursionCycle reporting "handled", so
   // ⌘↑/⌘↓ would stop falling back to cycling projects and simply do nothing, forever.
   const { ModManager } = await setup();
-  ModManager.showView(WORKSHOP_VIEW);
-  bridgeFor(ModManager, 'workshop').onExcursionCycle(() => {});
+  ModManager.showView(INBOX_VIEW);
+  bridgeFor(ModManager, 'inbox').onExcursionCycle(() => {});
   ModManager.showView(TOWER_VIEW);
-  ModManager.showView(WORKSHOP_VIEW);
-  bridgeFor(ModManager, 'workshop').visitSession('a');
+  ModManager.showView(INBOX_VIEW);
+  bridgeFor(ModManager, 'inbox').visitSession('a');
   assert.strictEqual(ModManager.requestExcursionCycle(1), false);
 });
 
 test('only the page in the slot may lend you out', async () => {
   // A panel mod calling visitSession would start a trail back to a view that is not on screen.
   const { ModManager } = await setup();
-  ModManager.showView(WORKSHOP_VIEW);
+  ModManager.showView(INBOX_VIEW);
   bridgeFor(ModManager, 'action-required').visitSession('b');
   assert.strictEqual(ModManager.isExcursionActive(), false);
 });
 
 test('focusSession is untouched: it starts no excursion (#661 is strictly opt-in)', async () => {
   const { ModManager, state, backBtn } = await setup();
-  ModManager.showView(WORKSHOP_VIEW);
-  bridgeFor(ModManager, 'workshop').focusSession('b');
+  ModManager.showView(INBOX_VIEW);
+  bridgeFor(ModManager, 'inbox').focusSession('b');
 
   assert.strictEqual(ModManager.isExcursionActive(), false, 'no existing mod changes');
   assert.strictEqual(ModManager.isModViewVisible(), false);
   assert.strictEqual(state.railSuppressed, false);
-  assert.strictEqual(backBtn.textContent, '← Workshop', 'the plain one-hop label');
+  assert.strictEqual(backBtn.textContent, '← Inbox', 'the plain one-hop label');
   assert.strictEqual(backBtn.classList.contains('excursion'), false);
 });
 
@@ -415,19 +415,19 @@ test('a corrupt stored stack reads as no excursion rather than wedging the slot'
   const a = await setup({ keepStorage: true });
   assert.strictEqual(a.ModManager.isExcursionActive(), false);
 
-  sessionMap.set('deepsteve-excursion', JSON.stringify({ appId: 'workshop', stack: 'nope' }));
+  sessionMap.set('deepsteve-excursion', JSON.stringify({ appId: 'inbox', stack: 'nope' }));
   const b = await setup({ keepStorage: true });
   assert.strictEqual(b.ModManager.isExcursionActive(), false);
 
-  sessionMap.set('deepsteve-excursion', JSON.stringify({ appId: 'workshop', stack: [{}, { sessionId: 'a' }] }));
+  sessionMap.set('deepsteve-excursion', JSON.stringify({ appId: 'inbox', stack: [{}, { sessionId: 'a' }] }));
   const c = await setup({ keepStorage: true });
   assert.strictEqual(c.ModManager.getExcursion().depth, 1, 'frames without a session are dropped');
 });
 
 test('the trail cannot grow without bound', async () => {
   const { ModManager, state } = await setup();
-  ModManager.showView(WORKSHOP_VIEW);
-  bridgeFor(ModManager, 'workshop').visitSession('a');
+  ModManager.showView(INBOX_VIEW);
+  bridgeFor(ModManager, 'inbox').visitSession('a');
   for (let i = 0; i < 60; i++) {
     state.live.add('s' + i);
     ModManager.noteExcursionDrill('s' + i);

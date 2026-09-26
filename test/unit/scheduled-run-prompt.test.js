@@ -44,7 +44,7 @@ const CONTEXT_HEADING = 'Project context for scheduled runs, from .deepsteve/sch
 
 test('MCP, not isolated: the contract and the unattended rules, and no worktree text', () => {
   const out = scheduledRunPrompt(task, { mcpWired: true });
-  assert.strictEqual(out.split('\n')[0], HEADER, 'the ⏰ header stays verbatim — noRunResult and Workshop refer to it');
+  assert.strictEqual(out.split('\n')[0], HEADER, 'the ⏰ header stays verbatim — noRunResult and Inbox refer to it');
   for (const name of TOOL_NAMES) assert.ok(out.includes(`\`${name}\``), `MCP prompt never names ${name}`);
   assert.match(out, /nobody will answer a question/i, 'the no-questions rule (#708)');
   assert.match(out, /durable_days/, 'a human-needed run asks durably, so the question outlives the tab');

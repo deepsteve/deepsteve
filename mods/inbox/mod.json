@@ -1,0 +1,62 @@
+{
+  "name": "Inbox",
+  "version": "0.12.0",
+  "minDeepsteveVersion": "0.4.0",
+  "description": "Inbox, async agent messages",
+  "experimental": true,
+  "enabledByDefault": false,
+  "entry": "index.html",
+  "app": true,
+  "toolbar": { "label": "Inbox" },
+  "settings": [
+    {
+      "key": "pollSeconds",
+      "type": "number",
+      "label": "Refresh interval (s)",
+      "description": "How often the inbox re-reads the server. Lower is snappier and costs more screen scrapes.",
+      "default": 2
+    },
+    {
+      "key": "idleAfterSeconds",
+      "type": "number",
+      "label": "Call a session idle after (s)",
+      "description": "How long an agent must sit at its prompt before the bench says it is waiting on you. Lower if you are watching; higher if you are not.",
+      "default": 15
+    },
+    {
+      "key": "showBriefings",
+      "type": "boolean",
+      "label": "Show briefings",
+      "description": "Include the read-only notes agents post with inbox_brief",
+      "default": true
+    },
+    {
+      "key": "groupByProject",
+      "type": "boolean",
+      "label": "Group by project",
+      "description": "Bucket the list under project headings instead of one flat run",
+      "default": false
+    },
+    {
+      "key": "compactRows",
+      "type": "boolean",
+      "label": "Compact rows",
+      "description": "One line per item — hides the session and project line",
+      "default": false
+    },
+    {
+      "key": "showBacklog",
+      "type": "boolean",
+      "label": "Show backlog",
+      "description": "List the focused project's open GitHub issues under the inbox — all of them, or one label's worth",
+      "default": true
+    },
+    {
+      "key": "backlogPollSeconds",
+      "type": "number",
+      "label": "Backlog refresh (s)",
+      "description": "How often the issue list re-reads GitHub. Minutes, not seconds — a backlog changes slowly and every refresh runs gh.",
+      "default": 120
+    }
+  ]
+}

@@ -341,7 +341,7 @@ function appendClientLogEntries(windowId, entries) {
   for (const e of entries.slice(0, CLIENT_LOG_MAX_ENTRIES)) {
     const kind = sanitizeClientLogField(e && e.kind, 40) || 'event';
     const msg = sanitizeClientLogField(e && e.msg, 400);
-    // The realm (shell, mod:workshop, display-tab:…) is what #675 lacked: 660 rejections and no way
+    // The realm (shell, mod:inbox, display-tab:…) is what #675 lacked: 660 rejections and no way
     // to tell which of the page's same-origin realms was making them.
     const realm = sanitizeClientLogField(e && e.realm, 40);
     log(`[client ${win}${realm ? ` ${realm}` : ''}] ${kind}: ${msg}`);
@@ -738,7 +738,7 @@ const SETTINGS_SCHEMA = [
   { name: 'issueAutopilot',             type: 'boolean', default: false },
   // #668: the workflow stages appended to every issue prompt — orient, ask rather than
   // guess, flag surprises, justify before merging — so a finished issue can be judged
-  // from the Workshop inbox instead of by opening its tab. A mod's own enable/disable is
+  // from the Inbox instead of by opening its tab. A mod's own enable/disable is
   // per-browser localStorage and never reaches the server, and this decision is made
   // server-side at spawn time, so it needs a real setting (same reason projectModsEnabled
   // and scheduledTasksEnabled exist). Read live inside issueStagesText(), so a Settings
@@ -3255,7 +3255,7 @@ function setWaiting(e, id, waiting, via, extra = {}) {
  * It lives on the entry rather than in the mod that noticed it, because three different
  * things need it and none of them can ask a mod: the tab strip (a glyph, so you can see
  * it without opening anything), `get_session_info` (so the AGENT can find out what state
- * it is in), and the Workshop list. One writer, so those three can never disagree.
+ * it is in), and the Inbox list. One writer, so those three can never disagree.
  *
  * PERSISTED, via serializeShellEntry. The claim is "the last merge attempt failed and
  * none has succeeded since", which a restart does not falsify — and a state that
@@ -3893,7 +3893,7 @@ let stateFrozen = false;  // Set during shutdown to prevent onExit handlers from
 // (configDir was lost this way, breaking #537 profile resumes — #542).
 // `mergeBlock` is the merge-blocked session state: carried so a `./restart.sh` between a
 // refused merge and the fix does not silently drop it — see setMergeBlock().
-// `resultItemId` / `resultApprovedAt` are Workshop's review-gate stamps (#669), carried
+// `resultItemId` / `resultApprovedAt` are Inbox's review-gate stamps (#669), carried
 // for the same reason `autopilot` is: they are read at completion time, and a
 // ./restart.sh landing between a human pressing Approve and the agent calling
 // issue_complete would otherwise silently send it back to "share a result first".
@@ -3901,7 +3901,7 @@ let stateFrozen = false;  // Set during shutdown to prevent onExit handlers from
 // were already on the branch when this session started, it cannot be recomputed later
 // (by then they look like everyone else's), and issue_complete reads it at the end.
 // `lastHumanInputAt` (#710) is when a person last replied in the session. It is kept
-// separately from `lastInputTime` because every programmatic prompt stamps that one. Workshop
+// separately from `lastInputTime` because every programmatic prompt stamps that one. Inbox
 // reads it off the live entry or the closed record to see that a question was overtaken, so it
 // has to outlive both a restart and the session closing.
 function serializeShellEntry(entry) {
@@ -4338,7 +4338,7 @@ function restartBlockedBy() {
   return null;
 }
 
-// Who wants to know that a PERSON submitted a line in a session tab (#710). Workshop does: a
+// Who wants to know that a PERSON submitted a line in a session tab (#710). Inbox does: a
 // reply typed in the tab supersedes the questions that session left in the inbox. Keyed by
 // name rather than a list, because initMCP has run twice in one boot before (#670), and a
 // second registration must replace the first rather than double every call. An observer gets
@@ -7141,7 +7141,7 @@ function startIssueSession({ number, title, body, labels, url, cwd, agentType, c
  * Start an agent session in a directory with a prompt, and open its tab (#705).
  *
  * The first shared form of the spawn recipe that open_terminal, the scheduled-tasks runner and
- * startIssueSession each still carry inline. Only Workshop's decision links use it so far — the
+ * startIssueSession each still carry inline. Only Inbox's decision links use it so far — the
  * follow-up session an option's `then` starts, and Discuss when the asker cannot be restored.
  * Moving those three onto it is deliberately a separate change.
  *
@@ -8895,7 +8895,7 @@ function broadcastToWindow(windowId, msg) {
 // transcriptPath landed last — every mod's stashed ctx came from it (`init(context)`
 // assigns unconditionally, and nothing here awaits the first call). The chat pane's
 // transcript reader was therefore dead from the day it shipped, silently falling back
-// to the workshop_say store. Adding a ctx field means editing this line, never copying it.
+// to the inbox_say store. Adding a ctx field means editing this line, never copying it.
 initMCP({ app, security, shells, wss, broadcast, broadcastToWindow, log, MODS_DIR, closeSession, tombstoneSession, handleShellGone, spawnSession, sessionEnv, getSpawnArgs, mcpConfigArgs, getAgentConfig, resolveConfigDir, validateModel, validateEffort, wireShellOutput, watchClaudeSessionDir, unwatchClaudeSessionDir, resolveForkParentSession, transcriptPath, saveState, validateWorktree, ensureWorktree, sessionPaths, submitToShell, fetchIssueFromGitHub, deliverPromptWhenReady, startIssueSession, reloadClients, deliverToWindow, noteSpawnDelivery, settings, isShuttingDown: () => shuttingDown, displayTabs, setDisplayTab, deleteDisplayTab, screenshots, setScreenshot, deleteScreenshot, getScreenshotPath, getDefaultEngine, getForegroundCommand, sessionLog, emitSessionOpen, getContexts: () => contexts, pathInside, getSavedSession: (id) => savedState[id] || null, links, linkUrl: links.urlFor, spawnAgentSession, stripEscapeSequences, readTerminalScreen, sessionInputState, setMergeBlock, recordMergeAttempt, maybeInheritRemoteControl, requestMetaControlsConsent, registerRestartBlocker, registerSubmitKeyObserver, registerDisplayTabHooks, armSessionAutoClose, logRcWrite }).catch(e => log('MCP init failed:', e.message));
 
 // Watch themes directory for changes and broadcast to clients

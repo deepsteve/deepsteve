@@ -1,9 +1,9 @@
 // Repeated auth rejections must collapse into one line plus a count.
 //
 // The first version of this throttle spent a single global budget of 5 lines per 10s window. That
-// shape assumes a burst. #675 was a *poller*: a workshop iframe re-fetching every 2s with a stale
+// shape assumes a burst. #675 was a *poller*: an Inbox iframe re-fetching every 2s with a stale
 // cookie emits roughly five rejections per window, so the budget was never spent and every single
-// poll got its own line — 541 identical `GET /api/workshop/inbox` rejections in half an hour, which
+// poll got its own line — 541 identical `GET /api/inbox/items` rejections in half an hour, which
 // buried everything else in the daemon log. These tests pin the collapse-by-cause behavior that
 // replaced it, and the two things the old code got wrong: no key (so unrelated endpoints shared one
 // budget) and no timer (so a storm that stopped never printed its tail).
@@ -60,26 +60,26 @@ describe('auth rejection logging collapses repeats', () => {
 
   it('logs the first rejection of a cause immediately', () => {
     const t = fresh();
-    t.reject('GET', '/api/workshop/inbox');
+    t.reject('GET', '/api/inbox/items');
     assert.strictEqual(t.rejections().length, 1, 'the first sighting must not be delayed');
-    assert.match(t.rejections()[0], /Auth: rejected GET \/api\/workshop\/inbox — invalid auth cookie \(401\)/);
+    assert.match(t.rejections()[0], /Auth: rejected GET \/api\/inbox\/items — invalid auth cookie \(401\)/);
   });
 
   it('a poller produces one line plus one rollup, not one line per poll', () => {
     const t = fresh();
-    for (let i = 0; i < 300; i++) t.reject('GET', '/api/workshop/inbox');
+    for (let i = 0; i < 300; i++) t.reject('GET', '/api/inbox/items');
     assert.strictEqual(t.rejections().length, 1,
       `300 identical polls logged ${t.rejections().length} rejection lines`);
     t.security._rejectLog.flush();
     assert.strictEqual(t.rollups().length, 1);
-    assert.match(t.rollups()[0], /Auth: rejected GET \/api\/workshop\/inbox — invalid auth cookie ×300 in 60s/);
+    assert.match(t.rollups()[0], /Auth: rejected GET \/api\/inbox\/items — invalid auth cookie ×300 in 60s/);
   });
 
   it('keys distinct endpoints separately', () => {
     const t = fresh();
-    t.reject('GET', '/api/workshop/inbox');
+    t.reject('GET', '/api/inbox/items');
     t.reject('GET', '/api/scheduled-tasks');
-    t.reject('POST', '/api/workshop/inbox');
+    t.reject('POST', '/api/inbox/items');
     assert.strictEqual(t.rejections().length, 3, 'method and path both belong in the key');
   });
 
@@ -132,24 +132,24 @@ describe('auth rejection logging collapses repeats', () => {
   });
 
   it('collapses id-bearing path segments', () => {
-    // The incident's second-loudest line was /api/workshop/items/blocked%3A<sessionId>/screen — 48
+    // The incident's second-loudest line was /api/inbox/items/blocked%3A<sessionId>/screen — 48
     // of them. Keying on the raw path mints one key per session, and once past the key cap every
     // later session falls into the anonymous overflow bucket instead of being named once.
     const t = fresh();
-    t.reject('GET', '/api/workshop/items/blocked%3A31b72d2a/screen');
-    t.reject('GET', '/api/workshop/items/blocked%3Aaa839f69/screen');
-    t.reject('GET', '/api/workshop/items/blocked%3A90f893a0/screen');
+    t.reject('GET', '/api/inbox/items/blocked%3A31b72d2a/screen');
+    t.reject('GET', '/api/inbox/items/blocked%3Aaa839f69/screen');
+    t.reject('GET', '/api/inbox/items/blocked%3A90f893a0/screen');
     assert.strictEqual(t.rejections().length, 1, 'one poller, one line');
     t.security._rejectLog.flush();
-    assert.match(t.rollups()[0], /\/api\/workshop\/items\/:id\/screen — invalid auth cookie ×3/);
+    assert.match(t.rollups()[0], /\/api\/inbox\/items\/:id\/screen — invalid auth cookie ×3/);
   });
 
   it('does not collapse ordinary path segments', () => {
     // The normalization has to stop at things that actually look like ids, or every endpoint
     // collapses into one key and the log stops naming what is broken.
     const t = fresh();
-    t.reject('GET', '/api/workshop/inbox');
-    t.reject('GET', '/api/workshop/items');
+    t.reject('GET', '/api/inbox/items');
+    t.reject('GET', '/api/inbox/backlog');
     t.reject('GET', '/api/scheduled-tasks');
     assert.strictEqual(t.rejections().length, 3);
   });

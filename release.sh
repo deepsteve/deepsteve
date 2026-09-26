@@ -256,6 +256,15 @@ find mods -type f -not -path '*/.*' | LC_ALL=C sort | while IFS= read -r f; do
   fi
 done
 
+# Mods renamed in place leave their old directory behind on an upgrade: this installer only
+# writes files, and unlike restart.sh it prunes nothing. The server loads every directory in
+# mods/, so the old copy would register its tools and routes beside the new one. A directory
+# with a .source marker was installed by the user, not by us, and is left alone.
+for renamed in workshop; do
+  echo "[ -d \"\$INSTALL_DIR/mods/$renamed\" ] && [ ! -f \"\$INSTALL_DIR/mods/$renamed/.source\" ] && rm -r \"\$INSTALL_DIR/mods/$renamed\"" >> "$OUT"
+done
+echo "" >> "$OUT"
+
 # Skill files. A skill whose frontmatter carries `maintainer: true` drives this repo's
 # own maintenance rather than the user's project, so it is deliberately left out of the
 # installed build: it exists only in a git clone, and even there it ships disabled until

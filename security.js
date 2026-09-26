@@ -226,7 +226,7 @@ function createSecurity(cfg) {
   //
   // The first cut throttled a single global budget of 5 lines per 10s window. A *burst* is not the
   // shape this actually takes: #675 was a 2s poller, which emits ~5 per window, so the budget was
-  // never spent and every single poll got its own line — 541 identical `GET /api/workshop/inbox`
+  // never spent and every single poll got its own line — 541 identical `GET /api/inbox/items`
   // rejections in half an hour, burying everything else. Collapse by CAUSE instead: key on
   // method + path + reason, log a key's first occurrence immediately, then count and emit one
   // rollup per key per window.
@@ -236,7 +236,7 @@ function createSecurity(cfg) {
   // varies per call is not a key — it is the unthrottled log we started with.
   //   - the query string goes: /api/git-root?cwd=A and ?cwd=B are one poller and one bug
   //   - id-shaped path segments go: the incident's second-noisiest line was
-  //     /api/workshop/items/blocked%3A<sessionId>/screen, which would otherwise mint a key per
+  //     /api/inbox/items/blocked%3A<sessionId>/screen, which would otherwise mint a key per
   //     session and, once past REJECT_MAX_KEYS, spill every later session into the overflow bucket
   const ID_SEGMENT = /^(?:[0-9a-f]{8,}|\d+|.*%3A.*|.*:.*)$/i;
   function rejectKey(method, url, why) {

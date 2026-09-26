@@ -97,7 +97,7 @@ test('markers cover the real permission and idle-footer phrasings', () => {
 test('the plan-approval gate reads as waiting, and a saved plan path does not', () => {
   // Its footer names neither Esc nor Enter and its question is "Would you like to
   // proceed?", so none of the other permission markers see it — a session sitting on
-  // it reported 'unknown', which is what kept Workshop's pre-filter from ever
+  // it reported 'unknown', which is what kept Inbox's pre-filter from ever
   // scraping the screen. Both halves of the marker are load-bearing: `.claude/plans/`
   // on its own is what an agent writes every time it saves one, mid-turn.
   const gate = 'ctrl+g to edit in VS Code · ~/.claude/plans/i-need-you-to-humming-lobster.md';

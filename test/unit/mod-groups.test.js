@@ -20,7 +20,7 @@ const MODULE_URL = pathToFileURL(
 // One entry per section, plus the two shapes that are easy to lose: an unknown kind, and a
 // catalog row that is not installed.
 const FIXTURE = [
-  { id: 'workshop', name: 'Workshop', kind: 'app', description: 'One inbox for every agent' },
+  { id: 'inbox', name: 'Inbox', kind: 'app', description: 'One inbox for every agent' },
   { id: 'tasks', name: 'Tasks', kind: 'panel', description: 'Task list for human actions',
     tools: [{ name: 'add_task' }] },
   { id: 'screenshots', name: 'Screenshots', kind: 'panel', description: 'Capture terminal images',

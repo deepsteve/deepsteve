@@ -1,8 +1,8 @@
 // Guard for MOD_SANDBOX — the sandbox attribute every mod iframe gets (#671).
 //
-// This is its own file rather than a case in workshop-mod-shape.test.js because the
+// This is its own file rather than a case in inbox-mod-shape.test.js because the
 // string is the HOST's, shared by the panel path and the fullscreen path and by every
-// mod that will ever want to link out. Workshop is only the first caller.
+// mod that will ever want to link out. Inbox is only the first caller.
 //
 // Every failure mode here is SILENT. A sandbox flag does not throw when it is missing;
 // the affordance it gates simply stops working, with no console line in most browsers.
@@ -77,7 +77,7 @@ test('a mod can open an external link — BOTH popup flags, or the feature is wo
     flags.has('allow-popups'),
     'MOD_SANDBOX dropped allow-popups. Without it a mod iframe cannot open an external '
     + 'URL at all: <a target="_blank"> and window.open() are both refused, and refused '
-    + 'SILENTLY — no exception, no console line, the click just does nothing. Workshop\'s '
+    + 'SILENTLY — no exception, no console line, the click just does nothing. Inbox\'s '
     + 'backlog rows (#671) link to GitHub through a real anchor and need it.',
   );
 

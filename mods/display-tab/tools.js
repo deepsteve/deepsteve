@@ -5,8 +5,8 @@ const { randomUUID } = require('crypto');
 // so it lives at the root rather than here. See html-source.js.
 const { resolveHtml } = require('../../html-source.js');
 const decision = require('./decision.js');
-// The same "is a modal on screen?" gate Workshop's chat endpoint uses, rather than a second one.
-const dialogParse = require('../workshop/dialog-parse.js');
+// The same "is a modal on screen?" gate Inbox's chat endpoint uses, rather than a second one.
+const dialogParse = require('../inbox/dialog-parse.js');
 
 const DIALOG_ROWS = 30;
 const DECISION_BAR_SRC = '/mods/display-tab/decision-bar.js';

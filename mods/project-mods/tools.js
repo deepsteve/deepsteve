@@ -617,7 +617,7 @@ function refresh(reason) {
 function init(context) {
   if (context) ctx = context;
   ensureScanned(true);
-  // What `/v1/project-mod/<id>` means. Guarded like Workshop's, so a context without the link
+  // What `/v1/project-mod/<id>` means. Guarded like Inbox's, so a context without the link
   // registry (a test's fake ctx) still loads every tool.
   if (ctx && ctx.links && typeof ctx.links.registerProvider === 'function') {
     ctx.links.registerProvider(linkProvider());

@@ -68,11 +68,11 @@ Claude is the one agent never probed, because it is the default and the fallback
 | Fork a session | yes | — | — | — | — | — |
 | Plan mode | yes | — | — | yes | — | — |
 | Idle / waiting classification | yes | — | — | — | — | — |
-| Workshop dialog answering | yes | — | — | — | — | — |
-| Workshop result gate (`share_result`) | yes | yes | — | — | — | — |
+| Inbox dialog answering | yes | — | — | — | — | — |
+| Inbox result gate (`share_result`) | yes | yes | — | — | — | — |
 | Autopilot merge (`issue_complete`) | yes | yes | — | — | — | — |
 | Merged from the tab menu (no agent) | yes | yes | yes | yes | yes | yes |
-| Workshop chat, agent's replies read from | transcript | `workshop_say` | — ⚠️ | — ⚠️ | — ⚠️ | — |
+| Inbox chat, agent's replies read from | transcript | `inbox_say` | — ⚠️ | — ⚠️ | — ⚠️ | — |
 | Prompt readiness | screen state | rendered MCP boot | 3s timer | 3s timer | 3s timer | 30s deadline |
 | Echo-confirmed submit | yes | own Enter retry | — | — | — | — |
 | Session pinned by | `--session-id` | per-tab `CODEX_HOME` | nothing | `--session` | `--session-dir` | nothing |
@@ -198,8 +198,8 @@ path. What Codex does *not* have is ongoing idle/busy classification: `state` fr
 - ⚠️ **Scheduled-run contract tools are not pre-permitted.** A scheduled Codex run *is*
   given the self-report contract (the `mcpWired` probe is true for Codex), but the
   `--allowedTools` pre-permit from #612 is a no-op, because that flag lives only on
-  `AGENT_CONFIGS.claude`. Since #708 the contract also names `workshop_answers`,
-  `workshop_ask` and `share_result`, which Claude gets pre-permitted and Codex does not,
+  `AGENT_CONFIGS.claude`. Since #708 the contract also names `inbox_answers`,
+  `inbox_ask` and `share_result`, which Claude gets pre-permitted and Codex does not,
   so there are more tools to stall on. So an unattended Codex run can block on a permission prompt,
   never call `scheduled_task_finished`, and leave its run stuck at `running` — which
   makes the overlap guard skip **every subsequent fire of that task** until
@@ -409,26 +409,26 @@ wired — in practice `claude` and `codex`. Mods add more; see [mods.md](mods.md
 - **`read_session_screen`**: ungated read-only companion to `meta_type` — returns the last N lines (default 40, max 200) of a session's server-side interpreted terminal buffer plus `state` (`idle`/`busy`/`unknown`) and `seconds_since_output`. Cursor movement, erase operations, alternate-screen redraws, reflow, and CSI intermediate bytes are resolved before lines are returned. Use it to check what a session is doing or to verify typed input landed — no more `browser_eval` poking at `window.__deepsteve` internals.
 - **`issue_complete`**: an issue session calls this when it believes the work is done — every issue prompt ends with an instruction to, in both autopilot states. It resolves the caller the way `merge_worktree` does (`session_id`, else `shellId` from the MCP request URL), reads `autopilot` off that session's entry, and either stops (`next: 'stop'`, leave the tab for review) or **performs the merge and reports it** (`next: 'merged'`). Since #688 it does the merge itself rather than answering with instructions: the old answer named `/deepsteve:merge`, and running that skill was about ten further assistant turns — each one a full replay of a session's context at its largest point — to rediscover facts the daemon already had. It takes optional `target`/`subject`/`body`, which cost a caller nothing because they ride on the call it was making anyway, and it needs none of them. `conflict` is the one status handed back to the agent (`next: 'resolve-conflict'`: rebase in the worktree, retry through `merge_worktree`), because resolving one needs the code in context; every other status is `next: 'stop'` with the target untouched. There is no longer an `enabledSkills` check or a Codex `$deepsteve-merge` rewrite — a server-side merge names no command, so whether a skill is installed stopped being a fact this tool has any reason to know. See [sessions.md](sessions.md) for why the flag is read at call time rather than injected when it is switched on.
 - **`merge_session` (#688)**: the composed merge, and the whole of what `/deepsteve:merge` used to do step by step — read the branch, commit anything uncommitted, resolve the target, merge in the checkout that holds it, close the GitHub issue a `*github-issue-<n>*` branch names, and arm the #627 auto-close. `issue_complete` calls the same routine; this is the tool for a worktree that is not issue-shaped (a `/deepsteve:fork` branch, a hand-made one). The commit subject is derived with no model involvement — `<issue title> (#<n>)` from a live `gh issue view`, else `Merge <branch> into <target>`, and never a `Co-Authored-By` trailer — though a caller may pass a better `subject`. From a **non-worktree** session it commits and pushes on the branch it is already on, and merges and closes nothing (`pushed`/`push-failed`). Statuses are `merge_worktree`'s, unchanged. Use `merge_worktree` instead when you want the merge alone.
-- **Decision links: `workshop_ask`'s `url` and `workshop_answers` (#705, Workshop mod)**:
-  - `workshop_ask` returns `{ id, url, message }`. `url` is `/v1/decision/<id>`, a link an agent
+- **Decision links: `inbox_ask`'s `url` and `inbox_answers` (#705, Inbox mod)**:
+  - `inbox_ask` returns `{ id, url, message }`. `url` is `/v1/decision/<id>`, a link an agent
     puts in an email so the question opens and is answered in one click. The id is a random UUID
     the server mints; an agent never chooses or predicts it.
   - `durable_days` (at most 30) keeps the question after the session closes.
   - An option's `then` says what a new session in the project should do if that option is picked
-    after the asker has gone. That session does it, reports the outcome with `workshop_brief`,
+    after the asker has gone. That session does it, reports the outcome with `inbox_brief`,
     and closes itself, so `then` should be a complete action.
-  - `workshop_answers({ since })` reads answered questions back. From a scheduled run it covers
+  - `inbox_answers({ since })` reads answered questions back. From a scheduled run it covers
     every run of the same task (the server records which task asked); from any other session,
     that session's own questions. It is how the next run of a scheduled job hears a "no".
   - A question is **superseded** (#710) when a person replies in the asking session, or when a
-    later run of the same scheduled task succeeds. `workshop_check` says so and why; the agent
+    later run of the same scheduled task succeeds. `inbox_check` says so and why; the agent
     never has to close its own questions. See [mods.md](mods.md#superseded-questions-710).
-  - An unattended agent needs `workshop_ask` in its allowed tools, or it stalls on a permission
-    prompt. A scheduled Claude run has it (and `workshop_answers` and `share_result`)
+  - An unattended agent needs `inbox_ask` in its allowed tools, or it stalls on a permission
+    prompt. A scheduled Claude run has it (and `inbox_answers` and `share_result`)
     pre-permitted since #708, because its prompt names them; see
     [scheduled-tasks.md](scheduled-tasks.md).
   - See [links.md](links.md).
-- **`share_result` (#669, Workshop mod)**: the other half of `issue_complete`'s gate. An agent posts a writeup — `summary` (what changed and *why this shape*), `before`/`after`, `images`, `caveats` — to the Workshop inbox, and it **returns immediately**: the human's Approve or Request-changes arrives later as a new message, so the agent ends its turn rather than polling. It is an approval gate, not a status update: with `issueStagesEnabled` on, `issue_complete` answers `share_result` (nothing shared) or `await_review` (shared, undecided) instead of `merge` until a result has been approved. Two fields on the shell entry carry the state — `resultItemId`, written by the tool itself and which by itself *refuses* a merge, and `resultApprovedAt`, written only from the panel's answer endpoint. `images` are references, never base64: a screenshot id or a path inside the caller's own project, copied into a Workshop-owned store at share time (a screenshot would otherwise vanish under the 7-day sweep) and served from `/api/workshop/images/<file>`. See [mods.md](mods.md#workshop) for the store and the retention rules.
+- **`share_result` (#669, Inbox mod)**: the other half of `issue_complete`'s gate. An agent posts a writeup — `summary` (what changed and *why this shape*), `before`/`after`, `images`, `caveats` — to the Inbox, and it **returns immediately**: the human's Approve or Request-changes arrives later as a new message, so the agent ends its turn rather than polling. It is an approval gate, not a status update: with `issueStagesEnabled` on, `issue_complete` answers `share_result` (nothing shared) or `await_review` (shared, undecided) instead of `merge` until a result has been approved. Two fields on the shell entry carry the state — `resultItemId`, written by the tool itself and which by itself *refuses* a merge, and `resultApprovedAt`, written only from the panel's answer endpoint. `images` are references, never base64: a screenshot id or a path inside the caller's own project, copied into an Inbox-owned store at share time (a screenshot would otherwise vanish under the 7-day sweep) and served from `/api/inbox/images/<file>`. See [mods.md](mods.md#inbox) for the store and the retention rules.
 - **Browser Console / Screenshots**: these operate on the deepsteve UI tab only — they do NOT access your project's website or any other browser tab. `screenshot_capture` and `scene_snapshot` save PNGs to disk and return the file path; use the `Read` tool on that path to view the image. Do NOT try to base64-decode or re-save — the bytes are already on disk at the returned path. All three return an immediate `isError` when no browser window is connected, rather than broadcasting into the void.
 
 ## Adding an agent

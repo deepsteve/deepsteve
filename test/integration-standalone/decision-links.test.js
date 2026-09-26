@@ -2,7 +2,7 @@
  * Decision links end to end (#705): a real daemon, a real MCP client, real PTYs.
  *
  * test/unit/links.test.js pins every branch of the /v1 scheme and
- * test/unit/workshop-decision-links.test.js drives Workshop's provider through it with a fake
+ * test/unit/inbox-decision-links.test.js drives Inbox's provider through it with a fake
  * ctx. What neither can prove is the part that only exists in a running daemon:
  *
  *   1. the routes are mounted where the auth gate covers them, and the page's script and
@@ -13,7 +13,7 @@
  *   4. with the asking session closed, an option's `then` really spawns a session in the
  *      project, and its prompt — including the instruction to close itself — really reaches
  *      that session's composer;
- *   5. workshop_answers hands the answer back to the asker's own scope, and to nobody else.
+ *   5. inbox_answers hands the answer back to the asker's own scope, and to nobody else.
  *
  * Own daemon: scratch $HOME, random port, its own tmux server via the scratch HOME (#625), and
  * disposable (#678), so the follow-up's "open the UI" logs a URL instead of opening a browser.
@@ -237,13 +237,13 @@ let asker = null;
 let askerMcp = null;
 let decision = null;
 
-test('the link scheme and Workshop\'s provider are live', async () => {
-  await waitFor(() => /registered tool "workshop_answers" from mod "workshop"/.test(daemonLog),
-    'the workshop mod to register — look for `failed to load tools from mod "workshop"` below', 20000);
-  await waitFor(() => /\[links\] provider "workshop" registered/.test(daemonLog), 'the workshop link provider', 20000);
+test('the link scheme and Inbox\'s provider are live', async () => {
+  await waitFor(() => /registered tool "inbox_answers" from mod "inbox"/.test(daemonLog),
+    'the inbox mod to register — look for `failed to load tools from mod "inbox"` below', 20000);
+  await waitFor(() => /\[links\] provider "inbox" registered/.test(daemonLog), 'the inbox link provider', 20000);
 });
 
-test('workshop_ask from a live session returns a server-minted id and a link on the canonical origin', async () => {
+test('inbox_ask from a live session returns a server-minted id and a link on the canonical origin', async () => {
   const c = new Client();
   clients.push(c);
   const s = await c.connect({ cwd: projDir, new: '1', agentType: 'claude' });
@@ -252,7 +252,7 @@ test('workshop_ask from a live session returns a server-minted id and a link on 
 
   askerMcp = await mcpFor(asker);
   decision = JSON.parse(toolText(await askerMcp.callTool({
-    name: 'workshop_ask',
+    name: 'inbox_ask',
     arguments: {
       question: QUESTION,
       context: 'Drafted in the report: **Track exports**.',
@@ -274,11 +274,11 @@ test('the page renders for a signed-in browser, and its assets are served', asyn
   assert.match(ok.text, /id="decision-data"/);
   assert.match(ok.text, /"status":"open"/);
 
-  for (const asset of ['/mods/workshop/decision-page.js', '/mods/workshop/markdown.js', '/mods/workshop/decision-page.css']) {
+  for (const asset of ['/mods/inbox/decision-page.js', '/mods/inbox/markdown.js', '/mods/inbox/decision-page.css']) {
     const r = await raw('GET', asset);
     assert.strictEqual(r.status, 200, `${asset} -> ${r.status}`);
   }
-  const script = await raw('GET', '/mods/workshop/decision-page.js');
+  const script = await raw('GET', '/mods/inbox/decision-page.js');
   assert.match(script.headers['content-type'], /javascript/, 'a module script with the wrong MIME type never runs');
 });
 
@@ -301,8 +301,8 @@ test('the stored item decides the type, and every other address explains itself'
   assert.strictEqual(wrong.status, 302);
   assert.strictEqual(wrong.headers.location, `/v1/decision/${decision.id}`);
 
-  await askerMcp.callTool({ name: 'workshop_brief', arguments: { headline: 'Nightly report sent' } });
-  const inbox = await (await fetch(`${BASE}/api/workshop/inbox?all=1`, { headers: authHeaders() })).json();
+  await askerMcp.callTool({ name: 'inbox_brief', arguments: { headline: 'Nightly report sent' } });
+  const inbox = await (await fetch(`${BASE}/api/inbox/items?all=1`, { headers: authHeaders() })).json();
   const brief = inbox.items.find((i) => i.headline === 'Nightly report sent');
   assert.ok(brief, 'the briefing is on the inbox');
   const reserved = await page(`/v1/markdown/${brief.id}`);
@@ -336,7 +336,7 @@ test('with the asker closed, the option\'s `then` starts a session in the projec
   assert.ok(followUp, 'the follow-up session id is recorded on the item');
   assert.notStrictEqual(followUp, asker);
 
-  const spawnLine = daemonLog.split('\n').find((l) => l.includes(`[spawn] workshop then: id=${followUp} `));
+  const spawnLine = daemonLog.split('\n').find((l) => l.includes(`[spawn] inbox then: id=${followUp} `));
   assert.ok(spawnLine, 'the spawn was logged');
   assert.ok(spawnLine.endsWith(`cwd=${projDir}`), `spawned in the project root: ${spawnLine}`);
 
@@ -352,20 +352,20 @@ test('with the asker closed, the option\'s `then` starts a session in the projec
     'and, last, to close itself rather than dangle');
 });
 
-test('an item is answered once, and workshop_answers reads it back only in the asker\'s scope', async () => {
+test('an item is answered once, and inbox_answers reads it back only in the asker\'s scope', async () => {
   const again = await act(decision.id, { action: 'answer', optionIndex: 1 });
   assert.strictEqual(again.status, 409);
   assert.strictEqual(again.json.error, 'not-open');
 
   // The asker's session is closed, but its own id still scopes the read.
-  const rows = JSON.parse(toolText(await askerMcp.callTool({ name: 'workshop_answers', arguments: {} })));
+  const rows = JSON.parse(toolText(await askerMcp.callTool({ name: 'inbox_answers', arguments: {} })));
   assert.strictEqual(rows.length, 1);
   assert.strictEqual(rows[0].id, decision.id);
   assert.deepStrictEqual(rows[0].answer, { optionLabel: 'Yes', text: 'go ahead' });
   assert.strictEqual(rows[0].deliveredVia, 'then');
 
   const stranger = await mcpFor('not-the-asker');
-  const none = JSON.parse(toolText(await stranger.callTool({ name: 'workshop_answers', arguments: {} })));
+  const none = JSON.parse(toolText(await stranger.callTool({ name: 'inbox_answers', arguments: {} })));
   assert.deepStrictEqual(none, [], 'another caller cannot read the asker\'s answers');
 });
 
@@ -378,7 +378,7 @@ test('Discuss on the closed asker asks a window to restore it', async () => {
 });
 
 test('a line a person submits in the asking tab supersedes its question, and the link stops offering the then (#710)', async () => {
-  // The unit tests call Workshop's observer directly. This is the part only a daemon has: a
+  // The unit tests call Inbox's observer directly. This is the part only a daemon has: a
   // person's Enter arriving on the session WebSocket, server.js recognising it as a submit key
   // and handing it to the observer the mod registered, before the key reaches the PTY.
   const c = new Client();
@@ -388,7 +388,7 @@ test('a line a person submits in the asking tab supersedes its question, and the
 
   const mcp = await mcpFor(s.id);
   const asked = JSON.parse(toolText(await mcp.callTool({
-    name: 'workshop_ask',
+    name: 'inbox_ask',
     arguments: {
       question: 'Send the report as CSV?',
       options: [{ label: 'Yes', then: 'Send the CSV report.' }, { label: 'No' }],
@@ -396,7 +396,7 @@ test('a line a person submits in the asking tab supersedes its question, and the
     },
   })));
   const listed = async () => {
-    const all = await (await fetch(`${BASE}/api/workshop/inbox?all=1`, { headers: authHeaders() })).json();
+    const all = await (await fetch(`${BASE}/api/inbox/items?all=1`, { headers: authHeaders() })).json();
     return all.items.find((i) => i.id === asked.id);
   };
   assert.strictEqual((await listed()).status, 'open');
@@ -420,7 +420,7 @@ test('a line a person submits in the asking tab supersedes its question, and the
   assert.strictEqual(item.dismissedReason, 'superseded');
   assert.strictEqual(item.supersededBy.rule, 'tab-reply');
   assert.match(item.closedNote, /replied in the asking session/);
-  assert.match(daemonLog, new RegExp(`\\[workshop\\] superseded ${asked.id} rule=tab-reply`));
+  assert.match(daemonLog, new RegExp(`\\[inbox\\] superseded ${asked.id} rule=tab-reply`));
   // Written through serializeShellEntry, so a restart or the session closing keeps it.
   const state = JSON.parse(fs.readFileSync(path.join(HOME, '.deepsteve', 'state.json'), 'utf8'));
   assert.strictEqual(state[s.id].lastHumanInputAt, item.supersededBy.at, 'the stamp is persisted with the session');
@@ -430,5 +430,5 @@ test('a line a person submits in the asking tab supersedes its question, and the
   const r = await act(asked.id, { action: 'answer', optionIndex: 0 });
   assert.strictEqual(r.status, 409, r.text);
   assert.strictEqual(r.json.error, 'superseded');
-  assert.ok(!daemonLog.includes(`workshop then ${asked.id}`), 'the option\'s then never ran');
+  assert.ok(!daemonLog.includes(`inbox then ${asked.id}`), 'the option\'s then never ran');
 });

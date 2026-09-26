@@ -12,7 +12,7 @@
 //     round trip the issue forbids;
 //   * employer framing is a one-word regression that no functional test can see.
 //
-// Pure fs reads plus validate-mods.js — the workshop-mod-shape.test.js shape, no server
+// Pure fs reads plus validate-mods.js — the inbox-mod-shape.test.js shape, no server
 // boot and no shell, so it runs in the bare `unit` CI job.
 //
 // Run: node --test test/unit/timecard-mod-shape.test.js

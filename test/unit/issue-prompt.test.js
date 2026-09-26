@@ -134,7 +134,7 @@ test('the instruction is NOT in the shipped default template', () => {
   assert.ok(start > 0 && !template.includes('issue_complete'),
     'WAND_DEFAULT_TEMPLATE must not carry the issue_complete line — append it in renderIssuePrompt (#643)');
   // Same argument, same failure mode, for the workflow stages (#668).
-  assert.ok(!template.includes('workshop'),
+  assert.ok(!template.includes('inbox'),
     'WAND_DEFAULT_TEMPLATE must not carry the workflow stages — append them in renderIssuePrompt (#668)');
 });
 
@@ -223,9 +223,9 @@ test('the stage text names only tools a mod actually registers (#668)', () => {
   // "no such tool" and improvises. PENDING held share_result while #668 shipped ahead of
   // it; #669 landed the tool, so the set is empty and every name is now checked for real.
   const PENDING = new Set();
-  const sources = ['mods/workshop/tools.js', 'mods/deepsteve-core/tools.js'].map(read);
+  const sources = ['mods/inbox/tools.js', 'mods/deepsteve-core/tools.js'].map(read);
   const named = [...new Set([...WORKFLOW_STAGES.matchAll(
-    /(?:mcp__deepsteve__)?\b(workshop_\w+|issue_complete|share_result)\b/g)].map(m => m[1]))];
+    /(?:mcp__deepsteve__)?\b(inbox_\w+|issue_complete|share_result)\b/g)].map(m => m[1]))];
   assert.ok(named.length >= 3, 'the stages should name the tools they want called');
   for (const name of named) {
     if (PENDING.has(name)) continue;

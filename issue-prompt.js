@@ -62,10 +62,10 @@ const ISSUE_COMPLETE_INSTRUCTION =
 // Stage 4 names `share_result`, which #669 builds. That is why `issueStagesEnabled`
 // ships OFF, and why the "names only registered tools" test carries an exemption.
 const WORKFLOW_STAGES = [
-  'Workflow for this issue — report as you go, so this work can be judged from the Workshop inbox without opening this tab:',
-  '1. Orient. Before writing code, post one paragraph with `mcp__deepsteve__workshop_brief`: what you understand the task to be, and how you mean to approach it.',
-  "2. Ask, don't guess. A decision you genuinely cannot make alone goes to `mcp__deepsteve__workshop_ask` with options — not into a silent assumption, and not into a comment in the code.",
-  '3. Flag surprises when you find them. Something that changes the shape of the work — the bug is not where the issue says it is, the fix is three times bigger than it looked — is another `workshop_brief` at the moment you find it, not a line in the final summary.',
+  'Workflow for this issue — report as you go, so this work can be judged from the Inbox without opening this tab:',
+  '1. Orient. Before writing code, post one paragraph with `mcp__deepsteve__inbox_brief`: what you understand the task to be, and how you mean to approach it.',
+  "2. Ask, don't guess. A decision you genuinely cannot make alone goes to `mcp__deepsteve__inbox_ask` with options — not into a silent assumption, and not into a comment in the code.",
+  '3. Flag surprises when you find them. Something that changes the shape of the work — the bug is not where the issue says it is, the fix is three times bigger than it looked — is another `inbox_brief` at the moment you find it, not a line in the final summary.',
   '4. Justify before you merge. Call `share_result` with a writeup and evidence, then `issue_complete`.',
 ].join('\n');
 

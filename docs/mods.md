@@ -172,7 +172,7 @@ mod under Background.
 | **Tasks** | panel | on | Task list populated by Agent sessions |
 | **Tower** | fullscreen | off | Pixel art skyscraper view of sessions |
 | **Village** | fullscreen | off | Walk a rainy town where every house is a project |
-| **Workshop** | app | off | One inbox for every agent that needs you — see [Workshop](#workshop) |
+| **Inbox** | app | off | One inbox for every agent that needs you — see [Inbox](#inbox) |
 
 This is a highlights list, not an inventory — it names neither every mod nor the tools each one
 registers. Those are declared in the mod's `tools.js` and reported by `GET /api/mods`, which derives
@@ -357,7 +357,7 @@ Pops everything and returns to the app.
 
 ### Quiet mode — for [Apps](#apps-661) only
 
-Both are ignored unless the caller is the page currently in the fullscreen slot. The host owns the state, renders the toggle and applies the chrome; these exist only so an app can bind ⌘\ *inside its own page*, because a host-registered shortcut listens on the top document and never sees a keystroke made in a mod iframe — which is exactly when you want the chrome gone. `mods/workshop/workshop.jsx` does this in the same keydown handler it already uses for its cursor keys.
+Both are ignored unless the caller is the page currently in the fullscreen slot. The host owns the state, renders the toggle and applies the chrome; these exist only so an app can bind ⌘\ *inside its own page*, because a host-registered shortcut listens on the top document and never sees a keystroke made in a mod iframe — which is exactly when you want the chrome gone. `mods/inbox/inbox.jsx` does this in the same keydown handler it already uses for its cursor keys.
 
 ### `toggleQuiet()`
 Flips quiet mode for this app and persists it. Do **not** build a toggle in the iframe as well — the host's is always on screen, and one built in here would be stuck on hardcoded fallback colours.
@@ -546,27 +546,27 @@ Mod state is stored in localStorage with the following keys:
 
 Panel mods are auto-enabled on first visit (when no mod preferences have been saved yet).
 
-## Workshop
+## Inbox
 
 One fullscreen inbox merging **blocked sessions** — anything sitting on a Claude Code permission
 or AskUserQuestion dialog, with the question and options parsed and rendered inline — and the
-**questions, briefings and results agents post deliberately** through `workshop_ask`,
-`workshop_brief`, `share_result` and `workshop_check`. You answer from the inbox instead of
+**questions, briefings and results agents post deliberately** through `inbox_ask`,
+`inbox_brief`, `share_result` and `inbox_check`. You answer from the inbox instead of
 switching to the tab, and since #669 a finished issue has to be approved here before
 `issue_complete` will say "merge". Approving is a transaction, though, and the reaction to a
 result is usually a question — so since #670 a third column turns any item with a session
 behind it into a conversation. See [The chat pane](#the-chat-pane-670).
 
-Everything lives in `mods/workshop/`. There is no new bridge hook:
+Everything lives in `mods/inbox/`. There is no new bridge hook:
 `registerRoutes(app, context)` already hands every mod the full `initMCP` context, and the panel
 polls its own routes. (The [Backlog](#the-backlog-671) added one host change — two popup flags on
-`MOD_SANDBOX` — but that is the shared iframe sandbox, made once for every mod, not a Workshop
+`MOD_SANDBOX` — but that is the shared iframe sandbox, made once for every mod, not an Inbox
 hook. The [workflow stages](#the-workflow-stages-668) added a real one, the
 [merge gate](#results-and-the-merge-gate-669) three more, and the
 [chat pane](#the-chat-pane-670) a fourth — `transcriptPath`, which is server.js's own helper,
 shared with #672, put into the mod context.)
 
-**Workshop is the first [App](#apps-661).** Going to look at an agent is a `visitSession()`, not
+**Inbox is the first [App](#apps-661).** Going to look at an agent is a `visitSession()`, not
 a `focusSession()`, so ⌘← brings you back; and its `onExcursionCycle` handler moves the *same*
 cursor the bare ↑/↓ keys move, so ⌘↑/⌘↓ walk the queue from inside a terminal. That walk steps
 past any item with no tab in this window — `getSessions()` is window-scoped, so a scheduled run
@@ -576,12 +576,12 @@ first unattended agent.
 **Blocked items are derived, never stored.** They are computed per request from `ctx.shells`, so
 they exist exactly as long as the dialog does — nothing to reconcile, no tombstone, and no stale
 row when a dialog resolves itself in its own terminal. Questions and briefings are stored at
-`stateDir()/workshop.json`.
+`stateDir()/inbox.json`.
 
 **Membership is `detectDialog()`, not `waitingForInput`.** `sessionInputState()` maps `'waiting'`
 to `'idle'`, and `'idle'` covers a session sitting at an empty composer just as much as one
 showing a modal. `waitingForInput` is only a cheap pre-filter; the positive dialog signal in
-`mods/workshop/dialog-parse.js` is what stops every agent that merely finished its turn becoming
+`mods/inbox/dialog-parse.js` is what stops every agent that merely finished its turn becoming
 an inbox row. The listing reads `entry.terminalScreen.linesSync(n)` and never
 `readTerminalScreen`, which would replay the whole scrollback into a fresh emulator and `await`
 a parse queue one chatty session can defer indefinitely.
@@ -596,23 +596,23 @@ means box borders rather than a divider, and the run stops.
 ### The workflow stages (#668)
 
 Nothing about the inbox makes an agent *use* it. The workflow stages are four numbered lines
-appended to every GitHub-issue prompt — orient with a `workshop_brief` before writing code, take a
-decision you cannot make alone to `workshop_ask` rather than assuming, post a surprise the moment
+appended to every GitHub-issue prompt — orient with a `inbox_brief` before writing code, take a
+decision you cannot make alone to `inbox_ask` rather than assuming, post a surprise the moment
 you find it, and justify the result before merging — so a finished issue can be judged from the
 inbox instead of by opening its tab.
 
 They live in `issue-prompt.js` and are appended by `renderIssuePrompt()`, so this is the one part
-of Workshop that **is** a host edit. **The toggle is `issueStagesEnabled`, a `SETTINGS_SCHEMA`
-entry, not a Workshop mod setting** — a mod's own settings are per-browser `localStorage`
+of Inbox that **is** a host edit. **The toggle is `issueStagesEnabled`, a `SETTINGS_SCHEMA`
+entry, not an Inbox mod setting** — a mod's own settings are per-browser `localStorage`
 (`public/js/mod-manager.js`) and never reach the server, and this decision is made server-side at
 spawn time, which is the same reason `scheduledTasksEnabled`, `projectModsEnabled` and
 `metaControlsEnabled` exist. Default **off**. The mechanism — the single reader, the three call
 sites, the `stages=<on|off>` field on the `[issue] #N:` line — is in
 [sessions.md](sessions.md); what matters here is the coupling in the other direction: the stage
-text **names Workshop's tools**, so renaming one breaks a prompt that lives outside this mod. A
+text **names Inbox's tools**, so renaming one breaks a prompt that lives outside this mod. A
 unit test in `test/unit/issue-prompt.test.js` fails if the stages name a tool no mod registers.
 
-Turning it on is a decision about two mods' worth of state, because Workshop the *app* is off by
+Turning it on is a decision about two mods' worth of state, because Inbox the *app* is off by
 default per browser while its MCP tools register server-side regardless: stages on with the app
 never enabled means agents posting into an inbox nobody is reading.
 
@@ -623,8 +623,8 @@ its own failure, and before #663 the inbox had no way to shed one.
 
 | Kind | Leaves when |
 |---|---|
-| Question (`workshop_ask`) | answered, archived with `e`, **superseded** (below), or its session has been absent from `ctx.shells` for `EXPIRY_GRACE_MS` (5 min). A **durable** question (`durable_days`, #705) skips that sweep: it leaves when answered, archived, superseded, or when `durableUntil` passes (`expired`). See [links.md](links.md) |
-| Briefing (`workshop_brief`) | archived with `e` — `⏎` archives it too, since there is nothing to answer |
+| Question (`inbox_ask`) | answered, archived with `e`, **superseded** (below), or its session has been absent from `ctx.shells` for `EXPIRY_GRACE_MS` (5 min). A **durable** question (`durable_days`, #705) skips that sweep: it leaves when answered, archived, superseded, or when `durableUntil` passes (`expired`). See [links.md](links.md) |
+| Briefing (`inbox_brief`) | archived with `e` — `⏎` archives it too, since there is nothing to answer |
 | Result (`share_result`) | approved, returned for changes, or archived with `e`. **Never by the dead-session sweep** — see below |
 | Blocked (derived) | the dialog resolves, the session goes, or **`e` mutes it** |
 
@@ -648,13 +648,13 @@ persists it, so it survives a restart and is carried onto the closed record. Two
   `ctx.registerSubmitKeyObserver(name, fn)` when a WebSocket payload carries Enter
   (`hasSubmitKey()` in `terminal-input.js`). The call comes after the terminal-report and
   `inputBlocked` drops and before the PTY write. The observer gets the session, never the bytes.
-  Workshop ignores that Enter if its dialog detector (`scrapeFor().detected`) shows a permission
+  Inbox ignores that Enter if its dialog detector (`scrapeFor().detected`) shows a permission
   or AskUserQuestion dialog, because that Enter answers the dialog.
-- **A Workshop chat-pane or idle-row prompt.** It is stamped with the time it was sent, from its
+- **An Inbox chat-pane or idle-row prompt.** It is stamped with the time it was sent, from its
   `onDeliver`, so a prompt dropped before delivery replaces nothing.
 
 *What does not count.* Scheduled-task prompts, `initialPrompt`/`issue` messages, `meta_type`, and
-Workshop's own dialog key presses never reach either path. Neither does answering a stored question
+Inbox's own dialog key presses never reach either path. Neither does answering a stored question
 from the inbox or its link: that goes through `answerStored()`, which knows which item it closed.
 
 *When it is checked.* A stamp is written, and settled at once, only while the session has an open
@@ -678,7 +678,7 @@ question older than it. Typing in an ordinary tab costs one inbox scan and no st
 **Every reader computes it.** `inbox.supersession()` runs the way `isExpired` does, so the verdict
 is right on a machine where no panel has polled.
 - These readers also record it through `settleSuperseded()`: the list route, `answerStored`,
-  `workshop_check`, `workshop_answers` and `workshop_ask`. The list route runs it before the
+  `inbox_check`, `inbox_answers` and `inbox_ask`. The list route runs it before the
   dead-session sweep and without the boot gate.
 - The decision link's GET only computes. A recorded verdict is final, because its facts are not:
   a task keeps 20 runs, and closed records are pruned.
@@ -686,13 +686,13 @@ is right on a machine where no panel has polled.
 **What a superseded question does.**
 - It leaves the inbox. `all=1` carries a `closedNote`.
 - Its answer endpoint returns 409 `superseded` with a `hint`. No `then` ever runs.
-- `workshop_check` says why. `workshop_answers` never listed it, because it lists only answered
+- `inbox_check` says why. `inbox_answers` never listed it, because it lists only answered
   questions.
 - A `wait_seconds` hold on it is released at once.
 - Results and briefings are never superseded.
 
 **`e` on a blocked row is a mute, not a dismissal.** Nothing is written, no tombstone is minted,
-and the dialog is left exactly as it stands — Escape *is* a decision and Workshop still never makes
+and the dialog is left exactly as it stands — Escape *is* a decision and Inbox still never makes
 it for you. The mute is keyed on `dialogParse.dialogFingerprint()`, the dialog itself rather than
 the session: the row stays gone while that question is on screen and returns unprompted the moment
 the tab asks a different one. That is the whole moved-on rule — a tab that moves on either paints a
@@ -713,7 +713,7 @@ dialog can be replaced between the poll and the click, and muting whatever is on
 would silence a question nobody has seen; a mismatch is a `409 dialog-changed` and the row
 redraws.
 
-Only `POST /api/workshop/items/blocked:<id>/dismiss` writes a mute, and no MCP tool calls it. **An
+Only `POST /api/inbox/items/blocked:<id>/dismiss` writes a mute, and no MCP tool calls it. **An
 agent must never be able to silence a human's inbox** — same line as the meta-controls reasoning
 below.
 
@@ -775,21 +775,21 @@ was not told.
 
 **Results have their own retention bucket.** `RETENTION_CAP` keeps 200 closed items;
 `RESULT_RETENTION_CAP` keeps 200 closed *results* separately. One shared cap would let a
-chatty week of `workshop_brief` quietly delete the writeup for the change that broke
+chatty week of `inbox_brief` quietly delete the writeup for the change that broke
 production. It is a second bucket rather than an exemption, so the file is still bounded.
 
 #### Images are copied, not referenced
 
-`images` takes screenshot ids and paths, and `mods/workshop/images.js` **copies the bytes**
-into `stateDir()/workshop-images/` at share time, storing only `<itemId>-<n>.png` on the
+`images` takes screenshot ids and paths, and `mods/inbox/images.js` **copies the bytes**
+into `stateDir()/inbox-images/` at share time, storing only `<itemId>-<n>.png` on the
 item. Two independent reasons:
 
-- `workshop.json` is read whole on every poll of `/api/workshop/inbox`, so base64 in there
+- `inbox.json` is read whole on every poll of `/api/inbox/items`, so base64 in there
   is fatal to the panel's 2-second refresh — not merely wasteful.
 - A screenshot id rots. The screenshots subsystem deletes anything older than seven days,
   so a durable record that only *references* one loses its evidence in a week.
 
-Copying also collapses the security question. `GET /api/workshop/images/:file` accepts only
+Copying also collapses the security question. `GET /api/inbox/images/:file` accepts only
 names this module produces and reads out of one directory; every decision about where the
 bytes came from was made once, at ingest, where a refusal can be explained to the agent
 that caused it. A path ref must **realpath** into the calling session's repo root or cwd,
@@ -817,7 +817,7 @@ works today only because those agents happen to carry no `claudeSessionId`.
 | Source | When | Cost |
 |---|---|---|
 | the session's own `.jsonl` | `getAgentConfig(agentType).supportsSessionWatch` — Claude | none; no extra turn, no cooperation from the agent |
-| `stateDir()/workshop-chat.json` | everything else, filled by the `workshop_say` tool | one turn per reply |
+| `stateDir()/inbox-chat.json` | everything else, filled by the `inbox_say` tool | one turn per reply |
 
 Both emit the same `{ id, role, text, at }` shape, so the pane cannot tell them apart. On the
 transcript path the store is **not written at all** — Claude records the human's message itself,
@@ -830,7 +830,7 @@ nothing else records that the human asked anything.
 on one machine, parsing a 1 MB tail costs ~2.6 ms even when the file behind it is 139 MB; a delta
 reader would buy that back only by assuming the file is strictly append-only, which we cannot
 prove, and a wrong assumption there corrupts a thread silently. The bound that matters is on the
-wire: `GET /api/workshop/chat/:id?since=<messageId>` returns only what is new. A rotation shows up
+wire: `GET /api/inbox/chat/:id?since=<messageId>` returns only what is new. A rotation shows up
 as a changed `threadKey`, which is the client's cue to drop its cursor and take the thread whole.
 
 The tail is **1 MB**, four times `prompt-delivery-check.js`'s window, because that module wants the
@@ -851,43 +851,43 @@ a real misfire rather than a confusing message:
 | session showing a dialog | a permission prompt classifies as `'waiting'` (`screen-classifier.js`), so `drainPromptQueue` would read the screen as idle and type a paragraph of prose into the modal 500 ms later |
 | mid key-dance (`inFlightChoices`) | a chat message interleaved with `sendChoice`'s arrows corrupts both |
 
-None writes a byte to a PTY, and `test/unit/workshop-chat-routes.test.js` asserts exactly that.
+None writes a byte to a PTY, and `test/unit/inbox-chat-routes.test.js` asserts exactly that.
 
 **The reply instruction is chosen at delivery time, by agent type** — appended to the prompt only
 when the agent keeps no transcript. That is what lets the workflow stages stay agent-agnostic while
-the agents that need `workshop_say` still hear about it.
+the agents that need `inbox_say` still hear about it.
 
-**Markdown is a tokenizer, not a library.** `mods/workshop/markdown.js` returns an AST and
-`workshop.jsx` maps it to React **elements**, so there is no HTML string at any point and
+**Markdown is a tokenizer, not a library.** `mods/inbox/markdown.js` returns an AST and
+`inbox.jsx` maps it to React **elements**, so there is no HTML string at any point and
 agent-authored text cannot become markup — the class of bug is absent by construction rather than
 filtered by a sanitizer. Mod iframes are `allow-same-origin` (they must be, for the bridge), so the
 sandbox provides no XSS containment; the element tree is the containment.
-`test/unit/workshop-mod-shape.test.js` fails the build if `innerHTML` or its React twin appears in
-`workshop.jsx`. A scheme allowlist is still needed and still enforced — React renders
+`test/unit/inbox-mod-shape.test.js` fails the build if `innerHTML` or its React twin appears in
+`inbox.jsx`. A scheme allowlist is still needed and still enforced — React renders
 `<a href="javascript:…">` happily — and `data:image/svg+xml` is refused, an SVG being a code URL
 wearing an image's name.
 
-`workshop_say` takes **no session parameter**: it writes the caller's own thread via
+`inbox_say` takes **no session parameter**: it writes the caller's own thread via
 `callerFields()`, reaches no PTY, and is rate-limited, so it does not move the consent line below.
 
 ### The three answer paths, and why they differ
 
 | Situation | What happens | PTY write |
 |---|---|---|
-| The agent is holding inside `workshop_ask` (`wait_seconds`) | resolve its pending promise | **none** |
-| The agent's turn ended and it is idle at its composer | `deliverPromptWhenReady(…, { source: 'workshop' })` | via the prompt FIFO |
+| The agent is holding inside `inbox_ask` (`wait_seconds`) | resolve its pending promise | **none** |
+| The agent's turn ended and it is idle at its composer | `deliverPromptWhenReady(…, { source: 'inbox' })` | via the prompt FIFO |
 | The agent is showing a live dialog | raw key writes, 250 ms apart | arrows + `\r` |
-| The asker has gone (a stored question, #705) | the picked option's `then` starts a new session in the project; with no `then`, the answer is recorded for `workshop_answers` | the new session's prompt FIFO, or none |
+| The asker has gone (a stored question, #705) | the picked option's `then` starts a new session in the project; with no `then`, the answer is recorded for `inbox_answers` | the new session's prompt FIFO, or none |
 
 The third is **not** `submitToShell`: its `confirmEcho` waits for the composer to echo the text,
 and a modal has no composer, so every answer would burn the full cap waiting for an echo that can
-never arrive. Instead Workshop moves the cursor **relative to where it already is**, re-reads the
+never arrive. Instead Inbox moves the cursor **relative to where it already is**, re-reads the
 screen to confirm `❯` landed on the intended option, and only then sends Enter — #607's
 "confirmed, not assumed" applied to a menu. **A failed verification sends no Enter**, and does not
 send Escape either: Escape cancels the dialog, which is a decision the human did not make.
 
 Each control byte is its own `engine.write` separated by 250 ms, because Ink recognizes a control
-byte only when it arrives as its own stdin read. `test/integration-standalone/workshop-dialog-answer.test.js`
+byte only when it arrives as its own stdin read. `test/integration-standalone/inbox-dialog-answer.test.js`
 proves this through a real PTY using the `menu` policy in `test/helpers/stubs/fake-claude-tui.js`.
 
 A blocked item is answered **by option only**. Free text is refused with a 400 and a hint to open
@@ -896,34 +896,34 @@ the agent was asking about.
 
 ### Decision links (#705)
 
-A stored question has an address. `workshop_ask` returns `url`, which is `/v1/decision/<id>`: it
+A stored question has an address. `inbox_ask` returns `url`, which is `/v1/decision/<id>`: it
 opens the question in a plain browser tab and answers it in one click.
 
-The scheme is core (`links.js`), and Workshop registers the provider that says what each item is:
+The scheme is core (`links.js`), and Inbox registers the provider that says what each item is:
 - a question resolves to `decision`
 - a briefing resolves to the reserved `markdown` type
 - a result resolves to nothing. Approve unlocks a merge, and the panel stays the only place that
   happens.
 
 The page's answer button calls `answerStored()`, the same function the panel calls. Durable
-questions, `then` follow-ups, Discuss and `workshop_answers` are in [links.md](links.md).
+questions, `then` follow-ups, Discuss and `inbox_answers` are in [links.md](links.md).
 
 ### It deliberately skips the meta-controls consent gate
 
 That gate prices one risk: an *agent* typing into another agent's session (#519). Every PTY write
-in Workshop originates from a human pressing a key in the host UI, behind the same auth cookie
+in Inbox originates from a human pressing a key in the host UI, behind the same auth cookie
 that already authorizes closing the session. Routing it through the modal would ask the user to
 approve their own click, and a decline there starts a 60 s cooldown that would block the next
 unrelated `meta_type`. The five MCP tools write nothing to any PTY. The two that look like they
 move this line do not: `share_result` can only stamp the field that *refuses* a merge, never the
-one that permits it (see the asymmetry above), and `workshop_say` takes no session parameter, so
+one that permits it (see the asymmetry above), and `inbox_say` takes no session parameter, so
 there is no spelling of it that reaches another agent's conversation. **If an agent ever gains a
 way to answer another agent's item, or to put text into another agent's session through here,
-revisit this** — at that point Workshop becomes exactly what #519 guards. The reasoning is
-repeated in the header of `mods/workshop/tools.js`.
+revisit this** — at that point Inbox becomes exactly what #519 guards. The reasoning is
+repeated in the header of `mods/inbox/tools.js`.
 
 `logRcWrite` only logs text matching `/(^|\s)\/rc(\s|$)/` — deliberately not a keylogger — and
-arrow keys plus `\r` can never match it, so the explicit `[workshop] answer …` log line is the
+arrow keys plus `\r` can never match it, so the explicit `[inbox] answer …` log line is the
 only record that a human moved a cursor in someone else's session.
 
 ### The Backlog (#671)
@@ -937,12 +937,12 @@ the reason they share a column is the diff between them.
 **The label lives on the panel, not in the gear menu.** The mod settings modal renders only
 checkboxes and number inputs (`_showSettingsModal`, `public/js/mod-manager.js`), so a string
 setting there would be an invisible control. It is stored through `updateSetting('issueLabel', …)`
-like `blockingOnly`, and listed in `UNRENDERED_SETTINGS` in `test/unit/workshop-mod-shape.test.js`.
+like `blockingOnly`, and listed in `UNRENDERED_SETTINGS` in `test/unit/inbox-mod-shape.test.js`.
 `showBacklog` and `backlogPollSeconds` **are** in `mod.json`, because those two types do render.
 
 **The first option in the picker is `all issues`, and it is the default (#679).** Its value is the
 empty string — a *scope*, not a label — and it is what `DEFAULTS.issueLabel` now holds. The read in
-`workshop.jsx` is `String(settings.issueLabel || '')` and must stay that way: the `|| 'bug'` it
+`inbox.jsx` is `String(settings.issueLabel || '')` and must stay that way: the `|| 'bug'` it
 replaced would coerce a cleared filter straight back on every reload, so the "all" choice could
 never survive one. For the same reason the synthesised stand-in option (the one that keeps a label
 the repo no longer defines visible in the picker) is skipped when the label is empty — `{ name: '' }`
@@ -952,7 +952,7 @@ would draw a second, blank row.
 server-side cache is keyed on `project + label` rather than on the panel's idea of state; the
 unfiltered list is simply the empty-label key, `` `${project}\0` ``.
 
-**The project follows the focused tab.** `GET /api/workshop/backlog?session=<id>` resolves it with
+**The project follows the focused tab.** `GET /api/inbox/backlog?session=<id>` resolves it with
 `projectScope.resolveProject`, which goes through `ctx.sessionPaths` — so a `github-issue-671`
 worktree tab asks about its **parent repo**, not about the worktree. With no session named, or one
 that has since closed, it falls back to the most recently active live session; with no sessions at
@@ -1005,7 +1005,7 @@ byte-identical** — exit 0, `[]`, both. The picker is populated from `gh label 
 the choice comes from labels the repo actually has.
 
 The argv itself is built by `backlog.issueListArgs(label)` rather than inline in the route, so the
-two shapes can be asserted without a subprocess in `test/unit/workshop-backlog.test.js`. An empty
+two shapes can be asserted without a subprocess in `test/unit/inbox-backlog.test.js`. An empty
 label omits `--label` **entirely** — `--label=` with nothing after it is a real argument to `gh`
 and matches nothing, which is the opposite of what "all" means.
 
@@ -1019,7 +1019,7 @@ the issues nobody has started.
 ### Coexisting with Action Required
 
 Both surfaces are untouched by each other, and Action Required's auto-cycle **will switch tabs out
-from under Workshop**. Workshop cannot detect that — `getSettings()` is scoped to the calling mod
+from under Inbox**. Inbox cannot detect that — `getSettings()` is scoped to the calling mod
 — so it shows a one-time dismissible note instead. Turn auto-cycle off while sitting in the inbox.
 
 Two known gaps, both needing the platform work in #661: a fullscreen mod has no way to show an
@@ -1209,8 +1209,8 @@ works.
 - **Reconciliation is one rule**, `syncModView()`: the slot may only hold a mod that `visibleMods()` still returns *in view mode*. Deleted, disabled, `projectModsEnabled` off, flipped back to `'tab'`, and "you switched project" all collapse into it — so a view can never outlive the chrome that opens it. It must stay **idempotent**, because hiding fires `onViewChanged` → `render()` and only the existing re-entrancy guard plus an immediate second-pass return makes that terminate. **There is no Escape binding**: `showModView()` focuses the iframe, so a host-level keydown would fire only when chrome happens to hold focus — unpredictable is worse than absent, and injecting into the same-origin iframe would steal Escape from the page. Hence `test/unit/shortcuts-registry.test.js`'s exact-id set is untouched.
 - **Two invariants the first build got wrong, both now pinned by tests.** (1) **`render()` must never call back into the rail.** `cb.renderRail()` runs `applyFilter()`, whose `onContextViewApplied` hook calls `render()` — so only `refresh()` may call it, and `render()` additionally carries a re-entrancy guard, because opening a pinned tab runs `notifyTabsChanged()` → `applyFilter()` → `render()`. Without both, the first pinned mod recursed ~1600 deep and no surface finished rendering. `renameProjectModTab` notifies **only when a name actually changed** for the same reason. (2) **The tab id is derived, not minted** — `tabIdFor(modId)` = `pm-<modId>`. A pinned mod is opened from three directions (restore, auto-open, click) and with random ids each was a separate tab that accumulated across reloads; deriving makes a duplicate impossible by construction. `viewIdFor(modId)` = `project-mod:<modId>` follows the same rule for the view slot. `tabNameFor(mod)` prefixes the icon into the **label** because `tabIcon()` reads the chip off the label — otherwise a 📊 mod is a "B" in the vertical rail, where the chip is the whole tab; it is idempotent for the icon-less stub the restore path passes.
 - **The client did not change for #638.** The wire shape is identical (`serialize()` keeps `root`/`dirname`/`dir`/`entry` off it, which is what that function was always for) and `/api/project-mods/:id/page` kept its URL, so `app.js`, `project-mods.js` and `context-views.js` are untouched — which is the check that the storage move really is only a storage move.
-- **A ping for a change nobody told us about is `refresh()`**, exported from `tools.js` (#703): force a rescan, ping, no "did the list change" gate — a window that loaded through a TTL read can hold a list that was never broadcast, so "unchanged since the last ping" is not "unchanged for every window". `refresh_project_mods` calls it, and so do the two merge funnels: `mergeSession()` in `mods/deepsteve-core/session-merge.js` (which is `issue_complete`, `merge_session`, the tab-menu Merge and Workshop's merge) and the `merge_worktree` handler, which doesn't compose on that routine. Both `require('../project-mods/tools.js')`, which is the same module instance `mcp-server.js` loaded; before `init()` it is a no-op, which is what keeps `session-merge.js`'s injected-runner tests daemon-free. It runs only on `status === 'merged'` — every other status left the target checkout untouched — and before the issue close, so the rail doesn't wait on GitHub.
-- Tests: `test/unit/project-mods.test.js` (the scan, derived ids, the `scope` filter, tools, REST, assets and traversal, the gate, the `cleanPlacement` truth table, `refresh_project_mods` and the root-set rescan), `test/unit/project-mods-repo-storage.test.js` (`.deepsteve` is never gitignored and no script writes a repo-relative one), `test/unit/project-mod-links.test.js` (the `/v1/project-mod` provider through a real link registry: `url` on the agent payloads only, the redirect, a deleted mod's explanation, id ownership disjoint from Workshop's) and `test/unit/project-mods-client.test.js` (scoping, the three surfaces, derived identity, the re-entrancy invariant, view mode — whose `setup()` carries a **simulated view slot** rather than bare recorders, because `openMod`'s toggle and `syncModView` both read the slot back — plus the un-pin teardown, the right-click menu's paused-view item, and a source guard that both `contexts` handlers in `app.js` call `ProjectMods.refresh()`). The merge ping is pinned twice: `test/unit/session-merge.test.js` (a landed merge pings before the issue close; a conflict, a dirty target and the non-worktree push don't) and `test/unit/merge-auto-close.test.js` (a real repo, where a mod committed in the worktree is listed after `merge_worktree` and `merge_session` alike).
+- **A ping for a change nobody told us about is `refresh()`**, exported from `tools.js` (#703): force a rescan, ping, no "did the list change" gate — a window that loaded through a TTL read can hold a list that was never broadcast, so "unchanged since the last ping" is not "unchanged for every window". `refresh_project_mods` calls it, and so do the two merge funnels: `mergeSession()` in `mods/deepsteve-core/session-merge.js` (which is `issue_complete`, `merge_session`, the tab-menu Merge and Inbox's merge) and the `merge_worktree` handler, which doesn't compose on that routine. Both `require('../project-mods/tools.js')`, which is the same module instance `mcp-server.js` loaded; before `init()` it is a no-op, which is what keeps `session-merge.js`'s injected-runner tests daemon-free. It runs only on `status === 'merged'` — every other status left the target checkout untouched — and before the issue close, so the rail doesn't wait on GitHub.
+- Tests: `test/unit/project-mods.test.js` (the scan, derived ids, the `scope` filter, tools, REST, assets and traversal, the gate, the `cleanPlacement` truth table, `refresh_project_mods` and the root-set rescan), `test/unit/project-mods-repo-storage.test.js` (`.deepsteve` is never gitignored and no script writes a repo-relative one), `test/unit/project-mod-links.test.js` (the `/v1/project-mod` provider through a real link registry: `url` on the agent payloads only, the redirect, a deleted mod's explanation, id ownership disjoint from Inbox's) and `test/unit/project-mods-client.test.js` (scoping, the three surfaces, derived identity, the re-entrancy invariant, view mode — whose `setup()` carries a **simulated view slot** rather than bare recorders, because `openMod`'s toggle and `syncModView` both read the slot back — plus the un-pin teardown, the right-click menu's paused-view item, and a source guard that both `contexts` handlers in `app.js` call `ProjectMods.refresh()`). The merge ping is pinned twice: `test/unit/session-merge.test.js` (a landed merge pings before the issue close; a conflict, a dirty target and the non-worktree push don't) and `test/unit/merge-auto-close.test.js` (a real repo, where a mod committed in the worktree is listed after `merge_worktree` and `merge_session` alike).
 
 ## Display tabs
 
@@ -1242,8 +1242,8 @@ routes), and `decision-bar.js` (the in-page bar).
   `GET /api/decision-tabs` — deliberately not under `/api/display-tab/`, where server.js's `:id`
   route would take the word for an id.
 - **Delivery** goes through `deliverPromptWhenReady` with `source: 'decision-tab'`, never
-  `submitToShell`. `decide` refuses first, as Workshop's chat endpoint does: 409 `session-gone`
-  (the FIFO drops a missing shell silently), 409 `session-blocked` when Workshop's `detectDialog`
+  `submitToShell`. `decide` refuses first, as Inbox's chat endpoint does: 409 `session-gone`
+  (the FIFO drops a missing shell silently), 409 `session-blocked` when Inbox's `detectDialog`
   sees a modal (the choice would be typed into it), 409 `already-decided`. The bar renders each
   state; an unanswered tab whose session ended stays open and says so — close paths are untouched.
 - **Decision Tab mode** (`public/js/decision-mode.js`). The server pushes `{type:'decision-tabs',

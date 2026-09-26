@@ -108,7 +108,7 @@ globalThis.requestAnimationFrame = (fn) => fn();
 let importCount = 0;
 
 const MODS = [
-  { id: 'workshop', name: 'Workshop', entry: 'index.html', app: true, toolbar: { label: 'Workshop' } },
+  { id: 'inbox', name: 'Inbox', entry: 'index.html', app: true, toolbar: { label: 'Inbox' } },
   { id: 'atelier', name: 'Atelier', entry: 'index.html', app: true },   // a second app
   { id: 'tower', name: 'Tower', entry: 'index.html' },                  // fullscreen, not an app
 ];
@@ -123,7 +123,7 @@ const QUIET_KEY = 'deepsteve-app-quiet';   // window.parent === window → nsKey
 async function setup({ keepStorage = false } = {}) {
   allElements = [];
   if (!keepStorage) storeMap.clear();
-  storeMap.set('deepsteve-enabled-mods', JSON.stringify(['workshop', 'atelier', 'tower']));
+  storeMap.set('deepsteve-enabled-mods', JSON.stringify(['inbox', 'atelier', 'tower']));
 
   const appContainer = fakeElement();
   appContainer.id = 'app-container';
@@ -185,10 +185,10 @@ test('it appears for an app and stays hidden for a plain fullscreen mod', async 
   const btn = quietBtnIn(modContainer());
   assert.strictEqual(btn.style.display, 'none', 'nothing is in the slot yet');
 
-  ModManager.openApp('workshop');
+  ModManager.openApp('inbox');
   assert.strictEqual(btn.style.display, '', 'an app is a place you sit in — offer it');
 
-  ModManager.hideView('workshop');
+  ModManager.hideView('inbox');
   ModManager.showView({ id: 'tower', name: 'Tower', src: '/mods/tower/index.html' });
   assert.strictEqual(btn.style.display, 'none', 'Tower is a view you visit, not a place');
   assert.strictEqual(isQuietClass(appContainer), false);
@@ -196,16 +196,16 @@ test('it appears for an app and stays hidden for a plain fullscreen mod', async 
 
 test('the gutter comes and goes with the button that lives in it', async () => {
   // The toggle gets a 30px column of its own rather than floating over the page: an overlay in
-  // the top-left lands on whatever the app draws there (on Workshop, the word "Inbox") and
+  // the top-left lands on whatever the app draws there (on Inbox, the word "Inbox") and
   // reads as a rendering fault. A slot with no toggle must not keep the inset.
   const { ModManager } = await setup();
   const mc = modContainer();
   assert.strictEqual(mc.classList.contains('has-quiet-btn'), false);
 
-  ModManager.openApp('workshop');
+  ModManager.openApp('inbox');
   assert.strictEqual(mc.classList.contains('has-quiet-btn'), true);
 
-  ModManager.hideView('workshop');
+  ModManager.hideView('inbox');
   assert.strictEqual(mc.classList.contains('has-quiet-btn'), false);
 
   ModManager.showView({ id: 'tower', name: 'Tower', src: '/mods/tower/index.html' });
@@ -214,7 +214,7 @@ test('the gutter comes and goes with the button that lives in it', async () => {
 
 test('toggling hides the strip, asks for the rail, and leaves the toggle up', async () => {
   const { ModManager, appContainer, quietCalls } = await setup();
-  ModManager.openApp('workshop');
+  ModManager.openApp('inbox');
   const btn = quietBtnIn(modContainer());
 
   btn.listeners.click();
@@ -236,7 +236,7 @@ test('an excursion lifts it and coming home puts it back, with nothing written',
   // The excursion bar IS the back button, and the back button is in #tabs — so the strip must
   // come back, or the one thing telling you where you are goes with it.
   const { ModManager, appContainer } = await setup();
-  ModManager.openApp('workshop');
+  ModManager.openApp('inbox');
   quietBtnIn(modContainer()).listeners.click();
   const stored = storeMap.get(QUIET_KEY);
 
@@ -252,39 +252,39 @@ test('an excursion lifts it and coming home puts it back, with nothing written',
 
 test('closing the app restores the chrome but remembers the preference', async () => {
   const { ModManager, appContainer } = await setup();
-  ModManager.openApp('workshop');
+  ModManager.openApp('inbox');
   quietBtnIn(modContainer()).listeners.click();
 
-  ModManager.hideView('workshop');
+  ModManager.hideView('inbox');
   assert.strictEqual(isQuietClass(appContainer), false, 'no app, no quiet mode');
   assert.strictEqual(quietBtnIn(modContainer()).style.display, 'none');
 
-  ModManager.openApp('workshop');
+  ModManager.openApp('inbox');
   assert.strictEqual(isQuietClass(appContainer), true, 'and it is where you left it on return');
 });
 
 test('the preference is per app, not per browser', async () => {
   const { ModManager, appContainer } = await setup();
-  ModManager.openApp('workshop');
+  ModManager.openApp('inbox');
   quietBtnIn(modContainer()).listeners.click();
 
-  ModManager.openApp('atelier');   // one slot: this replaces Workshop
+  ModManager.openApp('atelier');   // one slot: this replaces Inbox
   assert.strictEqual(ModManager.getActiveViewId(), 'atelier');
   assert.strictEqual(isQuietClass(appContainer), false, 'a second app inherits nothing');
-  assert.deepStrictEqual(JSON.parse(storeMap.get(QUIET_KEY)), ['workshop']);
+  assert.deepStrictEqual(JSON.parse(storeMap.get(QUIET_KEY)), ['inbox']);
 });
 
 test('it survives a reload — localStorage, because it is a preference not a place', async () => {
   const first = await setup();
-  first.ModManager.openApp('workshop');
+  first.ModManager.openApp('inbox');
   quietBtnIn(modContainer()).listeners.click();
-  assert.deepStrictEqual(JSON.parse(storeMap.get(QUIET_KEY)), ['workshop']);
+  assert.deepStrictEqual(JSON.parse(storeMap.get(QUIET_KEY)), ['inbox']);
 
   // A fresh module and a fresh DOM against the same storage: whatever comes back can only
-  // have come off disk. ACTIVE_VIEW_KEY brings Workshop back by itself, and showModView()'s
+  // have come off disk. ACTIVE_VIEW_KEY brings Inbox back by itself, and showModView()'s
   // re-assert is what carries quiet mode in with it — no separate restore path.
   const { ModManager, appContainer } = await setup({ keepStorage: true });
-  assert.strictEqual(ModManager.getActiveViewId(), 'workshop');
+  assert.strictEqual(ModManager.getActiveViewId(), 'inbox');
   assert.strictEqual(isQuietClass(appContainer), true, 'the reload lands quiet, not with a flash of chrome');
   assert.strictEqual(ModManager.isQuietMode(), true);
 });
@@ -293,21 +293,21 @@ test('a window that is not showing the app is not quiet', async () => {
   // ACTIVE_VIEW_KEY is localStorage and so is this, but they are read independently: a second
   // window at the same origin that has not opened the app must show its normal chrome.
   const first = await setup();
-  first.ModManager.openApp('workshop');
+  first.ModManager.openApp('inbox');
   quietBtnIn(modContainer()).listeners.click();
 
   storeMap.delete('deepsteve-active-mod-view');
   const { ModManager, appContainer } = await setup({ keepStorage: true });
   assert.strictEqual(ModManager.getActiveViewId(), null);
   assert.strictEqual(isQuietClass(appContainer), false, 'no app on screen, no quiet mode');
-  ModManager.openApp('workshop');
+  ModManager.openApp('inbox');
   assert.strictEqual(isQuietClass(appContainer), true, 'and it arrives with the app');
 });
 
 test('a corrupt or absent key is not quiet mode', async () => {
   storeMap.set('deepsteve-app-quiet', 'not json');
   const { ModManager, appContainer } = await setup({ keepStorage: true });
-  ModManager.openApp('workshop');
+  ModManager.openApp('inbox');
   assert.strictEqual(isQuietClass(appContainer), false);
   assert.strictEqual(ModManager.isQuietMode(), false);
 });
@@ -321,7 +321,7 @@ test('isQuietAvailable gates the ⌘\\ registry entry', async () => {
   ModManager.showView({ id: 'tower', name: 'Tower', src: '/mods/tower/index.html' });
   assert.strictEqual(ModManager.isQuietAvailable(), false, 'a view is not a place');
 
-  ModManager.openApp('workshop');
+  ModManager.openApp('inbox');
   assert.strictEqual(ModManager.isQuietAvailable(), true);
 
   ModManager.showTerminalForSession('sess-a');

@@ -1,5 +1,5 @@
 // #612: a scheduled fire pre-permits the MCP tools its own prompt contract tells it to
-// call — the self-report pair, plus since #708 the Workshop tools prefix.md names.
+// call — the self-report pair, plus since #708 the Inbox tools prefix.md names.
 //
 // Without this, whether an unattended run can honor the contract deepsteve imposed on
 // it depends on whatever settings.json allowlist happens to exist in the target
@@ -240,15 +240,15 @@ test('an agent with no deepsteve MCP gets no grant (it gets no contract either)'
 });
 
 // Every tool name deepsteve registers that a fragment could plausibly name: this mod's own
-// (off the init() result above) plus Workshop's, read from source rather than required —
-// Workshop's init() wants a far richer ctx than this harness has. A tool key there is a
+// (off the init() result above) plus Inbox's, read from source rather than required —
+// Inbox's init() wants a far richer ctx than this harness has. A tool key there is a
 // 4-space-indented `name: {` whose next line opens its description.
 function deepsteveToolNames() {
-  const workshopSrc = fs.readFileSync(path.join(__dirname, '..', '..', 'mods', 'workshop', 'tools.js'), 'utf8');
-  const workshop = [...workshopSrc.matchAll(/^ {4}(\w+): \{\n\s+description:/gm)].map((m) => m[1]);
-  assert.ok(workshop.includes('workshop_ask') && workshop.includes('share_result'),
-    `the Workshop tool scan found ${JSON.stringify(workshop)} — has its layout changed?`);
-  return new Set([...Object.keys(tools), ...workshop]);
+  const inboxSrc = fs.readFileSync(path.join(__dirname, '..', '..', 'mods', 'inbox', 'tools.js'), 'utf8');
+  const inbox = [...inboxSrc.matchAll(/^ {4}(\w+): \{\n\s+description:/gm)].map((m) => m[1]);
+  assert.ok(inbox.includes('inbox_ask') && inbox.includes('share_result'),
+    `the Inbox tool scan found ${JSON.stringify(inbox)} — has its layout changed?`);
+  return new Set([...Object.keys(tools), ...inbox]);
 }
 
 test('the granted list is exactly the deepsteve tools the prompt fragments name (#612, #708)', () => {

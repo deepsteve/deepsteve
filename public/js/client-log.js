@@ -15,7 +15,7 @@
  *
  * REALMS (#675). Every mod iframe, display tab and project-mod page is a
  * separate JS realm with its own `window.fetch`, so wrapping only the shell's
- * left them invisible: a workshop iframe polling a dead cookie produced 660
+ * left them invisible: an Inbox iframe polling a dead cookie produced 660
  * daemon-log rejections and not one client-side line. The shell therefore wraps
  * each child realm's fetch from the parent — the same same-origin reach the
  * `window.deepsteve` bridge already relies on — and tags entries with the realm
