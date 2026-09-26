@@ -84,6 +84,14 @@ test('footer text below an unbounded composer is not swallowed into the draft', 
   assert.strictEqual(draft, 'hello there');
 });
 
+test('a draft with blank lines in it is read to the closing rule, not to the first blank', () => {
+  const rule = '─'.repeat(80);
+  const text = 'The user chose: A\n\nOption A\n\nThe tab has closed itself.';
+  const screen = ['⏺ earlier output', rule, '❯ The user chose: A', '', '  Option A', '', '  The tab has closed itself.', rule, '  ? for shortcuts'];
+  assert.strictEqual(readComposerDraft(screen), 'The user chose: A Option A The tab has closed itself.');
+  assert.strictEqual(promptDraftVerdict(screen, text), 'complete');
+});
+
 // --- isPromptStaged --------------------------------------------------------
 
 test('THE DOUBLE-SUBMIT GUARD: a submitted prompt echoed in the transcript is not staged', () => {

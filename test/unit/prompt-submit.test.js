@@ -194,8 +194,8 @@ test('a stalled partial prompt is cleared and re-typed, never Entered as a fragm
   // It stays partial past echoStallMs, so the composer is emptied and re-typed.
   await h.drain();
   await submitted;
-  assert.deepStrictEqual(h.writes, [PROMPT, '\x1b', PROMPT, '\r'],
-    'Esc clears the box before the re-type, so the agent can never receive it twice');
+  assert.deepStrictEqual(h.writes, [PROMPT, '\x03', PROMPT, '\r'],
+    'Ctrl+C clears the box before the re-type, so the agent can never receive it twice');
   assert.ok(h.logs.some((m) => m.includes('clearing and re-typing')), h.logs.join('\n'));
   assert.ok(h.logs.some((m) => m.includes('still shows only PART')), h.logs.join('\n'));
 });
@@ -205,7 +205,9 @@ test('the re-type happens at most once', async () => {
   const submitted = h.submitToShell(ID, PROMPT, h.engine, { confirmEcho: true });
   await h.drain();
   await submitted;
-  assert.strictEqual(h.writes.filter((w) => w === '\x1b').length, 1);
+  assert.strictEqual(h.writes.filter((w) => w === '\x03').length, 1);
+  // Never Esc: one only arms "Esc again to clear" (#716).
+  assert.strictEqual(h.writes.filter((w) => w === '\x1b').length, 0);
   assert.strictEqual(h.writes.filter((w) => w === PROMPT).length, 2);
 });
 
@@ -273,7 +275,7 @@ test('a collapsed paste whose line count is far short is re-typed, not Entered',
   const submitted = h.submitToShell(ID, PROMPT, h.engine, { confirmEcho: true });
   await h.drain();
   await submitted;
-  assert.deepStrictEqual(h.writes, [PROMPT, '\x1b', PROMPT, '\r']);
+  assert.deepStrictEqual(h.writes, [PROMPT, '\x03', PROMPT, '\r']);
 });
 
 test('a shell killed mid-echo-wait stops cold and still resolves', async () => {
@@ -494,7 +496,7 @@ test('the re-type takes the same route as the first delivery', async () => {
   await h.drain();
   await submitted;
   assert.deepStrictEqual(h.pastes, [BIG_PROMPT, BIG_PROMPT]);
-  // Esc and Enter are keystrokes and stay on write(), which is what makes Enter
+  // Ctrl+C and Enter are keystrokes and stay on write(), which is what makes Enter
   // arrive as its own stdin read.
-  assert.deepStrictEqual(h.writes, ['\x1b', '\r']);
+  assert.deepStrictEqual(h.writes, ['\x03', '\r']);
 });

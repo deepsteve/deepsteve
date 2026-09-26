@@ -134,6 +134,9 @@ let draftIsPaste = false;
 let menuUp = false;
 let menuCursor = 0;
 
+let lastEscAt = 0;              // a second Esc inside the window clears the draft
+const ESC_CLEAR_WINDOW_MS = 500;
+
 // Raw mode may clear OPOST, so every line break is written explicitly.
 const out = (s) => { try { process.stdout.write(s); } catch {} };
 
@@ -361,7 +364,12 @@ function consume(bytes) {
 }
 
 function handleKeys(s) {
-  if (s === '\x03') { ev('exit', { via: 'ctrl-c' }); process.exit(0); }
+  // Claude Code 2.1.283, measured (#716): Ctrl+C with a draft empties the composer and
+  // stays running; only with an empty one does it head for the exit.
+  if (s === '\x03') {
+    if (!draft) { ev('exit', { via: 'ctrl-c' }); process.exit(0); }
+    draft = ''; draftIsPaste = false; pasteNewlines = 0; ev('ctrl-c-clear', {}); render(); return;
+  }
 
   // #660 — while the modal is up it owns every key, and it obeys Ink's rule: an arrow
   // counts only when its escape sequence arrives as its OWN read, which is precisely
@@ -382,8 +390,16 @@ function handleKeys(s) {
     return;
   }
 
-  // Escape clears the composer
-  if (s === '\x1b') { draft = ''; draftIsPaste = false; pasteNewlines = 0; render(); return; }
+  // One Escape does NOT clear the composer; it arms "Esc again to clear", and only a
+  // second one soon after empties it. Measured on Claude Code 2.1.283 (#716): 200ms
+  // apart clears, 1.5s apart does not. A stub where one Esc cleared is what let the
+  // daemon's re-type pile a second copy onto the draft without a test noticing.
+  if (s === '\x1b') {
+    const now = Date.now();
+    if (now - lastEscAt < ESC_CLEAR_WINDOW_MS) { draft = ''; draftIsPaste = false; pasteNewlines = 0; lastEscAt = 0; render(); }
+    else lastEscAt = now;
+    return;
+  }
 
   if (CFG.policy === 'ink') {
     if (s === '\r' || s === '\n') { ev('enter', { own_chunk: true }); onEnter(); return; }

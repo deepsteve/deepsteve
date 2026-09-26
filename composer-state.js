@@ -131,11 +131,13 @@ function readComposerDraft(lines) {
     while (top > 0 && PROMPT_GLYPH_RE.test(lines[top - 1])) top--;
 
     // Wrapped rows below, but only when a closing rule proves where the box ends.
-    // Without that boundary the lines under the glyph are footer, not draft.
+    // Without that boundary the lines under the glyph are footer, not draft. A blank
+    // row does NOT end the box: a draft with an empty line in it draws one, and
+    // stopping there read a multi-paragraph prompt as its first line — 'incomplete'
+    // forever, so it was re-typed on top of itself (#716).
     let close = -1;
     for (let j = i + 1; j < lines.length; j++) {
       if (RULE_RE.test(lines[j])) { close = j; break; }
-      if (stripBorders(lines[j]).trim() === '') break;
     }
 
     const parts = [];

@@ -2567,10 +2567,15 @@ async function submitWithConfirmedEnter(id, entry, engine, text, options) {
       if (!retyped && Date.now() - stalledSince >= SUBMIT_TIMINGS.echoStallMs) {
         // Nothing has been submitted yet, so this is recoverable: clear the composer
         // and write the text again. If the read was wrong and the draft was whole,
-        // the cost is a re-type, not a duplicate prompt — Esc empties the box first.
+        // the cost is a re-type, not a duplicate prompt — Ctrl+C empties the box first.
+        // Not Esc: one Esc only arms "Esc again to clear", so the re-type landed on top
+        // of the draft, and an Esc followed by a prompt starting with `[` is read as
+        // an arrow key (#716). Ctrl+C clears a typed or pasted draft in one byte, and
+        // this branch only runs with our own non-empty draft on screen, so it can
+        // neither interrupt a turn nor arm "Ctrl+C again to exit".
         retyped = true;
         log(`[submit] id=${id} composer shows a PARTIAL prompt — clearing and re-typing (len=${text.length})`);
-        try { engine.write(id, '\x1b'); } catch { return; }
+        try { engine.write(id, '\x03'); } catch { return; }
         await promptSleep(SUBMIT_TIMINGS.echoPollMs);
         if (shells.get(id) !== entry || entry.killed) return;
         try { deliverPromptText(engine, id, entry, text); } catch { return; }
