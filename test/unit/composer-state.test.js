@@ -6,7 +6,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert');
 
-const { readComposerDraft, isPromptStaged, promptDraftVerdict } = require('../../composer-state');
+const { readComposerDraft, hasStashedDraft, isPromptStaged, promptDraftVerdict } = require('../../composer-state');
 const F = require('./fixtures/composer-screens');
 
 // The text the STAGED_*/PASTE_* fixtures are renderings of. #656's completeness
@@ -21,6 +21,26 @@ test('an empty composer reads as an empty draft, not as unknown', () => {
 
 test('the rotating placeholder hint is not a draft', () => {
   assert.strictEqual(readComposerDraft(F.PLACEHOLDER_COMPOSER), '');
+});
+
+test('mid-turn: an empty composer, a draft, and the queued-messages hint (real 2.1.283)', () => {
+  assert.strictEqual(readComposerDraft(F.WORKING_EMPTY_COMPOSER), '');
+  assert.strictEqual(readComposerDraft(F.WORKING_USER_DRAFT), 'user draft in progress');
+  // The queued message above the spinner carries the glyph too; it is not the composer.
+  assert.strictEqual(readComposerDraft(F.WORKING_QUEUED_MESSAGE), '');
+});
+
+test('the stash slot is read off its indicator, and a stashed composer is empty (real 2.1.283)', () => {
+  assert.strictEqual(hasStashedDraft(F.IDLE_STASHED_EMPTY), true);
+  assert.strictEqual(hasStashedDraft(F.WORKING_STASHED_EMPTY), true);
+  assert.strictEqual(hasStashedDraft(F.IDLE_DRAFT_WITH_STASH), true);
+  assert.strictEqual(readComposerDraft(F.IDLE_STASHED_EMPTY), '');
+  assert.strictEqual(readComposerDraft(F.WORKING_STASHED_EMPTY), '');
+  assert.strictEqual(readComposerDraft(F.IDLE_DRAFT_WITH_STASH), 'SECOND live draft again');
+  for (const name of ['EMPTY_COMPOSER', 'STAGED_DRAFT', 'WORKING_USER_DRAFT', 'WORKING_QUEUED_MESSAGE', 'PERMISSION_MENU']) {
+    assert.strictEqual(hasStashedDraft(F[name]), false, name);
+  }
+  assert.strictEqual(hasStashedDraft(null), false);
 });
 
 test('a half-typed draft is read back verbatim', () => {

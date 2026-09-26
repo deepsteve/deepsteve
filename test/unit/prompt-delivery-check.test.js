@@ -146,6 +146,20 @@ test('isMeta and isSidechain records are skipped', () => {
   });
 });
 
+test('a prompt absorbed mid-turn is found in its queued_command attachment', () => {
+  // The record shape Claude Code 2.1.283 wrote for a decision-tab answer typed while it
+  // worked — no `user` record exists for it at all.
+  withTranscript([
+    userRec('the prompt that started the turn'),
+    { type: 'queue-operation', operation: 'enqueue', content: PROMPT },
+    { type: 'queue-operation', operation: 'remove', content: PROMPT, reason: 'absorbed_mid_turn' },
+    { type: 'attachment', isSidechain: false, attachment: { type: 'queued_command', prompt: PROMPT, commandMode: 'prompt', origin: { kind: 'human' } } },
+  ], (file) => {
+    assert.strictEqual(readLastUserMessage(file), PROMPT);
+    assert.strictEqual(compareDelivered(PROMPT, readRecentUserMessages(file)).ok, true);
+  });
+});
+
 test('a truncated arrival on disk is reported as missing the head', () => {
   withTranscript([userRec(TAIL_ONLY)], (file) => {
     const v = compareDelivered(PROMPT, readRecentUserMessages(file));

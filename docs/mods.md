@@ -1246,6 +1246,24 @@ routes), and `decision-bar.js` (the in-page bar).
   (the FIFO drops a missing shell silently), 409 `session-blocked` when Inbox's `detectDialog`
   sees a modal (the choice would be typed into it), 409 `already-decided`. The bar renders each
   state; an unanswered tab whose session ended stays open and says so — close paths are untouched.
+- **Delivered mid-turn** (`midTurn: true` on the FIFO). Every other prompt waits for the turn to
+  end, and for a click that meant 26 s to 4½ min of latency behind a busy agent. Claude Code
+  accepts a message entered while it works, queues it, and absorbs it at the next tool boundary
+  with full user standing (recorded as a `queued_command` attachment, not a `user` record). So a
+  `midTurn` delivery is gated on the **composer** instead: `servePendingDelivery` types only into
+  one `readComposerDraft` reads as `''`, working or idle. A person's draft is **stashed**, not
+  waited on (holding until they sent it left every click stuck behind the box): Claude Code's
+  `chat:stash` (ctrl+s) empties the composer and restores the draft verbatim once our message
+  submits. Once per delivery, and only into an empty slot (`hasStashedDraft`, the `› stashed`
+  indicator) — a second stash replaces the first. A draft with the slot taken, a stash that did
+  not empty the box, and `null` (a dialog, whose cursor would take the keystrokes) all hold, with
+  no deadline. The queued-messages hint Claude Code shows in an emptied composer counts as empty,
+  or back-to-back answers would stall on each other.
+- **Why not a Claude Code channel.** `notifications/claude/channel` from our MCP server does
+  reach a session mid-turn, including an HTTP server from `--mcp-config` — measured on 2.1.283.
+  But the model treats a `<channel>` message as untrusted third-party content and declined to act
+  on one, while it obeyed the same text typed. It also needs
+  `--dangerously-load-development-channels`, whose confirmation dialog appears on every launch.
 - **Decision Tab mode** (`public/js/decision-mode.js`). The server pushes `{type:'decision-tabs',
   tabs}` — tabs still waiting on an answer — on connect and on every change; `create_display_tab`
   sends it **before** the open, so a window already in the mode sees the new tab as a decision.

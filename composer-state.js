@@ -59,8 +59,10 @@ const MENU_OPTION_RE = /^\d+\.\s/;
 // The rotating placeholder Claude Code draws in an EMPTY composer. Requiring the
 // quote keeps a real draft that merely begins with the word "try" from being read
 // as empty (and if that ever misfires, an empty verdict just means "no echo yet"
-// → the timed fallback).
-const PLACEHOLDER_RE = /^try\s+["'“”]/i;
+// → the timed fallback). The second form is what an empty composer shows while a
+// message sits in Claude Code's own mid-turn queue (captured on 2.1.283); without
+// it, a second mid-turn delivery reads the hint as somebody's draft and holds.
+const PLACEHOLDER_RE = /^try\s+["'“”]|^press up to edit queued messages$/i;
 
 // Claude Code collapses a large paste into a placeholder instead of echoing it,
 // so a long prompt may never show its own characters. Kept loose on purpose: the
@@ -278,8 +280,28 @@ function isPromptOnScreen(lines, text) {
   return norm(lines.join(' ')).includes(needle);
 }
 
+// Claude Code's stash indicator, drawn at the right end of the status row just above the
+// composer ("27195 tokens · › stashed", 2.1.283). chat:stash (ctrl+s by default) moves
+// the composer's draft into a single slot and brings it back by itself once the next
+// message is submitted.
+const STASH_INDICATOR_RE = /(?:^|\s)›\s*stashed\s*$/;
+const STASH_ROWS = 12;
+
+/**
+ * True when the stash slot is occupied. It matters because stashing is not a stack: a
+ * second ctrl+s REPLACES what was stashed, so a draft may only be stashed into an
+ * empty slot.
+ *
+ * @param {string[]} lines  Interpreted screen lines, oldest first.
+ */
+function hasStashedDraft(lines) {
+  if (!Array.isArray(lines)) return false;
+  return lines.slice(-STASH_ROWS).some((l) => STASH_INDICATOR_RE.test(String(l == null ? '' : l)));
+}
+
 module.exports = {
   readComposerDraft,
+  hasStashedDraft,
   isPromptStaged,
   isPromptOnScreen,
   promptDraftVerdict,

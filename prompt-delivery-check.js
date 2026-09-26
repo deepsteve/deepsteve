@@ -100,6 +100,16 @@ function readRecentUserMessages(file, limit = MAX_CANDIDATES) {
       if (!line.trim()) continue;
       let obj;
       try { obj = JSON.parse(line); } catch { continue; }
+      // A message entered mid-turn is never a `user` record: Claude Code absorbs it at
+      // the next tool boundary and records it as a queued_command attachment
+      // (2.1.283). Without this, every mid-turn delivery reads as unconfirmed.
+      const queued = obj.type === 'attachment' && !obj.isSidechain && obj.attachment
+        && obj.attachment.type === 'queued_command' && typeof obj.attachment.prompt === 'string'
+        ? obj.attachment.prompt : null;
+      if (queued !== null) {
+        if (queued && !MACHINERY_RE.test(queued)) out.push(queued);
+        continue;
+      }
       if (obj.type !== 'user' || obj.isMeta || obj.isSidechain) continue;
       const text = messageText(obj.message);
       if (!text || MACHINERY_RE.test(text)) continue;

@@ -28,7 +28,7 @@ const { createSessionAutoClose } = require('./session-auto-close');
 const { classifyScreenTail, CLAUDE_SCREEN_MARKERS } = require('./screen-classifier');
 const { TerminalScreen } = require('./terminal-screen');
 const { terminalEnv } = require('./terminal-env');
-const { readComposerDraft, isPromptStaged, isPromptOnScreen, promptDraftVerdict } = require('./composer-state');
+const { readComposerDraft, hasStashedDraft, isPromptStaged, isPromptOnScreen, promptDraftVerdict } = require('./composer-state');
 const { wrapRunCommand } = require('./terminal-run');
 const { isTerminalReport, hasSubmitKey } = require('./terminal-input');
 const { renderIssuePrompt, issueWorktreeName, issueTabName, resumePromptText, WORKFLOW_STAGES } = require('./issue-prompt');
@@ -2718,9 +2718,15 @@ async function confirmPromptSubmitted(id, text, options = {}) {
       if (entry.lastInputTime !== inputStamp) return 'aborted';
       const state = classifyScreenState(entry);
       // Cheapest check, and no emulator read: a running turn means the prompt went
-      // through, whatever the composer happens to be showing.
-      if (state === 'working') return 'submitted';
-      if (state !== 'waiting') continue;
+      // through, whatever the composer happens to be showing. Except mid-turn, where
+      // the turn was running before we typed and proves nothing — there the composer
+      // is the only evidence, working or idle.
+      if (options.midTurn) {
+        if (state === 'unknown') continue;
+      } else {
+        if (state === 'working') return 'submitted';
+        if (state !== 'waiting') continue;
+      }
       const view = await promptScreenView(entry);
       if (view === null) continue;
       if (isPromptStaged(view, text)) { sawStaged = true; continue; }
@@ -2931,7 +2937,7 @@ function drainPromptQueue(id) {
     // mean "we wrote \r", which is exactly the lie #607 is about). Keeping input
     // blocked through verification is also what makes the retry Enter safe.
     submitToShell(id, prompt, null, { ...options, confirmEcho: confirm }).then(
-      () => confirmPromptSubmitted(id, prompt, { verify: confirm })
+      () => confirmPromptSubmitted(id, prompt, { verify: confirm, midTurn: !!options.midTurn })
     ).then(finishDelivery);
   }
 
@@ -2971,6 +2977,17 @@ function drainPromptQueue(id) {
       log(`[deliverPrompt] id=${id} waiting for Codex MCP readiness`);
       e.onCodexReadyOnce = () => setTimeout(submitAndNotify, 50);
     }
+    return;
+  }
+  // A mid-turn delivery does not wait for the turn to end. Claude Code queues a
+  // message entered while it works and hands it over at the next tool boundary —
+  // what a person typing into the tab gets. Held turn-end delivery is what made a
+  // decision-tab click arrive minutes late behind a long turn. Its gate is the
+  // composer instead: see servePendingDelivery.
+  if (options.midTurn && config.screenMarkers) {
+    log(`[deliverPrompt] id=${id} arming mid-turn delivery (waits only for an empty composer)`);
+    e.pendingDelivery = { submit: submitAndNotify, midTurn: true, len: prompt.length, armedAt: Date.now() };
+    servePendingDelivery(e, id, classifyScreenState(e));
     return;
   }
   // If the screen shows the agent is idle at its prompt right now, submit
@@ -3023,6 +3040,41 @@ const PROMPT_READY_DEADLINE_MS = parseInt(process.env.DEEPSTEVE_PROMPT_READY_DEA
 function servePendingDelivery(e, id, state) {
   const pending = e.pendingDelivery;
   if (!pending) return;
+  if (pending.midTurn) {
+    // Working or idle alike, type only into a composer we can SEE is empty. Typing on
+    // top of a draft merged a person's half-sentence into the answer. null is a
+    // dialog, whose cursor would take our keystrokes as its answer, or a screen we
+    // cannot read: that holds, with no deadline.
+    const lines = e.terminalScreen ? e.terminalScreen.linesSync(SUBMIT_TIMINGS.screenLines) : [];
+    const draft = readComposerDraft(lines);
+    if (draft === '') {
+      e.pendingDelivery = null;
+      if (state === 'waiting') setWaiting(e, id, false, 'deliver-level');
+      log(`[deliverPrompt] id=${id} composer empty (state=${state}) — submitting mid-turn prompt (len=${pending.len})${pending.stashedAt ? '; the stashed draft comes back once it submits' : ''}`);
+      setTimeout(pending.submit, 0);
+      return;
+    }
+    // A draft does not hold the answer until it is sent — that left every click waiting
+    // on whatever sat in the box. Claude Code's own stash (chat:stash, ctrl+s) steps the
+    // draft aside and restores it, verbatim, the moment our message submits. Only into
+    // an EMPTY slot: a second stash replaces the first, and losing someone's stashed text
+    // is worse than waiting. Once per delivery: if the box has not emptied, the key does
+    // something else here (rebound) or they kept typing, and pressing it again is a guess.
+    if (draft && !pending.stashedAt && !hasStashedDraft(lines)) {
+      pending.stashedAt = Date.now();
+      log(`[deliverPrompt] id=${id} composer holds a draft — stashing it (ctrl+s) so the prompt can go in (state=${state}, len=${pending.len})`);
+      try { (e.engine || getEngine(id)).write(id, '\x13'); } catch {}
+      return;
+    }
+    if (!pending.heldLogged && Date.now() - pending.armedAt >= 10000) {
+      pending.heldLogged = true;
+      const why = draft === null ? 'composer unreadable (dialog?)'
+        : pending.stashedAt ? 'the stash did not empty the composer'
+        : 'composer holds a draft and the stash slot is taken';
+      log(`[deliverPrompt] id=${id} mid-turn prompt held: ${why} (state=${state}, len=${pending.len})`);
+    }
+    return;
+  }
   if (state === 'waiting') {
     e.pendingDelivery = null;
     setWaiting(e, id, false, 'deliver-level');

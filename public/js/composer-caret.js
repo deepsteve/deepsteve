@@ -57,8 +57,9 @@ const MENU_MARKER_RE = /Enter to select|Do you want to\b|Esc to cancel\b|Tab to 
 // A menu option body: "1. Yes", "2. Minimal".
 const MENU_OPTION_RE = /^\d+\.\s/;
 
-// The rotating placeholder Claude Code draws in an EMPTY composer.
-const PLACEHOLDER_RE = /^try\s+["'“”]/i;
+// The rotating placeholder Claude Code draws in an EMPTY composer, and the hint it
+// shows there while a message waits in its mid-turn queue.
+const PLACEHOLDER_RE = /^try\s+["'“”]|^press up to edit queued messages$/i;
 
 // How far past the candidate line to look for menu markers.
 const MENU_LOOKAHEAD = 6;

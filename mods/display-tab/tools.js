@@ -369,10 +369,15 @@ function registerRoutes(app, context) {
     r.choice = { index: body.index, label: button.label, note: note || null };
     store.set(id, r);
 
-    // The FIFO, never submitToShell and never e.pendingDelivery: it sequences this behind
-    // whatever the agent is mid-way through.
+    // The FIFO, never submitToShell and never e.pendingDelivery. midTurn: the answer is
+    // typed as soon as the composer is empty, even while the agent works, and Claude
+    // Code hands it over at the next tool boundary — the person clicked it now, and
+    // waiting for the turn to end made it land minutes late. A message pushed through
+    // a Claude Code channel instead would arrive as untrusted third-party content,
+    // which the model declines to act on (measured on 2.1.283).
     ctx.deliverPromptWhenReady(owner, decision.decidePrompt({ tabId: id, name: r.name, button, note, closed }), {
       source: 'decision-tab',
+      midTurn: true,
       skipIf: (sid) => !ctx.shells.has(sid),
       skipReason: 'session gone before the decision-tab choice could be delivered',
       onDeliver: (sid) => ctx.log(`[decision-tab] delivered ${id} -> ${sid}`),

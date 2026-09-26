@@ -17,6 +17,8 @@ const vm = require('vm');
 
 const { classifyScreenTail, CLAUDE_SCREEN_MARKERS } = require('../../screen-classifier');
 const { fixtures } = require('./fixtures/screen-tails');
+const { readComposerDraft, hasStashedDraft } = require('../../composer-state');
+const COMPOSER = require('./fixtures/composer-screens');
 
 const serverSource = fs.readFileSync(path.join(__dirname, '..', '..', 'server.js'), 'utf8');
 
@@ -65,6 +67,13 @@ function makeHarness({ agentType = 'claude', waitingForInput = true, screen = 'u
     lastSpinnerTime: null,
     lastInputTime: 0,
     loading: true,
+    // The interpreted screen the mid-turn gate reads. Separate from `scrollback`
+    // (the classifier's tail) so a test can set each half independently.
+    composerLines: COMPOSER.WORKING_EMPTY_COMPOSER,
+    terminalScreen: { linesSync: () => entry.composerLines },
+    // Keys the delivery path writes itself (the stash), as opposed to submitted prompts.
+    keys: [],
+    engine: { write: (_id, data) => entry.keys.push(data) },
   };
   shells.set(ID, entry);
 
@@ -74,6 +83,9 @@ function makeHarness({ agentType = 'claude', waitingForInput = true, screen = 'u
     auditWaiting: () => {},
     auditScreenTail: () => '',
     classifyScreenTail,
+    readComposerDraft,
+    hasStashedDraft,
+    SUBMIT_TIMINGS: { screenLines: 40 },
     getAgentConfig: (t) => AGENT_CONFIGS[t] || AGENT_CONFIGS.claude,
     deliverToWindow: (msg) => windowMsgs.push(msg),
     process: { env: {} },
@@ -292,4 +304,88 @@ test('an unclassified agent gets its deadline served instead of hanging forever'
 test('the deadline constant is the one server.js actually uses', () => {
   const h = makeHarness();
   assert.strictEqual(h.PROMPT_READY_DEADLINE_MS, DEADLINE_MS);
+});
+
+// --- midTurn: decision-tab answers (#716 follow-up) ---------------------------
+//
+// A click used to be held until the agent's turn ended — 26s, 69s, 4.5 minutes in the
+// log. Claude Code queues a message entered mid-turn and hands it over at the next
+// tool boundary, so a midTurn delivery types as soon as the COMPOSER is empty, and
+// only then: a draft is a person mid-sentence, and an unreadable composer is usually
+// a dialog whose cursor would take the keystrokes as its answer.
+
+test('midTurn: a prompt into a working session is typed now, not at the end of the turn', async () => {
+  const h = makeHarness({ waitingForInput: false, screen: 'working' });
+  h.deliverPromptWhenReady(ID, 'decision answer', { midTurn: true });
+  await h.runDue();
+  assert.deepStrictEqual(h.submits.map((s) => s.text), ['decision answer']);
+});
+
+test('midTurn: a draft is stashed, not waited on, and the prompt goes into the emptied box', async () => {
+  const h = makeHarness({ waitingForInput: false, screen: 'working' });
+  h.entry.composerLines = COMPOSER.WORKING_USER_DRAFT;
+  h.deliverPromptWhenReady(ID, 'decision answer', { midTurn: true });
+  assert.deepStrictEqual(h.entry.keys, ['\x13'], 'ctrl+s, once');
+  assert.strictEqual(h.submits.length, 0, 'typed on top of somebody\'s draft');
+  h.sweep();                                                  // still painting the stash
+  assert.deepStrictEqual(h.entry.keys, ['\x13'], 'pressed the stash key twice');
+  h.entry.composerLines = COMPOSER.WORKING_STASHED_EMPTY;     // Claude Code took it
+  h.sweep();
+  await h.runDue();
+  assert.deepStrictEqual(h.submits.map((s) => s.text), ['decision answer']);
+});
+
+test('midTurn: a draft with the stash slot already taken holds rather than overwrite it', async () => {
+  const h = makeHarness({ waitingForInput: true, screen: 'waiting' });
+  h.entry.composerLines = COMPOSER.IDLE_DRAFT_WITH_STASH;
+  h.deliverPromptWhenReady(ID, 'decision answer', { midTurn: true });
+  for (let i = 0; i < 12; i++) { h.advance(1000); h.sweep(); await h.runDue(); }
+  assert.deepStrictEqual(h.entry.keys, [], 'a second stash replaces the first');
+  assert.strictEqual(h.submits.length, 0);
+  assert.ok(h.logs.some((l) => /held: composer holds a draft and the stash slot is taken/.test(l)));
+  h.entry.composerLines = COMPOSER.IDLE_STASHED_EMPTY;        // they sent it
+  h.sweep();
+  await h.runDue();
+  assert.deepStrictEqual(h.submits.map((s) => s.text), ['decision answer']);
+});
+
+test('midTurn: a stash key that does not empty the box is pressed once, then held', async () => {
+  const h = makeHarness({ waitingForInput: false, screen: 'working' });
+  h.entry.composerLines = COMPOSER.WORKING_USER_DRAFT;        // and it stays that way (rebound key)
+  h.deliverPromptWhenReady(ID, 'decision answer', { midTurn: true });
+  for (let i = 0; i < 12; i++) { h.advance(1000); h.sweep(); await h.runDue(); }
+  assert.deepStrictEqual(h.entry.keys, ['\x13']);
+  assert.strictEqual(h.submits.length, 0);
+  assert.ok(h.logs.some((l) => /held: the stash did not empty the composer/.test(l)));
+});
+
+test('midTurn: a dialog holds the prompt with no deadline, idle or not', async () => {
+  const h = makeHarness({ waitingForInput: true, screen: 'waiting' });
+  h.entry.composerLines = COMPOSER.PERMISSION_MENU;
+  h.deliverPromptWhenReady(ID, 'decision answer', { midTurn: true });
+  for (let i = 0; i < 5; i++) { h.advance(60000); h.sweep(); await h.runDue(); }
+  assert.strictEqual(h.submits.length, 0, 'typed into a dialog');
+  h.entry.composerLines = COMPOSER.EMPTY_COMPOSER;
+  h.sweep();
+  await h.runDue();
+  assert.deepStrictEqual(h.submits.map((s) => s.text), ['decision answer']);
+});
+
+test('midTurn: two answers in a row both go in while the turn runs', async () => {
+  const h = makeHarness({ waitingForInput: false, screen: 'working' });
+  h.deliverPromptWhenReady(ID, 'first', { midTurn: true });
+  h.deliverPromptWhenReady(ID, 'second', { midTurn: true });
+  await h.runDue();
+  // After the first, Claude Code shows its queued-messages hint in an empty composer.
+  h.entry.composerLines = COMPOSER.WORKING_QUEUED_MESSAGE;
+  h.sweep();
+  await h.runDue();
+  assert.deepStrictEqual(h.submits.map((s) => s.text), ['first', 'second']);
+});
+
+test('without midTurn a working session still holds the prompt for the turn to end', async () => {
+  const h = makeHarness({ waitingForInput: false, screen: 'working' });
+  h.deliverPromptWhenReady(ID, 'issue prompt');
+  for (let i = 0; i < 5; i++) { h.advance(1000); h.setScreen('working'); h.sweep(); await h.runDue(); }
+  assert.strictEqual(h.submits.length, 0);
 });

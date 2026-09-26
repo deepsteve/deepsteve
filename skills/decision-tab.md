@@ -24,7 +24,7 @@ Reach for it while you work, whenever a choice is easier to make by looking than
      - `close_on_decision`: `true` by default — the tab closes itself once a choice is sent. Set `false` when the user should keep the page after answering, or you plan a follow-up question in the same tab.
      - `allow_note`: `true` adds a free-text field whose contents arrive with the choice.
 
-4. **End your turn.** Tell the user in one line that the decision is waiting in the tab, then stop. Do not poll and do not sleep: the answer arrives by itself as a new message beginning `[Decision tab "<name>" (<id>)] The user chose: …`, followed by `sends` and any note.
+4. **End your turn.** Tell the user in one line that the decision is waiting in the tab, then stop. Do not poll and do not sleep: the answer arrives by itself as a new message beginning `[Decision tab "<name>" (<id>)] The user chose: …`, followed by `sends` and any note. If you are still working when they click, it arrives mid-turn, between your tool calls — act on it then rather than finishing what the choice has overtaken.
 
 5. **Act on the choice** when that message arrives. For a follow-up in the same tab (only if it is still open — `close_on_decision: false`), call `mcp__deepsteve__update_display_tab` with the `tab_id`, the new page, and a new `decision`; that replaces the buttons and re-arms the tab. Then end your turn again.
 

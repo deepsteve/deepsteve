@@ -70,6 +70,12 @@ const VERDICTS = {
   SELECTION_MENU: 'unknown',
   STARTUP_BANNER: 'unknown',
   WORKING_NO_COMPOSER: 'unknown',
+  WORKING_EMPTY_COMPOSER: 'empty',
+  WORKING_USER_DRAFT: 'busy',
+  WORKING_QUEUED_MESSAGE: 'empty',
+  IDLE_STASHED_EMPTY: 'empty',
+  IDLE_DRAFT_WITH_STASH: 'busy',
+  WORKING_STASHED_EMPTY: 'empty',
 };
 
 test('every fixture has a pinned verdict', () => {

@@ -190,6 +190,72 @@ const WORKING_NO_COMPOSER = [
   '✽ Writing revendor-demo.sh… (12s · ↓ 24.9k tokens)',
 ];
 
+// Mid-turn, captured from Claude Code 2.1.283 under tmux (#716 follow-up). A message
+// typed and entered while the agent works goes into Claude Code's own queue, is shown
+// above the spinner with a send-now hint, and leaves the composer showing a queued-
+// messages hint — an EMPTY composer, like the rotating placeholder above.
+const WORKING_EMPTY_COMPOSER = [
+  '⏺ Bash(sleep 8)',
+  '     (ctrl+b ctrl+b (twice) to run in background)',
+  '✻ Bootstrapping… (7s · ↓ 73 tokens)',
+  RULE,
+  '❯',
+  RULE,
+  '  ⏵⏵ auto mode on (shift+tab to cycle) · esc to interrupt · ← for agents',
+];
+
+const WORKING_USER_DRAFT = [
+  '⏺ Bash(sleep 8)',
+  '     (ctrl+b ctrl+b (twice) to run in background)',
+  '✽ Bootstrapping… (8s · ↓ 81 tokens)',
+  RULE,
+  '❯ user draft in progress',
+  RULE,
+  '  ⏵⏵ auto mode on (shift+tab to cycle)',
+];
+
+const WORKING_QUEUED_MESSAGE = [
+  '     (ctrl+b ctrl+b (twice) to run in background)',
+  '❯ user draft in progress',
+  '  ctrl+x ctrl+s to send now',
+  '✶ Bootstrapping… (10s · ↓ 81 tokens)',
+  RULE,
+  '❯ Press up to edit queued messages',
+  RULE,
+  '  ⏵⏵ auto mode on (shift+tab to cycle) · esc to interrupt · ← for agents',
+];
+
+// chat:stash (ctrl+s), captured from Claude Code 2.1.283. The stash is one slot, shown
+// as "› stashed" at the end of the status row above the composer, and it comes back by
+// itself once the next message submits.
+const IDLE_STASHED_EMPTY = [
+  '⏺ GOT-IT',
+  '                                                                              27195 tokens · › stashed',
+  RULE,
+  '❯',
+  RULE,
+  '  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents',
+];
+
+const IDLE_DRAFT_WITH_STASH = [
+  '⏺ GOT-IT',
+  '                                                                              27195 tokens · › stashed',
+  RULE,
+  '❯ SECOND live draft again',
+  RULE,
+  '  ⏵⏵ auto mode on (shift+tab to cycle)',
+];
+
+const WORKING_STASHED_EMPTY = [
+  '⏺ Bash(sleep 6)',
+  '✽ Moseying… (4s · ↓ 40 tokens)',
+  '                                                                              26664 tokens · › stashed',
+  RULE,
+  '❯',
+  RULE,
+  '  ⏵⏵ auto mode on (shift+tab to cycle) · esc to interrupt · ← for agents',
+];
+
 module.exports = {
   RULE,
   EMPTY_COMPOSER,
@@ -210,4 +276,10 @@ module.exports = {
   SELECTION_MENU,
   STARTUP_BANNER,
   WORKING_NO_COMPOSER,
+  WORKING_EMPTY_COMPOSER,
+  WORKING_USER_DRAFT,
+  WORKING_QUEUED_MESSAGE,
+  IDLE_STASHED_EMPTY,
+  IDLE_DRAFT_WITH_STASH,
+  WORKING_STASHED_EMPTY,
 };
