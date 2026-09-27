@@ -118,6 +118,30 @@ The stack lives in `sessionStorage`, so it survives a reload of the same window 
 leak into a second one. That is a deliberate split from which app is *open*, which is a
 browser-wide `localStorage` preference.
 
+**Count badge** (#718). An app can put a red count on its rail row so you can tell something is
+waiting without opening it. Inbox's is how many things are in it. Declare the route that
+answers it:
+
+```json
+"badge": { "url": "/api/inbox/count", "params": { "projects": "projects", "briefings": "showBriefings" } }
+```
+
+The host polls `url` for `{ "count": n }`: every 5s, every 30s while the window is hidden, and
+immediately when you leave the app or come back to the window. The poll runs whether or not the
+app is open, since the badge matters most while it is closed. Each `params` entry maps a query
+key to one of the app's own stored settings. Arrays are joined with commas, booleans become
+`1`/`0`, and empty values are left off. That is how a count is scoped the same way the app
+scopes its list, so the badge and the list can't disagree. Because the route runs every 5s in
+every window, keep it cheap. Inbox's reads only its stored items and never a terminal screen.
+The badge sits on the icon square, the one part of a row the collapsed 48px rail keeps. It is
+hidden at 0 and reads `99+` above 99. An auth rejection (401/403/429) stops the poll for the
+rest of the page's life.
+
+Right-clicking a badged row, or the Apps header, offers **Hide/Show *label* count**. The choice
+is per app id in `localStorage` (`deepsteve-app-badge-hidden`), like quiet mode, and a hidden
+badge is not polled. `validate-mods.js` rejects a `badge` on a non-app, a `url` that is not a
+same-origin path, and `params` that are not string-to-string.
+
 ### How a mod is grouped (#673)
 
 The Mods modal has one section per **kind**. Kind is derived once, server-side, by
@@ -201,6 +225,7 @@ mods/<name>/
 | `entry` | string | no | HTML entry point, defaults to `"index.html"`. Omit for tools-only mods. |
 | `display` | string | no | `"panel"` for a docked panel, `"tab"` for a mod that opens as its own tab (`baby-browser`, `steveonardo`). Omit for fullscreen (default) or tools-only mods. |
 | `app` | boolean | no | `true` marks a fullscreen mod as an **App** — a place you work from. Adds an Apps rail row and a palette entry, unlocks the excursion API and quiet mode, and **suppresses both tab-strip buttons** (the toolbar launcher and the `←` back button). Requires `entry`. See [Apps](#apps-661). |
+| `badge` | object | no | Apps only. `{ url, params? }`: a same-origin route answering `{ count }`, polled by the host to draw a red count on the app's rail row. `params` maps query keys to the app's setting keys. See [Apps](#apps-661). |
 | `panel.position` | string | no | `"right"` (only value currently supported) |
 | `panel.defaultWidth` | number | no | Initial panel width in pixels |
 | `panel.minWidth` | number | no | Minimum panel width when resizing |

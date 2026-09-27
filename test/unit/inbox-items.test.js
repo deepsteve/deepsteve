@@ -775,3 +775,36 @@ test('supersededNote says what replaced the question, and when', () => {
     /^A later run of the same scheduled task finished successfully at 2026-09-15T09:15:00\.000Z/,
   );
 });
+
+// ── countOpen: the App bar's badge (#718) ────────────────────────────────────
+
+test('countOpen counts the open things agents posted — questions, results and briefings', () => {
+  const q = mk({ kind: 'question', project: '/a' }, 1);
+  const r = mk({ kind: 'result', project: '/a' }, 2);
+  const b = mk({ kind: 'briefing', project: '/b' }, 3);
+  const answered = mk({ kind: 'question', project: '/a' }, 4);
+  inbox.applyAnswer(answered, { text: 'yes' }, NOW + 1);
+  const archived = mk({ kind: 'briefing', project: '/a' }, 5);
+  inbox.applyDismiss(archived, 'archived', NOW + 1);
+
+  const items = [q, r, b, answered, archived];
+  assert.strictEqual(inbox.countOpen(items), 3, 'a closed item is not in the inbox any more');
+});
+
+test('countOpen applies the project filter and the showBriefings setting the list applies', () => {
+  const items = [
+    mk({ kind: 'question', project: '/a' }, 1),
+    mk({ kind: 'briefing', project: '/a' }, 2),
+    mk({ kind: 'result', project: '/b' }, 3),
+  ];
+  const onlyA = (i) => i.project === '/a';
+  assert.strictEqual(inbox.countOpen(items, { pick: onlyA }), 2);
+  assert.strictEqual(inbox.countOpen(items, { briefings: false }), 2,
+    'a panel that hides briefings must not be told it has one');
+  assert.strictEqual(inbox.countOpen(items, { pick: onlyA, briefings: false }), 1);
+});
+
+test('countOpen tolerates junk rather than throwing into a poll', () => {
+  assert.strictEqual(inbox.countOpen(null), 0);
+  assert.strictEqual(inbox.countOpen([null, undefined, mk({}, 1)]), 1);
+});

@@ -1777,6 +1777,31 @@ kbd {
    bottom border is what keeps Apps and Projects apart once the rail collapses to squares and
    both headers drop out. */
 .app-list { display: flex; flex-direction: column; padding: calc(var(--ds-context-radius) / 6) calc(var(--ds-context-radius) / 3); border-bottom: 1px solid var(--ds-border); padding-bottom: 6px; }
+/* An app's count (#718), e.g. how many things are in the Inbox. It hangs off the icon square
+   because the square is all of a row the collapsed 48px rail keeps, so the count sits in the
+   same corner expanded and collapsed. Hidden at 0 — a red 0 would be a false alarm. */
+.app-row .context-row-icon { position: relative; }
+.app-row-badge {
+  display: none;
+  position: absolute;
+  top: -6px;
+  /* -4px leaves a 2px gap before the label (the row's gap is 6px); a wider offset would sit on
+     "Inbox". The collapsed rail has no label, so there it reaches further out, below. */
+  right: -4px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  box-sizing: border-box;
+  border-radius: 8px;
+  background: var(--ds-accent-red);
+  color: #fff;
+  font: 600 10px/16px system-ui, -apple-system, sans-serif;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+  pointer-events: none;
+}
+.app-row-badge.visible { display: block; }
+#context-rail.collapsed .app-row-badge { right: -8px; }
 .context-row { display: flex; align-items: center; gap: 6px; padding: 7px 12px; cursor: pointer; color: var(--ds-text-secondary); font-size: 13px; border-left: 3px solid transparent; border-radius: calc(var(--ds-context-radius) / 2); }
 .context-row:hover { background: var(--ds-bg-tertiary); color: var(--ds-text-primary); }
 .context-row.active { color: var(--ds-text-bright); background: var(--ds-bg-tertiary); border-left-color: var(--ds-accent-blue); }

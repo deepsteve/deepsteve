@@ -15,6 +15,7 @@ import { tabIcon, TabManager } from './tab-manager.js';
 import { MOD_ROW_SELECTOR, groupMods, isModEnabled } from './mod-groups.js';
 import { wrapRealmFetch } from './client-log.js';
 import { claimHistoryKey } from './session-history.js';
+import { isAuthStatus } from './api.js';
 
 /**
  * The sandbox every mod iframe gets, in one place so the panel path and the
@@ -63,6 +64,9 @@ const ACTIVE_PANEL_KEY = nsKey('deepsteve-active-panel'); // Which panel tab is 
 // project-mods.js makes for its compact rail, and the same one ACTIVE_VIEW_KEY above makes for
 // which app is open. It never reaches the server, so there is no SETTINGS_SCHEMA entry.
 const QUIET_KEY = nsKey('deepsteve-app-quiet'); // JSON array of app ids you sit in quietly
+// Which apps' count badges you hid from the Apps rail (#718). The same call QUIET_KEY makes: a
+// display preference, so localStorage, and never the server.
+const BADGE_HIDDEN_KEY = nsKey('deepsteve-app-badge-hidden'); // JSON array of app ids
 
 let allMods = [];          // [{ id, name, description, entry, toolbar }]
 let enabledMods = new Set(); // mod IDs that are enabled
@@ -125,6 +129,8 @@ function forgetCallbacks(modId) {
 let modViewVisible = false;
 let toolbarButtons = new Map(); // modId → button element
 let appRows = new Map();        // modId → the Apps rail row, for the .active sweep (#661)
+let appBadges = new Map();      // modId → that row's count badge element (#718)
+let appBadgeCounts = new Map(); // modId → the last count its badge URL answered
 
 // Panel mode state — multi-panel
 let panelContainer = null;
@@ -298,6 +304,12 @@ function init(appHooks) {
   // keeps the module import free of storage access.
   excursion = _loadExcursion();
 
+  // A hidden window polls app badges rarely (#718); coming back re-polls at once, so the count
+  // you look at on return is current rather than up to 30s old.
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') refreshAppBadges();
+  });
+
   // Create back button (in #tabs, after layout-toggle)
   backBtn = document.createElement('button');
   backBtn.className = 'mod-back-btn';
@@ -414,6 +426,9 @@ function _saveEnabledMods() {
   // render. Without this, enabling an app while the rail is open shows nothing until something
   // else happens to re-render it.
   hooks?.onAppsChanged?.();
+  // An app just enabled needs its badge now, not at the next tick of a loop that may not be
+  // running; one just disabled has its cached count dropped.
+  refreshAppBadges();
 }
 
 /**
@@ -585,6 +600,8 @@ async function loadAvailableMods() {
   // stays empty until something unrelated happens to re-render it. Tell the host the apps are
   // known now. (The toolbar buttons above have no such problem: they are inserted here.)
   hooks?.onAppsChanged?.();
+  // Their badges too (#718) — the first poll, which arms the loop if any app declares one.
+  refreshAppBadges();
 
   // Load ALL enabled panel mods (not just the first one)
   const panelWasVisible = localStorage.getItem(PANEL_VISIBLE_KEY) !== 'false';
@@ -2163,12 +2180,22 @@ function appendAppRows(rail) {
   const header = document.createElement('div');
   header.className = 'context-rail-header';
   header.textContent = 'Apps';
+  // The section-level half of the badge menu (#718). The header drops out of the collapsed
+  // rail, so each badged row carries the same menu for itself below.
+  const badged = apps.filter(_hasBadge);
+  if (badged.length) {
+    header.title = 'Right-click for app options';
+    header.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      _showAppMenu(e.clientX, e.clientY, badged);
+    });
+  }
   rail.appendChild(header);
 
   const list = document.createElement('div');
   list.className = 'app-list';
   for (const mod of apps) {
-    const label = mod.toolbar?.label || mod.name;
+    const label = _appLabel(mod);
     const row = document.createElement('div');
     // .has-icon is what reveals .context-row-icon, which is the only thing left of a row once
     // the rail is collapsed to squares.
@@ -2183,6 +2210,19 @@ function appendAppRows(rail) {
     iconEl.textContent = glyph;
     row.appendChild(iconEl);
 
+    // Inside the icon, not beside the label: the icon is the one part of a row the collapsed
+    // 48px rail keeps, so anchoring here puts the count in the same place in both.
+    if (_hasBadge(mod)) {
+      const badge = document.createElement('span');
+      badge.className = 'app-row-badge';
+      iconEl.appendChild(badge);
+      appBadges.set(mod.id, badge);
+      row.addEventListener('contextmenu', (e) => {
+        e.preventDefault();
+        _showAppMenu(e.clientX, e.clientY, [mod]);
+      });
+    }
+
     const labelEl = document.createElement('span');
     labelEl.className = 'context-row-label';
     labelEl.textContent = label;
@@ -2193,7 +2233,12 @@ function appendAppRows(rail) {
     list.appendChild(row);
   }
   rail.appendChild(list);
+  // From the last known counts, so a re-render never flashes the badges off until the next poll.
+  _paintAppBadges();
 }
+
+/** The name an app goes by in the rail: its row label, and its badge menu's wording. */
+const _appLabel = (mod) => mod.toolbar?.label || mod.name;
 
 /**
  * Which app owns the slot. A sweep over the rows we kept, not a re-render — the same
@@ -2204,6 +2249,169 @@ function appendAppRows(rail) {
  */
 function _paintAppRows() {
   for (const [modId, row] of appRows) row.classList.toggle('active', activeView?.id === modId);
+}
+
+// ─── App badges (#718) ──────────────────────────────────────────────────────────────
+//
+// An app can put a count on its rail row — Inbox shows how many things are in it — so you can
+// tell something is waiting without opening the app. It is declared in the manifest, never
+// hard-coded here, which is what keeps this file free of any one mod's names:
+//
+//   "badge": { "url": "/api/inbox/count", "params": { "projects": "projects" } }
+//
+// The host polls `url` for `{ count }`, with each `params` entry filled from the app's own
+// stored settings (query key → setting key), so a count scoped the way the app's list is scoped
+// comes back scoped the same way. It polls because the whole point is a number that moves while
+// the app is CLOSED, when there is no iframe to ask.
+
+const BADGE_POLL_MS = 5000;
+// A hidden window still polls, just rarely: the count is what you see first when you come back,
+// and visibilitychange re-polls at once on the way in anyway.
+const BADGE_HIDDEN_POLL_MS = 30000;
+
+let badgeTimer = null;
+let badgeInFlight = false;
+let badgeAgain = false;   // a refresh was asked for mid-poll; run one more as soon as it lands
+// An auth rejection is not a hiccup and will not clear on its own (#676): re-arming would be a
+// rejected request every 5s forever, each walking this tab toward authGate's 429 lockout. The
+// heal reloads the page, which is what resets this.
+let badgeStopped = false;
+
+const _hasBadge = (mod) => typeof mod?.badge?.url === 'string';
+
+function _loadBadgeHidden() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(BADGE_HIDDEN_KEY));
+    return new Set(Array.isArray(parsed) ? parsed : []);
+  } catch { return new Set(); }
+}
+let badgeHidden = _loadBadgeHidden();
+
+/** Has this browser hidden the app's count? */
+function isAppBadgeHidden(id) {
+  return badgeHidden.has(id);
+}
+
+/** The one writer. Persists first, then repaints, like setQuietMode(). */
+function setAppBadgeHidden(id, hidden) {
+  if (hidden) badgeHidden.add(id);
+  else badgeHidden.delete(id);
+  try { localStorage.setItem(BADGE_HIDDEN_KEY, JSON.stringify([...badgeHidden])); } catch { /* private mode */ }
+  _paintAppBadges();
+  // A hidden badge is not polled, so the count it would show again is stale — fetch it now.
+  if (!hidden) refreshAppBadges();
+}
+
+/** The badge URL with the app's settings mapped into the query. Empty values are left off. */
+function _badgeUrl(mod) {
+  const settings = _loadModSettings(mod);
+  const q = new URLSearchParams();
+  for (const [param, key] of Object.entries(mod.badge.params || {})) {
+    const v = settings[key];
+    if (Array.isArray(v)) { if (v.length) q.set(param, v.join(',')); }
+    else if (typeof v === 'boolean') q.set(param, v ? '1' : '0');
+    else if (v !== undefined && v !== null && v !== '') q.set(param, String(v));
+  }
+  const qs = q.toString();
+  return qs ? `${mod.badge.url}${mod.badge.url.includes('?') ? '&' : '?'}${qs}` : mod.badge.url;
+}
+
+async function _fetchBadge(mod) {
+  try {
+    const r = await fetch(_badgeUrl(mod), { cache: 'no-store' });
+    if (isAuthStatus(r.status)) { badgeStopped = true; return; }
+    if (!r.ok) return;
+    const n = Number((await r.json())?.count);
+    if (Number.isFinite(n) && n >= 0) appBadgeCounts.set(mod.id, Math.floor(n));
+  } catch { /* keep the last count — a network blip must not blank the badge */ }
+}
+
+/**
+ * Poll every enabled app's badge now, and re-arm. Safe to call from anywhere and at any rate:
+ * it clears the pending tick first, and a call while a poll is in flight queues exactly one
+ * follow-up rather than a second concurrent fetch. The follow-up is not optional — the poll in
+ * flight may have been answered before the thing that prompted the call (you just answered an
+ * item, or re-showed a hidden badge), and dropping it would show that stale number for a tick.
+ * With no badged app enabled it simply stops, and the next enable calls it again.
+ */
+async function refreshAppBadges() {
+  if (badgeTimer) { clearTimeout(badgeTimer); badgeTimer = null; }
+  if (badgeStopped) return;
+  if (badgeInFlight) { badgeAgain = true; return; }
+  const apps = getApps().filter(_hasBadge);
+  // A disabled app's last count must not flash back when it is re-enabled.
+  for (const id of [...appBadgeCounts.keys()]) {
+    if (!apps.some(m => m.id === id)) appBadgeCounts.delete(id);
+  }
+  if (!apps.length) return;
+
+  badgeInFlight = true;
+  try {
+    await Promise.all(apps.filter(m => !badgeHidden.has(m.id)).map(_fetchBadge));
+  } finally {
+    badgeInFlight = false;
+  }
+  _paintAppBadges();
+  if (badgeStopped) return;
+  if (badgeAgain) { badgeAgain = false; return refreshAppBadges(); }
+  badgeTimer = setTimeout(refreshAppBadges,
+    document.visibilityState === 'hidden' ? BADGE_HIDDEN_POLL_MS : BADGE_POLL_MS);
+}
+
+/** Paint every badge from the cached counts. A sweep over the rows we kept, never a re-render. */
+function _paintAppBadges() {
+  for (const [modId, badge] of appBadges) {
+    const n = appBadgeCounts.get(modId) || 0;
+    const show = n > 0 && !badgeHidden.has(modId);
+    badge.textContent = show ? (n > 99 ? '99+' : String(n)) : '';
+    badge.classList.toggle('visible', show);
+  }
+}
+
+// The badge menu. Reuses the generic .context-menu classes and mirrors project-mods.js's
+// dismissal: mousedown, not click, because a rail re-render can detach the pressed row
+// mid-gesture and the click that follows never reaches document (#546).
+let appMenu = null;
+function _hideAppMenu() {
+  if (appMenu) { appMenu.remove(); appMenu = null; }
+  document.removeEventListener('mousedown', _onAppMenuDocMouseDown, true);
+  document.removeEventListener('keydown', _onAppMenuKey, true);
+}
+function _onAppMenuKey(e) {
+  if (e.key === 'Escape') { e.preventDefault(); _hideAppMenu(); }
+}
+function _onAppMenuDocMouseDown(e) {
+  if (appMenu && !appMenu.contains(e.target)) _hideAppMenu();
+}
+
+/** One Hide/Show toggle per app — the row offers its own, the Apps header every badged app's. */
+function _showAppMenu(x, y, apps) {
+  _hideAppMenu();
+  const menu = document.createElement('div');
+  menu.className = 'context-menu app-menu';
+  for (const mod of apps) {
+    const hidden = badgeHidden.has(mod.id);
+    const item = document.createElement('div');
+    item.className = 'context-menu-item';
+    item.textContent = `${hidden ? 'Show' : 'Hide'} ${_appLabel(mod).toLowerCase()} count`;
+    item.onclick = () => { _hideAppMenu(); setAppBadgeHidden(mod.id, !hidden); };
+    menu.appendChild(item);
+  }
+
+  menu.style.left = x + 'px';
+  menu.style.top = y + 'px';
+  document.body.appendChild(menu);
+  const rect = menu.getBoundingClientRect();
+  if (rect.right > window.innerWidth) menu.style.left = (window.innerWidth - rect.width - 8) + 'px';
+  if (rect.bottom > window.innerHeight) menu.style.top = (window.innerHeight - rect.height - 8) + 'px';
+
+  appMenu = menu;
+  // Deferred so the opening right-click's own mousedown can't close it; the guard keeps a stale
+  // timeout from arming for a menu that has already been replaced.
+  setTimeout(() => {
+    if (appMenu === menu) document.addEventListener('mousedown', _onAppMenuDocMouseDown, true);
+  }, 0);
+  document.addEventListener('keydown', _onAppMenuKey, true);
 }
 
 // ─── Quiet mode (#662) ──────────────────────────────────────────────────────────────
@@ -2451,8 +2659,13 @@ function getActiveViewId() {
  * you were" free.
  */
 function _setModViewVisible(on) {
+  const wasVisible = modViewVisible;
   modViewVisible = on;
   TabManager.setActive(on ? null : (getActiveSessionIdFn?.() ?? null));
+  // Leaving an app is the moment its count most likely changed — you were just in it answering
+  // things — so re-poll now rather than showing the old number for up to a tick (#718). On the
+  // transition only: a backgrounded slot re-runs this on every tab switch.
+  if (wasVisible && !on) refreshAppBadges();
 }
 
 /**
@@ -3451,6 +3664,10 @@ export const ModManager = {
   isQuietMode,
   isQuietAvailable,
   setQuietMode,
+  // App badges (#718)
+  refreshAppBadges,
+  isAppBadgeHidden,
+  setAppBadgeHidden,
 };
 
 // context-views.js draws the Apps section into the rail with this, the same shape it already

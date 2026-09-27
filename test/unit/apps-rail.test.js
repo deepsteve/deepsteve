@@ -55,6 +55,8 @@ function fakeElement(tag = 'div') {
     setAttribute: (k, v) => { el[k] = v; },
     querySelector: () => null,
     querySelectorAll: () => [],
+    contains: (other) => other === el,
+    getBoundingClientRect: () => ({ right: 0, bottom: 0, width: 0, height: 0 }),
     remove: () => {
       const p = el.parent;
       if (p) { const i = p.children.indexOf(el); if (i >= 0) p.children.splice(i, 1); }
@@ -107,9 +109,9 @@ const MODS = [
 ];
 
 /** mod-manager, loaded with the mod list above and every mod enabled. */
-async function setup({ enabled = ['inbox', 'tower', 'tasks', 'core'] } = {}) {
+async function setup({ enabled = ['inbox', 'tower', 'tasks', 'core'], mods = MODS, onFetch = null, keepStorage = false } = {}) {
   allElements = [];
-  storeMap.clear();
+  if (!keepStorage) storeMap.clear();
   storeMap.set('deepsteve-enabled-mods', JSON.stringify(enabled));
 
   const appRoot = fakeElement();
@@ -127,8 +129,9 @@ async function setup({ enabled = ['inbox', 'tower', 'tasks', 'core'] } = {}) {
 
   globalThis.fetch = (url) => {
     if (String(url).includes('/api/mods')) {
-      return Promise.resolve({ ok: true, json: () => Promise.resolve({ mods: MODS, deepsteveVersion: '9.9.9' }) });
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ mods, deepsteveVersion: '9.9.9' }) });
     }
+    if (onFetch) return Promise.resolve(onFetch(String(url)));
     return Promise.reject(new Error('unexpected fetch ' + url));
   };
 
@@ -312,4 +315,215 @@ test('openApp is the command palette entry point', async () => {
   assert.strictEqual(ModManager.getActiveViewId(), 'inbox');
   ModManager.openApp('tower');   // not an app: the palette never offers it
   assert.strictEqual(ModManager.getActiveViewId(), 'inbox');
+});
+
+// ------------------------------------------------------------------ count badge (#718)
+//
+// An app that declares `badge` in its manifest gets a count on its rail row — Inbox's is how
+// many things are in it — polled by the host so it moves while the app is closed.
+
+const BADGED = [
+  {
+    id: 'inbox', name: 'Inbox', entry: 'index.html', app: true, toolbar: { label: 'Inbox' },
+    badge: { url: '/api/inbox/count', params: { projects: 'projects', briefings: 'showBriefings' } },
+    settings: [{ key: 'showBriefings', type: 'boolean', default: true }],
+  },
+  { id: 'tower', name: 'Tower', entry: 'index.html', app: true },   // an app with no badge
+];
+
+/**
+ * The poll re-arms itself with setTimeout, and a real 5s timer would hold this process open
+ * after the last test. Record instead of scheduling, and put the real ones back afterwards.
+ */
+function fakeTimers(t) {
+  const real = { setTimeout: globalThis.setTimeout, clearTimeout: globalThis.clearTimeout };
+  const timers = [];
+  globalThis.setTimeout = (fn, ms) => { timers.push({ fn, ms }); return timers.length; };
+  globalThis.clearTimeout = () => {};
+  t.after(() => Object.assign(globalThis, real));
+  return timers;
+}
+
+/** A fetch stub for the badge URL: answers `count()` and records every URL it was asked. */
+function countServer(count, { status = 200 } = {}) {
+  const urls = [];
+  const onFetch = (url) => {
+    urls.push(url);
+    return { ok: status === 200, status, json: () => Promise.resolve({ count: count() }) };
+  };
+  return { urls, onFetch };
+}
+
+// The poll is fire-and-forget from loadAvailableMods(); let its fetch and json() settle.
+const settle = () => new Promise((r) => setImmediate(r));
+
+const badgeOf = (row) => row.children.find(c => c.classList.contains('context-row-icon'))
+  ?.children.find(c => c.classList.contains('app-row-badge'));
+const shown = (badge) => (badge.classList.contains('visible') ? badge.textContent : null);
+const lastMenu = () => [...allElements].reverse().find(e => e.classList.contains('context-menu'));
+const rightClick = (el) => el.listeners.contextmenu({ preventDefault() {}, clientX: 10, clientY: 10 });
+
+test('a badged app shows its count inside the icon square, which the collapsed rail keeps', async (t) => {
+  fakeTimers(t);
+  const server = countServer(() => 3);
+  const { mod } = await setup({ enabled: ['inbox', 'tower'], mods: BADGED, onFetch: server.onFetch });
+  const rail = fakeElement();
+  mod.appendAppRows(rail);
+  await settle();
+
+  const [inboxRow, towerRow] = rowsOf(rail);
+  assert.strictEqual(shown(badgeOf(inboxRow)), '3', 'painted in place on the row already on screen');
+  assert.strictEqual(badgeOf(towerRow), undefined, 'an app that declares no badge gets none');
+  assert.deepStrictEqual(server.urls, ['/api/inbox/count?briefings=1'], 'only badged apps are polled');
+
+  // A re-render paints from the last count rather than waiting a tick with the badge off.
+  const rail2 = fakeElement();
+  mod.appendAppRows(rail2);
+  assert.strictEqual(shown(badgeOf(rowsOf(rail2)[0])), '3');
+});
+
+test('the badge URL carries the app\'s own settings, so it is scoped like the app\'s list', async (t) => {
+  fakeTimers(t);
+  storeMap.clear();
+  storeMap.set('deepsteve-mod-settings-inbox', JSON.stringify({ projects: ['/r/a', '/r/b'], showBriefings: false }));
+  const server = countServer(() => 1);
+  await setup({ enabled: ['inbox'], mods: BADGED, onFetch: server.onFetch, keepStorage: true });
+  await settle();
+
+  const url = new URL(server.urls[0], 'http://x');
+  assert.strictEqual(url.pathname, '/api/inbox/count');
+  assert.strictEqual(url.searchParams.get('projects'), '/r/a,/r/b');
+  assert.strictEqual(url.searchParams.get('briefings'), '0');
+});
+
+test('zero hides the badge, and a big number is capped at 99+', async (t) => {
+  fakeTimers(t);
+  let n = 0;
+  const server = countServer(() => n);
+  const { mod, ModManager } = await setup({ enabled: ['inbox'], mods: BADGED, onFetch: server.onFetch });
+  const rail = fakeElement();
+  mod.appendAppRows(rail);
+  await settle();
+  const badge = badgeOf(rowsOf(rail)[0]);
+  assert.strictEqual(shown(badge), null, 'a red 0 would be a false alarm');
+
+  n = 150;
+  await ModManager.refreshAppBadges();
+  assert.strictEqual(shown(badge), '99+');
+
+  n = 0;
+  await ModManager.refreshAppBadges();
+  assert.strictEqual(shown(badge), null, 'and it goes away again when the inbox empties');
+});
+
+test('the poll re-arms itself while the app is closed', async (t) => {
+  const timers = fakeTimers(t);
+  const server = countServer(() => 2);
+  await setup({ enabled: ['inbox'], mods: BADGED, onFetch: server.onFetch });
+  await settle();
+  assert.strictEqual(timers.filter(x => x.ms === 5000).length, 1, 'the next tick is armed');
+
+  await timers.find(x => x.ms === 5000).fn();
+  assert.strictEqual(server.urls.length, 2, 'and firing it polls again, with no view ever opened');
+});
+
+test('a refresh asked for mid-poll is not lost — it runs as soon as that poll lands', async (t) => {
+  // Leaving the app kicks a refresh; if a tick is already in flight, its answer may predate
+  // what you just did in there. Dropping the kick would show that stale number for 5s.
+  fakeTimers(t);
+  let n = 5;
+  const urls = [];
+  const pending = [];
+  const onFetch = (url) => {
+    urls.push(url);
+    const v = n;
+    return { ok: true, status: 200, json: () => new Promise((r) => pending.push(() => r({ count: v }))) };
+  };
+  const { mod, ModManager } = await setup({ enabled: ['inbox'], mods: BADGED, onFetch });
+  const rail = fakeElement();
+  mod.appendAppRows(rail);
+  await settle();
+  assert.strictEqual(urls.length, 1, 'the first poll is in flight');
+
+  n = 1;
+  ModManager.refreshAppBadges();
+  assert.strictEqual(urls.length, 1, 'no second concurrent fetch');
+
+  pending.shift()();
+  await settle();
+  assert.strictEqual(urls.length, 2, 'the queued refresh ran as soon as the first poll landed');
+  pending.shift()();
+  await settle();
+  assert.strictEqual(shown(badgeOf(rowsOf(rail)[0])), '1', 'and its newer answer is what shows');
+});
+
+test('right-click hides the count, and the choice survives a reload', async (t) => {
+  fakeTimers(t);
+  const server = countServer(() => 4);
+  const { mod, ModManager } = await setup({ enabled: ['inbox'], mods: BADGED, onFetch: server.onFetch });
+  const rail = fakeElement();
+  mod.appendAppRows(rail);
+  await settle();
+  const row = rowsOf(rail)[0];
+  assert.strictEqual(shown(badgeOf(row)), '4');
+
+  rightClick(row);
+  const hide = lastMenu().children[0];
+  assert.strictEqual(hide.textContent, 'Hide inbox count');
+  hide.onclick();
+  assert.strictEqual(shown(badgeOf(row)), null);
+  assert.strictEqual(ModManager.isAppBadgeHidden('inbox'), true);
+  assert.strictEqual(storeMap.get('deepsteve-app-badge-hidden'), '["inbox"]', 'per-browser, like quiet mode');
+
+  // A reload: a fresh module over the same localStorage.
+  const server2 = countServer(() => 4);
+  const { mod: mod2 } = await setup({ enabled: ['inbox'], mods: BADGED, onFetch: server2.onFetch, keepStorage: true });
+  const rail2 = fakeElement();
+  mod2.appendAppRows(rail2);
+  await settle();
+  const row2 = rowsOf(rail2)[0];
+  assert.strictEqual(shown(badgeOf(row2)), null, 'still hidden after the reload');
+  assert.deepStrictEqual(server2.urls, [], 'and a hidden badge is not polled at all');
+
+  rightClick(row2);
+  const show = lastMenu().children[0];
+  assert.strictEqual(show.textContent, 'Show inbox count');
+  show.onclick();
+  await settle();
+  assert.strictEqual(shown(badgeOf(row2)), '4', 're-showing fetches the count at once');
+  assert.strictEqual(storeMap.get('deepsteve-app-badge-hidden'), '[]');
+});
+
+test('the Apps header offers the toggle too — it is the section-level target', async (t) => {
+  fakeTimers(t);
+  const server = countServer(() => 1);
+  const { mod } = await setup({ enabled: ['inbox', 'tower'], mods: BADGED, onFetch: server.onFetch });
+  const rail = fakeElement();
+  mod.appendAppRows(rail);
+  rightClick(rail.children[0]);
+  assert.deepStrictEqual(lastMenu().children.map(c => c.textContent), ['Hide inbox count'],
+    'one entry per badged app; Tower has no count to hide');
+});
+
+test('with no badged app, nothing is polled and there is no menu', async () => {
+  // MODS' Inbox declares no badge, and the default fetch stub rejects anything but /api/mods.
+  const { mod } = await setup();
+  const rail = fakeElement();
+  mod.appendAppRows(rail);
+  await settle();
+  assert.strictEqual(rail.children[0].listeners.contextmenu, undefined);
+  assert.strictEqual(rowsOf(rail)[0].listeners.contextmenu, undefined);
+  assert.strictEqual(badgeOf(rowsOf(rail)[0]), undefined);
+});
+
+test('an auth rejection stops the poll dead (#676)', async (t) => {
+  const timers = fakeTimers(t);
+  const server = countServer(() => 1, { status: 401 });
+  const { ModManager } = await setup({ enabled: ['inbox'], mods: BADGED, onFetch: server.onFetch });
+  await settle();
+  assert.strictEqual(server.urls.length, 1);
+  assert.strictEqual(timers.filter(x => x.ms === 5000).length, 0, 'no next tick is armed');
+
+  await ModManager.refreshAppBadges();
+  assert.strictEqual(server.urls.length, 1, 'and nothing re-polls a cookie the server refused');
 });

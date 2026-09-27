@@ -54,6 +54,23 @@ function validateManifest(mod, manifest) {
     errors.push(`[${mod}] "tags" must be an array of strings (e.g. ["games"])`);
   }
 
+  // #718: a count badge is drawn on the app's row in the Apps rail, so it means nothing on a
+  // mod that has no row — and a malformed one would simply never paint, with nothing to say why.
+  if ('badge' in manifest) {
+    const b = manifest.badge;
+    if (manifest.app !== true) {
+      errors.push(`[${mod}] "badge" requires "app": true — the badge is drawn on the Apps rail row`);
+    }
+    // `//host/x` starts with a slash too, and is protocol-relative — another origin.
+    if (!b || typeof b.url !== 'string' || !/^\/(?!\/)/.test(b.url)) {
+      errors.push(`[${mod}] "badge.url" must be a same-origin path (e.g. "/api/${mod}/count")`);
+    }
+    if (b && 'params' in b && (!b.params || typeof b.params !== 'object' || Array.isArray(b.params)
+        || Object.values(b.params).some(v => typeof v !== 'string'))) {
+      errors.push(`[${mod}] "badge.params" must map query keys to setting keys (strings)`);
+    }
+  }
+
   return errors;
 }
 
