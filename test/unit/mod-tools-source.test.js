@@ -148,6 +148,24 @@ test('validate-mods.js requires an entry for "app": true (#661)', () => {
   assert.deepStrictEqual(validateManifest('demo', base), []);
 });
 
+test('validate-mods.js checks a "badge" the way the host will read it (#718)', () => {
+  // A badge that the host cannot use never paints and says nothing, so the build says it.
+  const { validateManifest } = require('../../validate-mods');
+  const app = { name: 'D', version: '1.0.0', description: 'd', app: true, entry: 'index.html' };
+  const ok = { url: '/api/demo/count', params: { projects: 'projects' } };
+  assert.deepStrictEqual(validateManifest('demo', { ...app, badge: ok }), []);
+  assert.deepStrictEqual(validateManifest('demo', { ...app, badge: { url: '/api/demo/count' } }), [],
+    'params are optional');
+
+  const fails = (badge, extra = {}) => validateManifest('demo', { ...app, ...extra, badge });
+  assert.match(fails(ok, { app: false })[0] || '', /requires "app": true/, 'no rail row, nowhere to draw it');
+  assert.match(fails({ url: 'https://elsewhere.test/count' })[0] || '', /same-origin path/);
+  assert.match(fails({ url: '//elsewhere.test/count' })[0] || '', /same-origin path/, 'protocol-relative is another origin');
+  assert.match(fails({})[0] || '', /same-origin path/);
+  assert.match(fails({ url: '/c', params: ['projects'] })[0] || '', /badge\.params/);
+  assert.match(fails({ url: '/c', params: { projects: 1 } })[0] || '', /badge\.params/);
+});
+
 test('docs/mods.md teaches the rule and stops teaching the old one (#644)', () => {
   assert.doesNotMatch(doc, /^\|\s*`tools`\s*\|/m,
     'the mod.json field reference must not list a `tools` field — there is none (#644)');

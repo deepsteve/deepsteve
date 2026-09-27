@@ -11,6 +11,11 @@
  * oversight: a new push feed would need a notifyX/onXChanged pair in
  * public/js/mod-manager.js plus a dispatch line in public/js/app.js.
  *
+ * The App bar's badge (#718) polls too, and it is the one reader that runs while the panel is
+ * closed. The host polls the route mod.json names under `badge` — GET /api/inbox/count — which
+ * counts stored items only and never reads a terminal screen, so it costs nothing with the
+ * panel shut.
+ *
  * Inbox shipped (#660) with no host edit at all. It now has exactly one: ctx.transcriptPath,
  * put in the mod context for the chat pane (#670). The function itself is server.js's and is
  * shared with #672 — locating a session's conversation means knowing both how Claude Code
@@ -412,6 +417,28 @@ function settleSuperseded(now = Date.now()) {
   }
   if (dismissed.length) inbox.save();
   return dismissed.length;
+}
+
+/**
+ * Bring the store up to date before anyone reads it, and return it. Shared by /items and
+ * /count (#718) so the list and the App bar's badge are counted from the same settled store.
+ */
+function settleStore(now = Date.now()) {
+  const stored = inbox.all();
+
+  // #710. Not gated on boot like the sweep below, because its facts include saved session
+  // records as well as live shells, so an empty ctx.shells cannot make it wrong. And it runs
+  // first, so a question you replied to before its tab closed reads as superseded, not
+  // session-gone.
+  settleSuperseded(now);
+
+  // Skip the sweep entirely while ctx.shells might still be filling up after boot,
+  // or every restart dismisses the whole inbox.
+  if (ctx.shells.size > 0 || now - BOOTED_AT > BOOT_GRACE_MS) {
+    const changed = inbox.sweepDeadSessions(stored, (sid) => ctx.shells.has(sid), now);
+    if (changed) inbox.save();
+  }
+  return stored;
 }
 
 /** Does this session have an open question asked before `at`? Only those can be superseded by it. */
@@ -1968,20 +1995,7 @@ function registerRoutes(app, context) {
 
   app.get('/api/inbox/items', (req, res) => {
     const now = Date.now();
-    const stored = inbox.all();
-
-    // #710. Not gated on boot like the sweep below, because its facts include saved session
-    // records as well as live shells, so an empty ctx.shells cannot make it wrong. And it runs
-    // first, so a question you replied to before its tab closed reads as superseded, not
-    // session-gone.
-    settleSuperseded(now);
-
-    // Skip the sweep entirely while ctx.shells might still be filling up after boot,
-    // or every restart dismisses the whole inbox.
-    if (ctx.shells.size > 0 || now - BOOTED_AT > BOOT_GRACE_MS) {
-      const changed = inbox.sweepDeadSessions(stored, (sid) => ctx.shells.has(sid), now);
-      if (changed) inbox.save();
-    }
+    const stored = settleStore(now);
 
     const includeClosed = req.query.all === '1';
     const pick = projectFilter(req.query);
@@ -1990,6 +2004,25 @@ function registerRoutes(app, context) {
       ...derivedItems(now, { idleAfterMs: idleAfterFrom(req.query) }),
     ].filter(pick));
     res.json({ items, generatedAt: now, projects: knownProjects() });
+  });
+
+  /**
+   * The App bar's badge (#718): how many things are in the Inbox, polled by the host while
+   * the panel is closed.
+   *
+   * Never scrapes. The number is the stored items alone (see countOpen), so this is one pass
+   * over an in-memory array — which is what makes it safe to poll from every browser window
+   * whether or not anyone has the panel open. It runs the same settle as /items first, and the
+   * same project filter, so the badge cannot count a question the list would already have
+   * dropped. `briefings=0` is the panel's showBriefings setting, passed through by the host.
+   */
+  app.get('/api/inbox/count', (req, res) => {
+    const now = Date.now();
+    const count = inbox.countOpen(settleStore(now), {
+      pick: projectFilter(req.query),
+      briefings: req.query.briefings !== '0',
+    });
+    res.json({ count, generatedAt: now });
   });
 
   /**

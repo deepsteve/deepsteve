@@ -1,6 +1,6 @@
 {
   "name": "Inbox",
-  "version": "0.12.0",
+  "version": "0.13.0",
   "minDeepsteveVersion": "0.4.0",
   "description": "Inbox, async agent messages",
   "experimental": true,
@@ -8,6 +8,10 @@
   "entry": "index.html",
   "app": true,
   "toolbar": { "label": "Inbox" },
+  "badge": {
+    "url": "/api/inbox/count",
+    "params": { "projects": "projects", "briefings": "showBriefings" }
+  },
   "settings": [
     {
       "key": "pollSeconds",

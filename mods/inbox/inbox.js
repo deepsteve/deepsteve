@@ -521,6 +521,22 @@ function sortForInbox(items) {
   return (Array.isArray(items) ? items.slice() : []).sort(compareItems);
 }
 
+/**
+ * How many things are in the Inbox (#718) — the number on the App bar's badge.
+ *
+ * Stored items only: the questions, results and briefings agents actually posted. The derived
+ * rows /api/inbox/items adds (working, idle, blocked, stuck) describe TABS, and counting them
+ * would make the badge read "how many sessions are open". `pick` is the same project predicate
+ * the list is filtered by, and `briefings: false` mirrors the panel's showBriefings setting, so
+ * the badge counts what the panel would list.
+ */
+function countOpen(items, { pick = () => true, briefings = true } = {}) {
+  if (!Array.isArray(items)) return 0;
+  return items.filter((i) => i && i.status === 'open'
+    && (briefings || i.kind !== 'briefing')
+    && pick(i)).length;
+}
+
 // ── persistence ──────────────────────────────────────────────────────────────
 
 // Resolved lazily, never at module scope: paths.js says so, and a test that repoints
@@ -674,6 +690,7 @@ module.exports = {
   sweepSuperseded,
   compareItems,
   sortForInbox,
+  countOpen,
   // store
   load,
   save,
