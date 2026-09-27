@@ -1757,6 +1757,8 @@ function getAgentConfig(agentType) {
   return AGENT_CONFIGS[agentType] || AGENT_CONFIGS.claude;
 }
 
+const MCP_TOOL_TIMEOUT_MS = 24 * 60 * 60 * 1000;
+
 function mcpConfigArgs(agentType, shellId) {
   if (!shellId) return [];
   if (agentType === 'codex') {
@@ -1778,6 +1780,11 @@ function mcpConfigArgs(agentType, shellId) {
         type: 'http',
         url: `http://localhost:${PORT}/mcp?shellId=${shellId}`,
         headers: { Authorization: `Bearer ${AUTH_TOKEN}` },
+        // Claude Code abandons an http MCP call that has sent nothing for 5 minutes, and tells
+        // neither the server nor anyone else (measured on 2.1.283). await_decision holds until a
+        // person clicks, so this server's calls get a day. The per-server `timeout` raises both
+        // that idle limit and the wall clock; Esc still cancels any call at once.
+        timeout: MCP_TOOL_TIMEOUT_MS,
       },
     },
   };

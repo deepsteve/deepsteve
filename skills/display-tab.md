@@ -6,7 +6,7 @@ argument-hint: [what to display]
 
 Build a **display tab**: an agent-authored HTML page that opens as its own tab alongside the terminal tabs. Reach for it whenever the answer is better looked at than printed — a chart, a dashboard, a report, a diagram, a small interactive tool. The subject is `$ARGUMENTS` when provided; otherwise it is whatever the user just asked to see.
 
-A display tab renders and can call back into deepsteve over HTTP, but it gets **no `window.deepsteve` bridge** and cannot drive the UI. **If the user wants a durable page the project keeps across sessions, use `mcp__deepsteve__create_project_mod` instead** — a display tab is a one-shot page, and closing it destroys it. **If the page exists to get a choice back from the user, follow the `decision-tab` skill instead** — `create_display_tab`'s `decision` param adds buttons whose click comes back to you as a message.
+A display tab renders and can call back into deepsteve over HTTP, but it gets **no `window.deepsteve` bridge** and cannot drive the UI. **If the user wants a durable page the project keeps across sessions, use `mcp__deepsteve__create_project_mod` instead** — a display tab is a one-shot page, and closing it destroys it. **If the page exists to get a choice back from the user, follow the `decision-tab` skill instead** — `create_display_tab`'s `decision` param adds buttons whose click comes back to you through `await_decision`.
 
 ## Procedure
 

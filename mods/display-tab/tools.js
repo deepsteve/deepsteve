@@ -7,14 +7,37 @@ const { resolveHtml } = require('../../html-source.js');
 const decision = require('./decision.js');
 // The same "is a modal on screen?" gate Inbox's chat endpoint uses, rather than a second one.
 const dialogParse = require('../inbox/dialog-parse.js');
+const projectScope = require('../../project-scope');
 
 const DIALOG_ROWS = 30;
 const DECISION_BAR_SRC = '/mods/display-tab/decision-bar.js';
+
+// How long a choice nobody is waiting for is held for an await_decision call to claim it
+// before it is typed instead. Covers an agent between create_display_tab and its
+// await_decision, and one re-calling after a dropped transport (2-3s in every measurement).
+const CLAIM_GRACE_MS = 10_000;
+// How long an answer handed to a waiting call has to show up in the transcript before it is
+// typed instead. It is written within ~100ms when it arrives at all.
+const CONFIRM_MS = 30_000;
+const CONFIRM_POLL_MS = 1_000;
+const DELIVERED_KEEP = 200;
 
 // Stashed by init() and shared with registerRoutes(): mcp-server.js always calls init()
 // first, and both halves need the same context and store.
 let ctx = null;
 let store = null;
+
+// #716: an answer is the RESULT of the agent's own await_decision call wherever possible, so
+// nothing is typed into a TUI whose composer we would have to read first. Three maps, all
+// in-memory — a daemon restart drops every held call anyway, and the agent calls again:
+//   waiters   — the call holding for each tab. At most one: a second call for the same tab
+//               replaces the first, which Claude Code may have abandoned without telling us.
+//   unclaimed — a choice made while no call was holding. Typed after CLAIM_GRACE_MS unless a
+//               call claims it first; a call can claim it until the typing actually starts.
+//   delivered — where recent answers went, so a late call can say so instead of waiting forever.
+const waiters = new Map();    // tabId → { owner, finish(outcome) }
+const unclaimed = new Map();  // tabId → { owner, prompt, timer }
+const delivered = new Map();  // tabId → 'tool' | 'typed'
 
 const decisionSchema = z.object({
   buttons: z.array(z.object({
@@ -51,10 +74,118 @@ function broadcastDecisionTabs() {
 // Also server.js's display-tab delete hook, so a tab the user ✕-closes (DELETE
 // /api/display-tab/:id, which this mod does not own) leaves Decision Tab mode everywhere.
 function forgetDecision(id) {
+  // A tab closed with no choice made releases the call holding for it.
+  const w = waiters.get(id);
+  if (w) w.finish({ closed: true });
   if (!store.get(id)) return;
   store.remove(id);
   broadcastDecisionTabs();
 }
+
+function noteDelivered(id, how) {
+  delivered.delete(id);
+  delivered.set(id, how);
+  while (delivered.size > DELIVERED_KEEP) delivered.delete(delivered.keys().next().value);
+}
+
+/** Hold the agent's await_decision call until the tab is answered, closed, replaced or cancelled. */
+function holdForChoice(id, owner, signal) {
+  const prev = waiters.get(id);
+  if (prev) prev.finish({ superseded: true });
+  return new Promise((resolve) => {
+    const w = {
+      owner,
+      finish: (outcome) => {
+        if (waiters.get(id) === w) waiters.delete(id);
+        if (signal) signal.removeEventListener('abort', onAbort);
+        resolve(outcome);
+      },
+    };
+    // Esc in Claude Code sends notifications/cancelled, which the SDK turns into this abort.
+    const onAbort = () => w.finish({ aborted: true });
+    waiters.set(id, w);
+    if (signal) {
+      if (signal.aborted) onAbort();
+      else signal.addEventListener('abort', onAbort, { once: true });
+    }
+  });
+}
+
+/**
+ * Type the choice into the owning session after `delayMs`, unless an await_decision call
+ * claims it first. The path for an agent that never calls await_decision, and the fallback
+ * for an answer that never reached the conversation.
+ */
+function typeUnlessClaimed(id, owner, prompt, delayMs) {
+  const u = { owner, prompt, timer: null };
+  unclaimed.set(id, u);
+  u.timer = setTimeout(() => {
+    // The FIFO, never submitToShell and never e.pendingDelivery. midTurn: typed as soon as the
+    // composer is empty, even while the agent works, and Claude Code hands it over at the next
+    // tool boundary. A message pushed through a Claude Code channel instead would arrive as
+    // untrusted third-party content, which the model declines to act on (measured on 2.1.283).
+    ctx.deliverPromptWhenReady(owner, prompt, {
+      source: 'decision-tab',
+      midTurn: true,
+      // Evaluated immediately before typing, so a call that claimed the choice while this
+      // waited for an empty composer wins.
+      skipIf: (sid) => !ctx.shells.has(sid) || unclaimed.get(id) !== u,
+      skipReason: 'session gone, or an await_decision call took the decision-tab choice first',
+      onDeliver: (sid) => {
+        if (unclaimed.get(id) === u) unclaimed.delete(id);
+        noteDelivered(id, 'typed');
+        ctx.log(`[decision-tab] delivered ${id} -> ${sid} (typed)`);
+      },
+    });
+  }, delayMs);
+  if (u.timer.unref) u.timer.unref();
+}
+
+/** The choice waiting in `unclaimed` for this tab, taken so it is never also typed. */
+function claimUnclaimed(id) {
+  const u = unclaimed.get(id);
+  if (!u) return null;
+  clearTimeout(u.timer);
+  unclaimed.delete(id);
+  noteDelivered(id, 'tool');
+  return u.prompt;
+}
+
+/**
+ * Give the choice to the call holding for it, then make sure it reached the conversation:
+ * a call Claude Code abandoned can still look alive from here (see answerInTranscript), so
+ * an answer not in the transcript within CONFIRM_MS is typed instead.
+ */
+function answerWaiter(id, owner, prompt) {
+  const at = Date.now();
+  waiters.get(id).finish({ prompt });
+  noteDelivered(id, 'tool');
+  const entry = ctx.shells.get(owner);
+  const file = entry && typeof ctx.transcriptPath === 'function' ? ctx.transcriptPath(entry) : null;
+  if (!file) {
+    ctx.log(`[decision-tab] delivered ${id} -> ${owner} (await_decision result; no transcript to confirm it against)`);
+    return;
+  }
+  const poll = () => {
+    if (decision.answerInTranscript(file, id, at - 2000)) {
+      ctx.log(`[decision-tab] delivered ${id} -> ${owner} (await_decision result, in the transcript after ${Date.now() - at}ms)`);
+      return;
+    }
+    if (!ctx.shells.has(owner)) return;
+    if (Date.now() - at >= CONFIRM_MS) {
+      ctx.log(`[decision-tab] ${id} -> ${owner}: an await_decision call took the choice but it is not in the transcript after ${CONFIRM_MS / 1000}s — typing it instead`);
+      typeUnlessClaimed(id, owner, prompt, 0);
+      return;
+    }
+    const t = setTimeout(poll, CONFIRM_POLL_MS);
+    if (t.unref) t.unref();
+  };
+  const t = setTimeout(poll, CONFIRM_POLL_MS);
+  if (t.unref) t.unref();
+}
+
+const text = (s) => ({ content: [{ type: 'text', text: s }] });
+const refuse = (s) => ({ content: [{ type: 'text', text: s }], isError: true });
 
 function closeTab(id) {
   ctx.deleteDisplayTab(id);
@@ -92,14 +223,14 @@ function init(context) {
 
   return {
     create_display_tab: {
-      description: 'Create a new browser tab displaying arbitrary HTML content (charts, dashboards, reports). The HTML is rendered in a sandboxed iframe. Supply the page EITHER inline via html OR — cheaper, preferred when the page already exists on disk — via file_path, which the server reads itself so you do not re-emit the document as output tokens. The page is served from the deepsteve origin, so use window.location.origin or relative /api/... URLs to call back into deepsteve; never hard-code a port. Pass your DEEPSTEVE_SESSION_ID so the tab opens in the same browser window and is scoped to your Project view (it appears only in the project you spawned it from, like a regular session tab). Pass `decision` to add a row of buttons whose click comes back to you as a new message.',
+      description: 'Create a new browser tab displaying arbitrary HTML content (charts, dashboards, reports). The HTML is rendered in a sandboxed iframe. Supply the page EITHER inline via html OR — cheaper, preferred when the page already exists on disk — via file_path, which the server reads itself so you do not re-emit the document as output tokens. The page is served from the deepsteve origin, so use window.location.origin or relative /api/... URLs to call back into deepsteve; never hard-code a port. Pass your DEEPSTEVE_SESSION_ID so the tab opens in the same browser window and is scoped to your Project view (it appears only in the project you spawned it from, like a regular session tab). Pass `decision` to add a row of buttons, then call await_decision with the returned id to receive the click.',
       schema: {
         session_id: z.string().describe('Your DEEPSTEVE_SESSION_ID env var — targets the correct browser window and scopes the tab to your project'),
         html: z.string().optional().describe('Full HTML content to display (can include inline CSS/JS, e.g. Chart.js visualizations). Mutually exclusive with file_path'),
         file_path: z.string().optional().describe('Absolute path to an HTML file the server reads instead of you passing html. Mutually exclusive with html'),
         replacements: z.record(z.string()).optional().describe('Literal find→replace pairs applied to the HTML server-side, e.g. {"%%CHANNEL%%": "slot-ab3f9c12"} — lets a file on disk stay a reusable template'),
         name: z.string().optional().describe('Tab name (defaults to "Display")'),
-        decision: decisionSchema.describe('Make this a decision tab: a row of buttons along the bottom whose click is delivered back to YOUR session as a new message ("[Decision tab …] The user chose: …"). After creating one, end your turn rather than polling — the choice arrives on its own.'),
+        decision: decisionSchema.describe('Make this a decision tab: a row of buttons along the bottom. Then call await_decision with the returned id — it returns the choice ("[Decision tab …] The user chose: …").'),
       },
       handler: async ({ session_id, html, file_path, replacements, name, decision: rawDecision }) => {
         const resolved = resolveHtml({ html, file_path, replacements });
@@ -175,7 +306,7 @@ function init(context) {
         const result = { id, name: tabName };
         if (config) {
           result.decision = true;
-          result.message = 'The choice will arrive as a new message beginning "[Decision tab". End your turn now rather than polling.';
+          result.message = `Now call await_decision with tab_id "${id}": it returns the user's choice.`;
         }
         return { content: [{ type: 'text', text: JSON.stringify(result) }] };
       },
@@ -242,7 +373,7 @@ function init(context) {
         const result = { id: tab_id, updated: true };
         if (rearmed) {
           result.decision = true;
-          result.message = 'Re-armed. The choice will arrive as a new message beginning "[Decision tab". End your turn now rather than polling.';
+          result.message = `Re-armed. Now call await_decision with tab_id "${tab_id}": it returns the user's choice.`;
         }
         return { content: [{ type: 'text', text: JSON.stringify(result) }] };
       },
@@ -310,6 +441,53 @@ function init(context) {
         return { content: [{ type: 'text', text: JSON.stringify({ id: tab_id, closed: true }) }] };
       },
     },
+
+    await_decision: {
+      description: 'Wait for the user to answer a decision tab you created with create_display_tab (or re-armed with update_display_tab), and return their choice: "[Decision tab …] The user chose: …". Call it right after creating the tab. It can take minutes or hours; if Claude Code moves the call to the background, end your turn and the choice will wake you when it arrives. If the call fails with a connection or transport error, call it again with the same tab_id — nothing is lost. Esc cancels the wait; the tab stays open and a later choice is typed into your session instead.',
+      schema: {
+        tab_id: z.string().describe('The id create_display_tab (or update_display_tab) returned for the decision tab'),
+      },
+      handler: async ({ tab_id }, extra) => {
+        const caller = projectScope.callerShellId(extra);
+        const r = store.get(tab_id);
+        const owner = (unclaimed.get(tab_id) || {}).owner || (r && r.ownerSessionId) || null;
+        if (owner && caller && caller !== owner) {
+          return refuse(`Decision tab ${tab_id} belongs to session ${owner}; only that session can wait on it.`);
+        }
+
+        // Answered before this call arrived — between create_display_tab and here, or between a
+        // dropped call and its retry — and not yet typed.
+        const early = claimUnclaimed(tab_id);
+        if (early !== null) {
+          log(`[decision-tab] delivered ${tab_id} -> ${owner} (await_decision claimed a choice made before it was called)`);
+          return text(early);
+        }
+
+        const went = delivered.get(tab_id);
+        if (went && (!r || r.status !== 'open')) {
+          return text(went === 'typed'
+            ? `Decision tab ${tab_id} was already answered, and the choice was typed into this session as a message beginning "[Decision tab". Act on that message; there is nothing left to wait for.`
+            : `Decision tab ${tab_id} was already answered, and the choice was returned to an earlier await_decision call. There is nothing left to wait for.`);
+        }
+        if (!r || !displayTabs.has(tab_id)) return refuse(`No open decision tab "${tab_id}".`);
+        if (r.status !== 'open') {
+          return text(`Decision tab ${tab_id} was already answered. To ask a follow-up in it, call update_display_tab with a new decision, then await_decision again.`);
+        }
+        // Held calls are measured on Claude Code only. Anything else keeps the typed delivery.
+        const entry = shells.get(r.ownerSessionId);
+        const agent = (entry && entry.agentType) || 'claude';
+        if (agent !== 'claude') {
+          return text(`await_decision is not supported for ${agent} sessions yet. End your turn: the choice will be typed into this session as a new message beginning "[Decision tab".`);
+        }
+
+        log(`[decision-tab] ${tab_id} await_decision holding for ${r.ownerSessionId}`);
+        const outcome = await holdForChoice(tab_id, r.ownerSessionId, extra && extra.signal);
+        if (outcome.prompt) return text(outcome.prompt);
+        if (outcome.closed) return text(`Decision tab ${tab_id} was closed without a choice.`);
+        if (outcome.superseded) return text(`A newer await_decision call for tab ${tab_id} replaced this one.`);
+        return text(`Stopped waiting on decision tab ${tab_id}.`);
+      },
+    },
   };
 }
 
@@ -357,9 +535,11 @@ function registerRoutes(app, context) {
     if (!entry) {
       return res.status(409).json({ error: 'session-gone', hint: 'The session that asked has ended. Close this tab with its ✕.' });
     }
-    // A dialog on screen classifies as 'waiting', so the FIFO would take it for idle and type
-    // the choice into the modal — answering a question the person never read.
-    if (showingDialog(entry)) {
+    // Only the typed path cares: a dialog on screen classifies as 'waiting', so the FIFO would
+    // take it for idle and type the choice into the modal — answering a question the person
+    // never read. A held await_decision call is answered without touching the terminal.
+    const waiting = waiters.has(id);
+    if (!waiting && showingDialog(entry)) {
       return res.status(409).json({ error: 'session-blocked', hint: 'The agent is showing a dialog. Answer it in the session tab first, then try again.' });
     }
 
@@ -369,21 +549,17 @@ function registerRoutes(app, context) {
     r.choice = { index: body.index, label: button.label, note: note || null };
     store.set(id, r);
 
-    // The FIFO, never submitToShell and never e.pendingDelivery. midTurn: the answer is
-    // typed as soon as the composer is empty, even while the agent works, and Claude
-    // Code hands it over at the next tool boundary — the person clicked it now, and
-    // waiting for the turn to end made it land minutes late. A message pushed through
-    // a Claude Code channel instead would arrive as untrusted third-party content,
-    // which the model declines to act on (measured on 2.1.283).
-    ctx.deliverPromptWhenReady(owner, decision.decidePrompt({ tabId: id, name: r.name, button, note, closed }), {
-      source: 'decision-tab',
-      midTurn: true,
-      skipIf: (sid) => !ctx.shells.has(sid),
-      skipReason: 'session gone before the decision-tab choice could be delivered',
-      onDeliver: (sid) => ctx.log(`[decision-tab] delivered ${id} -> ${sid}`),
-    });
+    const prompt = decision.decidePrompt({ tabId: id, name: r.name, button, note, closed });
     // The label and the note's length, never its content.
-    ctx.log(`[decision-tab] ${id} decided "${button.label}"${note ? ` note=${note.length}ch` : ''} -> ${owner}${closed ? ' (closing)' : ''}`);
+    ctx.log(`[decision-tab] ${id} decided "${button.label}"${note ? ` note=${note.length}ch` : ''} -> ${owner}${closed ? ' (closing)' : ''}${waiting ? '' : ' — no await_decision holding; typing it unless one claims it'}`);
+    if (waiting) {
+      answerWaiter(id, owner, prompt);
+    } else {
+      // A Claude session may be about to call await_decision (or calling it again after a
+      // dropped transport); anything else has no call coming, so it is typed without the wait.
+      const claude = ((entry && entry.agentType) || 'claude') === 'claude';
+      typeUnlessClaimed(id, owner, prompt, claude ? CLAIM_GRACE_MS : 0);
+    }
 
     if (closed) closeTab(id);
     else broadcastDecisionTabs();

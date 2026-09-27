@@ -97,7 +97,37 @@ async function initMCP(context) {
   }
 
   // Session management: one McpServer+transport per MCP session
-  const sessions = new Map(); // sessionId → { server, transport }
+  const sessions = new Map(); // sessionId → { server, transport, keepalive, pingFailures }
+
+  // Claude Code puts a read timeout on the GET notification stream (358s measured on 2.1.283:
+  // "SSE stream disconnected: TimeoutError"), and counts it as a transport error: 90s later it
+  // declares every tool call still running on this server lost, though each call's own stream
+  // is fine. acquire_lock waits and await_decision holds for as long as a person takes, so the
+  // stream must never go quiet. A ping is a request the client has to answer, and it rides
+  // that stream. A client that stops answering is left alone after three misses.
+  // `mcpKeepaliveMs` exists for test/unit/mcp-keepalive.test.js.
+  const KEEPALIVE_MS = context.mcpKeepaliveMs || 60_000;
+  const KEEPALIVE_MAX_MISSES = 3;
+  function scheduleKeepalive(sessionId) {
+    const s = sessions.get(sessionId);
+    if (!s) return;
+    s.keepalive = setTimeout(async () => {
+      const cur = sessions.get(sessionId);
+      if (cur !== s) return;
+      try {
+        await s.server.server.ping();
+        s.pingFailures = 0;
+      } catch (e) {
+        s.pingFailures = (s.pingFailures || 0) + 1;
+        if (s.pingFailures >= KEEPALIVE_MAX_MISSES) {
+          log(`MCP: session ${sessionId} missed ${KEEPALIVE_MAX_MISSES} keepalive pings (${e.message}) — no more pings`);
+          return;
+        }
+      }
+      scheduleKeepalive(sessionId);
+    }, KEEPALIVE_MS);
+    if (s.keepalive.unref) s.keepalive.unref();
+  }
 
   function createSession() {
     const server = new McpServer({
@@ -160,6 +190,7 @@ async function initMCP(context) {
 
     if (capturedSessionId) {
       sessions.set(capturedSessionId, { server, transport });
+      scheduleKeepalive(capturedSessionId);
       log(`MCP: new session ${capturedSessionId}`);
     }
   });
@@ -180,7 +211,8 @@ async function initMCP(context) {
   app.delete('/mcp', async (req, res) => {
     const sessionId = req.headers['mcp-session-id'];
     if (sessionId && sessions.has(sessionId)) {
-      const { transport } = sessions.get(sessionId);
+      const { transport, keepalive } = sessions.get(sessionId);
+      clearTimeout(keepalive);
       await transport.handleRequest(req, res);
       sessions.delete(sessionId);
       log(`MCP: session ${sessionId} deleted`);

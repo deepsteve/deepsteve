@@ -69,6 +69,7 @@ Claude is the one agent never probed, because it is the default and the fallback
 | Plan mode | yes | — | — | yes | — | — |
 | Idle / waiting classification | yes | — | — | — | — | — |
 | Inbox dialog answering | yes | — | — | — | — | — |
+| Decision tab answer as a tool result (`await_decision`) | yes | typed instead | — | — | — | — |
 | Inbox result gate (`share_result`) | yes | yes | — | — | — | — |
 | Autopilot merge (`issue_complete`) | yes | yes | — | — | — | — |
 | Merged from the tab menu (no agent) | yes | yes | yes | yes | yes | yes |
@@ -123,6 +124,22 @@ state. See [frontend.md](frontend.md) for the pane and `GET /api/shells/:id/tran
 **MCP.** Full. A per-shell config file is written to `~/.deepsteve/mcp-configs/<id>.json`
 mode `0600` and passed as a *path* — never inline, or the bearer token would be visible
 in `ps` to every local user.
+
+A tool call that waits on a person (`await_decision`, `acquire_lock`) runs into three
+Claude Code limits, all measured on 2.1.283 (#716):
+- **5-minute idle cutoff.** A call that has sent nothing for 5 minutes is abandoned, with
+  no cancel and no closed request, so the server cannot tell. The config sets the
+  per-server `timeout` to a day, which raises that cutoff and the wall clock together.
+- **Notification-stream timeout.** The GET stream carrying server→client notifications
+  gets a read timeout (358s measured). When it fires, Claude Code declares every call
+  still running on that server lost 90s later. `mcp-server.js` pings each session every
+  60s so the stream is never quiet.
+- **Background move.** After 120s a still-running call is moved to the background: the
+  model gets a placeholder result, the turn can end, and the real result arrives later
+  as a task notification that wakes an idle session. Esc sends `notifications/cancelled`,
+  which aborts the handler's signal.
+
+A session spawned before a config change keeps its old file until it is respawned.
 
 **Skills.** Enabled skills are copied to `~/.claude/commands/deepsteve/<id>.md` and
 invoked as `/deepsteve:<id>`. Custom config profiles get the same directory symlinked in.

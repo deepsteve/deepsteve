@@ -1222,7 +1222,8 @@ sibling of a project mod. `create_display_tab` / `update_display_tab` build one.
 ### Decision tabs (#716)
 
 A display tab created or updated with a `decision` param gets a row of buttons along the bottom
-whose click is typed into the **owning session** as a new prompt. The skill is
+whose click answers the **owning session** — as the result of its own `await_decision` call
+wherever possible, typed in as a new prompt otherwise. The skill is
 `skills/decision-tab.md`; the code is `mods/display-tab/` — `decision.js` (config normalizer,
 prompt text, and a store at `statePath('display-tab-decisions.json')`), `tools.js` (the tools and
 routes), and `decision-bar.js` (the in-page bar).
@@ -1241,12 +1242,30 @@ routes), and `decision-bar.js` (the in-page bar).
   `POST /api/display-tab/:id/decide {index, note?}` (behind `requireAllowedOrigin`), and
   `GET /api/decision-tabs` — deliberately not under `/api/display-tab/`, where server.js's `:id`
   route would take the word for an id.
-- **Delivery** goes through `deliverPromptWhenReady` with `source: 'decision-tab'`, never
+- **A tool result first.** Typing into Claude Code's composer means reading its screen to know
+  when that is safe, and every new screen state it drew (a suggested prompt, a queued-messages
+  hint, a draft) held a click until the person sent a message themselves. So the agent calls
+  `await_decision(tab_id)` after creating the tab, and the click becomes that call's result.
+  The limits a held call runs into, and what the config and `mcp-server.js` do about them, are
+  in [agents.md](agents.md#claude-code-claude) under MCP. After 120 s Claude Code moves the call to
+  the background and the turn ends; the click then wakes the idle session through Claude
+  Code's own task notification, and the person can talk to the agent in the meantime. Held
+  calls are Claude-only: any other agent is told to end its turn and gets the typed path.
+- **Nothing is trusted to the transport.** `waiters` holds at most one call per tab: a second
+  call replaces the first, because the model calls again after a dropped transport and the
+  old request may be dead without a word. An answer handed to a call must then show up in the
+  transcript (`answerInTranscript`: the `(tab id)] The user chose:` marker in a `tool_result` or
+  a background `queue-operation`, stamped after the click) within 30 s, or it is typed instead.
+  A click with no call holding goes into `unclaimed` for 10 s (Claude sessions only), where an
+  `await_decision` arriving late, or calling again, claims it; a claim wins until the typing
+  actually starts (`skipIf`), and `delivered` lets a later call say where the choice went.
+- **Typed delivery** goes through `deliverPromptWhenReady` with `source: 'decision-tab'`, never
   `submitToShell`. `decide` refuses first, as Inbox's chat endpoint does: 409 `session-gone`
   (the FIFO drops a missing shell silently), 409 `session-blocked` when Inbox's `detectDialog`
-  sees a modal (the choice would be typed into it), 409 `already-decided`. The bar renders each
-  state; an unanswered tab whose session ended stays open and says so — close paths are untouched.
-- **Delivered mid-turn** (`midTurn: true` on the FIFO). Every other prompt waits for the turn to
+  sees a modal and no call is holding (the choice would be typed into it), 409
+  `already-decided`. The bar renders each state; an unanswered tab whose session ended stays
+  open and says so — close paths are untouched.
+- **Typed mid-turn** (`midTurn: true` on the FIFO). Every other prompt waits for the turn to
   end, and for a click that meant 26 s to 4½ min of latency behind a busy agent. Claude Code
   accepts a message entered while it works, queues it, and absorbs it at the next tool boundary
   with full user standing (recorded as a `queued_command` attachment, not a `user` record). So a

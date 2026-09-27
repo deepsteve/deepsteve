@@ -69,6 +69,48 @@ function decidePrompt({ tabId, name, button, note, closed }) {
   return lines.join('\n');
 }
 
+// Enough tail to hold the records since a click even behind a large tool result.
+const TRANSCRIPT_TAIL_BYTES = 1024 * 1024;
+
+/**
+ * Did the owning session's transcript record this tab's answer at or after `sinceMs`?
+ *
+ * The one check that does not trust the transport. An await_decision call Claude Code has
+ * given up on can look alive from here — measured on 2.1.283, it abandons a call at its idle
+ * timeout without a cancel and without closing the request — so handing the answer to a
+ * waiting call proves nothing until the answer shows up in the conversation. Both ways a
+ * held call returns are written within milliseconds of it: a `tool_result` for a call still
+ * in the foreground, and a `queue-operation` carrying the result for one Claude Code had
+ * moved to the background. The marker is decidePrompt's header, which JSON encoding leaves
+ * intact; the time bound keeps an earlier answer in the same tab (a re-armed follow-up) from
+ * counting. Never throws: a missing or unreadable file is "not yet".
+ */
+function answerInTranscript(file, tabId, sinceMs) {
+  if (!file || !tabId) return false;
+  const marker = `(${tabId})] The user chose:`;
+  let fd = null;
+  try {
+    const stat = fs.statSync(file);
+    const len = Math.min(stat.size, TRANSCRIPT_TAIL_BYTES);
+    if (!len) return false;
+    const buf = Buffer.alloc(len);
+    fd = fs.openSync(file, 'r');
+    fs.readSync(fd, buf, 0, len, stat.size - len);
+    for (const line of buf.toString('utf8').split('\n')) {
+      if (!line.includes(marker)) continue;
+      let rec;
+      try { rec = JSON.parse(line); } catch { continue; } // the window's first line may be cut
+      const at = Date.parse(rec && rec.timestamp);
+      if (Number.isFinite(at) && at >= sinceMs) return true;
+    }
+    return false;
+  } catch {
+    return false;
+  } finally {
+    if (fd !== null) try { fs.closeSync(fd); } catch {}
+  }
+}
+
 /**
  * Persisted store. `isLive(id)` is the display-tab map's membership test: list() drops any
  * record whose tab is gone — swept as stale at boot, or deleted while the daemon was down —
@@ -137,4 +179,4 @@ function createDecisionStore({ file = () => statePath('display-tab-decisions.jso
   return { get, set, remove, prune, list, save, reload: load };
 }
 
-module.exports = { normalizeDecision, decidePrompt, createDecisionStore, MAX_BUTTONS, MAX_NOTE, STYLES };
+module.exports = { normalizeDecision, decidePrompt, answerInTranscript, createDecisionStore, MAX_BUTTONS, MAX_NOTE, STYLES };

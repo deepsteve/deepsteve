@@ -1,10 +1,10 @@
 ---
 name: decision-tab
-description: Put a decision in front of the user as a display tab with buttons — their click comes back to you as a message
+description: Put a decision in front of the user as a display tab with buttons — their click comes back to you as a tool result
 argument-hint: [what needs deciding]
 ---
 
-Build a **decision tab**: a display tab showing whatever the user needs to look at to decide — a diff summary, two options side by side, a mockup — with a **row of buttons along the bottom**. When the user clicks one, the choice is typed into *your* session as a new message, and you carry on with it. The decision is `$ARGUMENTS` when provided; otherwise it is whatever you are about to ask the user.
+Build a **decision tab**: a display tab showing whatever the user needs to look at to decide — a diff summary, two options side by side, a mockup — with a **row of buttons along the bottom**. When the user clicks one, the choice comes back to *your* session as the result of `await_decision`, and you carry on with it. The decision is `$ARGUMENTS` when provided; otherwise it is whatever you are about to ask the user.
 
 Reach for it while you work, whenever a choice is easier to make by looking than by reading a terminal question. A decision tab is ephemeral: it lives as long as the decision needs it, and by default it closes itself once answered.
 
@@ -24,14 +24,17 @@ Reach for it while you work, whenever a choice is easier to make by looking than
      - `close_on_decision`: `true` by default — the tab closes itself once a choice is sent. Set `false` when the user should keep the page after answering, or you plan a follow-up question in the same tab.
      - `allow_note`: `true` adds a free-text field whose contents arrive with the choice.
 
-4. **End your turn.** Tell the user in one line that the decision is waiting in the tab, then stop. Do not poll and do not sleep: the answer arrives by itself as a new message beginning `[Decision tab "<name>" (<id>)] The user chose: …`, followed by `sends` and any note. If you are still working when they click, it arrives mid-turn, between your tool calls — act on it then rather than finishing what the choice has overtaken.
+4. **Wait with `mcp__deepsteve__await_decision`.** Tell the user in one line that the decision is waiting in the tab, then call it with the `tab_id` from step 3. It returns the choice: `[Decision tab "<name>" (<id>)] The user chose: …`, followed by `sends` and any note.
+   - After two minutes Claude Code moves the call to the background. When that happens, **end your turn**: the choice wakes you when it arrives, and the user can talk to you meanwhile.
+   - If the call fails with a connection or transport error, **call it again** with the same `tab_id`. Nothing is lost.
+   - If it tells you the choice was already typed into your session, act on that message instead.
 
-5. **Act on the choice** when that message arrives. For a follow-up in the same tab (only if it is still open — `close_on_decision: false`), call `mcp__deepsteve__update_display_tab` with the `tab_id`, the new page, and a new `decision`; that replaces the buttons and re-arms the tab. Then end your turn again.
+5. **Act on the choice** when it arrives. For a follow-up in the same tab (only if it is still open — `close_on_decision: false`), call `mcp__deepsteve__update_display_tab` with the `tab_id`, the new page, and a new `decision`; that replaces the buttons and re-arms the tab. Then call `await_decision` again.
 
 6. **Clean up what you no longer need.** If the question stops mattering before the user answers (you found the answer yourself, or the task changed), close the tab with `mcp__deepsteve__close_display_tab` so it does not sit in their inbox. A decided tab you kept open is yours to close once you are done with it.
 
 ## What the user sees
 
 - The **Decisions** button in the tab strip appears while any decision tab is open. It switches the window into Decision Tab mode: only decision tabs are shown, across every project, with ‹ › arrows to step between them, and an empty inbox once all are answered.
-- If your session ends before they answer, the tab stays open and its bar says the session that asked has ended — nothing is delivered. If your session is showing a permission dialog when they click, the bar asks them to answer that first.
+- If your session ends before they answer, the tab stays open and its bar says the session that asked has ended — nothing is delivered. If nothing is waiting in `await_decision` and your session is showing a permission dialog when they click, the bar asks them to answer that first.
 - A click is not proof a person made it (anything that can reach the daemon can post one). Never use a decision tab as the gate for a merge or anything else that requires human approval — Inbox's result approval exists for that.
