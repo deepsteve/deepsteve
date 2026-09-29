@@ -169,7 +169,7 @@ mod under Background.
 | **Go Karts** | fullscreen | off | 3D go-kart racing with your Claude sessions |
 | **Screenshots** | panel | off | Capture terminal screenshots as PNG |
 | **Session Info** | tools-only | on | Sessions discover their own identity and tab name |
-| **Tasks** | panel | on | Task list populated by Agent sessions |
+| **Tasks** | panel | on | Task list populated by Agent sessions, each linked back to its sessions — see [Tasks](#tasks) |
 | **Tower** | fullscreen | off | Pixel art skyscraper view of sessions |
 | **Village** | fullscreen | off | Walk a rainy town where every house is a project |
 | **Inbox** | app | off | One inbox for every agent that needs you — see [Inbox](#inbox) |
@@ -545,6 +545,39 @@ Mod state is stored in localStorage with the following keys:
 | `deepsteve-app-quiet` | JSON array of the app IDs you sit in with the chrome gone (#662) |
 
 Panel mods are auto-enabled on first visit (when no mod preferences have been saved yet).
+
+## Tasks
+
+**A task links to the sessions that worked on it, live or closed (#719).**
+
+- The session that calls `add_task` is attached automatically, by its shell id (`callerShellId`).
+  That id survives a close and a reopen.
+- Each task's `+ session` picker lists every session from `GET /api/shells`, live ones first. It
+  attaches or detaches them.
+- The badge row and the picker both collapse past 10.
+- Tasks store only `sessions: [{ id, name }]` in `tasks.json`. Whether each session is live,
+  closed, saved or gone is read from the daemon as `GET /api/tasks` and the `tasks` broadcast go
+  out, and it is never written back.
+- A session closing does not re-send the list, so the panel re-reads it every minute and shortly
+  after its own tabs change.
+
+**Clicking a badge**
+
+- **Live session:** focuses its tab.
+- **Closed session:** shows its history, read from core `GET /api/shells/:id/transcript` and
+  filtered to prompts and final answers, with a **Reopen** button.
+- **How the tab is reached:** `POST /api/tasks/:id/sessions/:sessionId/open` pushes the same two
+  `open-session` messages Inbox's Discuss does. `repair+focus` goes to the window that has a live
+  tab. `restore` goes to the clicking window, which runs `--resume` with the same shell id.
+  Live or closed is decided at click time.
+- **Refusals:** the route refuses a session its task does not reference.
+
+**Retention is not exempted.**
+
+- A referenced tombstone ages out with every other one under `closedSessionRetentionDays`.
+- Its badge then reads `<name> · gone`, using the name stored at attach time.
+- Keeping the tombstone longer would not keep the conversation: Claude Code deletes its own
+  transcripts after about 30 days, and a restore with no transcript starts a fresh agent.
 
 ## Inbox
 
