@@ -194,6 +194,7 @@ mod under Background.
 | **Screenshots** | panel | off | Capture terminal screenshots as PNG |
 | **Session Info** | tools-only | on | Sessions discover their own identity and tab name |
 | **Tasks** | panel | on | Task list populated by Agent sessions, each linked back to its sessions — see [Tasks](#tasks) |
+| **Tasks App** | app | off | The same tasks beside their terminals, drawn by a view agents can rewrite — see [Tasks app](#tasks-app) |
 | **Tower** | fullscreen | off | Pixel art skyscraper view of sessions |
 | **Village** | fullscreen | off | Walk a rainy town where every house is a project |
 | **Inbox** | app | off | One inbox for every agent that needs you — see [Inbox](#inbox) |
@@ -603,6 +604,36 @@ Panel mods are auto-enabled on first visit (when no mod preferences have been sa
 - Its badge then reads `<name> · gone`, using the name stored at attach time.
 - Keeping the tombstone longer would not keep the conversation: Claude Code deletes its own
   transcripts after about 30 days, and a restore with no transcript starts a fresh agent.
+
+## Tasks app
+
+`mods/tasks-app` is an [App](#apps-661) over the Tasks mod's store. It has no store of its own.
+The left side is a **view** that draws the tasks. The right side shows the selected task and its
+terminal.
+
+**The shell and the view are split on purpose.** The shell (`app.js`) owns selection, the terminal
+pane and getting to a session. The view owns only the drawing. That is what lets an agent rewrite
+a view freely: a broken view cannot lose a task or strand a session.
+
+- **Views are HTML files.** Built-ins ship in `mods/tasks-app/views/` (`board`, `orbit`). Custom
+  ones live in `<stateDir>/tasks-app/views/`, and a custom file with a built-in's name shadows it.
+  `views/README.md` is the contract a view is written against: the `taskApp` API, the key
+  rules, and the colours.
+- **Edit view** copies a built-in into the custom directory, then starts the default agent there
+  with a prompt pointing at the file and the README. The shell polls view mtimes every 2s and
+  reloads on a save, so the user watches each edit land. **Reset** deletes the custom copy.
+- **The terminal pane** polls `GET /api/tasks/:id/sessions/:sessionId/screen` (plain text, via
+  `linesSync`). Opening goes through #719's open route. A live tab in this window is an
+  [excursion](#excursions--for-apps-only), so ⌘↑/⌘↓ walk the view's order (`taskApp.setOrder`).
+- **+ Session** is `POST /api/tasks/:id/start`. It spawns the default agent server-side, because
+  the bridge's `createSession` cannot return the id the task needs, and it attaches the new
+  session. It refuses any cwd that is not a registered project's directory.
+- A task's `project` is derived as the list goes out, from the first session whose cwd sits inside
+  a project directory. It is never stored.
+- The rail badge is `GET /api/tasks/count`, the tasks that are not done.
+- The mod iframe has no `allow-forms` or `allow-modals`. A `<form>` there never fires `submit`,
+  and `confirm()` does nothing, so the composer is a plain `div` and Reset asks by relabelling
+  itself.
 
 ## Inbox
 

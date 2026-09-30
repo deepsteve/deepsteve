@@ -1,0 +1,21 @@
+{
+  "name": "Tasks App",
+  "version": "0.1.0",
+  "minDeepsteveVersion": "0.4.0",
+  "description": "Your tasks beside their terminals, drawn by a view your agents can rewrite",
+  "experimental": true,
+  "enabledByDefault": false,
+  "entry": "index.html",
+  "app": true,
+  "toolbar": { "label": "Tasks" },
+  "badge": { "url": "/api/tasks/count" },
+  "settings": [
+    {
+      "key": "previewSeconds",
+      "type": "number",
+      "label": "Terminal refresh (s)",
+      "description": "How often the terminal preview re-reads the selected session's screen",
+      "default": 1
+    }
+  ]
+}

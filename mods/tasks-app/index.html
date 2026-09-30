@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    /* Mod iframes receive NO theme variables from the host, so every var() here carries the
+       fallback that is actually shown. */
+    * { margin: 0; box-sizing: border-box; }
+    html, body { height: 100%; }
+    body {
+      background: var(--ds-bg-primary, #0d1117);
+      color: var(--ds-text-primary, #c9d1d9);
+      font: 13px/1.4 system-ui, -apple-system, sans-serif;
+      overflow: hidden;
+      -webkit-font-smoothing: antialiased;
+    }
+    button, input, select, textarea { font: inherit; color: inherit; }
+    button {
+      background: #21262d; border: 1px solid #30363d; border-radius: 6px;
+      padding: 3px 10px; cursor: pointer;
+    }
+    button:hover:not(:disabled) { background: #30363d; }
+    button:disabled { opacity: 0.5; cursor: default; }
+    button.primary { background: #238636; border-color: #2ea043; color: #fff; }
+    button.primary:hover:not(:disabled) { background: #2ea043; }
+    button.ghost { background: transparent; border-color: transparent; color: #8b949e; }
+    button.ghost:hover:not(:disabled) { background: #21262d; color: #c9d1d9; }
+    input, select, textarea {
+      background: #0d1117; border: 1px solid #30363d; border-radius: 6px; padding: 3px 8px;
+    }
+    textarea { resize: vertical; width: 100%; }
+    :focus-visible { outline: 2px solid var(--ds-accent, #58a6ff); outline-offset: 1px; }
+    .muted { color: #8b949e; }
+    .hidden { display: none !important; }
+
+    #app { display: flex; height: 100%; }
+    #left { flex: 1; min-width: 240px; display: flex; flex-direction: column; }
+    #divider { width: 5px; cursor: col-resize; background: #21262d; flex: none; }
+    #divider:hover, #divider.dragging { background: #58a6ff; }
+    #right { width: 46%; min-width: 320px; display: flex; flex-direction: column; overflow: hidden; }
+
+    /* ── left: view bar + view */
+    #viewbar {
+      display: flex; align-items: center; gap: 6px; padding: 8px 10px;
+      border-bottom: 1px solid #30363d; flex-wrap: wrap;
+    }
+    #viewbar .title { font-weight: 600; margin-right: 6px; }
+    #view-tabs { display: flex; gap: 2px; }
+    #view-tabs button { border-color: transparent; background: transparent; color: #8b949e; }
+    #view-tabs button.active { background: #21262d; border-color: #30363d; color: #c9d1d9; }
+    #view-tabs button .dot { color: #d29922; margin-left: 3px; }
+    #viewbar .spacer { flex: 1; }
+    #composer {
+      padding: 10px; border-bottom: 1px solid #30363d; background: #161b22;
+      display: flex; flex-direction: column; gap: 6px;
+    }
+    #composer .row { display: flex; gap: 6px; align-items: center; }
+    #composer .row input { flex: 1; }
+    #view-frame { flex: 1; border: 0; width: 100%; background: #0d1117; }
+
+    /* ── right: the selected task and its terminal */
+    #detail { padding: 12px 14px 8px; border-bottom: 1px solid #30363d; }
+    #detail .head { display: flex; gap: 8px; align-items: baseline; }
+    #detail .id { color: #8b949e; }
+    #detail h1 { font-size: 15px; font-weight: 600; flex: 1; }
+    #detail .desc {
+      margin-top: 6px; white-space: pre-wrap; color: #adbac7; max-height: 7.5em; overflow: auto;
+    }
+    #detail .meta { display: flex; gap: 8px; align-items: center; margin-top: 8px; flex-wrap: wrap; }
+    .seg { display: inline-flex; border: 1px solid #30363d; border-radius: 6px; overflow: hidden; }
+    .seg button { border: 0; border-radius: 0; background: transparent; color: #8b949e; }
+    .seg button + button { border-left: 1px solid #30363d; }
+    .seg button.on { background: #1f6feb33; color: #c9d1d9; }
+    .project { font-size: 11px; padding: 1px 7px; border-radius: 10px; background: #1f6feb22; color: #79c0ff; }
+
+    #sessions { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; padding: 8px 14px; }
+    .chip {
+      display: inline-flex; gap: 5px; align-items: center; font-size: 12px;
+      padding: 2px 9px; border-radius: 12px; border: 1px solid #30363d; background: #161b22; cursor: pointer;
+    }
+    .chip.on { border-color: #58a6ff; background: #1f6feb22; }
+    .chip .led { width: 7px; height: 7px; border-radius: 50%; background: #484f58; }
+    .chip.live .led { background: #3fb950; }
+    .chip.live.busy .led { background: #d29922; animation: pulse 1.2s infinite; }
+    .chip.gone { opacity: 0.55; cursor: default; }
+    #start { display: inline-flex; gap: 4px; align-items: center; margin-left: auto; }
+    #start select { max-width: 200px; }
+
+    #terminal { flex: 1; display: flex; flex-direction: column; margin: 0 14px 12px; min-height: 0; }
+    #term-bar { display: flex; align-items: center; gap: 8px; padding: 4px 0 6px; }
+    #term-bar .name { font-weight: 600; }
+    #term-bar .spacer { flex: 1; }
+    #screen {
+      flex: 1; overflow: hidden; background: #010409; border: 1px solid #30363d; border-radius: 6px;
+      padding: 8px 10px; white-space: pre; color: #c9d1d9; cursor: pointer;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace; line-height: 1.25;
+      display: flex; flex-direction: column; justify-content: flex-end;
+    }
+    #screen:hover { border-color: #58a6ff; }
+    #empty {
+      flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center;
+      gap: 10px; color: #8b949e; text-align: center; padding: 20px;
+    }
+    kbd {
+      font: 11px ui-monospace, Menlo, monospace; padding: 0 4px; border-radius: 4px;
+      border: 1px solid #30363d; background: #161b22; color: #8b949e;
+    }
+
+    #toast {
+      position: fixed; left: 50%; bottom: 16px; transform: translateX(-50%);
+      background: #161b22; border: 1px solid #f85149; color: #ffa198; padding: 6px 12px;
+      border-radius: 6px; max-width: 70%; z-index: 10;
+    }
+    #toast.info { border-color: #30363d; color: #c9d1d9; }
+
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { animation: none !important; transition: none !important; }
+    }
+    ::-webkit-scrollbar { width: 10px; height: 10px; }
+    ::-webkit-scrollbar-thumb { background: #30363d; border-radius: 5px; border: 2px solid transparent; background-clip: padding-box; }
+    ::-webkit-scrollbar-track { background: transparent; }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <section id="left">
+      <div id="viewbar">
+        <span class="title">Tasks</span>
+        <div id="view-tabs"></div>
+        <button class="ghost" id="new-view-btn" title="Ask an agent to build a new view">+ View</button>
+        <span class="spacer"></span>
+        <button id="add-task-btn" title="Add a task (n)">+ Task</button>
+        <button id="edit-view-btn" title="Ask an agent to change this view">✎ Edit view</button>
+        <button class="ghost hidden" id="reset-view-btn" title="Delete the custom copy and go back to the built-in view">Reset</button>
+      </div>
+      <!-- Not a <form>: the mod sandbox has no allow-forms, and a sandboxed form is blocked before its
+           submit event even fires. The Go button and Enter in either input submit instead. -->
+      <div id="composer" class="hidden">
+        <label id="composer-label" class="muted"></label>
+        <div class="row">
+          <input id="composer-name" placeholder="view-name" class="hidden" size="14" autocomplete="off">
+          <input id="composer-text" autocomplete="off">
+          <button type="button" class="primary" id="composer-go"></button>
+          <button type="button" class="ghost" id="composer-cancel">Cancel</button>
+        </div>
+      </div>
+      <iframe id="view-frame" title="Task view"></iframe>
+    </section>
+    <div id="divider" title="Drag to resize"></div>
+    <section id="right">
+      <div id="detail" class="hidden">
+        <div class="head"><span class="id"></span><h1></h1></div>
+        <div class="meta">
+          <div class="seg" id="status-seg">
+            <button data-status="pending">Pending</button>
+            <button data-status="in-progress">In progress</button>
+            <button data-status="done">Done</button>
+          </div>
+          <span class="project hidden"></span>
+          <span class="muted" id="priority"></span>
+        </div>
+        <div class="desc"></div>
+      </div>
+      <div id="sessions" class="hidden">
+        <span id="chips"></span>
+        <span id="start">
+          <select id="start-dir" title="Project directory for a new session"></select>
+          <button id="start-btn" title="Start a new agent session for this task">+ Session</button>
+        </span>
+      </div>
+      <div id="terminal">
+        <div id="term-bar" class="hidden">
+          <span class="name"></span><span class="muted" id="term-state"></span>
+          <span class="spacer"></span>
+          <button class="primary" id="open-btn"></button>
+        </div>
+        <div id="screen" class="hidden" title="Open this terminal (Enter)"></div>
+        <div id="empty"></div>
+      </div>
+    </section>
+  </div>
+  <div id="toast" class="hidden"></div>
+  <script type="module" src="app.js"></script>
+</body>
+</html>

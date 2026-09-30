@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Board</title>
+<style>
+  * { margin: 0; box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    background: #0d1117; color: #c9d1d9; overflow: hidden;
+    font: 13px/1.4 system-ui, -apple-system, sans-serif; -webkit-font-smoothing: antialiased;
+    display: flex; flex-direction: column;
+  }
+  button { font: inherit; color: inherit; cursor: pointer; }
+  #bar { display: flex; gap: 8px; align-items: center; padding: 8px 12px; color: #8b949e; font-size: 12px; }
+  .seg { display: inline-flex; border: 1px solid #30363d; border-radius: 6px; overflow: hidden; }
+  .seg button { border: 0; background: transparent; color: #8b949e; padding: 2px 9px; }
+  .seg button + button { border-left: 1px solid #30363d; }
+  .seg button.on { background: #1f6feb33; color: #c9d1d9; }
+  #bar label { display: inline-flex; gap: 5px; align-items: center; cursor: pointer; }
+  #cols { flex: 1; display: flex; gap: 10px; padding: 0 12px 12px; overflow-x: auto; min-height: 0; }
+  .col {
+    flex: 1 0 220px; max-width: 360px; display: flex; flex-direction: column; min-height: 0;
+    background: #161b22; border: 1px solid #21262d; border-radius: 8px;
+  }
+  .col.over { border-color: #58a6ff; background: #1f6feb11; }
+  .col h2 {
+    font-size: 12px; font-weight: 600; padding: 8px 10px; display: flex; gap: 6px; align-items: center;
+    text-transform: uppercase; letter-spacing: 0.04em; color: #8b949e;
+  }
+  .col h2 .n { font-weight: 400; }
+  .list { flex: 1; overflow-y: auto; padding: 0 8px 8px; display: flex; flex-direction: column; gap: 6px; }
+  .card {
+    background: #0d1117; border: 1px solid #30363d; border-left: 3px solid #484f58; border-radius: 6px;
+    padding: 7px 9px; cursor: pointer; user-select: none;
+  }
+  .card:hover { border-color: #484f58; }
+  .card.sel { border-color: #58a6ff; box-shadow: 0 0 0 1px #58a6ff; }
+  .card.p-high { border-left-color: #f85149; }
+  .card.p-medium { border-left-color: #d29922; }
+  .card.p-low { border-left-color: #484f58; }
+  .card.done .t { color: #8b949e; text-decoration: line-through; text-decoration-color: #484f58; }
+  .card.dragging { opacity: 0.4; }
+  .card.drop-before { box-shadow: 0 -2px 0 #58a6ff; }
+  .t { overflow-wrap: anywhere; }
+  .m { display: flex; gap: 6px; align-items: center; margin-top: 5px; font-size: 11px; color: #8b949e; flex-wrap: wrap; }
+  .proj { padding: 0 6px; border-radius: 8px; background: #1f6feb22; color: #79c0ff; }
+  .st { padding: 0 6px; border-radius: 8px; background: #21262d; }
+  .leds { display: inline-flex; gap: 3px; margin-left: auto; }
+  .led { width: 7px; height: 7px; border-radius: 50%; background: #484f58; }
+  .led.live { background: #3fb950; }
+  .more { border: 1px dashed #30363d; background: transparent; color: #8b949e; border-radius: 6px; padding: 4px; }
+  .empty { color: #484f58; font-size: 12px; padding: 6px 2px; }
+</style>
+</head>
+<body>
+<div id="bar">
+  <span>Group by</span>
+  <div class="seg" id="group">
+    <button data-g="status">Status</button>
+    <button data-g="project">Project</button>
+  </div>
+  <label><input type="checkbox" id="show-done"> Show done</label>
+</div>
+<div id="cols"></div>
+<script>
+const app = window.parent.taskApp;
+const STATUSES = [['pending', 'Pending'], ['in-progress', 'In progress'], ['done', 'Done']];
+const DONE_SHOWN = 15;
+const PRIORITY = { high: 0, medium: 1, low: 2 };
+
+let tasks = [];
+let selected = null;
+let state = { groupBy: 'status', showDone: true, order: [] };
+let doneExpanded = false;
+let dragId = null;
+
+const cols = document.getElementById('cols');
+
+function save() { app.saveState(state).catch(() => {}); }
+
+/** Tasks the user has placed come in the order they were put; ones never placed come first, newest first. */
+function sorted(list) {
+  const rank = new Map(state.order.map((id, i) => [id, i]));
+  return [...list].sort((a, b) => {
+    const ra = rank.has(a.id) ? rank.get(a.id) : -1, rb = rank.has(b.id) ? rank.get(b.id) : -1;
+    if (ra !== rb) return ra - rb;
+    return (PRIORITY[a.priority] ?? 1) - (PRIORITY[b.priority] ?? 1) || b.created - a.created;
+  });
+}
+
+function columns() {
+  const visible = state.showDone ? tasks : tasks.filter((t) => t.status !== 'done');
+  if (state.groupBy === 'project') {
+    const byProject = new Map();
+    for (const t of visible) {
+      const key = t.project ? t.project.id : '';
+      if (!byProject.has(key)) byProject.set(key, { key, title: t.project ? t.project.name : 'No project', tasks: [] });
+      byProject.get(key).tasks.push(t);
+    }
+    return [...byProject.values()]
+      .sort((a, b) => (a.key === '') - (b.key === '') || a.title.localeCompare(b.title))
+      .map((c) => ({ ...c, tasks: sorted(c.tasks), drop: null }));
+  }
+  return STATUSES
+    .filter(([s]) => s !== 'done' || state.showDone)
+    .map(([s, title]) => ({ key: s, title, tasks: sorted(visible.filter((t) => t.status === s)), drop: s }));
+}
+
+function card(t) {
+  const el = document.createElement('div');
+  el.className = `card p-${t.priority}${t.status === 'done' ? ' done' : ''}${t.id === selected ? ' sel' : ''}`;
+  el.dataset.id = t.id;
+  el.draggable = true;
+  const title = document.createElement('div');
+  title.className = 't';
+  title.textContent = t.title;
+  const meta = document.createElement('div');
+  meta.className = 'm';
+  meta.append(`#${t.id}`);
+  if (state.groupBy === 'status' && t.project) {
+    const p = document.createElement('span');
+    p.className = 'proj';
+    p.textContent = t.project.name;
+    meta.append(p);
+  }
+  if (state.groupBy === 'project') {
+    const s = document.createElement('span');
+    s.className = 'st';
+    s.textContent = STATUSES.find(([k]) => k === t.status)?.[1] || t.status;
+    meta.append(s);
+  }
+  if (t.sessions.length) {
+    const leds = document.createElement('span');
+    leds.className = 'leds';
+    leds.title = t.sessions.map((s) => `${s.label} · ${s.state}`).join('\n');
+    for (const s of t.sessions.slice(0, 6)) {
+      const d = document.createElement('span');
+      d.className = `led ${s.state}`;
+      leds.append(d);
+    }
+    meta.append(leds);
+  }
+  el.append(title, meta);
+  el.onclick = () => app.select(t.id);
+  el.ondblclick = () => app.open(t.id);
+  el.ondragstart = (e) => { dragId = t.id; el.classList.add('dragging'); e.dataTransfer.effectAllowed = 'move'; };
+  el.ondragend = () => { dragId = null; el.classList.remove('dragging'); clearMarks(); };
+  return el;
+}
+
+function clearMarks() {
+  document.querySelectorAll('.over, .drop-before').forEach((n) => n.classList.remove('over', 'drop-before'));
+}
+
+function render() {
+  const visualOrder = [];
+  cols.replaceChildren(...columns().map((c) => {
+    const col = document.createElement('section');
+    col.className = 'col';
+    const h = document.createElement('h2');
+    h.textContent = c.title;
+    const n = document.createElement('span');
+    n.className = 'n';
+    n.textContent = c.tasks.length;
+    h.append(n);
+    const list = document.createElement('div');
+    list.className = 'list';
+    let shown = c.tasks;
+    if (c.key === 'done' && !doneExpanded && shown.length > DONE_SHOWN) shown = shown.slice(0, DONE_SHOWN);
+    for (const t of shown) { list.append(card(t)); visualOrder.push(t.id); }
+    if (shown.length < c.tasks.length) {
+      const more = document.createElement('button');
+      more.className = 'more';
+      more.textContent = `Show ${c.tasks.length - shown.length} more`;
+      more.onclick = () => { doneExpanded = true; render(); };
+      list.append(more);
+    }
+    if (!c.tasks.length) {
+      const e = document.createElement('div');
+      e.className = 'empty';
+      e.textContent = 'Nothing here';
+      list.append(e);
+    }
+    wireDrop(col, list, c);
+    col.append(h, list);
+    return col;
+  }));
+  app.setOrder(visualOrder);
+  const sel = cols.querySelector('.card.sel');
+  if (sel) sel.scrollIntoView({ block: 'nearest' });
+}
+
+/** Dropping moves the card to just before the card under the pointer, or to the column's end. */
+function wireDrop(col, list, c) {
+  const target = (e) => e.target.closest('.card');
+  col.ondragover = (e) => {
+    if (dragId === null) return;
+    const from = tasks.find((t) => t.id === dragId);
+    const sameColumn = c.tasks.some((t) => t.id === dragId);
+    if (!c.drop && !sameColumn) return;   // a project is where the work ran, not something to drag
+    if (!from) return;
+    e.preventDefault();
+    clearMarks();
+    col.classList.add('over');
+    const over = target(e);
+    if (over && Number(over.dataset.id) !== dragId) over.classList.add('drop-before');
+  };
+  col.ondragleave = (e) => { if (!col.contains(e.relatedTarget)) col.classList.remove('over'); };
+  col.ondrop = (e) => {
+    e.preventDefault();
+    const id = dragId;
+    const over = target(e);
+    clearMarks();
+    if (id === null) return;
+    const before = over ? Number(over.dataset.id) : null;
+    const ids = c.tasks.map((t) => t.id).filter((x) => x !== id);
+    const at = before === null ? ids.length : Math.max(0, ids.indexOf(before));
+    ids.splice(at, 0, id);
+    // Rewrite this column's slice of the order and keep everyone else's where it was.
+    const rest = state.order.filter((x) => !ids.includes(x));
+    state.order = [...ids, ...rest];
+    save();
+    if (c.drop && tasks.find((t) => t.id === id)?.status !== c.drop) app.setStatus(id, c.drop);
+    else render();
+  };
+}
+
+document.getElementById('group').onclick = (e) => {
+  const g = e.target.closest('button')?.dataset.g;
+  if (!g || g === state.groupBy) return;
+  state.groupBy = g;
+  save();
+  syncBar();
+  render();
+};
+document.getElementById('show-done').onchange = (e) => { state.showDone = e.target.checked; save(); render(); };
+
+function syncBar() {
+  for (const b of document.querySelectorAll('#group button')) b.classList.toggle('on', b.dataset.g === state.groupBy);
+  document.getElementById('show-done').checked = state.showDone;
+}
+
+app.loadState().then((s) => { if (s) state = { ...state, ...s }; }).catch(() => {}).finally(() => {
+  syncBar();
+  app.onTasks((list) => { tasks = list; render(); });
+  app.onSelect((id) => { selected = id; render(); });
+});
+</script>
+</body>
+</html>

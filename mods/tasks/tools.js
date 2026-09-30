@@ -73,10 +73,40 @@ function describeSession(ref) {
   return { id: ref.id, label, state: 'gone', closedAt: null };
 }
 
+/**
+ * The project a task belongs to, derived from where its sessions ran: the first session whose cwd
+ * sits inside a registered project's directory. { id, name, dir } or null. Derived rather than
+ * stored for the same reason as a session's state — a project can be renamed or archived.
+ */
+function taskProject(task) {
+  const contexts = ctx && ctx.getContexts ? ctx.getContexts() : [];
+  if (!Array.isArray(contexts) || contexts.length === 0) return null;
+  for (const ref of sessionRefs(task)) {
+    const entry = sessionEntry(ref.id);
+    const cwd = entry && entry.cwd;
+    if (!cwd) continue;
+    for (const c of contexts) {
+      const dir = (c.dirs || []).find(d => cwd === d || cwd.startsWith(String(d).replace(/\/+$/, '') + '/'));
+      if (dir) return { id: c.id, name: c.name, dir };
+    }
+  }
+  return null;
+}
+
 /** The task list as it goes over the wire: each reference decorated with its session's state. */
 function wireTasks() {
-  return tasks.map(t => ({ ...t, sessions: sessionRefs(t).map(describeSession) }));
+  return tasks.map(t => ({ ...t, sessions: sessionRefs(t).map(describeSession), project: taskProject(t) }));
 }
+
+/** Every directory of every registered project — the only places the Tasks app starts a session. */
+function projectDirs() {
+  const contexts = ctx && ctx.getContexts ? ctx.getContexts() : [];
+  return (Array.isArray(contexts) ? contexts : []).flatMap(c => c.dirs || []);
+}
+
+// The screen preview's row cap. A session is spawned 40 rows tall, and the preview never needs its
+// scrollback.
+const SCREEN_ROWS_MAX = 60;
 
 function broadcastTasks() {
   if (ctx) ctx.broadcast({ type: 'tasks', tasks: wireTasks() });
@@ -208,6 +238,35 @@ function registerRoutes(app, context) {
     res.json({ tasks: wireTasks() });
   });
 
+  // The Tasks app's rail badge: how many tasks are not done. Polled every 5s by every window, so it
+  // reads the in-memory list and nothing else.
+  app.get('/api/tasks/count', (req, res) => {
+    res.json({ count: tasks.filter(t => t.status !== 'done').length });
+  });
+
+  // A task the human writes in the Tasks app. add_task is the agents' door; this is the human's, so
+  // it attaches no session.
+  app.post('/api/tasks', (req, res) => {
+    const body = req.body || {};
+    const title = typeof body.title === 'string' ? body.title.trim() : '';
+    if (!title) return res.status(400).json({ error: 'A task needs a title' });
+    const priority = ['low', 'medium', 'high'].includes(body.priority) ? body.priority : 'medium';
+    const task = {
+      id: nextId++,
+      title: title.slice(0, 500),
+      description: typeof body.description === 'string' ? body.description : '',
+      priority,
+      status: 'pending',
+      session_tag: '',
+      sessions: [],
+      created: Date.now(),
+    };
+    tasks.push(task);
+    saveTasks();
+    broadcastTasks();
+    res.json({ task });
+  });
+
   app.post('/api/tasks/:id/status', (req, res) => {
     const id = parseInt(req.params.id);
     const { status } = req.body;
@@ -319,6 +378,62 @@ function registerRoutes(app, context) {
     }, clickedWindow, { openBrowser: true });
     ctx.log(`[tasks] task #${id} -> restore ${sessionId} (${tabDelivery})`);
     res.json({ opened: 'restored', tabDelivery });
+  });
+
+  // The Tasks app's terminal preview: the bottom of a live session's screen, as plain text. Scoped
+  // like the open route, so it is not a way to read any session's screen. linesSync, not the
+  // awaited read, because this is polled every second and a chatty session must not stall it.
+  app.get('/api/tasks/:id/sessions/:sessionId/screen', (req, res) => {
+    const id = parseInt(req.params.id);
+    const task = tasks.find(t => t.id === id);
+    if (!task) return res.status(404).json({ error: 'Task not found' });
+    const sessionId = req.params.sessionId;
+    if (!sessionRefs(task).some(s => s.id === sessionId)) {
+      return res.status(404).json({ error: 'Session is not attached to this task' });
+    }
+    const entry = ctx.shells.get(sessionId);
+    if (!entry) return res.status(409).json({ error: 'not-live' });
+    const n = Math.max(1, Math.min(SCREEN_ROWS_MAX, Number(req.query.lines) || 40));
+    let lines = [];
+    try {
+      const scr = entry.terminalScreen;
+      if (scr && typeof scr.linesSync === 'function') lines = scr.linesSync(n) || [];
+    } catch {}
+    const state = ctx.sessionInputState ? ctx.sessionInputState(entry) : null;
+    res.json({ lines, state });
+  });
+
+  // Start a new agent session for a task, in one of a registered project's directories, and attach
+  // it (#719's reference, so it gets a badge and survives a close like any other). The spawn is
+  // server-side because the browser's createSession cannot hand back the id the task needs.
+  app.post('/api/tasks/:id/start', (req, res) => {
+    const id = parseInt(req.params.id);
+    const task = tasks.find(t => t.id === id);
+    if (!task) return res.status(404).json({ error: 'Task not found' });
+    const cwd = req.body && typeof req.body.cwd === 'string' ? req.body.cwd : '';
+    if (!projectDirs().includes(cwd)) {
+      return res.status(400).json({ error: 'not-a-project', message: 'Tasks start sessions only in a registered project\'s directory.' });
+    }
+    if (typeof ctx.spawnAgentSession !== 'function') {
+      return res.status(501).json({ error: 'This daemon cannot start sessions for Tasks' });
+    }
+    const name = task.title.length > 40 ? task.title.slice(0, 39) + '…' : task.title;
+    const result = ctx.spawnAgentSession({
+      cwd,
+      agentType: (ctx.settings && ctx.settings.defaultAgent) || 'claude',
+      name,
+      windowId: connectedWindow(req.body && req.body.windowId),
+      source: `tasks #${id}`,
+    });
+    if (!result || result.error) {
+      const err = result && result.error;
+      return res.status(409).json({ error: (err && err.code) || 'spawn-failed', message: (err && err.message) || 'The session did not start' });
+    }
+    task.sessions = [...sessionRefs(task), { id: result.id, name }];
+    saveTasks();
+    broadcastTasks();
+    ctx.log(`[tasks] task #${id} -> started ${result.id} in ${cwd}`);
+    res.json({ id: result.id, tabDelivery: result.tabDelivery });
   });
 }
 

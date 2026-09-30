@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Orbit</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #0d1117; overflow: hidden; }
+  canvas { display: block; }
+  #hint {
+    position: fixed; left: 12px; bottom: 10px; color: #8b949e;
+    font: 11px system-ui, sans-serif; pointer-events: none;
+  }
+</style>
+<script type="importmap">{ "imports": {
+  "three": "https://esm.sh/three@0.160.0",
+  "three/addons/": "https://esm.sh/three@0.160.0/examples/jsm/"
+}}</script>
+</head>
+<body>
+<div id="hint">Drag to orbit · scroll to zoom · click a block to select · double-click to open its terminal</div>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+const app = window.parent.taskApp;
+const PRIORITY_COLOR = { high: 0xf85149, medium: 0xd29922, low: 0x6e7681 };
+const DONE_SHOWN = 24;        // per project: the newest done tasks, as flat tiles
+const ISLAND_GAP = 9;
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(window.devicePixelRatio);
+document.body.append(renderer.domElement);
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0d1117);
+scene.fog = new THREE.Fog(0x0d1117, 30, 80);
+const camera = new THREE.PerspectiveCamera(50, 1, 0.1, 200);
+camera.position.set(0, 16, 22);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.maxPolarAngle = Math.PI * 0.47;
+scene.add(new THREE.HemisphereLight(0xbcd7ff, 0x0d1117, 0.9));
+const sun = new THREE.DirectionalLight(0xffffff, 1.1);
+sun.position.set(8, 20, 10);
+scene.add(sun);
+const grid = new THREE.GridHelper(120, 60, 0x21262d, 0x161b22);
+grid.position.y = -0.01;
+scene.add(grid);
+
+let world = new THREE.Group();
+scene.add(world);
+let blocks = [];                 // { mesh, task, baseY, ring }
+let tasks = [];
+let selected = null;
+let focusTarget = null;
+
+function label(text, { size = 34, color = '#c9d1d9', bg = 'rgba(13,17,23,0.8)' } = {}) {
+  const c = document.createElement('canvas');
+  const ctx = c.getContext('2d');
+  ctx.font = `600 ${size}px system-ui, sans-serif`;
+  const w = Math.ceil(ctx.measureText(text).width) + 24;
+  c.width = w; c.height = size + 18;
+  ctx.font = `600 ${size}px system-ui, sans-serif`;
+  ctx.fillStyle = bg;
+  ctx.fillRect(0, 0, c.width, c.height);
+  ctx.fillStyle = color;
+  ctx.textBaseline = 'middle';
+  ctx.fillText(text, 12, c.height / 2);
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, depthWrite: false }));
+  const scale = 0.008;
+  s.scale.set(c.width * scale, c.height * scale, 1);
+  return s;
+}
+
+// Until the user moves the camera (or a saved one is loaded), keep every island in shot.
+let framed = false;
+function frame(radius) {
+  const r = radius + 5;
+  camera.position.set(0, r * 1.5 + 4, r * 1.9 + 4);
+  controls.target.set(0, 0, 0);
+}
+
+const short = (t, n) => (t.length > n ? t.slice(0, n - 1) + '…' : t);
+
+function build() {
+  scene.remove(world);
+  world.traverse((o) => { o.geometry?.dispose?.(); o.material?.map?.dispose?.(); o.material?.dispose?.(); });
+  world = new THREE.Group();
+  scene.add(world);
+  blocks = [];
+
+  const groups = new Map();
+  for (const t of tasks) {
+    const key = t.project ? t.project.id : '';
+    if (!groups.has(key)) groups.set(key, { name: t.project ? t.project.name : 'No project', open: [], done: [] });
+    groups.get(key)[t.status === 'done' ? 'done' : 'open'].push(t);
+  }
+  const list = [...groups.values()].filter((g) => g.open.length || g.done.length)
+    .sort((a, b) => b.open.length - a.open.length || a.name.localeCompare(b.name));
+  const radius = list.length > 1 ? (ISLAND_GAP * list.length) / (2 * Math.PI) + 3 : 0;
+  const order = [];
+  if (!framed) frame(radius);
+
+  list.forEach((g, gi) => {
+    const angle = (gi / list.length) * Math.PI * 2;
+    const island = new THREE.Group();
+    island.position.set(Math.sin(angle) * radius, 0, Math.cos(angle) * radius);
+    world.add(island);
+    const disc = new THREE.Mesh(
+      new THREE.CylinderGeometry(3.6, 3.9, 0.3, 48),
+      new THREE.MeshStandardMaterial({ color: 0x161b22, roughness: 0.9 }),
+    );
+    disc.position.y = -0.15;
+    island.add(disc);
+    const name = label(g.name, { size: 40, color: '#79c0ff' });
+    name.position.set(0, 0.6, 4.4);
+    island.add(name);
+
+    // Open tasks float in a ring above the island; done ones lie flat, newest nearest the middle.
+    g.open.sort((a, b) => (a.status === 'in-progress' ? 0 : 1) - (b.status === 'in-progress' ? 0 : 1) || b.created - a.created);
+    g.open.forEach((t, i) => {
+      const a = (i / Math.max(1, g.open.length)) * Math.PI * 2;
+      const r = g.open.length === 1 ? 0 : 1.9;
+      const inProgress = t.status === 'in-progress';
+      const mesh = new THREE.Mesh(
+        new THREE.BoxGeometry(1.1, 1.1, 1.1),
+        new THREE.MeshStandardMaterial({
+          color: PRIORITY_COLOR[t.priority] || PRIORITY_COLOR.medium,
+          emissive: inProgress ? 0x1f6feb : 0x000000, emissiveIntensity: 0.5, roughness: 0.5,
+        }),
+      );
+      const baseY = inProgress ? 2.6 : 1.4;
+      mesh.position.set(Math.cos(a) * r, baseY, Math.sin(a) * r);
+      island.add(mesh);
+      const tag = label(short(t.title, 30), { size: 30 });
+      tag.position.set(0, 1.05, 0);
+      mesh.add(tag);
+      let ring = null;
+      if (t.sessions.some((s) => s.state === 'live')) {
+        ring = new THREE.Mesh(new THREE.TorusGeometry(0.95, 0.06, 8, 40), new THREE.MeshBasicMaterial({ color: 0x3fb950 }));
+        ring.rotation.x = Math.PI / 2;
+        ring.position.y = -0.75;
+        mesh.add(ring);
+      }
+      blocks.push({ mesh, task: t, baseY, ring });
+      order.push(t.id);
+    });
+    g.done.sort((a, b) => b.created - a.created).slice(0, DONE_SHOWN).forEach((t, i) => {
+      const a = i * 2.4;
+      const r = 1 + Math.sqrt(i) * 0.55;
+      const mesh = new THREE.Mesh(
+        new THREE.BoxGeometry(0.45, 0.12, 0.45),
+        new THREE.MeshStandardMaterial({ color: 0x30363d, roughness: 1 }),
+      );
+      const baseY = 0.06;
+      mesh.position.set(Math.cos(a) * r, baseY, Math.sin(a) * r);
+      island.add(mesh);
+      blocks.push({ mesh, task: t, baseY, ring: null });
+      order.push(t.id);
+    });
+  });
+  app.setOrder(order);
+  highlight(false);
+}
+
+/** Mark the selected block. `focus` glides the camera to it, which only a new selection asks for. */
+function highlight(focus) {
+  if (focus) focusTarget = null;
+  for (const b of blocks) {
+    const on = b.task.id === selected;
+    b.mesh.scale.setScalar(on ? 1.35 : 1);
+    if (b.mesh.material.emissive && b.task.status !== 'in-progress') {
+      b.mesh.material.emissive.setHex(on ? 0xffffff : 0x000000);
+      b.mesh.material.emissiveIntensity = on ? 0.25 : 0.5;
+    }
+    if (on && focus) focusTarget = b.mesh.getWorldPosition(new THREE.Vector3());
+  }
+}
+
+// Picking.
+const ray = new THREE.Raycaster();
+const pointer = new THREE.Vector2();
+let downAt = null;
+function pick(e) {
+  const rect = renderer.domElement.getBoundingClientRect();
+  pointer.set(((e.clientX - rect.left) / rect.width) * 2 - 1, -((e.clientY - rect.top) / rect.height) * 2 + 1);
+  ray.setFromCamera(pointer, camera);
+  const hit = ray.intersectObjects(blocks.map((b) => b.mesh), false)[0];
+  return hit ? blocks.find((b) => b.mesh === hit.object) : null;
+}
+renderer.domElement.addEventListener('pointerdown', (e) => { downAt = [e.clientX, e.clientY]; });
+renderer.domElement.addEventListener('click', (e) => {
+  // A drag that ends on a block orbited the camera; it did not choose the block.
+  if (downAt && Math.hypot(e.clientX - downAt[0], e.clientY - downAt[1]) > 5) return;
+  const b = pick(e);
+  if (b) app.select(b.task.id);
+});
+renderer.domElement.addEventListener('dblclick', (e) => { const b = pick(e); if (b) app.open(b.task.id); });
+
+// The camera is the layout this view remembers.
+let saveTimer = null;
+controls.addEventListener('end', () => {
+  framed = true;
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => app.saveState({
+    camera: camera.position.toArray(), target: controls.target.toArray(),
+  }).catch(() => {}), 500);
+});
+
+function resize() {
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  camera.aspect = window.innerWidth / Math.max(1, window.innerHeight);
+  camera.updateProjectionMatrix();
+}
+window.addEventListener('resize', resize);
+resize();
+
+const clock = new THREE.Clock();
+renderer.setAnimationLoop(() => {
+  const t = clock.getElapsedTime();
+  for (const b of blocks) {
+    if (b.task.status !== 'done') b.mesh.position.y = b.baseY + Math.sin(t * 1.3 + b.task.id) * 0.12;
+    if (b.ring) {
+      b.ring.material.transparent = true;
+      b.ring.material.opacity = 0.6 + Math.sin(t * 4) * 0.4;
+    }
+  }
+  // Glide to a newly selected block, then let go so the user can orbit away from it.
+  if (focusTarget) {
+    controls.target.lerp(focusTarget, 0.08);
+    if (controls.target.distanceTo(focusTarget) < 0.05) focusTarget = null;
+  }
+  controls.update();
+  renderer.render(scene, camera);
+});
+
+const saved = await app.loadState().catch(() => null);
+if (saved?.camera && saved?.target) {
+  framed = true;
+  camera.position.fromArray(saved.camera);
+  controls.target.fromArray(saved.target);
+}
+app.onTasks((list) => { tasks = list; build(); });
+let firstSelect = true;
+app.onSelect((id) => {
+  selected = id;
+  // The first call is the current selection, and a saved camera outranks it.
+  highlight(!(firstSelect && saved?.target));
+  firstSelect = false;
+});
+</script>
+</body>
+</html>
