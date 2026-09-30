@@ -587,6 +587,12 @@ Panel mods are auto-enabled on first visit (when no mod preferences have been sa
 - A session closing does not re-send the list, so the panel re-reads it every minute and shortly
   after its own tabs change.
 
+**This project.** The header's toggle (the `projectOnly` mod setting, per browser) keeps only the
+tasks whose derived `project` (see [Tasks app](#tasks-app)) is the one selected in the rail,
+followed through `onActiveContextChanged`. A task with no session in any project has no project
+and is hidden while it is on. With **All** selected in the rail there is nothing to narrow to, so
+every task shows.
+
 **Clicking a badge**
 
 - **Live session:** focuses its tab.

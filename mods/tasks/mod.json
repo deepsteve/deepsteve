@@ -10,6 +10,7 @@
   "toolbar": { "label": "Tasks" },
   "settings": [
     { "key": "panelPosition", "type": "boolean", "label": "Panel on left", "description": "Show panel on left side instead of right", "default": false },
-    { "key": "compactView", "type": "boolean", "label": "Compact view", "description": "Show only task names (hide descriptions and badges)", "default": false }
+    { "key": "compactView", "type": "boolean", "label": "Compact view", "description": "Show only task names (hide descriptions and badges)", "default": false },
+    { "key": "projectOnly", "type": "boolean", "label": "Only this project", "description": "Show only the tasks whose sessions ran in the project selected in the rail", "default": false }
   ]
 }

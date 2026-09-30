@@ -592,6 +592,11 @@ function TasksPanel() {
   const [filter, setFilter] = useState('all');
   const [tagFilter, setTagFilter] = useState('all');
   const [compactView, setCompactView] = useState(false);
+  // "This project": only the tasks of the project selected in the rail. null there means All,
+  // which leaves nothing to narrow to, so every task shows.
+  const [projectOnly, setProjectOnly] = useState(false);
+  const [activeProjectId, setActiveProjectId] = useState(null);
+  const [projects, setProjects] = useState([]);
   const [now, setNow] = useState(Date.now());
   const [history, setHistory] = useState(null);   // { taskId, session } while a history is up
   const [notice, setNotice] = useState(null);
@@ -600,6 +605,8 @@ function TasksPanel() {
     let unsubTasks = null;
     let unsubSettings = null;
     let unsubSessions = null;
+    let unsubProjects = null;
+    let unsubActiveProject = null;
     let refreshTimer = null;
     let sessionsTimer = null;
 
@@ -627,15 +634,25 @@ function TasksPanel() {
       });
       refreshTimer = setInterval(refresh, REFRESH_MS);
 
+      // The rail's projects, for the toggle's label, and which one is selected.
+      if (window.deepsteve.onContextsChanged) {
+        unsubProjects = window.deepsteve.onContextsChanged((list) => setProjects(list || []));
+      }
+      if (window.deepsteve.onActiveContextChanged) {
+        unsubActiveProject = window.deepsteve.onActiveContextChanged((id) => setActiveProjectId(id || null));
+      }
+
       // Restore persisted settings
       const settings = window.deepsteve.getSettings();
       if (settings.compactView != null) setCompactView(settings.compactView);
+      if (settings.projectOnly != null) setProjectOnly(settings.projectOnly);
       if (settings.statusFilter != null) setFilter(settings.statusFilter);
       if (settings.tagFilter != null) setTagFilter(settings.tagFilter);
 
       // React to settings changes (e.g. toggled from settings panel)
       unsubSettings = window.deepsteve.onSettingsChanged((settings) => {
         if (settings.compactView != null) setCompactView(settings.compactView);
+        if (settings.projectOnly != null) setProjectOnly(settings.projectOnly);
         if (settings.statusFilter != null) setFilter(settings.statusFilter);
         if (settings.tagFilter != null) setTagFilter(settings.tagFilter);
       });
@@ -661,6 +678,8 @@ function TasksPanel() {
       if (unsubTasks) unsubTasks();
       if (unsubSettings) unsubSettings();
       if (unsubSessions) unsubSessions();
+      if (unsubProjects) unsubProjects();
+      if (unsubActiveProject) unsubActiveProject();
       clearInterval(refreshTimer);
       clearTimeout(sessionsTimer);
     };
@@ -745,11 +764,26 @@ function TasksPanel() {
     });
   }, []);
 
+  const toggleProjectOnly = useCallback(() => {
+    setProjectOnly(prev => {
+      const next = !prev;
+      if (window.deepsteve) window.deepsteve.updateSetting('projectOnly', next);
+      return next;
+    });
+  }, []);
+
   // Get unique session tags for filter dropdown
   const tags = [...new Set(tasks.map(t => t.session_tag).filter(Boolean))];
 
+  // A task's project is derived by the server from where its sessions ran (tools.js taskProject),
+  // so a task with no session in any project belongs to none and is hidden here.
+  const scoped = projectOnly && activeProjectId;
+  const activeProject = projects.find(p => p.id === activeProjectId) || null;
+  const projectName = activeProject ? activeProject.name : 'this project';
+  const inScope = scoped ? tasks.filter(t => t.project && t.project.id === activeProjectId) : tasks;
+
   // Apply filters
-  let filtered = tasks;
+  let filtered = inScope;
   if (filter !== 'all') filtered = filtered.filter(t => t.status === filter);
   if (tagFilter !== 'all') filtered = filtered.filter(t => t.session_tag === tagFilter);
 
@@ -768,16 +802,41 @@ function TasksPanel() {
         <div style={{ fontSize: 14, fontWeight: 600, color: '#f0f6fc', marginBottom: 8, display: 'flex', alignItems: 'center' }}>
           <span>
             Tasks
-            {tasks.length > 0 && (
+            {inScope.length > 0 && (
               <span style={{ fontSize: 12, color: '#8b949e', fontWeight: 400, marginLeft: 6 }}>
-                {tasks.filter(t => t.status !== 'done').length} pending
+                {inScope.filter(t => t.status !== 'done').length} pending
               </span>
             )}
           </span>
           <button
+            type="button"
+            onClick={toggleProjectOnly}
+            title={!projectOnly
+              ? (activeProjectId ? `Show only the tasks in ${projectName}` : 'Show only the tasks in the project selected in the rail')
+              : scoped
+                ? `Showing only the tasks in ${projectName}. Click to show every project's.`
+                : 'No project is selected in the rail, so every task shows. Select one to narrow the list.'}
+            style={{
+              ...chipButtonStyle,
+              marginLeft: 'auto',
+              maxWidth: 140,
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap',
+              fontWeight: 400,
+              ...(projectOnly ? {
+                background: scoped ? '#58a6ff' : 'rgba(88,166,255,0.1)',
+                color: scoped ? '#fff' : '#58a6ff',
+                border: '1px solid rgba(88,166,255,0.4)',
+              } : {}),
+            }}
+          >
+            {scoped && activeProject ? activeProject.name : 'This project'}
+          </button>
+          <button
             onClick={toggleCompactView}
             style={{
-              marginLeft: 'auto',
+              marginLeft: 6,
               background: 'none',
               border: 'none',
               color: compactView ? '#58a6ff' : '#8b949e',
@@ -852,7 +911,9 @@ function TasksPanel() {
           }}>
             {tasks.length === 0
               ? 'No tasks yet. Claude sessions can create tasks via MCP tools.'
-              : 'No tasks match the current filter.'}
+              : scoped && inScope.length === 0
+                ? `No tasks in ${projectName}.`
+                : 'No tasks match the current filter.'}
           </div>
         ) : (
           filtered.map(task => (
