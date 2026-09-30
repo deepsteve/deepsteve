@@ -812,16 +812,13 @@ function TasksPanel() {
             type="button"
             onClick={toggleProjectOnly}
             title={!projectOnly
-              ? (activeProjectId ? `Show only the tasks in ${projectName}` : 'Show only the tasks in the project selected in the rail')
+              ? `Showing every project's tasks. Click to show only the tasks in ${activeProjectId ? projectName : 'the project selected in the rail'}.`
               : scoped
                 ? `Showing only the tasks in ${projectName}. Click to show every project's.`
                 : 'No project is selected in the rail, so every task shows. Select one to narrow the list.'}
             style={{
               ...chipButtonStyle,
               marginLeft: 'auto',
-              maxWidth: 140,
-              overflow: 'hidden',
-              textOverflow: 'ellipsis',
               whiteSpace: 'nowrap',
               fontWeight: 400,
               ...(projectOnly ? {
@@ -831,7 +828,7 @@ function TasksPanel() {
               } : {}),
             }}
           >
-            {scoped && activeProject ? activeProject.name : 'This project'}
+            {projectOnly ? 'This project' : 'All projects'}
           </button>
           <button
             onClick={toggleCompactView}
