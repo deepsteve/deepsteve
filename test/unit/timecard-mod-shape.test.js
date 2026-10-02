@@ -138,6 +138,22 @@ test('switching views re-renders from memory and never fetches', () => {
   assert.ok(!/fetch|refresh|load/.test(handler), 'and must not go to the network');
 });
 
+test('stepping through months re-renders from memory and never fetches', () => {
+  const handler = js.match(/el\.nav\.addEventListener\('click',[\s\S]*?\n\}\);/)[0]
+    .replace(/\/\/.*$/gm, '');
+  assert.match(handler, /render\(\)/, 'a month step re-renders');
+  assert.ok(!/fetch|refresh|load/.test(handler), 'and must not go to the network');
+  assert.match(html, /aria-label="Previous month"/, 'the arrows are glyphs, so they need names');
+  assert.match(html, /aria-label="Next month"/);
+});
+
+test('the chosen month is held by key, so a refresh cannot move it', () => {
+  // An index into pastMonths would shift by one when the 60s refresh crosses midnight on
+  // the 1st, swapping the month on screen under a user who never touched anything.
+  assert.match(js, /let monthKey = null/);
+  assert.match(js, /m\.key === monthKey/);
+});
+
 test('the stat row re-renders its labels as well as its values', () => {
   assert.match(js, /stat\.label/, 'labels come from the dataset, not from a fixed list');
   assert.match(js, /formatStat\(stat\)/);

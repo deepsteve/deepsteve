@@ -23,6 +23,7 @@ const REFRESH_MS = 60 * 1000;
 const el = {
   total: document.getElementById('tc-total'),
   range: document.getElementById('tc-range'),
+  nav: document.getElementById('tc-nav'),
   views: document.getElementById('tc-views'),
   chart: document.getElementById('tc-chart'),
   tip: document.getElementById('tc-tip'),
@@ -34,6 +35,10 @@ const el = {
 let data = null;
 // Week is the default view.
 let view = 'week';
+// Which month the Month view shows, by key; null follows the current month. Held by key
+// rather than by index so the 60s refresh — which grows the list at midnight on the 1st
+// — never silently moves the selection to a different month.
+let monthKey = null;
 // The bar the hover readout is currently describing, so a mousemove within one bar is
 // free and a re-render under a stationary pointer still re-anchors.
 let tipBar = null;
@@ -157,9 +162,28 @@ function renderStats(dataset) {
   }
 }
 
+/** Every month the card can show, oldest first; the last is the current one. */
+function months() {
+  return [...(data.views.pastMonths || []), data.views.month];
+}
+
+function currentDataset() {
+  if (view !== 'month') return data.views[view];
+  // A month that has aged out of the log falls back to the current one.
+  return months().find((m) => m.key === monthKey) || data.views.month;
+}
+
+function renderNav(dataset) {
+  const list = months();
+  const i = list.indexOf(dataset);
+  el.nav.hidden = view !== 'month' || list.length < 2;
+  el.nav.querySelector('[data-step="-1"]').disabled = i <= 0;
+  el.nav.querySelector('[data-step="1"]').disabled = i >= list.length - 1;
+}
+
 function render() {
   if (!data) return;
-  const dataset = data.views[view];
+  const dataset = currentDataset();
   if (!dataset) return;
 
   el.total.textContent = Number(dataset.total).toFixed(1);
@@ -176,6 +200,7 @@ function render() {
     button.classList.toggle('active', button.dataset.view === view);
   }
 
+  renderNav(dataset);
   renderChart(dataset);
   renderStats(dataset);
 }
@@ -211,6 +236,18 @@ el.views.addEventListener('click', (e) => {
   if (!button || !VIEWS.includes(button.dataset.view)) return;
   view = button.dataset.view;
   render(); // no fetch — every view is already here
+});
+
+el.nav.addEventListener('click', (e) => {
+  const button = e.target.closest('button[data-step]');
+  if (!button || button.disabled) return;
+  const list = months();
+  const target = list[list.indexOf(currentDataset()) + Number(button.dataset.step)];
+  if (!target) return;
+  // Stepping forward onto the newest month goes back to following the present, so the
+  // card rolls over to a new month on its own instead of pinning this one.
+  monthKey = target === data.views.month ? null : target.key;
+  render(); // no fetch — every past month arrived with the rest
 });
 
 syncTheme();

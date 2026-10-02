@@ -334,10 +334,24 @@ test('a week that has not started yet is not a quiet week', () => {
   // Thu 10 Sep 2026. September starts on a Tuesday: W1 1–6, W2 7–13, then W3–W5 ahead.
   const now = new Date(2026, 8, 10, 12, 0, 0).getTime();
   const quiet = (samples) => buildViews(samples, now).month.stats.find((s) => s.label === 'Quiet weeks').value;
-  const w2 = activeRun(new Date(2026, 8, 8, 11, 0, 0).getTime(), 12);
+  // An idle sample on the 1st says the sampler was running through W1 — without it, W1
+  // predates the log and is not quiet either (see below).
+  const running = { t: new Date(2026, 8, 1, 9, 0, 0).getTime(), a: 0, m: 5, s: 0 };
+  const w2 = [running, ...activeRun(new Date(2026, 8, 8, 11, 0, 0).getTime(), 12)];
   assert.strictEqual(buildViews(w2, now).month.labels.length, 5);
   assert.strictEqual(quiet(w2), 1, 'W1 was quiet; W3, W4 and W5 have not happened');
   assert.strictEqual(quiet([...w2, ...activeRun(new Date(2026, 8, 2, 11, 0, 0).getTime(), 12)]), 0);
+});
+
+test('a period that ended before the log began is not a day off or a quiet week', () => {
+  // The timecard was installed on Thu 10 Sep 2026. Nobody knows what Mon–Wed held.
+  const now = new Date(2026, 8, 11, 12, 0, 0).getTime(); // Fri
+  const samples = activeRun(new Date(2026, 8, 10, 11, 0, 0).getTime(), 12);
+  const { week, month } = buildViews(samples, now);
+  assert.strictEqual(week.stats.find((s) => s.label === 'Days off').value, 1,
+    'Friday counts; Mon–Wed predate the log, Thursday has hours, Sat–Sun are ahead');
+  assert.strictEqual(month.stats.find((s) => s.label === 'Quiet weeks').value, 0,
+    'W1 (1–6 Sep) ended before the first sample');
 });
 
 test('a block that has not started yet is not an idle block', () => {
@@ -358,6 +372,55 @@ test('the stat LABELS change with the view, not just the values', () => {
   // And the three sets really are distinct, so a swap would be visible.
   const all = new Set([...STAT_LABELS.day, ...STAT_LABELS.week, ...STAT_LABELS.month]);
   assert.strictEqual(all.size, 9);
+});
+
+// ------------------------------------------------------------------ past months
+
+test('every earlier month with samples is offered, oldest first', () => {
+  const now = new Date(2026, 9, 2, 12, 0, 0).getTime(); // 2 Oct 2026
+  const samples = [
+    ...activeRun(new Date(2026, 5, 10, 11, 0, 0).getTime(), 12), // June: 1h
+    { t: new Date(2026, 6, 20, 11, 0, 0).getTime(), a: 0, m: 5, s: 0 }, // July: idle only
+    // August: nothing — the daemon never ran
+    ...activeRun(new Date(2026, 8, 15, 12, 0, 0).getTime(), 36), // September: 3h
+    ...activeRun(new Date(2026, 9, 1, 11, 0, 0).getTime(), 12), // October: the current month
+  ];
+  const { month, pastMonths } = buildViews(samples, now);
+  assert.deepStrictEqual(pastMonths.map((m) => m.range), ['June 2026', 'July 2026', 'September 2026'],
+    'an idle month is still history; a month the sampler never ran in is not');
+  assert.deepStrictEqual(pastMonths.map((m) => m.key), ['2026-06', '2026-07', '2026-09']);
+  assert.deepStrictEqual(pastMonths.map((m) => m.total), [1, 0, 3]);
+  assert.strictEqual(month.range, 'October 2026', 'the current month stays where it was');
+  assert.strictEqual(month.key, '2026-10');
+  assert.strictEqual(month.total, 1, 'and keeps only its own hours');
+});
+
+test('a sample is filed under the month its minutes started in', () => {
+  // Stamped 00:03 on 1 Oct, covering 23:58–00:03: it belongs to September.
+  const now = new Date(2026, 9, 2, 12, 0, 0).getTime();
+  const samples = [{ t: new Date(2026, 9, 1, 0, 3, 0).getTime(), a: 1, m: 5, s: 1 }];
+  const { month, pastMonths } = buildViews(samples, now);
+  assert.deepStrictEqual(pastMonths.map((m) => m.key), ['2026-09']);
+  assert.strictEqual(month.total, 0);
+});
+
+test('a past month is judged as a whole month, not as of the day it was picked by', () => {
+  // September 2026 viewed from October, with hours in W2 only and the log running from
+  // the 1st: every one of its five weeks has begun, so four are quiet.
+  const now = new Date(2026, 9, 2, 12, 0, 0).getTime();
+  const samples = [
+    { t: new Date(2026, 8, 1, 9, 0, 0).getTime(), a: 0, m: 5, s: 0 },
+    ...activeRun(new Date(2026, 8, 8, 11, 0, 0).getTime(), 12),
+  ];
+  const [sep] = buildViews(samples, now).pastMonths;
+  assert.deepStrictEqual(sep.labels, ['W1', 'W2', 'W3', 'W4', 'W5']);
+  assert.strictEqual(sep.stats.find((s) => s.label === 'Quiet weeks').value, 4);
+  assert.deepStrictEqual(sep.stats.map((s) => s.label), STAT_LABELS.month);
+});
+
+test('example data has no history to step back through', () => {
+  assert.deepStrictEqual(seedViews(new Date(2026, 9, 2, 12, 0, 0).getTime()).pastMonths, []);
+  assert.deepStrictEqual(buildViews([], Date.now()).pastMonths, []);
 });
 
 // ------------------------------------------------------------------ bar scaling

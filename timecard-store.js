@@ -249,6 +249,24 @@ function hoursIn(samples, from, to) {
   return minutes / 60;
 }
 
+/** When the log begins: the start of the earliest sample's span. */
+function logStartOf(samples) {
+  let start = Infinity;
+  for (const s of samples) start = Math.min(start, s.t - (Number(s.m) || 0) * 60000);
+  // An empty log has no start to measure from, so every begun period counts. The card
+  // never sees this case — the route shows the seed instead — but the stat row's
+  // arithmetic stays defined for it.
+  return Number.isFinite(start) ? start : -Infinity;
+}
+
+/**
+ * Whether the log can speak for [from, to): the period has begun, and it did not end
+ * before the first sample. A week from before the timecard existed is not a quiet week —
+ * "no evidence" is not "not working" either — and the first month of history always
+ * starts partway through.
+ */
+const observed = (from, to, now, logStart) => from <= now && to > logStart;
+
 /** A bucket can never hold more hours than it is long. */
 const clampHours = (h, span) => Math.min(h, span);
 
@@ -288,7 +306,7 @@ function buildView(name, range, labels, rawValues, started = rawValues.map(() =>
   };
 }
 
-function buildDay(samples, now) {
+function buildDay(samples, now, logStart) {
   const start = startOfDay(now);
   const labels = [];
   const values = [];
@@ -298,12 +316,12 @@ function buildDay(samples, now) {
     const to = new Date(start); to.setHours(h + DAY_BLOCK_HOURS);
     labels.push(hourLabel(h));
     values.push(clampHours(hoursIn(samples, from.getTime(), to.getTime()), DAY_BLOCK_HOURS));
-    started.push(from.getTime() <= now);
+    started.push(observed(from.getTime(), to.getTime(), now, logStart));
   }
   return buildView('day', dayRange(start), labels, values, started);
 }
 
-function buildWeek(samples, now) {
+function buildWeek(samples, now, logStart) {
   const start = startOfWeek(now);
   const labels = [];
   const values = [];
@@ -313,14 +331,22 @@ function buildWeek(samples, now) {
     const to = new Date(start); to.setDate(to.getDate() + i + 1);
     labels.push(WEEK_LABELS[i]);
     values.push(clampHours(hoursIn(samples, from.getTime(), to.getTime()), 24));
-    started.push(from.getTime() <= now);
+    started.push(observed(from.getTime(), to.getTime(), now, logStart));
   }
   const end = new Date(start); end.setDate(end.getDate() + 6);
   return buildView('week', weekRange(start, end), labels, values, started);
 }
 
-function buildMonth(samples, now) {
-  const first = startOfMonth(now);
+function monthKey(d) {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+}
+
+/**
+ * The month starting at `first`, judged as of `now` — which is a different instant from
+ * the month's own whenever it is a past month, and must be: every week of last month has
+ * begun, whatever date inside it was used to pick it.
+ */
+function buildMonth(samples, now, logStart, first = startOfMonth(now)) {
   const next = new Date(first); next.setMonth(next.getMonth() + 1);
   const labels = [];
   const values = [];
@@ -335,18 +361,45 @@ function buildMonth(samples, now) {
     const to = Math.min(weekEnd.getTime(), next.getTime());
     labels.push(`W${++n}`);
     values.push(clampHours(hoursIn(samples, from, to), 24 * 7));
-    started.push(from <= now);
+    started.push(observed(from, to, now, logStart));
     cursor = weekEnd;
   }
-  return buildView('month', monthRange(first), labels, values, started);
+  return { ...buildView('month', monthRange(first), labels, values, started), key: monthKey(first) };
 }
 
-/** All three datasets at once, so the card can switch views with no round trip. */
+/**
+ * Every month before this one that has samples in it, oldest first. A month the sampler
+ * never ran in is skipped rather than offered as a row of zeros — there is nothing in it
+ * to look at. Samples are grouped by the month their span started in, the same
+ * attribution hoursIn uses, so each month is built from its own rows and the work stays
+ * one pass over the log however much history there is.
+ */
+function buildPastMonths(samples, now, logStart) {
+  const current = startOfMonth(now).getTime();
+  const byMonth = new Map();
+  for (const s of samples) {
+    const at = s.t - (Number(s.m) || 0) * 60000;
+    if (!(at < current)) continue;
+    const key = startOfMonth(at).getTime();
+    if (!byMonth.has(key)) byMonth.set(key, []);
+    byMonth.get(key).push(s);
+  }
+  return [...byMonth.keys()]
+    .sort((a, b) => a - b)
+    .map((key) => buildMonth(byMonth.get(key), now, logStart, new Date(key)));
+}
+
+/**
+ * All three datasets at once, plus every earlier month with data, so the card can switch
+ * views and step back through months with no round trip.
+ */
 function buildViews(samples, now = Date.now()) {
+  const logStart = logStartOf(samples);
   return {
-    day: buildDay(samples, now),
-    week: buildWeek(samples, now),
-    month: buildMonth(samples, now),
+    day: buildDay(samples, now, logStart),
+    week: buildWeek(samples, now, logStart),
+    month: buildMonth(samples, now, logStart),
+    pastMonths: buildPastMonths(samples, now, logStart),
   };
 }
 
@@ -368,7 +421,12 @@ function seedViews(now = Date.now()) {
   return {
     day: buildView('day', dayRange(startOfDay(now)), dayLabels, SEED_VALUES.day),
     week: buildView('week', weekRange(weekStart, weekEnd), WEEK_LABELS.slice(), SEED_VALUES.week),
-    month: buildView('month', monthRange(startOfMonth(now)), ['W1', 'W2', 'W3', 'W4', 'W5'], SEED_VALUES.month),
+    month: {
+      ...buildView('month', monthRange(startOfMonth(now)), ['W1', 'W2', 'W3', 'W4', 'W5'], SEED_VALUES.month),
+      key: monthKey(startOfMonth(now)),
+    },
+    // Example data is one period of each; it has no history to step back through.
+    pastMonths: [],
   };
 }
 

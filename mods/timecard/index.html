@@ -38,6 +38,22 @@
     .tc-unit { font-size: 15px; color: var(--ds-text-secondary, #8b949e); }
     .tc-range { font-size: 13px; color: var(--ds-text-secondary, #8b949e); margin-top: 6px; }
 
+    /* Month stepping sits AFTER the range text, so the text stays left-aligned under the
+       headline whether or not the arrows are showing. `font: inherit` keeps the buttons
+       on the label's own line height — a taller button would nudge the chart down every
+       time the view switched to Month. */
+    .tc-nav { display: inline-flex; gap: 2px; margin-left: 8px; }
+    .tc-nav button {
+      font: inherit;
+      background: none;
+      border: none;
+      padding: 0 4px;
+      cursor: pointer;
+      color: var(--ds-text-secondary, #8b949e);
+    }
+    .tc-nav button:hover:not(:disabled) { color: var(--ds-text-primary, #c9d1d9); }
+    .tc-nav button:disabled { opacity: 0.35; cursor: default; }
+
     .tc-views { display: flex; gap: 14px; flex: 0 0 auto; }
     .tc-views button {
       font-family: inherit;
@@ -124,7 +140,7 @@
             <span class="tc-total" id="tc-total">0.0</span>
             <span class="tc-unit">hours</span>
           </div>
-          <div class="tc-range" id="tc-range"></div>
+          <div class="tc-range"><span id="tc-range"></span><span class="tc-nav" id="tc-nav" hidden><button type="button" data-step="-1" aria-label="Previous month">‹</button><button type="button" data-step="1" aria-label="Next month">›</button></span></div>
         </div>
         <div class="tc-views" id="tc-views">
           <button type="button" data-view="day">Day</button>

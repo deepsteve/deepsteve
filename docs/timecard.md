@@ -82,8 +82,9 @@ until real time caught up.
 
 ## Aggregation
 
-Happens on read. `GET /api/timecard` returns all three datasets in one response, so the
-card switches views with no round trip.
+Happens on read. `GET /api/timecard` returns all three datasets in one response, plus
+`pastMonths` — every earlier month with at least one sample, oldest first — so the card
+switches views and steps back through months with no round trip.
 
 | View | Buckets | Range | Stats |
 |---|---|---|---|
@@ -95,9 +96,15 @@ Details that are deliberate rather than incidental:
 
 - **Averages divide by periods with hours logged**, not by period count. A week with two
   days off is not a week of five-sevenths days.
-- **Days off, quiet weeks and idle blocks count only periods that have begun.** The
-  current period counts once it has started with nothing logged, so every begun period is
-  either logged or off, and one still ahead is neither.
+- **Days off, quiet weeks and idle blocks count only periods the log covers** — begun,
+  and not over before the first sample. The current period counts once it has started
+  with nothing logged, so every begun period is either logged or off, and one still ahead
+  is neither; a week from before the timecard existed is not quiet either, which matters
+  because the first month of history always starts partway through.
+- **A month the sampler never ran in is not offered.** An idle-only month is (that is
+  history); a month with no rows at all has nothing to show. Months are keyed `YYYY-MM`,
+  and the card holds its selection by key, so the 60s refresh crossing the 1st cannot
+  move it.
 - **A sample is credited to the bucket its minutes started in**, not the one its
   timestamp lands in — otherwise the last few minutes of every bucket spill into the
   next.
@@ -128,6 +135,11 @@ each side), because a zero day is a 2px hairline and a quiet one is a sliver —
 something a pointer can land on. The native `title` tooltip is deliberately not used: it
 appears below and to the right of the cursor after a delay, which is neither over the bar
 nor immediate.
+
+In the Month view, `‹ ›` after the range label step through `pastMonths` and back to the
+current month; they are hidden in the other views and while there is no history. Stepping
+onto the newest month returns to following the present, so the card rolls over on the 1st
+on its own.
 
 While the store is empty the card shows seeded example data and says so in the range
 line; the note disappears the moment a real sample lands. A paused sampler says
