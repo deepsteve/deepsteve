@@ -174,6 +174,11 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
 .tab.active { background: var(--ds-bg-primary); color: var(--ds-text-bright); border-bottom-color: var(--ds-bg-primary); }
 .tab .close { opacity: 0.5; cursor: pointer; font-size: 11px; }
 .tab .close:hover { opacity: 1; color: var(--ds-accent-red); }
+/* A locked display tab (#715): the ✕ slot holds a padlock. It still takes the click — the
+   refusal says how to unlock — but it reads as a state, not as a red close affordance. */
+.tab.locked .close { display: inline-flex; align-items: center; cursor: default; }
+.tab.locked .close svg { width: 11px; height: 11px; }
+.tab.locked .close:hover { color: inherit; }
 /* History (#672). Present in every tab's skeleton, shown only on a tab that has a
    transcript (.has-history, set from the agentType the server sends) and only
    while that tab is active or hovered — a tab is 250px at most, and a glyph on

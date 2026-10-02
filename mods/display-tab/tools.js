@@ -187,10 +187,13 @@ function answerWaiter(id, owner, prompt) {
 const text = (s) => ({ content: [{ type: 'text', text: s }] });
 const refuse = (s) => ({ content: [{ type: 'text', text: s }], isError: true });
 
+// Returns whether the tab closed. A locked tab is refused inside deleteDisplayTab (#715), and
+// only the exact string counts — a fake deleteDisplayTab in a test returns a boolean.
 function closeTab(id) {
-  ctx.deleteDisplayTab(id);
+  if (ctx.deleteDisplayTab(id) === 'locked') return false;
   forgetDecision(id);
   sendToClients({ type: 'close-display-tab', id });
+  return true;
 }
 
 function showingDialog(entry) {
@@ -210,7 +213,7 @@ function injectDecisionBar(html, id) {
 
 function init(context) {
   ctx = context;
-  const { shells, reloadClients, pendingOpens, log, displayTabs, setDisplayTab, sessionPaths } = context;
+  const { shells, reloadClients, pendingOpens, log, displayTabs, setDisplayTab, sessionPaths, isDisplayTabLocked, setDisplayTabLocked } = context;
   // Lazy: nothing is read from disk until a decision tab is asked about.
   store = decision.createDecisionStore({ isLive: (id) => displayTabs.has(id) });
   if (typeof context.registerDisplayTabHooks === 'function') {
@@ -223,7 +226,7 @@ function init(context) {
 
   return {
     create_display_tab: {
-      description: 'Create a new browser tab displaying arbitrary HTML content (charts, dashboards, reports). The HTML is rendered in a sandboxed iframe. Supply the page EITHER inline via html OR — cheaper, preferred when the page already exists on disk — via file_path, which the server reads itself so you do not re-emit the document as output tokens. The page is served from the deepsteve origin, so use window.location.origin or relative /api/... URLs to call back into deepsteve; never hard-code a port. Pass your DEEPSTEVE_SESSION_ID so the tab opens in the same browser window and is scoped to your Project view (it appears only in the project you spawned it from, like a regular session tab). Pass `decision` to add a row of buttons, then call await_decision with the returned id to receive the click.',
+      description: 'Create a new browser tab displaying arbitrary HTML content (charts, dashboards, reports). The HTML is rendered in a sandboxed iframe. Supply the page EITHER inline via html OR — cheaper, preferred when the page already exists on disk — via file_path, which the server reads itself so you do not re-emit the document as output tokens. The page is served from the deepsteve origin, so use window.location.origin or relative /api/... URLs to call back into deepsteve; never hard-code a port. Pass your DEEPSTEVE_SESSION_ID so the tab opens in the same browser window and is scoped to your Project view (it appears only in the project you spawned it from, like a regular session tab). Pass `decision` to add a row of buttons, then call await_decision with the returned id to receive the click. Pass `locked: true` for a page the user wants kept: a locked tab cannot be closed until someone unlocks it.',
       schema: {
         session_id: z.string().describe('Your DEEPSTEVE_SESSION_ID env var — targets the correct browser window and scopes the tab to your project'),
         html: z.string().optional().describe('Full HTML content to display (can include inline CSS/JS, e.g. Chart.js visualizations). Mutually exclusive with file_path'),
@@ -231,8 +234,9 @@ function init(context) {
         replacements: z.record(z.string()).optional().describe('Literal find→replace pairs applied to the HTML server-side, e.g. {"%%CHANNEL%%": "slot-ab3f9c12"} — lets a file on disk stay a reusable template'),
         name: z.string().optional().describe('Tab name (defaults to "Display")'),
         decision: decisionSchema.describe('Make this a decision tab: a row of buttons along the bottom. Then call await_decision with the returned id — it returns the choice ("[Decision tab …] The user chose: …").'),
+        locked: z.boolean().optional().describe('Lock the tab so it cannot be closed — by the user\'s ✕ or by close_display_tab — until it is unlocked (update_display_tab with locked:false, or the tab\'s right-click menu). Default false'),
       },
-      handler: async ({ session_id, html, file_path, replacements, name, decision: rawDecision }) => {
+      handler: async ({ session_id, html, file_path, replacements, name, decision: rawDecision, locked }) => {
         const resolved = resolveHtml({ html, file_path, replacements });
         if (resolved.error) {
           return { content: [{ type: 'text', text: resolved.error }], isError: true };
@@ -259,11 +263,13 @@ function init(context) {
         const tabName = name || 'Display';
         const id = randomUUID().slice(0, 8);
 
-        setDisplayTab(id, html);
+        setDisplayTab(id, html, { name: tabName, cwd });
+        // Before the open goes out: the lock's state broadcast must reach the browser first.
+        if (locked) setDisplayTabLocked(id, true);
         if (config) {
           store.set(id, { ownerSessionId: session_id, name: tabName, config, status: 'open', createdAt: Date.now(), decidedAt: null, choice: null });
         }
-        log(`[MCP] create_display_tab: id=${id}, name=${tabName}, caller=${session_id}, cwd=${cwd || '(none)'}, source=${file_path ? `file:${file_path}` : 'inline'}${replacements ? `, replacements=${resolved.applied} applied/${resolved.unmatched} unmatched` : ''}${config ? `, decision=${config.buttons.length} buttons` : ''}`);
+        log(`[MCP] create_display_tab: id=${id}, name=${tabName}, caller=${session_id}, cwd=${cwd || '(none)'}, source=${file_path ? `file:${file_path}` : 'inline'}${replacements ? `, replacements=${resolved.applied} applied/${resolved.unmatched} unmatched` : ''}${config ? `, decision=${config.buttons.length} buttons` : ''}${locked ? ', locked' : ''}`);
 
         // The list goes out BEFORE the open, so a browser in Decision Tab mode already knows
         // the tab it is about to create is a decision — otherwise it would read as an
@@ -304,6 +310,7 @@ function init(context) {
         }
 
         const result = { id, name: tabName };
+        if (locked) result.locked = true;
         if (config) {
           result.decision = true;
           result.message = `Now call await_decision with tab_id "${id}": it returns the user's choice.`;
@@ -313,7 +320,7 @@ function init(context) {
     },
 
     update_display_tab: {
-      description: 'Update the HTML content of an existing display tab. The iframe will reload with the new content. Supply the page EITHER inline via html OR via file_path (read server-side, so you do not re-emit the document). Pass `decision` to replace a decision tab\'s buttons and re-arm it for a new answer.',
+      description: 'Update the HTML content of an existing display tab. The iframe will reload with the new content. Supply the page EITHER inline via html OR via file_path (read server-side, so you do not re-emit the document). Pass `decision` to replace a decision tab\'s buttons and re-arm it for a new answer. Pass `locked` to lock or unlock the tab — on its own, with no html or file_path, it changes only the lock.',
       schema: {
         tab_id: z.string().describe('The display tab ID returned by create_display_tab'),
         html: z.string().optional().describe('New HTML content to display. Mutually exclusive with file_path'),
@@ -321,10 +328,17 @@ function init(context) {
         replacements: z.record(z.string()).optional().describe('Literal find→replace pairs applied to the HTML server-side, e.g. {"%%CHANNEL%%": "slot-ab3f9c12"}'),
         decision: decisionSchema.describe('Replace the tab\'s buttons and re-arm it for a new answer — how you ask a follow-up in the same decision tab. Omit to keep the current buttons.'),
         session_id: z.string().optional().describe('Your DEEPSTEVE_SESSION_ID. Required only when adding a decision to a tab that was not created as a decision tab'),
+        locked: z.boolean().optional().describe('true locks the tab so nothing can close it; false unlocks it. Unlock a tab only when the user asked for it to be closed — whoever locked it did so to keep it'),
       },
-      handler: async ({ tab_id, html, file_path, replacements, decision: rawDecision, session_id }) => {
+      handler: async ({ tab_id, html, file_path, replacements, decision: rawDecision, session_id, locked }) => {
         if (!displayTabs.has(tab_id)) {
           return { content: [{ type: 'text', text: `Display tab "${tab_id}" not found.` }] };
+        }
+        // Lock-only: nothing to resolve and nothing to reload.
+        if (locked !== undefined && html === undefined && file_path === undefined && !rawDecision) {
+          setDisplayTabLocked(tab_id, locked);
+          log(`[MCP] update_display_tab: id=${tab_id}, ${locked ? 'locked' : 'unlocked'}`);
+          return { content: [{ type: 'text', text: JSON.stringify({ id: tab_id, locked }) }] };
         }
         const resolved = resolveHtml({ html, file_path, replacements });
         if (resolved.error) {
@@ -357,11 +371,12 @@ function init(context) {
         }
 
         setDisplayTab(tab_id, resolved.html);
+        if (locked !== undefined) setDisplayTabLocked(tab_id, locked);
         if (rearmed) {
           store.set(tab_id, rearmed);
           broadcastDecisionTabs();
         }
-        log(`[MCP] update_display_tab: id=${tab_id}, source=${file_path ? `file:${file_path}` : 'inline'}${replacements ? `, replacements=${resolved.applied} applied/${resolved.unmatched} unmatched` : ''}${rearmed ? `, decision re-armed (${rearmed.config.buttons.length} buttons)` : ''}`);
+        log(`[MCP] update_display_tab: id=${tab_id}, source=${file_path ? `file:${file_path}` : 'inline'}${replacements ? `, replacements=${resolved.applied} applied/${resolved.unmatched} unmatched` : ''}${rearmed ? `, decision re-armed (${rearmed.config.buttons.length} buttons)` : ''}${locked !== undefined ? (locked ? ', locked' : ', unlocked') : ''}`);
 
         // Broadcast to all clients so the iframe reloads
         for (const client of reloadClients) {
@@ -371,6 +386,7 @@ function init(context) {
         }
 
         const result = { id: tab_id, updated: true };
+        if (locked !== undefined) result.locked = locked;
         if (rearmed) {
           result.decision = true;
           result.message = `Re-armed. Now call await_decision with tab_id "${tab_id}": it returns the user's choice.`;
@@ -426,13 +442,16 @@ function init(context) {
     },
 
     close_display_tab: {
-      description: 'Close a display tab.',
+      description: 'Close a display tab. The user can bring it back from the tab bar\'s right-click menu ("Reopen closed tab"). A locked tab refuses to close.',
       schema: {
         tab_id: z.string().describe('The display tab ID to close'),
       },
       handler: async ({ tab_id }) => {
         if (!displayTabs.has(tab_id)) {
           return { content: [{ type: 'text', text: `Display tab "${tab_id}" not found.` }] };
+        }
+        if (isDisplayTabLocked(tab_id)) {
+          return refuse(`Display tab "${tab_id}" is locked, so it was not closed. It was locked to keep it from being closed by accident. Unlock it with update_display_tab({tab_id: "${tab_id}", locked: false}) only if the user asked for it to be closed.`);
         }
 
         closeTab(tab_id);
@@ -533,7 +552,7 @@ function registerRoutes(app, context) {
     const owner = r.ownerSessionId;
     const entry = ctx.shells.get(owner);
     if (!entry) {
-      return res.status(409).json({ error: 'session-gone', hint: 'The session that asked has ended. Close this tab with its ✕.' });
+      return res.status(409).json({ error: 'session-gone', hint: 'The session that asked has ended. You can close this tab.' });
     }
     // Only the typed path cares: a dialog on screen classifies as 'waiting', so the FIFO would
     // take it for idle and type the choice into the modal — answering a question the person
@@ -543,13 +562,15 @@ function registerRoutes(app, context) {
       return res.status(409).json({ error: 'session-blocked', hint: 'The agent is showing a dialog. Answer it in the session tab first, then try again.' });
     }
 
-    const closed = r.config.closeOnDecision;
+    // A locked tab outlives its own close_on_decision (#715): the lock is somebody asking to keep it.
+    const locked = ctx.isDisplayTabLocked(id);
+    const closed = r.config.closeOnDecision && !locked;
     r.status = 'decided';
     r.decidedAt = Date.now();
     r.choice = { index: body.index, label: button.label, note: note || null };
     store.set(id, r);
 
-    const prompt = decision.decidePrompt({ tabId: id, name: r.name, button, note, closed });
+    const prompt = decision.decidePrompt({ tabId: id, name: r.name, button, note, closed, locked });
     // The label and the note's length, never its content.
     ctx.log(`[decision-tab] ${id} decided "${button.label}"${note ? ` note=${note.length}ch` : ''} -> ${owner}${closed ? ' (closing)' : ''}${waiting ? '' : ' — no await_decision holding; typing it unless one claims it'}`);
     if (waiting) {

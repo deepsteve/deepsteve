@@ -129,6 +129,11 @@ body {
   color: #c0392b !important;
 }
 
+/* A locked tab's padlock is a state, not a close button (#715) */
+.tab.locked .close:hover {
+  color: inherit !important;
+}
+
 /* Tab badge — navy instead of blue glow */
 .tab .badge {
   background: #000080 !important;

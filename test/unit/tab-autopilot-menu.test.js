@@ -1,5 +1,5 @@
 // Headless unit tests for the tab right-click menu's session-lifecycle items:
-// Autopilot (#643) and Merge (#688).
+// Autopilot (#643), Merge (#688), and a display tab's Lock plus "Reopen closed tab" (#715).
 //
 // Autopilot's whole point is that it is a SERVER-side value: the menu is one of the
 // two switches that writes it, and it must show the session's real state (which the
@@ -68,10 +68,13 @@ function fakeElement() {
 }
 
 const bodyChildren = [];
+// Every document listener tab-manager.js registers, per import — the bar's contextmenu (#715)
+// is one of them, and the latest import's is the one a test fires.
+const docListeners = {};
 
 globalThis.window = { innerWidth: 1200, innerHeight: 800 };
 globalThis.document = {
-  addEventListener: () => {},
+  addEventListener: (type, fn) => { (docListeners[type] ||= []).push(fn); },
   removeEventListener: () => {},
   getElementById: (id) => (id === 'tabs-list' ? { appendChild: () => {} } : null),
   querySelector: () => null,
@@ -88,7 +91,7 @@ async function setup(callbacks) {
   url.search = `?t=${++importCount}`;
   const { TabManager } = await import(url.href);
   const tab = TabManager.createTab('s1', 'Session', callbacks);
-  return { tab };
+  return { tab, TabManager };
 }
 
 /** Right-click a tab and hand back the menu items showContextMenu() built. */
@@ -167,6 +170,8 @@ test('the item sits in its own group, between Send to Window and Fork tab', asyn
     'Fork tab',
     'History…',
     'Close tab',
+    '---',
+    'Reopen closed tab',
   ]);
 });
 
@@ -239,5 +244,98 @@ test('on a worktree tab both items share one group, Merge below Autopilot', asyn
     'Fork tab',
     'History…',
     'Close tab',
+    '---',
+    'Reopen closed tab',
   ]);
+});
+
+// ── Lock and "Reopen closed tab" (#715) ──────────────────────────────────────
+
+const findItem = (items, label) => items.find((i) => labelOf(i) === label) || null;
+
+test('no Lock item on a tab kind that cannot be locked', async () => {
+  const { tab } = await setup({});
+  const items = openMenuOn(tab);
+  assert.equal(findItem(items, 'Lock tab'), null);
+  assert.equal(findItem(items, 'Unlock tab'), null);
+  assert.ok(!findItem(items, 'Close tab').classList.contains('disabled'));
+});
+
+test('an unlocked display tab offers Lock, and clicking asks for locked', async () => {
+  const calls = [];
+  const { tab } = await setup({ getLocked: () => false, onToggleLock: (id, on) => calls.push([id, on]) });
+  findItem(openMenuOn(tab), 'Lock tab').onclick();
+  assert.deepEqual(calls, [['s1', true]]);
+});
+
+test('a locked display tab offers Unlock, and its Close is disabled and does nothing', async () => {
+  const toggles = [];
+  const closes = [];
+  const { tab } = await setup({
+    getLocked: () => true,
+    onToggleLock: (id, on) => toggles.push([id, on]),
+    onClose: (id) => closes.push(id),
+  });
+  const items = openMenuOn(tab);
+  const close = findItem(items, 'Close tab');
+  assert.ok(close.classList.contains('disabled'));
+  close.onclick();
+  assert.deepEqual(closes, [], '.disabled is only styling — the click itself must be refused');
+  findItem(items, 'Unlock tab').onclick();
+  assert.deepEqual(toggles, [['s1', false]]);
+});
+
+test('Reopen closed tab is disabled until the app says there is one, then reopens it', async () => {
+  const { tab, TabManager } = await setup({});
+  const unwired = findItem(openMenuOn(tab), 'Reopen closed tab');
+  assert.ok(unwired.classList.contains('disabled'));
+
+  let available = false;
+  let reopened = 0;
+  TabManager.setReopenClosedTab({ isAvailable: () => available, reopen: () => { reopened++; } });
+  const empty = findItem(openMenuOn(tab), 'Reopen closed tab');
+  assert.ok(empty.classList.contains('disabled'));
+  empty.onclick();
+  assert.equal(reopened, 0);
+
+  available = true;
+  const ready = findItem(openMenuOn(tab), 'Reopen closed tab');
+  assert.ok(!ready.classList.contains('disabled'));
+  ready.onclick();
+  assert.equal(reopened, 1);
+});
+
+function rightClickBar({ inTab = false, inButton = false, inBar = true, defaultPrevented = false } = {}) {
+  let prevented = false;
+  const target = {
+    closest: (sel) => {
+      if (sel === '.tab') return inTab ? {} : null;
+      if (sel === '#tabs') return inBar ? {} : null;
+      if (sel === 'button, input, .dropdown') return inButton ? {} : null;
+      return null;
+    },
+  };
+  const before = bodyChildren.length;
+  docListeners.contextmenu.at(-1)({ target, defaultPrevented, clientX: 5, clientY: 5, preventDefault: () => { prevented = true; } });
+  return { prevented, menu: bodyChildren.length > before ? bodyChildren.at(-1) : null };
+}
+
+test("right-clicking the bar's empty space opens a menu with Reopen closed tab", async () => {
+  const { TabManager } = await setup({});
+  let reopened = 0;
+  TabManager.setReopenClosedTab({ isAvailable: () => true, reopen: () => { reopened++; } });
+  const { prevented, menu } = rightClickBar();
+  assert.ok(prevented, 'the browser menu is replaced');
+  assert.deepEqual(menu.children.map(labelOf), ['Reopen closed tab']);
+  menu.children[0].onclick();
+  assert.equal(reopened, 1);
+});
+
+test('the bar menu leaves tabs, buttons, handled right-clicks and the rest of the page alone', async () => {
+  await setup({});
+  for (const opts of [{ inTab: true }, { inButton: true }, { defaultPrevented: true }, { inBar: false }]) {
+    const { prevented, menu } = rightClickBar(opts);
+    assert.equal(menu, null, JSON.stringify(opts));
+    assert.equal(prevented, false, JSON.stringify(opts));
+  }
 });

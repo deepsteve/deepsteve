@@ -27,6 +27,8 @@ function makeTools() {
     setDisplayTab: (id, html) => displayTabs.set(id, html),
     deleteDisplayTab: (id) => displayTabs.delete(id),
     sessionPaths: (e) => ({ cwd: e.cwd }),
+    isDisplayTabLocked: () => false,
+    setDisplayTabLocked: () => null,
   };
   return { tools: init(ctx), displayTabs, pendingOpens };
 }

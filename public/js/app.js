@@ -2818,6 +2818,56 @@ function createModTab(modId, opts = {}) {
   notifyTabsChanged();
 }
 
+// Display tabs the server says are locked, and how many it can reopen (#715). Server-owned:
+// it arrives as one full-state `display-tab-state` message on connect and on every change, so a
+// tab created before or after that message reads the same answer.
+const displayTabLocks = new Set();
+let closedDisplayTabCount = 0;
+
+function applyDisplayTabState(state) {
+  if (!state) return;
+  displayTabLocks.clear();
+  for (const id of state.locked || []) displayTabLocks.add(id);
+  closedDisplayTabCount = state.closed || 0;
+  for (const [id, s] of sessions) {
+    if (s.type !== 'display-tab') continue;
+    s.locked = displayTabLocks.has(id);
+    TabManager.updateLocked(id, s.locked);
+  }
+}
+
+// The response carries the new state too, so the tab is right even if the control socket is down.
+function setDisplayTabLock(id, locked) {
+  fetchJSON(`/api/display-tab/${encodeURIComponent(id)}/lock`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ locked: !!locked }),
+  }).then(r => applyDisplayTabState(r.state))
+    .catch(() => showToast(`Couldn't ${locked ? 'lock' : 'unlock'} the tab`));
+}
+
+/**
+ * "Reopen closed tab" (#715): the server pops its stack and hands the tab back to the window that
+ * asked. The tab may still be open here — a ✕ in another window closes only that window's copy —
+ * so an existing tab is jumped to, never created twice.
+ */
+async function reopenClosedTab() {
+  let tab;
+  try {
+    tab = await fetchJSON('/api/display-tabs/reopen', { method: 'POST' });
+  } catch {
+    showToast("Couldn't reopen the tab");
+    return;
+  }
+  applyDisplayTabState(tab.state);
+  if (!tab.id) { showToast('No recently closed tabs'); return; }
+  // A reopened tab is never a decision tab (its record went with the close), and Decision Tab
+  // mode hides every tab that isn't one.
+  DecisionMode.exit();
+  if (sessions.has(tab.id)) userJumpTo(tab.id);
+  else createDisplayTab(tab.id, tab.name, { cwd: tab.cwd });
+}
+
 /**
  * Create a display tab (agent-generated HTML in a sandboxed iframe, no PTY).
  */
@@ -2851,7 +2901,7 @@ function createDisplayTab(id, name, opts = {}) {
   sessions.set(id, {
     term: null, fit: null, ws: null, container, cwd,
     name: tabName, waitingForInput: false, hasUnseenActivity: false, scrollControl: null,
-    type: 'display-tab', emittingAudio: false,
+    type: 'display-tab', emittingAudio: false, locked: displayTabLocks.has(id),
   });
 
   SessionStores.add(getWindowId(), { id, name: tabName, type: 'display-tab', cwd });
@@ -2874,9 +2924,12 @@ function createDisplayTab(id, name, opts = {}) {
     getAutopilot: () => null,
     getWorktree: () => null,
     getModMenuItems: () => [],
+    getLocked: () => !!sessions.get(id)?.locked,
+    onToggleLock: (sessionId, locked) => setDisplayTabLock(sessionId, locked),
   };
 
   TabManager.addTab(id, tabName, tabCallbacks);
+  TabManager.updateLocked(id, sessions.get(id).locked);
   updateEmptyState();
   if (!opts.restoreActive) {
     focusTab(id); // (#547/#559)
@@ -3504,8 +3557,9 @@ function confirmCloseSession(id) {
   // A project mod's page is durable: closing the tab loses nothing, and it re-opens
   // from the rail (or on the next visit, if it's pinned). No prompt (#618).
   if (session?.type === 'project-mod') return Promise.resolve(true);
-  // Display tabs hold non-recoverable agent-generated HTML
-  if (session?.type === 'display-tab') return showCloseDisplayTabDialog();
+  // A closed display tab comes back from the tab bar's "Reopen closed tab", and a locked one
+  // refuses in killSession() — so there is nothing to confirm (#715).
+  if (session?.type === 'display-tab') return Promise.resolve(true);
 
   // Check local session first (tab is connected in this window)
   const isIdle = session ? session.waitingForInput : null;
@@ -3607,28 +3661,6 @@ function showResumeIssueDialog(issue, status) {
     overlay.querySelector('#resume-fresh').onclick = () => cleanup('fresh');
     overlay.querySelector('#resume-go').onclick = () => cleanup('resume');
     overlay.onclick = (e) => { if (e.target === overlay) cleanup(null); };
-  });
-}
-
-function showCloseDisplayTabDialog() {
-  return new Promise(resolve => {
-    const overlay = document.createElement('div');
-    overlay.className = 'modal-overlay';
-    overlay.innerHTML = `
-      <div class="modal">
-        <h2>Close display tab?</h2>
-        <p style="font-size:13px;color:var(--ds-text-secondary);margin-bottom:16px;">This tab's contents will be lost and cannot be recovered.</p>
-        <div class="modal-buttons">
-          <button class="btn-secondary" id="close-display-cancel">Cancel</button>
-          <button class="btn-danger" id="close-display-ok">Close</button>
-        </div>
-      </div>`;
-    document.body.appendChild(overlay);
-
-    const cleanup = (result) => { overlay.remove(); resolve(result); };
-    overlay.querySelector('#close-display-cancel').onclick = () => cleanup(false);
-    overlay.querySelector('#close-display-ok').onclick = () => cleanup(true);
-    overlay.onclick = (e) => { if (e.target === overlay) cleanup(false); };
   });
 }
 
@@ -3835,9 +3867,21 @@ function showReloadOverlay() {
   (document.getElementById('terminals') || document.body).appendChild(overlay);
 }
 
-function killSession(id) {
+/**
+ * `serverClosed`: the server already closed this display tab (an agent's close_display_tab, or a
+ * decision tab closing itself), so there is no lock to honour and no DELETE to send. An echo
+ * DELETE from every window could otherwise land after a "Reopen closed tab" and close it again.
+ */
+function killSession(id, { serverClosed = false } = {}) {
   const session = sessions.get(id);
   if (!session) return;
+  // The one guard every UI close passes through — ✕, the menu, ⌘K, a mod's killSession even
+  // with `force` — because a locked tab removed here would leave the server keeping a page no
+  // window shows (#715).
+  if (session.type === 'display-tab' && session.locked && !serverClosed) {
+    showToast(`"${session.name}" is locked — right-click the tab to unlock it`);
+    return;
+  }
 
   // The History pane lives inside session.container, so removing the container
   // takes its DOM with it — but not its poll timer or its Map entry (#672).
@@ -3845,8 +3889,21 @@ function killSession(id) {
 
   if (session.type === 'mod-tab' || session.type === 'display-tab' || session.type === 'project-mod') {
     // Mod/display/project-mod tabs: no PTY/WS to clean up
-    if (session.type === 'display-tab') {
-      fetch(`/api/display-tab/${id}`, { method: 'DELETE' }).catch(() => {});
+    if (session.type === 'display-tab' && !serverClosed) {
+      // The name rides along so "Reopen closed tab" brings it back under the name shown here.
+      const { name, cwd } = session;
+      fetch(`/api/display-tab/${id}`, {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name }),
+      }).then(res => {
+        // Locked between our last state message and this close: the server kept it, so put it back.
+        if (res.status === 409 && !sessions.has(id)) {
+          displayTabLocks.add(id);
+          createDisplayTab(id, name, { cwd });
+          showToast(`"${name}" is locked — right-click the tab to unlock it`);
+        }
+      }).catch(() => {});
     }
     // A project mod is deliberately NOT deleted here: closing its tab is closing a
     // window onto something durable, not unregistering it. Deleting is an explicit
@@ -5189,6 +5246,12 @@ async function init() {
     switchToTab: userJumpTo,
   });
 
+  // "Reopen closed tab" in the tab bar's right-click menus (#715).
+  TabManager.setReopenClosedTab({
+    isAvailable: () => closedDisplayTabCount > 0,
+    reopen: reopenClosedTab,
+  });
+
   // Keep macOS pinch-zoom (ctrl-wheel) away from xterm so the browser can zoom
   // over the terminal (#583). Delegated on #terminals; ModManager's #content-row
   // wrap moves the same node, so the listener survives regardless of ordering.
@@ -5473,8 +5536,9 @@ async function init() {
         }
       }
       if (msg.type === 'close-display-tab') {
-        if (sessions.has(msg.id)) killSession(msg.id);
+        if (sessions.has(msg.id)) killSession(msg.id, { serverClosed: true });
       }
+      if (msg.type === 'display-tab-state') applyDisplayTabState(msg);
       if (msg.type === 'decision-tabs') DecisionMode.setDecisionTabs(msg.tabs);
       if (msg.type === 'version-status') {
         setUpdateAvailableBadge(!!msg.status?.updateAvailable);

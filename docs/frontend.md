@@ -89,6 +89,17 @@ An agent tab has no scrollback to scroll — Claude Code repaints inside its own
 
 Tests: `test/unit/session-history-client.test.js` (the folding, grouping and formatting helpers, and `groupByPrompt`'s prompt → answer exchanges), `test/unit/shortcuts-registry.test.js` (⌘H is claimed on a tab with no History and inside an iframe realm; Ctrl+H is not), plus `transcript-view` / `transcript-window` for the server halves.
 
+## Tab-bar right-click and locked tabs (#715)
+
+**One document `contextmenu` listener in `tab-manager.js` owns the bar.** If a separate `#tabs` handler opened a menu, a document listener further up would hide it as the same event bubbled. The listener works like this:
+- A right-click on a `.tab` returns, because the tab built its own menu.
+- An event a control already handled (`defaultPrevented`) is left alone.
+- Anything else in `#tabs` that isn't a `button`, `input` or `.dropdown` gets the bar menu. That is `#tabs-spacer` in horizontal layout and the empty `#tabs-list` in vertical layout.
+
+**"Reopen closed tab"** is the bar menu's item, and it also sits at the foot of every tab's menu, because a full strip has no empty space left. `TabManager.setReopenClosedTab()` wires it to `reopenClosedTab()` in `app.js`. The server side is in [mods.md](mods.md#closing-locking-and-reopening-715).
+
+**A locked display tab has no close confirm to fall back on, so the lock is the guard.** The ✕ slot draws a padlock (`.tab.locked`, `TabManager.updateLocked`) but keeps its click. `killSession()` refuses a locked tab with a toast that says how to unlock it. That one guard covers ✕, the menu, ⌘K, and a mod's `killSession` even with `force`.
+
 ## Keyboard Shortcuts (`public/js/shortcuts.js`)
 
 **Every global key binding is declared in the `shortcuts.js` registry, and the ⌘? overlay (`shortcuts-help.js`) renders `getAll()`. The list is never hand-maintained** — that's the whole point of #549, and before it there were four independent capture-phase listeners with `parseShortcut`/`matchesShortcut` copy-pasted verbatim into two of them.

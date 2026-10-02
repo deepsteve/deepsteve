@@ -3,7 +3,8 @@
 // fake ctx and a fake express app — no daemon — covering the config normalizer, the tools'
 // `decision` param, the injected bar, every branch of POST /api/display-tab/:id/decide, and
 // await_decision: a held call answered by the click, the claim window for a choice nobody was
-// waiting for, the transcript check behind a held call, and the typed fallback.
+// waiting for, the transcript check behind a held call, and the typed fallback. Also the tools'
+// side of locking (#715): `locked`, a refused close_display_tab, and a decision on a locked tab.
 //
 // HOME is repointed before the require: the decision store persists under stateDir().
 //
@@ -50,6 +51,7 @@ function world() {
   const deliveries = [];
   const client = fakeClient();
   const hooks = new Map();
+  const locked = new Set();
   const ctx = {
     shells,
     reloadClients: new Set([client]),
@@ -57,10 +59,19 @@ function world() {
     log: () => {},
     displayTabs,
     setDisplayTab: (id, html) => displayTabs.set(id, html),
-    // Mirrors server.js: the delete hook fires for every deletion.
+    // Mirrors server.js: a locked tab is refused (#715), and the delete hook fires for every
+    // other deletion.
     deleteDisplayTab: (id) => {
+      if (locked.has(id)) return 'locked';
       displayTabs.delete(id);
       for (const h of hooks.values()) h.onDelete?.(id);
+      return 'closed';
+    },
+    isDisplayTabLocked: (id) => locked.has(id),
+    setDisplayTabLocked: (id, on) => {
+      if (!displayTabs.has(id)) return null;
+      if (on) locked.add(id); else locked.delete(id);
+      return !!on;
     },
     sessionPaths: (e) => ({ cwd: e.cwd }),
     deliverPromptWhenReady: (id, prompt, opts) => deliveries.push({ id, prompt, opts }),
@@ -72,7 +83,7 @@ function world() {
   const app = fakeApp();
   displayTab.registerRoutes(app, ctx);
   shells.set('owner-1', { cwd: '/tmp/proj', windowId: null });
-  return { ctx, tools, app, displayTabs, shells, deliveries, client, hooks, transcript };
+  return { ctx, tools, app, displayTabs, shells, deliveries, client, hooks, transcript, locked };
 }
 
 // The claim window and the transcript check run on timers; every test that reaches a delivery
@@ -491,4 +502,63 @@ test('the store persists across a reload and prunes records whose tab is gone', 
   assert.deepStrictEqual(s2.list().map(r => r.id), ['a']);
   const s3 = decision.createDecisionStore({ file: () => file, isLive: () => true });
   assert.deepStrictEqual(s3.list().map(r => r.id), ['a'], 'the prune was saved');
+});
+
+// ── locks (#715) ─────────────────────────────────────────────────────────────
+
+test('create_display_tab({locked:true}) locks the tab, and close_display_tab is refused until it is unlocked', async () => {
+  const w = world();
+  const out = parse(await w.tools.create_display_tab.handler({ session_id: 'owner-1', html: PAGE, name: 'Keep me', locked: true }));
+  assert.strictEqual(out.locked, true);
+  assert.ok(w.locked.has(out.id));
+
+  w.client.sent.length = 0;
+  const refused = await w.tools.close_display_tab.handler({ tab_id: out.id });
+  assert.strictEqual(refused.isError, true);
+  assert.match(refused.content[0].text, /locked/);
+  assert.match(refused.content[0].text, /locked: false/, 'says how to unlock');
+  assert.ok(w.displayTabs.has(out.id), 'still open');
+  assert.deepStrictEqual(w.client.sent, [], 'no close went to the browser');
+
+  const unlocked = parse(await w.tools.update_display_tab.handler({ tab_id: out.id, locked: false }));
+  assert.deepStrictEqual(unlocked, { id: out.id, locked: false });
+  const closed = await w.tools.close_display_tab.handler({ tab_id: out.id });
+  assert.ok(!closed.isError, closed.content[0].text);
+  assert.ok(!w.displayTabs.has(out.id));
+  assert.deepStrictEqual(w.client.sent.map(m => m.type), ['close-display-tab']);
+});
+
+test('a plain create does not lock, and a lock-only update_display_tab changes nothing else', async () => {
+  const w = world();
+  const id = parse(await w.tools.create_display_tab.handler({ session_id: 'owner-1', html: PAGE })).id;
+  assert.ok(!w.locked.has(id));
+  w.client.sent.length = 0;
+  const out = parse(await w.tools.update_display_tab.handler({ tab_id: id, locked: true }));
+  assert.deepStrictEqual(out, { id, locked: true });
+  assert.ok(w.locked.has(id));
+  assert.strictEqual(w.displayTabs.get(id), PAGE, 'the page is untouched');
+  assert.deepStrictEqual(w.client.sent, [], 'no update-display-tab: there is nothing to reload');
+
+  // With a page it is an ordinary update that also sets the lock.
+  const both = parse(await w.tools.update_display_tab.handler({ tab_id: id, html: '<p>v2</p>', locked: false }));
+  assert.strictEqual(both.updated, true);
+  assert.strictEqual(both.locked, false);
+  assert.ok(!w.locked.has(id));
+  assert.deepStrictEqual(w.client.sent.map(m => m.type), ['update-display-tab']);
+});
+
+test('a decision on a locked tab is delivered, but the tab stays open and the agent is told why', async (t) => {
+  mockTime(t);
+  const w = world();
+  const id = await createDecision(w, { buttons: [{ label: 'Yes' }] }, { locked: true });
+  w.client.sent.length = 0;
+  const res = decide(w, id, { index: 0 });
+  assert.strictEqual(res.statusCode, 200);
+  assert.deepStrictEqual(res.body, { sent: true, label: 'Yes', closed: false });
+  assert.ok(w.displayTabs.has(id), 'close_on_decision gives way to the lock');
+  assert.ok(!w.client.sent.some(m => m.type === 'close-display-tab'));
+  t.mock.timers.tick(CLAIM_GRACE_MS);
+  assert.strictEqual(w.deliveries.length, 1);
+  assert.match(w.deliveries[0].prompt, /still open because it is locked/);
+  assert.doesNotMatch(w.deliveries[0].prompt, /close it with close_display_tab/);
 });

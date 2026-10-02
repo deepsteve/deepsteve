@@ -29,4 +29,4 @@ A display tab renders and can call back into deepsteve over HTTP, but it gets **
 
 5. **Report**: Briefly confirm the tab — its name, what it shows, and its `id`, so this or a later turn can update it.
 
-6. **Say who closes it.** The user asked for this page, so it is theirs: leave it open and tell them it closes from the tab's ✕. A display tab you opened for *your own* purposes is yours to close, with `mcp__deepsteve__close_display_tab`. Either way, mention that closing is final — the HTML is deleted and cannot be recovered.
+6. **Say who closes it.** The user asked for this page, so it is theirs: leave it open and tell them it closes from the tab's ✕. A display tab you opened for *your own* purposes is yours to close, with `mcp__deepsteve__close_display_tab`. A closed tab is not lost: the user can bring it back with "Reopen closed tab" in the tab bar's right-click menu. If the user wants the page kept, pass `locked: true` to `create_display_tab` (or `update_display_tab` with only `tab_id` and `locked`). A locked tab can't be closed until someone unlocks it, so `close_display_tab` on one is refused. Don't unlock a tab unless the user asked for it to be closed.

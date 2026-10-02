@@ -101,7 +101,7 @@
 
   function showGone() {
     setEnabled(false);
-    setStatus('The session that asked has ended — close this tab with its ✕.', 'warn');
+    setStatus('The session that asked has ended — you can close this tab.', 'warn');
   }
 
   function decide(index) {

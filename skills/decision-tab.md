@@ -29,7 +29,7 @@ Reach for it while you work, whenever a choice is easier to make by looking than
    - If the call fails with a connection or transport error, **call it again** with the same `tab_id`. Nothing is lost.
    - If it tells you the choice was already typed into your session, act on that message instead.
 
-5. **Act on the choice** when it arrives. For a follow-up in the same tab (only if it is still open — `close_on_decision: false`), call `mcp__deepsteve__update_display_tab` with the `tab_id`, the new page, and a new `decision`; that replaces the buttons and re-arms the tab. Then call `await_decision` again.
+5. **Act on the choice** when it arrives. For a follow-up in the same tab (only if it is still open — `close_on_decision: false`, or the tab is locked), call `mcp__deepsteve__update_display_tab` with the `tab_id`, the new page, and a new `decision`; that replaces the buttons and re-arms the tab. Then call `await_decision` again.
 
 6. **Clean up what you no longer need.** If the question stops mattering before the user answers (you found the answer yourself, or the task changed), close the tab with `mcp__deepsteve__close_display_tab` so it does not sit in their inbox. A decided tab you kept open is yours to close once you are done with it.
 

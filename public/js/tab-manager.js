@@ -5,12 +5,51 @@
 // Speaker icon shown on a tab while it is emitting audio (inline SVG, inherits currentColor).
 const SPEAKER_SVG = '<svg viewBox="0 0 16 16"><path d="M8 2 4 5H1v6h3l4 3V2z" fill="currentColor"/><path d="M11 5a4 4 0 0 1 0 6" stroke="currentColor" fill="none" stroke-width="1.4" stroke-linecap="round"/></svg>';
 
+// Padlock shown in a locked tab's close slot (#715). Same currentColor convention as the speaker.
+const LOCK_SVG = '<svg viewBox="0 0 16 16" aria-hidden="true"><rect x="3" y="7" width="10" height="7.5" rx="1.5" fill="currentColor"/><path d="M5.25 7V5a2.75 2.75 0 0 1 5.5 0v2" stroke="currentColor" fill="none" stroke-width="1.5"/></svg>';
+const CLOSE_GLYPH = '&#10005;';
+
 // Drag reorder state
 const MOVE_THRESHOLD = 5;
 let dragState = null;
 let suppressNextClick = false;
 
 let contextMenu = null;
+
+// "Reopen closed tab" (#715), set by app.js: { isAvailable(), reopen() }. Not per-tab — the stack
+// is the server's, so every tab's menu and the empty bar's offer the same item.
+let reopenClosed = null;
+
+function appendReopenItem(menu) {
+  const available = !!(reopenClosed && reopenClosed.isAvailable());
+  const el = document.createElement('div');
+  el.className = 'context-menu-item';
+  if (!available) el.classList.add('disabled');
+  el.textContent = 'Reopen closed tab';
+  el.onclick = () => {
+    if (!available) return;
+    hideContextMenu();
+    reopenClosed.reopen();
+  };
+  menu.appendChild(el);
+}
+
+function placeMenu(menu, x, y) {
+  menu.style.left = x + 'px';
+  menu.style.top = y + 'px';
+  document.body.appendChild(menu);
+
+  // Adjust if off-screen
+  const rect = menu.getBoundingClientRect();
+  if (rect.right > window.innerWidth) {
+    menu.style.left = (window.innerWidth - rect.width - 8) + 'px';
+  }
+  if (rect.bottom > window.innerHeight) {
+    menu.style.top = (window.innerHeight - rect.height - 8) + 'px';
+  }
+
+  contextMenu = menu;
+}
 
 function buildWindowLabel(win) {
   const names = win.sessions.map(s => s.name).filter(Boolean);
@@ -168,15 +207,38 @@ function showContextMenu(x, y, sessionId, callbacks) {
   };
   menu.appendChild(historyEl);
 
+  // Lock (#715) — only a tab kind that supplies getLocked can be locked (display tabs). Locked,
+  // Close is disabled rather than omitted, so the menu shows why nothing would close.
+  const lockState = callbacks.getLocked ? callbacks.getLocked() : null;
+  const locked = lockState === true;
+  if (lockState !== null && lockState !== undefined) {
+    const lockEl = document.createElement('div');
+    lockEl.className = 'context-menu-item';
+    lockEl.textContent = locked ? 'Unlock tab' : 'Lock tab';
+    lockEl.onclick = () => {
+      hideContextMenu();
+      callbacks.onToggleLock?.(sessionId, !locked);
+    };
+    menu.appendChild(lockEl);
+  }
+
   // Close tab
   const closeEl = document.createElement('div');
   closeEl.className = 'context-menu-item';
+  if (locked) closeEl.classList.add('disabled');
   closeEl.textContent = 'Close tab';
   closeEl.onclick = () => {
+    if (locked) return;
     hideContextMenu();
     callbacks.onClose?.(sessionId);
   };
   menu.appendChild(closeEl);
+
+  // Right-clicking a tab is right-clicking the tab bar, and a full bar has no empty space left.
+  const sepReopen = document.createElement('div');
+  sepReopen.className = 'context-menu-separator';
+  menu.appendChild(sepReopen);
+  appendReopenItem(menu);
 
   // Mod-provided context menu items
   const modItems = callbacks.getModMenuItems ? callbacks.getModMenuItems() : [];
@@ -196,20 +258,17 @@ function showContextMenu(x, y, sessionId, callbacks) {
     }
   }
 
-  menu.style.left = x + 'px';
-  menu.style.top = y + 'px';
-  document.body.appendChild(menu);
+  placeMenu(menu, x, y);
+}
 
-  // Adjust if off-screen
-  const rect = menu.getBoundingClientRect();
-  if (rect.right > window.innerWidth) {
-    menu.style.left = (window.innerWidth - rect.width - 8) + 'px';
-  }
-  if (rect.bottom > window.innerHeight) {
-    menu.style.top = (window.innerHeight - rect.height - 8) + 'px';
-  }
-
-  contextMenu = menu;
+// The menu for the tab bar's empty space (#715).
+function showBarContextMenu(x, y) {
+  hideContextMenu();
+  const menu = document.createElement('div');
+  menu.className = 'context-menu';
+  menu.id = 'tab-context-menu';
+  appendReopenItem(menu);
+  placeMenu(menu, x, y);
 }
 
 function hideContextMenu() {
@@ -222,8 +281,17 @@ function hideContextMenu() {
 
 // Hide context menu on click outside
 document.addEventListener('click', hideContextMenu);
+// The one contextmenu listener for the bar, so a menu it opens is not hidden by a second
+// listener further up as the same event bubbles. A tab built its own menu already; a control
+// in the bar that handles its own right-click (preventDefault) wins; the rest of #tabs is the
+// bar's empty space — #tabs-spacer horizontally, #tabs-list below the tabs vertically.
 document.addEventListener('contextmenu', (e) => {
-  if (!e.target.closest('.tab')) hideContextMenu();
+  if (e.target.closest('.tab')) return;
+  hideContextMenu();
+  if (e.defaultPrevented) return;
+  if (!e.target.closest('#tabs') || e.target.closest('button, input, .dropdown')) return;
+  e.preventDefault();
+  showBarContextMenu(e.clientX, e.clientY);
 });
 
 // ── Tab nav arrows ───────────────────────────────────────────────────────────────────────────
@@ -717,6 +785,25 @@ export const TabManager = {
   updateMergeBlocked(sessionId, on) {
     const tab = document.getElementById('tab-' + sessionId);
     if (tab) tab.classList.toggle('merge-blocked', !!on);
+  },
+
+  /**
+   * A locked display tab (#715) shows a padlock where its ✕ was. The slot keeps its click: it
+   * reaches onClose, and the refusal there says how to unlock — which a hidden button could not.
+   */
+  updateLocked(sessionId, on) {
+    const tab = document.getElementById('tab-' + sessionId);
+    if (!tab) return;
+    tab.classList.toggle('locked', !!on);
+    const close = tab.querySelector('.close');
+    if (!close) return;
+    close.innerHTML = on ? LOCK_SVG : CLOSE_GLYPH;
+    close.setAttribute('aria-label', on ? 'Locked' : 'Close');
+  },
+
+  /** Wire the "Reopen closed tab" menu items to the app: { isAvailable(), reopen() } (#715). */
+  setReopenClosedTab(hooks) {
+    reopenClosed = hooks;
   },
 
   /**

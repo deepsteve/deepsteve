@@ -1314,6 +1314,45 @@ sibling of a project mod. `create_display_tab` / `update_display_tab` build one.
 
 **They take `file_path`, not just inline HTML (#599).** The tools accept **exactly one** of `html` or `file_path` (both or neither → `isError`). `file_path` must be absolute (a leading `~/` is expanded), ≤5MB, and is read **once, as a snapshot** — the HTML is copied into `~/.deepsteve/display-tabs/<id>.html` exactly as an inline string would be, so later edits to the source file need another `update_display_tab`. Prefer it whenever the page already exists on disk: the model emits ~15 tokens instead of the whole document. An optional `replacements` map (`{"%%CHANNEL%%": "slot-ab3f9c12"}`) is applied server-side as **literal** find→replace (split/join, longest key first — `$&` in a value stays literal), so a file on disk can stay a reusable template. Display tabs are served same-origin (`GET /api/display-tab/:id`), so pages call back into deepsteve via `window.location.origin` or a relative `/api/...` URL — **never** a hard-coded port, and no port substitution is needed. Shared resolver: `resolveHtml()` in **`html-source.js`** (repo root, so it ships automatically); tests in `test/unit/display-tab-source.test.js`.
 
+### Closing, locking and reopening (#715)
+
+Closing a display tab asks nothing: a close is undoable, and a lock is how a page is kept. The
+store is **`display-tab-registry.js`** (repo root; `test/unit/display-tab-registry.test.js`), and
+server.js's `displayTabs` is its map.
+
+- **On disk.** `display-tabs/<id>.html` holds open tabs, `display-tabs/closed/<id>.html` holds
+  closed ones, and `display-tabs/index.json` holds each open tab's `{name, cwd, locked}` plus the
+  closed stack.
+- **Every close goes on the stack**: the user's ✕ (`DELETE /api/display-tab/:id`, which sends the
+  tab's current name so a rename survives), an agent's `close_display_tab`, and a decision tab
+  closing itself. The stack keeps the newest 20 for 7 days and survives a restart.
+- **Reopen.** "Reopen closed tab" in the tab bar's right-click menu (and at the foot of every
+  tab's menu) calls `POST /api/display-tabs/reopen`. It pops the newest entry back open **under
+  the same id**, so the agent's `tab_id` works again. The tab comes back in the response, never as
+  an `open-display-tab` broadcast, because a window whose control socket isn't registered would
+  drop the broadcast. An empty stack answers 200 `{id: null}`.
+- **A reopened decision tab has no buttons.** `onDelete` forgot its record, and its
+  `await_decision` already returned (the choice, or "closed" with none). Re-arm it with
+  `update_display_tab` + `decision`.
+- **Locks.** A plain boolean that anyone can toggle:
+  - the user, from the tab's right-click menu (`POST /api/display-tab/:id/lock`);
+  - an agent, through `locked` on `create_display_tab` / `update_display_tab` (lock-only with no
+    page).
+  - `deleteDisplayTab` refuses a locked tab, so every close path inherits it: the DELETE answers
+    409, `close_display_tab` is an isError, and a decision tab's `close_on_decision` gives way.
+  - A locked tab is exempt from the boot-time 7-day sweep, so one whose window is gone for good
+    stays on disk until someone unlocks it.
+  - It is protection against accidents, not a security boundary. Any same-origin page can call
+    the route.
+- **State reaches the browser as full state**: `{type:'display-tab-state', locked, closed}`. It is
+  sent on connect (ahead of the mods' `onConnect` and the pending-opens flush) and on every
+  change; `setDisplayTabLocked` sends it synchronously, so a locked create has it on the wire ahead
+  of its open.
+- **No echo DELETE.** The browser's `close-display-tab` handler calls
+  `killSession(id, { serverClosed: true })`, which skips both the lock check and the DELETE. The
+  server already closed the tab, and an echo DELETE from each window could land after a reopen and
+  close the tab again.
+
 ### Decision tabs (#716)
 
 A display tab created or updated with a `decision` param gets a row of buttons along the bottom

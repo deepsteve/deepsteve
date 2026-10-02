@@ -59,13 +59,17 @@ function normalizeDecision(raw) {
 }
 
 /** The text typed into the owning session when the user clicks. */
-function decidePrompt({ tabId, name, button, note, closed }) {
+function decidePrompt({ tabId, name, button, note, closed, locked }) {
   const lines = [`[Decision tab "${name}" (${tabId})] The user chose: ${button.label}`];
   if (button.sends !== button.label) lines.push('', button.sends);
   if (note) lines.push('', `Their note: ${note}`);
+  const followUp = `To ask a follow-up in it, call update_display_tab on ${tabId} with a new decision`;
   lines.push('', closed
     ? 'The tab has closed itself.'
-    : `The tab is still open. To ask a follow-up in it, call update_display_tab on ${tabId} with a new decision; otherwise close it with close_display_tab.`);
+    : locked
+      // Locked (#715): close_display_tab would be refused, and the lock is someone asking to keep it.
+      ? `The tab is still open because it is locked; leave it open. ${followUp}.`
+      : `The tab is still open. ${followUp}; otherwise close it with close_display_tab.`);
   return lines.join('\n');
 }
 

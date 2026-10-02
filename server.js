@@ -22,6 +22,7 @@ const { worktreePath, worktreeExists, worktreeStatus, worktreeStatuses, freshWor
 const { stateDir, agentHomeDir, expandTilde, spawnCwdProblem, assertSpawnCwd, tmuxSocketPath, defaultTmuxSocketPath } = require('./paths');
 const { resolveBinary, runBinary, resolveUrlOpener, resolveLoginShell } = require('./bin-path');
 const { createPendingOpens } = require('./pending-opens');
+const { createDisplayTabRegistry } = require('./display-tab-registry');
 const { findOrphanSessions } = require('./orphan-sweep');
 const { reattachSurvivingTmuxSessions } = require('./tmux-reattach');
 const { createSessionAutoClose } = require('./session-auto-close');
@@ -3617,27 +3618,13 @@ if (Object.keys(savedState).length > 0) {
   log(`Loaded ${Object.keys(savedState).length} saved sessions: ${Object.entries(savedState).map(([id, e]) => `${id}→${(e.claudeSessionId || '?').slice(0, 8)}`).join(', ')}`);
 }
 
-const displayTabs = new Map(); // id → HTML string (disk-backed in ~/.deepsteve/display-tabs/)
-
-// Load persisted display tabs from disk and clean up stale files (>7 days)
+// Open display tabs, their locks, and the stack "Reopen closed tab" pops (#715) — all disk-backed
+// in ~/.deepsteve/display-tabs/. See display-tab-registry.js for the layout and the sweep rules.
+const displayTabRegistry = createDisplayTabRegistry({ dir: DISPLAY_TABS_DIR, log: (...a) => log(...a) });
+const displayTabs = displayTabRegistry.tabs; // id → HTML string
 try {
-  if (fs.existsSync(DISPLAY_TABS_DIR)) {
-    const now = Date.now();
-    const MAX_AGE = 7 * 24 * 60 * 60 * 1000;
-    for (const file of fs.readdirSync(DISPLAY_TABS_DIR)) {
-      if (!file.endsWith('.html')) continue;
-      const filePath = path.join(DISPLAY_TABS_DIR, file);
-      const stat = fs.statSync(filePath);
-      if (now - stat.mtimeMs > MAX_AGE) {
-        fs.unlinkSync(filePath);
-        log(`[display-tab] Cleaned up stale file: ${file}`);
-        continue;
-      }
-      const id = file.replace(/\.html$/, '');
-      displayTabs.set(id, fs.readFileSync(filePath, 'utf8'));
-    }
-    if (displayTabs.size > 0) log(`Loaded ${displayTabs.size} display tabs from disk`);
-  }
+  displayTabRegistry.load();
+  if (displayTabs.size > 0) log(`Loaded ${displayTabs.size} display tabs from disk`);
 } catch (e) {
   console.error('Failed to load display tabs:', e.message);
 }
@@ -5635,9 +5622,34 @@ app.head('/api/display-tab/:id', (req, res) => {
   res.type('html').end();
 });
 
+// The tab's ✕. A close is undoable (#715): the tab goes on the reopen stack under the name the
+// browser sends, which is the one the user last saw. 'missing' still answers deleted — after an
+// agent's close_display_tab the browser's own close of the same tab has nothing left to do.
 app.delete('/api/display-tab/:id', (req, res) => {
-  deleteDisplayTab(req.params.id);
+  const name = req.body && typeof req.body.name === 'string' ? req.body.name : undefined;
+  if (deleteDisplayTab(req.params.id, { name }) === 'locked') {
+    return res.status(409).json({ error: 'locked' });
+  }
   res.json({ deleted: true });
+});
+
+app.post('/api/display-tab/:id/lock', security.requireAllowedOrigin, (req, res) => {
+  const locked = setDisplayTabLocked(req.params.id, !!(req.body && req.body.locked));
+  if (locked === null) return res.status(404).json({ error: 'not-found' });
+  log(`[display-tab] ${req.params.id} ${locked ? 'locked' : 'unlocked'} from the UI`);
+  res.json({ id: req.params.id, locked, state: displayTabStateMessage() });
+});
+
+// Plural, so it can never be taken for a tab id by the /api/display-tab/:id routes. The tab
+// comes back in the RESPONSE, not as an open-display-tab broadcast: the window that asked is
+// the one that should show it, and it is certainly listening to this request. An empty stack
+// is a 200 — nothing to reopen is an answer, not an error the client log should record.
+app.post('/api/display-tabs/reopen', security.requireAllowedOrigin, (req, res) => {
+  const tab = displayTabRegistry.reopen();
+  if (!tab) return res.json({ id: null, state: displayTabStateMessage() });
+  log(`[display-tab] reopened ${tab.id} (${tab.name || 'unnamed'})`);
+  broadcastDisplayTabState();
+  res.json({ ...tab, state: displayTabStateMessage() });
 });
 
 app.get('/api/screenshots', (req, res) => {
@@ -7968,21 +7980,52 @@ if (tmuxEngine) {
   }
 }
 
-function setDisplayTab(id, html) {
-  displayTabs.set(id, html);
-  try {
-    fs.mkdirSync(DISPLAY_TABS_DIR, { recursive: true });
-    fs.writeFileSync(path.join(DISPLAY_TABS_DIR, `${id}.html`), html);
-  } catch (e) { log(`[display-tab] Failed to persist ${id}: ${e.message}`); }
+// `info` ({name, cwd}) is what "Reopen closed tab" restores the tab with — pass it when opening.
+function setDisplayTab(id, html, info) {
+  displayTabRegistry.set(id, html, info);
 }
 
-function deleteDisplayTab(id) {
-  displayTabs.delete(id);
+/**
+ * Close a display tab onto the reopen stack (#715). Returns 'closed', 'missing' or 'locked'; a
+ * locked tab is refused here, at the one place every close passes through, so no caller can
+ * forget to check. `info.name` is the name the closing browser showed, for the reopened tab.
+ */
+function deleteDisplayTab(id, info) {
+  const result = displayTabRegistry.close(id, info);
+  if (result === 'locked') return result;
   pendingOpens.drop(id); // don't offer a deleted tab to the next browser (#596)
-  try { fs.unlinkSync(path.join(DISPLAY_TABS_DIR, `${id}.html`)); } catch {}
   for (const [name, h] of displayTabHooks) {
     if (typeof h.onDelete !== 'function') continue;
     try { h.onDelete(id); } catch (e) { log(`[display-tab] onDelete ${name} threw: ${e.message}`); }
+  }
+  if (result === 'closed') broadcastDisplayTabState();
+  return result;
+}
+
+function isDisplayTabLocked(id) {
+  return displayTabRegistry.isLocked(id);
+}
+
+/**
+ * Lock or unlock a display tab — from its right-click menu or an agent's `locked`. Anyone may
+ * do either (#715). Broadcasts synchronously, so a create_display_tab({locked}) has its state
+ * message on the wire ahead of its open. Returns the new state, or null for an unknown tab.
+ */
+function setDisplayTabLocked(id, locked) {
+  const result = displayTabRegistry.setLocked(id, locked);
+  if (result !== null) broadcastDisplayTabState();
+  return result;
+}
+
+// Full state, not a delta, so a lost or reordered message can't leave a window wrong for long.
+function displayTabStateMessage() {
+  return { type: 'display-tab-state', locked: displayTabRegistry.lockedIds(), closed: displayTabRegistry.closedCount() };
+}
+
+function broadcastDisplayTabState() {
+  const data = JSON.stringify(displayTabStateMessage());
+  for (const client of reloadClients) {
+    if (client.readyState === 1) client.send(data);
   }
 }
 
@@ -8009,13 +8052,14 @@ function openDeepsteveWelcomeTab(ctx, windowId) {
     return false;
   }
   const id = randomUUID().slice(0, 8);
-  setDisplayTab(id, out.html);
+  const name = `Welcome to ${ctx.name}`;
+  setDisplayTab(id, out.html, { name, cwd: dir });
   // cwd is what scopes a display tab to a project view (#530), so the tab lands filtered
   // under Deep Steve rather than showing in every project. deliverToWindow handles the
   // three delivery cases, and isPendingOpenLive already knows an `open-display-tab` is
   // still live while displayTabs has its id — so a browser that isn't open yet gets it too.
   deliverToWindow(
-    { type: 'open-display-tab', id, name: `Welcome to ${ctx.name}`, cwd: dir, windowId },
+    { type: 'open-display-tab', id, name, cwd: dir, windowId },
     windowId);
   log(`[deepsteve-project] opened the welcome tab (${id}) for windowId=${windowId || 'any'}`);
   return true;
@@ -8158,8 +8202,10 @@ function handleWsConnection(ws, req) {
         }
       } catch {}
     });
-    // Display-tab mods' connect-time state (#716: the open decision tabs), sent before the
-    // pending opens below so a tab opened by that flush arrives already classified.
+    // Which display tabs are locked and whether there is one to reopen (#715), then the mods'
+    // connect-time state (#716: the open decision tabs) — all before the pending opens below, so
+    // a tab restored or opened by that flush arrives already knowing it is locked or a decision.
+    if (ws.readyState === 1) ws.send(JSON.stringify(displayTabStateMessage()));
     for (const [name, h] of displayTabHooks) {
       if (typeof h.onConnect !== 'function') continue;
       try {
@@ -8959,7 +9005,7 @@ function broadcastToWindow(windowId, msg) {
 // assigns unconditionally, and nothing here awaits the first call). The chat pane's
 // transcript reader was therefore dead from the day it shipped, silently falling back
 // to the inbox_say store. Adding a ctx field means editing this line, never copying it.
-initMCP({ app, security, shells, wss, broadcast, broadcastToWindow, log, MODS_DIR, closeSession, tombstoneSession, handleShellGone, spawnSession, sessionEnv, getSpawnArgs, mcpConfigArgs, getAgentConfig, resolveConfigDir, validateModel, validateEffort, wireShellOutput, watchClaudeSessionDir, unwatchClaudeSessionDir, resolveForkParentSession, transcriptPath, saveState, validateWorktree, ensureWorktree, sessionPaths, submitToShell, fetchIssueFromGitHub, deliverPromptWhenReady, startIssueSession, reloadClients, pendingOpens, deliverToWindow, noteSpawnDelivery, settings, isShuttingDown: () => shuttingDown, displayTabs, setDisplayTab, deleteDisplayTab, screenshots, setScreenshot, deleteScreenshot, getScreenshotPath, getDefaultEngine, getForegroundCommand, sessionLog, emitSessionOpen, getContexts: () => contexts, pathInside, getSavedSession: (id) => savedState[id] || null, links, linkUrl: links.urlFor, spawnAgentSession, stripEscapeSequences, readTerminalScreen, sessionInputState, setMergeBlock, recordMergeAttempt, maybeInheritRemoteControl, requestMetaControlsConsent, registerRestartBlocker, registerSubmitKeyObserver, registerDisplayTabHooks, armSessionAutoClose, logRcWrite }).catch(e => log('MCP init failed:', e.message));
+initMCP({ app, security, shells, wss, broadcast, broadcastToWindow, log, MODS_DIR, closeSession, tombstoneSession, handleShellGone, spawnSession, sessionEnv, getSpawnArgs, mcpConfigArgs, getAgentConfig, resolveConfigDir, validateModel, validateEffort, wireShellOutput, watchClaudeSessionDir, unwatchClaudeSessionDir, resolveForkParentSession, transcriptPath, saveState, validateWorktree, ensureWorktree, sessionPaths, submitToShell, fetchIssueFromGitHub, deliverPromptWhenReady, startIssueSession, reloadClients, pendingOpens, deliverToWindow, noteSpawnDelivery, settings, isShuttingDown: () => shuttingDown, displayTabs, setDisplayTab, deleteDisplayTab, isDisplayTabLocked, setDisplayTabLocked, screenshots, setScreenshot, deleteScreenshot, getScreenshotPath, getDefaultEngine, getForegroundCommand, sessionLog, emitSessionOpen, getContexts: () => contexts, pathInside, getSavedSession: (id) => savedState[id] || null, links, linkUrl: links.urlFor, spawnAgentSession, stripEscapeSequences, readTerminalScreen, sessionInputState, setMergeBlock, recordMergeAttempt, maybeInheritRemoteControl, requestMetaControlsConsent, registerRestartBlocker, registerSubmitKeyObserver, registerDisplayTabHooks, armSessionAutoClose, logRcWrite }).catch(e => log('MCP init failed:', e.message));
 
 // Watch themes directory for changes and broadcast to clients
 let themeWatchDebounce = null;
