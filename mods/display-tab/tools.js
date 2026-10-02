@@ -203,12 +203,25 @@ function showingDialog(entry) {
 }
 
 // Served-time injection, so edit_display_tab / update_display_tab can never strip the bar.
+/*
+ * Ahead of the page's own scripts, so it sees the page read its saved picks on load (#721): every
+ * localStorage key the page touches is recorded, and the bar sends their values with the click.
+ * The bar itself loads at the end of <body> and would only ever see writes made after it.
+ */
+const STORAGE_TRACKER = '<script>(function(){try{var S=Storage.prototype,k=window.__dsdKeys=window.__dsdKeys||new Set();'
+  + "['getItem','setItem','removeItem'].forEach(function(n){var f=S[n];S[n]=function(key){"
+  + 'try{if(this===window.localStorage)k.add(String(key));}catch(e){}return f.apply(this,arguments);};});}catch(e){}})();</script>';
+
 function injectDecisionBar(html, id) {
   if (!store || !store.get(id)) return html;
   const tag = `<script src="${DECISION_BAR_SRC}" defer></script>`;
   const at = html.search(/<\/body\s*>(?![\s\S]*<\/body\s*>)/i);
-  if (at >= 0) return html.slice(0, at) + tag + html.slice(at);
-  return html + tag;
+  html = at >= 0 ? html.slice(0, at) + tag + html.slice(at) : html + tag;
+  // First thing in <head>, or before the first <script> of a page without one.
+  const head = html.match(/<head(\s[^>]*)?>/i);
+  if (head) return html.slice(0, head.index + head[0].length) + STORAGE_TRACKER + html.slice(head.index + head[0].length);
+  const script = html.search(/<script[\s>]/i);
+  return script >= 0 ? html.slice(0, script) + STORAGE_TRACKER + html.slice(script) : STORAGE_TRACKER + html;
 }
 
 function init(context) {
@@ -545,6 +558,9 @@ function registerRoutes(app, context) {
     if (!button) return res.status(400).json({ error: 'bad-button' });
     const note = r.config.allowNote && typeof body.note === 'string' ? body.note.trim() : '';
     if (note.length > decision.MAX_NOTE) return res.status(400).json({ error: 'note-too-long', max: decision.MAX_NOTE });
+    // The page's state rides every click, note or no note (#721).
+    const state = typeof body.state === 'string' ? body.state.trim() : '';
+    if (state.length > decision.MAX_STATE) return res.status(400).json({ error: 'state-too-long', max: decision.MAX_STATE });
 
     if (r.status !== 'open') return res.status(409).json({ error: 'already-decided', choice: r.choice });
 
@@ -567,12 +583,12 @@ function registerRoutes(app, context) {
     const closed = r.config.closeOnDecision && !locked;
     r.status = 'decided';
     r.decidedAt = Date.now();
-    r.choice = { index: body.index, label: button.label, note: note || null };
+    r.choice = { index: body.index, label: button.label, note: note || null, state: state || null };
     store.set(id, r);
 
-    const prompt = decision.decidePrompt({ tabId: id, name: r.name, button, note, closed, locked });
-    // The label and the note's length, never its content.
-    ctx.log(`[decision-tab] ${id} decided "${button.label}"${note ? ` note=${note.length}ch` : ''} -> ${owner}${closed ? ' (closing)' : ''}${waiting ? '' : ' — no await_decision holding; typing it unless one claims it'}`);
+    const prompt = decision.decidePrompt({ tabId: id, name: r.name, button, note, state, closed, locked });
+    // The label and the lengths, never the content.
+    ctx.log(`[decision-tab] ${id} decided "${button.label}"${note ? ` note=${note.length}ch` : ''}${state ? ` state=${state.length}ch` : ''} -> ${owner}${closed ? ' (closing)' : ''}${waiting ? '' : ' — no await_decision holding; typing it unless one claims it'}`);
     if (waiting) {
       answerWaiter(id, owner, prompt);
     } else {

@@ -104,6 +104,54 @@
     setStatus('The session that asked has ended — you can close this tab.', 'warn');
   }
 
+  var MAX_STATE = 64000;
+
+  // A control's name as a person would say it: its name, id, aria-label, <label> or placeholder.
+  function nameOf(c) {
+    var lab = c.labels && c.labels[0] && c.labels[0].textContent.trim();
+    return c.name || c.id || c.getAttribute('aria-label') || lab || c.placeholder || c.tagName.toLowerCase();
+  }
+
+  /*
+   * What the page holds, sent with EVERY button (#721) — a click must never arrive as a bare label
+   * while the picks sit in the page. The page's own answer wins: `window.decisionState()` may
+   * return a string or anything JSON can carry. A page without one is read for what it keeps:
+   * each localStorage key it read or wrote (recorded by the tracker the server puts at the top of
+   * <head>) and each filled form control outside this bar.
+   */
+  function pageState() {
+    if (typeof window.decisionState === 'function') {
+      try {
+        var v = window.decisionState();
+        if (v != null && v !== '') return typeof v === 'string' ? v : JSON.stringify(v);
+      } catch (e) {
+        return 'window.decisionState() threw: ' + (e && e.message);
+      }
+    }
+    var parts = [];
+    if (window.__dsdKeys) {
+      window.__dsdKeys.forEach(function (k) {
+        try {
+          var val = window.localStorage.getItem(k);
+          if (val != null && val !== '') parts.push('localStorage["' + k + '"] = ' + val);
+        } catch (e) {}
+      });
+    }
+    var controls = document.querySelectorAll('input, select, textarea');
+    for (var i = 0; i < controls.length; i++) {
+      var c = controls[i];
+      if (bar && bar.contains(c)) continue;
+      var t = (c.type || '').toLowerCase();
+      if (t === 'hidden' || t === 'password' || t === 'file' || t === 'submit' || t === 'button' || t === 'reset') continue;
+      if (t === 'checkbox' || t === 'radio') {
+        if (c.checked) parts.push(nameOf(c) + (t === 'radio' || (c.value && c.value !== 'on') ? ' = ' + c.value : ' ✓'));
+      } else if (c.value && String(c.value).trim()) {
+        parts.push(nameOf(c) + ' = ' + String(c.value).trim());
+      }
+    }
+    return parts.join('\n');
+  }
+
   function decide(index) {
     if (sending) return;
     sending = true;
@@ -111,6 +159,8 @@
     setStatus('Sending…');
     var body = { index: index };
     if (noteEl && noteEl.value.trim()) body.note = noteEl.value.trim();
+    var state = pageState();
+    if (state) body.state = state.length > MAX_STATE ? state.slice(0, MAX_STATE - 40) + '\n… (cut at ' + MAX_STATE + ' chars)' : state;
     fetch(BASE + '/decide', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

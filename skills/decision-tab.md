@@ -13,6 +13,7 @@ Reach for it while you work, whenever a choice is easier to make by looking than
 1. **Get your session id**: Call `mcp__deepsteve__get_my_session_id`. The tab's buttons answer *this* session, so it must be yours.
 
 2. **Write the page**: a complete document starting with `<!DOCTYPE html>` with a `<head>` and `<body>`, CSS and JS inline — the same rules as any display tab (relative `/api/...` URLs, never a hard-coded port; `alert`/`confirm` are inert). Show what the decision is *about*. **Do not draw the buttons yourself** — the server adds the bar at the bottom of the page and pads the body so it never covers your content.
+   - **If the page holds picks of its own** (chips, per-item choices, edits), define `window.decisionState = () => …` returning a string or a JSON-able object. The bar sends it with every button, as its own block under the choice — whether or not `allow_note` is set. Never add a send button of your own: a second way to answer is the one that loses the picks. A page without `decisionState` still sends what it keeps — every localStorage key it read or wrote, and every filled form control — but in-memory state reaches you only through `decisionState`.
 
 3. **Create the tab** with `mcp__deepsteve__create_display_tab`:
    - `session_id`: from step 1

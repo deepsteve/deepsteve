@@ -562,3 +562,137 @@ test('a decision on a locked tab is delivered, but the tab stays open and the ag
   assert.match(w.deliveries[0].prompt, /still open because it is locked/);
   assert.doesNotMatch(w.deliveries[0].prompt, /close it with close_display_tab/);
 });
+
+// ── the page's state (#721) ──────────────────────────────────────────────────
+// A bar click arrived as "Send picks" and nothing else while thirty levels of picks sat in the
+// page's localStorage. The state is its own channel now, sent by the bar with every button.
+
+test('decidePrompt prints the page\'s state under its own heading', () => {
+  const p = decision.decidePrompt({ tabId: 'ab12', name: 'Pick', button: { label: 'Send', sends: 'Send' }, note: '', state: 'WORDS 31=B', closed: true });
+  assert.match(p, /The page when they clicked:\nWORDS 31=B/);
+  assert.doesNotMatch(p, /Their note/);
+});
+
+test('decide delivers the page\'s state on a tab that asked for no note, and refuses one past the cap', async (t) => {
+  mockTime(t);
+  const w = world();
+  const id = await createDecision(w, { buttons: [{ label: 'Send picks' }] });
+  assert.strictEqual(decide(w, id, { index: 0, state: 'x'.repeat(decision.MAX_STATE + 1) }).body.error, 'state-too-long');
+  assert.strictEqual(decide(w, id, { index: 0, state: 'WORDS 31=B 32=C' }).statusCode, 200);
+  t.mock.timers.tick(CLAIM_GRACE_MS);
+  assert.match(w.deliveries[0].prompt, /The page when they clicked:\nWORDS 31=B 32=C/);
+});
+
+test('the storage tracker goes in ahead of the page\'s own scripts', async () => {
+  const w = world();
+  const id = await createDecision(w, { buttons: [{ label: 'Yes' }] });
+  const inject = w.hooks.get('decision').inject;
+  const html = inject('<html><head><script>localStorage.getItem("picks")</script></head><body></body></html>', id);
+  assert.ok(html.indexOf('__dsdKeys') < html.indexOf('getItem("picks")'));
+  const headless = inject('<p>x</p><script>go()</script>', id);
+  assert.ok(headless.indexOf('__dsdKeys') < headless.indexOf('go()'));
+});
+
+// The real bar script, run in a vm against the smallest page it needs.
+const vm = require('node:vm');
+const BAR_SRC = fs.readFileSync(path.join(__dirname, '../../mods/display-tab/decision-bar.js'), 'utf8');
+const flush = () => new Promise((r) => setImmediate(r));
+
+async function trackerSource() {
+  const w = world();
+  const id = await createDecision(w, { buttons: [{ label: 'Yes' }] });
+  const html = w.hooks.get('decision').inject(PAGE, id);
+  return html.match(/<script>(\(function\(\)\{try\{var S=Storage[\s\S]*?)<\/script>/)[1];
+}
+
+async function clickBar({ config, stored = {}, pageScript = '', controls = [], note }) {
+  const made = [];
+  const el = (tag) => {
+    const e = {
+      tagName: tag.toUpperCase(), children: [], style: {}, attrs: {}, offsetHeight: 40, value: '',
+      appendChild(c) { this.children.push(c); c.parentNode = this; return c; },
+      setAttribute(k, v) { this.attrs[k] = v; },
+      getAttribute(k) { return k in this.attrs ? this.attrs[k] : null; },
+      remove() {}, focus() {},
+      contains(c) { for (let p = c; p; p = p.parentNode) if (p === this) return true; return false; },
+    };
+    made.push(e);
+    return e;
+  };
+  const document = {
+    head: el('head'), body: el('body'), createElement: el, addEventListener() {}, removeEventListener() {},
+    querySelectorAll: () => made.filter((e) => ['INPUT', 'SELECT', 'TEXTAREA'].includes(e.tagName)),
+  };
+  for (const c of controls) Object.assign(document.body.appendChild(el(c.tag || 'input')), c);
+  class Storage {
+    constructor() { this.m = new Map(Object.entries(stored)); }
+    getItem(k) { return this.m.has(k) ? this.m.get(k) : null; }
+    setItem(k, v) { this.m.set(k, String(v)); }
+    removeItem(k) { this.m.delete(k); }
+  }
+  const posted = [];
+  const win = {
+    location: { pathname: '/api/display-tab/t1' }, document, Storage, addEventListener() {},
+    fetch: async (url, opts) => {
+      if (url.endsWith('/decision')) return { ok: true, json: async () => ({ config, status: 'open', ownerAlive: true }) };
+      posted.push(JSON.parse(opts.body));
+      return { ok: true, json: async () => ({ label: 'x', closed: true }) };
+    },
+  };
+  win.window = win;
+  win.localStorage = new Storage();
+  vm.createContext(win);
+  vm.runInContext(await trackerSource(), win);
+  if (pageScript) vm.runInContext(pageScript, win);
+  vm.runInContext(BAR_SRC, win);
+  await flush(); await flush();
+  if (note != null) made.find((e) => e.className === 'dsd-note').value = note;
+  made.find((e) => e.tagName === 'BUTTON').onclick();
+  await flush();
+  assert.strictEqual(posted.length, 1, 'one click, one POST');
+  return posted[0];
+}
+
+test('a bar click carries the picks the page saved, on a tab that asked for no note', async () => {
+  const body = await clickBar({
+    config: { buttons: [{ label: 'Send picks' }], allowNote: false },
+    stored: { 'offleash-ch46-picks-v1': '{"w":{"31":"B"}}', 'some-other-page': 'not ours' },
+    pageScript: 'var P = JSON.parse(localStorage.getItem("offleash-ch46-picks-v1"));',
+  });
+  assert.strictEqual(body.index, 0);
+  assert.strictEqual(body.note, undefined);
+  assert.strictEqual(body.state, 'localStorage["offleash-ch46-picks-v1"] = {"w":{"31":"B"}}');
+});
+
+test('window.decisionState wins over the snapshot, and the typed note stays the note', async () => {
+  const body = await clickBar({
+    config: { buttons: [{ label: 'Send' }], allowNote: true },
+    stored: { picks: 'stale' },
+    pageScript: 'localStorage.getItem("picks"); window.decisionState = function () { return { w: { 31: "B" } }; };',
+    note: 'looks good',
+  });
+  assert.strictEqual(body.state, '{"w":{"31":"B"}}');
+  assert.strictEqual(body.note, 'looks good');
+});
+
+test('filled form controls ride along; hidden ones, empty ones and the bar\'s own note do not', async () => {
+  const body = await clickBar({
+    config: { buttons: [{ label: 'Send' }], allowNote: true },
+    controls: [
+      { type: 'text', name: 'word31', value: 'B' },
+      { type: 'checkbox', name: 'keep34', checked: true },
+      { type: 'radio', name: 'map54', value: 'b', checked: true },
+      { type: 'radio', name: 'map54', value: 'a', checked: false },
+      { type: 'hidden', name: 'secret', value: 'x' },
+      { type: 'text', name: 'empty', value: '' },
+    ],
+    note: 'n',
+  });
+  assert.strictEqual(body.state, 'word31 = B\nkeep34 ✓\nmap54 = b');
+  assert.strictEqual(body.note, 'n');
+});
+
+test('a page holding nothing sends no state at all', async () => {
+  const body = await clickBar({ config: { buttons: [{ label: 'Yes' }], allowNote: false } });
+  assert.deepStrictEqual(body, { index: 0 });
+});

@@ -18,6 +18,10 @@ const MAX_LABEL = 60;
 const MAX_SENDS = 4000;
 const MAX_PROMPT = 300;
 const MAX_NOTE = 4000;
+// What the page held when the button was pressed (#721) — picks in localStorage, form fields,
+// or whatever `window.decisionState()` returns. Its own channel, not the note: the note is what
+// the person typed, and a page's picks must arrive whether or not the tab asked for one.
+const MAX_STATE = 64000;
 const STYLES = ['default', 'primary', 'danger'];
 
 function str(v) {
@@ -59,10 +63,11 @@ function normalizeDecision(raw) {
 }
 
 /** The text typed into the owning session when the user clicks. */
-function decidePrompt({ tabId, name, button, note, closed, locked }) {
+function decidePrompt({ tabId, name, button, note, state, closed, locked }) {
   const lines = [`[Decision tab "${name}" (${tabId})] The user chose: ${button.label}`];
   if (button.sends !== button.label) lines.push('', button.sends);
   if (note) lines.push('', `Their note: ${note}`);
+  if (state) lines.push('', 'The page when they clicked:', state);
   const followUp = `To ask a follow-up in it, call update_display_tab on ${tabId} with a new decision`;
   lines.push('', closed
     ? 'The tab has closed itself.'
@@ -183,4 +188,4 @@ function createDecisionStore({ file = () => statePath('display-tab-decisions.jso
   return { get, set, remove, prune, list, save, reload: load };
 }
 
-module.exports = { normalizeDecision, decidePrompt, answerInTranscript, createDecisionStore, MAX_BUTTONS, MAX_NOTE, STYLES };
+module.exports = { normalizeDecision, decidePrompt, answerInTranscript, createDecisionStore, MAX_BUTTONS, MAX_NOTE, MAX_STATE, STYLES };
