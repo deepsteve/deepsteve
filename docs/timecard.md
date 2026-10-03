@@ -89,8 +89,8 @@ switches views and steps back through months with no round trip.
 | View | Buckets | Range | Stats |
 |---|---|---|---|
 | Day | 2-hour blocks, 8a–8p | `Monday 31 Aug` | Per block · Longest block · Idle blocks |
-| Week | Mon–Sun | `Mon 24 – Sun 30 Aug` | Daily average · Longest day · Days off |
-| Month | Monday-anchored weeks, clipped to the month | `August 2026` | Weekly average · Biggest week · Quiet weeks |
+| Week | Sun–Sat | `Sun 23 – Sat 29 Aug` | Daily average · Longest day · Days off |
+| Month | Sunday-anchored weeks, clipped to the month | `August 2026` | Weekly average · Biggest week · Quiet weeks |
 
 Details that are deliberate rather than incidental:
 
@@ -115,7 +115,7 @@ Details that are deliberate rather than incidental:
 - **The Day view only shows 8a–8p.** Hours outside that window are counted in the Week
   and Month views but have no bar of their own, and the Day headline is the sum of the
   bars on screen — the number and the chart never disagree.
-- Local time throughout; the week starts Monday.
+- Local time throughout; the week starts Sunday.
 
 ## The card
 

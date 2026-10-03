@@ -265,24 +265,24 @@ test('a two-hour block can never report more than two hours', () => {
   assert.ok(longest.value <= 2, 'and the stat agrees with the bar');
 });
 
-test('the Week view runs Mon–Sun and keeps zero days as zeros, not gaps', () => {
+test('the Week view runs Sun–Sat and keeps zero days as zeros, not gaps', () => {
   const now = new Date(2026, 7, 26, 12, 0, 0).getTime(); // a Wednesday
   const samples = activeRun(new Date(2026, 7, 26, 11, 0, 0).getTime(), 12);
   const { week } = buildViews(samples, now);
-  assert.deepStrictEqual(week.labels, ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']);
+  assert.deepStrictEqual(week.labels, ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']);
   assert.strictEqual(week.values.length, 7, 'every day has a bar, including the empty ones');
-  assert.strictEqual(week.values[2], 1, 'Wednesday');
-  assert.strictEqual(week.range, 'Mon 24 – Sun 30 Aug');
+  assert.strictEqual(week.values[3], 1, 'Wednesday');
+  assert.strictEqual(week.range, 'Sun 23 – Sat 29 Aug');
 });
 
 test('a week straddling two months names both, or it reads as running backwards', () => {
   const { week } = buildViews([], new Date(2026, 7, 1, 12, 0, 0).getTime()); // Sat 1 Aug
-  assert.strictEqual(week.range, 'Mon 27 Jul – Sun 2 Aug');
+  assert.strictEqual(week.range, 'Sun 26 Jul – Sat 1 Aug');
 });
 
-test('the Month view is Monday-anchored weeks clipped to the month', () => {
+test('the Month view is Sunday-anchored weeks clipped to the month', () => {
   const now = new Date(2026, 7, 15, 12, 0, 0).getTime();
-  // Aug 2026 starts on a Saturday, so W1 is the two days Aug 1–2.
+  // Aug 2026 starts on a Saturday, so W1 is the single day Aug 1.
   const samples = activeRun(new Date(2026, 7, 1, 11, 0, 0).getTime(), 12);
   const { month } = buildViews(samples, now);
   assert.strictEqual(month.range, 'August 2026');
@@ -309,7 +309,7 @@ test('averages divide by periods with hours logged, not by period count', () => 
   const avg = week.stats.find((s) => s.label === 'Daily average');
   assert.strictEqual(avg.value, 3, '(2 + 4) / 2 days with hours, not / 7');
   const off = week.stats.find((s) => s.label === 'Days off');
-  assert.strictEqual(off.value, 1, 'Wednesday has begun with nothing logged; Thu–Sun have not happened');
+  assert.strictEqual(off.value, 1, 'Wednesday has begun with nothing logged; Sunday predates the log, Thu–Sat have not happened');
   assert.strictEqual(off.kind, 'count', 'counts render as integers, hours to one decimal');
 });
 
@@ -318,20 +318,20 @@ test('an empty period averages to zero rather than dividing by nothing', () => {
   const [avg, longest, off] = week.stats;
   assert.strictEqual(avg.value, 0);
   assert.strictEqual(longest.value, 0);
-  assert.strictEqual(off.value, 3, 'Mon, Tue and the Wednesday in progress — not the four days ahead');
+  assert.strictEqual(off.value, 4, 'Sun, Mon, Tue and the Wednesday in progress — not the three days ahead');
   assert.strictEqual(week.total, 0);
 });
 
 test('a day that has not happened yet is not a day off', () => {
-  const now = new Date(2026, 7, 24, 15, 0, 0).getTime(); // a Monday afternoon
-  const worked = activeRun(new Date(2026, 7, 24, 11, 0, 0).getTime(), 24);
+  const now = new Date(2026, 7, 23, 15, 0, 0).getTime(); // a Sunday afternoon
+  const worked = activeRun(new Date(2026, 7, 23, 11, 0, 0).getTime(), 24);
   const off = (samples) => buildViews(samples, now).week.stats.find((s) => s.label === 'Days off').value;
-  assert.strictEqual(off(worked), 0, 'Tue–Sun are still ahead');
-  assert.strictEqual(off([]), 1, 'but a Monday that has begun with nothing in it counts');
+  assert.strictEqual(off(worked), 0, 'Mon–Sat are still ahead');
+  assert.strictEqual(off([]), 1, 'but a Sunday that has begun with nothing in it counts');
 });
 
 test('a week that has not started yet is not a quiet week', () => {
-  // Thu 10 Sep 2026. September starts on a Tuesday: W1 1–6, W2 7–13, then W3–W5 ahead.
+  // Thu 10 Sep 2026. September starts on a Tuesday: W1 1–5, W2 6–12, then W3–W5 ahead.
   const now = new Date(2026, 8, 10, 12, 0, 0).getTime();
   const quiet = (samples) => buildViews(samples, now).month.stats.find((s) => s.label === 'Quiet weeks').value;
   // An idle sample on the 1st says the sampler was running through W1 — without it, W1
@@ -344,14 +344,14 @@ test('a week that has not started yet is not a quiet week', () => {
 });
 
 test('a period that ended before the log began is not a day off or a quiet week', () => {
-  // The timecard was installed on Thu 10 Sep 2026. Nobody knows what Mon–Wed held.
+  // The timecard was installed on Thu 10 Sep 2026. Nobody knows what Sun–Wed held.
   const now = new Date(2026, 8, 11, 12, 0, 0).getTime(); // Fri
   const samples = activeRun(new Date(2026, 8, 10, 11, 0, 0).getTime(), 12);
   const { week, month } = buildViews(samples, now);
   assert.strictEqual(week.stats.find((s) => s.label === 'Days off').value, 1,
-    'Friday counts; Mon–Wed predate the log, Thursday has hours, Sat–Sun are ahead');
+    'Friday counts; Sun–Wed predate the log, Thursday has hours, Saturday is ahead');
   assert.strictEqual(month.stats.find((s) => s.label === 'Quiet weeks').value, 0,
-    'W1 (1–6 Sep) ended before the first sample');
+    'W1 (1–5 Sep) ended before the first sample');
 });
 
 test('a block that has not started yet is not an idle block', () => {

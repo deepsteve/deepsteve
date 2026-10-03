@@ -44,7 +44,7 @@ const VIEW_MAX = { day: DAY_BLOCK_HOURS, week: 12, month: 60 };
 
 const WEEKDAY_LONG = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 const WEEKDAY_SHORT = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-const WEEK_LABELS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+const WEEK_LABELS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const MONTH_LONG = ['January', 'February', 'March', 'April', 'May', 'June',
   'July', 'August', 'September', 'October', 'November', 'December'];
 const MONTH_SHORT = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
@@ -202,12 +202,12 @@ function decideSample({
   };
 }
 
-// --- Date helpers. Local time throughout; the week starts Monday. ---
+// --- Date helpers. Local time throughout; the week starts Sunday. ---
 
 function startOfDay(t) { const d = new Date(t); d.setHours(0, 0, 0, 0); return d; }
 function startOfWeek(t) {
   const d = startOfDay(t);
-  d.setDate(d.getDate() - ((d.getDay() + 6) % 7));
+  d.setDate(d.getDate() - d.getDay());
   return d;
 }
 function startOfMonth(t) { const d = startOfDay(t); d.setDate(1); return d; }
@@ -221,7 +221,7 @@ function dayRange(d) {
   return `${WEEKDAY_LONG[d.getDay()]} ${d.getDate()} ${MONTH_SHORT[d.getMonth()]}`;
 }
 function weekRange(start, end) {
-  // A week straddling two months has to name both, or "Mon 28 – Sun 3 Aug" reads as a
+  // A week straddling two months has to name both, or "Sun 27 – Sat 2 Aug" reads as a
   // week that runs backwards.
   const from = start.getMonth() === end.getMonth()
     ? `${WEEKDAY_SHORT[start.getDay()]} ${start.getDate()}`
@@ -276,7 +276,7 @@ function statsFor(name, values, started) {
   // days off is not a week of five-sevenths days.
   const logged = values.filter((v) => v > 0);
   const avg = logged.length ? logged.reduce((a, b) => a + b, 0) / logged.length : 0;
-  // Only a period that has begun can be a day off. On a Monday the six days ahead are
+  // Only a period that has begun can be a day off. On a Sunday the six days ahead are
   // zeros because they have not happened, not because nobody worked them.
   const off = values.filter((v, i) => started[i] && !(v > 0)).length;
   return [
@@ -355,7 +355,7 @@ function buildMonth(samples, now, logStart, first = startOfMonth(now)) {
   let n = 0;
   while (cursor.getTime() < next.getTime()) {
     const weekEnd = new Date(cursor); weekEnd.setDate(weekEnd.getDate() + 7);
-    // Weeks are clipped to the month, so W1 of a month starting on a Saturday is two
+    // Weeks are clipped to the month, so W1 of a month starting on a Friday is two
     // days long and the month's bars sum to the month's hours.
     const from = Math.max(cursor.getTime(), first.getTime());
     const to = Math.min(weekEnd.getTime(), next.getTime());
@@ -409,7 +409,7 @@ function buildViews(samples, now = Date.now()) {
 // for as long as it is showing them.
 const SEED_VALUES = {
   day: [1.8, 2.0, 0, 1.9, 2.0, 1.4],
-  week: [9.5, 8.2, 11.4, 7.6, 10.1, 3.4, 0],
+  week: [0, 9.5, 8.2, 11.4, 7.6, 10.1, 3.4],
   month: [44.6, 51.2, 38.9, 50.2, 12.3],
 };
 
