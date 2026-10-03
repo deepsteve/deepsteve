@@ -1372,8 +1372,16 @@ routes), and `decision-bar.js` (the in-page bar).
   `deleteDisplayTab`, which is how a user's ✕ (`DELETE /api/display-tab/:id`, owned by no mod)
   drops the record; `onConnect` returns a message for each control socket as it connects, sent
   **before** the pending-opens flush.
+- **Every click carries the page's state (#721).** The bar sends `state` with every button,
+  whatever `allow_note` says: `window.decisionState()` if the page defines one (a string, or
+  anything JSON can carry); otherwise each localStorage key the page read or wrote and each
+  filled form control outside the bar. The keys come from a `Storage.prototype` tracker that
+  `injectDecisionBar` puts first in `<head>`, because the bar loads at the end of `<body>` and
+  would miss the page reading its saved picks on load. `/decide` caps `state` at `MAX_STATE`
+  (64 000 chars); `decidePrompt` prints it under "The page when they clicked:", apart from the
+  typed note, and the log records only its length.
 - **Routes.** `GET /api/display-tab/:id/decision` (read-only: config, status, `ownerAlive`),
-  `POST /api/display-tab/:id/decide {index, note?}` (behind `requireAllowedOrigin`), and
+  `POST /api/display-tab/:id/decide {index, note?, state?}` (behind `requireAllowedOrigin`), and
   `GET /api/decision-tabs` — deliberately not under `/api/display-tab/`, where server.js's `:id`
   route would take the word for an id.
 - **A tool result first.** Typing into Claude Code's composer means reading its screen to know
