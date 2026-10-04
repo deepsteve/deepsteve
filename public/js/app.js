@@ -22,7 +22,7 @@ import { TabManager, getDefaultTabName, initTabArrows, refreshTabArrows } from '
 import { createTerminal, setupTerminalIO, fitTerminal, resizeTerminal, observeTerminalResize, measureTerminalSize, updateTerminalTheme, installTerminalWheelGuard } from './terminal.js';
 import { createWebSocket } from './ws-client.js';
 import { createConnectionTracker } from './connection-status.js';
-import { formatElapsed } from './elapsed.js';
+import { formatElapsed, relativeTime } from './elapsed.js';
 import { showDirectoryPicker } from './dir-picker.js';
 import { showSessionRestoreModal } from './session-restore-modal.js';
 import { LayoutManager } from './layout-manager.js';
@@ -408,17 +408,6 @@ const getVisibleTabIds = () =>
 // session configs, restorable from any browser/window/tab. See renderEmptyStateRecent
 // (empty-state buttons) and restoreRecentSession (the restore action).
 let recentSessions = [];
-
-function relativeTime(ts) {
-  if (!ts) return '';
-  const s = Math.max(0, Math.floor((Date.now() - ts) / 1000));
-  if (s < 60) return 'just now';
-  const m = Math.floor(s / 60);
-  if (m < 60) return `${m}m ago`;
-  const h = Math.floor(m / 60);
-  if (h < 24) return `${h}h ago`;
-  return `${Math.floor(h / 24)}d ago`;
-}
 
 function renderEmptyStateRecent() {
   const container = document.getElementById('empty-state-recent');
@@ -2818,17 +2807,18 @@ function createModTab(modId, opts = {}) {
   notifyTabsChanged();
 }
 
-// Display tabs the server says are locked, and how many it can reopen (#715). Server-owned:
-// it arrives as one full-state `display-tab-state` message on connect and on every change, so a
-// tab created before or after that message reads the same answer.
+// Display tabs the server says are locked, and the ones it can reopen (#715) — the stack itself,
+// [{id, name, closedAt}] newest first, which the "Reopen closed tab" submenu lists (#723).
+// Server-owned: it arrives as one full-state `display-tab-state` message on connect and on every
+// change, so a tab created before or after that message reads the same answer.
 const displayTabLocks = new Set();
-let closedDisplayTabCount = 0;
+let closedDisplayTabs = [];
 
 function applyDisplayTabState(state) {
   if (!state) return;
   displayTabLocks.clear();
   for (const id of state.locked || []) displayTabLocks.add(id);
-  closedDisplayTabCount = state.closed || 0;
+  closedDisplayTabs = Array.isArray(state.closed) ? state.closed : [];
   for (const [id, s] of sessions) {
     if (s.type !== 'display-tab') continue;
     s.locked = displayTabLocks.has(id);
@@ -2847,20 +2837,28 @@ function setDisplayTabLock(id, locked) {
 }
 
 /**
- * "Reopen closed tab" (#715): the server pops its stack and hands the tab back to the window that
- * asked. The tab may still be open here — a ✕ in another window closes only that window's copy —
- * so an existing tab is jumped to, never created twice.
+ * "Reopen closed tab" (#715): the server takes the tab off its stack — the one with `id` (#723),
+ * or the newest — and hands it back to the window that asked. The tab may still be open here —
+ * a ✕ in another window closes only that window's copy — so an existing tab is jumped to, never
+ * created twice.
  */
-async function reopenClosedTab() {
+async function reopenClosedTab(id) {
+  const byId = typeof id === 'string';
   let tab;
   try {
-    tab = await fetchJSON('/api/display-tabs/reopen', { method: 'POST' });
+    // The Content-Type is what makes the server parse the body; without it the id is dropped
+    // and the newest tab comes back instead of the one that was picked.
+    tab = await fetchJSON('/api/display-tabs/reopen', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(byId ? { id } : {}),
+    });
   } catch {
     showToast("Couldn't reopen the tab");
     return;
   }
   applyDisplayTabState(tab.state);
-  if (!tab.id) { showToast('No recently closed tabs'); return; }
+  if (!tab.id) { showToast(byId ? 'That tab can no longer be reopened' : 'No recently closed tabs'); return; }
   // A reopened tab is never a decision tab (its record went with the close), and Decision Tab
   // mode hides every tab that isn't one.
   DecisionMode.exit();
@@ -5246,9 +5244,9 @@ async function init() {
     switchToTab: userJumpTo,
   });
 
-  // "Reopen closed tab" in the tab bar's right-click menus (#715).
+  // "Reopen closed tab" in the tab bar's right-click menus (#715), and its submenu (#723).
   TabManager.setReopenClosedTab({
-    isAvailable: () => closedDisplayTabCount > 0,
+    list: () => closedDisplayTabs,
     reopen: reopenClosedTab,
   });
 

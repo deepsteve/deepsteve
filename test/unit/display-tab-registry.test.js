@@ -45,6 +45,70 @@ test('close moves the page onto the stack, newest first, and reopen brings it ba
   assert.strictEqual(reg.closedCount(), 0);
 });
 
+// ── Reopen by id (#723) ──────────────────────────────────────────────────────
+
+function closeThree() {
+  const s = setup();
+  for (const [id, name, cwd] of [['aa', 'A', '/a'], ['bb', 'B', null], ['cc', 'C', '/c']]) {
+    s.reg.set(id, `<p>${id}</p>`, { name, cwd });
+    s.reg.close(id);
+    s.clock.t += 1000;
+  }
+  return s; // stack: cc, bb, aa
+}
+
+test('reopen(id) brings back that exact tab from the middle of the stack, and leaves the rest in order', () => {
+  const { dir, reg } = closeThree();
+  assert.deepStrictEqual(reg.reopen('bb'), { id: 'bb', name: 'B', cwd: null });
+  assert.strictEqual(reg.tabs.get('bb'), '<p>bb</p>', 'its own content, not the newest one');
+  assert.ok(exists(dir, 'bb.html'));
+  assert.ok(!exists(dir, 'closed', 'bb.html'));
+  assert.deepStrictEqual(reg.closedList().map(e => e.id), ['cc', 'aa']);
+  assert.ok(!reg.tabs.has('cc') && !reg.tabs.has('aa'), 'nothing else reopens');
+  assert.deepStrictEqual(reg.reopen(), { id: 'cc', name: 'C', cwd: '/c' }, 'no id still means the newest');
+});
+
+test('reopen(id) of an id that is not on the stack is null and changes nothing', () => {
+  const { dir, reg } = closeThree();
+  assert.strictEqual(reg.reopen('nope'), null);
+  assert.strictEqual(reg.reopen('../index'), null, 'a request id is never turned into a path');
+  assert.ok(exists(dir, 'index.json'));
+  assert.deepStrictEqual(reg.closedList().map(e => e.id), ['cc', 'bb', 'aa']);
+  assert.strictEqual(reg.tabs.size, 0);
+});
+
+test('reopen(id) a second time is null — another window got there first', () => {
+  const { reg } = closeThree();
+  assert.strictEqual(reg.reopen('aa').id, 'aa');
+  assert.strictEqual(reg.reopen('aa'), null);
+  assert.ok(reg.tabs.has('aa'), 'the first reopen stands');
+  assert.deepStrictEqual(reg.closedList().map(e => e.id), ['cc', 'bb']);
+});
+
+test('reopen(id) of an expired entry is null, and its file is removed', () => {
+  const { dir, clock, reg } = setup();
+  reg.set('old', 'o', { name: 'Old' });
+  reg.close('old');
+  clock.t += DAY;
+  reg.set('new', 'n', { name: 'New' });
+  reg.close('new');
+  clock.t += 6.5 * DAY; // old is 7.5 days closed, new 6.5
+  assert.strictEqual(reg.reopen('old'), null);
+  assert.ok(!exists(dir, 'closed', 'old.html'));
+  assert.ok(!reg.tabs.has('old'));
+  assert.deepStrictEqual(reg.closedList().map(e => e.id), ['new']);
+  assert.strictEqual(reg.reopen('new').id, 'new');
+});
+
+test('a reopen by id survives a restart', () => {
+  const { make, reg } = closeThree();
+  reg.reopen('bb');
+  const after = make();
+  after.load();
+  assert.strictEqual(after.tabs.get('bb'), '<p>bb</p>');
+  assert.deepStrictEqual(after.closedList().map(e => e.id), ['cc', 'aa']);
+});
+
 test('closing a missing tab is a no-op, and a second close of the same tab pushes nothing', () => {
   const { reg } = setup();
   assert.strictEqual(reg.close('nope'), 'missing');

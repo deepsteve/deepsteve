@@ -2,6 +2,9 @@
  * Tab UI management for terminal tabs
  */
 
+import { attachSubmenu, enableMenuKeyboard } from './context-menu.js';
+import { relativeTime } from './elapsed.js';
+
 // Speaker icon shown on a tab while it is emitting audio (inline SVG, inherits currentColor).
 const SPEAKER_SVG = '<svg viewBox="0 0 16 16"><path d="M8 2 4 5H1v6h3l4 3V2z" fill="currentColor"/><path d="M11 5a4 4 0 0 1 0 6" stroke="currentColor" fill="none" stroke-width="1.4" stroke-linecap="round"/></svg>';
 
@@ -15,40 +18,79 @@ let dragState = null;
 let suppressNextClick = false;
 
 let contextMenu = null;
+let contextMenuKeys = null;
 
-// "Reopen closed tab" (#715), set by app.js: { isAvailable(), reopen() }. Not per-tab — the stack
-// is the server's, so every tab's menu and the empty bar's offer the same item.
+// "Reopen closed tab" (#715), set by app.js: { list(), reopen(id?) }. list() is the server's stack,
+// newest first — [{id, name, closedAt}] — and reopen() with no id takes the newest. Not per-tab —
+// the stack is the server's, so every tab's menu and the empty bar's offer the same item.
 let reopenClosed = null;
 
 function appendReopenItem(menu) {
-  const available = !!(reopenClosed && reopenClosed.isAvailable());
   const el = document.createElement('div');
   el.className = 'context-menu-item';
-  if (!available) el.classList.add('disabled');
   el.textContent = 'Reopen closed tab';
-  el.onclick = () => {
-    if (!available) return;
-    hideContextMenu();
-    reopenClosed.reopen();
-  };
   menu.appendChild(el);
+  // Nothing to reopen: disabled, with no arrow and no flyout behind it.
+  if (!reopenClosed || !reopenClosed.list().length) {
+    el.classList.add('disabled');
+    return;
+  }
+  // Hovering lists every closed tab (#723); clicking the row itself still reopens the newest, the
+  // one click it has been since #715.
+  attachSubmenu(menu, el, (flyout) => {
+    const closed = reopenClosed.list();
+    if (!closed.length) {
+      const none = document.createElement('div');
+      none.className = 'context-menu-item';
+      none.classList.add('disabled');
+      none.textContent = 'No recently closed tabs';
+      flyout.appendChild(none);
+    }
+    for (const entry of closed) {
+      const name = entry.name || 'Display';
+      const row = document.createElement('div');
+      row.className = 'context-menu-item';
+      row.classList.add('context-menu-row');
+      row.title = name;
+      const label = document.createElement('span');
+      label.className = 'context-menu-label';
+      label.textContent = name;
+      const hint = document.createElement('span');
+      hint.className = 'context-menu-hint';
+      hint.textContent = relativeTime(entry.closedAt);
+      row.appendChild(label);
+      row.appendChild(hint);
+      row.onclick = () => {
+        hideContextMenu();
+        reopenClosed.reopen(entry.id);
+      };
+      flyout.appendChild(row);
+    }
+  }, {
+    onClick: () => {
+      hideContextMenu();
+      reopenClosed.reopen();
+    },
+  });
 }
 
 function placeMenu(menu, x, y) {
-  menu.style.left = x + 'px';
+  // Measured at the left edge, where nothing squeezes it. Measured where it opens, a menu near the
+  // right edge shrinks to the sliver left there, wraps its rows (a submenu's ▶ drops onto a line
+  // of its own), and keeps that width when it is moved back on screen.
+  menu.style.left = '0px';
   menu.style.top = y + 'px';
   document.body.appendChild(menu);
 
   // Adjust if off-screen
   const rect = menu.getBoundingClientRect();
-  if (rect.right > window.innerWidth) {
-    menu.style.left = (window.innerWidth - rect.width - 8) + 'px';
-  }
+  menu.style.left = (x + rect.width > window.innerWidth ? window.innerWidth - rect.width - 8 : x) + 'px';
   if (rect.bottom > window.innerHeight) {
     menu.style.top = (window.innerHeight - rect.height - 8) + 'px';
   }
 
   contextMenu = menu;
+  contextMenuKeys = enableMenuKeyboard(menu, { onClose: () => hideContextMenu() });
 }
 
 function buildWindowLabel(win) {
@@ -79,21 +121,12 @@ function showContextMenu(x, y, sessionId, callbacks) {
   const liveWindows = callbacks.getLiveWindows ? callbacks.getLiveWindows() : [];
   const sendEl = document.createElement('div');
   sendEl.className = 'context-menu-item';
+  sendEl.textContent = 'Send to Window';
 
   if (liveWindows.length === 0) {
     sendEl.classList.add('disabled');
-    sendEl.textContent = 'Send to Window';
   } else {
-    sendEl.classList.add('context-menu-has-submenu');
-    sendEl.innerHTML = 'Send to Window <span class="context-menu-arrow"></span>';
-
-    // Build submenu on mouseenter
-    let submenu = null;
-    sendEl.addEventListener('mouseenter', () => {
-      if (submenu) return;
-      submenu = document.createElement('div');
-      submenu.className = 'context-menu context-submenu';
-
+    attachSubmenu(menu, sendEl, (flyout) => {
       for (const win of liveWindows) {
         const winEl = document.createElement('div');
         winEl.className = 'context-menu-item';
@@ -102,25 +135,7 @@ function showContextMenu(x, y, sessionId, callbacks) {
           hideContextMenu();
           callbacks.onSendToWindow?.(sessionId, win.windowId);
         };
-        submenu.appendChild(winEl);
-      }
-
-      sendEl.appendChild(submenu);
-
-      // Flip left if off-screen right
-      const subRect = submenu.getBoundingClientRect();
-      if (subRect.right > window.innerWidth) {
-        submenu.style.left = 'auto';
-        submenu.style.right = '100%';
-        submenu.style.marginLeft = '0';
-        submenu.style.marginRight = '2px';
-      }
-    });
-
-    sendEl.addEventListener('mouseleave', () => {
-      if (submenu) {
-        submenu.remove();
-        submenu = null;
+        flyout.appendChild(winEl);
       }
     });
   }
@@ -271,7 +286,10 @@ function showBarContextMenu(x, y) {
   placeMenu(menu, x, y);
 }
 
+// Also the document's click listener, so it takes no parameters: the first would be the event.
 function hideContextMenu() {
+  contextMenuKeys?.dispose();
+  contextMenuKeys = null;
   if (contextMenu) {
     contextMenu.remove();
     contextMenu = null;
@@ -801,7 +819,7 @@ export const TabManager = {
     close.setAttribute('aria-label', on ? 'Locked' : 'Close');
   },
 
-  /** Wire the "Reopen closed tab" menu items to the app: { isAvailable(), reopen() } (#715). */
+  /** Wire the "Reopen closed tab" menu items to the app: { list(), reopen(id?) } (#715, #723). */
   setReopenClosedTab(hooks) {
     reopenClosed = hooks;
   },

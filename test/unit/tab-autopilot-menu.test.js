@@ -1,5 +1,6 @@
 // Headless unit tests for the tab right-click menu's session-lifecycle items:
-// Autopilot (#643), Merge (#688), and a display tab's Lock plus "Reopen closed tab" (#715).
+// Autopilot (#643), Merge (#688), a display tab's Lock plus "Reopen closed tab" (#715) and its
+// submenu of recently closed tabs (#723).
 //
 // Autopilot's whole point is that it is a SERVER-side value: the menu is one of the
 // two switches that writes it, and it must show the session's real state (which the
@@ -47,18 +48,23 @@ function fakeElement() {
     '.close': { addEventListener: () => {} },
     '.tab-history': { addEventListener: () => {} },   // #672
   };
+  const attrs = {};
   const el = {
     children,
     listeners,
+    attrs,
     id: '',
     className: '',
     textContent: '',
     innerHTML: '',
+    title: '',
     style: {},
     classList: fakeClassList(),
     onclick: null,
+    isConnected: true,
     addEventListener: (type, fn) => { listeners[type] = fn; },
     removeEventListener: () => {},
+    setAttribute: (k, v) => { attrs[k] = String(v); },
     appendChild: (c) => { children.push(c); return c; },
     remove: () => {},
     querySelector: (sel) => stubs[sel] ?? null,
@@ -285,24 +291,86 @@ test('a locked display tab offers Unlock, and its Close is disabled and does not
   assert.deepEqual(toggles, [['s1', false]]);
 });
 
-test('Reopen closed tab is disabled until the app says there is one, then reopens it', async () => {
+// The server's stack as app.js hands it over (#723): newest first.
+const MIN = 60 * 1000;
+function stack() {
+  const now = Date.now();
+  return [
+    { id: 'cc', name: 'Charts', closedAt: now - 2 * MIN },
+    { id: 'bb', name: null, closedAt: now - 3 * 60 * MIN },
+    { id: 'aa', name: 'Old report', closedAt: now - 2 * 24 * 60 * MIN },
+  ];
+}
+
+const hasArrow = (item) => item.children.some((c) => c.className === 'context-menu-arrow');
+
+/** Hover the row and let the open delay pass; hands back the flyout attachSubmenu built. */
+function openFlyout(item, t) {
+  item.listeners.mouseenter();
+  t.mock.timers.tick(1000);
+  return item.children.find((c) => c.className.includes('context-flyout'));
+}
+
+test('Reopen closed tab is disabled, with no submenu, until the app has a stack', async () => {
   const { tab, TabManager } = await setup({});
   const unwired = findItem(openMenuOn(tab), 'Reopen closed tab');
   assert.ok(unwired.classList.contains('disabled'));
 
-  let available = false;
   let reopened = 0;
-  TabManager.setReopenClosedTab({ isAvailable: () => available, reopen: () => { reopened++; } });
+  TabManager.setReopenClosedTab({ list: () => [], reopen: () => { reopened++; } });
   const empty = findItem(openMenuOn(tab), 'Reopen closed tab');
   assert.ok(empty.classList.contains('disabled'));
-  empty.onclick();
+  assert.ok(!hasArrow(empty), 'no arrow on an empty stack');
+  assert.equal(empty.listeners.mouseenter, undefined, 'and no flyout to hover open');
+  assert.equal(empty.onclick, null, 'nothing to click either');
   assert.equal(reopened, 0);
+});
 
-  available = true;
+test('with a stack, clicking the row itself reopens the newest, as before #723', async () => {
+  const { tab, TabManager } = await setup({});
+  const calls = [];
+  TabManager.setReopenClosedTab({ list: stack, reopen: (...args) => calls.push(args) });
   const ready = findItem(openMenuOn(tab), 'Reopen closed tab');
   assert.ok(!ready.classList.contains('disabled'));
+  assert.ok(hasArrow(ready));
+  assert.equal(ready.attrs['aria-haspopup'], 'menu');
   ready.onclick();
-  assert.equal(reopened, 1);
+  assert.deepEqual(calls, [[]], 'no id: the server takes the newest');
+});
+
+test('hovering it lists every closed tab, newest first, with its name and how long ago', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const { tab, TabManager } = await setup({});
+  TabManager.setReopenClosedTab({ list: stack, reopen: () => {} });
+  const flyout = openFlyout(findItem(openMenuOn(tab), 'Reopen closed tab'), t);
+  assert.ok(flyout, 'a flyout opened');
+  const rows = flyout.children.map((r) => r.children.map((s) => s.textContent));
+  assert.deepEqual(rows, [
+    ['Charts', '2m ago'],
+    ['Display', '3h ago'],      // an unnamed tab reads as createDisplayTab names it
+    ['Old report', '2d ago'],
+  ]);
+});
+
+test('clicking an entry reopens that exact tab, not the newest', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const { tab, TabManager } = await setup({});
+  const calls = [];
+  TabManager.setReopenClosedTab({ list: stack, reopen: (...args) => calls.push(args) });
+  const flyout = openFlyout(findItem(openMenuOn(tab), 'Reopen closed tab'), t);
+  flyout.children[1].onclick();
+  assert.deepEqual(calls, [['bb']]);
+});
+
+test('the flyout lists the stack as it is when it opens, not when the menu did', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const { tab, TabManager } = await setup({});
+  let list = stack();
+  TabManager.setReopenClosedTab({ list: () => list, reopen: () => {} });
+  const item = findItem(openMenuOn(tab), 'Reopen closed tab');
+  list = list.slice(1); // another window reopened the newest meanwhile
+  const flyout = openFlyout(item, t);
+  assert.deepEqual(flyout.children.map((r) => r.title), ['Display', 'Old report']);
 });
 
 function rightClickBar({ inTab = false, inButton = false, inBar = true, defaultPrevented = false } = {}) {
@@ -323,7 +391,7 @@ function rightClickBar({ inTab = false, inButton = false, inBar = true, defaultP
 test("right-clicking the bar's empty space opens a menu with Reopen closed tab", async () => {
   const { TabManager } = await setup({});
   let reopened = 0;
-  TabManager.setReopenClosedTab({ isAvailable: () => true, reopen: () => { reopened++; } });
+  TabManager.setReopenClosedTab({ list: stack, reopen: () => { reopened++; } });
   const { prevented, menu } = rightClickBar();
   assert.ok(prevented, 'the browser menu is replaced');
   assert.deepEqual(menu.children.map(labelOf), ['Reopen closed tab']);

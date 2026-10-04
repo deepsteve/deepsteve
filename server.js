@@ -5644,11 +5644,18 @@ app.post('/api/display-tab/:id/lock', security.requireAllowedOrigin, (req, res) 
 // comes back in the RESPONSE, not as an open-display-tab broadcast: the window that asked is
 // the one that should show it, and it is certainly listening to this request. An empty stack
 // is a 200 — nothing to reopen is an answer, not an error the client log should record.
+// `{id}` reopens that entry (#723) and no id reopens the newest; an id no longer on the stack
+// (another window reopened it, or it expired) is the same `{id: null}` an empty stack gets.
+// Every call broadcasts, since even a miss can have trimmed expired entries off every menu.
 app.post('/api/display-tabs/reopen', security.requireAllowedOrigin, (req, res) => {
-  const tab = displayTabRegistry.reopen();
+  const id = req.body ? req.body.id : undefined;
+  if (id !== undefined && id !== null && typeof id !== 'string') {
+    return res.status(400).json({ error: 'id must be a string' });
+  }
+  const tab = displayTabRegistry.reopen(id);
+  broadcastDisplayTabState();
   if (!tab) return res.json({ id: null, state: displayTabStateMessage() });
   log(`[display-tab] reopened ${tab.id} (${tab.name || 'unnamed'})`);
-  broadcastDisplayTabState();
   res.json({ ...tab, state: displayTabStateMessage() });
 });
 
@@ -8018,8 +8025,13 @@ function setDisplayTabLocked(id, locked) {
 }
 
 // Full state, not a delta, so a lost or reordered message can't leave a window wrong for long.
+// `closed` is the reopen stack itself, newest first, for the "Reopen closed tab" submenu (#723).
 function displayTabStateMessage() {
-  return { type: 'display-tab-state', locked: displayTabRegistry.lockedIds(), closed: displayTabRegistry.closedCount() };
+  return {
+    type: 'display-tab-state',
+    locked: displayTabRegistry.lockedIds(),
+    closed: displayTabRegistry.closedList().map(({ id, name, closedAt }) => ({ id, name, closedAt })),
+  };
 }
 
 function broadcastDisplayTabState() {
@@ -8202,9 +8214,10 @@ function handleWsConnection(ws, req) {
         }
       } catch {}
     });
-    // Which display tabs are locked and whether there is one to reopen (#715), then the mods'
-    // connect-time state (#716: the open decision tabs) — all before the pending opens below, so
-    // a tab restored or opened by that flush arrives already knowing it is locked or a decision.
+    // Which display tabs are locked and which closed ones can be reopened (#715, #723), then the
+    // mods' connect-time state (#716: the open decision tabs) — all before the pending opens
+    // below, so a tab restored or opened by that flush arrives already knowing it is locked or a
+    // decision.
     if (ws.readyState === 1) ws.send(JSON.stringify(displayTabStateMessage()));
     for (const [name, h] of displayTabHooks) {
       if (typeof h.onConnect !== 'function') continue;

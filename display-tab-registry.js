@@ -1,5 +1,5 @@
 // Display tabs on disk (#715): each open tab's HTML, which tabs are locked, and the stack of
-// recently closed tabs that "Reopen closed tab" pops.
+// recently closed tabs that "Reopen closed tab" pops — the newest, or any one by id (#723).
 //
 // Before #715 a close unlinked <dir>/<id>.html, which is why closing asked "are you sure?".
 // Now a close moves the file into <dir>/closed/ and pushes an entry, and a reopen moves it back
@@ -218,22 +218,40 @@ function createDisplayTabRegistry({
     return 'closed';
   }
 
-  /** Pop the most recently closed tab back open. Returns {id, name, cwd}, or null when there is none. */
-  function reopen() {
+  // Move one entry's page back open. The entry is already off the stack; null when it can't come
+  // back, which drops it for good.
+  function restore(e) {
+    if (tabs.has(e.id)) { try { fs.unlinkSync(closedPath(e.id)); } catch {} return null; }
+    let html;
+    try { html = fs.readFileSync(closedPath(e.id), 'utf8'); } catch { return null; }
+    if (!move(closedPath(e.id), openPath(e.id), html)) return null;
+    // Reopening is someone asking for the page, so its staleness clock starts again.
+    try { const t = new Date(now()); fs.utimesSync(openPath(e.id), t, t); } catch {}
+    tabs.set(e.id, html);
+    meta[e.id] = { name: e.name, cwd: e.cwd, locked: false };
+    return { id: e.id, name: e.name, cwd: e.cwd };
+  }
+
+  /**
+   * Reopen a closed tab: the one with `id` (#723), or the most recent when there is no id.
+   * Returns {id, name, cwd}, or null when there is none — an id that was never closed, was
+   * already reopened (by another window, say) or has expired is null too. Only an id found on
+   * the stack ever becomes a path.
+   */
+  function reopen(id) {
     let changed = trimClosed();
     let out = null;
-    while (closed.length && !out) {
-      const e = closed.shift();
-      changed = true;
-      if (tabs.has(e.id)) { try { fs.unlinkSync(closedPath(e.id)); } catch {} continue; }
-      let html;
-      try { html = fs.readFileSync(closedPath(e.id), 'utf8'); } catch { continue; }
-      if (!move(closedPath(e.id), openPath(e.id), html)) continue;
-      // Reopening is someone asking for the page, so its staleness clock starts again.
-      try { const t = new Date(now()); fs.utimesSync(openPath(e.id), t, t); } catch {}
-      tabs.set(e.id, html);
-      meta[e.id] = { name: e.name, cwd: e.cwd, locked: false };
-      out = { id: e.id, name: e.name, cwd: e.cwd };
+    if (id === undefined || id === null) {
+      while (closed.length && !out) {
+        out = restore(closed.shift());
+        changed = true;
+      }
+    } else {
+      const i = closed.findIndex(e => e.id === id);
+      if (i >= 0) {
+        out = restore(closed.splice(i, 1)[0]);
+        changed = true;
+      }
     }
     if (changed) save();
     return out;
@@ -243,7 +261,7 @@ function createDisplayTabRegistry({
     return closed.filter(e => !isExpired(e)).length;
   }
 
-  /** The stack, newest first (copies). For tests and logging. */
+  /** The stack, newest first (copies). What the browser's "Reopen closed tab" submenu lists (#723). */
   function closedList() {
     return closed.filter(e => !isExpired(e)).map(e => ({ ...e }));
   }
