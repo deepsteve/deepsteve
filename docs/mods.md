@@ -1327,10 +1327,18 @@ server.js's `displayTabs` is its map.
   tab's current name so a rename survives), an agent's `close_display_tab`, and a decision tab
   closing itself. The stack keeps the newest 20 for 7 days and survives a restart.
 - **Reopen.** "Reopen closed tab" in the tab bar's right-click menu (and at the foot of every
-  tab's menu) calls `POST /api/display-tabs/reopen`. It pops the newest entry back open **under
-  the same id**, so the agent's `tab_id` works again. The tab comes back in the response, never as
-  an `open-display-tab` broadcast, because a window whose control socket isn't registered would
-  drop the broadcast. An empty stack answers 200 `{id: null}`.
+  tab's menu) calls `POST /api/display-tabs/reopen`. It brings an entry back open **under the
+  same id**, so the agent's `tab_id` works again.
+  - With no body it reopens the newest entry. With `{id}` it reopens that entry, which is what each
+    row of the item's submenu sends (#723).
+  - The body is JSON, so the request needs `Content-Type: application/json`. Without it the global
+    parser skips the body, and the newest tab comes back instead of the chosen one.
+  - A non-string `id` is a 400.
+  - The tab comes back in the response, never as an `open-display-tab` broadcast, because a window
+    whose control socket isn't registered would drop the broadcast.
+  - An empty stack, or an id no longer on it (another window reopened it, or it expired), answers
+    200 `{id: null}`.
+  - The registry only ever builds a path from an id it finds on the stack.
 - **A reopened decision tab has no buttons.** `onDelete` forgot its record, and its
   `await_decision` already returned (the choice, or "closed" with none). Re-arm it with
   `update_display_tab` + `decision`.
@@ -1344,10 +1352,13 @@ server.js's `displayTabs` is its map.
     stays on disk until someone unlocks it.
   - It is protection against accidents, not a security boundary. Any same-origin page can call
     the route.
-- **State reaches the browser as full state**: `{type:'display-tab-state', locked, closed}`. It is
-  sent on connect (ahead of the mods' `onConnect` and the pending-opens flush) and on every
-  change; `setDisplayTabLocked` sends it synchronously, so a locked create has it on the wire ahead
-  of its open.
+- **State reaches the browser as full state**: `{type:'display-tab-state', locked, closed}`.
+  - `closed` is the stack itself, `[{id, name, closedAt}]` newest first, which the submenu lists.
+    It was a count before #723.
+  - It is sent on connect (ahead of the mods' `onConnect` and the pending-opens flush) and on every
+    change. Every reopen call sends it, hit or miss, so a reopened tab leaves every window's list.
+  - `setDisplayTabLocked` sends it synchronously, so a locked create has it on the wire ahead of
+    its open.
 - **No echo DELETE.** The browser's `close-display-tab` handler calls
   `killSession(id, { serverClosed: true })`, which skips both the lock check and the DELETE. The
   server already closed the tab, and an echo DELETE from each window could land after a reopen and

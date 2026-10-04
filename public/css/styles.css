@@ -643,6 +643,17 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
 .context-menu-arrow::after { content: '\25B6'; }
 .context-menu.context-submenu { min-width: 160px; white-space: nowrap; }
 .context-submenu .context-menu-item { padding: 8px 12px; }
+/* Menus with keyboard navigation (#723, context-menu.js): .active is the one highlight, set by the
+   mouse and the keys alike, so a :hover left behind by the pointer can't show a second one. A
+   submenu row stays lit while its flyout is open. */
+.context-menu-kbd .context-menu-item.active { background: var(--ds-bg-tertiary); }
+.context-menu-kbd .context-menu-item:hover:not(.active):not([aria-expanded="true"]) { background: transparent; }
+.context-menu-has-submenu[aria-expanded="true"] { background: var(--ds-bg-tertiary); }
+/* attachSubmenu's flyout: capped so a full stack (20 closed tabs) scrolls inside the viewport. */
+.context-flyout { max-height: min(420px, calc(100vh - 16px)); max-width: 360px; overflow-y: auto; }
+.context-menu-row { display: flex; align-items: baseline; gap: 16px; }
+.context-menu-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.context-menu-hint { flex-shrink: 0; font-size: 11px; color: var(--ds-text-secondary); }
 
 /* Split button group (+ / ▾) */
 #new-btn-group { display: flex; margin-left: 4px; flex-shrink: 0; }

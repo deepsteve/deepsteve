@@ -96,7 +96,23 @@ Tests: `test/unit/session-history-client.test.js` (the folding, grouping and for
 - An event a control already handled (`defaultPrevented`) is left alone.
 - Anything else in `#tabs` that isn't a `button`, `input` or `.dropdown` gets the bar menu. That is `#tabs-spacer` in horizontal layout and the empty `#tabs-list` in vertical layout.
 
-**"Reopen closed tab"** is the bar menu's item, and it also sits at the foot of every tab's menu, because a full strip has no empty space left. `TabManager.setReopenClosedTab()` wires it to `reopenClosedTab()` in `app.js`. The server side is in [mods.md](mods.md#closing-locking-and-reopening-715).
+**"Reopen closed tab"** is the bar menu's item, and it also sits at the foot of every tab's menu, because a full strip has no empty space left. `TabManager.setReopenClosedTab({ list, reopen })` wires it to `app.js`, where `list()` is the server's closed stack and `reopen(id?)` is `reopenClosedTab()`. The server side is in [mods.md](mods.md#closing-locking-and-reopening-715).
+- Since #723 the item is a submenu. Hovering it lists every closed tab, newest first, with how long ago it closed, and clicking a row reopens that tab.
+- Clicking the item itself still reopens the newest.
+- An empty stack draws it disabled, with no arrow and no submenu.
+
+**Submenus and keyboard navigation live in `public/js/context-menu.js` (#723).** Use them for any new right-click menu rather than another hand-rolled `mouseenter`/`mouseleave` pair. The new-tab menu's Agent and tmux submenus in `app.js` still predate it.
+- **`attachSubmenu(menu, trigger, build, { onClick })`** turns a row into a submenu.
+  - The flyout is a child of the trigger, so removing the menu removes it.
+  - It opens after 120 ms of hover, and leaving starts a 300 ms grace, so the pointer can cross to it without the flyout snapping shut.
+  - `build(flyout)` refills it on every open.
+  - Without `onClick`, a click opens the flyout.
+  - Clicks inside the flyout never reach the trigger.
+- **`enableMenuKeyboard(menu, { onClose })`** gives a whole menu ↑/↓, → into a submenu, ←/Esc back out, Enter/Space and Esc-to-close.
+  - It listens on the document in the capture phase and focuses nothing. A right-click has already taken focus off the terminal.
+  - It swallows every key it handles, so Enter never reaches the PTY.
+  - `.active` (with `context-menu-kbd` on the menu) is the one highlight for mouse and keys alike.
+  - `tab-manager.js` arms it in `placeMenu()` and disposes it in `hideContextMenu()`.
 
 **A locked display tab has no close confirm to fall back on, so the lock is the guard.** The ✕ slot draws a padlock (`.tab.locked`, `TabManager.updateLocked`) but keeps its click. `killSession()` refuses a locked tab with a toast that says how to unlock it. That one guard covers ✕, the menu, ⌘K, and a mod's `killSession` even with `force`.
 
