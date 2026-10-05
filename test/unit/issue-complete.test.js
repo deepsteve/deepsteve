@@ -299,7 +299,9 @@ test('every call is logged, and a merge says which one it did', async () => {
   const { tools, logs } = mergeTools();
   await tools.issue_complete.handler({}, callerExtra('s'));
   assert.equal(logs.length, 1);
-  assert.match(logs[0], /issue_complete: s autopilot=on -> merged \(feature -> main = merged\)/);
+  // ...and where it landed (#725): this scratch repo has no origin, so the log says the
+  // merge fell back to the main checkout and why.
+  assert.match(logs[0], /issue_complete: s autopilot=on -> merged \(feature -> main = merged via local \(no-origin-remote\)\)/);
 
   const off = makeTools();
   await off.tools.issue_complete.handler({}, callerExtra('off'));

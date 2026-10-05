@@ -2,7 +2,7 @@ const { z } = require('zod');
 const { randomUUID } = require('crypto');
 const path = require('path');
 const { execFile, execFileSync } = require('child_process');
-const { mergeWorktree } = require('./merge-worktree');
+const { landWorktree, runGitNet, describeLanding } = require('./land-origin');
 const { mergeSession } = require('./session-merge');
 const projectMods = require('../project-mods/tools.js');
 const { resolveBinary } = require('../../bin-path');
@@ -193,7 +193,7 @@ function init(context) {
       return { ok: false, message: 'Could not resolve this session\'s working directory.' };
     }
     const result = await mergeSession({
-      git: runGit, gh: runGh, cwd, repoRoot, isWorktree: !!caller.worktree, target, subject, body,
+      git: runGit, gh: runGh, gitNet: runGitNet, cwd, repoRoot, isWorktree: !!caller.worktree, target, subject, body,
     });
     // The outcome becomes SESSION STATE, not just a return value. An agent that is told
     // "target-dirty" has already been told to stop, so without this the one fact worth
@@ -698,8 +698,8 @@ function init(context) {
             // context, which is exactly what resolving a conflict needs.
             payload = {
               autopilot: true, next: 'resolve-conflict', ...r,
-              instruction: `Merging "${r.branch}" into "${r.target}" conflicted, and the merge was aborted for `
-                + `you, so ${r.target} is untouched. Rebase this worktree onto it — \`git rebase ${r.target}\`, a `
+              instruction: `Merging "${r.branch}" into "${r.target}" conflicted, and nothing landed, `
+                + `so ${r.target} is untouched. Rebase this worktree onto it — \`git rebase ${r.rebaseOnto || r.target}\`, a `
                 + 'single git inside this worktree, which the isolation guard allows — resolve the conflicts, then '
                 + 'call mcp__deepsteve__merge_worktree to retry the merge. If the rebase itself conflicts beyond '
                 + 'what you can resolve, run `git rebase --abort`, tell the user, and stop. Do NOT close this session.',
@@ -764,12 +764,12 @@ function init(context) {
           + (stages ? ` stages=on result=${resultId || 'none'}/approved` : '')
           + (resumed ? ` resumed=${resumed.commitsBefore ?? '?'}c/${resumed.dirtyBefore ?? '?'}d` : '')
           + ` -> ${payload.next}`
-          + (payload.branch ? ` (${payload.branch} -> ${payload.target || '?'} = ${payload.status})` : ''));
+          + (payload.branch ? ` (${payload.branch} -> ${payload.target || '?'} = ${payload.status}${describeLanding(payload)})` : ''));
         return { content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }] };
       },
     },
     merge_worktree: {
-      description: 'Merge the calling session\'s worktree branch into a target branch, running the merge server-side in the checkout that has the target checked out. Use this instead of `git -C <main checkout> merge` from Bash: Claude Code 2.1.222+ isolates worktree sessions and refuses any Bash command that points git at the shared checkout, so the Bash form cannot work from a worktree. With no `target`, merges into whatever branch the main checkout currently has checked out. Refuses (without changing anything) when the target checkout is dirty, and aborts the merge on conflict so the target is left untouched. Commit your own worktree changes first — this merges committed work only. On success from a worktree session the daemon arms an auto-close of that session and the result says exactly when (`autoCloseAt` / `autoCloseMessage`); calling `close_session` after your report closes it immediately instead, and typing in the tab cancels the auto-close.',
+      description: 'Merge the calling session\'s worktree branch into a target branch, server-side. Use this instead of `git -C <main checkout> merge` from Bash: Claude Code 2.1.222+ isolates worktree sessions and refuses any Bash command that points git at the shared checkout, so the Bash form cannot work from a worktree. With no `target`, merges into whatever branch the main checkout currently has checked out. By default the merge lands on origin (fetch, merge in memory, push) and then catches the main checkout up if it is clean, so uncommitted work there cannot block it; a repo with `git config deepsteve.merge local`, no origin, or the target missing on origin merges in the main checkout instead, which refuses when that checkout is dirty. Either way a conflict leaves the target untouched — on origin the result carries `rebaseOnto` (e.g. `origin/main`) to rebase onto before retrying. Commit your own worktree changes first — this merges committed work only. On success from a worktree session the daemon arms an auto-close of that session and the result says exactly when (`autoCloseAt` / `autoCloseMessage`); calling `close_session` after your report closes it immediately instead, and typing in the tab cancels the auto-close.',
       schema: {
         target: z.string().optional().describe('Branch to merge into. Defaults to the branch currently checked out in the main worktree.'),
         session_id: z.string().optional().describe('Caller session ID (auto-detected if omitted).'),
@@ -784,8 +784,8 @@ function init(context) {
         if (!cwd || !repoRoot) {
           return { content: [{ type: 'text', text: 'Could not resolve this session\'s working directory.' }], isError: true };
         }
-        const result = mergeWorktree({ git: runGit, worktreeCwd: cwd, repoRoot, target });
-        log(`[MCP] merge_worktree: ${result.branch || '?'} -> ${result.target || '?'} = ${result.status}`);
+        const result = await landWorktree({ git: runGit, gitNet: runGitNet, worktreeCwd: cwd, repoRoot, target });
+        log(`[MCP] merge_worktree: ${result.branch || '?'} -> ${result.target || '?'} = ${result.status}${describeLanding(result)}`);
         // The un-composed primitive records the outcome too: every merge path in the
         // product has to leave the same session state behind, or "merge blocked" would
         // mean "blocked, and it happened to be the panel that tried".
@@ -853,7 +853,7 @@ function init(context) {
           return { content: [{ type: 'text', text: outcome.message }], isError: true };
         }
         const payload = outcome.payload;
-        log(`[MCP] merge_session: ${payload.branch || '?'} -> ${payload.target || '?'} = ${payload.status}`
+        log(`[MCP] merge_session: ${payload.branch || '?'} -> ${payload.target || '?'} = ${payload.status}${describeLanding(payload)}`
           + `${payload.committed ? ' (committed)' : ''}`
           + `${payload.issue && payload.issue.closed ? ` closed #${payload.issue.number}` : ''}`);
         // `pushed` joins `merged` as a success: the non-worktree path did everything it
@@ -1338,9 +1338,9 @@ function registerRoutes(app, context) {
       ? req.body.target.trim()
       : undefined;
     const result = await mergeSession({
-      git: runGit, gh: runGh, cwd, repoRoot, isWorktree: true, target,
+      git: runGit, gh: runGh, gitNet: runGitNet, cwd, repoRoot, isWorktree: true, target,
     });
-    context.log(`[API] merge ${id}: ${result.branch || '?'} -> ${result.target || '?'} = ${result.status}`
+    context.log(`[API] merge ${id}: ${result.branch || '?'} -> ${result.target || '?'} = ${result.status}${describeLanding(result)}`
       + `${result.committed ? ' (committed)' : ''}`
       + `${result.issue && result.issue.closed ? ` closed #${result.issue.number}` : ''}`);
     // Not a 500 on a refusal: "the target checkout is dirty" is an answer, and the client

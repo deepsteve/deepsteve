@@ -16,8 +16,9 @@
  * ── What this is NOT ──
  *
  * It is not a replacement for `mergeWorktree`, which stays a general primitive with its
- * own callers and its own tests; this composes ON TOP of it and passes its statuses
- * through byte-for-byte, so `conflict` / `target-dirty` / `target-not-checked-out` /
+ * own callers and its own tests; this composes ON TOP of it — through landWorktree, which
+ * lands on origin first and falls back to it (#725) — and passes its statuses through
+ * byte-for-byte, so `conflict` / `target-dirty` / `target-not-checked-out` /
  * `no-such-branch` / `detached` / `same-branch` mean exactly here what they have always
  * meant to the skill reading them.
  *
@@ -34,7 +35,7 @@
  * on PATH and no daemon, which matters: the CI unit job has none of the three.
  */
 
-const { mergeWorktree } = require('./merge-worktree');
+const { landWorktree } = require('./land-origin');
 // The same module instance mcp-server.js loaded, so refresh() reaches the live daemon's
 // context. With no context it does nothing, so this file's tests still need no daemon.
 const projectMods = require('../project-mods/tools.js');
@@ -77,6 +78,8 @@ async function deriveCommitSubject({ gh, cwd, branch, target, issueNumber }) {
  *
  * @param {(args: string[], cwd: string) => {ok: boolean, stdout: string, stderr: string}} git
  * @param {(argv: string[], cwd: string) => Promise<{stdout?: string, error?: string}>} gh
+ * @param {Function=} gitNet  async git for fetch/push; with it the merge lands on origin
+ *                            (land-origin.js), without it in the main checkout as before
  * @param {string}  cwd         the session's actual working directory (the worktree, for a worktree session)
  * @param {string}  repoRoot    the main checkout
  * @param {boolean} isWorktree  false takes the commit-and-push path and never merges
@@ -89,7 +92,7 @@ async function deriveCommitSubject({ gh, cwd, branch, target, issueNumber }) {
  *   carries `committed` (did we write a commit), `subject` (what it said, or would have)
  *   and `issue` (`null`, or `{ number, closed, error? }`).
  */
-async function mergeSession({ git, gh, cwd, repoRoot, isWorktree, target, subject, body }) {
+async function mergeSession({ git, gh, gitNet, cwd, repoRoot, isWorktree, target, subject, body }) {
   const head = git(['branch', '--show-current'], cwd);
   if (!head.ok) {
     return { status: 'error', message: `Could not read the current branch in ${cwd}: ${head.stderr.trim()}` };
@@ -181,7 +184,7 @@ async function mergeSession({ git, gh, cwd, repoRoot, isWorktree, target, subjec
     };
   }
 
-  const result = mergeWorktree({ git, worktreeCwd: cwd, repoRoot, target });
+  const result = await landWorktree({ git, gitNet, worktreeCwd: cwd, repoRoot, target });
 
   // A merge can bring a project mod into the target checkout — one an agent wrote as plain
   // files in its worktree — and nothing else would tell an open window to look (#703). Before

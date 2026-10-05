@@ -39,21 +39,21 @@ function findWorktreeFor(porcelain, target) {
 }
 
 /**
- * Resolve the target branch and merge directory, then merge.
+ * Which branch is being merged, and into what — the half every merge path shares,
+ * whether it lands in the main checkout (mergeWorktree below) or on origin
+ * (land-origin.js, #725).
  *
- * @param {(args: string[], cwd: string) => {ok: boolean, stdout: string, stderr: string}} git
- * @returns {{status: string, ...}} status is one of:
- *   merged | conflict | failed | target-dirty | target-not-checked-out |
- *   no-such-branch | same-branch | no-target | detached | error
+ * @returns {{ok: true, branch: string, target: string, detectedTarget: string}
+ *          |{ok: false, result: object}} a refusal carries the finished result
  */
-function mergeWorktree({ git, worktreeCwd, repoRoot, target }) {
+function resolveMergeBranches({ git, worktreeCwd, repoRoot, target }) {
   const head = git(['branch', '--show-current'], worktreeCwd);
   if (!head.ok) {
-    return { status: 'error', message: `Could not read the current branch in ${worktreeCwd}: ${head.stderr.trim()}` };
+    return { ok: false, result: { status: 'error', message: `Could not read the current branch in ${worktreeCwd}: ${head.stderr.trim()}` } };
   }
   const branch = head.stdout.trim();
   if (!branch) {
-    return { status: 'detached', message: `${worktreeCwd} is on a detached HEAD — there is no branch to merge.` };
+    return { ok: false, result: { status: 'detached', message: `${worktreeCwd} is on a detached HEAD — there is no branch to merge.` } };
   }
 
   const detected = git(['branch', '--show-current'], repoRoot);
@@ -63,41 +63,60 @@ function mergeWorktree({ git, worktreeCwd, repoRoot, target }) {
   const resolvedTarget = requested || detectedTarget;
   if (!resolvedTarget) {
     return {
-      status: 'no-target',
-      message: `No target branch given and the main checkout (${repoRoot}) is on a detached HEAD, so one can't be inferred. Pass \`target\` explicitly.`,
+      ok: false,
+      result: {
+        status: 'no-target',
+        message: `No target branch given and the main checkout (${repoRoot}) is on a detached HEAD, so one can't be inferred. Pass \`target\` explicitly.`,
+      },
     };
   }
   const safeTarget = validateBranch(resolvedTarget);
   if (!safeTarget) {
-    return { status: 'error', message: `"${resolvedTarget}" is not a valid branch name.` };
+    return { ok: false, result: { status: 'error', message: `"${resolvedTarget}" is not a valid branch name.` } };
   }
   const safeBranch = validateBranch(branch);
   if (!safeBranch) {
-    return { status: 'error', message: `"${branch}" is not a valid branch name.` };
+    return { ok: false, result: { status: 'error', message: `"${branch}" is not a valid branch name.` } };
   }
   if (safeTarget === safeBranch) {
-    return { status: 'same-branch', branch: safeBranch, target: safeTarget, message: `Already on "${safeBranch}" — there is nothing to merge.` };
+    return { ok: false, result: { status: 'same-branch', branch: safeBranch, target: safeTarget, message: `Already on "${safeBranch}" — there is nothing to merge.` } };
   }
+  return { ok: true, branch: safeBranch, target: safeTarget, detectedTarget };
+}
+
+/** The checkout that has `target` checked out, or null when none does. */
+function checkoutHolding({ git, repoRoot, target, detectedTarget }) {
+  if (target === detectedTarget) return repoRoot;
+  const list = git(['worktree', 'list', '--porcelain'], repoRoot);
+  return list.ok ? findWorktreeFor(list.stdout, target) : null;
+}
+
+/**
+ * Resolve the target branch and merge directory, then merge.
+ *
+ * @param {(args: string[], cwd: string) => {ok: boolean, stdout: string, stderr: string}} git
+ * @returns {{status: string, ...}} status is one of:
+ *   merged | conflict | failed | target-dirty | target-not-checked-out |
+ *   no-such-branch | same-branch | no-target | detached | error
+ */
+function mergeWorktree({ git, worktreeCwd, repoRoot, target }) {
+  const resolved = resolveMergeBranches({ git, worktreeCwd, repoRoot, target });
+  if (!resolved.ok) return resolved.result;
+  const { branch: safeBranch, target: safeTarget, detectedTarget } = resolved;
 
   // Merges always run from the checkout that has the target checked out.
-  let mergeDir;
-  if (safeTarget === detectedTarget) {
-    mergeDir = repoRoot;
-  } else {
-    const list = git(['worktree', 'list', '--porcelain'], repoRoot);
-    mergeDir = list.ok ? findWorktreeFor(list.stdout, safeTarget) : null;
-    if (!mergeDir) {
-      const exists = git(['rev-parse', '--verify', safeTarget], repoRoot);
-      if (!exists.ok) {
-        return { status: 'no-such-branch', target: safeTarget, message: `Branch "${safeTarget}" was not found.` };
-      }
-      return {
-        status: 'target-not-checked-out',
-        target: safeTarget,
-        repoRoot,
-        message: `Branch "${safeTarget}" exists but isn't checked out in any worktree. Check it out in ${repoRoot} first, then retry.`,
-      };
+  const mergeDir = checkoutHolding({ git, repoRoot, target: safeTarget, detectedTarget });
+  if (!mergeDir) {
+    const exists = git(['rev-parse', '--verify', safeTarget], repoRoot);
+    if (!exists.ok) {
+      return { status: 'no-such-branch', target: safeTarget, message: `Branch "${safeTarget}" was not found.` };
     }
+    return {
+      status: 'target-not-checked-out',
+      target: safeTarget,
+      repoRoot,
+      message: `Branch "${safeTarget}" exists but isn't checked out in any worktree. Check it out in ${repoRoot} first, then retry.`,
+    };
   }
 
   // The target checkout must be clean: git aborts the merge pre-flight on dirty
@@ -143,4 +162,4 @@ function mergeWorktree({ git, worktreeCwd, repoRoot, target }) {
   return { status: 'failed', branch: safeBranch, target: safeTarget, mergeDir, output };
 }
 
-module.exports = { mergeWorktree, findWorktreeFor, validateBranch };
+module.exports = { mergeWorktree, resolveMergeBranches, checkoutHolding, findWorktreeFor, validateBranch };

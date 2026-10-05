@@ -21,6 +21,7 @@ const { usableWorktree } = require('./worktree-support');
 const { worktreePath, worktreeExists, worktreeStatus, worktreeStatuses, freshWorktreeName } = require('./worktree-status');
 const { stateDir, agentHomeDir, expandTilde, spawnCwdProblem, assertSpawnCwd, tmuxSocketPath, defaultTmuxSocketPath } = require('./paths');
 const { resolveBinary, runBinary, resolveUrlOpener, resolveLoginShell } = require('./bin-path');
+const { worktreeAddArgs } = require('./merge-policy');
 const { createPendingOpens } = require('./pending-opens');
 const { createDisplayTabRegistry } = require('./display-tab-registry');
 const { findOrphanSessions } = require('./orphan-sweep');
@@ -1985,10 +1986,13 @@ function ensureWorktree(cwd, name) {
     return wtPath;
   }
   try {
-    log(`Creating git worktree: ${name} in ${cwd}`);
     // argv, no shell (#621): a worktree path containing a quote or a $ used to be
-    // re-interpreted by zsh on its way through the command string.
-    runBinary('git', ['worktree', 'add', wtPath], { cwd, encoding: 'utf8', timeout: 30000 });
+    // re-interpreted by zsh on its way through the command string. A NEW branch starts
+    // from origin's default branch, as Claude's native --worktree does (#725), unless the
+    // repo opted out with `git config deepsteve.merge local`.
+    const addArgs = worktreeAddArgs(cwd, wtPath);
+    log(`Creating git worktree: ${name} in ${cwd} (${addArgs.slice(2).join(' ')})`);
+    runBinary('git', addArgs, { cwd, encoding: 'utf8', timeout: 30000 });
     symlinkWorktreeClaudeSettings(cwd, wtPath);
     return wtPath;
   } catch (e) {

@@ -129,7 +129,9 @@ test('with the feature off the payload is exactly the pre-#627 result', async ()
   const p = parse(await tools.merge_worktree.handler({}, callerExtra('abc')));
   assert.strictEqual(p.status, 'merged');
   assert.strictEqual(armCalls.length, 1, 'still asked — the server owns the policy');
-  assert.deepStrictEqual(Object.keys(p).sort(), ['branch', 'mergeDir', 'output', 'status', 'target']);
+  // `via` / `originFallback` are #725's (where the merge landed — this scratch repo has
+  // no origin), not this feature's; nothing autoClose* may appear.
+  assert.deepStrictEqual(Object.keys(p).sort(), ['branch', 'mergeDir', 'originFallback', 'output', 'status', 'target', 'via']);
 
   fs.rmSync(tmp, { recursive: true, force: true });
 });
