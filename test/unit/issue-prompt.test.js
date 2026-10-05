@@ -14,7 +14,8 @@ const path = require('path');
 
 const {
   renderIssuePrompt, normalizeLabels, issueWorktreeName, issueTabName, ISSUE_BODY_LIMIT,
-  ISSUE_COMPLETE_INSTRUCTION, WORKFLOW_STAGES,
+  ISSUE_COMPLETE_INSTRUCTION, WORKFLOW_STAGES, WAND_DEFAULT_TEMPLATE, PREVIOUS_WAND_DEFAULTS,
+  migrateWandTemplate,
 } = require('../../issue-prompt.js');
 
 const ROOT = path.join(__dirname, '..', '..');
@@ -128,14 +129,77 @@ test('the instruction is NOT in the shipped default template', () => {
   // where the user has ever hit Save has the old default materialized. A token
   // added to the shipped default would silently never appear there — which is
   // why renderIssuePrompt appends it instead.
-  const server = read('server.js');
-  const start = server.indexOf('const WAND_DEFAULT_TEMPLATE');
-  const template = server.slice(start, server.indexOf('`;', start));
-  assert.ok(start > 0 && !template.includes('issue_complete'),
+  const template = WAND_DEFAULT_TEMPLATE;
+  assert.ok(template && !template.includes('issue_complete'),
     'WAND_DEFAULT_TEMPLATE must not carry the issue_complete line — append it in renderIssuePrompt (#643)');
   // Same argument, same failure mode, for the workflow stages (#668).
   assert.ok(!template.includes('inbox'),
     'WAND_DEFAULT_TEMPLATE must not carry the workflow stages — append them in renderIssuePrompt (#668)');
+});
+
+// ── #724: scope rule, and no prompt growth ──────────────────────────────────
+
+test('the instruction scopes the work, offers the already-done exit, and ends in closing the tab', () => {
+  assert.match(ISSUE_COMPLETE_INSTRUCTION, /^Scope: this issue only\./);
+  assert.match(ISSUE_COMPLETE_INSTRUCTION, /Already done on the base branch\?.*skip to issue_complete/);
+  assert.match(ISSUE_COMPLETE_INSTRUCTION, /`mcp__deepsteve__issue_complete`/);
+  assert.match(ISSUE_COMPLETE_INSTRUCTION, /including closing this tab\.$/);
+});
+
+test('the fixed text of an issue prompt did not grow', () => {
+  // Typed into every issue session. 378 was the fixed text before #724 (the old default
+  // template plus the old instruction); the rules it added had to fit inside that by
+  // dropping the template's own boilerplate.
+  const fixed = renderIssuePrompt(WAND_DEFAULT_TEMPLATE, {});
+  assert.ok(fixed.length <= 378, `issue prompt fixed text is ${fixed.length} chars, budget 378`);
+  assert.ok(`${WAND_DEFAULT_TEMPLATE}\n\n${ISSUE_COMPLETE_INSTRUCTION}`.length <= 378,
+    'and within budget counted with the placeholders unrendered, too');
+});
+
+test('the new default carries the issue and nothing else', () => {
+  assert.strictEqual(renderIssuePrompt(WAND_DEFAULT_TEMPLATE, {
+    number: 724, title: 'T', labels: 'bug', url: 'https://x/724', body: 'BODY',
+  }), `GitHub issue #724: "T"\nLabels: bug\nURL: https://x/724\n\nBODY${SUFFIX}`);
+});
+
+// ── #724: migrating a materialized old default ──────────────────────────────
+
+// The default every install had from #62 until #724, pinned here byte-for-byte rather
+// than read back off PREVIOUS_WAND_DEFAULTS — a "tidy-up" of that entry would otherwise
+// silently stop migrating the installs it exists for.
+const DEFAULT_BEFORE_724 = 'I need you to work on GitHub issue #{{number}}: "{{title}}"\n'
+  + 'Labels: {{labels}}\nURL: {{url}}\n\nIssue description:\n{{body}}\n\n'
+  + 'Please read the issue carefully, understand the codebase context, and implement the changes needed.';
+
+test('a stored copy of the old default migrates to the new one', () => {
+  assert.ok(PREVIOUS_WAND_DEFAULTS.includes(DEFAULT_BEFORE_724), 'the pre-#724 default is on the list');
+  assert.strictEqual(migrateWandTemplate(DEFAULT_BEFORE_724), WAND_DEFAULT_TEMPLATE);
+});
+
+test('a template the user actually changed is left alone', () => {
+  for (const custom of [
+    `${DEFAULT_BEFORE_724} Also run the tests.`,
+    `${DEFAULT_BEFORE_724}\n`,
+    DEFAULT_BEFORE_724.replace(/\n/g, '\r\n'),
+    'my own template {{body}}',
+    '',
+  ]) {
+    assert.strictEqual(migrateWandTemplate(custom), custom, JSON.stringify(custom.slice(-40)));
+  }
+  assert.strictEqual(migrateWandTemplate(WAND_DEFAULT_TEMPLATE), WAND_DEFAULT_TEMPLATE, 'the current default stays');
+  assert.strictEqual(migrateWandTemplate(undefined), undefined, 'nothing stored stays nothing stored');
+});
+
+test('the current default is never on the previous-defaults list', () => {
+  assert.ok(!PREVIOUS_WAND_DEFAULTS.includes(WAND_DEFAULT_TEMPLATE));
+});
+
+test('the daemon migrates on load, and takes the default from issue-prompt.js', () => {
+  const server = read('server.js');
+  assert.ok(server.includes('migrateWandTemplate(settings.wandPromptTemplate)'),
+    'server.js must run the stored template through migrateWandTemplate when it loads settings');
+  assert.ok(!/const WAND_DEFAULT_TEMPLATE\s*=/.test(server),
+    'one definition of the default, in issue-prompt.js beside the defaults it replaced');
 });
 
 test('autopilot is persisted, not just held in memory', () => {

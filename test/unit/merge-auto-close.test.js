@@ -14,7 +14,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { execFileSync } = require('child_process');
-const { init } = require('../../mods/deepsteve-core/tools.js');
+const { init, CLOSE_NOW } = require('../../mods/deepsteve-core/tools.js');
 
 // A repo with `main` checked out and a committed worktree branch, i.e. the state
 // /deepsteve:merge reaches step 6 in. Returns { repo, wt } and a cleanup path.
@@ -79,11 +79,12 @@ test('a successful merge from a worktree session arms the close and reports it',
   assert.deepStrictEqual(armCalls[0], ['abc', { reason: 'merged' }]);
   assert.strictEqual(p.autoCloseAt, closeAt);
   assert.ok(p.autoCloseInSeconds >= 118 && p.autoCloseInSeconds <= 120, `got ${p.autoCloseInSeconds}`);
-  // The sentence is the point: the agent paraphrases it instead of inventing one
-  // from an epoch timestamp, and it names both escape hatches.
-  assert.match(p.autoCloseMessage, /2 minutes/);
-  assert.match(p.autoCloseMessage, /close_session/);
-  assert.match(p.autoCloseMessage, /cancels the auto-close/);
+  // The sentence tells the agent to close, not that it may wait (#724): "this tab closes
+  // itself" is what agents left to the timer, and a click in the tab cancelled the timer.
+  // It is the same sentence issue_complete ends on, because a conflict finishes here.
+  assert.strictEqual(p.autoCloseMessage, CLOSE_NOW);
+  assert.match(p.autoCloseMessage, /call close_session in that same message/);
+  assert.doesNotMatch(p.autoCloseMessage, /automatically/);
 
   fs.rmSync(tmp, { recursive: true, force: true });
 });

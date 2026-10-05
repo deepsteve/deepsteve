@@ -61,13 +61,13 @@ function tabDeliveryNote(tabDelivery) {
   return { tabDelivery, note: 'No browser window was connected, so the tab is queued and will open when one connects. The session is running either way — do not tell the user a tab is open.' };
 }
 
-// "2 minutes" / "45 seconds" — the auto-close delay in words, so the agent has a
-// sentence to paraphrase to the user instead of an epoch timestamp (#627).
-function describeDelay(seconds) {
-  if (seconds < 90) return `${seconds} second${seconds === 1 ? '' : 's'}`;
-  const mins = Math.round(seconds / 60);
-  return `${mins} minute${mins === 1 ? '' : 's'}`;
-}
+// The last thing a merged worktree session is told (#724). It used to say the tab closes
+// itself and close_session was optional, so agents left it to the #627 timer — which a
+// click or scroll in the tab then cancelled. The timer is the safety net, not the plan.
+// Shared by issue_complete's `merged` answer and both autoCloseMessage sites, because
+// the conflict path finishes through merge_worktree.
+const CLOSE_NOW = 'Now write a short summary and call close_session in that same message. '
+  + 'Nothing else: no more commands, edits or notes.';
 
 // Derive a short, single-line tab name from a shell command (used when a
 // terminal tab is opened with a `command` but no explicit `name`).
@@ -206,8 +206,7 @@ function init(context) {
         const seconds = Math.max(0, Math.round((armed.closeAt - Date.now()) / 1000));
         payload.autoCloseAt = armed.closeAt;
         payload.autoCloseInSeconds = seconds;
-        payload.autoCloseMessage = `This session is finished and will close automatically in ${describeDelay(seconds)}. `
-          + 'Call close_session once your report is written to close it now instead; typing in this tab cancels the auto-close.';
+        payload.autoCloseMessage = CLOSE_NOW;
       }
     }
     return { ok: true, payload };
@@ -689,9 +688,7 @@ function init(context) {
                 + (r.issue && r.issue.closed ? `Issue #${r.issue.number} is closed. ` : '')
                 + (r.issue && r.issue.number != null && !r.issue.closed
                   ? `Closing issue #${r.issue.number} failed (${r.issue.error}) — mention it in your summary. ` : '')
-                + 'Write your summary of what you did now and end your turn. There is nothing left to run: '
-                + 'do not merge again and do not open a terminal. This tab closes itself — call close_session '
-                + 'in the same message as your summary if you want it to go now.',
+                + CLOSE_NOW,
             };
           } else if (r.status === 'conflict') {
             // The one place a model is still wanted. The working agent has the code in
@@ -812,8 +809,7 @@ function init(context) {
             const seconds = Math.max(0, Math.round((armed.closeAt - Date.now()) / 1000));
             payload.autoCloseAt = armed.closeAt;
             payload.autoCloseInSeconds = seconds;
-            payload.autoCloseMessage = `This session is finished and will close automatically in ${describeDelay(seconds)}. `
-              + 'Call close_session once your report is written to close it now instead; typing in this tab cancels the auto-close.';
+            payload.autoCloseMessage = CLOSE_NOW;
           }
         }
         // Only `merged` is a success; every other status left the target unchanged
@@ -1349,4 +1345,4 @@ function registerRoutes(app, context) {
   });
 }
 
-module.exports = { init, registerRoutes, deriveTabName, TIMINGS, RUN_TIMINGS };
+module.exports = { init, registerRoutes, deriveTabName, TIMINGS, RUN_TIMINGS, CLOSE_NOW };

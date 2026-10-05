@@ -28,7 +28,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { execFileSync } = require('node:child_process');
-const { init } = require('../../mods/deepsteve-core/tools.js');
+const { init, CLOSE_NOW } = require('../../mods/deepsteve-core/tools.js');
 
 // In production the caller is auto-detected from ?shellId= on the MCP request URL.
 const callerExtra = (shellId) => ({ requestInfo: { url: new URL(`http://localhost:3000/mcp?shellId=${shellId}`) } });
@@ -49,7 +49,7 @@ const git = (args, cwd) => execFileSync('git', args, { cwd, encoding: 'utf8', st
  * `dirtyTarget: true` leaves the main checkout with uncommitted work, which is what the
  * merge refuses on.
  */
-function repoFor({ conflict = false, dirtyTarget = false } = {}) {
+function repoFor({ conflict = false, dirtyTarget = false, ahead = true, advanceTarget = false } = {}) {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-issue-complete-'));
   tmpDirs.push(tmp);
   const repo = path.join(tmp, 'repo');
@@ -66,9 +66,19 @@ function repoFor({ conflict = false, dirtyTarget = false } = {}) {
 
   const wt = path.join(repo, '.claude', 'worktrees', 'feature');
   git(['worktree', 'add', '-q', '-b', 'feature', wt], repo);
-  fs.writeFileSync(path.join(wt, 'a.txt'), 'from the worktree\n');
-  git(['add', '-A'], wt);
-  git(['commit', '-qm', 'feature work'], wt);
+  // `ahead: false` is the issue whose fix is already on the base branch (#724): the
+  // session finds nothing to do and goes straight to issue_complete.
+  if (ahead) {
+    fs.writeFileSync(path.join(wt, 'a.txt'), 'from the worktree\n');
+    git(['add', '-A'], wt);
+    git(['commit', '-qm', 'feature work'], wt);
+  }
+  // `advanceTarget: true` moves main on after the worktree was cut, without conflict.
+  if (advanceTarget) {
+    fs.writeFileSync(path.join(repo, 'later.txt'), 'landed on main meanwhile\n');
+    git(['add', '-A'], repo);
+    git(['commit', '-qm', 'later work on main'], repo);
+  }
 
   if (conflict) {
     fs.writeFileSync(path.join(repo, 'a.txt'), 'from main\n');
@@ -100,8 +110,8 @@ function makeTools() {
  * A ctx with one autopilot-on session wired to a real repo. `sessionPaths` reads the
  * paths off the entry so one implementation serves however many sessions a test makes.
  */
-function mergeTools({ conflict = false, dirtyTarget = false, worktree = 'feature', armResult = { closeAt: Date.now() + 120000 } } = {}) {
-  const { repo, wt } = repoFor({ conflict, dirtyTarget });
+function mergeTools({ conflict = false, dirtyTarget = false, ahead = true, advanceTarget = false, worktree = 'feature', armResult = { closeAt: Date.now() + 120000 } } = {}) {
+  const { repo, wt } = repoFor({ conflict, dirtyTarget, ahead, advanceTarget });
   const armCalls = [];
   const logs = [];
   const shells = new Map([
@@ -180,12 +190,50 @@ test('autopilot on: the tool MERGES, and the answer reports it', async () => {
   assert.ok(p.autoCloseAt > Date.now());
 });
 
-test('the answer tells the agent to write its summary and stop, not to merge again', async () => {
+test('the answer tells the agent to write its summary and close the tab, and nothing else', async () => {
   const { tools } = mergeTools();
   const p = parse(await tools.issue_complete.handler({}, callerExtra('s')));
-  assert.match(p.instruction, /Write your summary/i);
-  assert.match(p.instruction, /do not merge again/i,
-    'the one failure mode of merging inside this call is an agent that then merges again');
+  assert.match(p.instruction, /write a short summary and call close_session in that same message/i,
+    'closing is the instruction, not an option left to the #627 timer (#724)');
+  assert.match(p.instruction, /Nothing else: no more commands, edits or notes\./,
+    'the one failure mode of merging inside this call is an agent that then keeps working');
+  assert.ok(p.instruction.endsWith(CLOSE_NOW));
+  assert.strictEqual(p.autoCloseMessage, CLOSE_NOW, 'the armed close says the same thing');
+});
+
+test('the merged answer is shorter than it was before #724', async () => {
+  // 258 = "Merged into main. " plus the old tail ("Write your summary of what you did now
+  // and end your turn. There is nothing left to run: … if you want it to go now.").
+  const { tools } = mergeTools();
+  const p = parse(await tools.issue_complete.handler({}, callerExtra('s')));
+  assert.ok(p.instruction.length < 258, `merged instruction is ${p.instruction.length} chars`);
+});
+
+// ── nothing to merge: the fix was already on the base branch (#724) ──────────
+
+test('a branch with no commits of its own still ends in merged, armed to close', async () => {
+  // The prompt's "already done? skip to issue_complete" sends sessions here, so this must
+  // be the ordinary success — not an error status that leaves the tab open.
+  const { tools, armCalls, repo, wt } = mergeTools({ ahead: false });
+  const mainBefore = git(['rev-parse', 'main'], repo).trim();
+  const p = parse(await tools.issue_complete.handler({}, callerExtra('s')));
+
+  assert.equal(p.next, 'merged', JSON.stringify(p));
+  assert.equal(p.status, 'merged');
+  assert.equal(p.committed, false, 'nothing was dirty, so nothing was written');
+  assert.deepStrictEqual(armCalls, [['s', { reason: 'merged' }]]);
+  assert.equal(git(['rev-parse', 'main'], repo).trim(), mainBefore, 'main is untouched');
+  assert.equal(git(['rev-parse', 'HEAD'], wt).trim(), mainBefore);
+});
+
+test('a branch with no commits, behind a target that moved on, still ends in merged', async () => {
+  const { tools, armCalls, repo } = mergeTools({ ahead: false, advanceTarget: true });
+  const mainBefore = git(['rev-parse', 'main'], repo).trim();
+  const p = parse(await tools.issue_complete.handler({}, callerExtra('s')));
+
+  assert.equal(p.next, 'merged', JSON.stringify(p));
+  assert.deepStrictEqual(armCalls, [['s', { reason: 'merged' }]]);
+  assert.equal(git(['rev-parse', 'main'], repo).trim(), mainBefore, 'already up to date: no merge commit');
 });
 
 test('uncommitted work in the worktree is committed before the merge', async () => {

@@ -350,12 +350,11 @@ test('start_issue inherits /rc from the caller and delivers it before the issue 
   }, 'child to receive /rc and the issue prompt', 30000, 500);
 
   // Compare positions on the DE-WRAPPED screen. read_session_screen returns rows of
-  // an emulated 120-column terminal, and the echoed issue prompt is longer than that:
-  // it lands as "…GOT:I need you to wor" / "k on GitHub issue #519…", so no single row
-  // holds both "GOT:" and the issue number.
+  // an emulated 120-column terminal, and the echoed issue prompt is longer than that,
+  // so a row break can land between "GOT:" and the issue number.
   const flat = lines.join('');
   const rcAt = flat.indexOf('GOT:/rc');
-  const promptAt = flat.indexOf('GOT:I need you to work on GitHub issue #519');
+  const promptAt = flat.indexOf('GOT:GitHub issue #519');
   assert.ok(rcAt >= 0, `child should have received /rc, screen: ${JSON.stringify(lines)}`);
   assert.ok(promptAt >= 0, `child should have received the issue prompt, screen: ${JSON.stringify(lines)}`);
   assert.ok(rcAt < promptAt, `/rc (at ${rcAt}) must land before the issue prompt (at ${promptAt})`);

@@ -56,6 +56,40 @@ const REPORT_PATTERNS = [
   /\x1b\][^\x1b\x07]*(?:\x1b\\|\x07)/y, // OSC reply (10/11/12 colors, 52 clipboard)
 ];
 
+// Mouse and focus reports (#724). tmux mouse mode (#650) turns on SGR mouse reporting in
+// xterm, so every click and wheel notch in a tab arrives here as `ESC[<b;x;y` + `M`/`m`
+// (one notch is `ESC[<64;66;26M`), and a focus change as `ESC[I`/`ESC[O`. Unlike the
+// replies above, a PERSON caused these, so they are kept off REPORT_PATTERNS on purpose:
+// they still count as input for `lastInputTime`, they are still dropped while an injected
+// prompt is being typed (#512), and they still reach the PTY — the wheel is how you scroll
+// the agent. The one thing they must not do is cancel a pending auto-close, which they did
+// for 55 of 63 logged cancels: scrolling up to read a finished agent's summary kept its tab.
+const POINTER_PATTERNS = [
+  /\x1b\[<\d+;\d+;\d+[Mm]/y,     // SGR mouse: press, release, wheel, drag
+  /\x1b\[[IO]/y,                 // focus in / focus out
+];
+
+// Is `data` made up ENTIRELY of sequences from `patterns`?
+function consistsOf(data, patterns) {
+  const s = typeof data === 'string' ? data : '';
+  // Cheapest possible rejection, and it covers the overwhelmingly common case: real
+  // typing does not begin with ESC. An empty payload is not a report either.
+  if (!s || s.charCodeAt(0) !== 0x1b) return false;
+
+  let i = 0;
+  while (i < s.length) {
+    let width = 0;
+    for (const re of patterns) {
+      re.lastIndex = i;
+      const m = re.exec(s);
+      if (m) { width = m[0].length; break; }
+    }
+    if (!width) return false;   // an unrecognized byte anywhere means input
+    i += width;
+  }
+  return true;
+}
+
 /**
  * Is this WebSocket payload made up ENTIRELY of terminal report sequences — i.e. the
  * terminal answering a program, rather than a person typing?
@@ -66,23 +100,16 @@ const REPORT_PATTERNS = [
  * collision is a `run_in_terminal` tab closing 20s later than someone wanted.
  */
 function isTerminalReport(data) {
-  const s = typeof data === 'string' ? data : '';
-  // Cheapest possible rejection, and it covers the overwhelmingly common case: real
-  // typing does not begin with ESC. An empty payload is not a report either.
-  if (!s || s.charCodeAt(0) !== 0x1b) return false;
+  return consistsOf(data, REPORT_PATTERNS);
+}
 
-  let i = 0;
-  while (i < s.length) {
-    let width = 0;
-    for (const re of REPORT_PATTERNS) {
-      re.lastIndex = i;
-      const m = re.exec(s);
-      if (m) { width = m[0].length; break; }
-    }
-    if (!width) return false;   // an unrecognized byte anywhere means input
-    i += width;
-  }
-  return true;
+/**
+ * Is this WebSocket payload made up ENTIRELY of mouse and focus reports — a person
+ * clicking, scrolling or switching tabs, rather than typing (#724)? Same default as
+ * isTerminalReport: one byte of anything else makes the whole payload a keystroke.
+ */
+function isPointerReport(data) {
+  return consistsOf(data, POINTER_PATTERNS);
 }
 
 // Bracketed paste (#710). A terminal whose program has turned the mode on wraps pasted text in
@@ -118,4 +145,4 @@ function hasSubmitKey(data) {
   return false;
 }
 
-module.exports = { isTerminalReport, hasSubmitKey };
+module.exports = { isTerminalReport, isPointerReport, hasSubmitKey };

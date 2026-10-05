@@ -31,8 +31,8 @@ const { TerminalScreen } = require('./terminal-screen');
 const { terminalEnv } = require('./terminal-env');
 const { readComposerDraft, hasStashedDraft, isPromptStaged, isPromptOnScreen, promptDraftVerdict } = require('./composer-state');
 const { wrapRunCommand } = require('./terminal-run');
-const { isTerminalReport, hasSubmitKey } = require('./terminal-input');
-const { renderIssuePrompt, issueWorktreeName, issueTabName, resumePromptText, WORKFLOW_STAGES } = require('./issue-prompt');
+const { isTerminalReport, isPointerReport, hasSubmitKey } = require('./terminal-input');
+const { renderIssuePrompt, issueWorktreeName, issueTabName, resumePromptText, WORKFLOW_STAGES, WAND_DEFAULT_TEMPLATE, migrateWandTemplate } = require('./issue-prompt');
 const { renderOnboardingPrompt, ONBOARDING_TOOLS, TOUR_PAGE_REL } = require('./onboarding-prompt');
 // The display-tab / project-mod HTML resolver, reused here for the built-in project's
 // welcome page (#696) — its `replacements` are what let a reviewed static file name the
@@ -692,15 +692,6 @@ app.put('/api/upload/:filename', express.raw({ type: () => true, limit: '50mb' }
 // POST /api/settings validation, and broadcastSettings() all flow from here.
 // See CLAUDE.md "Adding a New Setting" for the contract.
 
-const WAND_DEFAULT_TEMPLATE = `I need you to work on GitHub issue #{{number}}: "{{title}}"
-Labels: {{labels}}
-URL: {{url}}
-
-Issue description:
-{{body}}
-
-Please read the issue carefully, understand the codebase context, and implement the changes needed.`;
-
 // The agent integrations deepsteve ships, and how far each one actually goes (#622).
 // `tier` is the support promise, and it is DATA — not an "(experimental)" suffix baked
 // into `name`. That suffix used to be hardcoded here AND again in the Settings HTML,
@@ -1054,6 +1045,16 @@ try {
 if (settings.activeTheme === 'windows-95') {
   settings.activeTheme = 'win-95';
   try { fs.writeFileSync(SETTINGS_FILE, JSON.stringify(settings, null, 2)); } catch {}
+}
+
+// Migrate a materialized old default issue template (#724). The settings modal POSTs
+// wandPromptTemplate on every save, so a stored copy of a shipped default is not a
+// customization; one the user actually edited is left alone.
+const migratedWandTemplate = migrateWandTemplate(settings.wandPromptTemplate);
+if (migratedWandTemplate !== settings.wandPromptTemplate) {
+  settings.wandPromptTemplate = migratedWandTemplate;
+  try { fs.writeFileSync(SETTINGS_FILE, JSON.stringify(settings, null, 2)); } catch {}
+  log('Settings: migrated wandPromptTemplate from an old default to the current one');
 }
 
 function saveSettings() {
@@ -8915,7 +8916,12 @@ function handleWsConnection(ws, req) {
     // merely HAVING the tab open never cancels, and neither does a reconnect. The byte
     // count is logged because that is the only way to diagnose it if some future TUI
     // turns on a reporting mode this classifier does not yet know about.
-    sessionAutoClose.cancel(id, `user input, ${str.length} byte(s)`);
+    //
+    // A click, a wheel notch or a focus change is someone LOOKING, not typing (#724): tmux
+    // mouse mode (#650) sends each one up this socket, and scrolling up to read a finished
+    // agent's summary used to keep its tab. They still stamp lastInputTime above and still
+    // reach the PTY below; they just don't cancel.
+    if (!isPointerReport(str)) sessionAutoClose.cancel(id, `user input, ${str.length} byte(s)`);
     // #558 audit: keystroke-resolution ordering, debounced to 1/s per shell
     // (typing bursts collapse into a `burst` suppressed-count). clearedWaiting is
     // now always false — keystrokes no longer touch the flag.

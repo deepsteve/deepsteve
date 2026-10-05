@@ -58,6 +58,23 @@ test('observers see a submitted line only after the report and blocked-input dro
   assert.strictEqual(serverSource.split('notifySubmitKey(id, entry);').length - 1, 1, 'one call site');
 });
 
+test('a click or scroll still counts as input, but does not cancel the auto-close (#724)', () => {
+  // tmux mouse mode (#650) sends every click and wheel notch up the session socket.
+  // Before #724 each one cancelled a pending merge auto-close, so scrolling up to read a
+  // finished agent's summary kept its tab. A keystroke must still cancel.
+  const blocked = serverSource.indexOf('if (entry.inputBlocked) return;', serverSource.indexOf('if (isTerminalReport(str)) {'));
+  const stamp = serverSource.indexOf('entry.lastInputTime = Date.now();', blocked);
+  const cancel = serverSource.indexOf(
+    'if (!isPointerReport(str)) sessionAutoClose.cancel(id, `user input, ${str.length} byte(s)`);', stamp);
+  const write = serverSource.indexOf('getEngine(id).write(id, str);', cancel);
+  assert.ok(blocked > 0, 'the input path moved; re-anchor this test');
+  assert.ok(stamp > blocked && cancel > stamp,
+    'a click is still dropped while a prompt is injected (#512) and still stamps lastInputTime; only the cancel is gated');
+  assert.ok(write > cancel, 'and it still reaches the PTY — the wheel is how a person scrolls the agent');
+  assert.strictEqual(serverSource.split('sessionAutoClose.cancel(id, `user input').length - 1, 1,
+    'one keystroke cancel site, and it is the gated one');
+});
+
 test('the registry is keyed by name, and an observer that throws does not stop the rest', () => {
   const code = sourceBetween('const submitKeyObservers', 'const AUTO_APPLY_GRACE_MS');
   const logs = [];

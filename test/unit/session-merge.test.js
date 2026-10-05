@@ -324,6 +324,27 @@ test('a gh that cannot close the issue does not downgrade a successful merge', a
   assert.ok(r.issue.error, 'and the reason is reported');
 });
 
+test('an issue branch with nothing on it still closes its issue (#724)', async () => {
+  // The issue prompt tells a session whose fix is already on the base branch to skip
+  // straight to issue_complete. Its branch has no commits and a clean tree, and git
+  // answers that merge with exit 0 and "Already up to date." — which
+  // test/unit/issue-complete.test.js proves against a real repo. From there it is the
+  // ordinary success: merged, and the issue closed, with no commit and no title lookup.
+  const ghCalls = [];
+  const gitCalls = [];
+  const git = gitFor({ table: [['merge ', { stdout: 'Already up to date.\n' }]], calls: gitCalls });
+  const gh = scriptedGh([['issue close', { stdout: '' }]], ghCalls);
+
+  const r = await mergeSession({ git, gh, cwd: WT, repoRoot: ROOT, isWorktree: true });
+
+  assert.strictEqual(r.status, 'merged');
+  assert.strictEqual(r.committed, false);
+  assert.deepStrictEqual(r.issue, { number: 688, closed: true });
+  assert.ok(!gitCalls.some(c => c.args.startsWith('commit')), 'nothing to commit');
+  assert.deepStrictEqual(ghCalls.map(c => c.argv), ['issue close 688 --comment Merged into main.'],
+    'no subject was needed, so no issue lookup either');
+});
+
 test('a non-issue branch has no issue to close', async () => {
   const ghCalls = [];
   const git = gitFor({ branch: 'spike/colors', table: MERGE_OK });
