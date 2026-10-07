@@ -8,6 +8,7 @@ const decision = require('./decision.js');
 // The same "is a modal on screen?" gate Inbox's chat endpoint uses, rather than a second one.
 const dialogParse = require('../inbox/dialog-parse.js');
 const projectScope = require('../../project-scope');
+const { cleanSpawnView, SPAWN_VIEW_DESCRIPTION } = require('../project-mods/tools.js');
 
 const DIALOG_ROWS = 30;
 const DECISION_BAR_SRC = '/mods/display-tab/decision-bar.js';
@@ -248,8 +249,11 @@ function init(context) {
         name: z.string().optional().describe('Tab name (defaults to "Display")'),
         decision: decisionSchema.describe('Make this a decision tab: a row of buttons along the bottom. Then call await_decision with the returned id — it returns the choice ("[Decision tab …] The user chose: …").'),
         locked: z.boolean().optional().describe('Lock the tab so it cannot be closed — by the user\'s ✕ or by close_display_tab — until it is unlocked (update_display_tab with locked:false, or the tab\'s right-click menu). Default false'),
+        view: z.string().optional().describe(SPAWN_VIEW_DESCRIPTION),
       },
-      handler: async ({ session_id, html, file_path, replacements, name, decision: rawDecision, locked }) => {
+      handler: async ({ session_id, html, file_path, replacements, name, decision: rawDecision, locked, view }) => {
+        const spawnView = cleanSpawnView(view);
+        if (spawnView.error) return { content: [{ type: 'text', text: spawnView.error }], isError: true };
         const resolved = resolveHtml({ html, file_path, replacements });
         if (resolved.error) {
           return { content: [{ type: 'text', text: resolved.error }], isError: true };
@@ -291,8 +295,12 @@ function init(context) {
 
         // Notify browser to open the display tab (same window-targeting as open_terminal)
         const readyClients = [...reloadClients].filter(c => c.readyState === 1);
-        const openMsg = JSON.stringify({ type: 'open-display-tab', id, name: tabName, cwd, windowId });
-        const broadcastMsg = JSON.stringify({ type: 'open-display-tab', id, name: tabName, cwd });
+        // openerId / view (#726): the browser files the tab under project views — the explicit
+        // `view`, else every view the calling tab is in, so an analytics agent's charts land in
+        // Analytics beside it.
+        const viewFields = { openerId: caller ? session_id : null, ...(spawnView.view ? { view: spawnView.view } : {}) };
+        const openMsg = JSON.stringify({ type: 'open-display-tab', id, name: tabName, cwd, windowId, ...viewFields });
+        const broadcastMsg = JSON.stringify({ type: 'open-display-tab', id, name: tabName, cwd, ...viewFields });
         let delivered = false;
 
         if (windowId) {

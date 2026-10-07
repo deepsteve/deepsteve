@@ -114,7 +114,7 @@ let importCount = 0;
 
 // Fresh module + fake app.js wiring. Mirrors the app.js side of the contract:
 // tabs registry, active tab id, and the initContextViews callbacks.
-async function setup({ contexts = [CTX_A, CTX_B], tabs = {}, session = {}, local = {} } = {}) {
+async function setup({ contexts = [CTX_A, CTX_B], tabs = {}, session = {}, local = {}, extraCb = {} } = {}) {
   storeMap.clear();
   localMap.clear();
   for (const [k, v] of Object.entries(session)) storeMap.set(k, String(v));
@@ -147,6 +147,8 @@ async function setup({ contexts = [CTX_A, CTX_B], tabs = {}, session = {}, local
     onActiveContextChanged: () => {},
     createSessionInDir: (cwd) => { state.createInDirCalls.push(cwd); },
     promptNewTabDir: () => { state.promptDirCalls++; },
+    // Project views (#726) and anything else a test wants to wire in.
+    ...extraCb,
   });
   mod.setContexts(contexts);
 
@@ -1281,4 +1283,110 @@ test('restoring the active project at load opens no welcome tab (#696)', async (
     globalThis.fetch = realFetch;
   }
   assert.deepStrictEqual(calls.filter(c => String(c.url).includes('/welcome')), []);
+});
+
+// ------------------------------------------------------------ project views (#726)
+
+// A stand-in for project-views.js, wired the way app.js wires it: a selected view per
+// project, and the tabs in each view. `log` records the order reveal and select happen in.
+function viewModel({ sel = {}, members = {} } = {}) {
+  const log = [];
+  const inView = (id, ctx) => { const s = sel[ctx.id]; return !s || !!members[s]?.has(id); };
+  return {
+    sel, members, log,
+    cb: {
+      tabInView: inView,
+      viewKey: (ctx) => sel[ctx.id] || '',
+      revealTabView: (id, ctx) => {
+        log.push(`reveal:${id}@${ctx.id}`);
+        if (inView(id, ctx)) return null;
+        const next = Object.keys(members).find(s => members[s].has(id));
+        if (next) sel[ctx.id] = next; else delete sel[ctx.id];
+        return next ? `View ${next}` : 'All';
+      },
+      onActiveContextChanged: (id) => log.push(`select:${id}`),
+    },
+  };
+}
+
+test('a selected view narrows the project\'s tabs, through the same .context-hidden (#726)', async () => {
+  const vm = viewModel({ sel: { ctxa: 'mkt' }, members: { mkt: new Set(['t1']) } });
+  const { mod } = await setup({ tabs: { t1: '/repo/a', t2: '/repo/a', t3: '/repo/b' }, extraCb: vm.cb });
+  mod.setActiveContext('ctxa');
+  assert.strictEqual(isHidden('t1'), false);
+  assert.strictEqual(isHidden('t2'), true, 'in the project, not in the view');
+  assert.strictEqual(isHidden('t3'), true, 'not in the project');
+  delete vm.sel.ctxa;
+  mod.applyFilter();
+  assert.strictEqual(isHidden('t2'), false, 'All shows the whole project');
+});
+
+test('rail "All" applies no view filter (#726)', async () => {
+  const vm = viewModel({ sel: { ctxa: 'mkt' }, members: { mkt: new Set() } });
+  const { mod } = await setup({ tabs: { t1: '/repo/a' }, extraCb: vm.cb });
+  mod.applyFilter();
+  assert.strictEqual(isHidden('t1'), false);
+});
+
+test('last-tab memory is per project AND view, so All keeps its own (#726)', async () => {
+  const vm = viewModel({ members: { mkt: new Set(['t2']) } });
+  const { mod, state } = await setup({ tabs: { t1: '/repo/a', t2: '/repo/a' }, extraCb: vm.cb });
+  mod.setActiveContext('ctxa');
+  state.activeTabId = 't1';
+  mod.noteActiveTab('t1');
+  vm.sel.ctxa = 'mkt';
+  mod.applyFilter();   // t1 is hidden by the view → snaps to the view's first tab
+  assert.strictEqual(state.activeTabId, 't2');
+  mod.noteActiveTab('t2');
+  const memo = JSON.parse(storeMap.get('deepsteve-context-last-tab'));
+  assert.strictEqual(memo.ctxa, 't1', 'All\'s memory is the bare project id, untouched');
+  assert.strictEqual(memo['ctxa#mkt'], 't2');
+  mod.noteActiveTab('t1');
+  assert.strictEqual(JSON.parse(storeMap.get('deepsteve-context-last-tab'))['ctxa#mkt'], 't2', 'a tab outside the view is not recorded for it');
+});
+
+test('an empty view is an empty project: the welcome screen covers it (#726)', async () => {
+  const vm = viewModel({ sel: { ctxa: 'mkt' }, members: { mkt: new Set() } });
+  const { mod } = await setup({ tabs: { t1: '/repo/a' }, extraCb: vm.cb });
+  mod.setActiveContext('ctxa');
+  assert.strictEqual(mod.activeContextIsEmpty(), true);
+  vm.members.mkt.add('t1');
+  assert.strictEqual(mod.activeContextIsEmpty(), false);
+});
+
+test('focusing a tab the selected view hides moves the VIEW, not away from the tab (#726)', async () => {
+  const vm = viewModel({ sel: { ctxa: 'mkt' }, members: { mkt: new Set(['t1']), ops: new Set(['t2']) } });
+  const { mod, state, jumpToTab } = await setup({ tabs: { t1: '/repo/a', t2: '/repo/a' }, extraCb: vm.cb });
+  mod.setActiveContext('ctxa');
+  jumpToTab('t2');
+  assert.strictEqual(vm.sel.ctxa, 'ops');
+  assert.strictEqual(isHidden('t2'), false);
+  assert.deepStrictEqual(state.switchCalls, [], 'no snap-back');
+  assert.strictEqual(mod.getActiveContextId(), 'ctxa', 'same project');
+});
+
+test('a cross-project reveal settles the destination\'s view BEFORE selecting it (#726)', async () => {
+  // Beta remembers a view that does not hold t2. Selected first, the filter would snap away.
+  const vm = viewModel({ sel: { ctxb: 'mkt' }, members: { mkt: new Set(['t3']) } });
+  // Fresh copies: an earlier test's archive toggles `archived` on the shared fixture object.
+  const { mod, state, jumpToTab } = await setup({
+    contexts: [{ ...CTX_A, archived: false }, { ...CTX_B, archived: false }],
+    tabs: { t1: '/repo/a', t2: '/repo/b', t3: '/repo/b' }, extraCb: vm.cb,
+  });
+  mod.setActiveContext('ctxa');
+  vm.log.length = 0;
+  jumpToTab('t2');
+  assert.deepStrictEqual(vm.log.slice(0, 2), ['reveal:t2@ctxb', 'select:ctxb']);
+  assert.strictEqual(vm.sel.ctxb, undefined, 'Beta is back on All');
+  assert.strictEqual(isHidden('t2'), false);
+  assert.deepStrictEqual(state.switchCalls, []);
+});
+
+test('contextsForCwd lists every project holding a path, as copies (#726)', async () => {
+  const both = { id: 'ctxab', name: 'Both', dirs: ['/repo'] };
+  const { mod } = await setup({ contexts: [CTX_A, CTX_B, both] });
+  assert.deepStrictEqual(mod.contextsForCwd('/repo/a/src').map(c => c.id), ['ctxa', 'ctxab']);
+  assert.deepStrictEqual(mod.contextsForCwd(null), [], 'no cwd is not "every project"');
+  mod.contextsForCwd('/repo/a')[0].dirs.push('/mutated');
+  assert.deepStrictEqual(CTX_A.dirs, ['/repo/a']);
 });

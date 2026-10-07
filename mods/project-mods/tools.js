@@ -55,7 +55,7 @@
 const { z } = require('zod');
 const { createHash } = require('crypto');
 const fs = require('fs');
-const { projectModsDir } = require('../../paths');
+const { projectModsDir, projectViewsDir } = require('../../paths');
 const path = require('path');
 
 const { resolveHtml } = require('../../html-source.js');
@@ -219,8 +219,9 @@ function readMod(root, dirname) {
 }
 
 /**
- * Rebuild `mods` from the registered repos. Cheap — one readdir per repo plus one per mod
- * directory — and total, so a deleted or renamed directory disappears without bookkeeping.
+ * Rebuild `mods` — and `views` (#726), which share the scan, the cache and the pings — from
+ * the registered repos. Cheap — one readdir per repo plus one per mod directory — and total,
+ * so a deleted or renamed directory disappears without bookkeeping.
  *
  * Does nothing before init() has handed us a context: with no way to ask which projects are
  * registered, an empty scan is not a fact, and caching it would hide the first real one.
@@ -228,7 +229,9 @@ function readMod(root, dirname) {
 function scan(roots = scanRoots()) {
   if (!ctx) return;
   const out = [];
+  const outViews = [];
   for (const root of roots) {
+    outViews.push(...readViews(root));
     let entries;
     try {
       entries = fs.readdirSync(projectModsDir(root), { withFileTypes: true });
@@ -242,6 +245,7 @@ function scan(roots = scanRoots()) {
     }
   }
   mods = out;
+  views = outViews.sort(compareViews);
   lastScan = Date.now();
   scannedRoots = rootsKey(roots);
 }
@@ -612,6 +616,297 @@ function refresh(reason) {
   commit(reason ? `rescanned after ${reason}` : null);
 }
 
+// --- Project views (#726) ----------------------------------------------------
+//
+// A project view is a named view of a project's tabs ("Marketing", "Analytics"), shown as a
+// row of buttons over the tab strip. The built-in "All" is the default and is never a file.
+// Like a mod, a view is defined IN the repo — `<repoRoot>/.deepsteve/views/<slug>.json` — so
+// it is committed and travels with the checkout, and it is found by the same scan of the
+// registered projects' repos, refreshed by the same pings. Unlike a mod it is inert data (a
+// name and some match rules, never a page), which is why projectModsEnabled — the kill switch
+// for agent-authored HTML — does not gate it.
+//
+// The slug (the filename) is the view's identity everywhere: a tab's membership, the view a
+// window has selected, and the `view` param of the spawn tools all name it. So a slug is never
+// renamed (a rename changes `name` only), and a project whose repos both define `marketing`
+// has ONE Marketing view — the client merges them.
+//
+// Membership is decided in the browser (public/js/project-views.js): a tab is in a view when
+// one of the view's rules matches it, or when it was filed there — by hand, by being opened
+// while the view was selected, or by the agent tab that opened it. This file owns only the
+// definitions.
+
+const VIEW_SLUG_RE = /^[a-z0-9][a-z0-9-]{0,39}$/;
+const RESERVED_VIEW = 'all';   // the built-in default, never a file
+const VIEW_KINDS = ['agent', 'terminal', 'display-tab', 'project-mod', 'mod-tab'];
+const VIEW_FILE_EXT = '.json';
+const MAX_VIEW_RULES = 16;
+const MAX_RULE_ITEMS = 32;
+const MAX_VIEW_FILE_BYTES = 64 * 1024;
+const MAX_VIEW_ORDER = 1e6;
+
+let views = [];
+
+const unregisteredViewMsg = (proj) =>
+  `${proj} is not part of any registered project, so a view written there would never be ` +
+  'discovered. Views are found by scanning the repos of the projects in the rail. Ask the user ' +
+  'to add this repo to a project first (the "+ New project" entry in the projects rail).';
+
+// Keyed apart from modId() so a view and a mod can never share an id.
+const viewId = (root, slug) => createHash('sha1').update(`${root}\0views\0${slug}`).digest('hex').slice(0, 8);
+
+/** A slug as stored: lowercase, safe in a filename and a URL, and never the reserved "all". */
+function cleanViewSlug(raw) {
+  if (typeof raw !== 'string') return '';
+  const s = raw.trim().toLowerCase();
+  return VIEW_SLUG_RE.test(s) && s !== RESERVED_VIEW ? s : '';
+}
+
+/**
+ * A slug derived from a display name, or '' when the name has nothing to derive one from.
+ * No "-2" uniquifying the way mod directories get one: the slug is the membership key, so a
+ * `marketing-2` would quietly be a different view from the one the caller named.
+ */
+function slugifyView(name) {
+  const s = String(name || '').toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+/, '')
+    .slice(0, 40)
+    .replace(/-+$/, '');
+  return cleanViewSlug(s);
+}
+
+const cleanNeedle = (raw) => {
+  if (typeof raw !== 'string') return null;
+  const s = raw.replace(CONTROL_CHARS, '').trim().toLowerCase().slice(0, MAX_NAME_LEN);
+  return s || null;
+};
+
+/**
+ * A `paths` entry: relative to the view's repo, and never outside it. '' (written "." or
+ * "./") is the whole repo. Backslashes are normalized before the `..` check, as cleanEntry()
+ * does, so a Windows-style traversal can't slip past a `/`-oriented test.
+ */
+function cleanViewPath(raw) {
+  if (typeof raw !== 'string') return null;
+  const rel = raw.replace(CONTROL_CHARS, '').trim().replace(/\\/g, '/');
+  if (!rel || rel.startsWith('/') || path.isAbsolute(rel)) return null;
+  const segs = rel.split('/').filter(seg => seg && seg !== '.');
+  if (segs.some(seg => seg === '..')) return null;
+  return segs.join('/');
+}
+
+const cleanKind = (raw) => (VIEW_KINDS.includes(raw) ? raw : null);
+
+function cleanRuleField(raw, clean) {
+  if (!Array.isArray(raw)) return [];
+  const out = [];
+  for (const item of raw) {
+    const v = clean(item);
+    if (v !== null && !out.includes(v)) out.push(v);
+    if (out.length >= MAX_RULE_ITEMS) break;
+  }
+  return out;
+}
+
+/**
+ * A view's `match`: a list of rules. A tab is in the view when ANY rule matches, and a rule
+ * matches when EVERY field it states does (`names`: a substring of the tab name, any entry;
+ * `paths`: the tab's cwd inside one of these repo subfolders; `kinds`: the tab's kind). A bare
+ * object is accepted as a one-rule list.
+ *
+ * A rule that states a field and has none of that field's entries survive is dropped WHOLE,
+ * not with the field removed: `{kinds:['display-tab'], paths:['../elsewhere']}` must not widen
+ * into "every display tab in the project". An empty list is legal — a view tabs are filed into
+ * only by hand.
+ */
+function cleanMatch(raw) {
+  const list = Array.isArray(raw) ? raw : (raw && typeof raw === 'object' ? [raw] : []);
+  const rules = [];
+  for (const r of list) {
+    if (!r || typeof r !== 'object' || Array.isArray(r)) continue;
+    const rule = {};
+    let lostAField = false;
+    for (const [field, clean] of [['names', cleanNeedle], ['paths', cleanViewPath], ['kinds', cleanKind]]) {
+      if (r[field] === undefined) continue;
+      const cleaned = cleanRuleField(r[field], clean);
+      if (cleaned.length) rule[field] = cleaned;
+      else lostAField = true;
+    }
+    if (!lostAField && Object.keys(rule).length) rules.push(rule);
+    if (rules.length >= MAX_VIEW_RULES) break;
+  }
+  return rules;
+}
+
+function cleanViewOrder(raw) {
+  const n = Number(raw);
+  return Number.isFinite(n) ? Math.max(-MAX_VIEW_ORDER, Math.min(MAX_VIEW_ORDER, n)) : 0;
+}
+
+/** One view file → the in-memory row, or null if it is not a view we can make sense of. */
+function normalizeView(raw, root, slug) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  if (!root || !cleanViewSlug(slug) || cleanViewSlug(slug) !== slug) return null;
+  return {
+    id: viewId(root, slug),
+    // Server-only — serializeView() keeps it off the wire.
+    root,
+    file: path.join(projectViewsDir(root), slug + VIEW_FILE_EXT),
+    slug,
+    project: root,
+    name: cleanName(raw.name) || slug,
+    icon: cleanIcon(raw.icon),
+    order: cleanViewOrder(raw.order),
+    match: cleanMatch(raw.match),
+  };
+}
+
+/**
+ * Every view one repo defines. Only `<slug>.json` with a valid lowercase slug counts, so the
+ * `.tmp` an interrupted write leaves, an editor's swap file, a dotfile and a `Marketing.json`
+ * are all skipped rather than guessed at. Oversized and corrupt files are skipped too.
+ */
+function readViews(root) {
+  const dir = projectViewsDir(root);
+  let entries;
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return [];   // no .deepsteve/views in this repo, which is the common case
+  }
+  const out = [];
+  for (const e of entries) {
+    if (!e.isFile() || !e.name.endsWith(VIEW_FILE_EXT)) continue;
+    const slug = e.name.slice(0, -VIEW_FILE_EXT.length);
+    if (cleanViewSlug(slug) !== slug) continue;
+    const file = path.join(dir, e.name);
+    let raw;
+    try {
+      if (fs.statSync(file).size > MAX_VIEW_FILE_BYTES) continue;
+      raw = JSON.parse(fs.readFileSync(file, 'utf8'));
+    } catch {
+      continue;
+    }
+    const v = normalizeView(raw, root, slug);
+    if (v) out.push(v);
+  }
+  return out;
+}
+
+const compareViews = (a, b) =>
+  (a.order - b.order) || a.name.localeCompare(b.name) || a.project.localeCompare(b.project);
+
+/** The file's contents, in the order they read best in a diff. Empty icon / zero order are left out. */
+function viewManifestOf(v) {
+  const out = { name: v.name };
+  if (v.icon) out.icon = v.icon;
+  if (v.order) out.order = v.order;
+  out.match = v.match;
+  return out;
+}
+
+function writeView(v) {
+  writeFileAtomic(v.file, JSON.stringify(viewManifestOf(v), null, 2) + '\n');
+}
+
+/**
+ * Delete a view's file, then any now-empty `.deepsteve/views` and `.deepsteve` above it. The
+ * path is re-derived from the repo root and the slug and must stay inside the views directory,
+ * the same distrust removeMod() applies; the rmdir prune fails harmlessly on a directory that
+ * still holds something (another view, or `.deepsteve/mods`).
+ */
+function removeView(v) {
+  const base = path.resolve(projectViewsDir(v.root));
+  const file = path.resolve(base, v.slug + VIEW_FILE_EXT);
+  if (!file.startsWith(base + path.sep)) throw new Error('refusing to delete outside the views directory');
+  fs.rmSync(file, { force: true });
+  try { fs.rmdirSync(base); } catch {}
+  try { fs.rmdirSync(path.dirname(base)); } catch {}
+}
+
+// The browser's shape. `root` and `file` stay server-side; `project` is the repo root, which
+// is what the client scopes by (the same field a mod carries).
+const serializeView = (v) => ({
+  id: v.id, slug: v.slug, project: v.project, name: v.name, icon: v.icon, order: v.order, match: v.match,
+});
+
+const serializeViewForAgent = (v) => ({ ...serializeView(v), path: path.relative(v.root, v.file) });
+
+const viewCommitReminder = (v) =>
+  `This view is a file in the repo. Commit ${path.relative(v.root, v.file)} so it travels with the ` +
+  'project (and so an uncommitted change does not block a worktree merge).';
+
+/**
+ * The trap create_project_mod has too: a worktree session's project resolves to the PARENT
+ * repo (that is the root the scan knows), so the file lands in the main checkout, which the
+ * worktree's own Bash cannot commit, and merge_worktree refuses a dirty target. Said out loud
+ * rather than silently worked around.
+ */
+function worktreeViewNote(shellId, proj) {
+  const entry = shellId && ctx && ctx.shells && typeof ctx.shells.get === 'function' ? ctx.shells.get(shellId) : null;
+  if (!entry || !entry.worktree) return null;
+  return `Your session is in a worktree, but the view was written to ${proj} — the main checkout, the repo ` +
+    'the project scans. That checkout now has an uncommitted file, and merge_worktree / issue_complete refuse ' +
+    'a dirty target, so ask the user to commit it there. To ship a view with your branch instead, write ' +
+    '.deepsteve/views/<slug>.json inside your worktree and commit it; it appears when the merge lands.';
+}
+
+/**
+ * The `view` argument of the spawn tools (open_terminal, start_issue, create_display_tab):
+ * undefined = file the new tab under whatever views its opener is in; "all" = none; otherwise
+ * a slug. Not checked against the views that exist — a filing into a view nobody has defined
+ * yet is inert, and becomes live the moment someone does.
+ */
+function cleanSpawnView(raw) {
+  if (raw === undefined || raw === null || raw === '') return { view: undefined };
+  if (typeof raw !== 'string') return { error: 'view must be a string.' };
+  const s = raw.trim().toLowerCase();
+  if (s === RESERVED_VIEW) return { view: RESERVED_VIEW };
+  const slug = cleanViewSlug(s);
+  if (!slug) {
+    return { error: `view "${raw}" is not a view slug (lowercase letters, digits and dashes, e.g. "marketing"). Pass "all" to file the tab under no view.` };
+  }
+  return { view: slug };
+}
+
+// The spawn tools' `view` param, described once for all three of them.
+const SPAWN_VIEW_DESCRIPTION =
+  'Project view to file the new tab under — a view\'s slug, e.g. "marketing" (list_project_views). OMIT it and ' +
+  'the tab goes into every view YOUR tab is in, which is right for work you are handing off; pass "all" to file ' +
+  'it under no view.';
+
+const viewsIn = (proj) => { ensureScanned(); return views.filter(v => v.project === proj); };
+const findViewById = (id) => { ensureScanned(); return views.find(v => v.id === id) || null; };
+
+/**
+ * Write a new view file. Shared by create_project_view and the "+ New view" REST route, so an
+ * agent and a person clicking get the same validation. Returns `{view}` or `{error, status}`.
+ */
+function createView(proj, { name, slug, icon, order, match }) {
+  const cleanedName = cleanName(name);
+  if (!cleanedName) return { error: 'name is required.', status: 400 };
+  const explicitSlug = slug !== undefined && slug !== null && slug !== '';
+  const s = explicitSlug ? cleanViewSlug(String(slug)) : slugifyView(cleanedName);
+  if (!s) {
+    const asked = (explicitSlug ? String(slug) : cleanedName).trim().toLowerCase();
+    const why = asked === RESERVED_VIEW
+      ? '"All" is the built-in view every project already has.'
+      : 'Pass a slug: lowercase letters, digits and dashes, e.g. "marketing" ("all" is reserved).';
+    return { error: `No usable view slug from "${explicitSlug ? slug : cleanedName}". ${why}`, status: 400 };
+  }
+  const v = normalizeView({ name: cleanedName, icon, order, match }, proj, s);
+  if (fs.existsSync(v.file)) {
+    return {
+      error: `A view "${s}" already exists in ${proj} (${path.relative(proj, v.file)}). Use update_project_view to change it.`,
+      status: 409,
+    };
+  }
+  writeView(v);
+  commit(`created view ${s} "${v.name}" in ${proj} with ${v.match.length} rule(s)`);
+  return { view: v };
+}
+
 // --- MCP tools ---------------------------------------------------------------
 
 function init(context) {
@@ -839,12 +1134,12 @@ function init(context) {
 
     refresh_project_mods: {
       description:
-        'Re-read every registered project\'s .deepsteve/mods/ from disk and tell every open window to redraw its ' +
-        'project mods (rail rows, tab-strip buttons, pinned tabs), with no page reload. The create/update/edit/delete ' +
-        'tools already do this. Call it after changing a project mod ANY OTHER WAY: writing mod.json or a page with ' +
-        'your own Edit/Write tool, or a git pull, checkout or rebase that adds, removes or renames a ' +
-        '.deepsteve/mods/<name>/ directory. (A merge through merge_worktree or issue_complete refreshes on its own.) ' +
-        'Returns the mods now found in your project. A mod missing from the list either has no valid mod.json (it ' +
+        'Re-read every registered project\'s .deepsteve/mods/ and .deepsteve/views/ from disk and tell every open window ' +
+        'to redraw its project mods (rail rows, tab-strip buttons, pinned tabs) and project views, with no page reload. ' +
+        'The create/update/edit/delete tools already do this. Call it after changing a project mod or view ANY OTHER WAY: ' +
+        'writing mod.json, a page or a view file with your own Edit/Write tool, or a git pull, checkout or rebase that ' +
+        'adds, removes or renames one. (A merge through merge_worktree or issue_complete refreshes on its own.) ' +
+        'Returns the mods and views now found in your project. A mod missing from the list either has no valid mod.json (it ' +
         'needs "scope": "project") or lives in a repo that is not part of a registered project.',
       schema: {
         session_id: z.string().optional().describe('Your DEEPSTEVE_SESSION_ID env var — scopes the returned list to your project'),
@@ -859,6 +1154,7 @@ function init(context) {
           enabled: featureEnabled(),
           project: proj || null,
           mods: (proj ? mods.filter(m => m.project === proj) : mods).map(serializeForAgent),
+          views: (proj ? views.filter(v => v.project === proj) : views).map(serializeViewForAgent),
         };
         // Why nothing may show up, in the order an agent would want to fix it.
         if (!out.enabled) out.note = FEATURE_OFF_MSG;
@@ -883,6 +1179,154 @@ function init(context) {
         }
         commit(`deleted ${mod.dirname} "${mod.name}" from ${mod.root}`);
         return ok({ id: mod.id, deleted: true, path: removed });
+      },
+    },
+
+    // --- Project views (#726) ---
+
+    create_project_view: {
+      description:
+        'Create a PROJECT VIEW: a named view of this project\'s tabs, e.g. "Marketing" or "Analytics". Views appear ' +
+        'as a row of buttons over the tab strip (collapsed to one toggle by default) whenever the project is selected ' +
+        'in the rail; picking one shows only the tabs in it, and the built-in "All" shows everything. A tab is in a view ' +
+        'when ANY of its match rules matches — within one rule EVERY field given must match: `names` (case-insensitive ' +
+        'substrings of the tab name, any of them), `paths` (folders relative to the repo root; "." is the whole repo — ' +
+        'the tab\'s cwd must be inside one), `kinds` (agent, terminal, display-tab, project-mod, mod-tab). Tabs also ' +
+        'join a view without any rule: a tab the user opens while the view is selected, a tab filed there from its ' +
+        'right-click menu, and a tab an agent opens — which goes into every view ITS OPENER is in, unless the spawn ' +
+        'tool (open_terminal, start_issue, create_display_tab) passes `view`. So a view with no rules at all is a ' +
+        'manual folder, which is often what you want. Stored IN THE REPO at .deepsteve/views/<slug>.json — COMMIT IT. ' +
+        'The repo must already be part of a registered project.',
+      schema: {
+        name: z.string().describe('Display name, e.g. "Marketing". Also the basis for the slug unless you pass one'),
+        slug: z.string().optional().describe('The view\'s key and filename: lowercase letters, digits and dashes, e.g. "marketing". "all" is reserved. Spawn tools\' `view` param names this'),
+        icon: z.string().optional().describe('An emoji shown on the view\'s button'),
+        order: z.number().optional().describe('Sort key for the button row (ascending; ties sort by name). Default 0'),
+        match: z.array(z.object({
+          names: z.array(z.string()).optional().describe('Case-insensitive substrings of the tab name; any one matches'),
+          paths: z.array(z.string()).optional().describe('Folders relative to the repo root ("." = the whole repo); the tab\'s cwd must be inside one. A worktree counts as its repo'),
+          kinds: z.array(z.enum(VIEW_KINDS)).optional().describe('Tab kinds; any one matches'),
+        })).optional().describe('Rules, OR\'d together; the fields of one rule are AND\'d. Omit for a view tabs are only filed into'),
+        session_id: z.string().optional().describe('Your DEEPSTEVE_SESSION_ID env var — the project is inferred from your session\'s repo root. Omit only if you pass project'),
+        project: z.string().optional().describe('Absolute path to the project, canonicalized to its git repo root. Defaults to the calling session\'s repo root'),
+      },
+      handler: async ({ name, slug, icon, order, match, session_id, project }, extra) => {
+        const shellId = session_id || callerShellId(extra);
+        const proj = resolveProject(project, shellId);
+        if (!proj) {
+          return err('Could not determine which project this view belongs to. Pass your DEEPSTEVE_SESSION_ID as session_id, or an absolute path as project.');
+        }
+        if (!scanRoots().has(proj)) return err(unregisteredViewMsg(proj));
+        let made;
+        try {
+          made = createView(proj, { name, slug, icon, order, match });
+        } catch (e) {
+          return err(`Failed to write the view into ${proj}: ${e.message}`);
+        }
+        if (made.error) return err(made.error);
+        const out = { ...serializeViewForAgent(made.view), commitReminder: viewCommitReminder(made.view) };
+        const note = worktreeViewNote(shellId, proj);
+        if (note) out.worktreeNote = note;
+        return ok(out);
+      },
+    },
+
+    update_project_view: {
+      description:
+        'Change a project view: its name, icon, order and/or match rules. Pass only what changes; `match` replaces the ' +
+        'whole rule list (pass [] for a view tabs are only filed into). The slug cannot change — it is the key every ' +
+        'filed tab and spawn `view` param names; to rename the key, delete the view and create another. Writes the ' +
+        'view\'s file in the repo, so commit the result. Editing .deepsteve/views/<slug>.json with your own tools works ' +
+        'too; call refresh_project_mods afterwards so open windows redraw.',
+      schema: {
+        view: z.string().describe('The view\'s slug, e.g. "marketing"'),
+        name: z.string().optional().describe('New display name'),
+        icon: z.string().optional().describe('New emoji icon; "" clears it'),
+        order: z.number().optional().describe('New sort key'),
+        match: z.array(z.object({
+          names: z.array(z.string()).optional(),
+          paths: z.array(z.string()).optional(),
+          kinds: z.array(z.enum(VIEW_KINDS)).optional(),
+        })).optional().describe('The new rule list — replaces the old one'),
+        session_id: z.string().optional().describe('Your DEEPSTEVE_SESSION_ID env var — the project is inferred from your session\'s repo root'),
+        project: z.string().optional().describe('Absolute path to the project instead of your own'),
+      },
+      handler: async ({ view, name, icon, order, match, session_id, project }, extra) => {
+        const proj = resolveProject(project, session_id || callerShellId(extra));
+        if (!proj) return err('Could not determine which project the view is in. Pass session_id or project.');
+        const slug = cleanViewSlug(String(view || ''));
+        const here = viewsIn(proj);
+        const v = here.find(x => x.slug === slug);
+        if (!v) {
+          return err(`No view "${view}" in ${proj}. Views here: ${here.map(x => x.slug).join(', ') || '(none)'}.`);
+        }
+        if (name !== undefined) {
+          const cleaned = cleanName(name);
+          if (!cleaned) return err('name must not be empty.');
+          v.name = cleaned;
+        }
+        if (icon !== undefined) v.icon = cleanIcon(icon);
+        if (order !== undefined) v.order = cleanViewOrder(order);
+        if (match !== undefined) v.match = cleanMatch(match);
+        try {
+          writeView(v);
+        } catch (e) {
+          return err(`Failed to write the view: ${e.message}`);
+        }
+        const out = { ...serializeViewForAgent(v), updated: true };
+        commit(`updated view ${v.slug} in ${proj}`);
+        return ok(out);
+      },
+    },
+
+    delete_project_view: {
+      description:
+        'Delete a project view: its file is removed from the repo, and a window looking at it falls back to "All". ' +
+        'Tabs filed into it lose nothing else. Commit the deletion.',
+      schema: {
+        view: z.string().describe('The view\'s slug'),
+        session_id: z.string().optional().describe('Your DEEPSTEVE_SESSION_ID env var — the project is inferred from your session\'s repo root'),
+        project: z.string().optional().describe('Absolute path to the project instead of your own'),
+      },
+      handler: async ({ view, session_id, project }, extra) => {
+        const proj = resolveProject(project, session_id || callerShellId(extra));
+        if (!proj) return err('Could not determine which project the view is in. Pass session_id or project.');
+        const slug = cleanViewSlug(String(view || ''));
+        const v = viewsIn(proj).find(x => x.slug === slug);
+        if (!v) return err(`No view "${view}" in ${proj}.`);
+        const removed = path.relative(v.root, v.file);
+        try {
+          removeView(v);
+        } catch (e) {
+          return err(`Failed to delete the view: ${e.message}`);
+        }
+        commit(`deleted view ${v.slug} from ${proj}`);
+        return ok({ slug: v.slug, deleted: true, path: removed });
+      },
+    },
+
+    list_project_views: {
+      description:
+        'List project views. Defaults to the ones defined in YOUR project\'s repo; scope:"all" lists every registered ' +
+        'repo\'s. Each carries its slug (what a spawn tool\'s `view` param names), its rules and the path of its file.',
+      schema: {
+        session_id: z.string().optional().describe('Your DEEPSTEVE_SESSION_ID env var — scopes the listing to your project'),
+        scope: z.enum(['project', 'all']).optional().describe('"project" (default) = this project only; "all" = every project'),
+        project: z.string().optional().describe('Absolute path to list a specific project instead of your own'),
+      },
+      handler: async ({ session_id, scope, project }, extra) => {
+        ensureScanned();
+        if (scope === 'all') return ok({ scope: 'all', views: views.map(serializeViewForAgent) });
+        const proj = resolveProject(project, session_id || callerShellId(extra));
+        if (!proj) {
+          return ok({
+            scope: 'project', project: null, views: [],
+            note: 'No project could be determined for this session — pass session_id or project, or use scope:"all".',
+          });
+        }
+        const out = { scope: 'project', project: proj, views: views.filter(v => v.project === proj).map(serializeViewForAgent) };
+        if (!scanRoots().has(proj)) out.note = unregisteredViewMsg(proj);
+        return ok(out);
       },
     },
   };
@@ -984,6 +1428,73 @@ function registerRoutes(app, context) {
     commit(`deleted ${mod.dirname} "${mod.name}" from ${mod.root} (REST)`);
     res.json({ deleted: true, id: mod.id });
   });
+
+  // --- Project views (#726) ---
+  // Every view of every registered repo; the client scopes them to the selected project, the
+  // same split /api/project-mods makes. Not gated: a view is data, not agent-authored HTML.
+  app.get('/api/project-views', (req, res) => {
+    ensureScanned();
+    res.json({ views: views.map(serializeView) });
+  });
+
+  // "+ New view" — the manual mode, where a person rather than an agent makes the view. It is
+  // created with no rules, so it holds exactly the tabs filed into it. The browser names the
+  // PROJECT (a context id), not a path: which of the project's repos receives the file is
+  // decided here — the repo holding `cwd` (the tab the user is looking at) when there is one,
+  // else the project's first folder.
+  app.post('/api/project-views', (req, res) => {
+    const { contextId, name, icon, cwd } = req.body || {};
+    const contexts = projectScope.getContexts(ctx);
+    const project = contexts.find(c => c && c.id === contextId);
+    if (!project) return res.status(404).json({ error: 'Project not found' });
+    const dirs = (Array.isArray(project.dirs) ? project.dirs : []).filter(Boolean);
+    const pick = (typeof cwd === 'string' && cwd)
+      ? dirs.find(d => projectScope.pathInside(cwd, d, ctx) || projectScope.pathInside(cwd, canonicalRoot(d), ctx))
+      : null;
+    const proj = canonicalRoot(pick || dirs[0] || '');
+    if (!proj) return res.status(400).json({ error: 'This project has no folder to keep a view in' });
+    let made;
+    try {
+      made = createView(proj, { name, icon, match: [] });
+    } catch (e) {
+      return res.status(500).json({ error: `Failed to write the view: ${e.message}` });
+    }
+    if (made.error) return res.status(made.status || 400).json({ error: made.error });
+    res.status(201).json({ view: serializeView(made.view), path: path.relative(proj, made.view.file) });
+  });
+
+  // Rename / re-icon from the view button's menu. Rules stay agent- or file-edited.
+  app.put('/api/project-views/:id', (req, res) => {
+    const v = findViewById(req.params.id);
+    if (!v) return res.status(404).json({ error: 'View not found' });
+    const { name, icon } = req.body || {};
+    if (name !== undefined) {
+      const cleaned = cleanName(name);
+      if (!cleaned) return res.status(400).json({ error: 'name must not be empty' });
+      v.name = cleaned;
+    }
+    if (icon !== undefined) v.icon = cleanIcon(icon);
+    try {
+      writeView(v);
+    } catch (e) {
+      return res.status(500).json({ error: `Failed to write the view: ${e.message}` });
+    }
+    const body = { view: serializeView(v) };
+    commit(`updated view ${v.slug} in ${v.root} (REST)`);
+    res.json(body);
+  });
+
+  app.delete('/api/project-views/:id', (req, res) => {
+    const v = findViewById(req.params.id);
+    if (!v) return res.status(404).json({ error: 'View not found' });
+    try {
+      removeView(v);
+    } catch (e) {
+      return res.status(500).json({ error: `Failed to delete the view: ${e.message}` });
+    }
+    commit(`deleted view ${v.slug} from ${v.root} (REST)`);
+    res.json({ deleted: true, id: v.id });
+  });
 }
 
 // The mod loader only uses init/registerRoutes; the extra named exports are for unit tests.
@@ -999,4 +1510,8 @@ module.exports = {
   SURFACES, DEFAULT_SURFACES, OPEN_MODES, DEFAULT_OPEN_MODE,
   PROJECT_SCOPE, MANIFEST_FILE, DEFAULT_ENTRY, DIRNAME_RE,
   FEATURE_OFF_MSG,
+  // Project views (#726). cleanSpawnView is not test-only: the spawn tools validate `view` with it.
+  cleanSpawnView, SPAWN_VIEW_DESCRIPTION, cleanViewSlug, slugifyView, cleanMatch, cleanViewPath, normalizeView, viewId,
+  serializeView, serializeViewForAgent, viewManifestOf,
+  VIEW_KINDS, VIEW_SLUG_RE, RESERVED_VIEW,
 };

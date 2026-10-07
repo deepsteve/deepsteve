@@ -86,7 +86,7 @@ line below is a trigger: if you are about to do that thing, read that page first
 | [docs/frontend.md](docs/frontend.md) | adding a keyboard shortcut, a palette command, a page-level banner or tab indicator, opening a WebSocket, touching client-side session storage, or changing the projects rail / the built-in Deep Steve project |
 | [docs/timelapse.md](docs/timelapse.md) | touching timelapse recording, the shared DOM→PNG capture in `public/js/dom-capture.js`, or the panel-tab rail indicator |
 | [docs/agents.md](docs/agents.md) | assuming a feature works for a given agent, adding an agent, or using a core MCP session tool |
-| [docs/mods.md](docs/mods.md) | writing or changing a DeepSteve Mod, a Project Mod, or a display tab |
+| [docs/mods.md](docs/mods.md) | writing or changing a DeepSteve Mod, a Project Mod, a project view, or a display tab |
 | [docs/links.md](docs/links.md) | touching `/v1/<type>/<id>` links (`links.js`), a link type, Inbox's decision page, how Inbox ids are minted, or `authGate`'s link bounce |
 | [docs/themes.md](docs/themes.md) | adding or changing a theme |
 | [docs/timecard.md](docs/timecard.md) | touching `mods/timecard/`, `timecard-store.js`, or the presence beacon |

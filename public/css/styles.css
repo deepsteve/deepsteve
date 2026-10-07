@@ -81,11 +81,14 @@ html, body { overscroll-behavior: none; }  /* Prevent swipe back/forward gesture
 body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-family: system-ui; height: 100vh; overflow: hidden; touch-action: none; }
 
 /* App container - flexbox for layout switching.
-   Always a row: [ #context-rail | #app-main ]. #app-main owns the horizontal /
-   vertical tab-layout switch (it is the column that #tabs + #content-row live in),
-   so the context rail can sit full-height to the left of everything. */
+   Always a row: [ #context-rail | #app-main ], so the context rail can sit full-height to
+   the left of everything. #app-main is the monitor, and always a column:
+   [ #views-bar | #app-body ]. The project-views bar (#726) spans its full width in BOTH tab
+   layouts, so the horizontal / vertical switch lives one level down, on #app-body (the box
+   #tabs + #content-row live in). */
 #app-container { display: flex; flex-direction: row; height: 100vh; }
 #app-main { display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; position: relative; border-radius: var(--ds-main-radius); }
+#app-body { display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; }
 
 /* The terminal pane's inner edge light. Painted as an overlay rather than as a
    box-shadow on #app-main itself, for the reason spelled out at --ds-main-inset.
@@ -125,6 +128,78 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
 #tabs-arrow-end::after { content: '\203A'; }
 
 #tabs-spacer { flex: 1; }
+
+/* ── Project views (#726) ─────────────────────────────────────────────────────────────────────
+   Two forms of one control. Collapsed (the default) is #views-toggle, the first child of
+   #tabs-list-wrapper: immediately before the first tab — left of it horizontally, above it
+   vertically — whatever project-mod buttons sit before the wrapper. Expanded adds #views-bar,
+   a row of folder tabs across the full width of the monitor. The active one takes #tabs'
+   background and covers the bar's bottom rule, so it reads as the tab the strip below hangs
+   from. project-views.js toggles .hidden on both; neither is display-managed anywhere else. */
+#views-bar {
+  display: flex;
+  align-items: flex-end;
+  gap: 4px;
+  flex-shrink: 0;
+  padding: 6px 8px 0;
+  background: var(--ds-bg-primary);
+  border-bottom: 1px solid var(--ds-border);
+  overflow-x: auto;
+  scrollbar-width: none;
+  /* Below the #app-main::after bezel overlay (z-index 3), like every structural child. */
+  position: relative;
+  z-index: 1;
+}
+#views-bar::-webkit-scrollbar { display: none; }
+#views-bar.hidden, #views-toggle.hidden { display: none; }
+.view-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  max-width: 220px;
+  padding: 5px 14px;
+  margin-bottom: -1px;
+  background: var(--ds-bg-tertiary);
+  border: 1px solid var(--ds-border);
+  border-radius: 6px 6px 0 0;
+  color: var(--ds-text-secondary);
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.2;
+  cursor: pointer;
+  user-select: none;
+}
+.view-tab:hover { color: var(--ds-text-primary); }
+.view-tab.active { background: var(--ds-bg-secondary); border-bottom-color: var(--ds-bg-secondary); color: var(--ds-text-bright); }
+.view-tab-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.view-tab-add { background: transparent; border-color: transparent; color: var(--ds-text-secondary); }
+.view-tab-add:hover { border-color: var(--ds-border); }
+.views-toggle {
+  flex-shrink: 0;
+  padding: 4px 8px;
+  background: var(--ds-bg-tertiary);
+  border: 1px solid var(--ds-border);
+  border-radius: 4px;
+  color: var(--ds-text-secondary);
+  font: inherit;
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  max-width: 180px;
+}
+.views-toggle:hover { background: var(--ds-border); color: var(--ds-text-primary); }
+.views-toggle .btn-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.views-toggle .views-caret { font-size: 11px; line-height: 1; opacity: 0.8; }
+/* Pressed = the bar is open; .filtering = a view other than All is narrowing the strip, which
+   is the one state worth noticing with the bar closed. */
+.views-toggle.active { border-color: var(--ds-accent-blue); }
+.views-toggle.filtering { color: var(--ds-accent-blue); }
+/* Vertical: the shared .nav-btn row shape wins (it is more specific), so only the states are restated. */
+#app-container.vertical-layout .views-toggle { max-width: none; margin-bottom: 6px; }
+#app-container.vertical-layout .views-toggle.active { background: var(--ds-bg-tertiary); }
+#app-container.vertical-layout .views-toggle.filtering { color: var(--ds-accent-blue); }
+#app-container.vertical-layout.icon-rail .views-toggle .views-caret { display: none; }
 
 /* Layout toggle button */
 .layout-btn { padding: 4px 8px; background: var(--ds-bg-tertiary); border: 1px solid var(--ds-border); color: var(--ds-text-secondary); border-radius: 4px; cursor: pointer; font-size: 14px; margin-right: 8px; line-height: 1; }
@@ -225,13 +300,14 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
 #tabs.tab-switch-mode { outline: 2px solid var(--ds-accent-blue); outline-offset: -2px; border-radius: 4px; }
 
 /* Vertical layout mode — #app-container is always a row; the horizontal/vertical
-   switch flips #app-main (the tabs+content column) into a row so #tabs becomes a
-   left sidebar. The context rail stays left of #app-main in both modes. */
-#app-container.vertical-layout #app-main { flex-direction: row; }
+   switch flips #app-body (the tabs+content column) into a row so #tabs becomes a
+   left sidebar. The context rail stays left of #app-main in both modes, and the
+   project-views bar stays above #app-body (#726). */
+#app-container.vertical-layout #app-body { flex-direction: row; }
 
-/* No height here on purpose: #tabs is a child of #app-main, not of the viewport, so 100vh
+/* No height here on purpose: #tabs is a child of #app-body, not of the viewport, so 100vh
    overflowed every theme that insets the app (body padding + bezel) and the overflow was
-   clipped away — taking the ⚙ with it (#550). #app-main is a flex row in this mode, so its
+   clipped away — taking the ⚙ with it (#550). #app-body is a flex row in this mode, so its
    default align-items:stretch already gives #tabs exactly the right height. */
 /* --ds-rail-width is the ONE floor shared by BOTH collapsible rails — the vertical tab
    bar (#552) and the context rail (#569) — and CSS owns it: layout-manager.js and
@@ -1100,6 +1176,8 @@ kbd {
    an !important here. Panels need no rule: they live in #content-row, which showModView()
    already hides. Works in both tab layouts — vertical sets #tabs' width, never its display. */
 #app-container.quiet-mode #tabs { display: none; }
+/* The project-views bar is the strip's own chrome (#726), so it goes with it. */
+#app-container.quiet-mode #views-bar { display: none; }
 
 /* Panel container (side panel for panel-mode mods) */
 #panel-container { display: none; flex-shrink: 0; width: 360px; overflow: hidden; border-left: 1px solid var(--ds-border); position: relative; }
@@ -1117,8 +1195,9 @@ kbd {
    "Action Required" and every other panel tab. The strip is a flex column, so ordering is
    the whole collision story: it cannot overlap the rail chrome no matter how many panel
    mods are enabled. It is also genuinely top-right in both layouts, because vertical-layout
-   starts #content-row at y=0, and it survives quiet mode — neither of which is true of
-   anything mounted in #tabs.
+   starts #content-row at the top of #app-body (below the project-views bar when that is
+   open, #726), and it survives quiet mode — neither of which is true of anything mounted in
+   #tabs.
 
    Idle is a HOLLOW ring, armed is SOLID and pulsing. The shape carries the state as well as
    the colour, because win-95.css and ascii-art.css both restyle this corner with

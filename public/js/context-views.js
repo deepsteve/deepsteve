@@ -271,11 +271,25 @@ function filterSuspended() {
   return !!cb.isFilterSuspended?.();
 }
 
+// Project views (#726) narrow a project further: a tab is shown when it is in the project AND
+// in the view this window has selected for it. The view half is project-views.js's, injected
+// as cb.tabInView so this module never imports it. No callback, or no project, is no view filter.
+function tabInActiveView(id, ctx) {
+  return !ctx || cb.tabInView?.(id, ctx) !== false;
+}
+
+// Last-tab memory (#541) is per project AND view: the tab you were on in Marketing is not the
+// one to come back to in All. The All view keeps the bare project id it always had.
+function memoKey(ctx) {
+  const view = cb.viewKey?.(ctx);
+  return view ? `${ctx.id}#${view}` : ctx.id;
+}
+
 function activeContextHasTabs() {
   const ctx = getActiveContext();
   if (!ctx) return true;
   const ids = cb.getOrderedTabIds ? cb.getOrderedTabIds() : [];
-  return ids.some(id => tabInContext(cb.getTabCwd?.(id), ctx));
+  return ids.some(id => tabInContext(cb.getTabCwd?.(id), ctx) && tabInActiveView(id, ctx));
 }
 
 // Owned-tab count for the rail badge (#529). "All" (ctx null) → every tab. A real
@@ -310,7 +324,7 @@ export function applyFilter() {
   for (const id of ids) {
     const tabEl = document.getElementById('tab-' + id);
     if (!tabEl) continue;
-    const visible = tabInContext(cb.getTabCwd?.(id), ctx);
+    const visible = tabInContext(cb.getTabCwd?.(id), ctx) && tabInActiveView(id, ctx);
     tabEl.classList.toggle('context-hidden', !visible);
     if (visible && !firstVisible) firstVisible = id;
   }
@@ -323,7 +337,7 @@ export function applyFilter() {
     const activeHidden = !activeTab ||
       document.getElementById('tab-' + activeTab)?.classList.contains('context-hidden');
     if (activeHidden) {
-      const remembered = lastTabByContext[ctx.id];
+      const remembered = lastTabByContext[memoKey(ctx)];
       const rEl = remembered ? document.getElementById('tab-' + remembered) : null;
       const target = (rEl && !rEl.classList.contains('context-hidden')) ? remembered : firstVisible;
       if (target) cb.switchToTab?.(target);
@@ -1079,9 +1093,10 @@ export function noteActiveTab(tabId) {
   if (!enabled || !tabId || filterSuspended()) return;
   const ctx = getActiveContext();
   if (!ctx) return;
-  if (!tabInContext(cb.getTabCwd?.(tabId), ctx)) return;
-  if (lastTabByContext[ctx.id] === tabId) return;
-  lastTabByContext[ctx.id] = tabId;
+  if (!tabInContext(cb.getTabCwd?.(tabId), ctx) || !tabInActiveView(tabId, ctx)) return;
+  const key = memoKey(ctx);
+  if (lastTabByContext[key] === tabId) return;
+  lastTabByContext[key] = tabId;
   saveLastTabs();
 }
 
@@ -1099,9 +1114,23 @@ export function revealTabContext(tabId) {
   const ctx = getActiveContext();
   if (!ctx) return;
   const cwd = cb.getTabCwd?.(tabId);
-  if (tabInContext(cwd, ctx)) return;
+  if (tabInContext(cwd, ctx)) {
+    // In the project, but perhaps not in the view this window is looking at (#726). Move the
+    // VIEW — to the first one holding the tab, else All — rather than let the filter snap away
+    // from a tab you were just sent to.
+    const viewName = cb.revealTabView?.(tabId, ctx);
+    if (viewName) {
+      applyFilter();
+      noteActiveTab(tabId);
+      if (!ModManager.isExcursionActive()) showToast(`${ctx.name} · ${viewName}`);
+    }
+    return;
+  }
   // Archived contexts (#601) are not a jump target — a tab in one reveals as "All".
   const match = visibleContexts().find(c => tabInContext(cwd, c));
+  // The destination's view is settled BEFORE selectContext() filters, for the same reason: a
+  // view it remembers that doesn't hold this tab would snap straight away from it (#726).
+  if (match) cb.revealTabView?.(tabId, match);
   selectContext(match ? match.id : null);
   noteActiveTab(tabId);                        // record as destination's last tab (#541); self-no-ops for All
   // Explain the jump (mirrors cycleContext) — except on an excursion, where every ⌘↓ through
@@ -2006,8 +2035,9 @@ export function setContexts(list) {
   }
   // Drop last-tab memory for contexts that no longer exist (#541).
   let pruned = false;
-  for (const id of Object.keys(lastTabByContext)) {
-    if (!contexts.find(c => c.id === id)) { delete lastTabByContext[id]; pruned = true; }
+  for (const key of Object.keys(lastTabByContext)) {
+    const id = key.split('#')[0];   // `<ctx>#<view>` since #726
+    if (!contexts.find(c => c.id === id)) { delete lastTabByContext[key]; pruned = true; }
   }
   if (pruned) saveLastTabs();
   applyFilter();
@@ -2038,6 +2068,14 @@ export function getActiveContextInfo() {
   if (!enabled) return null;
   const c = getActiveContext();
   return c ? { name: c.name, dirs: [...c.dirs] } : null;
+}
+
+// Every project whose folders hold `cwd`, as copies — for project views (#726), which file a
+// tab an agent opens into the views its opener is in, and need the opener's projects to know
+// which views those are. Empty for no cwd (tabInContext would call that "every project").
+export function contextsForCwd(cwd) {
+  if (!cwd) return [];
+  return contexts.filter(c => tabInContext(cwd, c)).map(c => ({ id: c.id, name: c.name, dirs: [...c.dirs] }));
 }
 
 export function setEnabled(val) {

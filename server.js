@@ -7086,7 +7086,7 @@ function resumedStamp(status) {
  * Returns `{ error: <spawnCwdProblem> }` for a bad cwd — the caller formats it,
  * because an HTTP 400 body and an MCP isError result are not the same shape.
  */
-function startIssueSession({ number, title, body, labels, url, cwd, agentType, configDir, windowId, callerId, openBrowser = false, autopilot, source = 'unknown' }) {
+function startIssueSession({ number, title, body, labels, url, cwd, agentType, configDir, windowId, callerId, openBrowser = false, autopilot, view, source = 'unknown' }) {
   // #651: an omitted `autopilot` means "whatever the user usually wants", not "off".
   // A hard default here is what made every MCP / skill / autonomous start ignore the
   // remembered choice — and those are the paths most runs take. Read live off the
@@ -7213,7 +7213,12 @@ function startIssueSession({ number, title, body, labels, url, cwd, agentType, c
     });
   }
 
-  const tabDelivery = deliverToWindow({ type: 'open-session', id, cwd: spawnCwd, name, windowId, loading: true }, windowId, { openBrowser });
+  // openerId / view (#726): the browser files the new tab under project views — the
+  // explicit `view` (an already-cleaned slug or "all"), else the views of the tab that started it.
+  const tabDelivery = deliverToWindow({
+    type: 'open-session', id, cwd: spawnCwd, name, windowId, loading: true,
+    openerId: callerId || null, ...(view ? { view } : {}),
+  }, windowId, { openBrowser });
   noteSpawnDelivery(id, { tabDelivery, windowId, source: `start_issue #${number} (${source})` });
   // `resumed` (#689) is the facts, not a flag: the MCP path has no human to confirm
   // with, so telling the caller what it walked into is the whole of its answer.

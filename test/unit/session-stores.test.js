@@ -77,6 +77,21 @@ test('rename updates the name in both stores', async () => {
   assert.strictEqual(m.SessionStore.getWindowSessions(WIN).find((s) => s.id === 'a').name, 'Renamed');
 });
 
+test('setViews (#726) writes a tab\'s project-view filings to both stores, and an empty map as no key', async () => {
+  const m = await load(); reset();
+  m.SessionStores.add(WIN, { id: 'a', cwd: '/x', name: 'A' });
+  m.SessionStores.setViews(WIN, 'a', { marketing: true, analytics: false });
+  const tab = () => m.getTabSessions().find((s) => s.id === 'a');
+  const stored = () => m.SessionStore.getWindowSessions(WIN).find((s) => s.id === 'a');
+  assert.deepStrictEqual(tab().views, { marketing: true, analytics: false });
+  assert.deepStrictEqual(stored().views, { marketing: true, analytics: false });
+  m.SessionStores.setViews(WIN, 'a', undefined);
+  assert.ok(!('views' in tab()), 'the per-tab entry is back to its old shape');
+  assert.ok(!('views' in stored()), 'undefined is dropped on the way to localStorage');
+  m.SessionStores.setViews(WIN, 'a', {});
+  assert.ok(!('views' in tab()), 'an empty map is no filing at all');
+});
+
 test('reorder applies the same order to both stores', async () => {
   const m = await load(); reset();
   for (const id of ['a', 'b', 'c']) m.SessionStores.add(WIN, { id, cwd: '/x', name: id });

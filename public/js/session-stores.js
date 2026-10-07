@@ -75,6 +75,19 @@ export const SessionStores = {
     const entry = list.find(s => s.id === sessionId);
     if (entry) { entry.name = name; TabSessions.save(list); }
   },
+  // A tab's project-view filings (#726): `{slug: true}` filed in, `{slug: false}` taken out of
+  // a view whose rules would otherwise match it. An empty map is stored as NO key (undefined is
+  // dropped by JSON.stringify), so a tab nobody filed anywhere keeps its old entry shape.
+  setViews(windowId, sessionId, views) {
+    const clean = views && Object.keys(views).length ? { ...views } : undefined;
+    SessionStore.updateSession(windowId, sessionId, { views: clean });
+    const list = TabSessions.get();
+    const entry = list.find(s => s.id === sessionId);
+    if (entry) {
+      if (clean) entry.views = clean; else delete entry.views;
+      TabSessions.save(list);
+    }
+  },
   reorder(windowId, orderedIds) {
     const list = TabSessions.get();
     const reordered = orderedIds.map(id => list.find(s => s.id === id)).filter(Boolean);

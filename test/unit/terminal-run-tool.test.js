@@ -316,6 +316,29 @@ test('open_terminal still returns its old fields, plus a cleanup reminder naming
   assert.strictEqual(p.note, undefined, 'a tab that went where it was asked needs no caveat');
 });
 
+test('project views (#726): spawned tabs name their opener, and open_terminal passes a cleaned `view`', async () => {
+  const c = makeContext();
+  await c.tools.open_terminal.handler({ command: 'ls' }, callerExtra('caller'));
+  assert.strictEqual(c.opened.at(-1).openerId, 'caller', 'the browser files it into the opener\'s views');
+  assert.ok(!('view' in c.opened.at(-1)), 'no view given → inherit, so none is sent');
+
+  await c.tools.open_terminal.handler({ command: 'ls', view: ' Marketing ' }, callerExtra('caller'));
+  assert.strictEqual(c.opened.at(-1).view, 'marketing');
+  await c.tools.open_terminal.handler({ command: 'ls', view: 'all' }, callerExtra('caller'));
+  assert.strictEqual(c.opened.at(-1).view, 'all', '"all" travels: it means "file it nowhere"');
+
+  const before = c.opened.length;
+  const bad = await c.tools.open_terminal.handler({ command: 'ls', view: 'Not A Slug' }, callerExtra('caller'));
+  assert.strictEqual(bad.isError, true);
+  assert.strictEqual(c.opened.length, before, 'refused before anything opened');
+
+  const run = c.tools.run_in_terminal.handler({ command: 'true' }, callerExtra('caller'));
+  await new Promise((r) => setImmediate(r));
+  assert.strictEqual(c.opened.at(-1).openerId, 'caller', 'a run\'s brief tab sits in its caller\'s views');
+  c.finish(0);
+  await run;
+});
+
 test('#680: a tab nobody received comes back with a caveat, not a bare success', async () => {
   const c = makeContext({ tabDelivery: 'queued' });
   const p = parse(await c.tools.open_terminal.handler({ command: 'npm run dev' }, callerExtra('caller')));

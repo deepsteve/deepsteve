@@ -157,6 +157,16 @@ function projectModsDir(repoRoot) {
 }
 
 /**
+ * Where a REPO keeps its project views (#726): one `<slug>.json` per named view of the
+ * project's tabs. A sibling of projectModsDir(), rooted at the repo for the same reasons —
+ * a view is part of the project, committed and carried by the checkout, and DEEPSTEVE_HOME
+ * must never move it.
+ */
+function projectViewsDir(repoRoot) {
+  return path.join(repoRoot, DEFAULT_STATE_DIRNAME, 'views');
+}
+
+/**
  * A REPO's own guidance for its unattended scheduled runs (#708): an optional committed
  * file the scheduled-tasks mod reads at fire time and inserts after Deep Steve's prefix.
  *
@@ -264,6 +274,6 @@ function logDir({ platform = process.platform, env = process.env, homedir = os.h
 
 module.exports = {
   expandTilde, spawnCwdProblem, assertSpawnCwd,
-  stateDir, statePath, projectModsDir, projectScheduledContextPath, agentHomeDir, tmuxSocketPath, defaultTmuxSocketPath, logDir,
+  stateDir, statePath, projectModsDir, projectViewsDir, projectScheduledContextPath, agentHomeDir, tmuxSocketPath, defaultTmuxSocketPath, logDir,
   DEFAULT_STATE_DIRNAME,
 };

@@ -695,7 +695,8 @@ function makeApp() {
 test('REST exposes the list, the page, sibling assets, a metadata PUT and a DELETE', async () => {
   const app = makeApp();
   registerRoutes(app, ctx);
-  assert.deepStrictEqual(app.routeKeys().sort(), [
+  // The project-views routes (#726) share this module; test/unit/project-views.test.js covers them.
+  assert.deepStrictEqual(app.routeKeys().filter(k => k.includes('/api/project-mods')).sort(), [
     'DELETE /api/project-mods/:id',
     'GET /api/project-mods',
     'GET /api/project-mods/:id/*',

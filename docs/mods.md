@@ -1273,6 +1273,8 @@ The daemon does not walk your disk. It looks in exactly the repos named by your 
 
 A `git pull` or checkout you run by hand in a terminal is the one path none of these see: reload the page, or have an agent call `refresh_project_mods`.
 
+[Project views](#project-views-726) — `.deepsteve/views/*.json` beside `.deepsteve/mods/` — ride the same scan, the same cache and the same pings.
+
 Two consequences worth knowing:
 
 - A fresh clone lights up as soon as the repo is part of a project. Nothing has to be re-registered.
@@ -1306,6 +1308,61 @@ works.
 - **The client did not change for #638.** The wire shape is identical (`serialize()` keeps `root`/`dirname`/`dir`/`entry` off it, which is what that function was always for) and `/api/project-mods/:id/page` kept its URL, so `app.js`, `project-mods.js` and `context-views.js` are untouched — which is the check that the storage move really is only a storage move.
 - **A ping for a change nobody told us about is `refresh()`**, exported from `tools.js` (#703): force a rescan, ping, no "did the list change" gate — a window that loaded through a TTL read can hold a list that was never broadcast, so "unchanged since the last ping" is not "unchanged for every window". `refresh_project_mods` calls it, and so do the two merge funnels: `mergeSession()` in `mods/deepsteve-core/session-merge.js` (which is `issue_complete`, `merge_session`, the tab-menu Merge and Inbox's merge) and the `merge_worktree` handler, which doesn't compose on that routine. Both `require('../project-mods/tools.js')`, which is the same module instance `mcp-server.js` loaded; before `init()` it is a no-op, which is what keeps `session-merge.js`'s injected-runner tests daemon-free. It runs only on `status === 'merged'` — every other status left the target checkout untouched — and before the issue close, so the rail doesn't wait on GitHub.
 - Tests: `test/unit/project-mods.test.js` (the scan, derived ids, the `scope` filter, tools, REST, assets and traversal, the gate, the `cleanPlacement` truth table, `refresh_project_mods` and the root-set rescan), `test/unit/project-mods-repo-storage.test.js` (`.deepsteve` is never gitignored and no script writes a repo-relative one), `test/unit/project-mod-links.test.js` (the `/v1/project-mod` provider through a real link registry: `url` on the agent payloads only, the redirect, a deleted mod's explanation, id ownership disjoint from Inbox's) and `test/unit/project-mods-client.test.js` (scoping, the three surfaces, derived identity, the re-entrancy invariant, view mode — whose `setup()` carries a **simulated view slot** rather than bare recorders, because `openMod`'s toggle and `syncModView` both read the slot back — plus the un-pin teardown, the right-click menu's paused-view item, and a source guard that both `contexts` handlers in `app.js` call `ProjectMods.refresh()`). The merge ping is pinned twice: `test/unit/session-merge.test.js` (a landed merge pings before the issue close; a conflict, a dirty target and the non-worktree push don't) and `test/unit/merge-auto-close.test.js` (a real repo, where a mod committed in the worktree is listed after `merge_worktree` and `merge_session` alike).
+
+## Project views (#726)
+
+A **project view** is a named view of a project's tabs — **Marketing** (the tabs spawned to do marketing work), **Analytics** (the ones answering analytics questions). Picking one narrows the strip to its tabs; the built-in **All**, the default, shows the whole project. Like a project mod, a view is defined **in the repo** and committed, so it travels with the checkout; unlike one, it is inert JSON with no page, which is why `projectModsEnabled` does not gate it.
+
+### Where they show
+
+Only while a project is selected in the rail. The rail's **All** (or Projects turned off) means no views chrome and no view filter; Decision Tab mode sets views aside the way it sets the project filter aside.
+
+- **Collapsed (the default):** one toggle, `#views-toggle`, naming the current view — immediately before the first tab: above it in vertical layout, left of it in horizontal. It shows for any selected project, views or not, because it is how you reach "+ New view" for the first one.
+- **Expanded:** `#views-bar`, a row of folder-tab buttons — `[All] [📣 Marketing] [Analytics] [+ New view]` — across the **full width of the monitor**, above the tab strip in horizontal layout and above both the sidebar and the terminal in vertical. That is why `#app-main` is a column `[#views-bar, #app-body]` and the tab-layout switch moved to `#app-body`.
+
+Expanded/collapsed is a browser-wide preference; the selected view is per window and per project ([frontend.md](frontend.md#client-side-storage)).
+
+### Disk layout
+
+```jsonc
+// <repoRoot>/.deepsteve/views/marketing.json — the filename is the view's slug
+{
+  "name": "Marketing",
+  "icon": "📣",          // optional
+  "order": 10,           // optional; buttons sort by order, then name
+  "match": [             // optional; ANY rule matches (OR)…
+    { "names": ["marketing", "seo"] },                  // …and within a rule, EVERY field must (AND)
+    { "kinds": ["display-tab"], "paths": ["site"] }
+  ]
+}
+```
+
+- **The slug is the identity.** Lowercase letters, digits and dashes; `all` is reserved. A tab's filings, the selected view and the spawn tools' `view` param all name it, so a rename changes `name` and never the slug. A project spanning several repos that each define `marketing` has **one** Marketing view: the client merges them (name and icon from the first by order, rules unioned).
+- **`names`**: case-insensitive substrings of the tab's name. **`paths`**: folders relative to the view's repo (`"."` is the whole repo); the tab's cwd must be inside one, and a worktree under `.claude/worktrees/<name>/` counts as its repo. A path outside the repo is dropped — and a rule that loses a field it stated is dropped *whole*, so a bad path never widens a rule. **`kinds`**: `agent`, `terminal`, `display-tab`, `project-mod`, `mod-tab`.
+- **No `match` at all is a manual view**: it holds exactly the tabs filed into it.
+
+### Membership: rules plus filings
+
+A tab is in a view when one of its rules matches, **or** when the tab has been filed there. A filing lives with the tab in the client session stores (`views: {slug: true | false}`, never committed); `false` takes a tab *out* of a view whose rules would otherwise include it, which is what lets "remove" mean something for a rule-matched tab. Ways a tab gets filed:
+
+- **Opened in a view.** Every tab you open in a window while a view is selected — the + button, ⌘T, the issue picker, the empty state's "+ New" — joins it (`createSession(isNew)` and the other create paths call `activeJoins()`). Pinned background mod tabs don't: they are the project's, not yours.
+- **By hand — the manual mode.** A tab's right-click **Views ▸** is a checklist of the project's views; ticking files it in, unticking takes it out, and **New view…** creates one and files the tab into it. The bar's **+ New view** creates a rule-less view; a view button's own right-click offers Rename and Delete. A view made in the UI is written to the repo of the tab you are looking at (else the project's first folder), with a toast saying to commit it.
+- **By the agent that opened it.** `open_terminal`, `start_issue` and `create_display_tab` take an optional `view`: a slug files the new tab there, `"all"` files it nowhere. Without it, the new tab is filed into **every view its opener is in at that moment** — by filing or by rule — so an analytics agent's charts land in Analytics beside it. Exclusions are not inherited. `run_in_terminal`'s brief tab inherits too. The server only carries `openerId` and `view` on the `open-session` / `open-display-tab` message; the browser decides, because the opener's filings live there.
+
+A tab focused while the selected view hides it (an agent's new tab, a jump, a rename that stops a name rule matching) moves the **view** — to the first one holding it, else All, with a toast — rather than snapping away from it. An empty view shows the ordinary empty-state screen.
+
+### Agent surface
+
+`create_project_view` (`name`, `slug?`, `icon?`, `order?`, `match?`, scoped like `create_project_mod` by `session_id` / `project`), `update_project_view` (`view` = the slug; `match` replaces the whole list), `delete_project_view`, `list_project_views` (`scope: "project" | "all"`). Writing `.deepsteve/views/<slug>.json` with your own tools works too; then call `refresh_project_mods`, which rescans views and now returns them as well. A landed merge refreshes on its own.
+
+The same worktree trap as `create_project_mod`: from a worktree session the project resolves to the **main checkout**, so the tool writes there and the result carries a `worktreeNote` — that checkout is now dirty and `merge_worktree` will refuse it until the file is committed. To ship a view with your branch instead, write the file inside your worktree and commit it; it appears when the merge lands.
+
+### Implementation notes
+
+- **Server:** a "Project views" section of `mods/project-mods/tools.js`, not a sibling module — it shares `scan()`, `ensureScanned()`, `commit()` and `refresh()`, so `refresh_project_mods`, both merge funnels and the root-set rescan cover views with no wiring of their own, and the browser ping stays `{type:'project-mods'}`. The repo path is `projectViewsDir()` in `paths.js`. Routes: `GET /api/project-views` (every repo's, the client scopes), and for the manual mode `POST /api/project-views` (`{contextId, name, cwd?}` → a rule-less view), `PUT`/`DELETE /api/project-views/:id`. A view's id is derived like a mod's (`sha1(root, slug)`), but only the REST routes use it.
+- **Client:** `public/js/project-views.js` owns the selection, membership, the toggle, the bar and the menus; like `project-mods.js` it never imports `context-views.js`. The filter itself stays in `applyFilter()`, which ANDs `cb.tabInView(id, ctx)` with the project match and reuses `.context-hidden`, so navigation, the arrows, timelapse and overview see one answer. **`render()` never applies the filter** — it is called *from* `onContextViewApplied` — only `refresh()`, `selectView()` and `setMembership()` ask for a pass. `revealTabContext()` settles the destination's view *before* `selectContext()` filters, or a remembered view that lacks the tab would snap away from it. Overview mode is keyed per project-and-view.
+- **Not yet:** key bindings, tab counts on view buttons, views on `list_sessions` / `window.deepsteve`, and filings through "Reopen closed tab" or the restore modal (neither server record carries them).
+- **Tests:** `test/unit/project-views.test.js` (validation, scan, tools, REST, the gate exemption), `test/unit/project-views-client.test.js` (scoping and merging, the membership truth table, storage, the chrome, filing, the re-entrancy rule), plus view cases in `context-views.test.js`, `session-stores.test.js`, `terminal-run-tool.test.js`, `display-tab-decision.test.js` and `theme-pane-parity.test.js`.
 
 ## Display tabs
 

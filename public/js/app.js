@@ -39,8 +39,9 @@ import { init as initHashCommands, beforeSend as hashCommandsBeforeSend, setWait
 import { init as initOverviewMode, setEnabled as setOverviewModeEnabled, setShortcut as setOverviewModeShortcut, setDefaultLayout as setOverviewDefaultLayout, toggle as toggleOverviewMode, isOverviewActive, getLayout as getOverviewLayout, updateFocus as updateOverviewFocus, onTabsReordered as onOverviewTabsReordered, syncToContext as syncOverviewToContext } from './overview-mode.js';
 import { init as initTerminalSearch, attachSearchAddon, closeIfOpen as closeTerminalSearch } from './terminal-search.js';
 import * as SessionHistory from './session-history.js';
-import { init as initContextViews, setEnabled as setContextViewsEnabled, applyFilter as refreshContextFilter, requestNewTabInContext, resolveContextRepo, chooseContextDir, setContexts as applyServerContexts, setActiveContext as setActiveContextFromPanel, getActiveContextId, getActiveContextInfo, orderRecentDirsByContext, activeContextIsEmpty, noteActiveTab, revealTabContext, showToast, setRailSuppressed, setRailQuiet } from './context-views.js';
+import { init as initContextViews, setEnabled as setContextViewsEnabled, applyFilter as refreshContextFilter, requestNewTabInContext, resolveContextRepo, chooseContextDir, setContexts as applyServerContexts, setActiveContext as setActiveContextFromPanel, getActiveContextId, getActiveContextInfo, orderRecentDirsByContext, activeContextIsEmpty, noteActiveTab, revealTabContext, showToast, setRailSuppressed, setRailQuiet, contextsForCwd } from './context-views.js';
 import * as ProjectMods from './project-mods.js';
+import * as ProjectViews from './project-views.js';
 import * as DecisionMode from './decision-mode.js';
 import * as Onboarding from './onboarding.js';
 import { nsKey } from './storage-namespace.js';
@@ -298,6 +299,8 @@ function applySettings(settings) {
   }
   if (settings.contextViewsEnabled !== undefined) {
     setContextViewsEnabled(settings.contextViewsEnabled);
+    // applyFilter() returns early with Projects off, so the views chrome needs its own pass.
+    ProjectViews.render();
   }
   if (settings.timelapseEnabled !== undefined) {
     setTimelapseEnabled(settings.timelapseEnabled);
@@ -1780,6 +1783,7 @@ settingsBtn?.addEventListener('click', async () => {
     setShortcutsHelpShortcut(shortcutsHelpShortcut);
     setHashCommandsEnabled(hashCommandsEnabled);
     setContextViewsEnabled(contextViewsEnabled);
+    ProjectViews.render();   // see the settings-broadcast twin: applyFilter() skips it with Projects off
     setTimelapseEnabled(timelapseEnabled);
     setTimelapseInterval(timelapseIntervalMinutes);
     ProjectMods.refresh();   // the project-mods gate ships with the list, not with settings (#618)
@@ -1906,10 +1910,32 @@ function createTmuxAttachSession(tmuxSessionName) {
 }
 
 /**
+ * A tab's project-view filings (#726) as persisted — `{slug: true|false}` or undefined. The
+ * per-tab store first (it is this tab's truth), then the window's cross-tab list.
+ */
+function storedViews(id) {
+  return getTabSessions().find(s => s.id === id)?.views
+    || SessionStore.getWindowSessions(getWindowId()).find(s => s.id === id)?.views
+    || undefined;
+}
+
+/** The tab kind a project view's `kinds` rule matches on (#726), or null while unknown. */
+function tabKind(s) {
+  if (s.type === 'mod-tab' || s.type === 'display-tab' || s.type === 'project-mod') return s.type;
+  if (!s.agentType) return null;
+  return s.agentType === 'terminal' || s.agentType === 'tmux-attach' ? 'terminal' : 'agent';
+}
+
+/**
  * Create a new terminal session
  */
 function createSession(cwd, existingId = null, isNew = false, opts = {}) {
   const { cols, rows } = measureTerminalSize();
+  // Project views (#726): every tab the user opens in this window goes through here with
+  // isNew, and is filed into the view they are looking at — a fork, into its parent's views.
+  if (isNew && opts.views === undefined) {
+    opts = { ...opts, views: opts.fork ? ProjectViews.spawnJoins({ openerId: opts.fork }) : ProjectViews.activeJoins() };
+  }
   // Custom Claude config profiles (#537): a profile is picked as agentType 'config:<pid>'.
   // Resolve it here (the single WS-creation choke point) into a real agentType:'claude'
   // plus a configProfile param the server maps to a CLAUDE_CONFIG_DIR.
@@ -1999,7 +2025,9 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
         if (!existingSession) {
           // Use client-provided name, or fall back to server-persisted name
           const sessionName = opts.name || msg.name;
-          initTerminal(msg.id, ws, cwd, sessionName, { hasScrollback, pendingData, restoreActive: opts.restoreActive, background: opts.background, cols, rows });
+          // views + agentType ride in now (#726), not after: initTerminal focuses the tab, and
+          // whether it is in the selected view has to be answerable by then.
+          initTerminal(msg.id, ws, cwd, sessionName, { hasScrollback, pendingData, restoreActive: opts.restoreActive, background: opts.background, cols, rows, views: opts.views, agentType: msg.agentType });
           resolveReady(msg.id);
           if (opts.loading) {
             const sess = sessions.get(msg.id);
@@ -2159,9 +2187,12 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
         // Adding a folder to a project changes which repos the server scans for project
         // mods, so that repo's existing mods only appear once the list is refetched (#703).
         ProjectMods.refresh();
+        ProjectViews.refresh();   // …and its views (#726), found by the same scan
       } else if (msg.type === 'project-mods') {
-        // Payload-less ping (#618) — refetch and re-derive all three surfaces.
+        // Payload-less ping (#618) — refetch and re-derive all three surfaces. Project views
+        // (#726) share the scan and the ping.
         ProjectMods.refresh();
+        ProjectViews.refresh();
       } else if (msg.type === 'agent-chat') {
         ModManager.notifyAgentChatChanged(msg.channels);
       } else if (msg.type === 'browser-eval-request') {
@@ -2579,7 +2610,7 @@ function dismissLoadingBanner(sessionId) {
  */
 const nothingOnScreen = () => !activeId && !ModManager.isModViewVisible();
 
-function initTerminal(id, ws, cwd, initialName, { hasScrollback = false, pendingData = [], restoreActive = false, background = false, cols, rows } = {}) {
+function initTerminal(id, ws, cwd, initialName, { hasScrollback = false, pendingData = [], restoreActive = false, background = false, cols, rows, views, agentType } = {}) {
   const container = document.createElement('div');
   container.className = 'terminal-container';
   container.id = 'term-' + id;
@@ -2607,7 +2638,9 @@ function initTerminal(id, ws, cwd, initialName, { hasScrollback = false, pending
 
   // Store session in memory
   const searchAddon = attachSearchAddon(term);
-  sessions.set(id, { term, fit, ws, container, cwd, name, waitingForInput: false, hasUnseenActivity: false, scrollControl, searchAddon });
+  // A reconnect or restore that didn't carry its project-view filings (#726) reads them back.
+  const tabViews = views !== undefined ? views : storedViews(id);
+  sessions.set(id, { term, fit, ws, container, cwd, name, waitingForInput: false, hasUnseenActivity: false, scrollControl, searchAddon, views: tabViews, agentType });
 
   // Flush any buffered data that arrived before the terminal was created
   for (const data of pendingData) {
@@ -2690,7 +2723,7 @@ function initTerminal(id, ws, cwd, initialName, { hasScrollback = false, pending
 
   // Per-tab store (sessionStorage) is truth for this tab, SessionStore (localStorage)
   // is for cross-tab; the facade writes both in one call (#385).
-  SessionStores.add(windowId, { id, cwd, name });
+  SessionStores.add(windowId, { id, cwd, name, ...(tabViews ? { views: tabViews } : {}) });
   SessionStore.addRecentDir(cwd);
 
   // ResizeObserver handles window resize, layout toggle, mod panel.
@@ -2759,10 +2792,12 @@ function createModTab(modId, opts = {}) {
     ModManager.injectBridgeAPI(iframe, modId, id);
   });
 
+  // A fresh mod tab is filed into the view you are looking at (#726); a restored one keeps its own.
+  const views = opts.views !== undefined ? opts.views : (opts.id ? storedViews(id) : ProjectViews.activeJoins());
   sessions.set(id, {
     term: null, fit: null, ws: null, container, cwd: null,
     name, waitingForInput: false, hasUnseenActivity: false, scrollControl: null,
-    type: 'mod-tab', modId,
+    type: 'mod-tab', modId, views,
   });
 
   const tabCallbacks = {
@@ -2794,7 +2829,7 @@ function createModTab(modId, opts = {}) {
 
   // Persist
   const windowId = getWindowId();
-  SessionStores.add(windowId, { id, name, type: 'mod-tab', modId });
+  SessionStores.add(windowId, { id, name, type: 'mod-tab', modId, ...(views ? { views } : {}) });
 
   // Forward resize events to iframe
   const ro = new ResizeObserver(([entry]) => {
@@ -2896,13 +2931,16 @@ function createDisplayTab(id, name, opts = {}) {
   // cwd = the spawning session's dir, so Context Views scopes this tab to the
   // context it was created from (#530). null → global (e.g. saved-layout tabs).
   const cwd = opts.cwd || null;
+  // Project views (#726): an agent's open passes the filing it computed; anything else (a
+  // restore, a reopen) keeps whatever this tab had.
+  const views = opts.views !== undefined ? opts.views : storedViews(id);
   sessions.set(id, {
     term: null, fit: null, ws: null, container, cwd,
     name: tabName, waitingForInput: false, hasUnseenActivity: false, scrollControl: null,
-    type: 'display-tab', emittingAudio: false, locked: displayTabLocks.has(id),
+    type: 'display-tab', emittingAudio: false, locked: displayTabLocks.has(id), views,
   });
 
-  SessionStores.add(getWindowId(), { id, name: tabName, type: 'display-tab', cwd });
+  SessionStores.add(getWindowId(), { id, name: tabName, type: 'display-tab', cwd, ...(views ? { views } : {}) });
 
   const tabCallbacks = {
     onSwitch: (sessionId) => onTabStripClick(sessionId),
@@ -2994,13 +3032,18 @@ function createProjectModTab(mod, opts = {}) {
   });
 
   const tabName = projectModTabName(mod);
+  // Project views (#726): opened by a click, it is filed into the view you are looking at. A
+  // pinned background open is the project's, not yours, and a restore keeps its own.
+  const views = opts.views !== undefined ? opts.views
+    : opts.restoreActive ? storedViews(id)
+    : background ? undefined : ProjectViews.activeJoins();
   sessions.set(id, {
     term: null, fit: null, ws: null, container, cwd: mod.project,
     name: tabName, waitingForInput: false, hasUnseenActivity: false, scrollControl: null,
-    type: 'project-mod', projectModId: mod.id, pinned,
+    type: 'project-mod', projectModId: mod.id, pinned, views,
   });
 
-  SessionStores.add(getWindowId(), { id, name: tabName, type: 'project-mod', projectModId: mod.id, cwd: mod.project, pinned });
+  SessionStores.add(getWindowId(), { id, name: tabName, type: 'project-mod', projectModId: mod.id, cwd: mod.project, pinned, ...(views ? { views } : {}) });
 
   const tabCallbacks = {
     onSwitch: (sessionId) => onTabStripClick(sessionId),
@@ -3336,7 +3379,7 @@ async function restoreSessions(sessionList, opts = {}) {
       return fetch(`/api/display-tab/${entry.id}`, { method: 'HEAD' })
         .then(resp => {
           if (resp.ok) {
-            createDisplayTab(entry.id, entry.name, { restoreActive: true, cwd: entry.cwd });
+            createDisplayTab(entry.id, entry.name, { restoreActive: true, cwd: entry.cwd, views: entry.views });
             return entry.id;
           }
           return null; // server no longer has it
@@ -3372,10 +3415,10 @@ async function restoreSessions(sessionList, opts = {}) {
         })
         .catch(() => null);
     } else if (entry.type === 'mod-tab' && entry.modId) {
-      createModTab(entry.modId, { id: entry.id, name: entry.name, restoreActive: true });
+      createModTab(entry.modId, { id: entry.id, name: entry.name, restoreActive: true, views: entry.views });
       return Promise.resolve(entry.id);
     } else {
-      return createSession(entry.cwd, entry.id, false, { name: entry.name, restoreActive: true, allowDuplicate });
+      return createSession(entry.cwd, entry.id, false, { name: entry.name, restoreActive: true, allowDuplicate, views: entry.views });
     }
   });
 
@@ -3964,7 +4007,9 @@ async function sendToWindow(id, targetWindowId) {
       id,
       type: session.type || 'terminal',
       cwd: session.cwd,
-      name: session.name
+      name: session.name,
+      // Project-view filings (#726) are the tab's, so they go where it goes.
+      views: session.views,
     });
   } catch (err) {
     // Target window didn't ack — keep the session
@@ -4029,6 +4074,9 @@ function renameSession(id) {
     SessionStores.rename(getWindowId(), id, name);
     // Tell server so it persists across tab close/restore (skip for mod tabs — no WS)
     if (session.ws) session.ws.sendJSON({ type: 'rename', name });
+    // A project view can match on the name (#726), so a rename can take the tab you are
+    // looking at out of the view on screen. Move the view to it rather than snap away.
+    if (id === activeId) revealTabContext(id);
     notifyTabsChanged();
   });
 }
@@ -5392,7 +5440,12 @@ async function init() {
     // hook that settles the filter re-derives the strip buttons and opens the pinned
     // ones. Deliberately not the rail rows: renderRail() pulls those itself, and
     // calling render() from inside applyFilter would re-enter it.
-    onContextViewApplied: () => { syncOverviewToContext(); refreshTabArrows(); ProjectMods.render(); },
+    onContextViewApplied: () => { syncOverviewToContext(); refreshTabArrows(); ProjectMods.render(); ProjectViews.render(); },
+    // Project views (#726) narrow the selected project to one view's tabs. The filter, the
+    // per-view last-tab memory and the reveal-on-focus all ask project-views.js.
+    tabInView: (id, ctx) => ProjectViews.tabInView(id, ctx),
+    viewKey: (ctx) => ProjectViews.viewKey(ctx),
+    revealTabView: (id, ctx) => ProjectViews.revealTabView(id, ctx),
   });
 
   // Project Mods (#618). Everything about the active view arrives through these, so
@@ -5420,6 +5473,37 @@ async function init() {
     showModView: (mod) => showProjectModView(mod),
     hideModView: (modId) => ModManager.hideView(projectModViewId(modId)),
     getViewInfo: () => ({ id: ModManager.getActiveViewId(), front: ModManager.isModViewVisible() }),
+  });
+
+  // Project views (#726). Like project-mods.js, it never imports context-views.js.
+  ProjectViews.init({
+    // getActiveContextInfo() is {name, dirs} (a test pins that shape), so the id is added here.
+    getActiveContext: () => {
+      const id = getActiveContextId();
+      const info = getActiveContextInfo();
+      return id && info ? { id, ...info } : null;
+    },
+    contextsForCwd: (cwd) => contextsForCwd(cwd),
+    getTabInfo: (id) => {
+      const s = sessions.get(id);
+      return s ? { cwd: s.cwd || null, name: s.name || '', kind: tabKind(s), views: s.views } : null;
+    },
+    setTabViews: (id, views) => {
+      const s = sessions.get(id);
+      if (!s) return;
+      s.views = views;
+      SessionStores.setViews(getWindowId(), id, views);
+      refreshContextFilter();
+    },
+    getActiveTabCwd: () => (activeId ? sessions.get(activeId)?.cwd || null : null),
+    applyFilter: () => refreshContextFilter(),
+    isSuspended: () => DecisionMode.isDecisionModeActive(),
+    showToast: (text) => showToast(text),
+  });
+  TabManager.setTabViews({
+    menu: (id) => ProjectViews.menuFor(id),
+    set: (id, slug, on) => ProjectViews.setMembership(id, slug, on),
+    create: (id) => ProjectViews.createView({ fileTabId: id }),
   });
 
   // File drag-and-drop upload
@@ -5452,10 +5536,11 @@ async function init() {
         applyServerContexts(msg.contexts);
         ModManager.notifyContextsChanged(msg.contexts);
         ProjectMods.refresh();   // a project's folders decide which repos' mods exist (#703)
+        ProjectViews.refresh();  // …and which repos' views (#726)
       }
       // The reload channel is the one that reaches a window with no session sockets,
       // which is exactly when an unattended agent registers a project mod (#618).
-      if (msg.type === 'project-mods') ProjectMods.refresh();
+      if (msg.type === 'project-mods') { ProjectMods.refresh(); ProjectViews.refresh(); }
       if (msg.type === 'recent-sessions') {
         recentSessions = msg.sessions || [];
         renderEmptyStateRecent();
@@ -5487,7 +5572,10 @@ async function init() {
           if (msg.focus) userJumpTo(msg.id);
           return;
         }
-        createSession(msg.cwd, msg.id, false, { name: msg.name, allowDuplicate: true, initialPrompt: msg.initialPrompt, loading: msg.loading, background: msg.background, noRestore: !msg.restore });
+        // Project views (#726): an agent's tab is filed under the spawn tool's `view`, else into
+        // whatever views the tab that opened it is in. A repair re-emit carries neither.
+        const views = ProjectViews.spawnJoins({ view: msg.view, openerId: msg.openerId });
+        createSession(msg.cwd, msg.id, false, { name: msg.name, allowDuplicate: true, initialPrompt: msg.initialPrompt, loading: msg.loading, background: msg.background, noRestore: !msg.restore, views });
         // A background open (unattended scheduled run, #600) stays silent — the
         // top-of-page progress bar is ambient interruption for work the user
         // didn't just start.
@@ -5513,7 +5601,7 @@ async function init() {
       }
       if (msg.type === 'open-display-tab') {
         if (msg.windowId && msg.windowId !== getWindowId()) return;
-        createDisplayTab(msg.id, msg.name, { cwd: msg.cwd });
+        createDisplayTab(msg.id, msg.name, { cwd: msg.cwd, views: ProjectViews.spawnJoins({ view: msg.view, openerId: msg.openerId }) });
       }
       if (msg.type === 'open-browser-tab') {
         if (msg.windowId && msg.windowId !== getWindowId()) return;
@@ -5681,7 +5769,14 @@ async function init() {
     // part of a context switch, where focusTab's revealTabContext would bounce
     // the view back to the context being left (#590).
     activateTab: switchTo,
-    getActiveContextId,
+    // Overview is per PLACE (#590), and a project view is a place of its own (#726): the
+    // grid of Marketing's tabs is not the grid of All's. The All view keeps the bare id.
+    getActiveContextId: () => {
+      const id = getActiveContextId();
+      const info = getActiveContextInfo();
+      const view = id && info ? ProjectViews.viewKey({ id, ...info }) : '';
+      return view ? `${id}#${view}` : id;
+    },
     fitTerminals: (ids) => {
       for (const id of ids) {
         const s = sessions.get(id);
@@ -5757,6 +5852,7 @@ async function init() {
       TabManager.updateLabel(activeId, finalName);
       if (session.ws) session.ws.sendJSON({ type: 'rename', name: finalName });
       SessionStores.rename(getWindowId(), activeId, finalName);
+      revealTabContext(activeId);   // a name rule may have let go of it (#726) — see renameSession
       notifyTabsChanged();
     },
     restart: () => { fetch('/api/request-restart', { method: 'POST' }); },
@@ -5843,9 +5939,9 @@ async function init() {
     if (session.type === 'display-tab') {
       // Pass the cwd sendToWindow transmits, or the adopted tab loses its
       // context scoping (#530) and dodges revealTabContext (#547).
-      createDisplayTab(session.id, session.name, { cwd: session.cwd });
+      createDisplayTab(session.id, session.name, { cwd: session.cwd, views: session.views });
     } else {
-      createSession(session.cwd, session.id, false, { name: session.name, allowDuplicate: true });
+      createSession(session.cwd, session.id, false, { name: session.name, allowDuplicate: true, views: session.views });
     }
   });
 

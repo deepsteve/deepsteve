@@ -1973,7 +1973,8 @@ function _updatePanelTabsVisibility() {
  * First child, so it sits above "Action Required" and every other panel tab: the strip is
  * a flex column, so ordering is the whole collision story and overlap is impossible by
  * construction. It also keeps the indicator genuinely top-right in BOTH layouts — under
- * vertical-layout #content-row starts at y=0, and unlike anything in #tabs it does not
+ * vertical-layout #content-row starts at the top of #app-body (below the project-views bar
+ * when that is open, #726), and unlike anything in #tabs it does not
  * move to the left rail or vanish under quiet mode.
  */
 function mountRailIndicator(el) {
