@@ -182,6 +182,20 @@ test('a plain display tab is untouched: no bar, no list message', async () => {
   assert.strictEqual(w.hooks.get('decision').inject(PAGE, id), PAGE);
 });
 
+test('project views (#726): the open names its opener, carries a cleaned `view`, and refuses a bad one', async () => {
+  const w = world();
+  await w.tools.create_display_tab.handler({ session_id: 'owner-1', html: PAGE });
+  const plain = w.client.sent.at(-1);
+  assert.strictEqual(plain.openerId, 'owner-1', 'the browser files it into its opener\'s views');
+  assert.ok(!('view' in plain));
+  await w.tools.create_display_tab.handler({ session_id: 'owner-1', html: PAGE, view: 'Analytics' });
+  assert.strictEqual(w.client.sent.at(-1).view, 'analytics');
+  const before = w.client.sent.length;
+  const bad = await w.tools.create_display_tab.handler({ session_id: 'owner-1', html: PAGE, view: 'two words' });
+  assert.strictEqual(bad.isError, true);
+  assert.strictEqual(w.client.sent.length, before);
+});
+
 test('the bar is injected at serve time, before the last </body>', async () => {
   const w = world();
   const id = await createDecision(w, { buttons: [{ label: 'Yes' }] });

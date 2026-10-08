@@ -52,6 +52,9 @@ import { railModsFor, appendRailRows, isCompactRail, setCompactRail, modsForProj
 // imports only storage-namespace + tab-manager, so this adds no cycle. Do not import this
 // module back from there — mod-manager reaches context-views through app.js's hooks.
 import { ModManager, appendAppRows } from './mod-manager.js';
+// The issue-pipeline stage editor (#717), shared with Settings. A leaf module: it
+// imports nothing, so this adds no cycle.
+import { createPipelineEditor } from './pipeline-editor.js';
 
 // Context definitions are server-owned (#526): they are the same entity as the
 // Scheduled Tasks "project groups", loaded from /api/contexts and kept fresh by
@@ -271,11 +274,25 @@ function filterSuspended() {
   return !!cb.isFilterSuspended?.();
 }
 
+// Project views (#726) narrow a project further: a tab is shown when it is in the project AND
+// in the view this window has selected for it. The view half is project-views.js's, injected
+// as cb.tabInView so this module never imports it. No callback, or no project, is no view filter.
+function tabInActiveView(id, ctx) {
+  return !ctx || cb.tabInView?.(id, ctx) !== false;
+}
+
+// Last-tab memory (#541) is per project AND view: the tab you were on in Marketing is not the
+// one to come back to in All. The All view keeps the bare project id it always had.
+function memoKey(ctx) {
+  const view = cb.viewKey?.(ctx);
+  return view ? `${ctx.id}#${view}` : ctx.id;
+}
+
 function activeContextHasTabs() {
   const ctx = getActiveContext();
   if (!ctx) return true;
   const ids = cb.getOrderedTabIds ? cb.getOrderedTabIds() : [];
-  return ids.some(id => tabInContext(cb.getTabCwd?.(id), ctx));
+  return ids.some(id => tabInContext(cb.getTabCwd?.(id), ctx) && tabInActiveView(id, ctx));
 }
 
 // Owned-tab count for the rail badge (#529). "All" (ctx null) → every tab. A real
@@ -310,7 +327,7 @@ export function applyFilter() {
   for (const id of ids) {
     const tabEl = document.getElementById('tab-' + id);
     if (!tabEl) continue;
-    const visible = tabInContext(cb.getTabCwd?.(id), ctx);
+    const visible = tabInContext(cb.getTabCwd?.(id), ctx) && tabInActiveView(id, ctx);
     tabEl.classList.toggle('context-hidden', !visible);
     if (visible && !firstVisible) firstVisible = id;
   }
@@ -323,7 +340,7 @@ export function applyFilter() {
     const activeHidden = !activeTab ||
       document.getElementById('tab-' + activeTab)?.classList.contains('context-hidden');
     if (activeHidden) {
-      const remembered = lastTabByContext[ctx.id];
+      const remembered = lastTabByContext[memoKey(ctx)];
       const rEl = remembered ? document.getElementById('tab-' + remembered) : null;
       const target = (rEl && !rEl.classList.contains('context-hidden')) ? remembered : firstVisible;
       if (target) cb.switchToTab?.(target);
@@ -632,6 +649,9 @@ function showRowMenu(x, y, ctx) {
     if (projectMods.length) addRowMenuSeparator(menu);
 
     addRowMenuItem(menu, 'Edit', () => openContextEditor(ctx));
+    // The project level of the issue pipeline (#717): what an issue session started in
+    // this project's folders runs. A ✓ says this project has its own.
+    addRowMenuItem(menu, `${ctx.pipeline ? '✓ ' : ''}Issue pipeline…`, () => openIssuePipelineEditor(ctx));
     // Set icon: emoji or an uploaded PNG/SVG image (#569/#579). Right-click (not
     // double-click-the-square) so it works at any rail width and reuses this menu's
     // dismissal machinery. The picker offers both an emoji grid and a "Choose image…"
@@ -1079,9 +1099,10 @@ export function noteActiveTab(tabId) {
   if (!enabled || !tabId || filterSuspended()) return;
   const ctx = getActiveContext();
   if (!ctx) return;
-  if (!tabInContext(cb.getTabCwd?.(tabId), ctx)) return;
-  if (lastTabByContext[ctx.id] === tabId) return;
-  lastTabByContext[ctx.id] = tabId;
+  if (!tabInContext(cb.getTabCwd?.(tabId), ctx) || !tabInActiveView(tabId, ctx)) return;
+  const key = memoKey(ctx);
+  if (lastTabByContext[key] === tabId) return;
+  lastTabByContext[key] = tabId;
   saveLastTabs();
 }
 
@@ -1099,9 +1120,23 @@ export function revealTabContext(tabId) {
   const ctx = getActiveContext();
   if (!ctx) return;
   const cwd = cb.getTabCwd?.(tabId);
-  if (tabInContext(cwd, ctx)) return;
+  if (tabInContext(cwd, ctx)) {
+    // In the project, but perhaps not in the view this window is looking at (#726). Move the
+    // VIEW — to the first one holding the tab, else All — rather than let the filter snap away
+    // from a tab you were just sent to.
+    const viewName = cb.revealTabView?.(tabId, ctx);
+    if (viewName) {
+      applyFilter();
+      noteActiveTab(tabId);
+      if (!ModManager.isExcursionActive()) showToast(`${ctx.name} · ${viewName}`);
+    }
+    return;
+  }
   // Archived contexts (#601) are not a jump target — a tab in one reveals as "All".
   const match = visibleContexts().find(c => tabInContext(cwd, c));
+  // The destination's view is settled BEFORE selectContext() filters, for the same reason: a
+  // view it remembers that doesn't hold this tab would snap straight away from it (#726).
+  if (match) cb.revealTabView?.(tabId, match);
   selectContext(match ? match.id : null);
   noteActiveTab(tabId);                        // record as destination's last tab (#541); self-no-ops for All
   // Explain the jump (mirrors cycleContext) — except on an excursion, where every ⌘↓ through
@@ -1898,6 +1933,100 @@ function openContextEditor(ctx) {
   nameInput.focus();
 }
 
+/**
+ * The project's issue pipeline (#717). Each switch can inherit the global one, and the
+ * layout either inherits the global pipeline (null) or replaces it. Saved through its own
+ * route, like `archived`, so the project editor's upsert can never touch it; the
+ * `contexts` broadcast brings it back to every window.
+ */
+async function openIssuePipelineEditor(ctx) {
+  let global;
+  try {
+    const r = await fetch('/api/issue-pipeline');
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    global = await r.json();
+  } catch (e) {
+    showToast(`Couldn’t load the issue pipeline — ${e.message}`);
+    return;
+  }
+  const builtinIds = new Set(global.builtins.map(b => b.id));
+  const own = ctx.pipeline || null;
+  // Without its own pipeline the project starts from the global layout; the built-ins'
+  // resolved `enabled` is dropped so every switch starts as Inherit.
+  const initialStages = (own ? own.stages : global.stages)
+    .map(({ enabled, ...s }) => (builtinIds.has(s.id) ? s : { ...s, ...(enabled === false ? { enabled } : {}) }));
+  const switches = {};
+  for (const id of ['plan', 'review', 'merge']) {
+    const s = own && own.stages.find(x => x.id === id);
+    switches[id] = s && typeof s.enabled === 'boolean' ? s.enabled : null;
+  }
+  const editor = createPipelineEditor({
+    mode: 'project', builtins: global.builtins, limits: global.limits, stages: initialStages,
+    switches, inherited: { plan: global.plan, review: global.review, merge: global.merge },
+  });
+  const baseline = JSON.stringify(editor.read());
+
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  const modal = document.createElement('div');
+  modal.className = 'modal pipeline-modal';
+  overlay.appendChild(modal);
+  const h = document.createElement('h2');
+  h.textContent = `Issue pipeline — ${ctx.name}`;
+  modal.appendChild(h);
+  const note = document.createElement('p');
+  note.className = 'pipeline-modal-note';
+  note.textContent = own
+    ? 'Issue sessions started in this project\'s folders run this pipeline instead of the global one. '
+      + 'A repo\'s committed .deepsteve/pipeline.json still replaces the layout, and may turn review on and merge off.'
+    : 'This project uses the global pipeline (Settings → GitHub). Change anything here to give it its own. '
+      + 'A repo\'s committed .deepsteve/pipeline.json still replaces the layout, and may turn review on and merge off.';
+  modal.appendChild(note);
+  modal.appendChild(editor.el);
+
+  const send = (pipeline) => fetch(`/api/contexts/${encodeURIComponent(ctx.id)}/pipeline`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ pipeline }),
+  }).then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); })
+    .catch(e => showToast(`Couldn’t save the issue pipeline — ${e.message}`));
+
+  const btns = document.createElement('div');
+  btns.className = 'modal-buttons';
+  if (own) {
+    const reset = document.createElement('button');
+    reset.className = 'btn-secondary';
+    reset.textContent = 'Use global pipeline';
+    reset.style.marginRight = 'auto';
+    reset.onclick = () => { send(null); overlay.remove(); };
+    btns.appendChild(reset);
+  }
+  const cancel = document.createElement('button');
+  cancel.className = 'btn-secondary';
+  cancel.textContent = 'Cancel';
+  cancel.onclick = () => overlay.remove();
+  btns.appendChild(cancel);
+  const save = document.createElement('button');
+  save.className = 'btn-primary';
+  save.textContent = 'Save';
+  save.onclick = () => {
+    const edit = editor.read();
+    // Saving an untouched editor on a project that inherits must not materialize a copy
+    // of the global layout — that copy would stop following the global one.
+    if (!own && JSON.stringify(edit) === baseline) { overlay.remove(); return; }
+    send({ stages: edit.stages });
+    overlay.remove();
+  };
+  btns.appendChild(save);
+  modal.appendChild(btns);
+
+  overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
+  overlay.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); overlay.remove(); }
+  }, true);
+  document.body.appendChild(overlay);
+}
+
 // ------------------------------------------------------------------ lifecycle
 
 export function init(callbacks) {
@@ -2006,8 +2135,9 @@ export function setContexts(list) {
   }
   // Drop last-tab memory for contexts that no longer exist (#541).
   let pruned = false;
-  for (const id of Object.keys(lastTabByContext)) {
-    if (!contexts.find(c => c.id === id)) { delete lastTabByContext[id]; pruned = true; }
+  for (const key of Object.keys(lastTabByContext)) {
+    const id = key.split('#')[0];   // `<ctx>#<view>` since #726
+    if (!contexts.find(c => c.id === id)) { delete lastTabByContext[key]; pruned = true; }
   }
   if (pruned) saveLastTabs();
   applyFilter();
@@ -2038,6 +2168,14 @@ export function getActiveContextInfo() {
   if (!enabled) return null;
   const c = getActiveContext();
   return c ? { name: c.name, dirs: [...c.dirs] } : null;
+}
+
+// Every project whose folders hold `cwd`, as copies — for project views (#726), which file a
+// tab an agent opens into the views its opener is in, and need the opener's projects to know
+// which views those are. Empty for no cwd (tabInContext would call that "every project").
+export function contextsForCwd(cwd) {
+  if (!cwd) return [];
+  return contexts.filter(c => tabInContext(cwd, c)).map(c => ({ id: c.id, name: c.name, dirs: [...c.dirs] }));
 }
 
 export function setEnabled(val) {

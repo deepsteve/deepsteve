@@ -545,3 +545,29 @@ textarea:focus {
    and the base theme colors it gold via --ds-issue-bolt). Win95 chrome is strictly
    black-on-grey, so reclaim the glyph. */
 #issue-btn { --ds-issue-bolt: currentColor; }
+
+/* Project views (#726): the toggle is raised chrome like the rest of the strip, and the views
+   bar is a row of Win95 tabs over it — the selected one sunken, the same as .tab.active. */
+.views-toggle,
+.view-tab {
+  border-radius: 0 !important;
+  border: 2px solid !important;
+  border-color: #dfdfdf #404040 #404040 #dfdfdf !important;
+  box-shadow: inset 1px 1px 0 #fff, inset -1px -1px 0 #808080;
+  background: #c0c0c0 !important;
+  color: #000 !important;
+}
+.views-toggle:hover,
+.view-tab:hover { background: #d4d0c8 !important; }
+.views-toggle.active,
+.view-tab.active {
+  border-color: #404040 #dfdfdf #dfdfdf #404040 !important;
+  box-shadow: inset -1px -1px 0 #fff, inset 1px 1px 0 #808080;
+  background: #d4d0c8 !important;
+}
+.views-toggle.filtering { color: #000080 !important; }
+#views-bar {
+  background: #c0c0c0 !important;
+  border-bottom: 2px solid #808080 !important;
+  padding: 4px 4px 2px !important;
+}

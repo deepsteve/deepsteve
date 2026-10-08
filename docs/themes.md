@@ -107,7 +107,13 @@ vars and let the base stylesheet derive the corner; write the border as
 The rail needs none of this — its highlight is a real `box-shadow` on the element, and an
 inset shadow gets the padding-box corner for free. Only the overlay has to be told.
 
-`test/unit/theme-pane-parity.test.js` enforces all three rules.
+**A rounded monitor pads `#views-bar` too.** `#app-main` is a column, `[ #views-bar | #app-body ]`
+(#726): the project-views bar spans its full width in both tab layouts, and the tab-layout switch
+lives on `#app-body`. While the bar is expanded it is the row in the top corners, not `#tabs`, so
+a theme that pads the strip clear of its rounding must pad `#views-bar` the same way (the retro
+family also drops the strip's top padding while `#app-main.views-bar-open`).
+
+`test/unit/theme-pane-parity.test.js` enforces all four rules.
 
 Two structural families exist in the shipped themes, and either is fine:
 

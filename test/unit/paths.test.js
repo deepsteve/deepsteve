@@ -13,7 +13,7 @@ const path = require('path');
 
 const {
   expandTilde, stateDir, statePath, agentHomeDir, tmuxSocketPath, logDir, DEFAULT_STATE_DIRNAME,
-  projectModsDir, projectScheduledContextPath,
+  projectModsDir, projectViewsDir, projectPipelinePath, projectScheduledContextPath,
 } = require('../../paths');
 
 const REPO = path.join(__dirname, '..', '..');
@@ -80,6 +80,8 @@ test('tmuxSocketPath tracks the state dir, so HOME isolation is socket isolation
 
 test('a repo\'s own .deepsteve paths are rooted at the repo, never at the state dir', () => {
   assert.strictEqual(projectModsDir('/src/app'), '/src/app/.deepsteve/mods');
+  assert.strictEqual(projectViewsDir('/src/app'), '/src/app/.deepsteve/views');
+  assert.strictEqual(projectPipelinePath('/src/app'), '/src/app/.deepsteve/pipeline.json');
   assert.strictEqual(projectScheduledContextPath('/src/app'), '/src/app/.deepsteve/scheduled/CONTEXT.md');
   // DEEPSTEVE_HOME relocates the daemon's own state for tests and second instances; it must
   // never move where a user's repo keeps its files, or a test daemon and the real one would
@@ -88,6 +90,8 @@ test('a repo\'s own .deepsteve paths are rooted at the repo, never at the state 
   process.env.DEEPSTEVE_HOME = '/scratch/iso/.deepsteve';
   try {
     assert.strictEqual(projectScheduledContextPath('/src/app'), '/src/app/.deepsteve/scheduled/CONTEXT.md');
+    assert.strictEqual(projectViewsDir('/src/app'), '/src/app/.deepsteve/views');
+    assert.strictEqual(projectPipelinePath('/src/app'), '/src/app/.deepsteve/pipeline.json');
   } finally {
     if (saved === undefined) delete process.env.DEEPSTEVE_HOME; else process.env.DEEPSTEVE_HOME = saved;
   }
@@ -185,6 +189,7 @@ test('git-root.js still re-exports expandTilde (tmux-path.js imports it from the
 const GUARDED = [
   'server.js',
   'security.js',
+  'issue-pipeline.js', // reads a repo's .deepsteve/pipeline.json (#717)
   ...fs.readdirSync(path.join(REPO, 'mods'))
     .map((d) => path.join('mods', d, 'tools.js'))
     .filter((p) => fs.existsSync(path.join(REPO, p))),
@@ -225,7 +230,7 @@ test('nobody spells the .deepsteve dirname as a literal — use a paths.js helpe
     assert.ok(
       !/['"]\.deepsteve['"]/.test(src),
       `${rel} spells '.deepsteve' as a literal path segment — use stateDir()/statePath(), `
-      + 'projectModsDir() or projectScheduledContextPath() from paths.js',
+      + 'projectModsDir(), projectViewsDir() or projectScheduledContextPath() from paths.js',
     );
   }
 });

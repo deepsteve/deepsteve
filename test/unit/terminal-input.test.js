@@ -7,7 +7,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert');
 
-const { isTerminalReport, hasSubmitKey } = require('../../terminal-input');
+const { isTerminalReport, isPointerReport, hasSubmitKey } = require('../../terminal-input');
 
 // The replies @xterm/headless 6.0.0 actually produces, plus the two the browser build
 // can produce that headless cannot (it has no theme service and no window services).
@@ -112,6 +112,101 @@ test('every reply xterm 6 emits is recognized as a report', async () => {
     assert.strictEqual(isTerminalReport(reply), true,
       `xterm 6 replies ${JSON.stringify(reply)} and the classifier would call it a keystroke — ` +
       'every run_in_terminal tab leaks again until this reply is added to REPORT_PATTERNS');
+  }
+});
+
+// --- isPointerReport (#724) ---------------------------------------------------------
+//
+// A click, a wheel notch or a focus change. A person caused it, so it is still input —
+// but it must not cancel a pending auto-close, which is what scrolling up to read a
+// finished agent's summary used to do. server.js only gates the cancel on this.
+
+const POINTER = {
+  'one wheel notch, as captured from the live UI (12 bytes)': '\x1b[<64;66;26M',
+  'one click, as captured from the live UI (11 bytes)':       '\x1b[<0;66;26M',
+  'a button release':                                         '\x1b[<0;66;26m',
+  'wheel down':                                               '\x1b[<65;1;1M',
+  'a modified click':                                         '\x1b[<16;200;300M',
+  'several notches in one payload':                           '\x1b[<64;66;26M\x1b[<64;66;26M\x1b[<64;66;26M',
+  'focus in':                                                 '\x1b[I',
+  'focus out':                                                '\x1b[O',
+  'focus in, then a click':                                   '\x1b[I\x1b[<0;10;5M',
+};
+
+const NOT_POINTER = {
+  'a printable key':                 'a',
+  'Enter':                           '\r',
+  'an arrow':                        '\x1b[A',
+  'a lone ESC':                      '\x1b',
+  'nothing at all':                  '',
+  'a click, then a keystroke':       '\x1b[<0;66;26Ma',
+  'a keystroke, then a click':       'a\x1b[<0;66;26M',
+  'an unterminated mouse report':    '\x1b[<64;66',
+  'a mouse report with no final':    '\x1b[<64;66;26',
+  'legacy X10 mouse encoding':       '\x1b[M`!!',
+  'a terminal report':               '\x1b[?1;2c',
+  'Shift+Tab':                       '\x1b[Z',
+};
+
+test('a click, a scroll or a focus change is a pointer report', () => {
+  for (const [what, bytes] of Object.entries(POINTER)) {
+    assert.strictEqual(isPointerReport(bytes), true, `${what}: ${JSON.stringify(bytes)}`);
+  }
+});
+
+test('one byte of anything else makes the payload a keystroke, which still cancels', () => {
+  // Same safe direction as isTerminalReport: getting this wrong toward "pointer" lets a
+  // tab someone typed in close under them; toward "keystroke" only leaves one open.
+  for (const [what, bytes] of Object.entries(NOT_POINTER)) {
+    assert.strictEqual(isPointerReport(bytes), false, `${what}: ${JSON.stringify(bytes)}`);
+  }
+  assert.strictEqual(isPointerReport(undefined), false);
+  assert.strictEqual(isPointerReport(null), false);
+  assert.strictEqual(isPointerReport(123), false);
+});
+
+test('a pointer report is NOT a terminal report', () => {
+  // The two are kept apart on purpose. A terminal report skips the #512 inputBlocked drop
+  // and never stamps lastInputTime; a person's click must do neither — a wheel notch that
+  // reached tmux mid-injection would put the pane in copy-mode and swallow the Enter.
+  for (const [what, bytes] of Object.entries(POINTER)) {
+    assert.strictEqual(isTerminalReport(bytes), false, `${what}: ${JSON.stringify(bytes)}`);
+  }
+});
+
+test('every mouse report xterm 6 encodes is recognized as a pointer report', async () => {
+  // The drift guard for this half, same reasoning as the one above: drive xterm's own SGR
+  // encoder rather than trust a hand-written table. Headless has no DOM to click, so this
+  // reaches the encoder directly — a private API, so its absence fails loudly rather
+  // than passing vacuously. (Focus reports are two fixed literals in xterm's browser
+  // build, and headless has no focus; they are covered by the table above.)
+  const { Terminal } = require('@xterm/headless');
+  const term = new Terminal({ cols: 120, rows: 40, allowProposedApi: true });
+  const out = [];
+  term.onData((d) => out.push(d));
+  // What tmux asks the outer terminal for when mouse mode is on: button tracking + SGR.
+  await new Promise((resolve) => term.write('\x1b[?1000h\x1b[?1006h', resolve));
+
+  const mouse = term._core && term._core.coreMouseService;
+  assert.ok(mouse && typeof mouse.triggerMouseEvent === 'function',
+    'xterm no longer exposes coreMouseService.triggerMouseEvent — re-point this drift guard');
+  const base = { col: 65, row: 25, x: 0, y: 0, ctrl: false, alt: false, shift: false };
+  for (const ev of [
+    { button: 4, action: 0 }, // wheel up
+    { button: 4, action: 1 }, // wheel down
+    { button: 0, action: 1 }, // left press
+    { button: 0, action: 0 }, // left release
+    { button: 2, action: 1, ctrl: true }, // modified right press
+  ]) {
+    mouse.triggerMouseEvent({ ...base, ...ev });
+  }
+
+  assert.strictEqual(out.length, 5, `xterm encoded ${out.length} of 5 mouse events: ${JSON.stringify(out)}`);
+  assert.strictEqual(out[0], '\x1b[<64;66;26M', 'the wheel notch captured from the live UI');
+  for (const report of out) {
+    assert.strictEqual(isPointerReport(report), true,
+      `xterm 6 encodes ${JSON.stringify(report)} and the classifier would call it a keystroke — ` +
+      'a click in a merged tab cancels its auto-close again until POINTER_PATTERNS covers it');
   }
 });
 

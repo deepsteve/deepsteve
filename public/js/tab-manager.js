@@ -25,6 +25,10 @@ let contextMenuKeys = null;
 // the stack is the server's, so every tab's menu and the empty bar's offer the same item.
 let reopenClosed = null;
 
+// Project views (#726), set by app.js: { menu(id), set(id, slug, on), create(id) }. menu() is
+// the selected project's views with this tab's membership, or null when there is no project.
+let tabViews = null;
+
 function appendReopenItem(menu) {
   const el = document.createElement('div');
   el.className = 'context-menu-item';
@@ -140,6 +144,8 @@ function showContextMenu(x, y, sessionId, callbacks) {
     });
   }
   menu.appendChild(sendEl);
+
+  appendViewsItem(menu, sessionId);
 
   // Separator
   const sep1 = document.createElement('div');
@@ -274,6 +280,47 @@ function showContextMenu(x, y, sessionId, callbacks) {
   }
 
   placeMenu(menu, x, y);
+}
+
+/**
+ * "Views ▸" (#726) — the manual mode of project views: a checklist of the selected project's
+ * views, ticked where this tab is in one, so a click files it in or takes it out. "New view…"
+ * at the bottom makes a view and files the tab into it in one go. Omitted when no project is
+ * selected (the hook answers null), the Autopilot convention: there is no view to file into.
+ */
+function appendViewsItem(menu, sessionId) {
+  const items = tabViews?.menu?.(sessionId);
+  if (!Array.isArray(items)) return;
+  const viewsEl = document.createElement('div');
+  viewsEl.className = 'context-menu-item';
+  viewsEl.textContent = 'Views';
+  attachSubmenu(menu, viewsEl, (flyout) => {
+    for (const v of items) {
+      const el = document.createElement('div');
+      el.className = 'context-menu-item';
+      // The same tick convention as Autopilot: the unchecked state keeps the indent.
+      el.textContent = `${v.on ? '✓ ' : '   '}${v.icon ? v.icon + ' ' : ''}${v.name}`;
+      el.onclick = () => {
+        hideContextMenu();
+        tabViews.set?.(sessionId, v.slug, !v.on);
+      };
+      flyout.appendChild(el);
+    }
+    if (items.length) {
+      const sep = document.createElement('div');
+      sep.className = 'context-menu-separator';
+      flyout.appendChild(sep);
+    }
+    const newEl = document.createElement('div');
+    newEl.className = 'context-menu-item';
+    newEl.textContent = '   New view…';
+    newEl.onclick = () => {
+      hideContextMenu();
+      tabViews.create?.(sessionId);
+    };
+    flyout.appendChild(newEl);
+  });
+  menu.appendChild(viewsEl);
 }
 
 // The menu for the tab bar's empty space (#715).
@@ -822,6 +869,11 @@ export const TabManager = {
   /** Wire the "Reopen closed tab" menu items to the app: { list(), reopen(id?) } (#715, #723). */
   setReopenClosedTab(hooks) {
     reopenClosed = hooks;
+  },
+
+  /** Wire the "Views ▸" menu item to project views (#726): { menu(id), set(id, slug, on), create(id) }. */
+  setTabViews(hooks) {
+    tabViews = hooks;
   },
 
   /**

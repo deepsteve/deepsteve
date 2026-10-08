@@ -17,7 +17,7 @@ const fs = require('fs');
 const path = require('path');
 
 const REPO = path.join(__dirname, '..', '..');
-const { projectModsDir, DEFAULT_STATE_DIRNAME } = require('../../paths');
+const { projectModsDir, projectViewsDir, DEFAULT_STATE_DIRNAME } = require('../../paths');
 
 /** Non-comment, non-empty lines of an ignore file. */
 function ignorePatterns(file) {
@@ -40,6 +40,8 @@ test('the repo path is built by paths.js, and is the state dirname rooted at a r
   process.env.DEEPSTEVE_HOME = '/tmp/somewhere-else';
   try {
     assert.strictEqual(projectModsDir('/repo/alpha'), path.join('/repo/alpha', '.deepsteve', 'mods'));
+    // Project views (#726) are the same kind of repo file, in a sibling directory.
+    assert.strictEqual(projectViewsDir('/repo/alpha'), path.join('/repo/alpha', '.deepsteve', 'views'));
   } finally {
     if (before === undefined) delete process.env.DEEPSTEVE_HOME;
     else process.env.DEEPSTEVE_HOME = before;

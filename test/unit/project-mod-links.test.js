@@ -66,6 +66,7 @@ const create = async (name, html = '<p>page</p>') =>
 const routes = new Map();
 projectMods.registerRoutes({
   get: (p, h) => routes.set(`GET ${p}`, h),
+  post: (p, h) => routes.set(`POST ${p}`, h),
   put: (p, h) => routes.set(`PUT ${p}`, h),
   delete: (p, h) => routes.set(`DELETE ${p}`, h),
 }, ctx);

@@ -40,13 +40,51 @@ function clipBody(body, number) {
 // is the whole design: nothing is queued at toggle time, so nothing has to be
 // cancelled, and turning autopilot off stays meaningful right up until the call.
 //
-// It lives here rather than in WAND_DEFAULT_TEMPLATE because the settings modal
-// POSTs wandPromptTemplate on every save — any install where the user has ever hit
-// Save has the old default materialized, so a token added to the shipped default
-// would silently never appear there.
-const ISSUE_COMPLETE_INSTRUCTION =
-  'When the work is done, call the `mcp__deepsteve__issue_complete` tool. '
-  + 'It will tell you whether to merge this session or stop and leave the tab for review.';
+// It lives here rather than in WAND_DEFAULT_TEMPLATE because a user-edited template
+// must not be able to drop it, and because the settings modal POSTs wandPromptTemplate
+// on every save — an install that has ever hit Save holds a copy of whatever default it
+// saw, which only migrateWandTemplate() below can move on.
+//
+// The scope and already-done lines exist because nothing else in the prompt said either
+// (#724): an agent that found its fix already on main took the issue's QA checklist as
+// remaining work and never called issue_complete. Keep this no longer than it is — it is
+// typed into every issue session.
+const ISSUE_COMPLETE_INSTRUCTION = [
+  'Scope: this issue only. Anything else you notice goes in your summary, not into code.',
+  'Already done on the base branch? Say so and skip to issue_complete; do not redo or re-verify it.',
+  'Finish by calling `mcp__deepsteve__issue_complete` and doing exactly what it answers, including closing this tab.',
+].join('\n');
+
+// The shipped default for the `wandPromptTemplate` setting (#724 moved it here from
+// server.js, so it sits beside the defaults it replaced). Everything that is a rule
+// rather than the issue itself is appended by renderIssuePrompt, not written here.
+const WAND_DEFAULT_TEMPLATE = `GitHub issue #{{number}}: "{{title}}"
+Labels: {{labels}}
+URL: {{url}}
+
+{{body}}`;
+
+// Every default this setting has ever shipped with, byte-for-byte. A stored template
+// equal to one of these is a default the settings modal materialized, not a choice, so
+// it is migrated on load. Changing WAND_DEFAULT_TEMPLATE means appending the old one
+// here — otherwise every install that ever hit Save keeps it forever.
+const PREVIOUS_WAND_DEFAULTS = [
+  // #62 until #724.
+  `I need you to work on GitHub issue #{{number}}: "{{title}}"
+Labels: {{labels}}
+URL: {{url}}
+
+Issue description:
+{{body}}
+
+Please read the issue carefully, understand the codebase context, and implement the changes needed.`,
+];
+
+// The stored template to use from now on: the current default for a previous default,
+// anything else unchanged.
+function migrateWandTemplate(value) {
+  return PREVIOUS_WAND_DEFAULTS.includes(value) ? WAND_DEFAULT_TEMPLATE : value;
+}
 
 // The workflow stages (#668). Appended only when the CALLER passes them: the toggle
 // (`issueStagesEnabled`) is read in server.js, so this module stays pure and testable
@@ -165,8 +203,10 @@ function normalizeLabels(labels) {
 // `stages` is TEXT, not a flag (#668): the module never reads settings, so the daemon
 // stays the one place that decides whether a session gets the stages and — once #669
 // lands — what they are allowed to name. `resume` (#689) is text for the same reason,
-// and additionally because only the daemon can look at the worktree.
-function renderIssuePrompt(template, { number, title, labels, url, body } = {}, { stages, resume } = {}) {
+// and additionally because only the daemon can look at the worktree. `steps` (#717) is the
+// issue pipeline's per-stage instructions, rendered by issue-pipeline.js; null for the
+// default pipeline, so a session with no instructions gets exactly the old prompt.
+function renderIssuePrompt(template, { number, title, labels, url, body } = {}, { stages, resume, steps } = {}) {
   const vars = {
     number,
     title,
@@ -185,7 +225,12 @@ function renderIssuePrompt(template, { number, title, labels, url, body } = {}, 
   // about how to finish. Putting it after them would separate stage 4's "…then
   // issue_complete" from the instruction it refines, and would bury the one fact that
   // has to change the agent's FIRST move rather than its last.
-  const head = resume ? `${rendered}\n\n${String(resume).trim()}` : rendered;
+  //
+  // `steps` (#717) sits between that context and the rules about finishing: the
+  // pipeline's instructions are what to do between reading the issue and calling
+  // issue_complete, so they read before the instruction that ends the session.
+  const withResume = resume ? `${rendered}\n\n${String(resume).trim()}` : rendered;
+  const head = steps ? `${withResume}\n\n${String(steps).trim()}` : withResume;
   const out = `${head}\n\n${ISSUE_COMPLETE_INSTRUCTION}`;
   return stages ? `${out}\n\n${String(stages).trim()}` : out;
 }
@@ -203,4 +248,4 @@ function issueTabName(number, title, maxLen) {
   return full.length <= limit ? full : full.slice(0, limit) + '…';
 }
 
-module.exports = { renderIssuePrompt, normalizeLabels, issueWorktreeName, issueTabName, clipBody, resumePromptText, humanAge, ISSUE_BODY_LIMIT, ISSUE_COMPLETE_INSTRUCTION, WORKFLOW_STAGES, RESUME_TEXT_LIMIT };
+module.exports = { renderIssuePrompt, normalizeLabels, issueWorktreeName, issueTabName, clipBody, resumePromptText, humanAge, migrateWandTemplate, ISSUE_BODY_LIMIT, ISSUE_COMPLETE_INSTRUCTION, WAND_DEFAULT_TEMPLATE, PREVIOUS_WAND_DEFAULTS, WORKFLOW_STAGES, RESUME_TEXT_LIMIT };

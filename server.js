@@ -18,7 +18,7 @@ const { findGitRoot } = require('./git-root');
 const { modKind } = require('./mod-kind');
 const { isValidReleaseTag, installShUrl, safeReleaseUrl } = require('./release-check');
 const { usableWorktree } = require('./worktree-support');
-const { worktreePath, worktreeExists, worktreeStatus, worktreeStatuses, freshWorktreeName } = require('./worktree-status');
+const { worktreePath, worktreeExists, worktreeStatus, worktreeStatuses, freshWorktreeName, mainCheckoutOf } = require('./worktree-status');
 const { stateDir, agentHomeDir, expandTilde, spawnCwdProblem, assertSpawnCwd, tmuxSocketPath, defaultTmuxSocketPath } = require('./paths');
 const { resolveBinary, runBinary, resolveUrlOpener, resolveLoginShell } = require('./bin-path');
 const { worktreeAddArgs } = require('./merge-policy');
@@ -32,8 +32,9 @@ const { TerminalScreen } = require('./terminal-screen');
 const { terminalEnv } = require('./terminal-env');
 const { readComposerDraft, hasStashedDraft, isPromptStaged, isPromptOnScreen, promptDraftVerdict } = require('./composer-state');
 const { wrapRunCommand } = require('./terminal-run');
-const { isTerminalReport, hasSubmitKey } = require('./terminal-input');
-const { renderIssuePrompt, issueWorktreeName, issueTabName, resumePromptText, WORKFLOW_STAGES } = require('./issue-prompt');
+const { isTerminalReport, isPointerReport, hasSubmitKey } = require('./terminal-input');
+const { renderIssuePrompt, issueWorktreeName, issueTabName, resumePromptText, WORKFLOW_STAGES, WAND_DEFAULT_TEMPLATE, migrateWandTemplate } = require('./issue-prompt');
+const issuePipeline = require('./issue-pipeline');
 const { renderOnboardingPrompt, ONBOARDING_TOOLS, TOUR_PAGE_REL } = require('./onboarding-prompt');
 // The display-tab / project-mod HTML resolver, reused here for the built-in project's
 // welcome page (#696) — its `replacements` are what let a reviewed static file name the
@@ -693,15 +694,6 @@ app.put('/api/upload/:filename', express.raw({ type: () => true, limit: '50mb' }
 // POST /api/settings validation, and broadcastSettings() all flow from here.
 // See CLAUDE.md "Adding a New Setting" for the contract.
 
-const WAND_DEFAULT_TEMPLATE = `I need you to work on GitHub issue #{{number}}: "{{title}}"
-Labels: {{labels}}
-URL: {{url}}
-
-Issue description:
-{{body}}
-
-Please read the issue carefully, understand the codebase context, and implement the changes needed.`;
-
 // The agent integrations deepsteve ships, and how far each one actually goes (#622).
 // `tier` is the support promise, and it is DATA — not an "(experimental)" suffix baked
 // into `name`. That suffix used to be hardcoded here AND again in the Settings HTML,
@@ -743,13 +735,27 @@ const SETTINGS_SCHEMA = [
   // from the Inbox instead of by opening its tab. A mod's own enable/disable is
   // per-browser localStorage and never reaches the server, and this decision is made
   // server-side at spawn time, so it needs a real setting (same reason projectModsEnabled
-  // and scheduledTasksEnabled exist). Read live inside issueStagesText(), so a Settings
+  // and scheduledTasksEnabled exist). Read live inside globalPipelineLevel(), so a Settings
   // change applies with no restart — same rule as issueAutopilot above. Default OFF: it
   // changes what every issue session is asked to do, and stage 4 names `share_result`,
   // which #669 builds.
   { name: 'issueStagesEnabled',         type: 'boolean', default: false },
   { name: 'wandPromptTemplate',         type: 'string',  default: WAND_DEFAULT_TEMPLATE, broadcast: false,
     logValue: v => `(${v.length} chars)` },
+  // The global issue-pipeline LAYOUT (#717): stage order, per-stage instructions, custom
+  // stages. Its three switches are NOT here — they stay in wandPlanMode, issueStagesEnabled
+  // and issueAutopilot above, so normalizePipeline drops a built-in's `enabled` at this
+  // level. `null` is the default layout and is what gets stored whenever a POST equals it:
+  // the settings modal posts this on every save, and a materialized copy of the default
+  // would stop a later change to the shipped default from ever reaching that install —
+  // the trap migrateWandTemplate() exists to dig wandPromptTemplate out of.
+  { name: 'issuePipeline',              type: 'custom',  default: null, nullable: true, broadcast: false,
+    sanitize: (raw) => {
+      const layout = issuePipeline.normalizePipeline(raw, { level: 'global' });
+      if (!layout) return undefined;
+      return issuePipeline.isDefaultLayout(layout) ? null : layout;
+    },
+    logValue: v => (v ? `(${v.stages.length} stages)` : 'default') },
   { name: 'cmdTabSwitch',               type: 'boolean', default: false },
   { name: 'cmdTabSwitchHoldMs',         type: 'number',  default: 1000, clamp: [0, Infinity], fallback: 0 },
   { name: 'commandPaletteEnabled',      type: 'boolean', default: true },
@@ -1011,8 +1017,11 @@ function coerceSetting(entry, raw) {
       return { ok: true, value: arr, warning };
     }
     case 'custom': {
+      // `nullable` (#717) makes null a storable value rather than a rejection, so its
+      // sanitize rejects with `undefined` instead.
+      if (entry.nullable && raw === null) return { ok: true, value: null };
       const v = entry.sanitize(raw);
-      if (v === null || v === undefined) return { ok: false };
+      if (v === undefined || (v === null && !entry.nullable)) return { ok: false };
       return { ok: true, value: v };
     }
   }
@@ -1055,6 +1064,16 @@ try {
 if (settings.activeTheme === 'windows-95') {
   settings.activeTheme = 'win-95';
   try { fs.writeFileSync(SETTINGS_FILE, JSON.stringify(settings, null, 2)); } catch {}
+}
+
+// Migrate a materialized old default issue template (#724). The settings modal POSTs
+// wandPromptTemplate on every save, so a stored copy of a shipped default is not a
+// customization; one the user actually edited is left alone.
+const migratedWandTemplate = migrateWandTemplate(settings.wandPromptTemplate);
+if (migratedWandTemplate !== settings.wandPromptTemplate) {
+  settings.wandPromptTemplate = migratedWandTemplate;
+  try { fs.writeFileSync(SETTINGS_FILE, JSON.stringify(settings, null, 2)); } catch {}
+  log('Settings: migrated wandPromptTemplate from an old default to the current one');
 }
 
 function saveSettings() {
@@ -3718,7 +3737,7 @@ function loadContexts() {
       const v = JSON.parse(fs.readFileSync(CONTEXTS_FILE, 'utf8'));
       contexts = (Array.isArray(v) ? v : [])
         .filter(c => c && typeof c.name === 'string')
-        .map(c => ({ id: c.id || genContextId(), name: c.name, dirs: Array.isArray(c.dirs) ? c.dirs.filter(Boolean) : [], icon: typeof c.icon === 'string' ? c.icon : '', iconImage: (c.iconImage === 'png' || c.iconImage === 'svg') ? c.iconImage : '', archived: c.archived === true, alwaysShowMods: c.alwaysShowMods !== false, builtin: c.builtin === true, welcomedAt: Number(c.welcomedAt) || 0 }));
+        .map(c => ({ id: c.id || genContextId(), name: c.name, dirs: Array.isArray(c.dirs) ? c.dirs.filter(Boolean) : [], icon: typeof c.icon === 'string' ? c.icon : '', iconImage: (c.iconImage === 'png' || c.iconImage === 'svg') ? c.iconImage : '', archived: c.archived === true, alwaysShowMods: c.alwaysShowMods !== false, builtin: c.builtin === true, welcomedAt: Number(c.welcomedAt) || 0, pipeline: issuePipeline.normalizePipeline(c.pipeline, { level: 'project' }) }));
       return;
     }
   } catch (e) {
@@ -3792,7 +3811,7 @@ function seedDeepsteveContext() {
   contexts.unshift({
     id: DEEPSTEVE_CONTEXT_ID, name: DEEPSTEVE_CONTEXT_NAME, dirs: [dir],
     icon: '', iconImage, archived: false, alwaysShowMods: true,
-    builtin: true, welcomedAt: 0,
+    builtin: true, welcomedAt: 0, pipeline: null,
   });
   saveContexts();
   log(`[deepsteve-project] seeded the built-in project at ${dir}`);
@@ -3954,12 +3973,16 @@ let stateFrozen = false;  // Set during shutdown to prevent onExit handlers from
 // `resumedWorktree` (#689) is here on exactly that argument: it records which commits
 // were already on the branch when this session started, it cannot be recomputed later
 // (by then they look like everyone else's), and issue_complete reads it at the end.
+// `pipeline` (#717) is the issue pipeline's spawn snapshot — the project id and the repo
+// file as it was read — and is carried on the same argument: issue_complete resolves the
+// review gate from it, and the file may have changed (or been edited by this very agent)
+// since. Re-reading it after a restart would let that edit through.
 // `lastHumanInputAt` (#710) is when a person last replied in the session. It is kept
 // separately from `lastInputTime` because every programmatic prompt stamps that one. Inbox
 // reads it off the live entry or the closed record to see that a question was overtaken, so it
 // has to outlive both a restart and the session closing.
 function serializeShellEntry(entry) {
-  return { cwd: entry.cwd, claudeSessionId: entry.claudeSessionId, agentType: entry.agentType || 'claude', codexHomeId: entry.codexHomeId || null, configDir: entry.configDir || null, engineType: entry.engineType || 'node-pty', worktree: entry.worktree || null, name: entry.name || null, planMode: !!entry.planMode, model: entry.model || null, effort: entry.effort || null, allowedTools: Array.isArray(entry.allowedTools) && entry.allowedTools.length ? entry.allowedTools : null, forkParent: entry.forkParent || null, lastActivity: entry.lastActivity || null, createdAt: entry.createdAt || null, windowId: entry.windowId || null, scheduled: !!entry.scheduled, scheduledTaskId: entry.scheduledTaskId || null, autopilot: !!entry.autopilot, resumedWorktree: entry.resumedWorktree || null, resultItemId: entry.resultItemId || null, resultApprovedAt: entry.resultApprovedAt || null, mergeBlock: entry.mergeBlock || null, lastHumanInputAt: entry.lastHumanInputAt || null };
+  return { cwd: entry.cwd, claudeSessionId: entry.claudeSessionId, agentType: entry.agentType || 'claude', codexHomeId: entry.codexHomeId || null, configDir: entry.configDir || null, engineType: entry.engineType || 'node-pty', worktree: entry.worktree || null, name: entry.name || null, planMode: !!entry.planMode, model: entry.model || null, effort: entry.effort || null, allowedTools: Array.isArray(entry.allowedTools) && entry.allowedTools.length ? entry.allowedTools : null, forkParent: entry.forkParent || null, lastActivity: entry.lastActivity || null, createdAt: entry.createdAt || null, windowId: entry.windowId || null, scheduled: !!entry.scheduled, scheduledTaskId: entry.scheduledTaskId || null, autopilot: !!entry.autopilot, resumedWorktree: entry.resumedWorktree || null, pipeline: entry.pipeline || null, resultItemId: entry.resultItemId || null, resultApprovedAt: entry.resultApprovedAt || null, mergeBlock: entry.mergeBlock || null, lastHumanInputAt: entry.lastHumanInputAt || null };
 }
 
 // #561: a session record is never hard-deleted by any runtime path. Every close
@@ -6611,7 +6634,7 @@ app.post('/api/contexts', (req, res) => {
   // below assigns exactly the four editable fields, which is what carries them through an
   // edit — renaming Deep Steve or repointing its folder must not demote it.
   if (existing) { existing.name = name; existing.dirs = dirs; existing.icon = icon; existing.iconImage = iconImage; }
-  else contexts.push({ id, name, dirs, icon, iconImage, archived: false, alwaysShowMods: true, builtin: false, welcomedAt: 0 });
+  else contexts.push({ id, name, dirs, icon, iconImage, archived: false, alwaysShowMods: true, builtin: false, welcomedAt: 0, pipeline: null });
   saveContexts();
   broadcastContexts();
   res.json({ contexts });
@@ -6738,6 +6761,27 @@ app.post('/api/contexts/:id/always-show-mods', (req, res) => {
   ctx.alwaysShowMods = req.body?.alwaysShowMods !== false;
   saveContexts();
   broadcastContexts();
+  res.json({ contexts });
+});
+
+// The project level of the issue pipeline (#717): `{ pipeline: { stages } | null }`, where
+// null means "use the global pipeline". Its own route, like `archived` and `alwaysShowMods`,
+// so the project editor's upsert can never touch it. Unlike a committed repo file this
+// level is trusted — it is set from this daemon's own UI — so it may switch plan, review
+// and merge either way; normalizePipeline only cleans the shape.
+app.post('/api/contexts/:id/pipeline', (req, res) => {
+  const ctx = contexts.find(c => c.id === req.params.id);
+  if (!ctx) return res.status(404).json({ error: 'Project not found' });
+  const raw = req.body ? req.body.pipeline : undefined;
+  let pipeline = null;
+  if (raw != null) {
+    pipeline = issuePipeline.normalizePipeline(raw, { level: 'project' });
+    if (!pipeline) return res.status(400).json({ error: 'pipeline must be null or { stages: [...] }' });
+  }
+  ctx.pipeline = pipeline;
+  saveContexts();
+  broadcastContexts();
+  log(`[API] issue pipeline ${pipeline ? `set (${pipeline.stages.length} stages)` : 'cleared'} for project ${ctx.id} (${ctx.name})`);
   res.json({ contexts });
 });
 
@@ -6901,6 +6945,29 @@ app.get('/api/issues', (req, res) => {
 });
 
 /**
+ * The issue pipeline that applies (#717), for the picker's "Pipeline:" line and its
+ * Autopilot seed, and for the two editors.
+ *
+ * With `cwd`, the full resolution for a session starting there — the same function the
+ * spawn paths call, so the picker can never describe a pipeline the session won't get.
+ * Without it, the global level alone, which is what the Settings and project editors draw
+ * from. `builtins` and `limits` describe the stage model, so the browser keeps no copy of
+ * the built-in stage list.
+ */
+app.get('/api/issue-pipeline', (req, res) => {
+  const meta = { builtins: issuePipeline.BUILTIN_META, limits: issuePipeline.LIMITS };
+  if (!req.query.cwd) {
+    return res.json({ ...meta, ...issuePipeline.resolvePipeline({ global: globalPipelineLevel() }), project: null });
+  }
+  // A config profile id rides agentType as `config:<pid>` from some callers; it is Claude.
+  const rawAgent = String(req.query.agentType || 'claude');
+  const agentType = rawAgent.startsWith('config:') || !AGENT_TYPES.includes(rawAgent) ? 'claude' : rawAgent;
+  const { resolved, snapshot } = resolveIssuePipeline({ cwd: expandTilde(String(req.query.cwd)), agentType });
+  const project = snapshot.projectId ? contexts.find(c => c.id === snapshot.projectId) : null;
+  res.json({ ...meta, ...resolved, project: project ? { id: project.id, name: project.name } : null });
+});
+
+/**
  * The authoritative answer for ONE issue, at the moment the user clicks (#689).
  *
  * Everything the picker's list badge cannot afford or cannot know:
@@ -6948,12 +7015,17 @@ app.get('/api/issue-worktree', (req, res) => {
  * user asked for: MCP start_issue exposes `autopilot` as an agent-settable argument,
  * and a model that helpfully fills in `autopilot: false` is exactly what this makes
  * visible. When the two agree there is nothing to explain, so the line stays terse.
+ *
+ * Since #717 the preference is the pipeline's merge switch, which can come from the
+ * project or the repo file as well as the setting; `pipeline.sources.merge` names which,
+ * and `setting` keeps its old wording.
  */
-function autopilotLogLabel(on, explicit) {
+function autopilotLogLabel(on, explicit, pipeline) {
   const value = on ? 'on' : 'off';
-  if (!explicit) return `${value}(setting)`;
-  const pref = !!settings.issueAutopilot;
-  return on === pref ? `${value}(explicit)` : `${value}(explicit, setting=${pref ? 'on' : 'off'})`;
+  const source = pipeline.sources.merge;
+  if (!explicit) return `${value}(${source})`;
+  const pref = !!pipeline.merge;
+  return on === pref ? `${value}(explicit)` : `${value}(explicit, ${source}=${pref ? 'on' : 'off'})`;
 }
 
 /**
@@ -6965,7 +7037,7 @@ function autopilotLogLabel(on, explicit) {
  * the fact. `source` is a parameter, never guessed from the call stack; a caller that
  * forgets it shows up as `unknown` rather than claiming a surface it isn't.
  */
-function logIssueStart({ number, id, source, agentType, engineType, worktree, cwd, on, explicit, stages, resume }) {
+function logIssueStart({ number, id, source, agentType, engineType, worktree, cwd, on, explicit, stages, resume, pipeline }) {
   // `stages` reports whether this session was given the workflow stages (#668). "Started
   // with stages" and "started without" are different runs and the log has to say which.
   // An omitted argument reads `unknown` rather than `off`, for the same reason `source`
@@ -6977,24 +7049,100 @@ function logIssueStart({ number, id, source, agentType, engineType, worktree, cw
   const resumed = resume
     ? `, resume=${resume.commits == null ? '?' : resume.commits}c/${resume.dirty == null ? '?' : resume.dirty}d@${resume.head || '?'}`
     : '';
+  // `pipeline` (#717) names which pipeline was resolved and whose layout it is, e.g.
+  // `pipeline=repo:issue>implement>review`; a repo file that tried to loosen a switch is
+  // named on its own line, because a clamp is a config someone wrote that did not apply.
   log(`[issue] #${number}: id=${id}, source=${source}, agent=${agentType}, engine=${engineType}, `
-    + `worktree=${worktree || 'none'}, cwd=${cwd}, autopilot=${autopilotLogLabel(on, explicit)}, `
-    + `stages=${stages == null ? 'unknown' : (stages ? 'on' : 'off')}${resumed}`);
+    + `worktree=${worktree || 'none'}, cwd=${cwd}, autopilot=${autopilotLogLabel(on, explicit, pipeline)}, `
+    + `stages=${stages == null ? 'unknown' : (stages ? 'on' : 'off')}${resumed}, `
+    + `pipeline=${issuePipeline.pipelineLogLabel(pipeline)}`);
+  if (pipeline.clamped.length) {
+    log(`[issue] #${number}: pipeline clamp — ${pipeline.repoPath || 'the repo file'} may only turn review on and merge off; `
+      + `ignored ${pipeline.clamped.map(s => `${s}=${s === 'merge' ? 'on' : 'off'}`).join(', ')}`);
+  }
 }
 
 /**
- * The workflow-stage text a starting issue session gets, or null (#668).
+ * The global level of the issue pipeline (#717): the three switches and the layout.
  *
- * The single reader of the `issueStagesEnabled` setting, for the same reason
- * renderIssuePrompt is the single reader of `wandPromptTemplate`. Callers capture the
- * result ONCE per start: startIssueSession renders the prompt twice — inline body now,
- * gh-fetch body seconds later inside a `.then()` — and logs the decision at spawn, so
- * three live reads would let a Settings flip mid-flight produce a log line describing a
- * prompt nobody got. This is also where #669 branches, when the stages have to name a
- * tool only the daemon can confirm is registered.
+ * The single reader of `wandPlanMode`, `issueStagesEnabled`, `issueAutopilot` and
+ * `issuePipeline` for issue sessions, for the same reason renderIssuePrompt is the single
+ * reader of `wandPromptTemplate`. Read live, so a Settings change applies to the next
+ * start with no restart; a start captures the resolution ONCE (see startIssueSession).
  */
-function issueStagesText() {
-  return settings.issueStagesEnabled ? WORKFLOW_STAGES : null;
+function globalPipelineLevel() {
+  return {
+    plan: !!settings.wandPlanMode,
+    review: !!settings.issueStagesEnabled,
+    merge: !!settings.issueAutopilot,
+    layout: settings.issuePipeline ? issuePipeline.normalizePipeline(settings.issuePipeline, { level: 'global' }) : null,
+  };
+}
+
+/**
+ * The registered project an issue session's repo belongs to, or null (#717). The first
+ * in rail order whose folders contain the repo — or sit inside it, for a project that
+ * names a subfolder of a monorepo (the project-views route's rule).
+ */
+function projectForRepo(root) {
+  if (!root) return null;
+  return contexts.find(c => (c.dirs || []).some(d => pathInside(root, d) || pathInside(root, findGitRoot(d) || d))) || null;
+}
+
+function projectLevel(ctx) {
+  return ctx ? { id: ctx.id, name: ctx.name, pipeline: ctx.pipeline || null } : null;
+}
+
+/**
+ * Resolve the pipeline an issue session starting in `cwd` gets (#717).
+ *
+ * The repo level is read from the MAIN checkout, never a worktree: an issue session works
+ * in its worktree and could otherwise edit the file that gates it. `snapshot` is what the
+ * session carries on its entry — the project's id (so completion can read that level
+ * LIVE) and the repo file as it was at spawn (so completion never re-reads it).
+ */
+function resolveIssuePipeline({ cwd, agentType }) {
+  const root = mainCheckoutOf(cwd);
+  const project = projectForRepo(root || findGitRoot(cwd) || cwd);
+  const repo = issuePipeline.readRepoPipeline(root, { log });
+  const resolved = issuePipeline.resolvePipeline({
+    global: globalPipelineLevel(),
+    project: projectLevel(project),
+    repo,
+    planFlag: !!getAgentConfig(agentType || 'claude').planModeFlag,
+  });
+  return { resolved, snapshot: { projectId: project ? project.id : null, repo: repo ? repo.pipeline : null } };
+}
+
+/**
+ * Whether `issue_complete` gates this session on an approved `share_result` (#669, #717).
+ *
+ * Read at CALL time, like autopilot: the live global setting and the live project level,
+ * combined with the repo file as it was snapshotted at spawn — so a Settings flip still
+ * applies to a running session, as it always has, while an edit to the committed file
+ * (by the very agent being gated) does not. An entry with no snapshot — a session started
+ * before #717, or one that is not an issue session — reduces to the global setting, which
+ * is exactly the old behavior.
+ */
+function issueReviewEnabled(entry) {
+  const snap = entry && entry.pipeline;
+  const project = snap && snap.projectId ? contexts.find(c => c.id === snap.projectId) : null;
+  return issuePipeline.resolvePipeline({
+    global: globalPipelineLevel(),
+    project: projectLevel(project),
+    repo: snap && snap.repo ? { pipeline: snap.repo } : null,
+  }).review;
+}
+
+// A persisted pipeline snapshot, re-normalized on restore. Trust is applied when the
+// snapshot is RESOLVED, so a hand-edited state.json cannot loosen anything either; this
+// only keeps a malformed one from reaching resolvePipeline.
+function restorePipelineSnapshot(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  return {
+    projectId: typeof raw.projectId === 'string' ? raw.projectId : null,
+    repo: raw.repo ? issuePipeline.normalizePipeline(raw.repo, { level: 'repo' }) : null,
+  };
 }
 
 /**
@@ -7038,7 +7186,7 @@ function sessionsInWorktree(wtPath, exceptId = null) {
 /**
  * The "you are resuming" block a starting issue session gets, or null (#689).
  *
- * The single composer, for the same reason issueStagesText() is the single reader of
+ * The single composer, for the same reason globalPipelineLevel() is the single reader of
  * `issueStagesEnabled`: `renderIssuePrompt` takes TEXT, so exactly one place decides
  * what a resumed session is told. The wording itself lives in issue-prompt.js beside
  * the other prompt text, where a unit test can call it without a daemon; this wrapper
@@ -7089,26 +7237,11 @@ function resumedStamp(status) {
  * Returns `{ error: <spawnCwdProblem> }` for a bad cwd — the caller formats it,
  * because an HTTP 400 body and an MCP isError result are not the same shape.
  */
-function startIssueSession({ number, title, body, labels, url, cwd, agentType, configDir, windowId, callerId, openBrowser = false, autopilot, source = 'unknown' }) {
-  // #651: an omitted `autopilot` means "whatever the user usually wants", not "off".
-  // A hard default here is what made every MCP / skill / autonomous start ignore the
-  // remembered choice — and those are the paths most runs take. Read live off the
-  // settings object so a Settings change applies with no restart; an explicit boolean
-  // from a caller that means it still wins.
-  const autopilotOn = autopilot == null ? !!settings.issueAutopilot : !!autopilot;
-  // #653: which of the two branches above answered is what the log needs — see
+function startIssueSession({ number, title, body, labels, url, cwd, agentType, configDir, windowId, callerId, openBrowser = false, autopilot, view, source = 'unknown' }) {
+  // #653: which branch decides autopilot (below) is what the log needs — see
   // autopilotLogLabel(). Kept as its own flag rather than re-derived at the log line,
   // so the two can never disagree about what "explicit" meant.
   const autopilotExplicit = autopilot != null;
-  // #668: captured ONCE, here, rather than read at each use. This function renders the
-  // prompt twice — inline body now, gh-fetch body seconds later inside a .then() — and
-  // logs the decision at spawn; a live read at each of those three points would let a
-  // Settings flip mid-flight produce a log line that describes a prompt nobody got.
-  // Deliberately NOT a parameter: start_issue already exposes `autopilot` as an
-  // agent-settable argument and #653's `setting=` clause exists because a model filling
-  // that in silently overrode a user preference. An agent that could switch off its own
-  // reporting obligation is a strictly worse version of that.
-  const stages = issueStagesText();
 
   // Inherit whatever the caller didn't specify from the calling session.
   const caller = callerId ? shells.get(callerId) : null;
@@ -7133,6 +7266,25 @@ function startIssueSession({ number, title, body, labels, url, cwd, agentType, c
     log(`[issue] #${number} refused (${source}): ${problem.message}`);
     return { error: problem };
   }
+
+  // #717: the pipeline this session runs — global, project and repo levels combined —
+  // resolved ONCE, here, rather than read at each use. This function renders the prompt
+  // twice (inline body now, gh-fetch body seconds later inside a .then()) and logs the
+  // decision at spawn; a live read at each of those points would let a Settings flip
+  // mid-flight produce a log line that describes a prompt nobody got (#668).
+  // Deliberately NOT a parameter: start_issue already exposes `autopilot` as an
+  // agent-settable argument and #653's `setting=` clause exists because a model filling
+  // that in silently overrode a user preference. An agent that could switch off its own
+  // reporting obligation is a strictly worse version of that.
+  const { resolved: pipeline, snapshot: pipelineSnapshot } = resolveIssuePipeline({ cwd, agentType });
+  // #651: an omitted `autopilot` means "whatever the user usually wants", not "off".
+  // A hard default here is what made every MCP / skill / autonomous start ignore the
+  // remembered choice — and those are the paths most runs take. Since #717 "what the user
+  // usually wants" is the pipeline's merge switch; an explicit boolean from a caller that
+  // means it still wins, as a one-off on top of whichever level applied.
+  const autopilotOn = autopilot == null ? pipeline.merge : !!autopilot;
+  const stages = pipeline.review ? WORKFLOW_STAGES : null;
+  const steps = issuePipeline.pipelineStepsText(pipeline);
 
   // Same guard as the WS path: an issue opened against a repo with no commits yet
   // must not be handed --worktree, or the tab dies before it paints (#656).
@@ -7167,7 +7319,7 @@ function startIssueSession({ number, title, body, labels, url, cwd, agentType, c
 
   const spawnArgs = getSpawnArgs(agentType, {
     sessionId: claudeSessionId,
-    planMode: settings.wandPlanMode,
+    planMode: pipeline.plan,
     worktree,
     shellId: id
   });
@@ -7178,8 +7330,8 @@ function startIssueSession({ number, title, body, labels, url, cwd, agentType, c
   // tmux to node-pty (#620), and engineType must record what happened.
   const sessionEngine = spawnSession(getDefaultEngine(), id, agentType, spawnArgs, spawnCwd, { cols: 120, rows: 40, env: sessionEnv(id, { name, worktree, windowId: windowId || null, cwd: spawnCwd, agentType, configDir, codexHomeId }) });
   const engineType = sessionEngine === tmuxEngine ? 'tmux' : 'node-pty';
-  logIssueStart({ number, id, source, agentType, engineType, worktree, cwd: spawnCwd, on: autopilotOn, explicit: autopilotExplicit, stages: !!stages, resume: resumeStatus });
-  shells.set(id, { clients: new Set(), cwd: spawnCwd, claudeSessionId, agentType, codexHomeId, configDir: configDir || null, engine: sessionEngine, engineType, worktree: worktree || null, windowId: windowId || null, name, planMode: !!settings.wandPlanMode, autopilot: autopilotOn, resumedWorktree: resumedStamp(resumeStatus), waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now(), loading: true });
+  logIssueStart({ number, id, source, agentType, engineType, worktree, cwd: spawnCwd, on: autopilotOn, explicit: autopilotExplicit, stages: !!stages, resume: resumeStatus, pipeline });
+  shells.set(id, { clients: new Set(), cwd: spawnCwd, claudeSessionId, agentType, codexHomeId, configDir: configDir || null, engine: sessionEngine, engineType, worktree: worktree || null, windowId: windowId || null, name, planMode: pipeline.plan, autopilot: autopilotOn, pipeline: pipelineSnapshot, resumedWorktree: resumedStamp(resumeStatus), waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now(), loading: true });
   wireShellOutput(id);
   emitSessionOpen(id);
   recordRecentSession(id);
@@ -7199,24 +7351,29 @@ function startIssueSession({ number, title, body, labels, url, cwd, agentType, c
   // readiness wait or their configured delay. An inline body renders now; without
   // one, fetch from GitHub and render when it lands.
   if (body) {
-    deliverPromptWhenReady(id, renderIssuePrompt(settings.wandPromptTemplate, { number, title, labels, url, body }, { stages, resume }));
+    deliverPromptWhenReady(id, renderIssuePrompt(settings.wandPromptTemplate, { number, title, labels, url, body }, { stages, resume, steps }));
   } else {
     fetchIssueFromGitHub(number, cwd).then(gh => {
-      // `stages` and `resume` are the consts captured at the top, not fresh reads: this
-      // closure runs seconds later, after the log line already reported the decision
-      // (#668) and — for `resume` — after ensureWorktree may have created the very
-      // worktree whose absence it recorded (#689).
+      // `stages`, `steps` and `resume` are the consts captured at the top, not fresh
+      // reads: this closure runs seconds later, after the log line already reported the
+      // decision (#668, #717) and — for `resume` — after ensureWorktree may have created
+      // the very worktree whose absence it recorded (#689).
       deliverPromptWhenReady(id, renderIssuePrompt(settings.wandPromptTemplate, {
         number,
         title,
         labels: labels || (gh ? gh.labels : null),
         url: url || (gh ? gh.url : null),
         body: gh ? gh.body : null,
-      }, { stages, resume }));
+      }, { stages, resume, steps }));
     });
   }
 
-  const tabDelivery = deliverToWindow({ type: 'open-session', id, cwd: spawnCwd, name, windowId, loading: true }, windowId, { openBrowser });
+  // openerId / view (#726): the browser files the new tab under project views — the
+  // explicit `view` (an already-cleaned slug or "all"), else the views of the tab that started it.
+  const tabDelivery = deliverToWindow({
+    type: 'open-session', id, cwd: spawnCwd, name, windowId, loading: true,
+    openerId: callerId || null, ...(view ? { view } : {}),
+  }, windowId, { openBrowser });
   noteSpawnDelivery(id, { tabDelivery, windowId, source: `start_issue #${number} (${source})` });
   // `resumed` (#689) is the facts, not a flag: the MCP path has no human to confirm
   // with, so telling the caller what it walked into is the whole of its answer.
@@ -8401,6 +8558,11 @@ function handleWsConnection(ws, req) {
   // not something the client should know how to do.
   const freshWorktree = url.searchParams.get('fresh') === '1';
   const planMode = url.searchParams.get('planMode') === '1';
+  // The issue picker's create (#717). Plan mode is a spawn flag, so it has to be decided
+  // HERE — before the `issue` message says which issue this is — and by the server, which
+  // is the only side that can see the project and repo levels of the pipeline. A picker
+  // that decided it in the browser from /api/settings could only ever apply the global one.
+  const issueStart = url.searchParams.get('issue') === '1';
   const name = url.searchParams.get('name');
   const windowId = url.searchParams.get('windowId') || null;
   const initialCols = parseInt(url.searchParams.get('cols')) || 120;
@@ -8522,7 +8684,7 @@ function handleWsConnection(ws, req) {
       }
       sessionEngine = spawnedEngine;
       restoredEngineType = spawnedEngine === tmuxEngine ? 'tmux' : 'node-pty';
-      shells.set(id, { clients: new Set(), cwd, claudeSessionId, agentType: savedAgentType, codexHomeId, configDir: restored.configDir || null, engine: sessionEngine, engineType: restoredEngineType, worktree: savedWorktree, name: restoredName, planMode: savedPlanMode, model: restored.model || null, effort: restored.effort || null, allowedTools: restored.allowedTools || null, forkParent: restored.forkParent || null, restored: true, scheduled: !!restored.scheduled, scheduledTaskId: restored.scheduledTaskId || null, autopilot: !!restored.autopilot, resumedWorktree: restored.resumedWorktree || null, resultItemId: restored.resultItemId || null, resultApprovedAt: restored.resultApprovedAt || null, mergeBlock: restored.mergeBlock || null, lastHumanInputAt: restored.lastHumanInputAt || null, waitingForInput: false, lastActivity: Date.now(), createdAt: restored.createdAt || Date.now(), windowId: restoredWindowId });
+      shells.set(id, { clients: new Set(), cwd, claudeSessionId, agentType: savedAgentType, codexHomeId, configDir: restored.configDir || null, engine: sessionEngine, engineType: restoredEngineType, worktree: savedWorktree, name: restoredName, planMode: savedPlanMode, model: restored.model || null, effort: restored.effort || null, allowedTools: restored.allowedTools || null, forkParent: restored.forkParent || null, restored: true, scheduled: !!restored.scheduled, scheduledTaskId: restored.scheduledTaskId || null, autopilot: !!restored.autopilot, resumedWorktree: restored.resumedWorktree || null, pipeline: restorePipelineSnapshot(restored.pipeline), resultItemId: restored.resultItemId || null, resultApprovedAt: restored.resultApprovedAt || null, mergeBlock: restored.mergeBlock || null, lastHumanInputAt: restored.lastHumanInputAt || null, waitingForInput: false, lastActivity: Date.now(), createdAt: restored.createdAt || Date.now(), windowId: restoredWindowId });
       wireShellOutput(id, initialCols, initialRows);
       recordRecentSession(id);  // bump recency on same-browser reconnect + cross-browser restore
       if (agentConfig.supportsSessionWatch) watchClaudeSessionDir(id);
@@ -8681,6 +8843,7 @@ function handleWsConnection(ws, req) {
     let spawnedPlanMode;
     let spawnPath = 'new';
     let parentShell = null, parentClaude = null, parentWorktree = null;
+    let issuePipelineStart = null;
     if (forkFrom && shells.has(forkFrom) && agentType === 'claude') {
       const parent = shells.get(forkFrom);
       // Resolve the parent's LIVE transcript tip (#455) — the in-memory claudeSessionId
@@ -8698,13 +8861,19 @@ function handleWsConnection(ws, req) {
       parentWorktree = parent.worktree || null;
       log(`[WS] Forking from shell ${forkFrom} (parent claude session: ${forkParentSession})`);
     } else {
+      // #717: an issue create resolves its pipeline now, from the repo the picker chose,
+      // and the `planMode` query param is ignored for it. Pure fs plus in-memory reads —
+      // the repo file is one lstat and one small read — so this connection callback stays
+      // free of subprocesses (#553).
+      if (issueStart) issuePipelineStart = resolveIssuePipeline({ cwd, agentType });
+      const wantPlan = issuePipelineStart ? issuePipelineStart.resolved.plan : planMode;
       spawnArgs = getSpawnArgs(agentType, {
         sessionId,
-        planMode,
+        planMode: wantPlan,
         worktree,
         shellId: id
       });
-      spawnedPlanMode = !!planMode;
+      spawnedPlanMode = !!wantPlan;
     }
 
     const requestedSessionEngine = getEngineByType(requestedEngine || settings.engine);
@@ -8735,8 +8904,9 @@ function handleWsConnection(ws, req) {
     // before anything could have created the directory, and deliberately NOT in
     // serializeShellEntry. It answers one question exactly once, for the `issue`
     // message that arrives moments later; what survives a restart is the
-    // `resumedWorktree` snapshot that handler stamps.
-    shells.set(id, { clients: new Set(), cwd: worktreeCwd, claudeSessionId: sessionId, agentType, codexHomeId: agentType === 'codex' ? id : null, configDir: configDir || null, engine: sessionEngine, engineType, worktree: worktree || null, worktreeExisted, windowId, name: name || null, planMode: spawnedPlanMode, forkParent: parentClaude, waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now() });
+    // `resumedWorktree` snapshot that handler stamps. `pipelineResolved` (#717) is
+    // transient for the same reason; `pipeline` is the snapshot that IS persisted.
+    shells.set(id, { clients: new Set(), cwd: worktreeCwd, claudeSessionId: sessionId, agentType, codexHomeId: agentType === 'codex' ? id : null, configDir: configDir || null, engine: sessionEngine, engineType, worktree: worktree || null, worktreeExisted, windowId, name: name || null, planMode: spawnedPlanMode, forkParent: parentClaude, pipeline: issuePipelineStart ? issuePipelineStart.snapshot : null, pipelineResolved: issuePipelineStart ? issuePipelineStart.resolved : null, waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now() });
     wireShellOutput(id, initialCols, initialRows);
     emitSessionOpen(id);
     recordRecentSession(id);
@@ -8808,16 +8978,26 @@ function handleWsConnection(ws, req) {
         // Autopilot (#643) rides the issue message rather than the WS create query,
         // because this path builds its entry before the picker's choice is known.
         // saveState() is what makes the flag survive a restart of a picker-started
-        // session — the create path already saved an entry without it. An absent key
-        // falls back to the remembered preference, same rule as startIssueSession (#651);
-        // the picker itself always sends an explicit boolean, so this is for any other
-        // client that skips it.
+        // session — the create path already saved an entry without it.
+        //
+        // #717: the pipeline was resolved at create time (`issue=1`), because plan mode
+        // had to be decided then. A client that predates that flag decided plan mode in
+        // the browser, so resolve now and record the plan mode it actually spawned with.
+        let pipeline = entry.pipelineResolved;
+        if (!pipeline) {
+          const r = resolveIssuePipeline({ cwd: sessionPaths(entry).repoRoot, agentType: entry.agentType });
+          pipeline = issuePipeline.withSpawnedPlan(r.resolved, entry.planMode);
+          entry.pipeline = r.snapshot;
+        }
+        // An absent key falls back to the pipeline's merge switch, same rule as
+        // startIssueSession (#651). Since #717 the picker sends `autopilot` only when the
+        // user touched its checkbox, so an untouched start reads as the level it came from.
         const autopilotExplicit = parsed.autopilot != null;
-        entry.autopilot = parsed.autopilot == null ? !!settings.issueAutopilot : !!parsed.autopilot;
-        // #668: same rule as autopilot above — read off `settings`, so a Settings change
-        // applies with no restart. Unlike autopilot there is no per-start override: the
+        entry.autopilot = parsed.autopilot == null ? pipeline.merge : !!parsed.autopilot;
+        // #668: unlike autopilot there is no per-start override for the review stage: the
         // picker offers none, and the WS message must not be able to introduce one.
-        const stages = issueStagesText();
+        const stages = pipeline.review ? WORKFLOW_STAGES : null;
+        const steps = issuePipeline.pipelineStepsText(pipeline);
         // #689: the create block latched whether the worktree already existed, BEFORE
         // anything could have created it. Only now — in a message callback, where a
         // subprocess is safe — do we spend the git calls to say what is in it. Stamped
@@ -8835,20 +9015,20 @@ function handleWsConnection(ws, req) {
         // otherwise a picker start is the one surface with no `[issue] #N:` line at all.
         // It lands a moment AFTER this session's `[WS] Creating NEW shell:` line, because
         // here the tab exists before the issue is known; one grep for `[issue] #` still
-        // covers every path. The picker always sends an explicit boolean (app.js), so
-        // `ws-issue` reads `explicit` even though its checkbox was seeded from the setting.
+        // covers every path. `ws-issue` reads `explicit` only when the user touched the
+        // picker's Autopilot checkbox (#717).
         logIssueStart({
           number: parsed.issue?.number ?? '?', id, source: 'ws-issue',
           agentType: entry.agentType, engineType: entry.engineType,
           worktree: entry.worktree, cwd: entry.cwd,
           on: entry.autopilot, explicit: autopilotExplicit, stages: !!stages,
-          resume: resumeStatus,
+          resume: resumeStatus, pipeline,
         });
-        // `{ stages, resume }` is the THIRD argument. Folding either into the second —
+        // `{ stages, resume, steps }` is the THIRD argument. Folding any into the second —
         // the variable bag — would render as nothing (an unknown {{name}} is empty by
         // design) and the picker would be the one surface silently starting a different
         // kind of session.
-        deliverPromptWhenReady(id, renderIssuePrompt(settings.wandPromptTemplate, parsed.issue || {}, { stages, resume }));
+        deliverPromptWhenReady(id, renderIssuePrompt(settings.wandPromptTemplate, parsed.issue || {}, { stages, resume, steps }));
         return;
       }
       if (parsed.type === 'rename') { entry.name = parsed.name || null; return; }
@@ -8919,7 +9099,12 @@ function handleWsConnection(ws, req) {
     // merely HAVING the tab open never cancels, and neither does a reconnect. The byte
     // count is logged because that is the only way to diagnose it if some future TUI
     // turns on a reporting mode this classifier does not yet know about.
-    sessionAutoClose.cancel(id, `user input, ${str.length} byte(s)`);
+    //
+    // A click, a wheel notch or a focus change is someone LOOKING, not typing (#724): tmux
+    // mouse mode (#650) sends each one up this socket, and scrolling up to read a finished
+    // agent's summary used to keep its tab. They still stamp lastInputTime above and still
+    // reach the PTY below; they just don't cancel.
+    if (!isPointerReport(str)) sessionAutoClose.cancel(id, `user input, ${str.length} byte(s)`);
     // #558 audit: keystroke-resolution ordering, debounced to 1/s per shell
     // (typing bursts collapse into a `burst` suppressed-count). clearedWaiting is
     // now always false — keystrokes no longer touch the flag.
@@ -9022,7 +9207,7 @@ function broadcastToWindow(windowId, msg) {
 // assigns unconditionally, and nothing here awaits the first call). The chat pane's
 // transcript reader was therefore dead from the day it shipped, silently falling back
 // to the inbox_say store. Adding a ctx field means editing this line, never copying it.
-initMCP({ app, security, shells, wss, broadcast, broadcastToWindow, log, MODS_DIR, closeSession, tombstoneSession, handleShellGone, spawnSession, sessionEnv, getSpawnArgs, mcpConfigArgs, getAgentConfig, resolveConfigDir, validateModel, validateEffort, wireShellOutput, watchClaudeSessionDir, unwatchClaudeSessionDir, resolveForkParentSession, transcriptPath, saveState, validateWorktree, ensureWorktree, sessionPaths, submitToShell, fetchIssueFromGitHub, deliverPromptWhenReady, startIssueSession, reloadClients, pendingOpens, deliverToWindow, noteSpawnDelivery, settings, isShuttingDown: () => shuttingDown, displayTabs, setDisplayTab, deleteDisplayTab, isDisplayTabLocked, setDisplayTabLocked, screenshots, setScreenshot, deleteScreenshot, getScreenshotPath, getDefaultEngine, getForegroundCommand, sessionLog, emitSessionOpen, getContexts: () => contexts, pathInside, getSavedSession: (id) => savedState[id] || null, links, linkUrl: links.urlFor, spawnAgentSession, stripEscapeSequences, readTerminalScreen, sessionInputState, setMergeBlock, recordMergeAttempt, maybeInheritRemoteControl, requestMetaControlsConsent, registerRestartBlocker, registerSubmitKeyObserver, registerDisplayTabHooks, armSessionAutoClose, logRcWrite }).catch(e => log('MCP init failed:', e.message));
+initMCP({ app, security, shells, wss, broadcast, broadcastToWindow, log, MODS_DIR, closeSession, tombstoneSession, handleShellGone, spawnSession, sessionEnv, getSpawnArgs, mcpConfigArgs, getAgentConfig, resolveConfigDir, validateModel, validateEffort, wireShellOutput, watchClaudeSessionDir, unwatchClaudeSessionDir, resolveForkParentSession, transcriptPath, saveState, validateWorktree, ensureWorktree, sessionPaths, submitToShell, fetchIssueFromGitHub, deliverPromptWhenReady, startIssueSession, reloadClients, pendingOpens, deliverToWindow, noteSpawnDelivery, settings, isShuttingDown: () => shuttingDown, displayTabs, setDisplayTab, deleteDisplayTab, isDisplayTabLocked, setDisplayTabLocked, screenshots, setScreenshot, deleteScreenshot, getScreenshotPath, getDefaultEngine, getForegroundCommand, sessionLog, emitSessionOpen, getContexts: () => contexts, pathInside, getSavedSession: (id) => savedState[id] || null, links, linkUrl: links.urlFor, spawnAgentSession, stripEscapeSequences, readTerminalScreen, sessionInputState, setMergeBlock, recordMergeAttempt, maybeInheritRemoteControl, requestMetaControlsConsent, registerRestartBlocker, registerSubmitKeyObserver, registerDisplayTabHooks, armSessionAutoClose, issueReviewEnabled, logRcWrite }).catch(e => log('MCP init failed:', e.message));
 
 // Watch themes directory for changes and broadcast to clients
 let themeWatchDebounce = null;

@@ -38,6 +38,11 @@
   padding-right: 16px !important;
 }
 
+/* Project views (#726): an open views bar is the monitor's top row in either layout, so IT
+   clears the rounded corners, and the strip below it no longer has to. */
+#views-bar { padding: 8px 16px 0 !important; }
+#app-container:not(.vertical-layout) #app-main.views-bar-open #tabs { padding-top: 4px !important; }
+
 /* 90s CRT monitor bezel.
  *
  * Base CSS sets body to height:100vh, overflow:hidden, box-sizing:border-box.

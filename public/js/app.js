@@ -39,8 +39,9 @@ import { init as initHashCommands, beforeSend as hashCommandsBeforeSend, setWait
 import { init as initOverviewMode, setEnabled as setOverviewModeEnabled, setShortcut as setOverviewModeShortcut, setDefaultLayout as setOverviewDefaultLayout, toggle as toggleOverviewMode, isOverviewActive, getLayout as getOverviewLayout, updateFocus as updateOverviewFocus, onTabsReordered as onOverviewTabsReordered, syncToContext as syncOverviewToContext } from './overview-mode.js';
 import { init as initTerminalSearch, attachSearchAddon, closeIfOpen as closeTerminalSearch } from './terminal-search.js';
 import * as SessionHistory from './session-history.js';
-import { init as initContextViews, setEnabled as setContextViewsEnabled, applyFilter as refreshContextFilter, requestNewTabInContext, resolveContextRepo, chooseContextDir, setContexts as applyServerContexts, setActiveContext as setActiveContextFromPanel, getActiveContextId, getActiveContextInfo, orderRecentDirsByContext, activeContextIsEmpty, noteActiveTab, revealTabContext, showToast, setRailSuppressed, setRailQuiet } from './context-views.js';
+import { init as initContextViews, setEnabled as setContextViewsEnabled, applyFilter as refreshContextFilter, requestNewTabInContext, resolveContextRepo, chooseContextDir, setContexts as applyServerContexts, setActiveContext as setActiveContextFromPanel, getActiveContextId, getActiveContextInfo, orderRecentDirsByContext, activeContextIsEmpty, noteActiveTab, revealTabContext, showToast, setRailSuppressed, setRailQuiet, contextsForCwd } from './context-views.js';
 import * as ProjectMods from './project-mods.js';
+import * as ProjectViews from './project-views.js';
 import * as DecisionMode from './decision-mode.js';
 import * as Onboarding from './onboarding.js';
 import { nsKey } from './storage-namespace.js';
@@ -48,6 +49,7 @@ import { formatShortcut } from './shortcuts.js';
 import { init as initWakeWatch } from './wake-watch.js';
 import { openNewWindow, isFreshRequest } from './new-window.js';
 import { init as initTimelapse, setEnabled as setTimelapseEnabled, setIntervalMinutes as setTimelapseInterval } from './timelapse.js';
+import { createPipelineEditor } from './pipeline-editor.js';
 
 // Configuration
 let maxIssueTitleLength = 25;
@@ -298,6 +300,8 @@ function applySettings(settings) {
   }
   if (settings.contextViewsEnabled !== undefined) {
     setContextViewsEnabled(settings.contextViewsEnabled);
+    // applyFilter() returns early with Projects off, so the views chrome needs its own pass.
+    ProjectViews.render();
   }
   if (settings.timelapseEnabled !== undefined) {
     setTimelapseEnabled(settings.timelapseEnabled);
@@ -830,9 +834,9 @@ settingsBtn?.addEventListener('click', async () => {
   // rendered from guessed values would offer to SAVE them over the real ones. So
   // their failure aborts the open, loudly (#676). Before, they had no .catch at
   // all: a 401 rejected the whole await and the modal silently never appeared.
-  let settingsData, themesData, versionData, defaultsData, enginesData, agentsData;
+  let settingsData, themesData, versionData, defaultsData, enginesData, agentsData, pipelineData;
   try {
-    [settingsData, themesData, versionData, defaultsData, enginesData, agentsData] = await Promise.all([
+    [settingsData, themesData, versionData, defaultsData, enginesData, agentsData, pipelineData] = await Promise.all([
       fetchJSON('/api/settings'),
       fetchJSON('/api/themes'),
       fetchJSON('/api/version').catch(() => ({ current: '?', latest: null, updateAvailable: false })),
@@ -843,6 +847,8 @@ settingsBtn?.addEventListener('click', async () => {
       // and Settings is exactly where you land after installing an agent, so a fresh
       // availability probe beats a snapshot taken when the page loaded.
       fetchJSON('/api/agents').catch(() => null),
+      // The global issue pipeline and the stage model (#717), for the Magic Wand editor.
+      fetchJSON('/api/issue-pipeline').catch(() => null),
     ]);
   } catch (e) {
     // An auth failure already put the page-level banner up; anything else needs
@@ -852,9 +858,6 @@ settingsBtn?.addEventListener('click', async () => {
   }
   const currentProfile = settingsData.shellProfile || '~/.zshrc';
   const currentMaxTitle = settingsData.maxIssueTitleLength || 25;
-  const currentWandPlanMode = settingsData.wandPlanMode !== undefined ? settingsData.wandPlanMode : true;
-  const currentIssueAutopilot = !!settingsData.issueAutopilot;
-  const currentIssueStagesEnabled = !!settingsData.issueStagesEnabled;
   const currentWandTemplate = settingsData.wandPromptTemplate || defaultsData.wandPromptTemplate || '';
   const currentSymlinkWorktreeSettings = !!settingsData.symlinkWorktreeSettings;
   const currentCmdTabSwitch = !!settingsData.cmdTabSwitch;
@@ -1290,29 +1293,14 @@ settingsBtn?.addEventListener('click', async () => {
       </div>
       <div class="settings-section">
         <h3>Magic Wand</h3>
-        <label style="font-size: 13px; color: var(--ds-text-primary); cursor: pointer; display: flex; align-items: center; gap: 8px; margin-bottom: 8px;">
-          <input type="checkbox" id="wand-plan-mode" ${currentWandPlanMode ? 'checked' : ''} style="accent-color: var(--ds-accent-green);">
-          Start issues in plan mode
-        </label>
-        <label style="font-size: 13px; color: var(--ds-text-primary); cursor: pointer; display: flex; align-items: center; gap: 8px; margin-bottom: 4px;">
-          <input type="checkbox" id="wand-autopilot" ${currentIssueAutopilot ? 'checked' : ''} style="accent-color: var(--ds-accent-green);">
-          Start issues with Autopilot on
-        </label>
-        <p style="font-size: 12px; color: var(--ds-text-secondary); margin: 0 0 12px 24px;">
-          An issue session that finishes its work merges itself instead of leaving the tab for review.
-          The issue picker's Autopilot checkbox writes this too; every start path uses it.
+        <p style="font-size: 12px; color: var(--ds-text-secondary); margin: 0 0 8px;">
+          The issue pipeline: the stages every issue session runs, in order. Turn a stage on or off,
+          give any stage its own instructions, or add stages of your own between them. A project can
+          override this from its right-click menu (<em>Issue pipeline…</em>), and a repo can commit
+          <code>.deepsteve/pipeline.json</code>, which may turn review on and merge off but never the reverse.
+          The issue picker's Autopilot checkbox writes the merge switch too.
         </p>
-        <label style="font-size: 13px; color: var(--ds-text-primary); cursor: pointer; display: flex; align-items: center; gap: 8px; margin-bottom: 4px;">
-          <input type="checkbox" id="wand-issue-stages" ${currentIssueStagesEnabled ? 'checked' : ''} style="accent-color: var(--ds-accent-green);">
-          Add workflow stages to the issue prompt
-        </label>
-        <p style="font-size: 12px; color: var(--ds-text-secondary); margin: 0 0 12px 24px;">
-          Asks an issue session to post its plan, its open questions and its surprises to the Inbox
-          inbox as it works, and to justify the result before merging — so finished work can be judged
-          without opening the tab. Enable the Inbox app to read them. It also turns the last stage
-          into a gate: <code>issue_complete</code> will not say &ldquo;merge&rdquo; until the session has posted a
-          writeup with <code>share_result</code> and you have approved it.
-        </p>
+        <div id="wand-pipeline-editor"></div>
         <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px;">
           <span style="font-size: 13px; color: var(--ds-text-primary);">Prompt template</span>
           <button class="btn-secondary" id="wand-template-reset" style="padding: 2px 8px; font-size: 11px;">Reset</button>
@@ -1443,6 +1431,23 @@ settingsBtn?.addEventListener('click', async () => {
       if (typeof result === 'string' && result && dirInput) dirInput.value = result;
     }
   });
+
+  // The issue pipeline editor (#717). Its three switches ARE the old checkboxes'
+  // settings keys; only the layout (order, instructions, custom stages) is new. If the
+  // pipeline could not be loaded, the editor is left out and Save leaves those keys alone.
+  let wandPipeline = null;
+  if (pipelineData && Array.isArray(pipelineData.builtins)) {
+    wandPipeline = createPipelineEditor({
+      mode: 'global',
+      builtins: pipelineData.builtins,
+      limits: pipelineData.limits,
+      stages: pipelineData.stages.map(({ enabled, ...s }) => (pipelineData.builtins.some(b => b.id === s.id) ? s : { ...s, enabled })),
+      switches: { plan: !!pipelineData.plan, review: !!pipelineData.review, merge: !!pipelineData.merge },
+    });
+    overlay.querySelector('#wand-pipeline-editor').appendChild(wandPipeline.el);
+  } else {
+    overlay.querySelector('#wand-pipeline-editor').textContent = 'Could not load the issue pipeline.';
+  }
 
   // Wand template reset button
   overlay.querySelector('#wand-template-reset').onclick = async () => {
@@ -1675,9 +1680,18 @@ settingsBtn?.addEventListener('click', async () => {
     const selected = overlay.querySelector('input[name="profile"]:checked').value;
     const shellProfile = selected === 'custom' ? customInput.value : selected;
     const newMaxTitle = Number(overlay.querySelector('#max-issue-title-length').value) || 25;
-    const wandPlanMode = overlay.querySelector('#wand-plan-mode').checked;
-    const issueAutopilot = overlay.querySelector('#wand-autopilot').checked;
-    const issueStagesEnabled = overlay.querySelector('#wand-issue-stages').checked;
+    // The issue pipeline (#717): the switches go to their own settings keys, and the
+    // layout is sent as null whenever it equals the default — this Save runs on every
+    // settings change, and a materialized default would stop a later shipped default from
+    // ever reaching this install. With no editor (the pipeline failed to load) none of
+    // the four keys is sent, so nothing is overwritten with a guess.
+    const pipelineEdit = wandPipeline ? wandPipeline.read() : null;
+    const pipelinePayload = pipelineEdit ? {
+      wandPlanMode: !!pipelineEdit.switches.plan,
+      issueAutopilot: !!pipelineEdit.switches.merge,
+      issueStagesEnabled: !!pipelineEdit.switches.review,
+      issuePipeline: pipelineEdit.isDefault ? null : { stages: pipelineEdit.stages },
+    } : {};
     const wandPromptTemplate = overlay.querySelector('#wand-prompt-template').value;
     const symlinkWorktreeSettings = overlay.querySelector('#symlink-worktree-settings').checked;
     const cmdTabSwitch = overlay.querySelector('#cmd-tab-switch').checked;
@@ -1760,7 +1774,7 @@ settingsBtn?.addEventListener('click', async () => {
     const preventSleepWhileActive = overlay.querySelector('#prevent-sleep-while-active').checked;
     const inheritRemoteControl = overlay.querySelector('#inherit-rc-newtab').checked;
     const inheritRemoteControlOnFork = overlay.querySelector('#inherit-rc-fork').checked;
-    const settingsPayload = { shellProfile, maxIssueTitleLength: newMaxTitle, wandPlanMode, issueAutopilot, issueStagesEnabled, wandPromptTemplate, symlinkWorktreeSettings, cmdTabSwitch, cmdTabSwitchHoldMs, commandPaletteEnabled, commandPaletteShortcut, shortcutsHelpEnabled, shortcutsHelpShortcut, hashCommandsEnabled, contextViewsEnabled, projectModsEnabled, timelapseEnabled, timelapseIntervalMinutes, metaControlsEnabled, inheritRemoteControl, inheritRemoteControlOnFork, overviewDefaultLayout, enabledAgents, ...agentBinaries, ...(selectedEngine ? { engine: selectedEngine } : {}), scrollbackKB, recentSessionsLimit, autoUpdateCheckEnabled, autoUpdateCheckIntervalHours, autoUpdateApply, sessionLogEnabled, timecardEnabled, timecardSampleMinutes, scheduledTasksEnabled, scheduledTasksOpenInBackground, scheduledDefaultModel, scheduledDefaultEffort, preventSleepWhileActive, customAgentConfigs };
+    const settingsPayload = { shellProfile, maxIssueTitleLength: newMaxTitle, ...pipelinePayload, wandPromptTemplate, symlinkWorktreeSettings, cmdTabSwitch, cmdTabSwitchHoldMs, commandPaletteEnabled, commandPaletteShortcut, shortcutsHelpEnabled, shortcutsHelpShortcut, hashCommandsEnabled, contextViewsEnabled, projectModsEnabled, timelapseEnabled, timelapseIntervalMinutes, metaControlsEnabled, inheritRemoteControl, inheritRemoteControlOnFork, overviewDefaultLayout, enabledAgents, ...agentBinaries, ...(selectedEngine ? { engine: selectedEngine } : {}), scrollbackKB, recentSessionsLimit, autoUpdateCheckEnabled, autoUpdateCheckIntervalHours, autoUpdateApply, sessionLogEnabled, timecardEnabled, timecardSampleMinutes, scheduledTasksEnabled, scheduledTasksOpenInBackground, scheduledDefaultModel, scheduledDefaultEffort, preventSleepWhileActive, customAgentConfigs };
     let resp = await fetch('/api/settings', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1780,6 +1794,7 @@ settingsBtn?.addEventListener('click', async () => {
     setShortcutsHelpShortcut(shortcutsHelpShortcut);
     setHashCommandsEnabled(hashCommandsEnabled);
     setContextViewsEnabled(contextViewsEnabled);
+    ProjectViews.render();   // see the settings-broadcast twin: applyFilter() skips it with Projects off
     setTimelapseEnabled(timelapseEnabled);
     setTimelapseInterval(timelapseIntervalMinutes);
     ProjectMods.refresh();   // the project-mods gate ships with the list, not with settings (#618)
@@ -1906,10 +1921,32 @@ function createTmuxAttachSession(tmuxSessionName) {
 }
 
 /**
+ * A tab's project-view filings (#726) as persisted — `{slug: true|false}` or undefined. The
+ * per-tab store first (it is this tab's truth), then the window's cross-tab list.
+ */
+function storedViews(id) {
+  return getTabSessions().find(s => s.id === id)?.views
+    || SessionStore.getWindowSessions(getWindowId()).find(s => s.id === id)?.views
+    || undefined;
+}
+
+/** The tab kind a project view's `kinds` rule matches on (#726), or null while unknown. */
+function tabKind(s) {
+  if (s.type === 'mod-tab' || s.type === 'display-tab' || s.type === 'project-mod') return s.type;
+  if (!s.agentType) return null;
+  return s.agentType === 'terminal' || s.agentType === 'tmux-attach' ? 'terminal' : 'agent';
+}
+
+/**
  * Create a new terminal session
  */
 function createSession(cwd, existingId = null, isNew = false, opts = {}) {
   const { cols, rows } = measureTerminalSize();
+  // Project views (#726): every tab the user opens in this window goes through here with
+  // isNew, and is filed into the view they are looking at — a fork, into its parent's views.
+  if (isNew && opts.views === undefined) {
+    opts = { ...opts, views: opts.fork ? ProjectViews.spawnJoins({ openerId: opts.fork }) : ProjectViews.activeJoins() };
+  }
   // Custom Claude config profiles (#537): a profile is picked as agentType 'config:<pid>'.
   // Resolve it here (the single WS-creation choke point) into a real agentType:'claude'
   // plus a configProfile param the server maps to a CLAUDE_CONFIG_DIR.
@@ -1919,7 +1956,7 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
     configProfile = agentType.slice('config:'.length);
     agentType = 'claude';
   }
-  const ws = createWebSocket({ id: existingId, cwd, isNew, worktree: opts.worktree, fresh: opts.fresh, name: opts.name, planMode: opts.planMode, agentType, configProfile, cols, rows, windowId: getWindowId(), fork: opts.fork, rcParent: opts.rcParent, noRestore: opts.noRestore });
+  const ws = createWebSocket({ id: existingId, cwd, isNew, worktree: opts.worktree, fresh: opts.fresh, name: opts.name, planMode: opts.planMode, issue: !!opts.issue, agentType, configProfile, cols, rows, windowId: getWindowId(), fork: opts.fork, rcParent: opts.rcParent, noRestore: opts.noRestore });
 
   // Reconnect state lives on this handle, not the sessions map (#556): the map
   // entry only exists after the first {type:'session'} message, so a connect
@@ -1999,7 +2036,9 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
         if (!existingSession) {
           // Use client-provided name, or fall back to server-persisted name
           const sessionName = opts.name || msg.name;
-          initTerminal(msg.id, ws, cwd, sessionName, { hasScrollback, pendingData, restoreActive: opts.restoreActive, background: opts.background, cols, rows });
+          // views + agentType ride in now (#726), not after: initTerminal focuses the tab, and
+          // whether it is in the selected view has to be answerable by then.
+          initTerminal(msg.id, ws, cwd, sessionName, { hasScrollback, pendingData, restoreActive: opts.restoreActive, background: opts.background, cols, rows, views: opts.views, agentType: msg.agentType });
           resolveReady(msg.id);
           if (opts.loading) {
             const sess = sessions.get(msg.id);
@@ -2012,8 +2051,10 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
             ws.sendJSON({ type: 'initialPrompt', text: opts.initialPrompt, loading: opts.loading });
           } else if (opts.issue) {
             // Wand picker (#642): the server renders wandPromptTemplate from these
-            // fields. Same `loading` contract as initialPrompt above.
-            ws.sendJSON({ type: 'issue', issue: opts.issue, loading: opts.loading, autopilot: !!opts.autopilot });
+            // fields. Same `loading` contract as initialPrompt above. `autopilot` is
+            // sent only when the picker's checkbox was touched (#717) — absent, the
+            // server applies the issue pipeline's merge switch for this repo.
+            ws.sendJSON({ type: 'issue', issue: opts.issue, loading: opts.loading, ...(opts.autopilot != null ? { autopilot: !!opts.autopilot } : {}) });
           }
           // Apply persisted waiting state from the server. This restores the
           // busy/idle flag after a reconnect so close-confirm and the hash
@@ -2159,9 +2200,12 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
         // Adding a folder to a project changes which repos the server scans for project
         // mods, so that repo's existing mods only appear once the list is refetched (#703).
         ProjectMods.refresh();
+        ProjectViews.refresh();   // …and its views (#726), found by the same scan
       } else if (msg.type === 'project-mods') {
-        // Payload-less ping (#618) — refetch and re-derive all three surfaces.
+        // Payload-less ping (#618) — refetch and re-derive all three surfaces. Project views
+        // (#726) share the scan and the ping.
         ProjectMods.refresh();
+        ProjectViews.refresh();
       } else if (msg.type === 'agent-chat') {
         ModManager.notifyAgentChatChanged(msg.channels);
       } else if (msg.type === 'browser-eval-request') {
@@ -2579,7 +2623,7 @@ function dismissLoadingBanner(sessionId) {
  */
 const nothingOnScreen = () => !activeId && !ModManager.isModViewVisible();
 
-function initTerminal(id, ws, cwd, initialName, { hasScrollback = false, pendingData = [], restoreActive = false, background = false, cols, rows } = {}) {
+function initTerminal(id, ws, cwd, initialName, { hasScrollback = false, pendingData = [], restoreActive = false, background = false, cols, rows, views, agentType } = {}) {
   const container = document.createElement('div');
   container.className = 'terminal-container';
   container.id = 'term-' + id;
@@ -2607,7 +2651,9 @@ function initTerminal(id, ws, cwd, initialName, { hasScrollback = false, pending
 
   // Store session in memory
   const searchAddon = attachSearchAddon(term);
-  sessions.set(id, { term, fit, ws, container, cwd, name, waitingForInput: false, hasUnseenActivity: false, scrollControl, searchAddon });
+  // A reconnect or restore that didn't carry its project-view filings (#726) reads them back.
+  const tabViews = views !== undefined ? views : storedViews(id);
+  sessions.set(id, { term, fit, ws, container, cwd, name, waitingForInput: false, hasUnseenActivity: false, scrollControl, searchAddon, views: tabViews, agentType });
 
   // Flush any buffered data that arrived before the terminal was created
   for (const data of pendingData) {
@@ -2690,7 +2736,7 @@ function initTerminal(id, ws, cwd, initialName, { hasScrollback = false, pending
 
   // Per-tab store (sessionStorage) is truth for this tab, SessionStore (localStorage)
   // is for cross-tab; the facade writes both in one call (#385).
-  SessionStores.add(windowId, { id, cwd, name });
+  SessionStores.add(windowId, { id, cwd, name, ...(tabViews ? { views: tabViews } : {}) });
   SessionStore.addRecentDir(cwd);
 
   // ResizeObserver handles window resize, layout toggle, mod panel.
@@ -2759,10 +2805,12 @@ function createModTab(modId, opts = {}) {
     ModManager.injectBridgeAPI(iframe, modId, id);
   });
 
+  // A fresh mod tab is filed into the view you are looking at (#726); a restored one keeps its own.
+  const views = opts.views !== undefined ? opts.views : (opts.id ? storedViews(id) : ProjectViews.activeJoins());
   sessions.set(id, {
     term: null, fit: null, ws: null, container, cwd: null,
     name, waitingForInput: false, hasUnseenActivity: false, scrollControl: null,
-    type: 'mod-tab', modId,
+    type: 'mod-tab', modId, views,
   });
 
   const tabCallbacks = {
@@ -2794,7 +2842,7 @@ function createModTab(modId, opts = {}) {
 
   // Persist
   const windowId = getWindowId();
-  SessionStores.add(windowId, { id, name, type: 'mod-tab', modId });
+  SessionStores.add(windowId, { id, name, type: 'mod-tab', modId, ...(views ? { views } : {}) });
 
   // Forward resize events to iframe
   const ro = new ResizeObserver(([entry]) => {
@@ -2896,13 +2944,16 @@ function createDisplayTab(id, name, opts = {}) {
   // cwd = the spawning session's dir, so Context Views scopes this tab to the
   // context it was created from (#530). null → global (e.g. saved-layout tabs).
   const cwd = opts.cwd || null;
+  // Project views (#726): an agent's open passes the filing it computed; anything else (a
+  // restore, a reopen) keeps whatever this tab had.
+  const views = opts.views !== undefined ? opts.views : storedViews(id);
   sessions.set(id, {
     term: null, fit: null, ws: null, container, cwd,
     name: tabName, waitingForInput: false, hasUnseenActivity: false, scrollControl: null,
-    type: 'display-tab', emittingAudio: false, locked: displayTabLocks.has(id),
+    type: 'display-tab', emittingAudio: false, locked: displayTabLocks.has(id), views,
   });
 
-  SessionStores.add(getWindowId(), { id, name: tabName, type: 'display-tab', cwd });
+  SessionStores.add(getWindowId(), { id, name: tabName, type: 'display-tab', cwd, ...(views ? { views } : {}) });
 
   const tabCallbacks = {
     onSwitch: (sessionId) => onTabStripClick(sessionId),
@@ -2994,13 +3045,18 @@ function createProjectModTab(mod, opts = {}) {
   });
 
   const tabName = projectModTabName(mod);
+  // Project views (#726): opened by a click, it is filed into the view you are looking at. A
+  // pinned background open is the project's, not yours, and a restore keeps its own.
+  const views = opts.views !== undefined ? opts.views
+    : opts.restoreActive ? storedViews(id)
+    : background ? undefined : ProjectViews.activeJoins();
   sessions.set(id, {
     term: null, fit: null, ws: null, container, cwd: mod.project,
     name: tabName, waitingForInput: false, hasUnseenActivity: false, scrollControl: null,
-    type: 'project-mod', projectModId: mod.id, pinned,
+    type: 'project-mod', projectModId: mod.id, pinned, views,
   });
 
-  SessionStores.add(getWindowId(), { id, name: tabName, type: 'project-mod', projectModId: mod.id, cwd: mod.project, pinned });
+  SessionStores.add(getWindowId(), { id, name: tabName, type: 'project-mod', projectModId: mod.id, cwd: mod.project, pinned, ...(views ? { views } : {}) });
 
   const tabCallbacks = {
     onSwitch: (sessionId) => onTabStripClick(sessionId),
@@ -3336,7 +3392,7 @@ async function restoreSessions(sessionList, opts = {}) {
       return fetch(`/api/display-tab/${entry.id}`, { method: 'HEAD' })
         .then(resp => {
           if (resp.ok) {
-            createDisplayTab(entry.id, entry.name, { restoreActive: true, cwd: entry.cwd });
+            createDisplayTab(entry.id, entry.name, { restoreActive: true, cwd: entry.cwd, views: entry.views });
             return entry.id;
           }
           return null; // server no longer has it
@@ -3372,10 +3428,10 @@ async function restoreSessions(sessionList, opts = {}) {
         })
         .catch(() => null);
     } else if (entry.type === 'mod-tab' && entry.modId) {
-      createModTab(entry.modId, { id: entry.id, name: entry.name, restoreActive: true });
+      createModTab(entry.modId, { id: entry.id, name: entry.name, restoreActive: true, views: entry.views });
       return Promise.resolve(entry.id);
     } else {
-      return createSession(entry.cwd, entry.id, false, { name: entry.name, restoreActive: true, allowDuplicate });
+      return createSession(entry.cwd, entry.id, false, { name: entry.name, restoreActive: true, allowDuplicate, views: entry.views });
     }
   });
 
@@ -3964,7 +4020,9 @@ async function sendToWindow(id, targetWindowId) {
       id,
       type: session.type || 'terminal',
       cwd: session.cwd,
-      name: session.name
+      name: session.name,
+      // Project-view filings (#726) are the tab's, so they go where it goes.
+      views: session.views,
     });
   } catch (err) {
     // Target window didn't ack — keep the session
@@ -4029,6 +4087,9 @@ function renameSession(id) {
     SessionStores.rename(getWindowId(), id, name);
     // Tell server so it persists across tab close/restore (skip for mod tabs — no WS)
     if (session.ws) session.ws.sendJSON({ type: 'rename', name });
+    // A project view can match on the name (#726), so a rename can take the tab you are
+    // looking at out of the view on screen. Move the view to it rather than snap away.
+    if (id === activeId) revealTabContext(id);
     notifyTabsChanged();
   });
 }
@@ -4895,10 +4956,11 @@ async function showIssuePicker() {
         </div>
       </div>
       <div class="modal-buttons">
-        <label for="issue-autopilot" style="display:flex; align-items:center; gap:6px; margin:0 auto 0 0; font-size:12px; cursor:pointer;">
+        <label for="issue-autopilot" style="display:flex; align-items:center; gap:6px; font-size:12px; cursor:pointer;">
           <input type="checkbox" id="issue-autopilot" ${issueAutopilotDefault ? 'checked' : ''} style="accent-color: var(--ds-accent-green);">
           Autopilot
         </label>
+        <span id="issue-pipeline-label" style="margin:0 auto 0 4px; font-size:11px; color: var(--ds-text-secondary);"></span>
         <button class="btn-secondary" id="issue-cancel">Cancel</button>
       </div>
     </div>
@@ -4906,20 +4968,48 @@ async function showIssuePicker() {
   document.body.appendChild(overlay);
   const closeIssuePicker = () => overlay.remove();
   overlay.querySelector('#issue-cancel').onclick = closeIssuePicker;
-  // Remembered even if the picker is then cancelled — it is a preference, not part
-  // of this start.
-  overlay.querySelector('#issue-autopilot').onchange = (e) => saveIssueAutopilotDefault(e.target.checked);
+  // #717: the issue pipeline for this repo — global, project or committed repo file —
+  // resolved by the server, which is what the spawn will use. The checkbox is seeded from
+  // its merge switch and the line beside it names the level that applies.
+  let pipelineInfo = null;
+  // Touched = the user chose for THIS start. Only then is `autopilot` sent; untouched, the
+  // server applies the pipeline, so a project or repo level is never overridden by a
+  // checkbox that merely displayed it.
+  let autopilotTouched = false;
+  const PIPELINE_LEVEL_LABELS = { default: 'default', global: 'Settings', project: 'project', repo: 'repo file' };
+  async function refreshPipeline() {
+    const forRoot = gitRoot;
+    const agentType = getDefaultAgentType();
+    const info = await fetchJSON(`/api/issue-pipeline?cwd=${encodeURIComponent(forRoot)}&agentType=${encodeURIComponent(agentType)}`)
+      .catch(() => null);
+    if (!info || forRoot !== gitRoot || !overlay.parentNode) return;
+    pipelineInfo = info;
+    const label = overlay.querySelector('#issue-pipeline-label');
+    if (label) {
+      const where = info.level === 'project' && info.project ? `project “${info.project.name}”` : PIPELINE_LEVEL_LABELS[info.level] || info.level;
+      const plan = !info.planApplicable ? 'n/a' : (info.plan ? 'on' : 'off');
+      label.textContent = `Pipeline: ${where} · plan ${plan}${info.review ? ' · review' : ''}`;
+      label.title = info.stages.filter(s => s.enabled).map(s => s.label || s.id).join(' → ')
+        + (info.clamped.length ? `\n${info.repoPath} may only tighten review and merge; ignored: ${info.clamped.join(', ')}` : '');
+    }
+    const box = overlay.querySelector('#issue-autopilot');
+    if (box && !autopilotTouched) box.checked = !!info.merge;
+  }
+  refreshPipeline();
+  // A choice made here is remembered as the global preference (#651) — even if the
+  // picker is then cancelled — but only while that preference is what decides this repo.
+  // When a project or the repo file sets the merge switch, the checkbox is a one-off.
+  overlay.querySelector('#issue-autopilot').onchange = (e) => {
+    autopilotTouched = true;
+    if (!pipelineInfo || pipelineInfo.sources.merge === 'setting') saveIssueAutopilotDefault(e.target.checked);
+  };
   overlay.onclick = (e) => { if (e.target === overlay) closeIssuePicker(); };
   const onEscIssuePicker = (e) => { if (e.key === 'Escape') { e.preventDefault(); closeIssuePicker(); } };
   document.addEventListener('keydown', onEscIssuePicker);
   let issueObserver = null;  // infinite-scroll IntersectionObserver; hoisted so teardown is centralized here
   new MutationObserver((_, obs) => { if (!overlay.parentNode) { document.removeEventListener('keydown', onEscIssuePicker); issueObserver?.disconnect(); obs.disconnect(); } }).observe(document.body, { childList: true });
 
-  // wandPlanMode defaults here rather than in fetchAndRender: /api/settings is
-  // allowed to fail without taking the picker down (#676), and Start still has
-  // to send something.
   let issues, hasMore;
-  let wandPlanMode = true;
   let selectedIssue = null;
   let currentPage = 1;
   let loadingMore = false;
@@ -5023,8 +5113,8 @@ async function showIssuePicker() {
   async function startIssue() {
     if (!selectedIssue) return;
     // Read BEFORE the overlay is torn down, and here rather than off the Start
-    // button — double-clicking a row calls this directly.
-    const autopilot = !!overlay.querySelector('#issue-autopilot')?.checked;
+    // button — double-clicking a row calls this directly. Undefined unless touched (#717).
+    const autopilot = autopilotTouched ? !!overlay.querySelector('#issue-autopilot')?.checked : undefined;
     const issue = selectedIssue;
     overlay.remove();
 
@@ -5059,11 +5149,12 @@ async function showIssuePicker() {
         url: issue.url,
         body: issue.body,
       },
-      planMode: wandPlanMode,
+      // No planMode (#717): `issue` makes the WS create carry `issue=1`, and the server
+      // takes plan mode from this repo's issue pipeline.
       name: truncateTitle(`#${issue.number} ${issue.title}`),
       agentType: getDefaultAgentType(),
-      // Seeds the session's server-side autopilot value (#643); the tab context
-      // menu is what changes it afterwards.
+      // Seeds the session's server-side autopilot value (#643) when the user chose one
+      // here; the tab context menu is what changes it afterwards.
       autopilot,
       // Show the loading banner + block input while the issue prompt auto-submits,
       // matching the server-initiated /api/start-issue path (#495, #512).
@@ -5078,7 +5169,7 @@ async function showIssuePicker() {
     issueObserver?.disconnect();
     issueObserver = null;
     try {
-      // Settings is ancillary — it supplies two defaults the picker already
+      // Settings is ancillary — it supplies a default the picker already
       // has. Before #676 its failure rejected the whole Promise.all, so a 401
       // on /api/settings blanked an issue list that had loaded fine; and since
       // it was parsed with no res.ok check, what surfaced was the JSON.parse
@@ -5089,7 +5180,6 @@ async function showIssuePicker() {
       ]);
       issues = issuesData.issues;
       hasMore = issuesData.hasMore;
-      if (settingsData.wandPlanMode !== undefined) wandPlanMode = settingsData.wandPlanMode;
       if (settingsData.maxIssueTitleLength) maxIssueTitleLength = settingsData.maxIssueTitleLength;
 
       // Modal may have been dismissed while loading
@@ -5178,6 +5268,7 @@ async function showIssuePicker() {
     const startBtn = overlay.querySelector('#issue-start');
     if (startBtn) startBtn.remove();
     fetchAndRender();
+    refreshPipeline(); // another repo can have another pipeline (#717)
   });
 
   // Populate repo dropdown asynchronously
@@ -5392,7 +5483,12 @@ async function init() {
     // hook that settles the filter re-derives the strip buttons and opens the pinned
     // ones. Deliberately not the rail rows: renderRail() pulls those itself, and
     // calling render() from inside applyFilter would re-enter it.
-    onContextViewApplied: () => { syncOverviewToContext(); refreshTabArrows(); ProjectMods.render(); },
+    onContextViewApplied: () => { syncOverviewToContext(); refreshTabArrows(); ProjectMods.render(); ProjectViews.render(); },
+    // Project views (#726) narrow the selected project to one view's tabs. The filter, the
+    // per-view last-tab memory and the reveal-on-focus all ask project-views.js.
+    tabInView: (id, ctx) => ProjectViews.tabInView(id, ctx),
+    viewKey: (ctx) => ProjectViews.viewKey(ctx),
+    revealTabView: (id, ctx) => ProjectViews.revealTabView(id, ctx),
   });
 
   // Project Mods (#618). Everything about the active view arrives through these, so
@@ -5420,6 +5516,37 @@ async function init() {
     showModView: (mod) => showProjectModView(mod),
     hideModView: (modId) => ModManager.hideView(projectModViewId(modId)),
     getViewInfo: () => ({ id: ModManager.getActiveViewId(), front: ModManager.isModViewVisible() }),
+  });
+
+  // Project views (#726). Like project-mods.js, it never imports context-views.js.
+  ProjectViews.init({
+    // getActiveContextInfo() is {name, dirs} (a test pins that shape), so the id is added here.
+    getActiveContext: () => {
+      const id = getActiveContextId();
+      const info = getActiveContextInfo();
+      return id && info ? { id, ...info } : null;
+    },
+    contextsForCwd: (cwd) => contextsForCwd(cwd),
+    getTabInfo: (id) => {
+      const s = sessions.get(id);
+      return s ? { cwd: s.cwd || null, name: s.name || '', kind: tabKind(s), views: s.views } : null;
+    },
+    setTabViews: (id, views) => {
+      const s = sessions.get(id);
+      if (!s) return;
+      s.views = views;
+      SessionStores.setViews(getWindowId(), id, views);
+      refreshContextFilter();
+    },
+    getActiveTabCwd: () => (activeId ? sessions.get(activeId)?.cwd || null : null),
+    applyFilter: () => refreshContextFilter(),
+    isSuspended: () => DecisionMode.isDecisionModeActive(),
+    showToast: (text) => showToast(text),
+  });
+  TabManager.setTabViews({
+    menu: (id) => ProjectViews.menuFor(id),
+    set: (id, slug, on) => ProjectViews.setMembership(id, slug, on),
+    create: (id) => ProjectViews.createView({ fileTabId: id }),
   });
 
   // File drag-and-drop upload
@@ -5452,10 +5579,11 @@ async function init() {
         applyServerContexts(msg.contexts);
         ModManager.notifyContextsChanged(msg.contexts);
         ProjectMods.refresh();   // a project's folders decide which repos' mods exist (#703)
+        ProjectViews.refresh();  // …and which repos' views (#726)
       }
       // The reload channel is the one that reaches a window with no session sockets,
       // which is exactly when an unattended agent registers a project mod (#618).
-      if (msg.type === 'project-mods') ProjectMods.refresh();
+      if (msg.type === 'project-mods') { ProjectMods.refresh(); ProjectViews.refresh(); }
       if (msg.type === 'recent-sessions') {
         recentSessions = msg.sessions || [];
         renderEmptyStateRecent();
@@ -5487,7 +5615,10 @@ async function init() {
           if (msg.focus) userJumpTo(msg.id);
           return;
         }
-        createSession(msg.cwd, msg.id, false, { name: msg.name, allowDuplicate: true, initialPrompt: msg.initialPrompt, loading: msg.loading, background: msg.background, noRestore: !msg.restore });
+        // Project views (#726): an agent's tab is filed under the spawn tool's `view`, else into
+        // whatever views the tab that opened it is in. A repair re-emit carries neither.
+        const views = ProjectViews.spawnJoins({ view: msg.view, openerId: msg.openerId });
+        createSession(msg.cwd, msg.id, false, { name: msg.name, allowDuplicate: true, initialPrompt: msg.initialPrompt, loading: msg.loading, background: msg.background, noRestore: !msg.restore, views });
         // A background open (unattended scheduled run, #600) stays silent — the
         // top-of-page progress bar is ambient interruption for work the user
         // didn't just start.
@@ -5513,7 +5644,7 @@ async function init() {
       }
       if (msg.type === 'open-display-tab') {
         if (msg.windowId && msg.windowId !== getWindowId()) return;
-        createDisplayTab(msg.id, msg.name, { cwd: msg.cwd });
+        createDisplayTab(msg.id, msg.name, { cwd: msg.cwd, views: ProjectViews.spawnJoins({ view: msg.view, openerId: msg.openerId }) });
       }
       if (msg.type === 'open-browser-tab') {
         if (msg.windowId && msg.windowId !== getWindowId()) return;
@@ -5681,7 +5812,14 @@ async function init() {
     // part of a context switch, where focusTab's revealTabContext would bounce
     // the view back to the context being left (#590).
     activateTab: switchTo,
-    getActiveContextId,
+    // Overview is per PLACE (#590), and a project view is a place of its own (#726): the
+    // grid of Marketing's tabs is not the grid of All's. The All view keeps the bare id.
+    getActiveContextId: () => {
+      const id = getActiveContextId();
+      const info = getActiveContextInfo();
+      const view = id && info ? ProjectViews.viewKey({ id, ...info }) : '';
+      return view ? `${id}#${view}` : id;
+    },
     fitTerminals: (ids) => {
       for (const id of ids) {
         const s = sessions.get(id);
@@ -5757,6 +5895,7 @@ async function init() {
       TabManager.updateLabel(activeId, finalName);
       if (session.ws) session.ws.sendJSON({ type: 'rename', name: finalName });
       SessionStores.rename(getWindowId(), activeId, finalName);
+      revealTabContext(activeId);   // a name rule may have let go of it (#726) — see renameSession
       notifyTabsChanged();
     },
     restart: () => { fetch('/api/request-restart', { method: 'POST' }); },
@@ -5843,9 +5982,9 @@ async function init() {
     if (session.type === 'display-tab') {
       // Pass the cwd sendToWindow transmits, or the adopted tab loses its
       // context scoping (#530) and dodges revealTabContext (#547).
-      createDisplayTab(session.id, session.name, { cwd: session.cwd });
+      createDisplayTab(session.id, session.name, { cwd: session.cwd, views: session.views });
     } else {
-      createSession(session.cwd, session.id, false, { name: session.name, allowDuplicate: true });
+      createSession(session.cwd, session.id, false, { name: session.name, allowDuplicate: true, views: session.views });
     }
   });
 

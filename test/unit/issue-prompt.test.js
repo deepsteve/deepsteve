@@ -14,7 +14,8 @@ const path = require('path');
 
 const {
   renderIssuePrompt, normalizeLabels, issueWorktreeName, issueTabName, ISSUE_BODY_LIMIT,
-  ISSUE_COMPLETE_INSTRUCTION, WORKFLOW_STAGES,
+  ISSUE_COMPLETE_INSTRUCTION, WORKFLOW_STAGES, WAND_DEFAULT_TEMPLATE, PREVIOUS_WAND_DEFAULTS,
+  migrateWandTemplate,
 } = require('../../issue-prompt.js');
 
 const ROOT = path.join(__dirname, '..', '..');
@@ -128,14 +129,77 @@ test('the instruction is NOT in the shipped default template', () => {
   // where the user has ever hit Save has the old default materialized. A token
   // added to the shipped default would silently never appear there — which is
   // why renderIssuePrompt appends it instead.
-  const server = read('server.js');
-  const start = server.indexOf('const WAND_DEFAULT_TEMPLATE');
-  const template = server.slice(start, server.indexOf('`;', start));
-  assert.ok(start > 0 && !template.includes('issue_complete'),
+  const template = WAND_DEFAULT_TEMPLATE;
+  assert.ok(template && !template.includes('issue_complete'),
     'WAND_DEFAULT_TEMPLATE must not carry the issue_complete line — append it in renderIssuePrompt (#643)');
   // Same argument, same failure mode, for the workflow stages (#668).
   assert.ok(!template.includes('inbox'),
     'WAND_DEFAULT_TEMPLATE must not carry the workflow stages — append them in renderIssuePrompt (#668)');
+});
+
+// ── #724: scope rule, and no prompt growth ──────────────────────────────────
+
+test('the instruction scopes the work, offers the already-done exit, and ends in closing the tab', () => {
+  assert.match(ISSUE_COMPLETE_INSTRUCTION, /^Scope: this issue only\./);
+  assert.match(ISSUE_COMPLETE_INSTRUCTION, /Already done on the base branch\?.*skip to issue_complete/);
+  assert.match(ISSUE_COMPLETE_INSTRUCTION, /`mcp__deepsteve__issue_complete`/);
+  assert.match(ISSUE_COMPLETE_INSTRUCTION, /including closing this tab\.$/);
+});
+
+test('the fixed text of an issue prompt did not grow', () => {
+  // Typed into every issue session. 378 was the fixed text before #724 (the old default
+  // template plus the old instruction); the rules it added had to fit inside that by
+  // dropping the template's own boilerplate.
+  const fixed = renderIssuePrompt(WAND_DEFAULT_TEMPLATE, {});
+  assert.ok(fixed.length <= 378, `issue prompt fixed text is ${fixed.length} chars, budget 378`);
+  assert.ok(`${WAND_DEFAULT_TEMPLATE}\n\n${ISSUE_COMPLETE_INSTRUCTION}`.length <= 378,
+    'and within budget counted with the placeholders unrendered, too');
+});
+
+test('the new default carries the issue and nothing else', () => {
+  assert.strictEqual(renderIssuePrompt(WAND_DEFAULT_TEMPLATE, {
+    number: 724, title: 'T', labels: 'bug', url: 'https://x/724', body: 'BODY',
+  }), `GitHub issue #724: "T"\nLabels: bug\nURL: https://x/724\n\nBODY${SUFFIX}`);
+});
+
+// ── #724: migrating a materialized old default ──────────────────────────────
+
+// The default every install had from #62 until #724, pinned here byte-for-byte rather
+// than read back off PREVIOUS_WAND_DEFAULTS — a "tidy-up" of that entry would otherwise
+// silently stop migrating the installs it exists for.
+const DEFAULT_BEFORE_724 = 'I need you to work on GitHub issue #{{number}}: "{{title}}"\n'
+  + 'Labels: {{labels}}\nURL: {{url}}\n\nIssue description:\n{{body}}\n\n'
+  + 'Please read the issue carefully, understand the codebase context, and implement the changes needed.';
+
+test('a stored copy of the old default migrates to the new one', () => {
+  assert.ok(PREVIOUS_WAND_DEFAULTS.includes(DEFAULT_BEFORE_724), 'the pre-#724 default is on the list');
+  assert.strictEqual(migrateWandTemplate(DEFAULT_BEFORE_724), WAND_DEFAULT_TEMPLATE);
+});
+
+test('a template the user actually changed is left alone', () => {
+  for (const custom of [
+    `${DEFAULT_BEFORE_724} Also run the tests.`,
+    `${DEFAULT_BEFORE_724}\n`,
+    DEFAULT_BEFORE_724.replace(/\n/g, '\r\n'),
+    'my own template {{body}}',
+    '',
+  ]) {
+    assert.strictEqual(migrateWandTemplate(custom), custom, JSON.stringify(custom.slice(-40)));
+  }
+  assert.strictEqual(migrateWandTemplate(WAND_DEFAULT_TEMPLATE), WAND_DEFAULT_TEMPLATE, 'the current default stays');
+  assert.strictEqual(migrateWandTemplate(undefined), undefined, 'nothing stored stays nothing stored');
+});
+
+test('the current default is never on the previous-defaults list', () => {
+  assert.ok(!PREVIOUS_WAND_DEFAULTS.includes(WAND_DEFAULT_TEMPLATE));
+});
+
+test('the daemon migrates on load, and takes the default from issue-prompt.js', () => {
+  const server = read('server.js');
+  assert.ok(server.includes('migrateWandTemplate(settings.wandPromptTemplate)'),
+    'server.js must run the stored template through migrateWandTemplate when it loads settings');
+  assert.ok(!/const WAND_DEFAULT_TEMPLATE\s*=/.test(server),
+    'one definition of the default, in issue-prompt.js beside the defaults it replaced');
 });
 
 test('autopilot is persisted, not just held in memory', () => {
@@ -151,6 +215,22 @@ test('autopilot is persisted, not just held in memory', () => {
     'the WS restore path must restore autopilot onto the live entry (#643)');
 });
 
+test('the issue pipeline snapshot is persisted, and issue_complete never re-reads the repo file (#717)', () => {
+  // The repo file is read once, from the main checkout, at spawn. An issue session can
+  // edit that file; what gates it must be what it started with — so the snapshot has to
+  // survive a restart, and the completion path must not call the reader.
+  const server = read('server.js');
+  const ser = server.slice(server.indexOf('function serializeShellEntry('));
+  assert.ok(/pipeline: entry\.pipeline \|\| null/.test(ser.slice(0, ser.indexOf('\n}'))),
+    'serializeShellEntry must carry the pipeline snapshot (#717)');
+  assert.ok(/pipeline: restorePipelineSnapshot\(restored\.pipeline\)/.test(server),
+    'the WS restore path must restore the pipeline snapshot (#717)');
+  const gate = server.slice(server.indexOf('function issueReviewEnabled('));
+  const body = gate.slice(0, gate.indexOf('\n}'));
+  assert.ok(!/readRepoPipeline|resolveIssuePipeline/.test(body),
+    'issueReviewEnabled must use the spawn snapshot, never re-read .deepsteve/pipeline.json (#717)');
+});
+
 test('an omitted autopilot seeds from the remembered preference, not from off (#651)', () => {
   // The bug this guards: `autopilot = false` in the signature (and `!!autopilot`
   // at the call sites) made "not specified" indistinguishable from "off", so every
@@ -161,8 +241,12 @@ test('an omitted autopilot seeds from the remembered preference, not from off (#
   const head = sig.slice(0, sig.indexOf(') {'));
   assert.ok(!/autopilot\s*=/.test(head),
     'startIssueSession must not hard-default autopilot in its signature (#651)');
-  assert.ok(/autopilot == null \? !!settings\.issueAutopilot/.test(sig.slice(0, sig.indexOf('\n}'))),
-    'startIssueSession must fall back to settings.issueAutopilot (#651)');
+  // Since #717 the remembered preference is the issue pipeline's merge switch, whose
+  // global level IS settings.issueAutopilot (read in globalPipelineLevel()).
+  assert.ok(/autopilot == null \? pipeline\.merge : !!autopilot/.test(sig.slice(0, sig.indexOf('\n}'))),
+    'startIssueSession must fall back to the pipeline\'s merge switch (#651, #717)');
+  assert.ok(/merge: !!settings\.issueAutopilot/.test(server),
+    'the pipeline\'s global merge switch must be the issueAutopilot setting (#651, #717)');
 
   // Both server entry points have to pass the field through un-coerced, or the
   // fallback above never sees an undefined.
@@ -267,6 +351,10 @@ test('every renderIssuePrompt call site decides about stages (#668)', () => {
     // an agent walks into someone else's commits believing the worktree is its own.
     assert.match(call, /\bresume\b/,
       `a renderIssuePrompt call site does not pass resume (#689):\n${call}`);
+    // And `steps` (#717): a surface that forgets it silently drops every stage's
+    // instructions, so a project or repo pipeline works from MCP and not from the picker.
+    assert.match(call, /\bsteps\b/,
+      `a renderIssuePrompt call site does not pass the pipeline steps (#717):\n${call}`);
   }
   // The COUNT matters as much as the per-site check: a refactor that inlined a site to
   // zero would pass the loop vacuously.
@@ -281,7 +369,10 @@ test('the stages setting is read in exactly one place (#668)', () => {
   // for a Settings flip mid-flight to make the log describe a prompt nobody got.
   const server = read('server.js');
   assert.equal(server.split('settings.issueStagesEnabled').length - 1, 1,
-    'settings.issueStagesEnabled must be read once, in issueStagesText() (#668)');
+    'settings.issueStagesEnabled must be read once, in globalPipelineLevel() (#668, #717)');
+  // ...and every issue-start path resolves the pipeline once rather than reading the
+  // setting itself (#717): the old single reader is gone, not duplicated.
+  assert.ok(!/function issueStagesText\(/.test(server), 'issueStagesText() was folded into the pipeline (#717)');
 });
 
 test('issueStagesEnabled is a server setting, and it is off by default (#668)', () => {
@@ -309,19 +400,31 @@ test('the [issue] start line says whether the session got the stages (#668)', ()
     calls++;
     assert.match(server.slice(at, server.indexOf('});', at)), /\bstages:/,
       'a logIssueStart call site omits stages — its line would read stages=unknown (#668)');
+    // #717: the line names the pipeline and the level it came from.
+    assert.match(server.slice(at, server.indexOf('});', at)), /\bpipeline\b/,
+      'a logIssueStart call site omits the resolved pipeline (#717)');
   }
   assert.equal(calls, 2, `expected the 2 known logIssueStart call sites, found ${calls}`);
 });
 
-test('the Settings checkbox actually reaches the server (#668)', () => {
-  // applySettingsFromBody skips any key absent from the body, so a checkbox that is
-  // rendered and wired but left out of settingsPayload is a switch that silently does
-  // nothing — no error, no log line. That is the likeliest failure in this change.
+test('the Settings pipeline editor actually reaches the server (#668, #717)', () => {
+  // applySettingsFromBody skips any key absent from the body, so a switch that is
+  // rendered and wired but left out of settingsPayload silently does nothing — no
+  // error, no log line. Since #717 the three old checkboxes are the pipeline editor's
+  // switches, and all four keys travel in `pipelinePayload`.
   const app = read('public/js/app.js');
-  assert.ok(app.includes('id="wand-issue-stages"'), 'the GitHub tab needs the checkbox (#668)');
+  assert.ok(app.includes('id="wand-pipeline-editor"'), 'the GitHub tab needs the pipeline editor (#717)');
+  const pp = app.slice(app.indexOf('const pipelinePayload = '));
+  const ppBody = pp.slice(0, pp.indexOf('} : {};'));
+  for (const key of ['wandPlanMode', 'issueAutopilot', 'issueStagesEnabled', 'issuePipeline']) {
+    assert.match(ppBody, new RegExp(`\\b${key}:`), `${key} must be in pipelinePayload or its control does nothing`);
+  }
+  // The layout is never materialized: the default goes up as null (#717).
+  assert.match(ppBody, /issuePipeline: pipelineEdit\.isDefault \? null :/,
+    'the settings modal must send issuePipeline: null for the default layout (#717)');
   const payload = app.slice(app.indexOf('const settingsPayload = {'));
-  assert.match(payload.slice(0, payload.indexOf('};')), /\bissueStagesEnabled\b/,
-    'issueStagesEnabled must be in settingsPayload or the checkbox does nothing (#668)');
+  assert.match(payload.slice(0, payload.indexOf('};')), /\.\.\.pipelinePayload\b/,
+    'pipelinePayload must be spread into settingsPayload (#717)');
 });
 
 // --- drift guards: one implementation, one reader ---------------------------

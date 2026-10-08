@@ -106,6 +106,19 @@ test('the base stylesheet provides the overlay themes declare against', () => {
   assert.match(bare, /--ds-main-frame:\s*0px;/, '--ds-main-frame must default to 0px in :root');
 });
 
+test('#app-main stays a column; the tab-layout switch lives on #app-body (#726)', () => {
+  const bare = stripComments(fs.readFileSync(BASE_CSS, 'utf8'));
+  // The project-views bar spans the whole monitor in BOTH layouts, so the monitor itself
+  // never turns into a row — #app-body, below the bar, is what vertical layout flips.
+  assert.strictEqual(ruleBody(bare, '#app-container.vertical-layout #app-main'), null,
+    'vertical layout must not restyle #app-main — flip #app-body, or the views bar becomes a sidebar column');
+  assert.match(ruleBody(bare, '#app-container.vertical-layout #app-body') || '', /flex-direction:\s*row/);
+  assert.match(ruleBody(bare, '#app-body') || '', /flex:\s*1/);
+  // Below the #app-main::after ring (z-index 3), like every structural child.
+  const z = Number(declValue(ruleBody(bare, '#views-bar') || '', 'z-index'));
+  assert.ok(Number.isFinite(z) && z < 3, '#views-bar must sit under the #app-main::after overlay');
+});
+
 for (const file of themeFiles) {
   const raw = fs.readFileSync(path.join(THEMES_DIR, file), 'utf8');
   const css = stripComments(raw);
@@ -148,6 +161,18 @@ for (const file of themeFiles) {
     const frame = declValue(root, '--ds-main-frame');
     assert.ok(frame && parseFloat(frame) > 0,
       `${file} uses var(--ds-main-frame) as #app-main's border width but never declares it`);
+  });
+
+  // Project views (#726): an open views bar is the monitor's FIRST row in both tab layouts,
+  // so it is what meets the rounded top corners — a rounded theme that pads only #tabs
+  // leaves the first view button clipped by the corner the strip used to clear.
+  test(`${file}: a rounded monitor pads the project-views bar clear of its corners`, () => {
+    const radius = declValue(root, '--ds-main-radius');
+    if (!radius || parseFloat(radius) === 0) return;
+    const bar = ruleBody(css, '#views-bar');
+    assert.ok(bar && declValue(bar, 'padding'),
+      `${file} rounds #app-main (--ds-main-radius: ${radius}) but never pads #views-bar, ` +
+      'the row that sits in those corners while the views are expanded.');
   });
 
   test(`${file}: states both panes' inner highlight together`, () => {

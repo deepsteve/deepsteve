@@ -46,6 +46,7 @@
 const fs = require('fs');
 const path = require('path');
 const { runBinary } = require('./bin-path');
+const { findGitRoot } = require('./git-root');
 
 // Bounded like worktree-support.js rather than like mods/deepsteve-core's runGit
 // (120s): this runs on request paths — the issue picker and a session spawn — where a
@@ -133,6 +134,35 @@ function headBranch(headFile) {
   } catch {
     return null;
   }
+}
+
+/**
+ * The main checkout of the repo containing `dir`, or null (#717).
+ *
+ * For an ordinary checkout that is just its root. For a linked worktree — the
+ * `.claude/worktrees/<name>` layout DeepSteve creates — `findGitRoot` stops at the
+ * worktree, so follow its `.git` file to the admin dir and that dir's `commondir` back to
+ * the shared `.git`, whose parent is the main checkout. Pure fs, like the rest of this
+ * module, so it is safe on the WebSocket create path.
+ *
+ * Null for a worktree of a bare repo: there is no main checkout to name, and answering
+ * with the worktree itself would hand back exactly the copy an agent can edit.
+ */
+function mainCheckoutOf(dir) {
+  const root = findGitRoot(dir);
+  if (!root) return null;
+  const gitDir = gitDirOf(root);
+  if (!gitDir) return null;
+  if (gitDir === path.join(root, '.git')) return root;
+  let common;
+  try {
+    common = path.resolve(gitDir, fs.readFileSync(path.join(gitDir, 'commondir'), 'utf8').trim());
+  } catch {
+    // No `commondir`: not a linked worktree (a submodule's `.git` file points into the
+    // superproject's modules/ dir), so the checkout we found is the checkout.
+    return root;
+  }
+  return path.basename(common) === '.git' ? path.dirname(common) : null;
 }
 
 /** True when `repoRoot` already has a worktree directory called `name`. Pure fs. */
@@ -317,5 +347,5 @@ function freshWorktreeName(repoRoot, base, { git = defaultGit, reserved = [] } =
 
 module.exports = {
   worktreePath, worktreeExists, readWorktreeFacts, worktreeStatuses, worktreeStatus,
-  freshWorktreeName, validateBranch, gitDirOf, defaultGit,
+  freshWorktreeName, validateBranch, gitDirOf, mainCheckoutOf, defaultGit,
 };

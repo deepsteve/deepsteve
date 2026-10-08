@@ -5,6 +5,7 @@ const { execFile, execFileSync } = require('child_process');
 const { landWorktree, runGitNet, describeLanding } = require('./land-origin');
 const { mergeSession } = require('./session-merge');
 const projectMods = require('../project-mods/tools.js');
+const { SPAWN_VIEW_DESCRIPTION } = projectMods;
 const { resolveBinary } = require('../../bin-path');
 const { stateDir, spawnCwdProblem } = require('../../paths');
 const projectScope = require('../../project-scope');
@@ -61,13 +62,13 @@ function tabDeliveryNote(tabDelivery) {
   return { tabDelivery, note: 'No browser window was connected, so the tab is queued and will open when one connects. The session is running either way — do not tell the user a tab is open.' };
 }
 
-// "2 minutes" / "45 seconds" — the auto-close delay in words, so the agent has a
-// sentence to paraphrase to the user instead of an epoch timestamp (#627).
-function describeDelay(seconds) {
-  if (seconds < 90) return `${seconds} second${seconds === 1 ? '' : 's'}`;
-  const mins = Math.round(seconds / 60);
-  return `${mins} minute${mins === 1 ? '' : 's'}`;
-}
+// The last thing a merged worktree session is told (#724). It used to say the tab closes
+// itself and close_session was optional, so agents left it to the #627 timer — which a
+// click or scroll in the tab then cancelled. The timer is the safety net, not the plan.
+// Shared by issue_complete's `merged` answer and both autoCloseMessage sites, because
+// the conflict path finishes through merge_worktree.
+const CLOSE_NOW = 'Now write a short summary and call close_session in that same message. '
+  + 'Nothing else: no more commands, edits or notes.';
 
 // Derive a short, single-line tab name from a shell command (used when a
 // terminal tab is opened with a `command` but no explicit `name`).
@@ -152,7 +153,7 @@ function init(context) {
     reloadClients, deliverToWindow, noteSpawnDelivery, settings, log, isShuttingDown,
     emitSessionOpen,
     stripEscapeSequences, readTerminalScreen, sessionInputState, maybeInheritRemoteControl, requestMetaControlsConsent, logRcWrite,
-    armSessionAutoClose, recordMergeAttempt,
+    armSessionAutoClose, recordMergeAttempt, issueReviewEnabled,
   } = context;
 
   // Project scoping for list_sessions (#659). `context` is this mod's whole ctx, so
@@ -206,8 +207,7 @@ function init(context) {
         const seconds = Math.max(0, Math.round((armed.closeAt - Date.now()) / 1000));
         payload.autoCloseAt = armed.closeAt;
         payload.autoCloseInSeconds = seconds;
-        payload.autoCloseMessage = `This session is finished and will close automatically in ${describeDelay(seconds)}. `
-          + 'Call close_session once your report is written to close it now instead; typing in this tab cancels the auto-close.';
+        payload.autoCloseMessage = CLOSE_NOW;
       }
     }
     return { ok: true, payload };
@@ -502,13 +502,16 @@ function init(context) {
         cwd: z.string().optional().describe('Working directory (defaults to caller\'s cwd)'),
         agent_type: z.string().optional().describe('Agent type (defaults to caller\'s). Supported: "claude", "codex". Experimental: "opencode", "pi", "hermes" — these run, but get no deepsteve MCP tools and no skills, so the new session cannot call back into deepsteve. See docs/agents.md.'),
         autopilot: z.boolean().optional().describe('Whether the new session runs with Autopilot: when it calls issue_complete at the end of the work, it is told to merge itself instead of leaving the tab for review. OMIT this to use the user\'s remembered preference (the Autopilot checkbox in the issue picker and in Settings) — pass a boolean only to deliberately override that choice for this one session.'),
+        view: z.string().optional().describe(SPAWN_VIEW_DESCRIPTION),
       },
-      handler: async ({ session_id, number, title, body, labels, url, cwd, agent_type, autopilot }, extra) => {
+      handler: async ({ session_id, number, title, body, labels, url, cwd, agent_type, autopilot, view }, extra) => {
         const callerId = session_id || extra?.requestInfo?.url?.searchParams?.get('shellId');
         const caller = callerId ? shells.get(callerId) : null;
         if (!caller) {
           return { content: [{ type: 'text', text: `Session "${callerId || 'unknown'}" not found.` }] };
         }
+        const spawnView = projectMods.cleanSpawnView(view);
+        if (spawnView.error) return { content: [{ type: 'text', text: spawnView.error }], isError: true };
         // Everything past the caller lookup — inheritance, worktree, spawn, /rc
         // inheritance, prompt delivery — is startIssueSession's job (#642). This
         // tool used to carry its own copy of all of it, and the copy had drifted.
@@ -521,6 +524,7 @@ function init(context) {
           // startIssueSession as undefined so it can seed from settings.issueAutopilot
           // rather than being silently forced off.
           autopilot,
+          view: spawnView.view,
           // #653: which surface started the session. Before this the `[issue] #N:` line
           // was identical for MCP, HTTP and the picker, so "an agent overrode Autopilot"
           // was invisible after the fact.
@@ -616,7 +620,13 @@ function init(context) {
         // Fails open by construction. With `issueStagesEnabled` off — the default, and
         // every install that has never heard of it — neither field is consulted and the
         // three answers below are byte-identical to what they were before this issue.
-        const stages = !!settings.issueStagesEnabled;
+        //
+        // #717: that setting is now the global level of the pipeline's review stage.
+        // issueReviewEnabled() combines it, live, with the session's project and the repo
+        // file as snapshotted at spawn — never re-read, since the agent being gated can
+        // edit it — and a repo file can turn the gate on but never off. The fallback is
+        // for a context without the helper (the unit tests' partial ones).
+        const stages = issueReviewEnabled ? !!issueReviewEnabled(caller) : !!settings.issueStagesEnabled;
         const resultId = caller.resultItemId || null;
         const approved = !!caller.resultApprovedAt;
         let gate = null;
@@ -689,9 +699,7 @@ function init(context) {
                 + (r.issue && r.issue.closed ? `Issue #${r.issue.number} is closed. ` : '')
                 + (r.issue && r.issue.number != null && !r.issue.closed
                   ? `Closing issue #${r.issue.number} failed (${r.issue.error}) — mention it in your summary. ` : '')
-                + 'Write your summary of what you did now and end your turn. There is nothing left to run: '
-                + 'do not merge again and do not open a terminal. This tab closes itself — call close_session '
-                + 'in the same message as your summary if you want it to go now.',
+                + CLOSE_NOW,
             };
           } else if (r.status === 'conflict') {
             // The one place a model is still wanted. The working agent has the code in
@@ -812,8 +820,7 @@ function init(context) {
             const seconds = Math.max(0, Math.round((armed.closeAt - Date.now()) / 1000));
             payload.autoCloseAt = armed.closeAt;
             payload.autoCloseInSeconds = seconds;
-            payload.autoCloseMessage = `This session is finished and will close automatically in ${describeDelay(seconds)}. `
-              + 'Call close_session once your report is written to close it now instead; typing in this tab cancels the auto-close.';
+            payload.autoCloseMessage = CLOSE_NOW;
           }
         }
         // Only `merged` is a success; every other status left the target unchanged
@@ -899,13 +906,20 @@ function init(context) {
         agent_type: z.string().optional().describe('Agent type for an AGENT session. Supported: "claude", "codex". Experimental: "opencode", "pi", "hermes" — they run, but get no deepsteve MCP tools and no skills (docs/agents.md). OMIT this → a plain terminal (zsh), NOT the caller\'s agent. To inherit the caller\'s agent type instead, pass `fork: true`.'),
         plan_mode: z.boolean().optional().describe('Start in plan mode'),
         fork: z.boolean().optional().describe('Inherit the caller\'s agent type. For Claude Code callers with a resumable session, also fork the conversation; other agents start a fresh session.'),
+        view: z.string().optional().describe(SPAWN_VIEW_DESCRIPTION),
       },
-      handler: async ({ session_id, prompt, command, name, cwd, worktree, agent_type, plan_mode, fork }, extra) => {
+      handler: async ({ session_id, prompt, command, name, cwd, worktree, agent_type, plan_mode, fork, view }, extra) => {
         const callerId = session_id || extra?.requestInfo?.url?.searchParams?.get('shellId');
         const caller = callerId ? shells.get(callerId) : null;
         if (!caller) {
           return { content: [{ type: 'text', text: `Session "${callerId || 'unknown'}" not found.` }] };
         }
+        const spawnView = projectMods.cleanSpawnView(view);
+        if (spawnView.error) return { content: [{ type: 'text', text: spawnView.error }], isError: true };
+        // Which views the new tab is filed under (#726) is the browser's call — membership lives
+        // with the tab there — so the open carries what it needs to decide: the explicit `view`,
+        // and the opener whose views the new tab inherits when there is none.
+        const viewFields = { openerId: callerId, ...(spawnView.view ? { view: spawnView.view } : {}) };
 
         const effectiveCwd = cwd || caller.cwd;
         // Covers both branches below — the plain shell and the agent session, whose
@@ -959,7 +973,7 @@ function init(context) {
             handleShellGone(id);
           });
           saveState();
-          const shellDelivery = deliverToWindow({ type: 'open-session', id, cwd: effectiveCwd, name: tabName, windowId }, windowId);
+          const shellDelivery = deliverToWindow({ type: 'open-session', id, cwd: effectiveCwd, name: tabName, windowId, ...viewFields }, windowId);
           noteSpawnDelivery(id, { tabDelivery: shellDelivery, windowId, source: 'open_terminal (shell)' });
           return { content: [{ type: 'text', text: JSON.stringify({
             id, name: tabName || id, cwd: effectiveCwd, worktree: null,
@@ -1061,7 +1075,7 @@ function init(context) {
         });
         saveState();
 
-        const agentDelivery = deliverToWindow({ type: 'open-session', id, cwd: spawnCwd, name: tabName, windowId }, windowId);
+        const agentDelivery = deliverToWindow({ type: 'open-session', id, cwd: spawnCwd, name: tabName, windowId, ...viewFields }, windowId);
         noteSpawnDelivery(id, { tabDelivery: agentDelivery, windowId, source: `open_terminal (${effectiveAgentType})` });
 
         return { content: [{ type: 'text', text: JSON.stringify({ id, name: tabName || id, cwd: spawnCwd, worktree: validatedWorktree, ...tabDeliveryNote(agentDelivery) }) }] };
@@ -1135,7 +1149,9 @@ function init(context) {
         // Background (#600): a 200ms `git status` must not yank the user's focus out of
         // whatever they were doing. The tab still appears in the strip with the
         // unseen-activity badge, so a run that matters is still discoverable.
-        deliverToWindow({ type: 'open-session', id, cwd: effectiveCwd, name: tabName, windowId, background: true }, windowId);
+        // openerId (#726): the run's brief tab sits in the same project view as the tab that
+        // asked for it, so it doesn't vanish from the strip of someone looking at that view.
+        deliverToWindow({ type: 'open-session', id, cwd: effectiveCwd, name: tabName, windowId, background: true, openerId: callerId || null }, windowId);
 
         // Record the launch BEFORE waiting for it. The audit question this log exists to
         // answer is "what did an agent execute", and that has to survive the daemon dying
@@ -1349,4 +1365,4 @@ function registerRoutes(app, context) {
   });
 }
 
-module.exports = { init, registerRoutes, deriveTabName, TIMINGS, RUN_TIMINGS };
+module.exports = { init, registerRoutes, deriveTabName, TIMINGS, RUN_TIMINGS, CLOSE_NOW };

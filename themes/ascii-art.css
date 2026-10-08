@@ -216,6 +216,8 @@ body {
 #settings-btn    .btn-icon::before { content: '\2699'; }  /* ⚙ */
 #context-toggle  .btn-icon::before { content: '\25E7'; }  /* ◧ */
 #decision-mode-btn .btn-icon::before { content: '\2709'; }  /* ✉ */
+/* Project views (#726). Only while it shows the SVG — a view's own emoji is a text icon. */
+#views-toggle .btn-icon:not(.is-text)::before { content: '\25A6'; }  /* ▦ */
 /* ▤/▥ rather than the ▤/⬜ the JS used to set: the pair has to read as one axis flipped, and ⬜ is
    not the other half of anything — it renders as a blank square, i.e. as tofu (#552). */
 #layout-toggle .icon-layout-h::before { content: '\25A4'; }  /* ▤ */
@@ -519,3 +521,16 @@ input:focus, select:focus, textarea:focus {
 /* The ⚡ is drawn as a ::before glyph here and should read in the theme's own ink,
    not the base theme's gold (--ds-issue-bolt). */
 #issue-btn { --ds-issue-bolt: currentColor; }
+
+/* Project views (#726): bracketed like the strip's other buttons, and the bar ruled off with
+   the same single line as the strip below it. */
+.views-toggle,
+.view-tab {
+  border: 1px solid #666 !important;
+  border-radius: 0 !important;
+  text-transform: uppercase;
+  font-size: 12px !important;
+  letter-spacing: 0.5px;
+}
+.view-tab.active { border-color: #aaa !important; background: var(--ds-bg-primary) !important; }
+#views-bar { border-bottom: 1px solid #555 !important; }
