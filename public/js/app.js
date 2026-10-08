@@ -49,6 +49,7 @@ import { formatShortcut } from './shortcuts.js';
 import { init as initWakeWatch } from './wake-watch.js';
 import { openNewWindow, isFreshRequest } from './new-window.js';
 import { init as initTimelapse, setEnabled as setTimelapseEnabled, setIntervalMinutes as setTimelapseInterval } from './timelapse.js';
+import { createPipelineEditor } from './pipeline-editor.js';
 
 // Configuration
 let maxIssueTitleLength = 25;
@@ -833,9 +834,9 @@ settingsBtn?.addEventListener('click', async () => {
   // rendered from guessed values would offer to SAVE them over the real ones. So
   // their failure aborts the open, loudly (#676). Before, they had no .catch at
   // all: a 401 rejected the whole await and the modal silently never appeared.
-  let settingsData, themesData, versionData, defaultsData, enginesData, agentsData;
+  let settingsData, themesData, versionData, defaultsData, enginesData, agentsData, pipelineData;
   try {
-    [settingsData, themesData, versionData, defaultsData, enginesData, agentsData] = await Promise.all([
+    [settingsData, themesData, versionData, defaultsData, enginesData, agentsData, pipelineData] = await Promise.all([
       fetchJSON('/api/settings'),
       fetchJSON('/api/themes'),
       fetchJSON('/api/version').catch(() => ({ current: '?', latest: null, updateAvailable: false })),
@@ -846,6 +847,8 @@ settingsBtn?.addEventListener('click', async () => {
       // and Settings is exactly where you land after installing an agent, so a fresh
       // availability probe beats a snapshot taken when the page loaded.
       fetchJSON('/api/agents').catch(() => null),
+      // The global issue pipeline and the stage model (#717), for the Magic Wand editor.
+      fetchJSON('/api/issue-pipeline').catch(() => null),
     ]);
   } catch (e) {
     // An auth failure already put the page-level banner up; anything else needs
@@ -855,9 +858,6 @@ settingsBtn?.addEventListener('click', async () => {
   }
   const currentProfile = settingsData.shellProfile || '~/.zshrc';
   const currentMaxTitle = settingsData.maxIssueTitleLength || 25;
-  const currentWandPlanMode = settingsData.wandPlanMode !== undefined ? settingsData.wandPlanMode : true;
-  const currentIssueAutopilot = !!settingsData.issueAutopilot;
-  const currentIssueStagesEnabled = !!settingsData.issueStagesEnabled;
   const currentWandTemplate = settingsData.wandPromptTemplate || defaultsData.wandPromptTemplate || '';
   const currentSymlinkWorktreeSettings = !!settingsData.symlinkWorktreeSettings;
   const currentCmdTabSwitch = !!settingsData.cmdTabSwitch;
@@ -1293,29 +1293,14 @@ settingsBtn?.addEventListener('click', async () => {
       </div>
       <div class="settings-section">
         <h3>Magic Wand</h3>
-        <label style="font-size: 13px; color: var(--ds-text-primary); cursor: pointer; display: flex; align-items: center; gap: 8px; margin-bottom: 8px;">
-          <input type="checkbox" id="wand-plan-mode" ${currentWandPlanMode ? 'checked' : ''} style="accent-color: var(--ds-accent-green);">
-          Start issues in plan mode
-        </label>
-        <label style="font-size: 13px; color: var(--ds-text-primary); cursor: pointer; display: flex; align-items: center; gap: 8px; margin-bottom: 4px;">
-          <input type="checkbox" id="wand-autopilot" ${currentIssueAutopilot ? 'checked' : ''} style="accent-color: var(--ds-accent-green);">
-          Start issues with Autopilot on
-        </label>
-        <p style="font-size: 12px; color: var(--ds-text-secondary); margin: 0 0 12px 24px;">
-          An issue session that finishes its work merges itself instead of leaving the tab for review.
-          The issue picker's Autopilot checkbox writes this too; every start path uses it.
+        <p style="font-size: 12px; color: var(--ds-text-secondary); margin: 0 0 8px;">
+          The issue pipeline: the stages every issue session runs, in order. Turn a stage on or off,
+          give any stage its own instructions, or add stages of your own between them. A project can
+          override this from its right-click menu (<em>Issue pipeline…</em>), and a repo can commit
+          <code>.deepsteve/pipeline.json</code>, which may turn review on and merge off but never the reverse.
+          The issue picker's Autopilot checkbox writes the merge switch too.
         </p>
-        <label style="font-size: 13px; color: var(--ds-text-primary); cursor: pointer; display: flex; align-items: center; gap: 8px; margin-bottom: 4px;">
-          <input type="checkbox" id="wand-issue-stages" ${currentIssueStagesEnabled ? 'checked' : ''} style="accent-color: var(--ds-accent-green);">
-          Add workflow stages to the issue prompt
-        </label>
-        <p style="font-size: 12px; color: var(--ds-text-secondary); margin: 0 0 12px 24px;">
-          Asks an issue session to post its plan, its open questions and its surprises to the Inbox
-          inbox as it works, and to justify the result before merging — so finished work can be judged
-          without opening the tab. Enable the Inbox app to read them. It also turns the last stage
-          into a gate: <code>issue_complete</code> will not say &ldquo;merge&rdquo; until the session has posted a
-          writeup with <code>share_result</code> and you have approved it.
-        </p>
+        <div id="wand-pipeline-editor"></div>
         <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px;">
           <span style="font-size: 13px; color: var(--ds-text-primary);">Prompt template</span>
           <button class="btn-secondary" id="wand-template-reset" style="padding: 2px 8px; font-size: 11px;">Reset</button>
@@ -1446,6 +1431,23 @@ settingsBtn?.addEventListener('click', async () => {
       if (typeof result === 'string' && result && dirInput) dirInput.value = result;
     }
   });
+
+  // The issue pipeline editor (#717). Its three switches ARE the old checkboxes'
+  // settings keys; only the layout (order, instructions, custom stages) is new. If the
+  // pipeline could not be loaded, the editor is left out and Save leaves those keys alone.
+  let wandPipeline = null;
+  if (pipelineData && Array.isArray(pipelineData.builtins)) {
+    wandPipeline = createPipelineEditor({
+      mode: 'global',
+      builtins: pipelineData.builtins,
+      limits: pipelineData.limits,
+      stages: pipelineData.stages.map(({ enabled, ...s }) => (pipelineData.builtins.some(b => b.id === s.id) ? s : { ...s, enabled })),
+      switches: { plan: !!pipelineData.plan, review: !!pipelineData.review, merge: !!pipelineData.merge },
+    });
+    overlay.querySelector('#wand-pipeline-editor').appendChild(wandPipeline.el);
+  } else {
+    overlay.querySelector('#wand-pipeline-editor').textContent = 'Could not load the issue pipeline.';
+  }
 
   // Wand template reset button
   overlay.querySelector('#wand-template-reset').onclick = async () => {
@@ -1678,9 +1680,18 @@ settingsBtn?.addEventListener('click', async () => {
     const selected = overlay.querySelector('input[name="profile"]:checked').value;
     const shellProfile = selected === 'custom' ? customInput.value : selected;
     const newMaxTitle = Number(overlay.querySelector('#max-issue-title-length').value) || 25;
-    const wandPlanMode = overlay.querySelector('#wand-plan-mode').checked;
-    const issueAutopilot = overlay.querySelector('#wand-autopilot').checked;
-    const issueStagesEnabled = overlay.querySelector('#wand-issue-stages').checked;
+    // The issue pipeline (#717): the switches go to their own settings keys, and the
+    // layout is sent as null whenever it equals the default — this Save runs on every
+    // settings change, and a materialized default would stop a later shipped default from
+    // ever reaching this install. With no editor (the pipeline failed to load) none of
+    // the four keys is sent, so nothing is overwritten with a guess.
+    const pipelineEdit = wandPipeline ? wandPipeline.read() : null;
+    const pipelinePayload = pipelineEdit ? {
+      wandPlanMode: !!pipelineEdit.switches.plan,
+      issueAutopilot: !!pipelineEdit.switches.merge,
+      issueStagesEnabled: !!pipelineEdit.switches.review,
+      issuePipeline: pipelineEdit.isDefault ? null : { stages: pipelineEdit.stages },
+    } : {};
     const wandPromptTemplate = overlay.querySelector('#wand-prompt-template').value;
     const symlinkWorktreeSettings = overlay.querySelector('#symlink-worktree-settings').checked;
     const cmdTabSwitch = overlay.querySelector('#cmd-tab-switch').checked;
@@ -1763,7 +1774,7 @@ settingsBtn?.addEventListener('click', async () => {
     const preventSleepWhileActive = overlay.querySelector('#prevent-sleep-while-active').checked;
     const inheritRemoteControl = overlay.querySelector('#inherit-rc-newtab').checked;
     const inheritRemoteControlOnFork = overlay.querySelector('#inherit-rc-fork').checked;
-    const settingsPayload = { shellProfile, maxIssueTitleLength: newMaxTitle, wandPlanMode, issueAutopilot, issueStagesEnabled, wandPromptTemplate, symlinkWorktreeSettings, cmdTabSwitch, cmdTabSwitchHoldMs, commandPaletteEnabled, commandPaletteShortcut, shortcutsHelpEnabled, shortcutsHelpShortcut, hashCommandsEnabled, contextViewsEnabled, projectModsEnabled, timelapseEnabled, timelapseIntervalMinutes, metaControlsEnabled, inheritRemoteControl, inheritRemoteControlOnFork, overviewDefaultLayout, enabledAgents, ...agentBinaries, ...(selectedEngine ? { engine: selectedEngine } : {}), scrollbackKB, recentSessionsLimit, autoUpdateCheckEnabled, autoUpdateCheckIntervalHours, autoUpdateApply, sessionLogEnabled, timecardEnabled, timecardSampleMinutes, scheduledTasksEnabled, scheduledTasksOpenInBackground, scheduledDefaultModel, scheduledDefaultEffort, preventSleepWhileActive, customAgentConfigs };
+    const settingsPayload = { shellProfile, maxIssueTitleLength: newMaxTitle, ...pipelinePayload, wandPromptTemplate, symlinkWorktreeSettings, cmdTabSwitch, cmdTabSwitchHoldMs, commandPaletteEnabled, commandPaletteShortcut, shortcutsHelpEnabled, shortcutsHelpShortcut, hashCommandsEnabled, contextViewsEnabled, projectModsEnabled, timelapseEnabled, timelapseIntervalMinutes, metaControlsEnabled, inheritRemoteControl, inheritRemoteControlOnFork, overviewDefaultLayout, enabledAgents, ...agentBinaries, ...(selectedEngine ? { engine: selectedEngine } : {}), scrollbackKB, recentSessionsLimit, autoUpdateCheckEnabled, autoUpdateCheckIntervalHours, autoUpdateApply, sessionLogEnabled, timecardEnabled, timecardSampleMinutes, scheduledTasksEnabled, scheduledTasksOpenInBackground, scheduledDefaultModel, scheduledDefaultEffort, preventSleepWhileActive, customAgentConfigs };
     let resp = await fetch('/api/settings', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1945,7 +1956,7 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
     configProfile = agentType.slice('config:'.length);
     agentType = 'claude';
   }
-  const ws = createWebSocket({ id: existingId, cwd, isNew, worktree: opts.worktree, fresh: opts.fresh, name: opts.name, planMode: opts.planMode, agentType, configProfile, cols, rows, windowId: getWindowId(), fork: opts.fork, rcParent: opts.rcParent, noRestore: opts.noRestore });
+  const ws = createWebSocket({ id: existingId, cwd, isNew, worktree: opts.worktree, fresh: opts.fresh, name: opts.name, planMode: opts.planMode, issue: !!opts.issue, agentType, configProfile, cols, rows, windowId: getWindowId(), fork: opts.fork, rcParent: opts.rcParent, noRestore: opts.noRestore });
 
   // Reconnect state lives on this handle, not the sessions map (#556): the map
   // entry only exists after the first {type:'session'} message, so a connect
@@ -2040,8 +2051,10 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
             ws.sendJSON({ type: 'initialPrompt', text: opts.initialPrompt, loading: opts.loading });
           } else if (opts.issue) {
             // Wand picker (#642): the server renders wandPromptTemplate from these
-            // fields. Same `loading` contract as initialPrompt above.
-            ws.sendJSON({ type: 'issue', issue: opts.issue, loading: opts.loading, autopilot: !!opts.autopilot });
+            // fields. Same `loading` contract as initialPrompt above. `autopilot` is
+            // sent only when the picker's checkbox was touched (#717) — absent, the
+            // server applies the issue pipeline's merge switch for this repo.
+            ws.sendJSON({ type: 'issue', issue: opts.issue, loading: opts.loading, ...(opts.autopilot != null ? { autopilot: !!opts.autopilot } : {}) });
           }
           // Apply persisted waiting state from the server. This restores the
           // busy/idle flag after a reconnect so close-confirm and the hash
@@ -4943,10 +4956,11 @@ async function showIssuePicker() {
         </div>
       </div>
       <div class="modal-buttons">
-        <label for="issue-autopilot" style="display:flex; align-items:center; gap:6px; margin:0 auto 0 0; font-size:12px; cursor:pointer;">
+        <label for="issue-autopilot" style="display:flex; align-items:center; gap:6px; font-size:12px; cursor:pointer;">
           <input type="checkbox" id="issue-autopilot" ${issueAutopilotDefault ? 'checked' : ''} style="accent-color: var(--ds-accent-green);">
           Autopilot
         </label>
+        <span id="issue-pipeline-label" style="margin:0 auto 0 4px; font-size:11px; color: var(--ds-text-secondary);"></span>
         <button class="btn-secondary" id="issue-cancel">Cancel</button>
       </div>
     </div>
@@ -4954,20 +4968,48 @@ async function showIssuePicker() {
   document.body.appendChild(overlay);
   const closeIssuePicker = () => overlay.remove();
   overlay.querySelector('#issue-cancel').onclick = closeIssuePicker;
-  // Remembered even if the picker is then cancelled — it is a preference, not part
-  // of this start.
-  overlay.querySelector('#issue-autopilot').onchange = (e) => saveIssueAutopilotDefault(e.target.checked);
+  // #717: the issue pipeline for this repo — global, project or committed repo file —
+  // resolved by the server, which is what the spawn will use. The checkbox is seeded from
+  // its merge switch and the line beside it names the level that applies.
+  let pipelineInfo = null;
+  // Touched = the user chose for THIS start. Only then is `autopilot` sent; untouched, the
+  // server applies the pipeline, so a project or repo level is never overridden by a
+  // checkbox that merely displayed it.
+  let autopilotTouched = false;
+  const PIPELINE_LEVEL_LABELS = { default: 'default', global: 'Settings', project: 'project', repo: 'repo file' };
+  async function refreshPipeline() {
+    const forRoot = gitRoot;
+    const agentType = getDefaultAgentType();
+    const info = await fetchJSON(`/api/issue-pipeline?cwd=${encodeURIComponent(forRoot)}&agentType=${encodeURIComponent(agentType)}`)
+      .catch(() => null);
+    if (!info || forRoot !== gitRoot || !overlay.parentNode) return;
+    pipelineInfo = info;
+    const label = overlay.querySelector('#issue-pipeline-label');
+    if (label) {
+      const where = info.level === 'project' && info.project ? `project “${info.project.name}”` : PIPELINE_LEVEL_LABELS[info.level] || info.level;
+      const plan = !info.planApplicable ? 'n/a' : (info.plan ? 'on' : 'off');
+      label.textContent = `Pipeline: ${where} · plan ${plan}${info.review ? ' · review' : ''}`;
+      label.title = info.stages.filter(s => s.enabled).map(s => s.label || s.id).join(' → ')
+        + (info.clamped.length ? `\n${info.repoPath} may only tighten review and merge; ignored: ${info.clamped.join(', ')}` : '');
+    }
+    const box = overlay.querySelector('#issue-autopilot');
+    if (box && !autopilotTouched) box.checked = !!info.merge;
+  }
+  refreshPipeline();
+  // A choice made here is remembered as the global preference (#651) — even if the
+  // picker is then cancelled — but only while that preference is what decides this repo.
+  // When a project or the repo file sets the merge switch, the checkbox is a one-off.
+  overlay.querySelector('#issue-autopilot').onchange = (e) => {
+    autopilotTouched = true;
+    if (!pipelineInfo || pipelineInfo.sources.merge === 'setting') saveIssueAutopilotDefault(e.target.checked);
+  };
   overlay.onclick = (e) => { if (e.target === overlay) closeIssuePicker(); };
   const onEscIssuePicker = (e) => { if (e.key === 'Escape') { e.preventDefault(); closeIssuePicker(); } };
   document.addEventListener('keydown', onEscIssuePicker);
   let issueObserver = null;  // infinite-scroll IntersectionObserver; hoisted so teardown is centralized here
   new MutationObserver((_, obs) => { if (!overlay.parentNode) { document.removeEventListener('keydown', onEscIssuePicker); issueObserver?.disconnect(); obs.disconnect(); } }).observe(document.body, { childList: true });
 
-  // wandPlanMode defaults here rather than in fetchAndRender: /api/settings is
-  // allowed to fail without taking the picker down (#676), and Start still has
-  // to send something.
   let issues, hasMore;
-  let wandPlanMode = true;
   let selectedIssue = null;
   let currentPage = 1;
   let loadingMore = false;
@@ -5071,8 +5113,8 @@ async function showIssuePicker() {
   async function startIssue() {
     if (!selectedIssue) return;
     // Read BEFORE the overlay is torn down, and here rather than off the Start
-    // button — double-clicking a row calls this directly.
-    const autopilot = !!overlay.querySelector('#issue-autopilot')?.checked;
+    // button — double-clicking a row calls this directly. Undefined unless touched (#717).
+    const autopilot = autopilotTouched ? !!overlay.querySelector('#issue-autopilot')?.checked : undefined;
     const issue = selectedIssue;
     overlay.remove();
 
@@ -5107,11 +5149,12 @@ async function showIssuePicker() {
         url: issue.url,
         body: issue.body,
       },
-      planMode: wandPlanMode,
+      // No planMode (#717): `issue` makes the WS create carry `issue=1`, and the server
+      // takes plan mode from this repo's issue pipeline.
       name: truncateTitle(`#${issue.number} ${issue.title}`),
       agentType: getDefaultAgentType(),
-      // Seeds the session's server-side autopilot value (#643); the tab context
-      // menu is what changes it afterwards.
+      // Seeds the session's server-side autopilot value (#643) when the user chose one
+      // here; the tab context menu is what changes it afterwards.
       autopilot,
       // Show the loading banner + block input while the issue prompt auto-submits,
       // matching the server-initiated /api/start-issue path (#495, #512).
@@ -5126,7 +5169,7 @@ async function showIssuePicker() {
     issueObserver?.disconnect();
     issueObserver = null;
     try {
-      // Settings is ancillary — it supplies two defaults the picker already
+      // Settings is ancillary — it supplies a default the picker already
       // has. Before #676 its failure rejected the whole Promise.all, so a 401
       // on /api/settings blanked an issue list that had loaded fine; and since
       // it was parsed with no res.ok check, what surfaced was the JSON.parse
@@ -5137,7 +5180,6 @@ async function showIssuePicker() {
       ]);
       issues = issuesData.issues;
       hasMore = issuesData.hasMore;
-      if (settingsData.wandPlanMode !== undefined) wandPlanMode = settingsData.wandPlanMode;
       if (settingsData.maxIssueTitleLength) maxIssueTitleLength = settingsData.maxIssueTitleLength;
 
       // Modal may have been dismissed while loading
@@ -5226,6 +5268,7 @@ async function showIssuePicker() {
     const startBtn = overlay.querySelector('#issue-start');
     if (startBtn) startBtn.remove();
     fetchAndRender();
+    refreshPipeline(); // another repo can have another pipeline (#717)
   });
 
   // Populate repo dropdown asynchronously

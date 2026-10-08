@@ -2168,3 +2168,22 @@ kbd {
 .context-recent-select { flex: 1; padding: 6px; background: var(--ds-bg-primary); border: 1px solid var(--ds-border); border-radius: 4px; color: var(--ds-text-primary); font-size: 12px; }
 .context-dir-chooser .context-choose-dir { display: block; width: 100%; text-align: left; margin-bottom: 6px; font-family: monospace; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
+/* Issue pipeline stage editor (#717) — Settings → GitHub and the project rail's "Issue pipeline…" */
+.pipeline-editor { display: flex; flex-direction: column; gap: 6px; margin-bottom: 12px; }
+.pipeline-stage { background: var(--ds-bg-primary); border: 1px solid var(--ds-border); border-radius: 4px; padding: 6px 8px; }
+.pipeline-stage.custom { border-style: dashed; }
+.pipeline-stage-head { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--ds-text-primary); }
+.pipeline-stage-name { font-weight: 600; white-space: nowrap; }
+.pipeline-stage-hint { flex: 1; font-size: 11px; color: var(--ds-text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pipeline-always { width: 16px; text-align: center; color: var(--ds-text-secondary); }
+.pipeline-editor input.pipeline-switch { accent-color: var(--ds-accent-green); margin: 0; }
+.pipeline-editor select.pipeline-switch { padding: 2px 4px; background: var(--ds-bg-secondary); border: 1px solid var(--ds-border); border-radius: 4px; color: var(--ds-text-primary); font-size: 11px; }
+.pipeline-stage-label { flex: 1; padding: 3px 6px; background: var(--ds-bg-secondary); border: 1px solid var(--ds-border); border-radius: 4px; color: var(--ds-text-primary); font-size: 12px; }
+.pipeline-stage-btn { background: transparent; border: none; color: var(--ds-text-secondary); cursor: pointer; font-size: 12px; padding: 0 3px; }
+.pipeline-stage-btn:hover:not(:disabled) { color: var(--ds-text-bright); }
+.pipeline-stage-btn:disabled { opacity: 0.3; cursor: default; }
+.pipeline-stage-instructions { display: block; width: 100%; box-sizing: border-box; margin-top: 6px; padding: 4px 6px; background: var(--ds-bg-secondary); border: 1px solid var(--ds-border); border-radius: 4px; color: var(--ds-text-primary); font-size: 12px; font-family: inherit; resize: vertical; }
+.pipeline-add { align-self: flex-start; padding: 2px 10px; font-size: 12px; }
+.pipeline-modal { max-width: 640px; width: 90vw; max-height: 85vh; overflow-y: auto; }
+.pipeline-modal-note { font-size: 12px; color: var(--ds-text-secondary); margin: 0 0 10px; }
+

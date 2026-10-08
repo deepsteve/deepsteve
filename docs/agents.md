@@ -93,6 +93,14 @@ shell and lost anything `~/.zprofile` exported. All of them also get the
 `DEEPSTEVE_API_TOKEN`, …). An experimental agent with no MCP can still reach the REST API
 through those, if it has a shell tool.
 
+The **issue pipeline** (#717, see [sessions.md](sessions.md)) maps onto the rows above, and
+each stage reaches only the agents those rows reach:
+
+- Its `plan` stage is the **Plan mode** row. For an agent without a plan flag, the start line
+  logs `plan(n/a)` and nothing is passed.
+- Its `review` and `merge` stages are the two `issue_complete` / `share_result` rows.
+- Stage instructions and custom stages are prompt text, so they reach every agent.
+
 ## Claude Code (`claude`)
 
 **Tier: supported.** The reference integration. Every feature listed above exists here

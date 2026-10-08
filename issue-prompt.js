@@ -203,8 +203,10 @@ function normalizeLabels(labels) {
 // `stages` is TEXT, not a flag (#668): the module never reads settings, so the daemon
 // stays the one place that decides whether a session gets the stages and — once #669
 // lands — what they are allowed to name. `resume` (#689) is text for the same reason,
-// and additionally because only the daemon can look at the worktree.
-function renderIssuePrompt(template, { number, title, labels, url, body } = {}, { stages, resume } = {}) {
+// and additionally because only the daemon can look at the worktree. `steps` (#717) is the
+// issue pipeline's per-stage instructions, rendered by issue-pipeline.js; null for the
+// default pipeline, so a session with no instructions gets exactly the old prompt.
+function renderIssuePrompt(template, { number, title, labels, url, body } = {}, { stages, resume, steps } = {}) {
   const vars = {
     number,
     title,
@@ -223,7 +225,12 @@ function renderIssuePrompt(template, { number, title, labels, url, body } = {}, 
   // about how to finish. Putting it after them would separate stage 4's "…then
   // issue_complete" from the instruction it refines, and would bury the one fact that
   // has to change the agent's FIRST move rather than its last.
-  const head = resume ? `${rendered}\n\n${String(resume).trim()}` : rendered;
+  //
+  // `steps` (#717) sits between that context and the rules about finishing: the
+  // pipeline's instructions are what to do between reading the issue and calling
+  // issue_complete, so they read before the instruction that ends the session.
+  const withResume = resume ? `${rendered}\n\n${String(resume).trim()}` : rendered;
+  const head = steps ? `${withResume}\n\n${String(steps).trim()}` : withResume;
   const out = `${head}\n\n${ISSUE_COMPLETE_INSTRUCTION}`;
   return stages ? `${out}\n\n${String(stages).trim()}` : out;
 }

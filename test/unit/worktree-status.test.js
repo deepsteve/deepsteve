@@ -24,7 +24,7 @@ const { execFileSync } = require('child_process');
 
 const {
   worktreePath, worktreeExists, readWorktreeFacts, worktreeStatuses, worktreeStatus,
-  freshWorktreeName, validateBranch,
+  freshWorktreeName, validateBranch, mainCheckoutOf,
 } = require('../../worktree-status.js');
 
 // realpath'd for the same reason git-root.test.js does it: macOS /tmp is a symlink and
@@ -62,6 +62,19 @@ function commitIn(dir, file, body) {
 }
 
 // ------------------------------------------------------------------- existence
+
+test('mainCheckoutOf: a worktree resolves to the main checkout, never to itself (#717)', () => {
+  // The issue pipeline reads `.deepsteve/pipeline.json` from the MAIN checkout, because
+  // an issue session works in its worktree and could otherwise edit the file that gates it.
+  const repo = initRepo(scratch('ds-main-'));
+  const wt = addWorktree(repo, 'github-issue-717');
+  fs.mkdirSync(path.join(wt, 'sub'));
+  assert.equal(mainCheckoutOf(repo), repo);
+  assert.equal(mainCheckoutOf(path.join(repo, '.claude')), repo);
+  assert.equal(mainCheckoutOf(wt), repo);
+  assert.equal(mainCheckoutOf(path.join(wt, 'sub')), repo);
+  assert.equal(mainCheckoutOf(scratch('ds-norepo-')), null);
+});
 
 test('a missing worktree is absent, not an empty status', () => {
   // "No worktree" and "a worktree we could not read" must not look alike: the first

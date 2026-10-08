@@ -153,7 +153,7 @@ function init(context) {
     reloadClients, deliverToWindow, noteSpawnDelivery, settings, log, isShuttingDown,
     emitSessionOpen,
     stripEscapeSequences, readTerminalScreen, sessionInputState, maybeInheritRemoteControl, requestMetaControlsConsent, logRcWrite,
-    armSessionAutoClose, recordMergeAttempt,
+    armSessionAutoClose, recordMergeAttempt, issueReviewEnabled,
   } = context;
 
   // Project scoping for list_sessions (#659). `context` is this mod's whole ctx, so
@@ -620,7 +620,13 @@ function init(context) {
         // Fails open by construction. With `issueStagesEnabled` off — the default, and
         // every install that has never heard of it — neither field is consulted and the
         // three answers below are byte-identical to what they were before this issue.
-        const stages = !!settings.issueStagesEnabled;
+        //
+        // #717: that setting is now the global level of the pipeline's review stage.
+        // issueReviewEnabled() combines it, live, with the session's project and the repo
+        // file as snapshotted at spawn — never re-read, since the agent being gated can
+        // edit it — and a repo file can turn the gate on but never off. The fallback is
+        // for a context without the helper (the unit tests' partial ones).
+        const stages = issueReviewEnabled ? !!issueReviewEnabled(caller) : !!settings.issueStagesEnabled;
         const resultId = caller.resultItemId || null;
         const approved = !!caller.resultApprovedAt;
         let gate = null;

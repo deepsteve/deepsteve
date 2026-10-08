@@ -72,6 +72,9 @@ export function createWebSocket(options = {}) {
   if (options.rows) params.set('rows', options.rows);
   if (options.name) params.set('name', options.name);
   if (options.planMode) params.set('planMode', '1');
+  // #717: "this is an issue start" — the server resolves the issue pipeline for the repo
+  // and decides plan mode itself, so a project or repo pipeline reaches picker starts too.
+  if (options.issue) params.set('issue', '1');
   if (options.agentType && options.agentType !== 'claude') params.set('agentType', options.agentType);
   if (options.configProfile) params.set('configProfile', options.configProfile); // custom Claude config profile (#537)
   if (options.windowId) params.set('windowId', options.windowId);

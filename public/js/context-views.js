@@ -52,6 +52,9 @@ import { railModsFor, appendRailRows, isCompactRail, setCompactRail, modsForProj
 // imports only storage-namespace + tab-manager, so this adds no cycle. Do not import this
 // module back from there — mod-manager reaches context-views through app.js's hooks.
 import { ModManager, appendAppRows } from './mod-manager.js';
+// The issue-pipeline stage editor (#717), shared with Settings. A leaf module: it
+// imports nothing, so this adds no cycle.
+import { createPipelineEditor } from './pipeline-editor.js';
 
 // Context definitions are server-owned (#526): they are the same entity as the
 // Scheduled Tasks "project groups", loaded from /api/contexts and kept fresh by
@@ -646,6 +649,9 @@ function showRowMenu(x, y, ctx) {
     if (projectMods.length) addRowMenuSeparator(menu);
 
     addRowMenuItem(menu, 'Edit', () => openContextEditor(ctx));
+    // The project level of the issue pipeline (#717): what an issue session started in
+    // this project's folders runs. A ✓ says this project has its own.
+    addRowMenuItem(menu, `${ctx.pipeline ? '✓ ' : ''}Issue pipeline…`, () => openIssuePipelineEditor(ctx));
     // Set icon: emoji or an uploaded PNG/SVG image (#569/#579). Right-click (not
     // double-click-the-square) so it works at any rail width and reuses this menu's
     // dismissal machinery. The picker offers both an emoji grid and a "Choose image…"
@@ -1925,6 +1931,100 @@ function openContextEditor(ctx) {
   };
   document.body.appendChild(overlay);
   nameInput.focus();
+}
+
+/**
+ * The project's issue pipeline (#717). Each switch can inherit the global one, and the
+ * layout either inherits the global pipeline (null) or replaces it. Saved through its own
+ * route, like `archived`, so the project editor's upsert can never touch it; the
+ * `contexts` broadcast brings it back to every window.
+ */
+async function openIssuePipelineEditor(ctx) {
+  let global;
+  try {
+    const r = await fetch('/api/issue-pipeline');
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    global = await r.json();
+  } catch (e) {
+    showToast(`Couldn’t load the issue pipeline — ${e.message}`);
+    return;
+  }
+  const builtinIds = new Set(global.builtins.map(b => b.id));
+  const own = ctx.pipeline || null;
+  // Without its own pipeline the project starts from the global layout; the built-ins'
+  // resolved `enabled` is dropped so every switch starts as Inherit.
+  const initialStages = (own ? own.stages : global.stages)
+    .map(({ enabled, ...s }) => (builtinIds.has(s.id) ? s : { ...s, ...(enabled === false ? { enabled } : {}) }));
+  const switches = {};
+  for (const id of ['plan', 'review', 'merge']) {
+    const s = own && own.stages.find(x => x.id === id);
+    switches[id] = s && typeof s.enabled === 'boolean' ? s.enabled : null;
+  }
+  const editor = createPipelineEditor({
+    mode: 'project', builtins: global.builtins, limits: global.limits, stages: initialStages,
+    switches, inherited: { plan: global.plan, review: global.review, merge: global.merge },
+  });
+  const baseline = JSON.stringify(editor.read());
+
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  const modal = document.createElement('div');
+  modal.className = 'modal pipeline-modal';
+  overlay.appendChild(modal);
+  const h = document.createElement('h2');
+  h.textContent = `Issue pipeline — ${ctx.name}`;
+  modal.appendChild(h);
+  const note = document.createElement('p');
+  note.className = 'pipeline-modal-note';
+  note.textContent = own
+    ? 'Issue sessions started in this project\'s folders run this pipeline instead of the global one. '
+      + 'A repo\'s committed .deepsteve/pipeline.json still replaces the layout, and may turn review on and merge off.'
+    : 'This project uses the global pipeline (Settings → GitHub). Change anything here to give it its own. '
+      + 'A repo\'s committed .deepsteve/pipeline.json still replaces the layout, and may turn review on and merge off.';
+  modal.appendChild(note);
+  modal.appendChild(editor.el);
+
+  const send = (pipeline) => fetch(`/api/contexts/${encodeURIComponent(ctx.id)}/pipeline`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ pipeline }),
+  }).then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); })
+    .catch(e => showToast(`Couldn’t save the issue pipeline — ${e.message}`));
+
+  const btns = document.createElement('div');
+  btns.className = 'modal-buttons';
+  if (own) {
+    const reset = document.createElement('button');
+    reset.className = 'btn-secondary';
+    reset.textContent = 'Use global pipeline';
+    reset.style.marginRight = 'auto';
+    reset.onclick = () => { send(null); overlay.remove(); };
+    btns.appendChild(reset);
+  }
+  const cancel = document.createElement('button');
+  cancel.className = 'btn-secondary';
+  cancel.textContent = 'Cancel';
+  cancel.onclick = () => overlay.remove();
+  btns.appendChild(cancel);
+  const save = document.createElement('button');
+  save.className = 'btn-primary';
+  save.textContent = 'Save';
+  save.onclick = () => {
+    const edit = editor.read();
+    // Saving an untouched editor on a project that inherits must not materialize a copy
+    // of the global layout — that copy would stop following the global one.
+    if (!own && JSON.stringify(edit) === baseline) { overlay.remove(); return; }
+    send({ stages: edit.stages });
+    overlay.remove();
+  };
+  btns.appendChild(save);
+  modal.appendChild(btns);
+
+  overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
+  overlay.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); overlay.remove(); }
+  }, true);
+  document.body.appendChild(overlay);
 }
 
 // ------------------------------------------------------------------ lifecycle

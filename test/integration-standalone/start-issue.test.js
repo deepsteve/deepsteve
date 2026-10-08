@@ -730,8 +730,8 @@ test('an explicit autopilot that AGREES with the setting stays terse in the log 
 });
 
 test("the picker's issue message inherits the preference when it omits the key", async () => {
-  // The picker itself always sends an explicit boolean; this covers any other client
-  // of the {type:'issue'} message, and keeps that path on the same rule as the rest.
+  // Since #717 this is also the picker's own shape whenever its Autopilot checkbox was
+  // left untouched, and it keeps that path on the same rule as the rest.
   await setIssueAutopilotDefault(true);
   try {
     const tab = new SessionClient();
@@ -834,17 +834,208 @@ test('an issue with no worktree says nothing about resuming', async () => {
   assert.doesNotMatch(await issueLogFor(res.json.id), /resume=/);
 });
 
+// --- the issue pipeline (#717) -----------------------------------------------
+//
+// Global, project and repo levels, resolved server-side for every start path. Each test
+// that writes the repo file or registers a project undoes it in a `finally`: projDir and
+// the daemon are shared with every test in this file.
+
+const pipelineFile = () => path.join(projDir, '.deepsteve', 'pipeline.json');
+function writeRepoPipeline(stages) {
+  fs.mkdirSync(path.dirname(pipelineFile()), { recursive: true });
+  fs.writeFileSync(pipelineFile(), JSON.stringify({ stages }));
+}
+function removeRepoPipeline() {
+  fs.rmSync(path.join(projDir, '.deepsteve'), { recursive: true, force: true });
+}
+// The stub appends its argv per spawn; a session's line is the one naming its
+// --session-id, which is exactly where the plan-mode flag would sit.
+function spawnArgsFor(id) {
+  const sid = readState()[id]?.claudeSessionId;
+  if (!sid) return null;
+  let log = '';
+  try { log = fs.readFileSync(path.join(HOME, 'claude-invocations.log'), 'utf8'); } catch {}
+  return log.split('\n').find(l => l.includes(sid)) || null;
+}
+async function api(method, url, body) {
+  const r = await fetch(`${BASE}${url}`, {
+    method, headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+  });
+  return { status: r.status, json: await r.json().catch(() => null) };
+}
+
+test('a committed repo file turns plan mode off, and the start line names it', async () => {
+  writeRepoPipeline([{ id: 'plan', enabled: false }]);
+  try {
+    const res = await startIssueHttp({ number: 7171, title: 'repo plan off', body: 'PIPE-7171', cwd: projDir, windowId: 'win-1' });
+    assert.equal(res.status, 200, JSON.stringify(res.json));
+    opened.push(res.json.id);
+    const line = await issueLogFor(res.json.id);
+    assert.match(line, /pipeline=repo:issue>implement$/, 'the line names the repo level and leaves plan out');
+    const args = await waitFor(() => spawnArgsFor(res.json.id), 'the stub to record its argv');
+    assert.doesNotMatch(args, /--permission-mode plan/, 'plan mode must not be passed');
+    assert.equal(readState()[res.json.id].planMode, false);
+
+    // The picker's view of the same repo agrees with what the spawn did.
+    const view = await api('GET', `/api/issue-pipeline?cwd=${encodeURIComponent(projDir)}`);
+    assert.equal(view.json.level, 'repo');
+    assert.equal(view.json.plan, false);
+    assert.equal(view.json.sources.plan, 'repo');
+  } finally {
+    removeRepoPipeline();
+  }
+});
+
+test("the picker's create with issue=1 takes plan mode from the pipeline, not from the query", async () => {
+  writeRepoPipeline([{ id: 'plan', enabled: false }]);
+  try {
+    // A planMode=1 in the query is what a browser deciding from /api/settings would send;
+    // with issue=1 the server's resolution wins.
+    const tab = new SessionClient();
+    await tab.connect({ new: '1', cwd: projDir, windowId: 'win-1', agentType: 'claude', worktree: 'github-issue-7172', issue: '1', planMode: '1' });
+    opened.push(tab.session.id);
+    await waitFor(() => readState()[tab.session.id] || null, 'the session to reach state.json');
+    assert.equal(readState()[tab.session.id].planMode, false);
+    assert.doesNotMatch(await waitFor(() => spawnArgsFor(tab.session.id), 'the stub argv'), /--permission-mode plan/);
+    tab.ws.send(JSON.stringify({ type: 'issue', loading: true, issue: { number: 7172, title: 'picker pipeline', body: 'PIPE-7172' } }));
+    const line = await issueLogFor(tab.session.id);
+    assert.match(line, /source=ws-issue,/);
+    assert.match(line, /pipeline=repo:/);
+    tab.close();
+  } finally {
+    removeRepoPipeline();
+  }
+  // And with no repo file the same create gets the global default — plan on.
+  const tab = new SessionClient();
+  await tab.connect({ new: '1', cwd: projDir, windowId: 'win-1', agentType: 'claude', worktree: 'github-issue-7173', issue: '1' });
+  opened.push(tab.session.id);
+  await waitFor(() => readState()[tab.session.id] || null, 'the session to reach state.json');
+  assert.equal(readState()[tab.session.id].planMode, true);
+  assert.match(await waitFor(() => spawnArgsFor(tab.session.id), 'the stub argv'), /--permission-mode plan/);
+  tab.close();
+});
+
+test('a repo file cannot turn the merge on — it is clamped, and the clamp is logged', async () => {
+  writeRepoPipeline([{ id: 'merge', enabled: true }]);
+  try {
+    const res = await startIssueHttp({ number: 7174, title: 'repo merge on', body: 'PIPE-7174', cwd: projDir, windowId: 'win-1' });
+    assert.equal(res.status, 200, JSON.stringify(res.json));
+    opened.push(res.json.id);
+    assert.equal((await waitFor(() => readState()[res.json.id] || null, 'the entry')).autopilot, false, 'the setting is off, and a committed file may not turn it on');
+    assert.match(await issueLogFor(res.json.id), /clamped=merge/);
+    await waitFor(() => daemonLog.includes('[issue] #7174: pipeline clamp'), 'the clamp line');
+  } finally {
+    removeRepoPipeline();
+  }
+});
+
+test('the review gate reads the spawn snapshot, never the file as it is now', async () => {
+  // Global review is off. The repo file turns it on for this session; the "agent" then
+  // deletes the file — which must not open the gate.
+  writeRepoPipeline([{ id: 'review', enabled: true }]);
+  let gated;
+  try {
+    const res = await startIssueHttp({ number: 7175, title: 'snapshot', body: 'PIPE-7175', cwd: projDir, windowId: 'win-1', autopilot: true });
+    assert.equal(res.status, 200, JSON.stringify(res.json));
+    gated = res.json.id;
+    opened.push(gated);
+    assert.match(await issueLogFor(gated), /stages=on/, 'the repo file turned the review stage on');
+  } finally {
+    removeRepoPipeline();
+  }
+  assert.equal((await issueComplete(gated)).next, 'share_result', 'the file is gone, but the snapshot still gates');
+
+  // The converse: a session started BEFORE the file existed is not gated by it later.
+  const res = await startIssueHttp({ number: 7176, title: 'no snapshot', body: 'PIPE-7176', cwd: projDir, windowId: 'win-1', autopilot: false });
+  opened.push(res.json.id);
+  await waitFor(() => readState()[res.json.id] || null, 'the session to reach state.json');
+  writeRepoPipeline([{ id: 'review', enabled: true }]);
+  try {
+    const p = await issueComplete(res.json.id);
+    assert.equal(p.next, 'stop', 'a file written after spawn must not reach this session (autopilot off, so nothing merges)');
+  } finally {
+    removeRepoPipeline();
+  }
+});
+
+test('a project pipeline applies to issue starts in its folders, and the repo file replaces its layout', async () => {
+  const ctxId = 'pipe7177';
+  const created = await api('POST', '/api/contexts', { id: ctxId, name: 'Pipeline project', dirs: [projDir] });
+  assert.equal(created.status, 200, JSON.stringify(created.json));
+  try {
+    assert.equal((await api('POST', `/api/contexts/${ctxId}/pipeline`, { pipeline: 'nope' })).status, 400);
+    const set = await api('POST', `/api/contexts/${ctxId}/pipeline`, { pipeline: { stages: [
+      { id: 'implement', instructions: 'PROJECT-STEP-7177' }, { id: 'merge', enabled: true },
+    ] } });
+    assert.equal(set.status, 200, JSON.stringify(set.json));
+    assert.ok(set.json.contexts.find(c => c.id === ctxId).pipeline, 'the route answers with the stored pipeline');
+
+    const res = await startIssueHttp({ number: 7177, title: 'project level', body: 'PIPE-7177', cwd: projDir, windowId: 'win-1' });
+    assert.equal(res.status, 200, JSON.stringify(res.json));
+    opened.push(res.json.id);
+    assert.equal((await waitFor(() => readState()[res.json.id] || null, 'the entry')).autopilot, true, 'a trusted project level may turn the merge on');
+    const line = await issueLogFor(res.json.id);
+    assert.match(line, /autopilot=on\(project\)/);
+    assert.match(line, /pipeline=project:/);
+    const client = new SessionClient();
+    await client.connect({ id: res.json.id, cwd: projDir });
+    await waitFor(() => client.screen().includes('PROJECT-STEP-7177'), 'the project step to reach the PTY', 30000, 250);
+    assert.ok(client.screen().includes('Steps for this issue'), 'instructions arrive as the steps block');
+    client.close();
+
+    // A repo file replaces the layout (its instructions are not added to the project's)
+    // and may still turn the merge off.
+    writeRepoPipeline([{ id: 'merge', enabled: false }]);
+    try {
+      const view = await api('GET', `/api/issue-pipeline?cwd=${encodeURIComponent(projDir)}`);
+      assert.equal(view.json.level, 'repo');
+      assert.equal(view.json.merge, false);
+      assert.equal(view.json.project?.id, ctxId);
+      assert.ok(!view.json.stages.some(s => s.instructions), 'the project layout was replaced, not merged');
+    } finally {
+      removeRepoPipeline();
+    }
+
+    // Persisted through contexts.json, and cleared with null.
+    const onDisk = JSON.parse(fs.readFileSync(path.join(HOME, '.deepsteve', 'contexts.json'), 'utf8'));
+    assert.ok((Array.isArray(onDisk) ? onDisk : onDisk.contexts).find(c => c.id === ctxId).pipeline);
+    const cleared = await api('POST', `/api/contexts/${ctxId}/pipeline`, { pipeline: null });
+    assert.equal(cleared.json.contexts.find(c => c.id === ctxId).pipeline, null);
+  } finally {
+    await api('DELETE', `/api/contexts/${ctxId}`);
+  }
+});
+
+test('the global layout is stored as null when it equals the default', async () => {
+  const set = await api('POST', '/api/settings', { issuePipeline: { stages: [{ id: 'issue' }, { id: 'plan' }] } });
+  assert.equal(set.status, 200);
+  assert.equal(set.json.issuePipeline, null, 'a POSTed copy of the default is not materialized');
+  const custom = await api('POST', '/api/settings', { issuePipeline: { stages: [{ id: 'tests', instructions: 'GLOBAL-STEP' }] } });
+  assert.equal(custom.json.issuePipeline.stages.find(s => s.id === 'tests').instructions, 'GLOBAL-STEP');
+  const reset = await api('POST', '/api/settings', { issuePipeline: null });
+  assert.equal(reset.json.issuePipeline, null);
+});
+
 // LAST in the file: the restart leaves this suite's MCP client and reload window
 // dead, so nothing after it could use them.
-test('autopilot survives a daemon restart', async () => {
-  const res = await startIssueHttp({
-    number: 6434, title: 'survives restart', body: 'RESTART-6434',
-    cwd: projDir, windowId: 'win-1', autopilot: true,
-  });
-  assert.equal(res.status, 200, `expected 200, got ${res.status}: ${JSON.stringify(res.json)}`);
-  const id = res.json.id;
-  opened.push(id);
-  await waitFor(() => readState()[id]?.autopilot === true, 'the flag to reach state.json');
+test('autopilot and the pipeline snapshot survive a daemon restart', async () => {
+  // #717: the repo file's review switch is snapshotted at spawn and must come back with
+  // the session — a restart that re-read the file would let an edit made since through.
+  writeRepoPipeline([{ id: 'review', enabled: true }]);
+  let id;
+  try {
+    const res = await startIssueHttp({
+      number: 6434, title: 'survives restart', body: 'RESTART-6434',
+      cwd: projDir, windowId: 'win-1', autopilot: true,
+    });
+    assert.equal(res.status, 200, `expected 200, got ${res.status}: ${JSON.stringify(res.json)}`);
+    id = res.json.id;
+    opened.push(id);
+    await waitFor(() => readState()[id]?.autopilot === true, 'the flag to reach state.json');
+  } finally {
+    removeRepoPipeline();
+  }
 
   await restartDaemon();
 
@@ -852,4 +1043,6 @@ test('autopilot survives a daemon restart', async () => {
   // the value came back through serializeShellEntry either way.
   const rec = await waitFor(() => readState()[id] || null, 'the record after restart');
   assert.equal(rec.autopilot, true, 'autopilot must survive a restart (serializeShellEntry)');
+  assert.equal(rec.pipeline?.repo?.stages.find(s => s.id === 'review')?.enabled, true,
+    'the repo snapshot must survive a restart (serializeShellEntry)');
 });

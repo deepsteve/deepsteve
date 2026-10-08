@@ -499,6 +499,73 @@ test('an install that has never heard of issueStagesEnabled is not gated', async
   assert.equal(p.next, 'merged', 'undefined must read as off, not as undefined behaviour');
 });
 
+// --- the issue pipeline's review stage (#717) -------------------------------------------
+//
+// Since #717 the gate is the pipeline's review switch, resolved by the daemon's
+// issueReviewEnabled(entry): the live global setting and project level, combined with the
+// repo file as snapshotted on the entry at spawn. These pass the same composition the
+// daemon does, built from the real resolvePipeline, so what is pinned is both that the
+// tool asks the helper about THIS caller and that the trust rule survives the trip.
+
+const { normalizePipeline, resolvePipeline } = require('../../issue-pipeline.js');
+function reviewHelper(settings, projects = {}) {
+  return (entry) => {
+    const snap = entry && entry.pipeline;
+    return resolvePipeline({
+      global: { review: !!settings.issueStagesEnabled },
+      project: snap && projects[snap.projectId] ? { pipeline: projects[snap.projectId] } : null,
+      repo: snap && snap.repo ? { pipeline: snap.repo } : null,
+    }).review;
+  };
+}
+const repoSnap = (stages) => ({ projectId: null, repo: normalizePipeline({ stages }, { level: 'repo' }) });
+
+test('a repo snapshot that turns review on gates a session the global setting would not (#717)', async () => {
+  const settings = { issueStagesEnabled: false };
+  const shells = new Map([['s', { autopilot: true, agentType: 'claude', worktree: 'w', pipeline: repoSnap([{ id: 'review', enabled: true }]) }]]);
+  // No sessionPaths: reaching the merge would throw, so this proves the gate held.
+  const tools = init({ shells, settings, log: () => {}, issueReviewEnabled: reviewHelper(settings) });
+  const p = parse(await tools.issue_complete.handler({}, callerExtra('s')));
+  assert.equal(p.next, 'share_result');
+});
+
+test('a repo snapshot cannot switch an enabled review gate off (#717)', async () => {
+  const settings = { issueStagesEnabled: true };
+  const shells = new Map([['s', { autopilot: true, agentType: 'claude', worktree: 'w', pipeline: repoSnap([{ id: 'review', enabled: false }]) }]]);
+  const tools = init({ shells, settings, log: () => {}, issueReviewEnabled: reviewHelper(settings) });
+  const p = parse(await tools.issue_complete.handler({}, callerExtra('s')));
+  assert.equal(p.next, 'share_result', 'the committed file is clamped; the gate still holds');
+});
+
+test('a project that switches review off is not gated, and the merge runs (#717)', async () => {
+  const { repo, wt } = repoFor();
+  const settings = { issueStagesEnabled: true };
+  const shells = new Map([['s', {
+    autopilot: true, agentType: 'claude', worktree: 'feature', _cwd: wt, _root: repo,
+    pipeline: { projectId: 'p1', repo: null },
+  }]]);
+  const tools = init({
+    shells, settings, log: () => {},
+    sessionPaths: (e) => ({ cwd: e._cwd, repoRoot: e._root }),
+    armSessionAutoClose: () => ({ closeAt: Date.now() + 1000 }),
+    issueReviewEnabled: reviewHelper(settings, { p1: normalizePipeline({ stages: [{ id: 'review', enabled: false }] }, { level: 'project' }) }),
+  });
+  const p = parse(await tools.issue_complete.handler({}, callerExtra('s')));
+  assert.equal(p.next, 'merged');
+});
+
+test('the gate is asked about the calling session, at call time (#717)', async () => {
+  const seen = [];
+  let answer = false;
+  const shells = new Map([['s', { autopilot: false, agentType: 'claude', worktree: 'w' }]]);
+  const tools = init({ shells, settings: {}, log: () => {}, issueReviewEnabled: (e) => { seen.push(e); return answer; } });
+  assert.equal(parse(await tools.issue_complete.handler({}, callerExtra('s'))).next, 'stop');
+  answer = true;
+  assert.equal(parse(await tools.issue_complete.handler({}, callerExtra('s'))).next, 'share_result',
+    'flipping the level between calls changes the answer — nothing was captured at spawn');
+  assert.deepStrictEqual(seen, [shells.get('s'), shells.get('s')]);
+});
+
 test('a gated call is logged, with which gate it hit', async () => {
   const { tools, logs } = gateTools();
   await tools.issue_complete.handler({}, callerExtra('shared'));

@@ -846,6 +846,11 @@ stage text does, rather than a second toggle of its own. Stage 4 is what tells a
 merge for a tool the session was never told about. With it off — the default — neither field is
 consulted and `issue_complete` answers byte-identically to before the feature existed.
 
+Since #717 that setting is the global level of the issue pipeline's `review` stage, and the gate
+is `issueReviewEnabled(entry)`. That function combines the setting, the session's project level
+(both read live) and the repo's committed `.deepsteve/pipeline.json` as it was snapshotted at
+spawn. A repo file can turn the gate on but never off.
+
 **Request changes clears both stamps**, so the agent is back to "share a result first":
 the result it shared no longer stands. **Archiving an open result clears them too** — the
 session would otherwise sit on "awaiting review" for a review that was thrown away, which
@@ -1285,6 +1290,8 @@ Two consequences worth knowing:
 A project mod's page is agent-authored HTML served same-origin, in an iframe with `allow-same-origin` (required for the bridge). That is the same authority an agent-authored display tab already has — a continuation of the existing model, not a new one. The server-authoritative kill switch is the `projectModsEnabled` setting: off hides every surface and refuses every write (MCP `isError`, REST 403), while reads stay open so existing mods remain inspectable.
 
 Storing the mod in the repo (#638) *improves* this rather than widening it. The page used to appear in a home directory where nothing would ever show it to you; now it arrives in a diff, is reviewed like any other code, and its history is `git log`. The thing to be careful about is the other direction — a project mod is code that runs with the host's authority as soon as you look at its project, so **a mod that arrives in a repo you pulled is a mod you should read before opening the project**. That is the same judgement you already make about a repo's build scripts, and the reason it is worth stating is that a `.deepsteve/` directory is easy to skim past in a diff.
+
+A pulled `.deepsteve/pipeline.json` (#717) is the one `.deepsteve/` file that is trusted *less* than its author. It shapes every issue session in that repo, so it is allowed only to tighten: it may add stage instructions, turn the review gate on, turn the merge off, and switch plan mode. It can never turn the merge on or the review gate off — an entry that tries is clamped and logged. Its instructions are still prompt text an agent will follow, so read them like a `CLAUDE.md`. See [sessions.md](sessions.md) (the issue pipeline).
 
 The same goes for a pulled `.deepsteve/scheduled/CONTEXT.md` (#708). It is not code, but it is read into every unattended scheduled run of that repo, and those runs have the project's MCP servers and nobody watching them. It grants nothing a `CLAUDE.md` in the same repo doesn't already, and it is just as easy to skim past. See [scheduled-tasks.md](scheduled-tasks.md).
 
