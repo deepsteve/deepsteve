@@ -720,6 +720,9 @@ const AGENT_TYPES = AGENT_CATALOG.map(a => a.id);
 const SETTINGS_SCHEMA = [
   { name: 'shellProfile',               type: 'string',  default: '~/.zshrc' },
   { name: 'maxIssueTitleLength',        type: 'number',  default: 25, clamp: [10, 200] },
+  // The plan stage's global switch. The key predates the pipeline (#717) and kept its name;
+  // the stage it switches is prompt text with an Inbox gate (PLAN_DEFAULT_INSTRUCTIONS in
+  // issue-pipeline.js), not `--permission-mode plan` — no issue session spawns in plan mode.
   { name: 'wandPlanMode',               type: 'boolean', default: true, broadcast: false },
   // The remembered Autopilot choice for new issue sessions (#651). It used to be a
   // per-browser localStorage flag that only the picker checkbox read, so every other
@@ -6959,10 +6962,9 @@ app.get('/api/issue-pipeline', (req, res) => {
   if (!req.query.cwd) {
     return res.json({ ...meta, ...issuePipeline.resolvePipeline({ global: globalPipelineLevel() }), project: null });
   }
-  // A config profile id rides agentType as `config:<pid>` from some callers; it is Claude.
-  const rawAgent = String(req.query.agentType || 'claude');
-  const agentType = rawAgent.startsWith('config:') || !AGENT_TYPES.includes(rawAgent) ? 'claude' : rawAgent;
-  const { resolved, snapshot } = resolveIssuePipeline({ cwd: expandTilde(String(req.query.cwd)), agentType });
+  // Callers still send `agentType`; nothing in the pipeline depends on it any more, since
+  // every stage is prompt text and reaches every agent alike.
+  const { resolved, snapshot } = resolveIssuePipeline({ cwd: expandTilde(String(req.query.cwd)) });
   const project = snapshot.projectId ? contexts.find(c => c.id === snapshot.projectId) : null;
   res.json({ ...meta, ...resolved, project: project ? { id: project.id, name: project.name } : null });
 });
@@ -7101,7 +7103,7 @@ function projectLevel(ctx) {
  * session carries on its entry — the project's id (so completion can read that level
  * LIVE) and the repo file as it was at spawn (so completion never re-reads it).
  */
-function resolveIssuePipeline({ cwd, agentType }) {
+function resolveIssuePipeline({ cwd }) {
   const root = mainCheckoutOf(cwd);
   const project = projectForRepo(root || findGitRoot(cwd) || cwd);
   const repo = issuePipeline.readRepoPipeline(root, { log });
@@ -7109,7 +7111,6 @@ function resolveIssuePipeline({ cwd, agentType }) {
     global: globalPipelineLevel(),
     project: projectLevel(project),
     repo,
-    planFlag: !!getAgentConfig(agentType || 'claude').planModeFlag,
   });
   return { resolved, snapshot: { projectId: project ? project.id : null, repo: repo ? repo.pipeline : null } };
 }
@@ -7276,7 +7277,7 @@ function startIssueSession({ number, title, body, labels, url, cwd, agentType, c
   // agent-settable argument and #653's `setting=` clause exists because a model filling
   // that in silently overrode a user preference. An agent that could switch off its own
   // reporting obligation is a strictly worse version of that.
-  const { resolved: pipeline, snapshot: pipelineSnapshot } = resolveIssuePipeline({ cwd, agentType });
+  const { resolved: pipeline, snapshot: pipelineSnapshot } = resolveIssuePipeline({ cwd });
   // #651: an omitted `autopilot` means "whatever the user usually wants", not "off".
   // A hard default here is what made every MCP / skill / autonomous start ignore the
   // remembered choice — and those are the paths most runs take. Since #717 "what the user
@@ -7317,9 +7318,11 @@ function startIssueSession({ number, title, body, labels, url, cwd, agentType, c
     spawnCwd = ensureWorktree(cwd, worktree);
   }
 
+  // The plan stage is prompt text, never `--permission-mode plan` (PLAN_DEFAULT_INSTRUCTIONS
+  // in issue-pipeline.js says why), so an issue session spawns in the user's default
+  // permission mode and `planMode` stays false on its entry.
   const spawnArgs = getSpawnArgs(agentType, {
     sessionId: claudeSessionId,
-    planMode: pipeline.plan,
     worktree,
     shellId: id
   });
@@ -7331,7 +7334,7 @@ function startIssueSession({ number, title, body, labels, url, cwd, agentType, c
   const sessionEngine = spawnSession(getDefaultEngine(), id, agentType, spawnArgs, spawnCwd, { cols: 120, rows: 40, env: sessionEnv(id, { name, worktree, windowId: windowId || null, cwd: spawnCwd, agentType, configDir, codexHomeId }) });
   const engineType = sessionEngine === tmuxEngine ? 'tmux' : 'node-pty';
   logIssueStart({ number, id, source, agentType, engineType, worktree, cwd: spawnCwd, on: autopilotOn, explicit: autopilotExplicit, stages: !!stages, resume: resumeStatus, pipeline });
-  shells.set(id, { clients: new Set(), cwd: spawnCwd, claudeSessionId, agentType, codexHomeId, configDir: configDir || null, engine: sessionEngine, engineType, worktree: worktree || null, windowId: windowId || null, name, planMode: pipeline.plan, autopilot: autopilotOn, pipeline: pipelineSnapshot, resumedWorktree: resumedStamp(resumeStatus), waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now(), loading: true });
+  shells.set(id, { clients: new Set(), cwd: spawnCwd, claudeSessionId, agentType, codexHomeId, configDir: configDir || null, engine: sessionEngine, engineType, worktree: worktree || null, windowId: windowId || null, name, planMode: false, autopilot: autopilotOn, pipeline: pipelineSnapshot, resumedWorktree: resumedStamp(resumeStatus), waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now(), loading: true });
   wireShellOutput(id);
   emitSessionOpen(id);
   recordRecentSession(id);
@@ -8861,12 +8864,13 @@ function handleWsConnection(ws, req) {
       parentWorktree = parent.worktree || null;
       log(`[WS] Forking from shell ${forkFrom} (parent claude session: ${forkParentSession})`);
     } else {
-      // #717: an issue create resolves its pipeline now, from the repo the picker chose,
-      // and the `planMode` query param is ignored for it. Pure fs plus in-memory reads —
-      // the repo file is one lstat and one small read — so this connection callback stays
-      // free of subprocesses (#553).
-      if (issueStart) issuePipelineStart = resolveIssuePipeline({ cwd, agentType });
-      const wantPlan = issuePipelineStart ? issuePipelineStart.resolved.plan : planMode;
+      // #717: an issue create resolves its pipeline now, from the repo the picker chose.
+      // Pure fs plus in-memory reads — the repo file is one lstat and one small read — so
+      // this connection callback stays free of subprocesses (#553). The `planMode` query
+      // param is ignored for it: the plan stage is prompt text (PLAN_DEFAULT_INSTRUCTIONS
+      // in issue-pipeline.js), so an issue session is never spawned in plan mode.
+      if (issueStart) issuePipelineStart = resolveIssuePipeline({ cwd });
+      const wantPlan = issueStart ? false : planMode;
       spawnArgs = getSpawnArgs(agentType, {
         sessionId,
         planMode: wantPlan,
@@ -8980,13 +8984,13 @@ function handleWsConnection(ws, req) {
         // saveState() is what makes the flag survive a restart of a picker-started
         // session — the create path already saved an entry without it.
         //
-        // #717: the pipeline was resolved at create time (`issue=1`), because plan mode
-        // had to be decided then. A client that predates that flag decided plan mode in
-        // the browser, so resolve now and record the plan mode it actually spawned with.
+        // #717: the pipeline was resolved at create time (`issue=1`). A client that
+        // predates that flag sent no `issue=1`, so resolve now — nothing about the spawn
+        // depends on it, since the plan stage is prompt text rather than a spawn flag.
         let pipeline = entry.pipelineResolved;
         if (!pipeline) {
-          const r = resolveIssuePipeline({ cwd: sessionPaths(entry).repoRoot, agentType: entry.agentType });
-          pipeline = issuePipeline.withSpawnedPlan(r.resolved, entry.planMode);
+          const r = resolveIssuePipeline({ cwd: sessionPaths(entry).repoRoot });
+          pipeline = r.resolved;
           entry.pipeline = r.snapshot;
         }
         // An absent key falls back to the pipeline's merge switch, same rule as

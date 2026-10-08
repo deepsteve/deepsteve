@@ -96,8 +96,8 @@ through those, if it has a shell tool.
 The **issue pipeline** (#717, see [sessions.md](sessions.md)) maps onto the rows above, and
 each stage reaches only the agents those rows reach:
 
-- Its `plan` stage is the **Plan mode** row. For an agent without a plan flag, the start line
-  logs `plan(n/a)` and nothing is passed.
+- Its `plan` stage is prompt text plus an `inbox_ask` gate, so it reaches every agent. It
+  does not use the **Plan mode** row: no issue session spawns with a plan-mode flag.
 - Its `review` and `merge` stages are the two `issue_complete` / `share_result` rows.
 - Stage instructions and custom stages are prompt text, so they reach every agent.
 

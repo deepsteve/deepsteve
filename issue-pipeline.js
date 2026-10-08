@@ -17,16 +17,17 @@
  *
  * 1. **Built-in stages are anchors, in a fixed order.** `issue → plan → implement →
  *    review → merge`. Each one maps onto a mechanism that runs at a fixed point — plan is
- *    a spawn flag, review is a gate `issue_complete` checks before it merges — so their
- *    relative order is not configurable, and nothing can be moved around the gate. Custom
+ *    the first step of the prompt and ends in an Inbox question, review is a gate
+ *    `issue_complete` checks before it merges — so their relative order is not
+ *    configurable, and nothing can be moved around the gate. Custom
  *    stages (prompt text) go anywhere between them. "Removing" a built-in is turning it
  *    off; the normalizer re-inserts a missing one at its anchor.
  *
  * 2. **A committed repo file may only tighten** review and merge. Anyone who can push —
  *    and any agent working in the repo — can write `.deepsteve/pipeline.json`, so it may
  *    turn review ON and merge OFF, never the reverse; an entry that tries is clamped to the
- *    level below and reported in `clamped`. Plan mode is a preference, not a safety gate,
- *    so the file may switch it either way. The clamp lives in resolvePipeline(), not in
+ *    level below and reported in `clamped`. The plan stage is a preference, not a safety
+ *    gate, so the file may switch it either way. The clamp lives in resolvePipeline(), not in
  *    the normalizer, so a tampered snapshot in state.json cannot loosen anything either.
  *
  * 3. **Replace, not patch.** The most specific level that defines a pipeline supplies the
@@ -53,6 +54,21 @@ const INSTRUCTIONS_LIMIT = 400;
 const STEPS_TEXT_LIMIT = 2000;
 const PIPELINE_FILE_MAX_BYTES = 16 * 1024;
 
+// What the plan stage asks for when its row carries no instructions of its own. It is
+// prompt text, not `--permission-mode plan`: the session runs in whatever permission mode
+// the user's Claude Code defaults to, the plan goes to the Inbox as a question with a Begin
+// button, and the agent ends its turn — the answer comes back as its next prompt, so it
+// can be given from the Inbox or from the question's /v1 link without opening the tab.
+// A soft gate, on purpose. Plan mode's approval dialog lives inside the tab, plan mode
+// prompts for every MCP tool without a read-only hint, the flag was re-applied on every
+// restart until the session id changed, and a spawn flag reaches only the agents that
+// have one, where text reaches all of them. Kept within INSTRUCTIONS_LIMIT and on one
+// line, so the default is itself something a user could have typed on the row.
+const PLAN_DEFAULT_INSTRUCTIONS = 'Before you edit anything, write a short plan: approach, files to touch, risks, how you will verify. '
+  + 'Post it with mcp__deepsteve__inbox_ask (question: accept this plan and begin?; context: the plan; '
+  + 'options: Begin, Revise; urgency: blocking), then end your turn. Do not edit files or run anything that '
+  + 'changes state until the answer is Begin. On Revise, redo the plan and ask again.';
+
 const LIMITS = { maxCustomStages: MAX_CUSTOM_STAGES, label: LABEL_LIMIT, instructions: INSTRUCTIONS_LIMIT };
 
 // What the editors need to draw a built-in row. Served by GET /api/issue-pipeline so the
@@ -65,6 +81,10 @@ const BUILTIN_META = BUILTIN_STAGES.map(id => ({
   // there is no turn for instructions to land in. Anything that should happen before the
   // merge belongs on `review` or a custom stage placed before it.
   instructions: id !== 'merge',
+  // The text a row runs with when its own is empty. The editor shows it as the
+  // placeholder, never as the value: materialized into a layout it would pin every
+  // install to today's wording, the trap isDefaultLayout() exists for.
+  ...(id === 'plan' ? { defaultInstructions: PLAN_DEFAULT_INSTRUCTIONS } : {}),
 }));
 
 const DEFAULT_LAYOUT = Object.freeze({ stages: Object.freeze(BUILTIN_STAGES.map(id => Object.freeze({ id }))) });
@@ -171,14 +191,14 @@ function repoMayWrite(id, enabled) {
  *   global:  { plan, review, merge, layout }   — layout is a normalized global layout or null
  *   project: { id, name, pipeline } | null      — pipeline normalized at 'project', or null
  *   repo:    { path, pipeline } | null          — pipeline normalized at 'repo', or null
- *   planFlag: whether the agent has a plan-mode spawn flag (only Claude Code and OpenCode)
  *
- * Returns `{ level, stages, plan, review, merge, sources, clamped, planApplicable, repoPath }`.
- * `level` names whose layout won; `sources[x]` names the level that decided switch `x`
- * ('setting' for the global level, matching the #653 log wording). Every stage in
- * `stages` carries a resolved boolean `enabled`.
+ * Returns `{ level, stages, plan, review, merge, sources, clamped, repoPath }`. `level`
+ * names whose layout won; `sources[x]` names the level that decided switch `x` ('setting'
+ * for the global level, matching the #653 log wording). Every stage in `stages` carries a
+ * resolved boolean `enabled`. Nothing here depends on the agent: every stage is prompt
+ * text, so the same pipeline reaches every agent type.
  */
-function resolvePipeline({ global = {}, project = null, repo = null, planFlag = true } = {}) {
+function resolvePipeline({ global = {}, project = null, repo = null } = {}) {
   const on = { plan: !!global.plan, review: !!global.review, merge: !!global.merge };
   const sources = { plan: 'setting', review: 'setting', merge: 'setting' };
   const clamped = [];
@@ -210,22 +230,7 @@ function resolvePipeline({ global = {}, project = null, repo = null, planFlag = 
   });
   return {
     level, stages, plan: on.plan, review: on.review, merge: on.merge, sources, clamped,
-    planApplicable: !!planFlag, repoPath: (repo && repo.pipeline && repo.path) || null,
-  };
-}
-
-/**
- * The same resolution with plan mode as it was actually spawned. The picker's WebSocket
- * create decides plan mode before the `issue` message arrives; a client that predates
- * `issue=1` decided it in the browser, and the log must describe the session it got.
- */
-function withSpawnedPlan(resolved, plan) {
-  if (!!resolved.plan === !!plan) return resolved;
-  return {
-    ...resolved,
-    plan: !!plan,
-    sources: { ...resolved.sources, plan: 'explicit' },
-    stages: resolved.stages.map(s => (s.id === 'plan' ? { ...s, enabled: !!plan } : s)),
+    repoPath: (repo && repo.pipeline && repo.path) || null,
   };
 }
 
@@ -233,21 +238,27 @@ function stageLabel(s) {
   return s.label || BUILTIN_LABELS[s.id] || s.id;
 }
 
+// A row's own text, or the shipped default for a built-in that has one (only `plan`).
+function stageInstructions(s) {
+  return s.instructions || (s.id === 'plan' ? PLAN_DEFAULT_INSTRUCTIONS : '');
+}
+
 /**
- * The prompt text for the stages' instructions, or null when no enabled stage has any —
- * which is what keeps the default pipeline's prompt byte-for-byte what it was before.
+ * The prompt text for the stages' instructions, or null when no enabled stage has any.
+ * The plan stage always has some — its own, or PLAN_DEFAULT_INSTRUCTIONS — so the default
+ * pipeline's prompt carries exactly one step, and a pipeline with plan off adds nothing.
  *
  * Lists only the stages that carry text, in pipeline order. renderIssuePrompt() places it
  * after the issue (and any resume block) and before the completion instruction: these are
  * the steps between reading the issue and finishing it.
  */
 function pipelineStepsText(resolved) {
-  const steps = ((resolved && resolved.stages) || []).filter(s => s.enabled && s.instructions);
+  const steps = ((resolved && resolved.stages) || []).filter(s => s.enabled && stageInstructions(s));
   if (!steps.length) return null;
   const lines = ['Steps for this issue, in order:'];
   let used = lines[0].length;
   for (let i = 0; i < steps.length; i++) {
-    const line = `${i + 1}. ${stageLabel(steps[i])}: ${steps[i].instructions}`;
+    const line = `${i + 1}. ${stageLabel(steps[i])}: ${stageInstructions(steps[i])}`;
     if (used + line.length + 1 > STEPS_TEXT_LIMIT) {
       lines.push(`[${steps.length - i} more step(s) omitted: over the ${STEPS_TEXT_LIMIT}-character limit.]`);
       break;
@@ -260,13 +271,10 @@ function pipelineStepsText(resolved) {
 
 /**
  * `<level>:<enabled stage ids in order>` for the `[issue] #N:` start line, e.g.
- * `repo:issue>implement>run-tests>review`. Plan reads `plan(n/a)` for an agent with no
- * plan-mode flag (Codex, Hermes, Pi): the switch was on, but nothing was passed.
+ * `repo:issue>implement>run-tests>review`.
  */
 function pipelineLogLabel(resolved) {
-  const ids = resolved.stages
-    .filter(s => s.enabled)
-    .map(s => (s.id === 'plan' && !resolved.planApplicable ? 'plan(n/a)' : s.id));
+  const ids = resolved.stages.filter(s => s.enabled).map(s => s.id);
   const clamped = resolved.clamped && resolved.clamped.length ? `, clamped=${resolved.clamped.join('+')}` : '';
   return `${resolved.level}:${ids.join('>')}${clamped}`;
 }
@@ -311,6 +319,7 @@ function readRepoPipeline(repoRoot, { log = () => {} } = {}) {
 module.exports = {
   BUILTIN_STAGES, SWITCHABLE, BUILTIN_META, DEFAULT_LAYOUT, LIMITS, STAGE_ID_RE,
   MAX_CUSTOM_STAGES, INSTRUCTIONS_LIMIT, LABEL_LIMIT, STEPS_TEXT_LIMIT, PIPELINE_FILE_MAX_BYTES,
-  normalizePipeline, isDefaultLayout, resolvePipeline, withSpawnedPlan, pipelineStepsText,
+  PLAN_DEFAULT_INSTRUCTIONS,
+  normalizePipeline, isDefaultLayout, resolvePipeline, pipelineStepsText,
   pipelineLogLabel, readRepoPipeline,
 };

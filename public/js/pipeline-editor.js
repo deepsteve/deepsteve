@@ -19,13 +19,13 @@
 // UI copy per built-in. The labels themselves come from the server.
 const BUILTIN_HINTS = {
   issue: 'The issue, rendered with the prompt template.',
-  plan: 'Start the agent in plan mode (Claude Code and OpenCode have one).',
+  plan: 'The agent writes a plan, posts it to the Inbox and waits for Begin before it edits anything. Prompt text, so it reaches every agent.',
   implement: 'The agent does the work.',
   review: 'Report to the Inbox as it works, and get a human to approve a share_result before merging.',
   merge: 'Autopilot: issue_complete merges, closes the issue and closes the tab. Runs server-side, so it takes no instructions.',
 };
 
-const SWITCH_NAMES = { plan: 'plan mode', review: 'review gate', merge: 'Autopilot merge' };
+const SWITCH_NAMES = { plan: 'plan stage', review: 'review gate', merge: 'Autopilot merge' };
 
 function el(tag, props = {}, ...children) {
   const node = document.createElement(tag);
@@ -111,9 +111,14 @@ export function createPipelineEditor({ mode = 'global', builtins, limits = {}, s
       }
       card.append(head);
       if (!b || b.instructions) {
+        // A built-in with a shipped default shows it as the placeholder — what runs when
+        // the field is left empty, and what typing here replaces — never as the value,
+        // which Save would materialize into the layout.
+        const dflt = b && b.defaultInstructions;
         const text = el('textarea', {
-          className: 'pipeline-stage-instructions', rows: 2, value: row.instructions || '',
-          placeholder: b ? `Instructions for ${b.label.toLowerCase()} (optional)` : 'What the agent should do in this stage',
+          className: 'pipeline-stage-instructions', rows: dflt ? 4 : 2, value: row.instructions || '',
+          placeholder: dflt ? `Default: ${dflt}` : (b ? `Instructions for ${b.label.toLowerCase()} (optional)` : 'What the agent should do in this stage'),
+          title: dflt ? `Leave empty to use the default:\n${dflt}` : '',
         });
         if (limits.instructions) text.maxLength = limits.instructions;
         text.oninput = () => { row.instructions = text.value; };

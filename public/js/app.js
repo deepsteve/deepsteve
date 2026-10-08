@@ -4987,7 +4987,8 @@ async function showIssuePicker() {
     const label = overlay.querySelector('#issue-pipeline-label');
     if (label) {
       const where = info.level === 'project' && info.project ? `project “${info.project.name}”` : PIPELINE_LEVEL_LABELS[info.level] || info.level;
-      const plan = !info.planApplicable ? 'n/a' : (info.plan ? 'on' : 'off');
+      // The plan stage is prompt text, so it applies to every agent: on or off, never n/a.
+      const plan = info.plan ? 'on' : 'off';
       label.textContent = `Pipeline: ${where} · plan ${plan}${info.review ? ' · review' : ''}`;
       label.title = info.stages.filter(s => s.enabled).map(s => s.label || s.id).join(' → ')
         + (info.clamped.length ? `\n${info.repoPath} may only tighten review and merge; ignored: ${info.clamped.join(', ')}` : '');

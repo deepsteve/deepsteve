@@ -429,7 +429,7 @@ test('a missing cwd is refused with 400 and a code, not a 500', async () => {
 
 // --- workflow stages (#668) -------------------------------------------------
 
-test('with the stages setting off, the prompt says nothing about Inbox', async () => {
+test('with the stages setting off, the prompt carries no workflow stages', async () => {
   // Default off. The stages change what EVERY issue session is asked to do, and stage 4
   // names a tool #669 has not built — so the off path is the one that has to be exact.
   const res = await startIssueHttp({
@@ -865,7 +865,7 @@ async function api(method, url, body) {
   return { status: r.status, json: await r.json().catch(() => null) };
 }
 
-test('a committed repo file turns plan mode off, and the start line names it', async () => {
+test('a committed repo file turns the plan stage off, and the start line names it', async () => {
   writeRepoPipeline([{ id: 'plan', enabled: false }]);
   try {
     const res = await startIssueHttp({ number: 7171, title: 'repo plan off', body: 'PIPE-7171', cwd: projDir, windowId: 'win-1' });
@@ -887,11 +887,11 @@ test('a committed repo file turns plan mode off, and the start line names it', a
   }
 });
 
-test("the picker's create with issue=1 takes plan mode from the pipeline, not from the query", async () => {
+test("the picker's create with issue=1 never spawns plan mode; the default plan stage is a prompt step", async () => {
   writeRepoPipeline([{ id: 'plan', enabled: false }]);
   try {
-    // A planMode=1 in the query is what a browser deciding from /api/settings would send;
-    // with issue=1 the server's resolution wins.
+    // A planMode=1 in the query is what a browser deciding from /api/settings used to
+    // send; with issue=1 the server ignores it, and the plan stage is prompt text anyway.
     const tab = new SessionClient();
     await tab.connect({ new: '1', cwd: projDir, windowId: 'win-1', agentType: 'claude', worktree: 'github-issue-7172', issue: '1', planMode: '1' });
     opened.push(tab.session.id);
@@ -901,18 +901,23 @@ test("the picker's create with issue=1 takes plan mode from the pipeline, not fr
     tab.ws.send(JSON.stringify({ type: 'issue', loading: true, issue: { number: 7172, title: 'picker pipeline', body: 'PIPE-7172' } }));
     const line = await issueLogFor(tab.session.id);
     assert.match(line, /source=ws-issue,/);
-    assert.match(line, /pipeline=repo:/);
+    assert.match(line, /pipeline=repo:issue>implement/);
     tab.close();
   } finally {
     removeRepoPipeline();
   }
-  // And with no repo file the same create gets the global default — plan on.
+  // And with no repo file the same create gets the global default — the plan stage on,
+  // which is a step in the prompt (an Inbox question), not a spawn flag.
   const tab = new SessionClient();
   await tab.connect({ new: '1', cwd: projDir, windowId: 'win-1', agentType: 'claude', worktree: 'github-issue-7173', issue: '1' });
   opened.push(tab.session.id);
   await waitFor(() => readState()[tab.session.id] || null, 'the session to reach state.json');
-  assert.equal(readState()[tab.session.id].planMode, true);
-  assert.match(await waitFor(() => spawnArgsFor(tab.session.id), 'the stub argv'), /--permission-mode plan/);
+  assert.equal(readState()[tab.session.id].planMode, false);
+  assert.doesNotMatch(await waitFor(() => spawnArgsFor(tab.session.id), 'the stub argv'), /--permission-mode plan/);
+  tab.ws.send(JSON.stringify({ type: 'issue', loading: true, issue: { number: 7173, title: 'default pipeline', body: 'PIPE-7173' } }));
+  const line = await issueLogFor(tab.session.id);
+  assert.match(line, /pipeline=default:issue>plan>implement/);
+  await waitFor(() => tab.screen().includes('1. Plan:'), 'the plan step to reach the PTY', 30000, 250);
   tab.close();
 });
 

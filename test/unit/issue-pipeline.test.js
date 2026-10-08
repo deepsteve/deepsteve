@@ -1,9 +1,10 @@
 // Unit tests for issue-pipeline.js (#717): an issue session as an ordered list of stages,
 // configured globally, per project and per repo.
 //
-// The two properties that matter most are pinned first: the DEFAULT pipeline is exactly
-// the four settings that existed before (so there is no second code path to drift), and a
-// committed repo file can only tighten review and merge.
+// The properties that matter most are pinned first: the DEFAULT pipeline is exactly the
+// four settings that existed before (so there is no second code path to drift), its plan
+// stage is the shipped Inbox question and never a spawn flag, and a committed repo file
+// can only tighten review and merge.
 const { test } = require('node:test');
 const assert = require('node:assert');
 const fs = require('fs');
@@ -11,8 +12,8 @@ const os = require('os');
 const path = require('path');
 
 const {
-  BUILTIN_STAGES, DEFAULT_LAYOUT, MAX_CUSTOM_STAGES, INSTRUCTIONS_LIMIT, STEPS_TEXT_LIMIT,
-  PIPELINE_FILE_MAX_BYTES, normalizePipeline, isDefaultLayout, resolvePipeline, withSpawnedPlan,
+  BUILTIN_STAGES, BUILTIN_META, DEFAULT_LAYOUT, MAX_CUSTOM_STAGES, INSTRUCTIONS_LIMIT, STEPS_TEXT_LIMIT,
+  PIPELINE_FILE_MAX_BYTES, PLAN_DEFAULT_INSTRUCTIONS, normalizePipeline, isDefaultLayout, resolvePipeline,
   pipelineStepsText, pipelineLogLabel, readRepoPipeline,
 } = require('../../issue-pipeline.js');
 const { renderIssuePrompt } = require('../../issue-prompt.js');
@@ -34,12 +35,41 @@ test('with no project and no repo file, every switch is the global setting, in a
   }
 });
 
-test('the default pipeline adds nothing to the prompt — byte-for-byte the old one', () => {
+test('the default pipeline adds exactly one step to the prompt: the plan', () => {
   const r = resolvePipeline({ global: { plan: true, review: true, merge: true } });
+  assert.equal(pipelineStepsText(r), `Steps for this issue, in order:\n1. Plan: ${PLAN_DEFAULT_INSTRUCTIONS}`);
+});
+
+test('with the plan stage off, the default pipeline adds nothing — byte-for-byte the old prompt', () => {
+  const r = resolvePipeline({ global: { plan: false, review: true, merge: true } });
   assert.equal(pipelineStepsText(r), null);
   const fields = { number: 717, title: 't', body: 'b', labels: 'x', url: 'u' };
   assert.equal(renderIssuePrompt('T {{body}}', fields, { steps: pipelineStepsText(r) }),
     renderIssuePrompt('T {{body}}', fields));
+});
+
+test('the plan step is prompt text with an Inbox gate, never a spawn flag', () => {
+  // It names the tool it wants called, with the mcp__ prefix a fresh session needs, and
+  // that tool must exist — the #668 rule for the workflow stages, applied here too.
+  assert.match(PLAN_DEFAULT_INSTRUCTIONS, /mcp__deepsteve__inbox_ask/);
+  const inboxTools = fs.readFileSync(path.join(__dirname, '..', '..', 'mods', 'inbox', 'tools.js'), 'utf8');
+  assert.ok(/^ {4}inbox_ask: \{/m.test(inboxTools), 'inbox_ask must be a registered Inbox tool');
+  // It asks for the turn to end and for a Begin to arrive before anything is edited.
+  assert.match(PLAN_DEFAULT_INSTRUCTIONS, /end your turn/);
+  assert.match(PLAN_DEFAULT_INSTRUCTIONS, /until the answer is Begin/);
+  // It is itself something a user could have typed on the row, and one line of it.
+  assert.ok(PLAN_DEFAULT_INSTRUCTIONS.length <= INSTRUCTIONS_LIMIT, `${PLAN_DEFAULT_INSTRUCTIONS.length} characters`);
+  assert.ok(!PLAN_DEFAULT_INSTRUCTIONS.includes('\n'));
+  // Text on the plan row replaces it rather than adding to it.
+  const own = resolvePipeline({ global: { plan: true }, project: project([{ id: 'plan', instructions: 'Own plan text.' }]) });
+  assert.equal(pipelineStepsText(own), 'Steps for this issue, in order:\n1. Plan: Own plan text.');
+  // The resolved stages never carry the default as if someone had typed it: the editor
+  // would materialize it into the layout, the trap isDefaultLayout() exists for. The
+  // editor gets it as metadata instead, for the placeholder.
+  const r = resolvePipeline({ global: { plan: true } });
+  assert.equal(r.stages.find(s => s.id === 'plan').instructions, undefined);
+  assert.equal(BUILTIN_META.find(b => b.id === 'plan').defaultInstructions, PLAN_DEFAULT_INSTRUCTIONS);
+  assert.ok(BUILTIN_META.filter(b => b.id !== 'plan').every(b => !('defaultInstructions' in b)));
 });
 
 test('an empty global layout is the default layout, so it is never materialized', () => {
@@ -171,7 +201,7 @@ test('the repo clamp applies against the project level too, not only the global 
   assert.deepStrictEqual(r.clamped, ['review']);
 });
 
-test('plan mode is a preference: a repo file may switch it either way (#717)', () => {
+test('the plan stage is a preference: a repo file may switch it either way (#717)', () => {
   const off = resolvePipeline({ global: { plan: true }, repo: repo([{ id: 'plan', enabled: false }]) });
   assert.equal(off.plan, false);
   assert.equal(off.sources.plan, 'repo');
@@ -180,21 +210,11 @@ test('plan mode is a preference: a repo file may switch it either way (#717)', (
   assert.deepStrictEqual(off.clamped.concat(on.clamped), []);
 });
 
-test("this repo's own committed pipeline turns plan mode off and nothing else", () => {
-  const raw = JSON.parse(fs.readFileSync(path.join(__dirname, '..', '..', '.deepsteve', 'pipeline.json'), 'utf8'));
-  for (const merge of [false, true]) for (const review of [false, true]) {
-    const r = resolvePipeline({ global: { plan: true, review, merge }, repo: { path: 'x', pipeline: normalizePipeline(raw, { level: 'repo' }) } });
-    assert.deepStrictEqual({ plan: r.plan, review: r.review, merge: r.merge }, { plan: false, review, merge });
-    assert.equal(pipelineStepsText(r), null, 'it adds no prompt text');
-  }
-});
-
-test('withSpawnedPlan reports the plan mode a session actually got', () => {
-  const r = resolvePipeline({ global: { plan: true } });
-  assert.equal(withSpawnedPlan(r, true), r);
-  const off = withSpawnedPlan(r, false);
-  assert.equal(off.plan, false);
-  assert.ok(!off.stages.find(s => s.id === 'plan').enabled);
+test('this repo ships no pipeline file of its own: issues here run the shipped default', () => {
+  // The file that used to live here turned plan MODE off, back when the plan stage was
+  // `--permission-mode plan`. The plan stage is now the Inbox question, wanted here as
+  // everywhere, so the repo level says nothing.
+  assert.ok(!fs.existsSync(path.join(__dirname, '..', '..', '.deepsteve', 'pipeline.json')));
 });
 
 // --- prompt text and the log line -------------------------------------------------------
@@ -226,9 +246,9 @@ test('steps land after the issue (and resume) and before the completion instruct
   assert.ok(out.endsWith('\n\nSTAGES'));
 });
 
-test('the log label names the level and the enabled stages; plan is n/a without a flag', () => {
-  const r = resolvePipeline({ global: { plan: true, review: false, merge: true }, planFlag: false });
-  assert.equal(pipelineLogLabel(r), 'default:issue>plan(n/a)>implement>merge');
+test('the log label names the level and the enabled stages', () => {
+  const r = resolvePipeline({ global: { plan: true, review: false, merge: true } });
+  assert.equal(pipelineLogLabel(r), 'default:issue>plan>implement>merge');
   const clamped = resolvePipeline({ global: { plan: false, review: true }, repo: repo([{ id: 'review', enabled: false }]) });
   assert.equal(pipelineLogLabel(clamped), 'repo:issue>implement>review, clamped=review');
 });
