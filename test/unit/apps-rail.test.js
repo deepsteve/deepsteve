@@ -240,8 +240,10 @@ test('an app has NO ← button in the strip either, in both states (#662)', asyn
   ModManager.showTerminalForSession('sess-a');
   assert.strictEqual(ModManager.isModViewVisible(), false, 'the slot came down');
   assert.strictEqual(backBtn.style.display, 'none', 'and left no ← Inbox behind');
-  assert.strictEqual(rowsOf(rail)[0].classList.contains('active'), true,
-    'the rail row stays lit while you are away — that is what makes it the way back');
+  // #662 kept the row lit here; #727 reversed that. Lit means "on screen", or the rail shows the
+  // app selected beside whatever you left it for. Its click still raises it — see below.
+  assert.strictEqual(rowsOf(rail)[0].classList.contains('active'), false,
+    'a backgrounded app is not what you are looking at, so its row is not selected');
 
   // 2. Out on an excursion, where the same button doubles as the trail bar.
   const api = {};

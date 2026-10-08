@@ -2212,7 +2212,7 @@ function appendAppRows(rail) {
     const row = document.createElement('div');
     // .has-icon is what reveals .context-row-icon, which is the only thing left of a row once
     // the rail is collapsed to squares.
-    row.className = 'context-row app-row has-icon' + (activeView?.id === mod.id ? ' active' : '');
+    row.className = 'context-row app-row has-icon' + (_appOnScreen(mod.id) ? ' active' : '');
     row.dataset.appId = mod.id;
     row.title = mod.description || label;
 
@@ -2254,14 +2254,24 @@ function appendAppRows(rail) {
 const _appLabel = (mod) => mod.toolbar?.label || mod.name;
 
 /**
- * Which app owns the slot. A sweep over the rows we kept, not a re-render — the same
+ * Is this app what you are looking at? Occupying the slot is not enough — a backgrounded app
+ * still owns it — so its row reads as selected only while the slot is UP (#727). The projects
+ * half of the rail keys off the same fact (context-views' projectRowSelected), which is what
+ * keeps the rail to one selection: before this, an app you had left kept its row lit beside
+ * the project you had left it for.
+ */
+const _appOnScreen = (id) => modViewVisible && activeView?.id === id;
+
+/**
+ * Which app is on screen. A sweep over the rows we kept, not a re-render — the same
  * "derive it on every flip, never bookkeep it" shape as showView()'s toolbar sweep and
  * project-mods.js's paintRailRows(), and deliberately not a call back into context-views:
  * asking it to re-render the whole filter from inside a view change is a re-entrancy waiting
  * to happen (applyFilter can snap-switch a tab, which would background the view just opened).
+ * Called only from _setModViewVisible(), the one place the input changes.
  */
 function _paintAppRows() {
-  for (const [modId, row] of appRows) row.classList.toggle('active', activeView?.id === modId);
+  for (const [modId, row] of appRows) row.classList.toggle('active', _appOnScreen(modId));
 }
 
 // ─── App badges (#718) ──────────────────────────────────────────────────────────────
@@ -2631,7 +2641,6 @@ function showView(view) {
   for (const [id, btn] of toolbarButtons) {
     btn.classList.toggle('active', id === view.id);
   }
-  _paintAppRows();
 
   // An app opened earlier comes back as the page it was, already loaded and already bridged.
   if (!iframe && keptFrames.has(view.id)) {
@@ -2662,6 +2671,28 @@ function hideView(id) {
   if (activeView && activeView.id === id) _hideMod();
 }
 
+/**
+ * A project was picked, so the project is what goes on screen (#727). The ONE way every user
+ * project navigation leaves the slot — a rail press, ⌘↑/⌘↓, a project mod row pressed from
+ * another project, setActiveContext() — so none of them can do it differently. Before this,
+ * picking a project left the view only by accident, when the filter happened to snap-switch
+ * a tab; a project with no tabs, or one holding the current tab, kept the app on screen.
+ *
+ * The slot goes down exactly the way leaving for a tab takes it down (showTerminalForSession):
+ * a dismissOnLeave view is torn down, anything else is only BACKGROUNDED, so an app's row —
+ * or a mod's ← — still raises it with its state intact. No session is selected here; the
+ * caller's applyFilter() snap-switches to the project's tab or shows its empty state.
+ *
+ * It is an explicit navigation away, so an excursion's trail is spent — the same call ⌘P
+ * makes when it brings the rail back (context-views' unsuppressRail).
+ */
+function leaveForProject() {
+  if (isExcursionActive()) endExcursion({ goHome: false });
+  if (!activeView || !modViewVisible) return;
+  if (activeView.dismissOnLeave) _hideMod();
+  else _backgroundView();
+}
+
 /** The view slot's occupant id, or null. */
 function getActiveViewId() {
   return activeView?.id ?? null;
@@ -2685,6 +2716,11 @@ function _setModViewVisible(on) {
   const wasVisible = modViewVisible;
   modViewVisible = on;
   TabManager.setActive(on ? null : (getActiveSessionIdFn?.() ?? null));
+  // The rail is the same rule one level up (#727): the slot up means the app's row is the
+  // selection, and down means a project's is. Both halves repaint off this one flip — ours
+  // here, the projects' through app.js, since this file never imports context-views.
+  _paintAppRows();
+  hooks?.onViewVisibilityChanged?.(on);
   // Leaving an app is the moment its count most likely changed — you were just in it answering
   // things — so re-poll now rather than showing the old number for up to a tick (#718). On the
   // transition only: a backgrounded slot re-runs this on every tab switch.
@@ -2761,7 +2797,6 @@ function _hideMod() {
   for (const [, btn] of toolbarButtons) {
     btn.classList.remove('active');
   }
-  _paintAppRows();
 
   // Show content row, hide mod container and back button
   document.getElementById('content-row').style.display = '';
@@ -3061,11 +3096,11 @@ function _paintBackBtn() {
   // An App is never chrome in the strip — the other half of #662's rule. That issue dropped an
   // app's launcher button on the grounds that the Apps rail row is how you reach a place; this
   // button is the same launcher pointing the other way, so it goes for the same reason, and
-  // `"app": true` keeps meaning one thing rather than gaining an exception. The row stays
-  // `.active` the whole time you are away and its three-way toggle raises a backgrounded view
-  // or ends an excursion, ⌘← is the keyboard route while the ⌘P rail is closed, and the trail
-  // this used to carry is the strip's own selected tab. Non-app mods keep theirs: they have no
-  // rail row to be the way back.
+  // `"app": true` keeps meaning one thing rather than gaining an exception. The row's three-way
+  // toggle raises a backgrounded view or ends an excursion; it is lit only while the app is on
+  // screen (#727), but it is the way back whether lit or not. ⌘← is the keyboard route while
+  // the ⌘P rail is closed, and the trail this used to carry is the strip's own selected tab.
+  // Non-app mods keep theirs: they have no rail row to be the way back.
   //
   const shown = !!activeView && !modViewVisible && !_isApp(activeView.id);
   backBtn.style.display = shown ? '' : 'none';
@@ -3712,6 +3747,7 @@ export const ModManager = {
   injectBridgeAPI: _injectBridgeAPI,
   showView,
   hideView,
+  leaveForProject,
   getActiveViewId,
   isModViewVisible,
   isModActive,

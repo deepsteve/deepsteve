@@ -402,9 +402,31 @@ function updateIndicator() {
 
 // ----------------------------------------------------------------- rail (DOM)
 
+// Does this project row read as selected? Only while the view slot is DOWN (#727) — the
+// rail's half of the rule #639 gave the tab strip: with a view on screen, no project's tabs
+// are what you are looking at, so no project row may say they are. mod-manager lights an app
+// row on exactly the opposite condition, which is what makes "an app and a project both
+// selected" a state the rail cannot draw rather than one every navigation path must avoid.
+const projectRowSelected = (id) => id === activeContextId && !ModManager.isModViewVisible();
+
+// Every project row the last renderRail() drew, keyed by context id ("All" is null), so a
+// slot flip can repaint them without re-rendering the rail.
+const projectRows = new Map();
+
+/**
+ * Re-derive which project row is selected. A sweep over the rows already on screen, called
+ * (via app.js) from mod-manager's one visibility writer — deliberately not applyFilter() or
+ * renderRail(): a re-filter from inside a view change can snap-switch a tab, which would
+ * background the view that was just opened.
+ */
+export function paintProjectRows() {
+  for (const [id, row] of projectRows) row.classList.toggle('active', projectRowSelected(id));
+}
+
 function renderRail() {
   if (!rail || !railVisible()) return;
   rail.innerHTML = '';
+  projectRows.clear();
 
   // Apps (#661) — mods that are a place you work from rather than a tool you visit. Drawn by
   // mod-manager, which owns the manifests and the view slot; it appends nothing when no app is
@@ -429,9 +451,9 @@ function renderRail() {
   // `projects-list` names the one this function owns. The Apps block above is a sibling
   // .app-list, so "the first .context-list in the rail" can never come to mean something else.
   list.className = 'context-list projects-list';
-  list.appendChild(makeRow(null, 'All', activeContextId === null, null));
+  list.appendChild(makeRow(null, 'All', projectRowSelected(null), null));
   for (const ctx of visibleContexts()) {
-    list.appendChild(makeRow(ctx.id, ctx.name, ctx.id === activeContextId, ctx));
+    list.appendChild(makeRow(ctx.id, ctx.name, projectRowSelected(ctx.id), ctx));
     appendProjectModRows(list, ctx);
   }
   rail.appendChild(list);
@@ -455,7 +477,8 @@ function renderRail() {
       saveArchivedOpen();
       // Collapsing while viewing an archived context would leave the filter pointing
       // at a hidden row (and the section would just re-open) — go back to "All".
-      if (!archivedOpen && archived.some(c => c.id === activeContextId)) selectContext(null);
+      // A disclosure toggle, not a pick, so it moves the filter without leaving the slot.
+      if (!archivedOpen && archived.some(c => c.id === activeContextId)) applyContext(null);
       else renderRail();
     };
     rail.appendChild(toggle);
@@ -464,7 +487,7 @@ function renderRail() {
       const archivedList = document.createElement('div');
       archivedList.className = 'context-list context-archived-list';
       for (const ctx of archived) {
-        archivedList.appendChild(makeRow(ctx.id, ctx.name, ctx.id === activeContextId, ctx));
+        archivedList.appendChild(makeRow(ctx.id, ctx.name, projectRowSelected(ctx.id), ctx));
         appendProjectModRows(archivedList, ctx);
       }
       rail.appendChild(archivedList);
@@ -528,6 +551,7 @@ function makeRow(id, name, active, ctx) {
   // chosen icon — see #569; an uploaded image, #579, counts too); the collapsed icon
   // rail always shows a chip.
   row.className = 'context-row' + (active ? ' active' : '') + ((ctx?.icon || ctx?.iconImage) ? ' has-icon' : '');
+  projectRows.set(id, row);
 
   // Icon square (#569/#579) — see applyContextIcon for the image/emoji/glyph chain.
   const iconEl = document.createElement('span');
@@ -1049,7 +1073,20 @@ function endRowDrag() {
   renderRail(); // rebuild rows with fresh handlers / cleared drag state
 }
 
+// A user picking a project (#727): a rail press, ⌘↑/↓, the ⌘P→A chord, a project mod
+// opened from another project's row, setActiveContext(). Picking a project leaves whatever is
+// in the view slot, through ModManager's one entry point, so the project is what you see —
+// before this, an app stayed fullscreen whenever the filter had no tab to snap-switch to.
 function selectContext(id) {
+  ModManager.leaveForProject();
+  applyContext(id);
+}
+
+// Set the active project WITHOUT touching the view slot — for the paths that follow the
+// screen rather than change it. revealTabContext() is the one that matters: it runs inside
+// every excursion (visitSession → focusTab → reveal), where leaving would end the very
+// excursion that just put you there.
+function applyContext(id) {
   activeContextId = id;
   saveActive();
   notifyActive();
@@ -1066,12 +1103,12 @@ let welcomeRequested = false;
  * First open of the built-in project → ask the server for the welcome tab (#696).
  *
  * "Opened" is the project becoming the active view, not a tab being spawned in it — so the
- * hook is on the two functions that set it: selectContext (a rail press, and ⌘↑/↓ cycling)
- * and setActiveContext (the Scheduled Tasks panel, and a project mod row pressed from
- * another project).
+ * hook is in applyContext, which every pick reaches through selectContext: a rail press, ⌘↑/↓
+ * cycling, and setActiveContext (the Scheduled Tasks panel, and a project mod row pressed
+ * from another project).
  *
  * Nothing fires at page load: the active project is restored straight out of sessionStorage
- * without going through selectContext, and on a genuine first run there is nothing stored
+ * without going through applyContext, and on a genuine first run there is nothing stored
  * anyway. So the tab arrives when someone presses the row, never behind their back.
  *
  * `welcomedAt` is set optimistically for the same reason archiveContext flips `archived`
@@ -1134,10 +1171,10 @@ export function revealTabContext(tabId) {
   }
   // Archived contexts (#601) are not a jump target — a tab in one reveals as "All".
   const match = visibleContexts().find(c => tabInContext(cwd, c));
-  // The destination's view is settled BEFORE selectContext() filters, for the same reason: a
+  // The destination's view is settled BEFORE applyContext() filters, for the same reason: a
   // view it remembers that doesn't hold this tab would snap straight away from it (#726).
   if (match) cb.revealTabView?.(tabId, match);
-  selectContext(match ? match.id : null);
+  applyContext(match ? match.id : null);
   noteActiveTab(tabId);                        // record as destination's last tab (#541); self-no-ops for All
   // Explain the jump (mirrors cycleContext) — except on an excursion, where every ⌘↓ through
   // a queue would pop the same project's name and the excursion bar already says where you
@@ -1505,10 +1542,7 @@ function cycleContext(dir) {
   const next = dir > 0
     ? (idx >= order.length - 1 ? 0 : idx + 1)
     : (idx <= 0 ? order.length - 1 : idx - 1);
-  activeContextId = order[next];
-  saveActive();
-  notifyActive();
-  applyFilter();
+  selectContext(order[next]);
   showToast(activeContextId ? (getActiveContext()?.name || 'Context') : 'All tabs');
 }
 
@@ -2149,11 +2183,9 @@ export function setActiveContext(id) {
   const next = id || null;
   if (next === activeContextId) return;
   if (next && !contexts.find(c => c.id === next)) return;
-  activeContextId = next;
-  saveActive();
-  notifyActive();
-  applyFilter();
-  maybeWelcomeBuiltin(next); // opening the project from a panel is still opening it (#696)
+  // A pick like any other (#727), so it leaves the view slot — and opening the project from a
+  // panel is still opening it, so the built-in welcome fires too (#696).
+  selectContext(next);
 }
 
 export function getActiveContextId() {

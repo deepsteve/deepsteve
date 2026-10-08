@@ -73,8 +73,8 @@ Declaring it buys four things:
 and costs one: `"app": true` **implies no button of its own in the tab strip** (#662) — not the
 toolbar launcher, and not the `← <name>` back button either. The Apps section is how you get to
 a place, so it is also how you get back to one, and the `←` is only that launcher pointing the
-other way. The rail row stays lit the whole time you are away, ⌘← pops an excursion, and the
-palette entry is the route while the ⌘P rail is closed. There is no second manifest field for
+other way. The rail row raises a backgrounded app with its state intact, ⌘← pops an excursion,
+and the palette entry is the route while the ⌘P rail is closed. There is no second manifest field for
 this — one flag means one thing, so every future app inherits the decision. `toolbar.label` is
 still read: it names the rail row and the palette entry. Non-app fullscreen mods keep both
 buttons; they have no rail row to carry the job.
@@ -92,6 +92,17 @@ it subscribes once and keeps its subscriptions: excursion callbacks are scoped p
 (`getExcursion(viewId)`), so a parked app only ever hears its own trail, and ⌘↑/⌘↓ handlers are
 kept per app. A parked page is destroyed when it stops being an enabled app (`_pruneKeptFrames()`)
 or when its code changes (`handleModChanged()`).
+
+**The rail has one selection** (#727), derived from what is on screen rather than kept in sync
+by each navigation path. An app row is lit only while its app is *on screen* — occupying the slot
+is not enough, so a backgrounded app's row is unlit, though its click still raises it — and a
+project row only while the slot is *down*, for any view in it: the rule #639 gave the tab strip,
+one level up. Both repaint off `_setModViewVisible()`, the one place the slot's visibility
+changes. Picking a project — a rail press, ⌘↑/⌘↓, a project mod row pressed from another project,
+`setActiveContext()` — leaves the slot through `ModManager.leaveForProject()`, the same way
+leaving for a tab does (a `dismissOnLeave` view is torn down, anything else backgrounded), and
+ends an excursion without going home. Following a tab into its project (`revealTabContext`) is
+not a pick and leaves nothing; it runs inside every excursion.
 
 **Quiet mode** takes the host's chrome away and leaves the app alone on screen — the tab strip
 (which is also the toolbar) and the projects rail. The panels need no rule: they live in
@@ -117,8 +128,8 @@ screen — and coming home re-derives it with nothing saved or restored in betwe
 
 **Excursions** are a navigation stack owned by the host. An app calls `visitSession()` instead
 of `focusSession()`; the host hides the projects rail and filters the tab strip to the visited
-session's project. ⌘← pops one frame, as does the app's rail row, which stays lit for the whole
-errand; an emptied stack restores the app, which was only *backgrounded* — its iframe stayed
+session's project. ⌘← pops one frame, and the app's rail row ends the errand and takes you home;
+an emptied stack restores the app, which was only *backgrounded* — its iframe stayed
 loaded, so you come back to the state you left. (A non-app fullscreen mod may start an excursion
 too, and there the `← <name>` button becomes a trail: `← Tower · deepsteve / issue-661`.)
 

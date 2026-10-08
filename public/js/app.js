@@ -39,7 +39,7 @@ import { init as initHashCommands, beforeSend as hashCommandsBeforeSend, setWait
 import { init as initOverviewMode, setEnabled as setOverviewModeEnabled, setShortcut as setOverviewModeShortcut, setDefaultLayout as setOverviewDefaultLayout, toggle as toggleOverviewMode, isOverviewActive, getLayout as getOverviewLayout, updateFocus as updateOverviewFocus, onTabsReordered as onOverviewTabsReordered, syncToContext as syncOverviewToContext } from './overview-mode.js';
 import { init as initTerminalSearch, attachSearchAddon, closeIfOpen as closeTerminalSearch } from './terminal-search.js';
 import * as SessionHistory from './session-history.js';
-import { init as initContextViews, setEnabled as setContextViewsEnabled, applyFilter as refreshContextFilter, requestNewTabInContext, resolveContextRepo, chooseContextDir, setContexts as applyServerContexts, setActiveContext as setActiveContextFromPanel, getActiveContextId, getActiveContextInfo, orderRecentDirsByContext, activeContextIsEmpty, noteActiveTab, revealTabContext, showToast, setRailSuppressed, setRailQuiet, contextsForCwd } from './context-views.js';
+import { init as initContextViews, setEnabled as setContextViewsEnabled, applyFilter as refreshContextFilter, requestNewTabInContext, resolveContextRepo, chooseContextDir, setContexts as applyServerContexts, setActiveContext as setActiveContextFromPanel, getActiveContextId, getActiveContextInfo, orderRecentDirsByContext, activeContextIsEmpty, noteActiveTab, revealTabContext, showToast, setRailSuppressed, setRailQuiet, paintProjectRows, contextsForCwd } from './context-views.js';
 import * as ProjectMods from './project-mods.js';
 import * as ProjectViews from './project-views.js';
 import * as DecisionMode from './decision-mode.js';
@@ -5405,6 +5405,9 @@ async function init() {
     // #app-container; the rail's display is written inline by context-views, so it has to be
     // asked. Same one-way rule as above — mod-manager never imports context-views.
     onQuietChanged: (on) => setRailQuiet(on),
+    // The slot went up or down (#727), so the rail's selection moves between an app row and a
+    // project row. mod-manager repaints its app rows itself; the project rows are context-views'.
+    onViewVisibilityChanged: () => paintProjectRows(),
   });
 
   // Timelapse recorder (#667). After ModManager.init() — the recording dot mounts at the
