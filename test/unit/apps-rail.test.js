@@ -317,6 +317,103 @@ test('openApp is the command palette entry point', async () => {
   assert.strictEqual(ModManager.getActiveViewId(), 'inbox');
 });
 
+// ------------------------------------------------------------------------- parked apps
+//
+// Closing an app used to destroy its page, so every open was a cold load: a blank pane for
+// about a second and a half while the page compiled its JSX in the browser. The row toggles,
+// so the second click a user makes when nothing seems to happen closed it again, and the
+// Inbox read as broken. An app's page is parked instead, and comes back as it was.
+
+const framesIn = () => document.getElementById('mod-container').children.filter(c => c.tag === 'iframe');
+
+test('closing an app parks its page, and reopening shows that same page', async () => {
+  const { mod, ModManager } = await setup();
+  const rail = fakeElement();
+  mod.appendAppRows(rail);
+  const row = rowsOf(rail)[0];
+
+  row.onclick();
+  const [page] = framesIn();
+  row.onclick();                                    // close
+  assert.strictEqual(ModManager.getActiveViewId(), null);
+  assert.strictEqual(row.classList.contains('active'), false, 'closed reads as closed');
+  assert.deepStrictEqual(framesIn(), [page], 'the page is still loaded');
+  assert.strictEqual(page.style.display, 'none');
+
+  row.onclick();                                    // reopen
+  assert.strictEqual(ModManager.isModViewVisible(), true);
+  assert.deepStrictEqual(framesIn(), [page], 'and is shown again, not loaded a second time');
+  assert.strictEqual(page.style.display, '');
+});
+
+test('another view taking the slot parks an app, but still destroys a view that is not one', async () => {
+  const { ModManager } = await setup();
+  ModManager.openApp('inbox');
+  const [inbox] = framesIn();
+
+  ModManager.showView({ id: 'tower', name: 'Tower', src: '/mods/tower/index.html' });
+  const tower = framesIn().find(f => f !== inbox);
+  assert.strictEqual(inbox.style.display, 'none');
+
+  ModManager.openApp('inbox');
+  assert.deepStrictEqual(framesIn(), [inbox], 'Tower is torn down as it always was');
+  assert.strictEqual(tower.parent, null);
+});
+
+test('a parked page is dropped when its code changes, or when it stops being an app', async () => {
+  const { ModManager } = await setup();
+  ModManager.openApp('inbox');
+  ModManager.openApp('inbox');                      // open, close: parked
+  assert.strictEqual(framesIn().length, 1);
+
+  ModManager.handleModChanged('inbox');
+  assert.strictEqual(framesIn().length, 0, 'the parked copy runs the old code');
+
+  ModManager.openApp('inbox');
+  ModManager.openApp('inbox');
+  assert.strictEqual(framesIn().length, 1);
+  globalThis.fetch = () => Promise.resolve({
+    ok: true, json: () => Promise.resolve({ mods: MODS.filter(m => m.id !== 'inbox'), deepsteveVersion: '9.9.9' }),
+  });
+  await ModManager.loadAvailableMods();
+  assert.strictEqual(framesIn().length, 0, 'gone from the mod list, gone from the page');
+});
+
+test('a parked app keeps its own ⌘↑/⌘↓ handler, and never reads another app\'s trail', async () => {
+  // Before parking there was one live app page at a time, so one cycle handler was enough. A
+  // parked page does not load again, so it does not register again: the app opened second
+  // used to overwrite the first's handler, and walking the first's queue fell through to
+  // cycling projects.
+  const mods = [...MODS, { id: 'desk', name: 'Desk', entry: 'index.html', app: true }];
+  const { ModManager } = await setup({ mods, enabled: ['inbox', 'desk', 'tower', 'tasks', 'core'] });
+  const bridgeFor = (id) => {
+    const api = {};
+    ModManager.injectBridgeAPI({ contentWindow: api }, id, null);
+    return api.deepsteve;
+  };
+  const cycled = [];
+  const deskSaw = [];
+
+  ModManager.openApp('inbox');
+  const inbox = bridgeFor('inbox');
+  inbox.onExcursionCycle(({ delta }) => cycled.push(['inbox', delta]));
+
+  ModManager.openApp('desk');                       // Inbox parked
+  const desk = bridgeFor('desk');
+  desk.onExcursionCycle(({ delta }) => cycled.push(['desk', delta]));
+  desk.onExcursionChanged((ex) => deskSaw.push(ex.depth));
+
+  ModManager.openApp('inbox');                      // back, without a reload
+  inbox.visitSession('sess-b', { label: 'needs a decision' });
+  assert.strictEqual(inbox.getExcursion().depth, 1);
+
+  assert.strictEqual(ModManager.requestExcursionCycle(1), true);
+  assert.deepStrictEqual(cycled, [['inbox', 1]]);
+  assert.ok(deskSaw.length > 1, 'Desk was told when it changed');
+  assert.ok(deskSaw.every(d => d === 0), 'and was never handed Inbox\'s trail as its own');
+  assert.strictEqual(desk.getExcursion().depth, 0);
+});
+
 // ------------------------------------------------------------------ count badge (#718)
 //
 // An app that declares `badge` in its manifest gets a count on its rail row — Inbox's is how

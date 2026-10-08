@@ -79,6 +79,9 @@ let hasExplicitModPrefs = false; // true if user has saved mod prefs before
 // correctly never matches.
 let activeView = null;     // { id, name, src, sandbox, allow, persist, dismissOnLeave }
 let iframe = null;
+// Apps that have left the slot but are still loaded, parked display:none in #mod-container:
+// viewId → iframe. See _releaseIframe() for why an app's page outlives leaving it.
+const keptFrames = new Map();
 let modContainer = null;
 let backBtn = null;
 let quietBtn = null;       // quiet mode's toggle (#662) — lives IN the slot, see _paintQuietBtn
@@ -157,9 +160,11 @@ const EXCURSION_KEY = nsKey('deepsteve-excursion');
 // already well past the point where the button is the answer.
 const MAX_EXCURSION_DEPTH = 20;
 let excursion = null;                // { appId, chrome, stack: [{ sessionId, label, reason, at }] }
-// One view slot means one cycle handler; an array would need sweeping and a stale entry would
-// permanently disable the fall-back to cycling projects, which is worse than leaking it.
-let excursionCycleHandler = null;    // { viewId, cb }
+// One handler per live app page, because a kept app (see _releaseIframe) registered its handler
+// when it loaded and does not register again when it comes back. Only the handler of the app
+// that owns the excursion is ever consulted, so a parked app's entry cannot disable the
+// fall-back to cycling projects; _forgetViewCallbacks() drops it with the page.
+const excursionCycleHandlers = new Map();   // viewId → cb
 // visitSession() calls hooks.focusSession() itself, and that is a user-jump path which pushes.
 // Without this the ⌘↑/⌘↓ replace would immediately push on top of itself and the stack would
 // grow one frame per queue step — the exact thing the replace rule exists to prevent.
@@ -406,6 +411,8 @@ function init(appHooks) {
         }
       }
     }
+    // An app disabled in another tab may be parked here rather than in the slot.
+    _pruneKeptFrames();
 
     // Refresh marketplace modal toggles if open
     const overlay = document.querySelector('.modal-overlay:has(.marketplace-modal)');
@@ -426,6 +433,9 @@ function _saveEnabledMods() {
   // render. Without this, enabling an app while the rail is open shows nothing until something
   // else happens to re-render it.
   hooks?.onAppsChanged?.();
+  // The parked pages are a projection of it too. The disable paths only tear down the app IN
+  // the slot (`activeView?.id === id`), which a parked one is not.
+  _pruneKeptFrames();
   // An app just enabled needs its badge now, not at the next tick of a loop that may not be
   // running; one just disabled has its cached count dropped.
   refreshAppBadges();
@@ -600,6 +610,8 @@ async function loadAvailableMods() {
   // stays empty until something unrelated happens to re-render it. Tell the host the apps are
   // known now. (The toolbar buttons above have no such problem: they are inserted here.)
   hooks?.onAppsChanged?.();
+  // A reloaded mod list can drop an app that is parked rather than in the slot.
+  _pruneKeptFrames();
   // Their badges too (#718) — the first poll, which arms the loop if any app declares one.
   refreshAppBadges();
 
@@ -2581,7 +2593,8 @@ function _removeToolbarButton(modId) {
 
 /**
  * Put any page in the fullscreen view slot (#628). There is exactly ONE slot: showing a
- * second view replaces the first, destroying its iframe and dropping its bridge callbacks.
+ * second view replaces the first, destroying its iframe and dropping its bridge callbacks —
+ * unless the first is an app, whose page is parked instead (see _releaseIframe()).
  *
  *   id             unique; namespaced for non-mod views so it can't collide with a mod id
  *   name           back-button label ("← <name>")
@@ -2599,12 +2612,12 @@ function showView(view) {
   // A different occupant: tear its iframe down AND drop the callbacks it registered, which
   // are keyed by the id its bridge was injected under. Sweeping them was missing before
   // #628, so switching straight from one view to another leaked them against a dead iframe.
+  // An app is parked rather than torn down, and keeps its callbacks with its live page.
   if (activeView && activeView.id !== view.id) {
     // A different page took the slot — another app's rail row, a project mod — so the app that
     // lent you out is gone and its trail with it (#661).
     _abandonExcursion(activeView.id);
-    _forgetViewCallbacks(activeView.id);
-    _destroyIframe();
+    _releaseIframe(activeView.id);
   }
 
   activeView = view;
@@ -2620,14 +2633,23 @@ function showView(view) {
   }
   _paintAppRows();
 
+  // An app opened earlier comes back as the page it was, already loaded and already bridged.
+  if (!iframe && keptFrames.has(view.id)) {
+    iframe = keptFrames.get(view.id);
+    keptFrames.delete(view.id);
+    iframe.style.display = '';
+  }
+
   if (!iframe) {
-    iframe = document.createElement('iframe');
-    iframe.src = view.src;
-    iframe.setAttribute('sandbox', view.sandbox || MOD_SANDBOX);
-    if (view.allow) iframe.setAttribute('allow', view.allow);
-    modContainer.appendChild(iframe);
-    iframe.addEventListener('load', () => {
-      _injectBridgeAPI(iframe, view.id, view.bridgeTabId || null);
+    // The element, not the module variable: a parked page that reloads itself must have the
+    // bridge injected into it, not into whatever holds the slot by then.
+    const el = iframe = document.createElement('iframe');
+    el.src = view.src;
+    el.setAttribute('sandbox', view.sandbox || MOD_SANDBOX);
+    if (view.allow) el.setAttribute('allow', view.allow);
+    modContainer.appendChild(el);
+    el.addEventListener('load', () => {
+      _injectBridgeAPI(el, view.id, view.bridgeTabId || null);
     });
   }
 
@@ -2717,7 +2739,7 @@ function _forgetViewCallbacks(id) {
   // Not merely a leak: a cycle handler left pointing at a destroyed iframe realm would keep
   // requestExcursionCycle() reporting "handled", so ⌘↑/⌘↓ would stop falling back to cycling
   // projects and would simply do nothing, forever.
-  if (excursionCycleHandler?.viewId === id) excursionCycleHandler = null;
+  excursionCycleHandlers.delete(id);
 }
 
 /**
@@ -2731,9 +2753,9 @@ function _hideMod() {
   _abandonExcursion(hiddenModId);
   activeView = null;
   localStorage.removeItem(ACTIVE_VIEW_KEY);
-  _forgetViewCallbacks(hiddenModId);
-
-  _destroyIframe();
+  // Closing an app parks it. Every other path here runs after the mod has left the enabled
+  // set, so it is no longer an app and is destroyed as before.
+  _releaseIframe(hiddenModId);
 
   // Clear toolbar button states
   for (const [, btn] of toolbarButtons) {
@@ -2777,6 +2799,45 @@ function _destroyIframe() {
   if (iframe) {
     iframe.remove();
     iframe = null;
+  }
+}
+
+/**
+ * The slot lets go of the page it held under `id`. An app's page is parked, hidden, with its
+ * bridge callbacks intact, and the next open shows it as it was. Anything else is destroyed
+ * along with its callbacks.
+ *
+ * Parking is what makes an app openable. A fresh load is a blank pane for about a second and
+ * a half — the page compiles its JSX in the browser before React paints anything — and the
+ * rail row toggles. So a second click, made because nothing seemed to happen, landed on a
+ * page still loading and closed it, and the Inbox read as broken. Now that cost is paid once
+ * per page load instead of on every open. An app is a place you return to all day (#661),
+ * which is also why only apps are kept, not every mod view.
+ */
+function _releaseIframe(id) {
+  if (iframe && _isApp(id)) {
+    iframe.style.display = 'none';
+    keptFrames.set(id, iframe);
+    iframe = null;
+    return;
+  }
+  _forgetViewCallbacks(id);
+  _destroyIframe();
+}
+
+/** Destroy a parked app's page, and drop the callbacks that went with it. */
+function _dropKeptFrame(id) {
+  const el = keptFrames.get(id);
+  if (!el) return;
+  keptFrames.delete(id);
+  _forgetViewCallbacks(id);
+  el.remove();
+}
+
+/** The parked pages are a subset of the enabled apps: drop any that is no longer one. */
+function _pruneKeptFrames() {
+  for (const id of [...keptFrames.keys()]) {
+    if (!_isApp(id)) _dropKeptFrame(id);
   }
 }
 
@@ -2845,9 +2906,8 @@ function _excursionChanged() {
 }
 
 function _notifyExcursion() {
-  const state = getExcursion();
   for (const entry of CALLBACKS.excursionChanged) {
-    try { entry.cb(state); } catch (e) { console.error('Excursion callback error:', e); }
+    try { entry.cb(getExcursion(entry.modId)); } catch (e) { console.error('Excursion callback error:', e); }
   }
 }
 
@@ -2856,8 +2916,15 @@ function isExcursionActive() {
   return !!(excursion && excursion.stack.length);
 }
 
-function getExcursion() {
-  if (!isExcursionActive()) return { appId: null, depth: 0, stack: [], chrome: {} };
+/**
+ * The excursion, or the empty one. Pass `viewId` to ask as that page: an app only ever has a
+ * trail of its own. A parked app is still subscribed while another app holds the slot, and
+ * must not read that app's excursion as its own. Anything that is not an app sees it all.
+ */
+function getExcursion(viewId = null) {
+  if (!isExcursionActive() || (_isApp(viewId) && viewId !== excursion.appId)) {
+    return { appId: null, depth: 0, stack: [], chrome: {} };
+  }
   return {
     appId: excursion.appId,
     depth: excursion.stack.length,
@@ -2966,10 +3033,11 @@ function popExcursion() {
  * cycling projects instead of leaving the key dead.
  */
 function requestExcursionCycle(delta) {
-  if (!isExcursionActive() || !excursionCycleHandler) return false;
-  if (excursionCycleHandler.viewId !== excursion.appId) return false;
+  if (!isExcursionActive()) return false;
+  const cb = excursionCycleHandlers.get(excursion.appId);
+  if (!cb) return false;
   try {
-    excursionCycleHandler.cb({ delta });
+    cb({ delta });
   } catch (e) {
     console.error('Excursion cycle handler error:', e);
     return false;
@@ -3300,7 +3368,7 @@ function _injectBridgeAPI(iframeEl, modId, tabInstanceId) {
         visitSession(id, opts || {});
       },
       getExcursion() {
-        return getExcursion();
+        return getExcursion(modId);
       },
       endExcursion() {
         if (activeView?.id === modId) endExcursion();
@@ -3319,7 +3387,7 @@ function _injectBridgeAPI(iframeEl, modId, tabInstanceId) {
       onExcursionChanged(cb) {
         const entry = { modId, cb };
         CALLBACKS.excursionChanged.push(entry);
-        try { cb(getExcursion()); } catch {}
+        try { cb(getExcursion(modId)); } catch {}
         return () => {
           CALLBACKS.excursionChanged = CALLBACKS.excursionChanged.filter(e => e !== entry);
         };
@@ -3328,9 +3396,9 @@ function _injectBridgeAPI(iframeEl, modId, tabInstanceId) {
       // that knows what resolved while you were away; a snapshot taken on the way in would
       // send ⌘↓ to a row that no longer exists.
       onExcursionCycle(cb) {
-        excursionCycleHandler = { viewId: modId, cb };
+        excursionCycleHandlers.set(modId, cb);
         return () => {
-          if (excursionCycleHandler?.cb === cb) excursionCycleHandler = null;
+          if (excursionCycleHandlers.get(modId) === cb) excursionCycleHandlers.delete(modId);
         };
       },
       onSessionsChanged(cb) {
@@ -3568,6 +3636,8 @@ function handleModChanged(modId) {
   if (activeView?.id === modId && iframe) {
     iframe.src = iframe.src.replace(/(\?v=\d+)?$/, `?v=${Date.now()}`);
   }
+  // A parked copy is the old code; the next open should load the new one.
+  _dropKeptFrame(modId);
   const panelEntry = panelMods.get(modId);
   if (panelEntry) {
     // Clear stale callbacks for this mod before reload triggers re-injection

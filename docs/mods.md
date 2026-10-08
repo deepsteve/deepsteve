@@ -51,7 +51,7 @@ configure it. Settings are saved immediately to localStorage.
 
 Mods have four display modes:
 
-- **Fullscreen** — activated via a toolbar button, replaces the terminal view. Clicking a session in the mod switches back to the terminal with a back button to return. Only one fullscreen mod iframe exists at a time; it's created on show and destroyed on hide. An [App](#apps-661) has neither of those buttons — the Apps rail section and the command palette both launch it and return you to it.
+- **Fullscreen** — activated via a toolbar button, replaces the terminal view. Clicking a session in the mod switches back to the terminal with a back button to return. Only one fullscreen mod iframe is on screen at a time; it's created on show and destroyed on hide, except that an [App](#apps-661)'s is parked instead. An App has neither of those buttons — the Apps rail section and the command palette both launch it and return you to it.
 - **Panel** — docked to the right side of the terminal area, with tabs if multiple panel mods are enabled. A drag handle allows resizing. Panel iframes stay alive even when hidden, so MCP tools keep working.
 - **Tab** (`display: "tab"`) — opens as its own tab in the tab strip, offered in the new-tab menu under `tabOption.label`. `baby-browser` and `steveonardo` are the two. It gets no toolbar button.
 - **Tools-only** — no UI, no iframe, no toolbar button. Only provides MCP tools to sessions. Omit both `display` and `entry` from `mod.json`.
@@ -78,6 +78,20 @@ palette entry is the route while the ⌘P rail is closed. There is no second man
 this — one flag means one thing, so every future app inherits the decision. `toolbar.label` is
 still read: it names the rail row and the palette entry. Non-app fullscreen mods keep both
 buttons; they have no rail row to carry the job.
+
+**An app's page outlives leaving it.** Closing an app, or opening another view in its place,
+**parks** its iframe (`display: none` in `#mod-container`, bridge callbacks intact) rather than
+destroying it, and the next open shows that same page as it was. The slot still has one occupant;
+`keptFrames` in `mod-manager.js` holds the rest, and `_releaseIframe()` is the one place that
+decides between parking and destroying. Parking is what makes an app openable: a fresh load is
+a blank pane for about a second and a half while the page compiles its JSX in the browser, and
+the rail row toggles, so the second click a user makes when nothing seems to happen used to
+close a page that was still loading. Two consequences for an app author. A parked page keeps
+running, so its timers and polls keep firing while it is hidden. It also gets no new `load`, so
+it subscribes once and keeps its subscriptions: excursion callbacks are scoped per app
+(`getExcursion(viewId)`), so a parked app only ever hears its own trail, and ⌘↑/⌘↓ handlers are
+kept per app. A parked page is destroyed when it stops being an enabled app (`_pruneKeptFrames()`)
+or when its code changes (`handleModChanged()`).
 
 **Quiet mode** takes the host's chrome away and leaves the app alone on screen — the tab strip
 (which is also the toolbar) and the projects rail. The panels need no rule: they live in
@@ -546,7 +560,7 @@ Panel mod iframes are created when the mod is enabled and stay alive for the dur
 
 ### Fullscreen Mods
 
-Fullscreen mod iframes are created when shown and destroyed when hidden. If you switch to a different fullscreen mod, the previous one's iframe is destroyed first. Session and settings callbacks registered by a fullscreen mod are cleaned up on hide.
+Fullscreen mod iframes are created when shown and destroyed when hidden. If you switch to a different fullscreen mod, the previous one's iframe is destroyed first. Session and settings callbacks registered by a fullscreen mod are cleaned up on hide. An [App](#apps-661) is the exception: its iframe is parked, not destroyed, and keeps its callbacks.
 
 ### Hot Reload
 
@@ -1084,9 +1098,10 @@ panel-side match could only ever guess from the name.
 
 **Cadence.** The panel polls on its own clock — default 120s, clamped to 30s–30min — and the
 server caches per `project + label` for two minutes, with failures cached for twenty seconds and
-concurrent requests sharing one subprocess. The server cache is not redundant with the poll: a
-fullscreen mod's iframe is **destroyed on hide**, so every re-entry into the app is a fresh mount
-and an immediate fetch, and each browser window polls independently.
+concurrent requests sharing one subprocess. The server cache is not redundant with the poll:
+each browser window loads its own copy of the app and polls independently, and a reload, or
+reopening the app after its code changed, is a fresh mount and an immediate fetch. (Closing the
+app is not: an app's page is [parked](#apps-661), not destroyed.)
 
 **It never returns 500.** A missing `gh`, an unauthenticated one, a repo with no GitHub remote and
 a label the repo has never defined all produce an empty list plus an `error` string the section

@@ -18,6 +18,12 @@
       -webkit-font-smoothing: antialiased;
     }
     #inbox-root { height: 100%; }
+    /* Static, so it paints before the browser has compiled inbox.jsx — about a second and a
+       half of an otherwise empty pane on the first open. React's first render replaces it. */
+    .inbox-loading {
+      height: 100%; display: flex; align-items: center; justify-content: center;
+      color: var(--ds-text-secondary, #8b949e); font-size: 13px;
+    }
 
     button { font-family: inherit; }
     :focus-visible { outline: 2px solid var(--ds-accent, #58a6ff); outline-offset: 2px; }
@@ -39,7 +45,7 @@
   </style>
 </head>
 <body>
-  <div id="inbox-root"></div>
+  <div id="inbox-root"><div class="inbox-loading">Loading Inbox…</div></div>
   <script type="importmap">{ "imports": {
     "react": "https://esm.sh/react@18.3.1",
     "react/jsx-runtime": "https://esm.sh/react@18.3.1/jsx-runtime",
