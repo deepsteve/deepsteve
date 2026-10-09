@@ -401,7 +401,13 @@ terminal container is `display:none`, and pre-session there is no container at a
   a blocked connection is also marked reconnecting.
 
 The two need different responses from the user: orange resolves itself by waiting, red
-never will. The same split applies to the container overlay —
+never will.
+
+The **asking** mark is not a badge state. `TabManager.updateAsking` → `.tab.asking` shows its
+own orange `?` element, because it is about the agent rather than the connection and can be
+true alongside either dot. It floats on the icon's bottom-right corner in the collapsed rail.
+Its question goes in an `aria-label`, never a `title`, which would shadow the tab's name. What
+sets it is in [sessions.md](sessions.md#asking). The same split applies to the container overlay —
 `.terminal-container.auth-blocked::after` overrides "Reconnecting..." with "Signed out —
 reload to reconnect", for the same reason the reconnect banner is suppressed.
 

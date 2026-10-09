@@ -345,7 +345,9 @@ Every mod iframe gets a `deepsteve` object injected on its `window` after load. 
 Returns the deepsteve version string (e.g. `"0.3.0"`).
 
 ### `getSessions()`
-Returns an array of session objects with the current state of all sessions.
+Returns an array of session objects with the current state of all sessions:
+`{id, name, cwd, waitingForInput, asking, type}`. `asking` is null, or `{kind, text, fp}`
+while the session is showing a dialog ([sessions.md](sessions.md#asking)).
 
 ### `focusSession(id)`
 Switches from the mod view to the terminal view and focuses the given session. The mod is only *backgrounded* — for a fullscreen mod a `←` back button returns to it, and for an [App](#apps-661) the Apps rail row does (it has no strip button).
@@ -701,7 +703,8 @@ row when a dialog resolves itself in its own terminal. Questions and briefings a
 **Membership is `detectDialog()`, not `waitingForInput`.** `sessionInputState()` maps `'waiting'`
 to `'idle'`, and `'idle'` covers a session sitting at an empty composer just as much as one
 showing a modal. `waitingForInput` is only a cheap pre-filter; the positive dialog signal in
-`mods/inbox/dialog-parse.js` is what stops every agent that merely finished its turn becoming
+`dialog-parse.js` (a core module since the daemon's own **asking** signal reads it too; see
+[sessions.md](sessions.md#asking)) is what stops every agent that merely finished its turn becoming
 an inbox row. The listing reads `entry.terminalScreen.linesSync(n)` and never
 `readTerminalScreen`, which would replay the whole scrollback into a fresh emulator and `await`
 a parse queue one chatty session can defer indefinitely.
@@ -1104,7 +1107,7 @@ would routinely mark an unrelated issue #12 as in progress.
 Matching happens **server-side and on the way out, never cached**: the issue list is minutes-stale
 by design, but "which tab is on it" has to be current or a tab opened thirty seconds ago stays
 invisible for two minutes. It has to be server-side at all because the bridge's session list
-carries no `worktree` (`getSessions()` returns `{id, name, cwd, waitingForInput, type}`), so a
+carries no `worktree` (`getSessions()` returns `{id, name, cwd, waitingForInput, asking, type}`), so a
 panel-side match could only ever guess from the name.
 
 **Cadence.** The panel polls on its own clock — default 120s, clamped to 30s–30min — and the

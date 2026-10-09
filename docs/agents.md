@@ -68,6 +68,7 @@ Claude is the one agent never probed, because it is the default and the fallback
 | Fork a session | yes | — | — | — | — | — |
 | Plan mode | yes | — | — | yes | — | — |
 | Idle / waiting classification | yes | — | — | — | — | — |
+| Asking signal (a dialog, not a finished turn) | yes | — | — | — | — | — |
 | Inbox dialog answering | yes | — | — | — | — | — |
 | Decision tab answer as a tool result (`await_decision`) | yes | typed instead | — | — | — | — |
 | Inbox result gate (`share_result`) | yes | yes | — | — | — | — |
@@ -96,8 +97,11 @@ through those, if it has a shell tool.
 The **issue pipeline** (#717, see [sessions.md](sessions.md)) maps onto the rows above, and
 each stage reaches only the agents those rows reach:
 
-- Its `plan` stage is prompt text plus an `inbox_ask` gate, so it reaches every agent. It
-  does not use the **Plan mode** row: no issue session spawns with a plan-mode flag.
+- Its `plan` stage is prompt text ending in a Begin / Revise question, so it reaches every
+  agent. Claude asks with AskUserQuestion, which blocks the turn and shows up through the
+  **Asking signal** row ([sessions.md](sessions.md#asking)); other agents are told to ask in
+  text and end their turn. It does not use the **Plan mode** row: no issue session spawns with a
+  plan-mode flag.
 - Its `review` and `merge` stages are the two `issue_complete` / `share_result` rows.
 - Stage instructions and custom stages are prompt text, so they reach every agent.
 

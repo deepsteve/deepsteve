@@ -1,5 +1,5 @@
 /**
- * Dialog fixtures for mods/inbox/dialog-parse.js (#660).
+ * Dialog fixtures for dialog-parse.js (#660).
  *
  * Only the shapes test/unit/fixtures/composer-screens.js does NOT already carry.
  * PERMISSION_MENU and SELECTION_MENU live there and are imported by the test

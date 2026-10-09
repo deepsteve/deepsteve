@@ -3,7 +3,7 @@
 //
 // The properties that matter most are pinned first: the DEFAULT pipeline is exactly the
 // four settings that existed before (so there is no second code path to drift), its plan
-// stage is the shipped Inbox question and never a spawn flag, and a committed repo file
+// stage is a Begin / Revise question in the session's own tab and never a spawn flag, and a committed repo file
 // can only tighten review and merge.
 const { test } = require('node:test');
 const assert = require('node:assert');
@@ -48,15 +48,19 @@ test('with the plan stage off, the default pipeline adds nothing — byte-for-by
     renderIssuePrompt('T {{body}}', fields));
 });
 
-test('the plan step is prompt text with an Inbox gate, never a spawn flag', () => {
-  // It names the tool it wants called, with the mcp__ prefix a fresh session needs, and
-  // that tool must exist — the #668 rule for the workflow stages, applied here too.
-  assert.match(PLAN_DEFAULT_INSTRUCTIONS, /mcp__deepsteve__inbox_ask/);
-  const inboxTools = fs.readFileSync(path.join(__dirname, '..', '..', 'mods', 'inbox', 'tools.js'), 'utf8');
-  assert.ok(/^ {4}inbox_ask: \{/m.test(inboxTools), 'inbox_ask must be a registered Inbox tool');
-  // It asks for the turn to end and for a Begin to arrive before anything is edited.
-  assert.match(PLAN_DEFAULT_INSTRUCTIONS, /end your turn/);
-  assert.match(PLAN_DEFAULT_INSTRUCTIONS, /until the answer is Begin/);
+test('the plan step asks in the conversation, never through the Inbox or a spawn flag', () => {
+  // The question is a dialog in the session's own tab. AskUserQuestion blocks the turn
+  // until it is answered, and the daemon reads that dialog off the screen for the tab
+  // mark, the notification and the Inbox's blocked row — so the step must not send the
+  // agent anywhere else to ask.
+  assert.match(PLAN_DEFAULT_INSTRUCTIONS, /AskUserQuestion/);
+  assert.doesNotMatch(PLAN_DEFAULT_INSTRUCTIONS, /mcp__|inbox_/);
+  assert.match(PLAN_DEFAULT_INSTRUCTIONS, /Options: Begin, Revise\./);
+  // Nothing is edited before the answer, and Revise loops back to the plan.
+  assert.match(PLAN_DEFAULT_INSTRUCTIONS, /Wait for the answer before you edit files/);
+  assert.match(PLAN_DEFAULT_INSTRUCTIONS, /On Revise, redo the plan and ask again/);
+  // An agent without the tool still stops: it asks in text and ends its turn.
+  assert.match(PLAN_DEFAULT_INSTRUCTIONS, /Without AskUserQuestion, ask in plain text and end your turn/);
   // It is itself something a user could have typed on the row, and one line of it.
   assert.ok(PLAN_DEFAULT_INSTRUCTIONS.length <= INSTRUCTIONS_LIMIT, `${PLAN_DEFAULT_INSTRUCTIONS.length} characters`);
   assert.ok(!PLAN_DEFAULT_INSTRUCTIONS.includes('\n'));
@@ -212,7 +216,7 @@ test('the plan stage is a preference: a repo file may switch it either way (#717
 
 test('this repo ships no pipeline file of its own: issues here run the shipped default', () => {
   // The file that used to live here turned plan MODE off, back when the plan stage was
-  // `--permission-mode plan`. The plan stage is now the Inbox question, wanted here as
+  // `--permission-mode plan`. The plan stage is now a Begin / Revise question, wanted here as
   // everywhere, so the repo level says nothing.
   assert.ok(!fs.existsSync(path.join(__dirname, '..', '..', '.deepsteve', 'pipeline.json')));
 });

@@ -616,6 +616,7 @@ const TAB_INNER_HTML = `
       <span class="tab-icon" aria-hidden="true"></span>
       <span class="speaker-icon" aria-hidden="true">${SPEAKER_SVG}</span>
       <span class="tab-label"></span>
+      <span class="tab-asking" aria-label="Asking">?</span>
       <span class="tab-merge-block" aria-label="Merge blocked">&#9888;</span>
       <span class="tab-history" aria-label="History">&#10711;</span>
       <span class="close">&#10005;</span>
@@ -836,6 +837,26 @@ export const TabManager = {
   updateAuthBlocked(sessionId, on) {
     const tab = document.getElementById('tab-' + sessionId);
     if (tab) tab.classList.toggle('auth-blocked', !!on);
+  },
+
+  /**
+   * Mark a session that is showing a dialog — a permission prompt, an AskUserQuestion, a
+   * plan approval — as opposed to one sitting at its empty composer. `asking` is what the
+   * daemon read off the screen (docs/sessions.md#asking), or null.
+   *
+   * Its own glyph, not the badge slot: the blue dot means "something happened here you have
+   * not seen", which a finished turn earns too, and the orange and red dot states are about
+   * the connection. The question goes in an aria-label, not a title — a child title shadows
+   * the tab's own, which is the name.
+   */
+  updateAsking(sessionId, asking) {
+    const tab = document.getElementById('tab-' + sessionId);
+    if (!tab) return;
+    tab.classList.toggle('asking', !!asking);
+    const glyph = tab.querySelector('.tab-asking');
+    if (!glyph) return;
+    const what = asking && asking.kind === 'permission' ? 'Needs permission' : 'Asking';
+    glyph.setAttribute('aria-label', asking && asking.text ? `${what}: ${asking.text}` : what);
   },
 
   /**

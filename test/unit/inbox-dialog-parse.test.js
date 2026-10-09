@@ -1,4 +1,4 @@
-// Unit test for mods/inbox/dialog-parse.js — reading what a blocked session is
+// Unit test for dialog-parse.js — reading what a blocked session is
 // actually asking (#660).
 //
 // Why this file exists, and why it is the first thing built for Inbox: the whole
@@ -32,7 +32,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert');
 
-const dp = require('../../mods/inbox/dialog-parse.js');
+const dp = require('../../dialog-parse.js');
 const composer = require('./fixtures/composer-screens.js');
 const fx = require('./fixtures/inbox-dialogs.js');
 

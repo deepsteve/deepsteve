@@ -28,6 +28,7 @@ const { findOrphanSessions } = require('./orphan-sweep');
 const { reattachSurvivingTmuxSessions } = require('./tmux-reattach');
 const { createSessionAutoClose } = require('./session-auto-close');
 const { classifyScreenTail, CLAUDE_SCREEN_MARKERS } = require('./screen-classifier');
+const { askingSummary } = require('./dialog-parse');
 const { TerminalScreen } = require('./terminal-screen');
 const { terminalEnv } = require('./terminal-env');
 const { readComposerDraft, hasStashedDraft, isPromptStaged, isPromptOnScreen, promptDraftVerdict } = require('./composer-state');
@@ -721,8 +722,9 @@ const SETTINGS_SCHEMA = [
   { name: 'shellProfile',               type: 'string',  default: '~/.zshrc' },
   { name: 'maxIssueTitleLength',        type: 'number',  default: 25, clamp: [10, 200] },
   // The plan stage's global switch. The key predates the pipeline (#717) and kept its name;
-  // the stage it switches is prompt text with an Inbox gate (PLAN_DEFAULT_INSTRUCTIONS in
-  // issue-pipeline.js), not `--permission-mode plan` — no issue session spawns in plan mode.
+  // the stage it switches is prompt text ending in a Begin / Revise AskUserQuestion
+  // (PLAN_DEFAULT_INSTRUCTIONS in issue-pipeline.js), not `--permission-mode plan` — no
+  // issue session spawns in plan mode.
   { name: 'wandPlanMode',               type: 'boolean', default: true, broadcast: false },
   // The remembered Autopilot choice for new issue sessions (#651). It used to be a
   // per-browser localStorage flag that only the picker checkbox read, so every other
@@ -763,6 +765,9 @@ const SETTINGS_SCHEMA = [
   { name: 'cmdTabSwitchHoldMs',         type: 'number',  default: 1000, clamp: [0, Infinity], fallback: 0 },
   { name: 'commandPaletteEnabled',      type: 'boolean', default: true },
   { name: 'hashCommandsEnabled',        type: 'boolean', default: true },
+  // Browser notifications only for a session showing a dialog, never for a finished turn.
+  // Read by the client; the daemon's part is the `asking` field it computes regardless.
+  { name: 'notifyOnlyWhenAsking',       type: 'boolean', default: false },
   { name: 'contextViewsEnabled',        type: 'boolean', default: true },
   // Server-authoritative kill switch for Project Mods (#618). A mod's own enable/disable
   // is client-side localStorage and never reaches the server, so the agent-facing write
@@ -3325,12 +3330,103 @@ function computeWaiting(entry) {
 // off this transition via a one-shot e.onIdleOnce; #607 replaced that with the
 // level-triggered servePendingDelivery below, because an edge that has already
 // passed can never fire again.
+//
+// Turning ON is announced once the screen has settled, together with `asking` (see
+// checkAsking): "waiting" alone cannot say whether the agent finished its turn or is
+// showing a dialog, and the browser builds its notification from the first message it
+// gets. The flag itself flips here and now, so nothing server-side waits on the
+// announcement. Turning OFF is announced at once and clears `asking` with it.
 function setWaiting(e, id, waiting, via, extra = {}) {
   if (waiting === !!e.waitingForInput) return;
   e.waitingForInput = waiting;
   auditWaiting('transition', id, e, { to: waiting, via, screen: auditScreenTail(e, waiting ? 1500 : 300), ...extra });
-  const stateMsg = JSON.stringify({ type: 'state', waiting });
+  clearTimeout(e.askingTimer);
+  e.askingTimer = null;
+  e.waitingAnnounced = false;
+  e.askingRechecked = false;
+  if (waiting) return armAskingCheck(e, id);
+  if (e.asking) log(`[asking] ${id} answered (${via})`);
+  e.asking = null;
+  const stateMsg = JSON.stringify({ type: 'state', waiting: false, asking: null });
   e.clients.forEach((c) => c.send(stateMsg));
+}
+
+// --- Asking: which waiting sessions are showing a dialog ---
+// A waiting Claude session is either at its empty composer (it finished) or showing a
+// permission / AskUserQuestion / plan-approval dialog (it is asking). The classifier
+// cannot tell them apart from the scrollback tail, so this takes a second look at the
+// INTERPRETED screen with the same detector the Inbox's blocked row uses
+// (askingSummary in dialog-parse.js), and the two can never disagree.
+//
+// Read only once the screen has been QUIET for ASKING_SETTLE_MS: every output chunk while
+// waiting pushes the read out again. A dialog is drawn in several chunks, and so is the
+// full repaint Claude Code does when a browser reattaches; a read in the middle of either
+// sees a half-drawn dialog whose fingerprint differs from the finished one, and announced
+// a "new question" — a second notification on the first ask, and one on every reload.
+// ASKING_MAX_WAIT_MS caps the push-out so a screen that never goes quiet is still read.
+// One timer per session, read with linesSync, so no await can reorder the messages.
+const ASKING_SETTLE_MS = envMs('DEEPSTEVE_ASKING_SETTLE_MS', 150);
+const ASKING_MAX_WAIT_MS = envMs('DEEPSTEVE_ASKING_MAX_WAIT_MS', 1000);
+const ASKING_ROWS = 60;   // dialog-parse's TAIL_ROWS: a nine-option dialog fits
+
+function readAsking(e) {
+  if (!getAgentConfig(e.agentType).screenMarkers) return null;
+  const scr = e.terminalScreen;
+  if (!scr || typeof scr.linesSync !== 'function') return null;
+  try { return askingSummary(scr.linesSync(ASKING_ROWS) || []); } catch { return null; }
+}
+
+// (Re)start the quiet-period timer. The cap is measured from the first arm since the
+// last read, so a stream of chunks delays the read by at most ASKING_MAX_WAIT_MS.
+function armAskingCheck(e, id) {
+  const now = Date.now();
+  if (!e.askingTimer) e.askingDeadline = now + ASKING_MAX_WAIT_MS;
+  clearTimeout(e.askingTimer);
+  const delay = Math.max(0, Math.min(ASKING_SETTLE_MS, e.askingDeadline - now));
+  e.askingTimer = setTimeout(() => checkAsking(e, id), delay);
+  if (e.askingTimer.unref) e.askingTimer.unref();
+}
+
+// "The question changed" means what a person would read changed. Not the fingerprint: a
+// resize rewraps the dialog and moves it, and the same question at a new width is not news.
+const askingKey = (a) => (a ? `${a.kind}\n${a.text}` : '');
+
+// First call after a waiting edge: announce {type:'state', waiting:true, asking}. After
+// that, while the session stays waiting, send {type:'asking'} only when the question
+// changed — a new dialog over an idle composer, the next tab of a multi-question
+// AskUserQuestion, or Esc taking the dialog away.
+function checkAsking(e, id) {
+  e.askingTimer = null;
+  if (e.killed || shells.get(id) !== e || !e.waitingForInput) return;
+  const asking = readAsking(e);
+  e.askingSeq = e.outputSeq || 0;
+  // A repaint can leave a half-drawn dialog on screen for longer than the quiet period —
+  // measured on a browser reattach. Detected-but-unreadable is what that looks like, so it
+  // gets one more look before it is believed; a dialog that really is unreadable is only
+  // reported a settle later.
+  if (asking && !asking.text && !e.askingRechecked) {
+    e.askingRechecked = true;
+    return armAskingCheck(e, id);
+  }
+  e.askingRechecked = false;
+  // Still unreadable on the second look, while a readable question was up: a dialog is
+  // still on screen, which is all the mark claims, and the words we have are the best we
+  // will get until the repaint finishes. Never trade a readable question for an unreadable one.
+  if (asking && !asking.text && e.waitingAnnounced && e.asking && e.asking.text) return;
+  const before = askingKey(e.asking);
+  const after = askingKey(asking);
+  e.asking = asking;
+  if (!e.waitingAnnounced) {
+    e.waitingAnnounced = true;
+    if (asking) log(`[asking] ${id} ${asking.kind}: ${asking.text || '(unreadable dialog)'}`);
+    const stateMsg = JSON.stringify({ type: 'state', waiting: true, asking });
+    e.clients.forEach((c) => c.send(stateMsg));
+    return;
+  }
+  if (before === after) return;
+  log(asking ? `[asking] ${id} ${asking.kind}: ${asking.text || '(unreadable dialog)'}` : `[asking] ${id} dialog gone, still waiting`);
+  const msg = JSON.stringify({ type: 'asking', asking });
+  e.clients.forEach((c) => c.send(msg));
 }
 
 /**
@@ -3400,6 +3496,12 @@ function recordMergeAttempt(id, result) {
 function reclassifyWaiting(e, id, via) {
   const state = getAgentConfig(e.agentType).screenMarkers ? classifyScreenState(e) : 'unknown';
   if (state !== 'unknown') setWaiting(e, id, state === 'waiting', via);
+  // Waiting, and the screen moved since the last look: look again once it is quiet. A new
+  // chunk restarts a pending look (the debounce above); the 1s sweep only starts one that
+  // is missing, and is free for a quiet session because outputSeq has not moved.
+  if (e.waitingForInput && (e.outputSeq || 0) !== e.askingSeq && (via === 'output' || !e.askingTimer)) {
+    armAskingCheck(e, id);
+  }
   servePendingDelivery(e, id, state);
 }
 
@@ -3515,6 +3617,8 @@ function disposeTerminalScreen(entry) {
 function killShell(entry, id, reason = 'closed') {
   if (entry.killed) return;
   entry.killed = true;
+  clearTimeout(entry.askingTimer);
+  entry.askingTimer = null;
   disposeTerminalScreen(entry);
   // Record why this session is closing; the engine 'exit' funnel reads it when the
   // pty actually exits (closeReasons survives the shells.delete that happens first).
@@ -6292,6 +6396,8 @@ app.get('/api/shells/:id/state', (req, res) => {
   if (!entry) return res.status(404).json({ error: 'Shell not found' });
   res.json({
     waitingForInput: entry.waitingForInput || false,
+    // What the session is asking while it shows a dialog, else null (docs/sessions.md#asking).
+    asking: (entry.waitingForInput && entry.asking) || null,
     lastBelTime: entry.lastBelTime || null,
     lastInputTime: entry.lastInputTime || null,
     lastActivity: entry.lastActivity || null,
@@ -8940,7 +9046,7 @@ function handleWsConnection(ws, req) {
   // pingPong: capability flag (#563) — clients only send {type:'ping'} probes when
   // the server advertises it, because an older server would type the raw JSON into
   // the PTY (unknown control messages fall through to the input write).
-  ws.send(JSON.stringify({ type: 'session', id, restored: entry.restored || false, cwd: entry.cwd, name: entry.name || null, agentType: entry.agentType || 'claude', configDir: entry.configDir || null, engineType: entry.engineType || 'node-pty', claudeSessionId: entry.claudeSessionId || null, worktree: entry.worktree || null, autopilot: !!entry.autopilot, scrollback: hasScrollback, existingClients, waitingForInput: entry.waitingForInput || false, mergeBlock: entry.mergeBlock || null, pingPong: true }));
+  ws.send(JSON.stringify({ type: 'session', id, restored: entry.restored || false, cwd: entry.cwd, name: entry.name || null, agentType: entry.agentType || 'claude', configDir: entry.configDir || null, engineType: entry.engineType || 'node-pty', claudeSessionId: entry.claudeSessionId || null, worktree: entry.worktree || null, autopilot: !!entry.autopilot, scrollback: hasScrollback, existingClients, waitingForInput: entry.waitingForInput || false, asking: (entry.waitingForInput && entry.asking) || null, mergeBlock: entry.mergeBlock || null, pingPong: true }));
 
   // Send buffered scrollback so the client can render the terminal immediately
   if (hasScrollback) {

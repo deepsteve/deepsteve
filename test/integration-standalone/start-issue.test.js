@@ -907,7 +907,7 @@ test("the picker's create with issue=1 never spawns plan mode; the default plan 
     removeRepoPipeline();
   }
   // And with no repo file the same create gets the global default — the plan stage on,
-  // which is a step in the prompt (an Inbox question), not a spawn flag.
+  // which is a step in the prompt (a Begin / Revise question), not a spawn flag.
   const tab = new SessionClient();
   await tab.connect({ new: '1', cwd: projDir, windowId: 'win-1', agentType: 'claude', worktree: 'github-issue-7173', issue: '1' });
   opened.push(tab.session.id);

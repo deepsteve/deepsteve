@@ -580,7 +580,40 @@ function lastAgentLine(lines, max = 200) {
   return fallback;
 }
 
+// How much of a question travels with the asking signal. It is a notification body and
+// a tooltip, not the dialog: the Inbox and the tab itself show the whole thing.
+const ASKING_TEXT_MAX = 200;
+
+/**
+ * What a session is asking, or null when no dialog is on screen — the daemon's
+ * **asking** signal (see docs/sessions.md#asking).
+ *
+ * The daemon's waiting flag is true both for a dialog and for an agent that simply
+ * finished its turn, which is why a notification could never say which. This is the
+ * second look, taken once the flag is already true: detectDialog() is the membership
+ * gate, exactly as it is for the Inbox's blocked row, so the two can never disagree
+ * about whether a tab is asking.
+ *
+ * `text` is what to show: the question of an AskUserQuestion, or for a permission
+ * dialog the tool line above "Do you want to proceed?" — parseDialog's headline, which
+ * already makes that choice. An unreadable dialog is still asking, with empty text.
+ * `fp` is dialogFingerprint(), so a repaint of the same question is not a new one and
+ * moving the cursor between options is not either.
+ */
+function askingSummary(lines) {
+  const detected = detectDialog(lines);
+  if (!detected) return null;
+  const parsed = parseDialog(lines);
+  const text = parsed ? str(parsed.headline || parsed.question).replace(/\s+/g, ' ').trim() : '';
+  return {
+    kind: detected.kind,
+    text: text.length > ASKING_TEXT_MAX ? text.slice(0, ASKING_TEXT_MAX - 1) + '\u2026' : text,
+    fp: dialogFingerprint(lines),
+  };
+}
+
 module.exports = {
+  askingSummary,
   detectDialog,
   dialogFingerprint,
   screenFingerprint,

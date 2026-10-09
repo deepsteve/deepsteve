@@ -19,7 +19,7 @@
 // UI copy per built-in. The labels themselves come from the server.
 const BUILTIN_HINTS = {
   issue: 'The issue, rendered with the prompt template.',
-  plan: 'The agent writes a plan, posts it to the Inbox and waits for Begin before it edits anything. Prompt text, so it reaches every agent.',
+  plan: 'The agent writes a plan in the conversation, then asks Begin or Revise in its tab and edits nothing until you answer. Prompt text, so it reaches every agent.',
   implement: 'The agent does the work.',
   review: 'Report to the Inbox as it works, and get a human to approve a share_result before merging.',
   merge: 'Autopilot: issue_complete merges, closes the issue and closes the tab. Runs server-side, so it takes no instructions.',

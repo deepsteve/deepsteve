@@ -209,17 +209,37 @@ if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('/sw.js');
 }
 
-function showNotification(id, name) {
-  if (notifPermission !== 'granted') return;
-  if (activeId === id && document.hasFocus()) return;
-  const last = notifCooldown.get(id) || 0;
-  if (Date.now() - last < COOLDOWN_MS) return;
+// The notifyOnlyWhenAsking setting: with it on, a session that merely finished its
+// turn stays quiet and only a dialog notifies.
+let notifyOnlyWhenAsking = false;
 
-  notifCooldown.set(id, Date.now());
-  const notif = new Notification('Claude needs attention', {
-    body: `"${name}" is waiting for input`,
-    tag: id
-  });
+// What a notification says, from what the daemon saw on the session's screen
+// (docs/sessions.md#asking). A dialog is a question you have to answer; an empty
+// composer is a turn that finished.
+function notificationText(name, asking) {
+  if (asking && asking.kind === 'permission') {
+    return { title: `"${name}" needs permission`, body: asking.text || 'A permission dialog is waiting' };
+  }
+  if (asking) return { title: `"${name}" is asking`, body: asking.text || 'A question is waiting for your answer' };
+  return { title: `"${name}" finished`, body: 'Waiting for input' };
+}
+
+function showNotification(id, name, asking = null) {
+  if (notifPermission !== 'granted') return;
+  if (notifyOnlyWhenAsking && !asking) return;
+  if (activeId === id && document.hasFocus()) return;
+  // Cooled down per QUESTION, not per session: a turn that finishes and then, seconds
+  // later, asks something has two things to say, and the second is the one that matters.
+  const key = `${id}|${asking ? asking.fp : ''}`;
+  const now = Date.now();
+  if (now - (notifCooldown.get(key) || 0) < COOLDOWN_MS) return;
+  for (const [k, t] of notifCooldown) if (now - t >= COOLDOWN_MS) notifCooldown.delete(k);
+  notifCooldown.set(key, now);
+
+  const { title, body } = notificationText(name, asking);
+  // One notification per session (the tag), so a question replaces the "finished" it
+  // followed; renotify makes that replacement alert again instead of swapping silently.
+  const notif = new Notification(title, { body, tag: id, renotify: !!asking });
   notif.onclose = () => activeNotifications.delete(id);
   activeNotifications.set(id, notif);
 }
@@ -288,6 +308,9 @@ function applySettings(settings) {
   }
   if (settings.hashCommandsEnabled !== undefined) {
     setHashCommandsEnabled(settings.hashCommandsEnabled);
+  }
+  if (settings.notifyOnlyWhenAsking !== undefined) {
+    notifyOnlyWhenAsking = !!settings.notifyOnlyWhenAsking;
   }
   if (settings.overviewModeEnabled !== undefined) {
     setOverviewModeEnabled(settings.overviewModeEnabled);
@@ -373,7 +396,11 @@ window.addEventListener('focus', () => {
 
 function updateTitle() {
   const count = [...sessions.values()].filter(s => s.hasUnseenActivity).length;
-  document.title = count > 0 ? `(${count}) deepsteve` : 'deepsteve';
+  // A leading "?" while any session is showing a dialog: the browser tab's title is what
+  // you see from another tab or app, and "(3)" alone cannot say whether one of the three
+  // is waiting on a decision.
+  const asking = [...sessions.values()].some(s => s.asking);
+  document.title = `${asking ? '? ' : ''}${count > 0 ? `(${count}) ` : ''}deepsteve`;
 }
 
 // The #empty-state welcome screen covers the terminal area both when there are no
@@ -473,6 +500,7 @@ function getSessionList() {
     name: s.name || getDefaultTabName(s.cwd),
     cwd: s.cwd,
     waitingForInput: s.waitingForInput || false,
+    asking: s.asking || null,
     type: s.type || 'terminal',
   }));
 }
@@ -869,6 +897,7 @@ settingsBtn?.addEventListener('click', async () => {
   // menu claiming ⌘⇧/ can't leave the overlay unreachable.
   const currentShortcutsHelpShortcut = [].concat(settingsData.shortcutsHelpShortcut || ['Meta+Shift+?', 'Meta+/']);
   const currentHashCommandsEnabled = settingsData.hashCommandsEnabled !== undefined ? settingsData.hashCommandsEnabled : true;
+  const currentNotifyOnlyWhenAsking = !!settingsData.notifyOnlyWhenAsking;
   const currentContextViewsEnabled = settingsData.contextViewsEnabled !== undefined ? settingsData.contextViewsEnabled : true;
   const currentProjectModsEnabled = settingsData.projectModsEnabled !== false;
   const currentOverviewDefaultLayout = settingsData.overviewDefaultLayout || 'tall';
@@ -1061,6 +1090,16 @@ settingsBtn?.addEventListener('click', async () => {
         </label>
         <p style="font-size: 11px; color: var(--ds-text-secondary); margin-top: 4px;">
           Layout used when entering overview mode (\u2318O). Tall stacks vertically; Tiled uses a 2-row grid.
+        </p>
+      </div>
+      <div class="settings-section">
+        <h3>Notifications</h3>
+        <label style="font-size: 13px; color: var(--ds-text-primary); cursor: pointer; display: flex; align-items: center; gap: 8px;">
+          <input type="checkbox" id="notify-only-when-asking" ${currentNotifyOnlyWhenAsking ? 'checked' : ''} style="accent-color: var(--ds-accent-green);">
+          Only when a session is asking
+        </label>
+        <p style="font-size: 11px; color: var(--ds-text-secondary); margin-top: 4px;">
+          A session showing a permission prompt or a question gets a notification and a <b>?</b> on its tab. With this on, a session that just finished its turn stays quiet. Off by default.
         </p>
       </div>
       <div class="settings-section">
@@ -1709,6 +1748,7 @@ settingsBtn?.addEventListener('click', async () => {
       shortcutsHelpShortcut = overlay.querySelector('#shortcuts-help-shortcut').value;
     }
     const hashCommandsEnabled = overlay.querySelector('#hash-commands-enabled').checked;
+    const notifyOnlyWhenAskingChecked = overlay.querySelector('#notify-only-when-asking').checked;
     const contextViewsEnabled = overlay.querySelector('#context-views-enabled').checked;
     const timelapseEnabled = overlay.querySelector('#timelapse-enabled').checked;
     const timelapseIntervalMinutes = Math.max(1, Math.min(60, Math.round(Number(overlay.querySelector('#timelapse-interval').value)) || 5));
@@ -1774,7 +1814,7 @@ settingsBtn?.addEventListener('click', async () => {
     const preventSleepWhileActive = overlay.querySelector('#prevent-sleep-while-active').checked;
     const inheritRemoteControl = overlay.querySelector('#inherit-rc-newtab').checked;
     const inheritRemoteControlOnFork = overlay.querySelector('#inherit-rc-fork').checked;
-    const settingsPayload = { shellProfile, maxIssueTitleLength: newMaxTitle, ...pipelinePayload, wandPromptTemplate, symlinkWorktreeSettings, cmdTabSwitch, cmdTabSwitchHoldMs, commandPaletteEnabled, commandPaletteShortcut, shortcutsHelpEnabled, shortcutsHelpShortcut, hashCommandsEnabled, contextViewsEnabled, projectModsEnabled, timelapseEnabled, timelapseIntervalMinutes, metaControlsEnabled, inheritRemoteControl, inheritRemoteControlOnFork, overviewDefaultLayout, enabledAgents, ...agentBinaries, ...(selectedEngine ? { engine: selectedEngine } : {}), scrollbackKB, recentSessionsLimit, autoUpdateCheckEnabled, autoUpdateCheckIntervalHours, autoUpdateApply, sessionLogEnabled, timecardEnabled, timecardSampleMinutes, scheduledTasksEnabled, scheduledTasksOpenInBackground, scheduledDefaultModel, scheduledDefaultEffort, preventSleepWhileActive, customAgentConfigs };
+    const settingsPayload = { shellProfile, maxIssueTitleLength: newMaxTitle, ...pipelinePayload, wandPromptTemplate, symlinkWorktreeSettings, cmdTabSwitch, cmdTabSwitchHoldMs, commandPaletteEnabled, commandPaletteShortcut, shortcutsHelpEnabled, shortcutsHelpShortcut, hashCommandsEnabled, notifyOnlyWhenAsking: notifyOnlyWhenAskingChecked, contextViewsEnabled, projectModsEnabled, timelapseEnabled, timelapseIntervalMinutes, metaControlsEnabled, inheritRemoteControl, inheritRemoteControlOnFork, overviewDefaultLayout, enabledAgents, ...agentBinaries, ...(selectedEngine ? { engine: selectedEngine } : {}), scrollbackKB, recentSessionsLimit, autoUpdateCheckEnabled, autoUpdateCheckIntervalHours, autoUpdateApply, sessionLogEnabled, timecardEnabled, timecardSampleMinutes, scheduledTasksEnabled, scheduledTasksOpenInBackground, scheduledDefaultModel, scheduledDefaultEffort, preventSleepWhileActive, customAgentConfigs };
     let resp = await fetch('/api/settings', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1793,6 +1833,7 @@ settingsBtn?.addEventListener('click', async () => {
     setShortcutsHelpEnabled(shortcutsHelpEnabled);
     setShortcutsHelpShortcut(shortcutsHelpShortcut);
     setHashCommandsEnabled(hashCommandsEnabled);
+    notifyOnlyWhenAsking = notifyOnlyWhenAskingChecked;
     setContextViewsEnabled(contextViewsEnabled);
     ProjectViews.render();   // see the settings-broadcast twin: applyFilter() skips it with Projects off
     setTimelapseEnabled(timelapseEnabled);
@@ -2065,6 +2106,9 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
             const sess = sessions.get(msg.id);
             if (sess) {
               sess.waitingForInput = true;
+              sess.asking = msg.asking || null;
+              TabManager.updateAsking(msg.id, sess.asking);
+              updateTitle();
               if (msg.id === activeId) setHashCommandsWaiting(true);
               notifyTabsChanged();
             }
@@ -2172,6 +2216,8 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
         if (entry) {
           const [sid, s] = entry;
           s.waitingForInput = msg.waiting;
+          s.asking = msg.waiting ? (msg.asking || null) : null;
+          TabManager.updateAsking(sid, s.asking);
           if (sid === activeId) setHashCommandsWaiting(msg.waiting);
           s.scrollControl.syncViewport();
           if (msg.waiting && activeId !== sid) {
@@ -2181,8 +2227,29 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
           updateTitle();
           updateAppBadge();
           if (msg.waiting) {
-            showNotification(sid, s.name || getDefaultTabName(s.cwd));
+            showNotification(sid, s.name || getDefaultTabName(s.cwd), s.asking);
           }
+          notifyTabsChanged();
+        }
+      } else if (msg.type === 'asking') {
+        // The question changed while the session stayed waiting: a dialog appeared over an
+        // idle composer, a multi-question dialog moved on, or Esc took it away.
+        const entry = [...sessions.entries()].find(([, s]) => s.ws === ws);
+        if (entry) {
+          const [sid, s] = entry;
+          const wasAsking = !!s.asking;
+          s.asking = s.waitingForInput ? (msg.asking || null) : null;
+          TabManager.updateAsking(sid, s.asking);
+          // News only when it STARTS asking. The next tab of a multi-question dialog is the
+          // same conversation you are already in, and alerting on it is noise.
+          const started = !!s.asking && !wasAsking;
+          if (started && activeId !== sid) {
+            s.hasUnseenActivity = true;
+            TabManager.updateBadge(sid, true);
+            updateAppBadge();
+          }
+          updateTitle();
+          if (started) showNotification(sid, s.name || getDefaultTabName(s.cwd), s.asking);
           notifyTabsChanged();
         }
       } else if (msg.type === 'tasks') {
@@ -5431,6 +5498,7 @@ async function init() {
         type: s.type || 'terminal',
         cwd: s.cwd || null,
         waitingForInput: !!s.waitingForInput,
+        asking: s.asking || null,
         hasUnseenActivity: !!s.hasUnseenActivity,
         modId: s.modId || null,
         projectModId: s.projectModId || null,

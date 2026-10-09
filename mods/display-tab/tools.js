@@ -6,7 +6,7 @@ const { randomUUID } = require('crypto');
 const { resolveHtml } = require('../../html-source.js');
 const decision = require('./decision.js');
 // The same "is a modal on screen?" gate Inbox's chat endpoint uses, rather than a second one.
-const dialogParse = require('../inbox/dialog-parse.js');
+const dialogParse = require('../../dialog-parse');
 const projectScope = require('../../project-scope');
 const { cleanSpawnView, SPAWN_VIEW_DESCRIPTION } = require('../project-mods/tools.js');
 

@@ -18,6 +18,8 @@ const vm = require('vm');
 const { classifyScreenTail, CLAUDE_SCREEN_MARKERS } = require('../../screen-classifier');
 const { fixtures } = require('./fixtures/screen-tails');
 const { readComposerDraft, hasStashedDraft } = require('../../composer-state');
+const { askingSummary } = require('../../dialog-parse');
+const DIALOGS = require('./fixtures/inbox-dialogs');
 const COMPOSER = require('./fixtures/composer-screens');
 
 const serverSource = fs.readFileSync(path.join(__dirname, '..', '..', 'server.js'), 'utf8');
@@ -83,6 +85,8 @@ function makeHarness({ agentType = 'claude', waitingForInput = true, screen = 'u
     auditWaiting: () => {},
     auditScreenTail: () => '',
     classifyScreenTail,
+    askingSummary,
+    envMs: (_name, fallback) => fallback,
     readComposerDraft,
     hasStashedDraft,
     SUBMIT_TIMINGS: { screenLines: 40 },
@@ -263,7 +267,9 @@ test('an inherited /rc still submits before the issue prompt', async () => {
 
   h.setScreen('waiting');
   h.sweep();
-  await h.step();
+  // This waiting edge also arms the asking check, which settles sooner than the queued
+  // submit, so step until the submit has had its turn rather than exactly once.
+  while (h.submits.length < 2 && await h.step()) { /* next timer */ }
   assert.deepStrictEqual(h.submits.map((s) => s.text), ['/rc', 'do the issue']);
   assert.ok(h.windowMsgs.some((m) => m.type === 'prompt-submitted'), 'the banner clears only after the LAST prompt');
   assert.strictEqual(h.windowMsgs.filter((m) => m.type === 'prompt-submitted').length, 1);
@@ -406,4 +412,201 @@ test('midTurn: a suggested prompt in the composer is not a draft — no stash, t
   assert.deepStrictEqual(h.entry.keys, [], 'pressed ctrl+s on a suggestion');
   assert.deepStrictEqual(h.submits.map((s) => s.text), ['decision answer']);
   screen.dispose();
+});
+
+// --- asking: a dialog on a waiting screen (docs/sessions.md#asking) ----------
+//
+// The waiting flag cannot say whether an agent finished or is showing a dialog. The
+// daemon takes a second look at the interpreted screen one settle after the edge and
+// announces both together, then speaks again only when the question changes. These run
+// the real setWaiting / reclassifyWaiting / checkAsking from server.js.
+
+const askings = (h) => h.broadcasts.filter((b) => b.type === 'asking');
+
+test('a finished turn is announced as waiting, not asking, one settle after the edge', async () => {
+  const h = makeHarness({ waitingForInput: false, screen: 'waiting' });
+  h.entry.composerLines = COMPOSER.EMPTY_COMPOSER;
+  h.sweep();
+  assert.strictEqual(h.entry.waitingForInput, true, 'the flag itself flips at once');
+  assert.deepStrictEqual(h.broadcasts, [], 'the announcement waits for the screen to settle');
+  assert.ok(await h.step());
+  assert.deepStrictEqual(h.broadcasts, [{ type: 'state', waiting: true, asking: null }]);
+});
+
+test('a dialog is announced as asking, with its question', async () => {
+  const h = makeHarness({ waitingForInput: false, screen: 'waiting' });
+  h.entry.composerLines = DIALOGS.MULTI_QUESTION;
+  h.sweep();
+  await h.step();
+  assert.strictEqual(h.broadcasts.length, 1);
+  const [msg] = h.broadcasts;
+  assert.deepStrictEqual({ type: msg.type, waiting: msg.waiting, kind: msg.asking.kind, text: msg.asking.text },
+    { type: 'state', waiting: true, kind: 'question', text: 'How wide should the shared-jump wiring be?' });
+  assert.ok(h.logs.some((l) => l.startsWith(`[asking] ${ID} question: How wide`)), h.logs.join('\n'));
+});
+
+test('while still waiting, only a new question is news', async () => {
+  const h = makeHarness({ waitingForInput: false, screen: 'waiting' });
+  h.entry.composerLines = COMPOSER.EMPTY_COMPOSER;
+  h.sweep();
+  await h.step();
+
+  // Quiet sweeps cost nothing: the screen has not moved since the last look.
+  const before = h.timers.length;
+  h.sweep(); h.sweep();
+  assert.strictEqual(h.timers.length, before, 'no output, no re-read');
+
+  // A permission dialog appears over the idle composer.
+  h.entry.composerLines = DIALOGS.PERMISSION_CURSOR_MID;
+  h.entry.outputSeq = 1;
+  h.sweep();
+  await h.step();
+  assert.deepStrictEqual(askings(h).map((m) => [m.asking.kind, m.asking.text]),
+    [['permission', 'Bash(rm -rf node_modules)']]);
+
+  // The cursor moves: the same question, so nothing is sent.
+  h.entry.composerLines = DIALOGS.PERMISSION_CURSOR_LAST;
+  h.entry.outputSeq = 2;
+  h.sweep();
+  await h.step();
+  assert.strictEqual(askings(h).length, 1, 'arrowing between options is not a new question');
+
+  // Esc: the dialog goes and the session is still at its prompt.
+  h.entry.composerLines = COMPOSER.EMPTY_COMPOSER;
+  h.entry.outputSeq = 3;
+  h.sweep();
+  await h.step();
+  assert.deepStrictEqual(askings(h).at(-1), { type: 'asking', asking: null });
+  assert.ok(!h.broadcasts.some((b) => b.type === 'state' && b.waiting === false), 'still waiting throughout');
+});
+
+test('leaving waiting clears asking at once, and a pending look never announces late', async () => {
+  const h = makeHarness({ waitingForInput: false, screen: 'waiting' });
+  h.entry.composerLines = DIALOGS.MULTI_QUESTION;
+  h.sweep();                       // edge on, the look is pending
+  h.setScreen('working');
+  h.sweep();                       // edge off before the look ran
+  assert.deepStrictEqual(h.broadcasts, [{ type: 'state', waiting: false, asking: null }]);
+  while (await h.step()) { /* drain */ }
+  assert.ok(!h.broadcasts.some((b) => b.waiting === true || b.type === 'asking'),
+    `a cancelled look must stay cancelled: ${JSON.stringify(h.broadcasts)}`);
+  assert.strictEqual(h.entry.asking, null);
+});
+
+test('a session that answered its dialog is announced as no longer asking', async () => {
+  const h = makeHarness({ waitingForInput: false, screen: 'waiting' });
+  h.entry.composerLines = DIALOGS.PERMISSION_CURSOR_MID;
+  h.sweep();
+  await h.step();
+  assert.ok(h.entry.asking);
+  h.setScreen('working');          // the answer started the turn again
+  h.sweep();
+  assert.deepStrictEqual(h.broadcasts.at(-1), { type: 'state', waiting: false, asking: null });
+  assert.ok(h.logs.some((l) => l === `[asking] ${ID} answered (sweep)`), h.logs.join('\n'));
+});
+
+test('a dialog still being drawn is read once it is finished, and announced once', async () => {
+  // A dialog arrives in several chunks, and so does the full repaint a browser reattach
+  // causes. Reading mid-draw saw a half-drawn dialog — a different fingerprint — and
+  // announced a second "new" question: two notifications on the first ask, one per reload.
+  const h = makeHarness({ waitingForInput: false, screen: 'waiting' });
+  h.entry.composerLines = DIALOGS.SINGLE_OPTION;         // detected, not yet readable
+  h.sweep();                                            // the waiting edge
+  for (let i = 1; i <= 4; i++) {
+    h.advance(100);
+    h.entry.outputSeq = i;
+    h.reclassifyWaiting(h.entry, ID, 'output');          // each chunk restarts the quiet period
+    await h.runDue();
+  }
+  assert.deepStrictEqual(h.broadcasts, [], 'nothing is announced while the screen is still moving');
+  h.entry.composerLines = DIALOGS.MULTI_QUESTION;        // the last chunk completes the dialog
+  h.entry.outputSeq = 5;
+  h.reclassifyWaiting(h.entry, ID, 'output');
+  h.advance(150);
+  await h.runDue();
+  assert.strictEqual(h.broadcasts.length, 1, JSON.stringify(h.broadcasts));
+  assert.strictEqual(h.broadcasts[0].asking.text, 'How wide should the shared-jump wiring be?');
+
+  // A reattach repaints the same dialog: same fingerprint once quiet, so nothing is sent.
+  for (let i = 6; i <= 8; i++) {
+    h.entry.composerLines = i < 8 ? DIALOGS.SINGLE_OPTION : DIALOGS.MULTI_QUESTION;
+    h.entry.outputSeq = i;
+    h.reclassifyWaiting(h.entry, ID, 'output');
+    h.advance(60);
+    await h.runDue();
+  }
+  h.advance(150);
+  await h.runDue();
+  assert.strictEqual(h.broadcasts.length, 1, `a repaint is not a new question: ${JSON.stringify(h.broadcasts)}`);
+});
+
+test('a screen that never goes quiet is still read within the cap', async () => {
+  const h = makeHarness({ waitingForInput: false, screen: 'waiting' });
+  h.entry.composerLines = COMPOSER.EMPTY_COMPOSER;
+  h.sweep();
+  const edgeAt = h.now;
+  let announcedAt = null;
+  for (let i = 1; i <= 30 && announcedAt === null; i++) {
+    h.advance(100);
+    h.entry.outputSeq = i;
+    h.reclassifyWaiting(h.entry, ID, 'output');
+    await h.runDue();
+    if (h.broadcasts.length) announcedAt = h.now;
+  }
+  assert.ok(announcedAt !== null, 'never announced');
+  assert.ok(announcedAt - edgeAt <= 1000, `announced ${announcedAt - edgeAt}ms after the edge`);
+  assert.deepStrictEqual(h.broadcasts, [{ type: 'state', waiting: true, asking: null }]);
+});
+
+test('a repaint that leaves the dialog half-drawn, or rewrapped, is not a new question', async () => {
+  const h = makeHarness({ waitingForInput: false, screen: 'waiting' });
+  h.entry.composerLines = DIALOGS.MULTI_QUESTION;
+  h.sweep();
+  await h.step();
+  assert.strictEqual(h.broadcasts.length, 1);
+
+  // A reattach repaint stalls half-drawn for longer than the quiet period. The unreadable
+  // read is checked once more, by which time the dialog is whole again: nothing is sent.
+  h.entry.composerLines = DIALOGS.SINGLE_OPTION;
+  h.entry.outputSeq = 1;
+  h.sweep();
+  await h.step();
+  h.entry.composerLines = DIALOGS.MULTI_QUESTION;
+  await h.step();
+  assert.strictEqual(h.broadcasts.length, 1, `half-drawn is not news: ${JSON.stringify(h.broadcasts)}`);
+
+  // Measured on a real reattach: the repaint can still be half-drawn on the second look.
+  // A readable question is never traded for an unreadable read of the same screen.
+  h.entry.composerLines = DIALOGS.SINGLE_OPTION;
+  h.entry.outputSeq = 10;
+  h.sweep();
+  await h.step();
+  await h.step();
+  assert.strictEqual(h.broadcasts.length, 1, `still half-drawn is not news either: ${JSON.stringify(h.broadcasts)}`);
+  assert.strictEqual(h.entry.asking.text, 'How wide should the shared-jump wiring be?');
+  h.entry.composerLines = DIALOGS.MULTI_QUESTION;
+  h.entry.outputSeq = 11;
+  h.sweep();
+  await h.step();
+  assert.strictEqual(h.broadcasts.length, 1);
+
+  // The same question at another width: a different fingerprint, the same words.
+  assert.notStrictEqual(askingSummary(DIALOGS.MULTI_FOOTER_ONLY).fp, askingSummary(DIALOGS.MULTI_QUESTION).fp);
+  h.entry.composerLines = DIALOGS.MULTI_FOOTER_ONLY;
+  h.entry.outputSeq = 2;
+  h.sweep();
+  await h.step();
+  assert.strictEqual(h.broadcasts.length, 1, 'a rewrap is not news');
+});
+
+test('a dialog that really is unreadable is reported, one settle later', async () => {
+  const h = makeHarness({ waitingForInput: false, screen: 'waiting' });
+  h.entry.composerLines = DIALOGS.SINGLE_OPTION;
+  h.sweep();
+  assert.ok(await h.step());
+  assert.deepStrictEqual(h.broadcasts, [], 'the first unreadable read is checked again');
+  assert.ok(await h.step());
+  assert.strictEqual(h.broadcasts.length, 1);
+  assert.deepStrictEqual([h.broadcasts[0].waiting, h.broadcasts[0].asking.kind, h.broadcasts[0].asking.text],
+    [true, askingSummary(DIALOGS.SINGLE_OPTION).kind, '']);
 });

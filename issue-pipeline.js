@@ -17,7 +17,7 @@
  *
  * 1. **Built-in stages are anchors, in a fixed order.** `issue → plan → implement →
  *    review → merge`. Each one maps onto a mechanism that runs at a fixed point — plan is
- *    the first step of the prompt and ends in an Inbox question, review is a gate
+ *    the first step of the prompt and ends in a Begin / Revise question, review is a gate
  *    `issue_complete` checks before it merges — so their relative order is not
  *    configurable, and nothing can be moved around the gate. Custom
  *    stages (prompt text) go anywhere between them. "Removing" a built-in is turning it
@@ -56,18 +56,20 @@ const PIPELINE_FILE_MAX_BYTES = 16 * 1024;
 
 // What the plan stage asks for when its row carries no instructions of its own. It is
 // prompt text, not `--permission-mode plan`: the session runs in whatever permission mode
-// the user's Claude Code defaults to, the plan goes to the Inbox as a question with a Begin
-// button, and the agent ends its turn — the answer comes back as its next prompt, so it
-// can be given from the Inbox or from the question's /v1 link without opening the tab.
-// A soft gate, on purpose. Plan mode's approval dialog lives inside the tab, plan mode
-// prompts for every MCP tool without a read-only hint, the flag was re-applied on every
-// restart until the session id changed, and a spawn flag reaches only the agents that
-// have one, where text reaches all of them. Kept within INSTRUCTIONS_LIMIT and on one
-// line, so the default is itself something a user could have typed on the row.
-const PLAN_DEFAULT_INSTRUCTIONS = 'Before you edit anything, write a short plan: approach, files to touch, risks, how you will verify. '
-  + 'Post it with mcp__deepsteve__inbox_ask (question: accept this plan and begin?; context: the plan; '
-  + 'options: Begin, Revise; urgency: blocking), then end your turn. Do not edit files or run anything that '
-  + 'changes state until the answer is Begin. On Revise, redo the plan and ask again.';
+// the user's Claude Code defaults to, prints its plan in the conversation, and asks Begin /
+// Revise with AskUserQuestion. That call blocks the turn until the human answers, so the
+// gate holds without the agent having to remember an instruction, and the dialog it draws
+// is what the daemon's dialog detector reports as "asking" — the tab, the notification and
+// the Inbox's blocked row all read it from the screen, and none of them needs the agent to
+// post anything anywhere. An agent without AskUserQuestion asks in plain text and ends its
+// turn instead. Plan mode itself was dropped because it prompts for every MCP tool without
+// a read-only hint, the flag was re-applied on every restart until the session id changed,
+// and a spawn flag reaches only the agents that have one. Kept within INSTRUCTIONS_LIMIT and on one line, so the
+// default is itself something a user could have typed on the row.
+const PLAN_DEFAULT_INSTRUCTIONS = 'Before you edit anything, write a short plan as a message: approach, files to touch, risks, how you will verify. '
+  + 'Then ask one question with AskUserQuestion: begin with this plan? Options: Begin, Revise. '
+  + 'Wait for the answer before you edit files or run anything that changes state. On Revise, redo the plan and ask again. '
+  + 'Without AskUserQuestion, ask in plain text and end your turn.';
 
 const LIMITS = { maxCustomStages: MAX_CUSTOM_STAGES, label: LABEL_LIMIT, instructions: INSTRUCTIONS_LIMIT };
 

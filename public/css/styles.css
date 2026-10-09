@@ -268,6 +268,12 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
    inactive, unhovered tab, because the entire point is seeing it without looking. */
 .tab .tab-merge-block { display: none; flex-shrink: 0; font-size: 11px; line-height: 1; color: var(--ds-accent-red); }
 .tab.merge-blocked .tab-merge-block { display: inline; }
+/* Asking: the session is showing a dialog rather than sitting at its empty composer
+   (docs/sessions.md#asking). Its own element for the merge-block reason — it is about the
+   agent, not the connection — and visible on an inactive, unhovered tab, because it is how
+   you find the one session out of many that is waiting on a decision. */
+.tab .tab-asking { display: none; flex-shrink: 0; font-size: 12px; font-weight: 700; line-height: 1; color: var(--ds-accent-orange); }
+.tab.asking .tab-asking { display: inline; }
 .tab .badge { width: 8px; height: 8px; background: var(--ds-accent-blue); border-radius: 50%; display: inline-block; visibility: hidden; flex-shrink: 0; }
 .tab .badge.visible { visibility: visible; }
 .tab .speaker-icon { display: none; flex-shrink: 0; width: 13px; height: 13px; color: var(--ds-accent-blue); }
@@ -574,6 +580,15 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
 /* The speaker floats too, on the opposite corner from the badge so both can show at once. Inline
    it took a column beside the chip and pushed the chip off centre; the disc behind it keeps it
    legible over the active chip, which is the same blue. */
+/* The asking mark survives the collapse, floated on the corner the badge and speaker leave
+   free: in the rail it is the only way to tell a question from a finished turn. */
+#app-container.vertical-layout.icon-rail .tab.asking .tab-asking {
+  position: absolute;
+  bottom: 3px;
+  right: 6px;
+  z-index: 1;
+  font-size: 11px;
+}
 #app-container.vertical-layout.icon-rail .tab .speaker-icon {
   position: absolute;
   top: 3px;

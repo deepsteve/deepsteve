@@ -627,7 +627,7 @@ test('the fingerprint matches dialog-parse.js byte for byte', async () => {
   // Both sides of the verify step must normalize identically, or the server compares
   // the clicked label against the live one, never matches, and refuses every answer.
   const { fingerprint } = await load();
-  const server = require('../../mods/inbox/dialog-parse.js').fingerprint;
+  const server = require('../../dialog-parse.js').fingerprint;
   for (const label of [
     'Yes', '  Yes,   and   don\'t ask ', 'NO', '', null, undefined,
     'x'.repeat(500), 'Retry 3. times, then give up',
