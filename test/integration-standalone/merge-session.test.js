@@ -404,7 +404,7 @@ test('issue_complete with Autopilot on performs the merge inside that one call',
   assert.strictEqual(p.committed, true);
   assert.deepStrictEqual(p.issue, { number: 4243, closed: true });
   assert.ok(fs.existsSync(path.join(project.repo, 'late.txt')));
-  assert.match(p.instruction, /Write your summary/i);
+  assert.match(p.instruction, /write a short summary and call close_session in that same message/i);
 
   // Unlike the REST surface, this one arms the close: the agent has to be told to stop
   // and reliably isn't (#627), and there is nobody at the tab.
