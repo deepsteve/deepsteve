@@ -65,8 +65,9 @@ function tabDeliveryNote(tabDelivery) {
 // The last thing a merged worktree session is told (#724). It used to say the tab closes
 // itself and close_session was optional, so agents left it to the #627 timer — which a
 // click or scroll in the tab then cancelled. The timer is the safety net, not the plan.
-// Shared by issue_complete's `merged` answer and both autoCloseMessage sites, because
-// the conflict path finishes through merge_worktree.
+// Shared by issue_complete's `merged` answer and both autoCloseMessage sites
+// (merge_worktree, and mergeCallerSession under issue_complete and merge_session), so
+// every way a worktree merge can land ends on the same sentence.
 const CLOSE_NOW = 'Now write a short summary and call close_session in that same message. '
   + 'Nothing else: no more commands, edits or notes.';
 
@@ -704,12 +705,23 @@ function init(context) {
           } else if (r.status === 'conflict') {
             // The one place a model is still wanted. The working agent has the code in
             // context, which is exactly what resolving a conflict needs.
+            //
+            // The retry is THIS tool again, never merge_worktree. merge_worktree is the bare
+            // merge and closes no issue, so naming it here (as this answer did until
+            // yarnstory #627) left every issue whose first merge conflicted landed and still
+            // open. A second call is safe by construction: after a finished rebase the
+            // worktree is clean, so nothing is committed, and the merge, the issue close and
+            // the arming run exactly as a first clean call's would. The review gate above
+            // still applies — an approval is not cleared by a conflict — and a rebase left
+            // half-done is a detached HEAD, which mergeSession refuses as `detached`.
+            const closes = r.issue && r.issue.number != null ? `, closes issue #${r.issue.number}` : '';
             payload = {
               autopilot: true, next: 'resolve-conflict', ...r,
               instruction: `Merging "${r.branch}" into "${r.target}" conflicted, and nothing landed, `
                 + `so ${r.target} is untouched. Rebase this worktree onto it — \`git rebase ${r.rebaseOnto || r.target}\`, a `
-                + 'single git inside this worktree, which the isolation guard allows — resolve the conflicts, then '
-                + 'call mcp__deepsteve__merge_worktree to retry the merge. If the rebase itself conflicts beyond '
+                + 'single git inside this worktree, which the isolation guard allows — resolve the conflicts and finish '
+                + `the rebase, then call mcp__deepsteve__issue_complete again: it merges${closes} and says what is next. `
+                + 'Not `merge_worktree`, which merges without closing the issue. If the rebase itself conflicts beyond '
                 + 'what you can resolve, run `git rebase --abort`, tell the user, and stop. Do NOT close this session.',
             };
           } else if (r.status === 'pushed' || r.status === 'push-failed') {
@@ -840,7 +852,8 @@ function init(context) {
         + 'The commit subject is derived from the issue title with no input from you; pass `subject` only if you '
         + 'have something better to say. From a session that is NOT in a worktree it commits and pushes on the '
         + 'branch you are already on, and merges and closes nothing. Statuses are `merge_worktree`\'s, unchanged: '
-        + 'only `merged` is success, `conflict` is yours to rebase and retry through `merge_worktree`, and every '
+        + 'only `merged` is success, `conflict` is yours to rebase and then retry by calling `merge_session` again '
+        + '(not `merge_worktree`, which would merge and leave the issue open), and every '
         + 'other status left the target untouched. Use `merge_worktree` instead when you want the merge alone, '
         + 'with no commit and no issue closed.',
       schema: {

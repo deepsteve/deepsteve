@@ -49,7 +49,7 @@ const git = (args, cwd) => execFileSync('git', args, { cwd, encoding: 'utf8', st
  * `dirtyTarget: true` leaves the main checkout with uncommitted work, which is what the
  * merge refuses on.
  */
-function repoFor({ conflict = false, dirtyTarget = false, ahead = true, advanceTarget = false } = {}) {
+function repoFor({ conflict = false, dirtyTarget = false, ahead = true, advanceTarget = false, branch = 'feature' } = {}) {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-issue-complete-'));
   tmpDirs.push(tmp);
   const repo = path.join(tmp, 'repo');
@@ -64,8 +64,8 @@ function repoFor({ conflict = false, dirtyTarget = false, ahead = true, advanceT
   git(['add', '-A'], repo);
   git(['commit', '-qm', 'init'], repo);
 
-  const wt = path.join(repo, '.claude', 'worktrees', 'feature');
-  git(['worktree', 'add', '-q', '-b', 'feature', wt], repo);
+  const wt = path.join(repo, '.claude', 'worktrees', branch.replace(/^worktree-/, ''));
+  git(['worktree', 'add', '-q', '-b', branch, wt], repo);
   // `ahead: false` is the issue whose fix is already on the base branch (#724): the
   // session finds nothing to do and goes straight to issue_complete.
   if (ahead) {
@@ -110,8 +110,8 @@ function makeTools() {
  * A ctx with one autopilot-on session wired to a real repo. `sessionPaths` reads the
  * paths off the entry so one implementation serves however many sessions a test makes.
  */
-function mergeTools({ conflict = false, dirtyTarget = false, ahead = true, advanceTarget = false, worktree = 'feature', armResult = { closeAt: Date.now() + 120000 } } = {}) {
-  const { repo, wt } = repoFor({ conflict, dirtyTarget, ahead, advanceTarget });
+function mergeTools({ conflict = false, dirtyTarget = false, ahead = true, advanceTarget = false, branch = 'feature', worktree = 'feature', armResult = { closeAt: Date.now() + 120000 } } = {}) {
+  const { repo, wt } = repoFor({ conflict, dirtyTarget, ahead, advanceTarget, branch });
   const armCalls = [];
   const logs = [];
   const shells = new Map([
@@ -274,11 +274,76 @@ test('a conflict is handed back to the agent, and closes nothing', async () => {
   assert.equal(p.next, 'resolve-conflict');
   assert.equal(p.status, 'conflict');
   assert.match(p.instruction, /git rebase main/);
-  assert.match(p.instruction, /merge_worktree/, 'the retry goes through the primitive');
+  assert.match(p.instruction, /mcp__deepsteve__issue_complete again/,
+    'the retry is this tool again, which closes the issue — merge_worktree does not (yarnstory #627)');
   assert.match(p.instruction, /Do NOT close this session/);
   assert.deepStrictEqual(armCalls, [], 'an unfinished session must not be armed to close');
   // The merge was aborted, so the target is untouched.
   assert.equal(fs.readFileSync(path.join(repo, 'a.txt'), 'utf8'), 'from main\n');
+});
+
+// ── the conflict retry closes the issue (yarnstory #627) ─────────────────────
+//
+// The conflict answer used to name merge_worktree for the retry. That is the bare merge
+// — no commit, no issue close — so an issue session whose first merge conflicted landed
+// with its issue left open: yarnstory #627 on 2026-10-11 got `conflict`, rebased, called
+// merge_worktree as told, fast-forwarded, and the issue stayed open. This test follows
+// whatever retry the answer names, the way that agent did.
+//
+// The branch carries an issue number, so `gh` IS consulted here: a stub first on PATH
+// that records its argv (test/integration-standalone/merge-session.test.js's recipe).
+// runGh resolves the binary on every call and bin-path.js scans process.env.PATH before
+// its fallback dirs, so the real binary is never reached.
+function withGhStub() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-gh-stub-'));
+  tmpDirs.push(dir);
+  const logFile = path.join(dir, 'gh-invocations.log');
+  fs.writeFileSync(path.join(dir, 'gh'),
+    `#!/bin/sh\necho "$*" >> '${logFile}'\n[ "$1 $2" = "issue view" ] && echo "A stubbed title"\nexit 0\n`,
+    { mode: 0o755 });
+  const savedPath = process.env.PATH;
+  process.env.PATH = `${dir}${path.delimiter}${savedPath}`;
+  return {
+    calls: () => { try { return fs.readFileSync(logFile, 'utf8'); } catch { return ''; } },
+    restore: () => { process.env.PATH = savedPath; },
+  };
+}
+
+test('after a conflict and a rebase, the retry the answer names merges AND closes the issue (yarnstory #627)', async () => {
+  const gh = withGhStub();
+  try {
+    const { tools, armCalls, repo, wt } = mergeTools({ conflict: true, branch: 'worktree-github-issue-4242' });
+
+    const first = parse(await tools.issue_complete.handler({}, callerExtra('s')));
+    assert.equal(first.next, 'resolve-conflict', first.instruction);
+    assert.deepStrictEqual(first.issue, { number: 4242, closed: false });
+    assert.doesNotMatch(gh.calls(), /issue close/, 'nothing landed, so nothing is closed yet');
+
+    // Do what the answer says: rebase onto what it names, resolve, finish the rebase.
+    const onto = first.rebaseOnto || first.target;
+    assert.match(first.instruction, new RegExp(`git rebase ${onto}`));
+    assert.throws(() => git(['rebase', onto], wt), 'the rebase stops on the same conflict');
+    fs.writeFileSync(path.join(wt, 'a.txt'), 'from main, then the worktree\n');
+    git(['add', 'a.txt'], wt);
+    execFileSync('git', ['rebase', '--continue'], {
+      cwd: wt, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, GIT_EDITOR: 'true' },
+    });
+
+    // Then the retry — whichever tool the answer names, and it must name exactly one.
+    const named = [...new Set([...first.instruction.matchAll(/mcp__deepsteve__(\w+)/g)].map((m) => m[1]))];
+    assert.equal(named.length, 1, `the answer must name one tool to retry with, not [${named}]`);
+    const retry = parse(await tools[named[0]].handler({}, callerExtra('s')));
+
+    assert.equal(retry.status, 'merged', JSON.stringify(retry));
+    assert.equal(fs.readFileSync(path.join(repo, 'a.txt'), 'utf8'), 'from main, then the worktree\n',
+      'the resolved work reached the target');
+    assert.match(gh.calls(), /issue close 4242 --comment Merged into main\./,
+      `the retry named by the answer (${named[0]}) merged but left issue #4242 open`);
+    assert.deepStrictEqual(retry.issue, { number: 4242, closed: true });
+    assert.deepStrictEqual(armCalls, [['s', { reason: 'merged' }]], 'armed once, by the merge that landed');
+  } finally {
+    gh.restore();
+  }
 });
 
 test('a dirty target is refused, and closes nothing', async () => {

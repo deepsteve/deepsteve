@@ -294,6 +294,17 @@ test('skills/merge.md still asks for the explicit close', () => {
     'skills/merge.md must still tell the agent to call close_session');
 });
 
+test('a conflict is retried through merge_session, which closes the issue — never the bare merge', () => {
+  // merge_worktree merges and closes no issue, so a retry through it lands the work and
+  // leaves the issue open (yarnstory #627, via issue_complete's identical advice).
+  const bullet = SKILL.split('\n').find((l) => l.includes('**`conflict`**'));
+  assert.ok(bullet, 'skills/merge.md must still handle the conflict status');
+  assert.match(bullet, /call `mcp__deepsteve__merge_session` again/);
+  assert.doesNotMatch(bullet, /mcp__deepsteve__merge_worktree/);
+  const { tools } = makeContext({ cwd: os.tmpdir(), repoRoot: os.tmpdir() });
+  assert.match(tools.merge_session.description, /`conflict` is yours to rebase and then retry by calling `merge_session` again/);
+});
+
 test('skills/merge.md and the merge_worktree result agree on the field name', () => {
   const toolsSource = fs.readFileSync(path.join(__dirname, '..', '..', 'mods', 'deepsteve-core', 'tools.js'), 'utf8');
   assert.match(toolsSource, /payload\.autoCloseAt/, 'the tool must still return autoCloseAt');
