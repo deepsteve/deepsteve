@@ -42,26 +42,11 @@ const KINDS = {
   question: { glyph: '?', color: C.blue, tint: 'rgba(88,166,255,0.14)', label: 'Question' },
   briefing: { glyph: 'i', color: C.dim, tint: 'rgba(139,148,158,0.12)', label: 'Briefing' },
   result: { glyph: '▤', color: C.purple, tint: 'rgba(163,113,247,0.14)', label: 'Result' },
-  // Green, and alone in that: an idle agent is the one row on the bench that is not a
-  // problem. It finished. The colour is the difference between "eight things are wrong"
-  // and "eight things are done and want their next instruction" — which is the whole
-  // reading of the bench, at a glance, before a single row has been opened.
-  idle: { glyph: '▸', color: C.greenHi, tint: 'rgba(46,160,67,0.13)', label: 'Waiting on you' },
-  // Red, and alone in that. A stuck agent is the only row on the list that will not
-  // resolve itself: a dialog gets answered, an idle agent gets an instruction, a working
-  // one finishes — but work that cannot land stays exactly where it is until somebody
-  // moves something. That is worth the one colour nothing else uses.
-  stuck: { glyph: '⚠', color: C.red, tint: 'rgba(248,81,73,0.13)', label: 'Stuck' },
-  // Grey on purpose, and the only kind with no verb attached. A working agent is the
-  // ordinary state of the machine; it is on the list so the list is a picture of the
-  // machine, and it is grey so it never competes with a row that wants something.
-  working: { glyph: '●', color: C.dimmer, tint: 'transparent', label: 'Working' },
 };
 const kindOf = (item) => KINDS[item && item.kind] || KINDS.question;
 
 const DEFAULTS = {
   pollSeconds: 2,
-  showBriefings: true,
   groupByProject: false,
   compactRows: false,
   blockingOnly: false,
@@ -79,15 +64,10 @@ const DEFAULTS = {
   // because a fullscreen iframe is DESTROYED on hide and would otherwise snap back to
   // the first tab every time you looked away.
   tab: 'agents',
-  idleAfterSeconds: 15,
   // The projects this panel is scoped to — canonical repo roots, empty meaning "all of
   // them". Per-browser like every other view choice here: which repos you are herding
   // today is a property of your afternoon, not of the daemon.
   projects: [],
-  // "Only the ones that need me." The old behaviour, now a toggle: before this the
-  // working rows were not hidden, they were never built, and a busy machine showed an
-  // empty panel.
-  hideWorking: false,
   // The permissions log drawer.
   permOpen: false,
 };
@@ -489,14 +469,11 @@ const ItemRow = memo(function ItemRow({ item, selected, ageMs, compact, onSelect
             {item.sessionName || item.sessionId || 'unknown'}
             {item.projectName ? ` · ${item.projectName}` : ''}
             {item.worktree ? ` · ${item.worktree}` : ''}
-            {/* Only on a working row, and only when there is one: a queued prompt is
-                the difference between "busy" and "busy, and already told what next". */}
-            {item.kind === 'working' && item.queued > 0 ? ` · ${item.queued} queued` : ''}
           </div>
         )}
       </div>
       <span style={{
-        font: `13px ${MONO}`, color: ageColor(ageMs, item.urgency, item.kind),
+        font: `13px ${MONO}`, color: ageColor(ageMs, item.urgency),
         fontVariantNumeric: 'tabular-nums', flexShrink: 0, paddingTop: 1,
       }}>{formatAge(ageMs)}</span>
     </div>
@@ -756,11 +733,11 @@ function EmptyState() {
       <div style={{ fontSize: 28, color: C.hairline, lineHeight: 1 }}>{'⏸'}</div>
       <div style={{ font: `15px ${SANS}`, color: C.dim, margin: '18px 0 8px' }}>Nothing needs you</div>
       <div style={{ font: `13px/1.7 ${SANS}`, color: C.faint }}>
-        Sessions land here the moment an agent hits a permission prompt, and again when
-        one finishes its turn with nothing queued. Agents can also post here directly with{' '}
-        <code style={{ font: `12px ${MONO}` }}>inbox_ask</code>,{' '}
-        <code style={{ font: `12px ${MONO}` }}>inbox_brief</code> and{' '}
-        <code style={{ font: `12px ${MONO}` }}>share_result</code>.
+        A tab lands here while it is asking you something: a permission prompt or a
+        question on its screen, or an{' '}
+        <code style={{ font: `12px ${MONO}` }}>inbox_ask</code> or{' '}
+        <code style={{ font: `12px ${MONO}` }}>share_result</code> waiting on your answer.
+        It leaves the moment you answer, or the tab closes.
       </div>
     </div>
   );
@@ -879,81 +856,6 @@ function ResultBody({ item, onZoom }) {
 }
 
 /** Full-bleed image view. Any click or Escape closes it — nothing to learn. */
-/**
- * The stuck row's body: what is in the way, and who is standing in it.
- *
- * The holders list is the answer to the question an agent cannot answer for itself —
- * "who is being a hog" — and it is worth a real control rather than a sentence, because
- * knowing the name is not the point. Getting to the tab is the point. Every holder is
- * one click from being looked at, and that click is the whole feature.
- *
- * A holder may legitimately have no tab in THIS window (the session belongs to another
- * one), so `canVisit` gates the button rather than letting it silently do nothing.
- */
-function StuckBody({ item, onVisit, canVisit }) {
-  const s = item.stuck || {};
-  const holders = Array.isArray(s.holders) ? s.holders : [];
-  return (
-    <div style={{ marginTop: 22 }}>
-      <div style={{
-        border: `1px solid rgba(248,81,73,0.35)`, borderRadius: 6,
-        background: 'rgba(248,81,73,0.07)', padding: '12px 14px',
-      }}>
-        <div style={{
-          font: `600 11px ${MONO}`, letterSpacing: '0.06em', textTransform: 'uppercase',
-          color: C.red, marginBottom: 8,
-        }}>
-          {s.source === 'agent' ? 'The agent says it is blocked' : 'Merge did not run'}
-        </div>
-        {s.mergeStatus && (
-          <div style={{ font: `12px ${MONO}`, color: C.dim, marginBottom: 8 }}>
-            {s.branch || '?'} → {s.target || '?'} · {s.mergeStatus}
-          </div>
-        )}
-        <div style={{ font: `13px/1.6 ${SANS}`, color: C.text, whiteSpace: 'pre-wrap' }}>
-          {item.context}
-        </div>
-      </div>
-
-      {holders.length > 0 && (
-        <div style={{ marginTop: 16 }}>
-          <div style={{
-            font: `600 11px ${MONO}`, letterSpacing: '0.06em', textTransform: 'uppercase',
-            color: C.dim, marginBottom: 8,
-          }}>Working in the shared checkout</div>
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-            {holders.map((h) => {
-              const reachable = canVisit.has(h.sessionId);
-              return (
-                <button
-                  key={h.sessionId} type="button"
-                  onClick={() => onVisit(h.sessionId)}
-                  disabled={!reachable}
-                  title={reachable
-                    ? 'Go and look at this session'
-                    : 'That session has no tab in this window — open it from the Sessions menu first'}
-                  style={{
-                    display: 'inline-flex', alignItems: 'center', gap: 8,
-                    border: `1px solid ${C.border}`, borderRadius: 5, padding: '6px 12px',
-                    background: C.surface, color: C.text, font: `12px ${MONO}`,
-                    cursor: reachable ? 'pointer' : 'default', opacity: reachable ? 1 : 0.5,
-                  }}
-                >
-                  {h.sessionName || h.sessionId} ↗
-                </button>
-              );
-            })}
-          </div>
-          <div style={{ font: `12px/1.6 ${SANS}`, color: C.dimmer, marginTop: 10 }}>
-            Committing or stashing on their behalf is not safe — they are mid-task. Either
-            wait, or go and tell them.
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
 function Lightbox({ file, onClose }) {
   useEffect(() => {
     const onKey = (e) => { if (e.key === 'Escape') { e.stopPropagation(); onClose(); } };
@@ -1554,10 +1456,6 @@ function Inbox() {
 
   // ── Poll. A self-scheduling timeout, not an interval: that IS the answer to
   // overlapping fetches, since the next one is only armed once this one settles.
-  // The one URL both readers use. The threshold has to travel with every request
-  // because the derivation is server-side and stateless — there is no "current
-  // setting" over there to consult, by design: two browser windows may legitimately
-  // disagree about how long is long enough.
   // The picker's selection, normalised once. `projects` is per-browser storage and may
   // legitimately name a repo that has since gone away; it is passed through untouched
   // because the server canonicalises and a root nothing matches simply filters to nothing.
@@ -1569,12 +1467,8 @@ function Inbox() {
     ? '&projects=' + encodeURIComponent(chosenProjects.join(','))
     : '';
 
-  const inboxUrl = useMemo(() => {
-    const secs = Math.max(0, Number(settings.idleAfterSeconds));
-    return '/api/inbox/items?idleAfter='
-      + encodeURIComponent(Number.isFinite(secs) ? secs : DEFAULTS.idleAfterSeconds)
-      + projectQuery;
-  }, [settings.idleAfterSeconds, projectQuery]);
+  // The one URL both readers use.
+  const inboxUrl = projectQuery ? '/api/inbox/items?' + projectQuery.slice(1) : '/api/inbox/items';
   const inboxUrlRef = useRef(inboxUrl);
   useEffect(() => { inboxUrlRef.current = inboxUrl; }, [inboxUrl]);
 
@@ -1741,46 +1635,33 @@ function Inbox() {
   const view = useMemo(
     () => visibleItems(items, {
       tab,
-      showBriefings: settings.showBriefings,
       blockingOnly: settings.blockingOnly,
       groupByProject: settings.groupByProject,
-      hideWorking: settings.hideWorking,
-      // One `order` covers both sections of the issues tab, so ↑/↓ walks out of the
-      // briefings and into the issue list. Two sections computing their own order is the
-      // same class of bug the header comment on visibleItems warns about, with one more
-      // place to make it. On the agents tab there is no second section at all.
+      // The issues tab's list, which ↑/↓ walks with the same `order`. On the agents tab
+      // there is no second section at all.
       backlog: settings.showBacklog ? backlogView.list : [],
       backlogCollapsed: !!settings.backlogCollapsed,
     }),
-    [items, tab, settings.showBriefings, settings.blockingOnly, settings.groupByProject,
-      settings.hideWorking, settings.showBacklog, settings.backlogCollapsed, backlogView.list],
+    [items, tab, settings.blockingOnly, settings.groupByProject,
+      settings.showBacklog, settings.backlogCollapsed, backlogView.list],
   );
 
-  // What each tab has to say for itself before it is opened.
-  //
-  // The Agents count is deliberately NOT "every row on that tab" — that number is now
-  // "how many tabs are open", which is not news. It is the rows that want something: a
-  // dialog, a merge that will not land, an agent out of instructions. Working rows are on
-  // the list to be seen, not to be counted at somebody.
+  // What each tab has to say for itself before it is opened. Every row on the agents tab
+  // is something waiting on you, so its count is the same number as the App bar's badge.
   const needsYouCount = useMemo(
-    () => items.filter((i) => tabOf(i) === 'agents' && i.kind !== 'working' && !i.muted).length,
-    [items],
-  );
-  const agentCount = useMemo(
     () => items.filter((i) => tabOf(i) === 'agents').length,
     [items],
   );
-  // Blocked = a live dialog, or work that cannot land. The number the filter carries, so
-  // "is anything blocked" is answered by looking rather than by clicking in — which is
-  // the whole point of putting it on the button instead of leaving it to the list.
+  // Blocked = a live dialog. The number the filter carries, so "is anything blocked" is
+  // answered by looking rather than by clicking in — which is the whole point of putting
+  // it on the button instead of leaving it to the list.
   const blockedCount = useMemo(
-    () => items.filter((i) => i.urgency === 'blocking' && !i.muted).length,
+    () => items.filter((i) => i.urgency === 'blocking').length,
     [items],
   );
   const readingCount = useMemo(
-    () => (settings.showBriefings ? items.filter((i) => tabOf(i) === 'issues').length : 0)
-      + (settings.showBacklog ? backlogView.list.length : 0),
-    [items, settings.showBriefings, settings.showBacklog, backlogView.list],
+    () => (settings.showBacklog ? backlogView.list.length : 0),
+    [settings.showBacklog, backlogView.list],
   );
 
   useEffect(() => {
@@ -1815,7 +1696,7 @@ function Inbox() {
   // down and rebuild it on every poll.
   useEffect(() => {
     const id = selectedId;
-    const derived = !!id && (String(id).startsWith('blocked:') || String(id).startsWith('idle:'));
+    const derived = !!id && String(id).startsWith('blocked:');
     if (!derived) { setScreen(null); return undefined; }
     let cancelled = false;
     let timer = null;
@@ -2041,15 +1922,6 @@ function Inbox() {
     return true;
   }, [localIds]);
 
-  // Visiting by bare session id — the holders list, which names sessions rather than
-  // rows. Same excursion as `visit`, with a label that says why you went.
-  const visitSession = useCallback((sessionId) => {
-    if (!sessionId || !localIds.has(sessionId)) return;
-    const ds = window.deepsteve;
-    if (ds?.visitSession) ds.visitSession(sessionId, { label: 'holding the checkout', reason: 'stuck' });
-    else ds?.focusSession?.(sessionId);
-  }, [localIds]);
-
   // `rows`, not `view.list`: a matched backlog row carries the sessionId of the tab
   // already on that issue, so `o` opens it exactly as it opens a blocked agent's tab.
   const openTab = useCallback(() => {
@@ -2209,27 +2081,13 @@ function Inbox() {
   // All of these belong to the answer bench, which an issue never reaches. Gated on
   // selectedIsIssue rather than left to answerPayload's own null: a backlog row is not
   // an unanswerable item, it is not an item at all.
-  // A stuck or working row takes a prompt like an idle one does: telling an agent what
-  // to do about the thing it is stuck on is the single most useful thing this panel can
-  // offer, and a working agent queues it. Only `blocked` has no text box — a modal has
-  // no composer, and Escape-then-type would cancel the tool call the dialog was about.
+  // Only `blocked` has no text box — a modal has no composer, and Escape-then-type would
+  // cancel the tool call the dialog was about.
   const showReply = !selectedIsIssue && !!selected
-    && (selected.kind === 'question' || selected.kind === 'result' || selected.kind === 'idle'
-      || selected.kind === 'stuck' || selected.kind === 'working');
+    && (selected.kind === 'question' || selected.kind === 'result');
   const canSend = !selectedIsIssue && !!(selected && (selected.kind === 'briefing'
     || answerPayload(selected, { picked, draft })));
-  // An idle row's hint is its own, not PATH_HINT.prompt. That one says "when the agent
-  // is next idle", which is true of a stored question and absurd here — the row exists
-  // BECAUSE the agent is idle now, and a hint that hedges about it undermines the one
-  // thing the bench is asserting.
-  const pathHint = (!selected || selectedIsIssue) ? null
-    : selected.kind === 'idle'
-      ? 'goes straight to this agent, which is sitting at its prompt now'
-      : selected.kind === 'stuck'
-        ? 'goes to this agent and clears the block — it is stopped, so it lands now'
-        : selected.kind === 'working'
-          ? 'queues behind what this agent is doing and arrives when it next stops'
-          : PATH_HINT[selected.pendingPath];
+  const pathHint = (!selected || selectedIsIssue) ? null : PATH_HINT[selected.pendingPath];
   // A result's headline is DERIVED from the first line of its summary, so rendering both
   // the H1 and the raw context says the same sentence twice.
   const body = (selected && !selectedIsIssue) ? itemBody(selected) : '';
@@ -2239,12 +2097,10 @@ function Inbox() {
   // when canSend turns true, so the button never offers a verb it will not perform.
   const sendVerb = (!selected || selectedIsIssue) ? 'Send'
     : selected.kind === 'briefing' ? 'Archive'
-      : (selected.kind === 'idle' || selected.kind === 'stuck' || selected.kind === 'working')
-        ? 'Send prompt'
-        : selected.kind === 'result'
-          ? (picked === null ? 'Approve or request changes'
-            : (selected.options[picked] || {}).label || 'Send')
-          : 'Send';
+      : selected.kind === 'result'
+        ? (picked === null ? 'Approve or request changes'
+          : (selected.options[picked] || {}).label || 'Send')
+        : 'Send';
 
   const inboxRows = [];
   if (view.groups) {
@@ -2364,12 +2220,8 @@ function Inbox() {
         }}>
           {/* "Agents" and "Issues", not "Bench" and "Backlog". Both old names were
               metaphors that had to be explained, which for a two-tab strip is a
-              complete failure of the strip. The left tab is a list of agents and what
-              each one is doing; the right one is a list of issues.
-
-              The Agents count is the rows that WANT something, not the row count — with
-              every tab on the list the row count is "how many tabs are open", which is
-              not news and would make the number stop being read. */}
+              complete failure of the strip. The left tab is the agents asking you
+              something right now; the right one is a list of issues. */}
           <TabButton
             id="agents" label="Agents" count={needsYouCount} active={tab === 'agents'}
             accent={C.orange} onClick={(t) => setSetting('tab', t)}
@@ -2418,23 +2270,15 @@ function Inbox() {
           onToggle={toggleProject}
           onClear={clearProjects}
         >
-          {/* An urgency filter on the issues tab would empty it — a briefing is 'fyi' by
-              construction — and read as a broken list. */}
+          {/* An urgency filter on the issues tab would empty it, and read as a broken list. */}
           {tab === 'agents' && (
-            <>
-              <CountToggle
-                on={settings.blockingOnly} label="blocked" count={blockedCount}
-                title={blockedCount
-                  ? `${blockedCount} blocked — a dialog, or a merge that will not land. Click to show only these.`
-                  : 'Nothing is blocked. Click to filter to blocked agents anyway.'}
-                onClick={() => setSetting('blockingOnly', !settings.blockingOnly)}
-              />
-              <Toggle
-                on={settings.hideWorking} label="needs me"
-                title="Hide the agents that are just working"
-                onClick={() => setSetting('hideWorking', !settings.hideWorking)}
-              />
-            </>
+            <CountToggle
+              on={settings.blockingOnly} label="blocked" count={blockedCount}
+              title={blockedCount
+                ? `${blockedCount} blocked on a dialog. Click to show only these.`
+                : 'Nothing is blocked. Click to filter to blocked agents anyway.'}
+              onClick={() => setSetting('blockingOnly', !settings.blockingOnly)}
+            />
           )}
         </ProjectBar>
         <div style={{ flex: 1, overflowY: 'auto', minHeight: 0 }}>
@@ -2622,12 +2466,6 @@ function Inbox() {
                   <ResultBody item={selected} onZoom={setZoom} />
                 )}
 
-                {selected.kind === 'stuck' && (
-                  <StuckBody
-                    item={selected} onVisit={visitSession} canVisit={localIds}
-                  />
-                )}
-
                 {selected.kind === 'blocked' && !selected.answerable && (
                   <div style={{ font: `13px/1.6 ${SANS}`, color: C.orange, marginTop: 18 }}>
                     This dialog couldn’t be read well enough to answer from here — the screen is
@@ -2644,9 +2482,7 @@ function Inbox() {
                     onChange={(e) => setDraft(e.target.value)}
                     placeholder={selected.kind === 'result'
                       ? 'Why it needs changing \u2014 required to request changes, optional to approve'
-                      : selected.kind === 'idle'
-                        ? 'What should it do next? \u2014 Enter for a newline, \u2318\u23ce to send'
-                        : 'Reply \u2014 Enter for a newline, \u2318\u23ce to send'}
+                      : 'Reply \u2014 Enter for a newline, \u2318\u23ce to send'}
                     style={{
                       width: '100%', minHeight: 72, maxHeight: 200, marginTop: 18,
                       background: C.bg, border: `1px solid ${C.border}`, borderRadius: 6,
@@ -2656,11 +2492,7 @@ function Inbox() {
                   />
                 )}
 
-                {/* An idle row gets the preview too. Its headline is one scraped line;
-                    when that is not enough to know what to say next, the last screenful
-                    usually is — and reaching it without leaving the bench is the whole
-                    difference between deciding here and opening the tab. */}
-                {(selected.kind === 'blocked' || selected.kind === 'idle') && (
+                {selected.kind === 'blocked' && (
                   <ScreenPreview
                     lines={(screen && screen.id === selected.id ? screen.lines : selected.preview) || []}
                     open={screenOpen}
@@ -2690,20 +2522,12 @@ function Inbox() {
               >
                 <Key>{'⏎'}</Key> {sendVerb}
               </button>
-              {/* A working row has nothing to dismiss: it is not an obligation, it is the
-                  session existing, and the only way off the list is to close the tab. */}
-              {selected.kind !== 'briefing' && selected.kind !== 'working' && (
+              {selected.kind !== 'briefing' && (
                 <button
                   type="button" onClick={archive} disabled={sending}
                   title={selected.kind === 'blocked'
                     ? 'Drop this row. The dialog is left alone, and comes back if the tab asks something else.'
-                    : selected.kind === 'idle'
-                      ? 'Hide this row for a while. Nothing is typed, and it comes back if the '
-                        + 'session says something else — or in half an hour if it does not.'
-                      : selected.kind === 'stuck'
-                        ? 'Clear this block. Nothing is typed and nothing is merged — it just '
-                          + 'stops being on the list until it happens again.'
-                        : 'Archive this item without answering it.'}
+                    : 'Archive this item without answering it.'}
                   style={{
                     display: 'inline-flex', alignItems: 'center', gap: 8,
                     border: `1px solid ${C.border}`, borderRadius: 5, padding: '6px 12px',
@@ -2712,9 +2536,7 @@ function Inbox() {
                     font: `13px ${SANS}`,
                     cursor: sending ? 'default' : 'pointer',
                   }}
-                ><Key>e</Key> {selected.kind === 'blocked' ? 'Dismiss'
-                  : selected.kind === 'idle' ? 'Snooze'
-                    : selected.kind === 'stuck' ? 'Clear' : 'Archive'}</button>
+                ><Key>e</Key> {selected.kind === 'blocked' ? 'Dismiss' : 'Archive'}</button>
               )}
 
               {/* ── The two session verbs (#682).
@@ -2799,7 +2621,7 @@ function Inbox() {
               ['1–9', 'stage an option'],
               ['⏎', 'send'],
               ['⌘⏎', 'send while typing'],
-              ['e', 'archive / dismiss / snooze / clear'],
+              ['e', 'archive / dismiss'],
               ['p', 'permissions asked'],
               ['x', 'close the session'],
               ['m', 'merge the worktree'],

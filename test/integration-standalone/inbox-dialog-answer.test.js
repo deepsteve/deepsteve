@@ -418,12 +418,8 @@ test('a stale expect fingerprint is refused before a single key is sent', async 
 test('dismissing a live dialog silences the row without touching the session', async () => {
   // The other half of "a row stops asking for you" (#663). Every other exit needs the
   // human to answer or the session to die; this one is for the row nobody will ever
-  // act on — and it must be provable that the agent never noticed.
-  //
-  // A mute used to REMOVE the row. It no longer can: the Agents list is every live tab,
-  // so a tab that vanished from it because you pressed a key on it would be exactly the
-  // hole the roster closes. Dismissing demotes the row to 'fyi' — off the count, out of
-  // the blocking rank, still in the picture.
+  // act on — and it must be provable that the agent never noticed. The row leaves the
+  // list and the badge while that dialog stands; the tab keeps its own `?`.
   const { id } = await openBlockedSession();
   const row = await waitFor(() => blockedRow(id), 'the blocked row');
   assert.ok(row.fingerprint, 'the row must carry the fingerprint it was drawn with');
@@ -437,14 +433,9 @@ test('dismissing a live dialog silences the row without touching the session', a
   assert.strictEqual(r.status, 200, `dismiss failed: ${JSON.stringify(body)}`);
   assert.strictEqual(body.muted, true);
 
-  const quiet = await waitFor(
-    async () => {
-      const now = await blockedRow(id);
-      return now && now.urgency === 'fyi' ? now : null;
-    },
-    'the muted row to stop ranking as blocking',
-  );
-  assert.strictEqual(quiet.muted, true, 'and to say why it went quiet');
+  await waitFor(async () => !(await blockedRow(id)), 'the muted row to leave the Inbox');
+  const count = await fetch(`${BASE}/api/inbox/count`, { headers: authHeaders() }).then((x) => x.json());
+  assert.strictEqual(count.count, (await inbox()).length, 'the badge drops it too');
 
   // Nothing was typed, and the dialog is still standing in the real session: a mute is
   // not an Escape, and Escape is a decision Inbox does not get to make.
@@ -461,9 +452,9 @@ test('dismissing a live dialog silences the row without touching the session', a
     'the dialog itself must be left exactly as it was',
   );
 
-  // And it stays quiet rather than flickering back to blocking on the next poll.
+  // And it stays gone rather than flickering back on the next poll.
   await new Promise((r2) => setTimeout(r2, 1200));
-  assert.strictEqual((await blockedRow(id)).urgency, 'fyi', 'a mute must survive repaints');
+  assert.strictEqual(await blockedRow(id), null, 'a mute must survive repaints');
 });
 
 test('a real permission dialog lands in the permissions log', async () => {

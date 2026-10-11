@@ -155,6 +155,37 @@ function StatusBadge({ status }) {
   return <span style={{ color: map[status] || C.dim, fontSize: 11, border: `1px solid ${map[status] || C.dim}`, borderRadius: 4, padding: '0 5px' }}>{label}</span>;
 }
 
+// A run's deliverable — the `report` it passed to scheduled_task_finished. The task list
+// carries only `hasReport`, since it is refetched on every broadcast; the text is fetched
+// the first time it is opened.
+function RunReport({ taskId, startedAt }) {
+  const [open, setOpen] = useState(false);
+  const [text, setText] = useState(null);
+  const [error, setError] = useState(null);
+  const toggle = () => {
+    const next = !open;
+    setOpen(next);
+    if (next && text === null) {
+      setError(null);
+      api('GET', `/api/scheduled-tasks/${encodeURIComponent(taskId)}/runs/${startedAt}/report`)
+        .then((r) => setText(r.report || ''))
+        .catch((e) => setError(e.message));
+    }
+  };
+  return (
+    <div style={{ marginLeft: 2 }}>
+      <button onClick={toggle} style={{ background: 'none', border: 'none', padding: 0, color: C.accent, fontSize: 11, cursor: 'pointer' }}>
+        {open ? 'Hide report' : 'Report'}
+      </button>
+      {open ? (
+        <div style={{ fontSize: 12, color: C.text, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', maxHeight: 360, overflowY: 'auto', border: `1px solid ${C.border}`, borderRadius: 4, padding: '6px 8px', marginTop: 4 }}>
+          {error ? <span style={{ color: C.red }}>{error}</span> : text === null ? 'Loading…' : text}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function TaskCard({ task, onEdit, titleOf }) {
   const [open, setOpen] = useState(false);
   const last = task.runs && task.runs[0];
@@ -254,6 +285,7 @@ function TaskCard({ task, onEdit, titleOf }) {
                 {r.model || r.effort ? <span style={{ opacity: 0.5 }}>{[r.model, r.effort].filter(Boolean).join(' · ')}</span> : null}
               </div>
               {r.summary ? <div style={{ fontSize: 11, color: C.dim, opacity: 0.85, marginLeft: 2 }}>{r.summary}</div> : null}
+              {r.hasReport ? <RunReport taskId={task.id} startedAt={r.startedAt} /> : null}
             </div>
           ))}
           {changes.length ? (

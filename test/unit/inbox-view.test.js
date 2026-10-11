@@ -231,7 +231,7 @@ test('the bench carries obligations and the backlog tab carries reading material
   const { visibleItems } = await load();
   const items = [
     item({ id: 'w1', kind: 'blocked', urgency: 'blocking' }),
-    item({ id: 'w2', kind: 'idle' }),
+    item({ id: 'w2', kind: 'question' }),
     item({ id: 'w3', kind: 'question' }),
     item({ id: 'w4', kind: 'result' }),
     brief({ id: 'w5' }),
@@ -268,11 +268,9 @@ test('blockingOnly filters the bench and never the reading tab', async () => {
 
 test('every session row belongs to the Agents tab', async () => {
   const { tabOf } = await load();
-  assert.strictEqual(tabOf({ kind: 'idle' }), 'agents');
   assert.strictEqual(tabOf({ kind: 'blocked' }), 'agents');
+  assert.strictEqual(tabOf({ kind: 'question' }), 'agents');
   assert.strictEqual(tabOf({ kind: 'result' }), 'agents');
-  assert.strictEqual(tabOf({ kind: 'stuck' }), 'agents');
-  assert.strictEqual(tabOf({ kind: 'working' }), 'agents');
   assert.strictEqual(tabOf({ kind: 'briefing' }), 'issues');
   assert.strictEqual(tabOf(null), 'agents', 'an unknown row is an obligation until proven otherwise');
 });
@@ -288,35 +286,6 @@ test('the old tab ids in every browser’s localStorage still land somewhere', a
   assert.strictEqual(normalizeTab('issues'), 'issues');
   assert.strictEqual(normalizeTab('a-tab-from-the-future'), TABS[0]);
   assert.strictEqual(normalizeTab(undefined), TABS[0]);
-});
-
-test('“needs me” hides the working rows and nothing else', async () => {
-  const { visibleItems } = await load();
-  const items = [
-    { id: 'a', kind: 'working', urgency: 'fyi', createdAt: 1 },
-    { id: 'b', kind: 'blocked', urgency: 'blocking', createdAt: 2 },
-    { id: 'c', kind: 'idle', urgency: 'normal', createdAt: 3 },
-    { id: 'd', kind: 'stuck', urgency: 'blocking', createdAt: 4 },
-  ];
-  const all = visibleItems(items, { tab: 'agents' });
-  assert.deepStrictEqual(all.list.map((i) => i.id).sort(), ['a', 'b', 'c', 'd']);
-
-  const filtered = visibleItems(items, { tab: 'agents', hideWorking: true });
-  assert.deepStrictEqual(filtered.list.map((i) => i.id).sort(), ['b', 'c', 'd']);
-  assert.ok(!filtered.order.includes('a'), 'a hidden row must leave the cursor order too');
-});
-
-test('a stuck row outranks an idle one', async () => {
-  // The ordering that makes the list readable: work that cannot land is the only state
-  // that will not resolve itself, so it sits above an agent that is merely out of
-  // instructions, which sits above one that is busy.
-  const { visibleItems } = await load();
-  const list = visibleItems([
-    { id: 'working', kind: 'working', urgency: 'fyi', createdAt: 1 },
-    { id: 'idle', kind: 'idle', urgency: 'normal', createdAt: 1 },
-    { id: 'stuck', kind: 'stuck', urgency: 'blocking', createdAt: 1 },
-  ], { tab: 'agents' }).list.map((i) => i.id);
-  assert.deepStrictEqual(list, ['stuck', 'idle', 'working']);
 });
 
 test('an issue row cannot be answered, archived or option-picked', async () => {
@@ -352,24 +321,6 @@ test('the inbox keys are unchanged by the new flag defaulting to false', async (
   assert.deepStrictEqual(keyAction('Enter', {}), { type: 'send' });
   assert.deepStrictEqual(keyAction('r', {}), { type: 'focusReply' });
   assert.deepStrictEqual(keyAction('1', { optionCount: 2 }), { type: 'pick', index: 0 });
-});
-
-test('showBriefings:false drops briefings and only briefings', async () => {
-  // Since #682 a briefing is only ever on the reading tab, so that is where the toggle
-  // has to be observed. The bench is unaffected either way — which is the assertion
-  // that matters, because a setting that could empty the bench would be a way to hide
-  // an agent that is waiting on you.
-  const { visibleItems } = await load();
-  const list = [
-    item({ id: 'w1', kind: 'briefing', urgency: 'fyi' }),
-    item({ id: 'w2', kind: 'question' }),
-    item({ id: 'w3', kind: 'blocked', urgency: 'blocking' }),
-  ];
-  assert.deepStrictEqual(visibleItems(list, { ...READING, showBriefings: false }).order, []);
-  assert.deepStrictEqual(visibleItems(list, { ...READING, showBriefings: true }).order, ['w1']);
-  for (const showBriefings of [true, false]) {
-    assert.deepStrictEqual(visibleItems(list, { showBriefings }).order, ['w3', 'w2']);
-  }
 });
 
 test('blockingOnly filters on urgency, not kind', async () => {
@@ -692,13 +643,10 @@ test('a result still sorts and filters like every other stored item', async () =
     view.sortItems(items).map((i) => i.id), ['b1', 'w1', 'w2'],
     'urgency first: a result is normal, so it sits under a blocked agent and above a briefing',
   );
-  for (const showBriefings of [true, false]) {
-    assert.deepStrictEqual(
-      view.visibleItems(items, { showBriefings }).order, ['b1', 'w1'],
-      'a result is an obligation, so it is on the bench and the briefing toggle — which '
-      + 'only ever reaches the reading tab — cannot touch it',
-    );
-  }
+  assert.deepStrictEqual(
+    view.visibleItems(items).order, ['b1', 'w1'],
+    'a result is an obligation, so it is on the bench and never on the reading tab',
+  );
   assert.deepStrictEqual(
     view.visibleItems(items, { blockingOnly: true }).order, ['b1'],
   );
@@ -741,25 +689,4 @@ test('itemBody is scoped to results — it never edits another kind\'s context',
   }
   assert.strictEqual(view.itemBody(null), '');
   assert.strictEqual(view.itemBody({ kind: 'result' }), '');
-});
-
-test('an idle row is not measured against a blocked row’s clock (#682)', async () => {
-  // The bug this pins: on the shared scale a session that finished ninety seconds ago
-  // was already alarm-red, so every row on the bench went red within a minute and the
-  // colour stopped carrying information.
-  const { ageColor } = await load();
-  const twoMinutes = 120_000;
-  assert.notStrictEqual(
-    ageColor(twoMinutes, 'normal', 'idle'), ageColor(twoMinutes, 'normal', 'blocked'),
-    'two minutes is an emergency for a stopped agent and unremarkable for a finished one',
-  );
-  assert.strictEqual(ageColor(twoMinutes, 'normal', 'idle'), ageColor(0, 'normal'), 'still calm');
-  assert.strictEqual(ageColor(20 * 60_000, 'normal', 'idle'), ageColor(45_000, 'normal'), 'warn');
-  assert.strictEqual(ageColor(60 * 60_000, 'normal', 'idle'), ageColor(90_000, 'normal'), 'alert');
-  assert.strictEqual(
-    ageColor(60 * 60_000, 'fyi', 'idle'), ageColor(0, 'fyi'),
-    'fyi still outranks the scale — that rule is unchanged',
-  );
-  // Every existing caller passed two arguments and must keep the behaviour it had.
-  assert.strictEqual(ageColor(90_000, 'normal'), ageColor(90_000, 'normal', 'blocked'));
 });

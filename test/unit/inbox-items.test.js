@@ -776,35 +776,28 @@ test('supersededNote says what replaced the question, and when', () => {
   );
 });
 
-// ── countOpen: the App bar's badge (#718) ────────────────────────────────────
+// ── isListed: what is on the Inbox, and so on the App bar's badge ────────────
 
-test('countOpen counts the open things agents posted — questions, results and briefings', () => {
-  const q = mk({ kind: 'question', project: '/a' }, 1);
-  const r = mk({ kind: 'result', project: '/a' }, 2);
-  const b = mk({ kind: 'briefing', project: '/b' }, 3);
-  const answered = mk({ kind: 'question', project: '/a' }, 4);
+test('isListed: an open question or result from a live session, and nothing else', () => {
+  const alive = (sid) => sid === 'live';
+  const q = mk({ kind: 'question', sessionId: 'live' }, 1);
+  const r = mk({ kind: 'result', sessionId: 'live' }, 2);
+  const b = mk({ kind: 'briefing', sessionId: 'live' }, 3);
+  const answered = mk({ kind: 'question', sessionId: 'live' }, 4);
   inbox.applyAnswer(answered, { text: 'yes' }, NOW + 1);
-  const archived = mk({ kind: 'briefing', project: '/a' }, 5);
-  inbox.applyDismiss(archived, 'archived', NOW + 1);
+  const goneResult = mk({ kind: 'result', sessionId: 'gone' }, 5);
+  const goneDurable = mk({ kind: 'question', sessionId: 'gone', durableDays: 7 }, 6);
+  const noSession = mk({ kind: 'question' }, 7);
 
-  const items = [q, r, b, answered, archived];
-  assert.strictEqual(inbox.countOpen(items), 3, 'a closed item is not in the inbox any more');
+  assert.deepStrictEqual(
+    [q, r, b, answered, goneResult, goneDurable, noSession].filter((i) => inbox.isListed(i, alive)).map((i) => i.id),
+    ['w1', 'w2'],
+    'a briefing asks nothing, and nothing is waiting on an answer once its session has gone',
+  );
+  assert.strictEqual(goneDurable.status, 'open', 'leaving the Inbox closes nothing — the link still answers it');
 });
 
-test('countOpen applies the project filter and the showBriefings setting the list applies', () => {
-  const items = [
-    mk({ kind: 'question', project: '/a' }, 1),
-    mk({ kind: 'briefing', project: '/a' }, 2),
-    mk({ kind: 'result', project: '/b' }, 3),
-  ];
-  const onlyA = (i) => i.project === '/a';
-  assert.strictEqual(inbox.countOpen(items, { pick: onlyA }), 2);
-  assert.strictEqual(inbox.countOpen(items, { briefings: false }), 2,
-    'a panel that hides briefings must not be told it has one');
-  assert.strictEqual(inbox.countOpen(items, { pick: onlyA, briefings: false }), 1);
-});
-
-test('countOpen tolerates junk rather than throwing into a poll', () => {
-  assert.strictEqual(inbox.countOpen(null), 0);
-  assert.strictEqual(inbox.countOpen([null, undefined, mk({}, 1)]), 1);
+test('isListed tolerates junk rather than throwing into a poll', () => {
+  assert.strictEqual(inbox.isListed(null, () => true), false);
+  assert.strictEqual(inbox.isListed(undefined, () => true), false);
 });

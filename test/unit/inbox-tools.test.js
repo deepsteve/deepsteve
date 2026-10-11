@@ -52,6 +52,7 @@ fs.writeFileSync(path.join(OUTSIDE_DIR, 'secret.png'), TINY_PNG);
 const inboxMod = require('../../mods/inbox/tools.js');
 const inbox = require('../../mods/inbox/inbox.js');
 const fx = require('./fixtures/inbox-dialogs.js');
+const dialogParse = require('../../dialog-parse');
 
 // ── fakes ────────────────────────────────────────────────────────────────────
 
@@ -126,6 +127,13 @@ function makeEntry(id, dialog, over = {}) {
     outputSeq: 1,
     _dialog: dialog,
     terminalScreen: dialog ? new FakeScreen(dialog) : null,
+    // The daemon's `asking` signal, which is what puts a tab on the Inbox. server.js's
+    // readAsking reads it off the screen with askingSummary; this does the same on every
+    // read, so answering or swapping a fake dialog moves it exactly as it would for real.
+    get asking() {
+      if (!this.waitingForInput || !this.terminalScreen) return null;
+      try { return dialogParse.askingSummary(this.terminalScreen.linesSync(60) || []); } catch { return null; }
+    },
     engine: {
       write(_id, bytes) {
         // Each control byte must arrive as its own write. Anything batched would not
@@ -274,17 +282,13 @@ test('a session on a permission dialog appears with its question and options', a
   assert.strictEqual(row.projectName, 'deepsteve');
 });
 
-// ── derived idle items (#682) ────────────────────────────────────────────────
+// ── what is NOT on the Inbox ─────────────────────────────────────────────────
 //
-// Inbox's actionable population used to be gated entirely on detectDialog, and the
-// test that stood here asserted the consequence: an agent that finished its turn was
-// not an inbox row. That was the arithmetic that made the panel informational — on a
-// machine with nothing showing a dialog, which is the normal case, the bench was empty
-// and the page was the issue list below it.
-//
-// So the gate is now two gates, and everything below is about the second one being
-// tight enough to be worth having. `idleAfter=0` throughout: the grace window is real
-// but it is a clock, and a unit test that waits on a clock is a flaky test.
+// The Inbox lists what is waiting on the human now: a tab that is asking, or an open
+// question or result from a live session. It once also listed every finished session, every
+// working one and every merge that did not land, and the badge counted posts from sessions
+// that had closed days before — which is how it became a list nobody could act on. Each test
+// here pins one of those out.
 
 /** A session sitting at its own composer, with `said` as the last thing it printed. */
 function idleEntry(id, said = 'Done — the migration is applied.', over = {}) {
@@ -294,207 +298,94 @@ function idleEntry(id, said = 'Done — the migration is applied.', over = {}) {
   return entry;
 }
 
-const NOW_IDLE = { query: { idleAfter: '0' } };
+/** The rows the Inbox lists for one session. */
+const rowsFor = (body, id) => (body.items || []).filter((i) => i.sessionId === id);
 
-/**
- * The rows that ASK something, which is what most of the tests below are about.
- *
- * Every live session now produces a row — that is the point of the rewrite: the list
- * used to be gated on `waitingForInput`, so a machine running eight agents flat out
- * showed an empty panel. A `working` row is scenery, and a test asserting "nothing is
- * waiting on you" must not be broken by scenery existing.
- *
- * The tests that are about the roster itself assert on `body.items` directly.
- */
-const needy = (body) => (body.items || []).filter((i) => i.kind !== 'working');
-
-test('a session that finished its turn is on the bench, headlined with what it said', async () => {
+test('a session that finished its turn is not on the Inbox', async () => {
+  // Finishing is not asking. The tab shows it; the Inbox is for what cannot go on without you.
   const { shells, app } = world();
   const id = sid();
   shells.set(id, idleEntry(id));
 
-  const { body } = await app.call('GET', '/api/inbox/items', NOW_IDLE);
-  const row = body.items.find((i) => i.id === 'idle:' + id);
-  assert.ok(row, 'an agent waiting on you is the state Inbox exists to show');
-  assert.strictEqual(row.kind, 'idle');
-  assert.strictEqual(
-    row.urgency, 'normal',
-    'not blocking: a finished session must never outrank an agent stuck on a dialog',
-  );
-  assert.strictEqual(
-    row.headline, 'Done — the migration is applied.',
-    'a bench of rows all saying "Waiting for you" is a list of session names, which is '
-    + 'the informational surface this replaced',
-  );
-  assert.strictEqual(row.answerable, true);
-  assert.strictEqual(row.pendingPath, 'prompt');
-  assert.strictEqual(row.canClose, true);
-  assert.strictEqual(row.canMerge, false, 'nothing to merge outside a worktree');
-  assert.strictEqual(row.sessionName, 'fix-660');
-  assert.strictEqual(row.projectName, 'deepsteve');
+  const { body } = await app.call('GET', '/api/inbox/items');
+  assert.deepStrictEqual(rowsFor(body, id), []);
+  const count = await app.call('GET', '/api/inbox/count');
+  assert.strictEqual(count.body.count, body.items.length, 'and the badge agrees with the list');
+});
+
+test('an agent mid-turn is not on the Inbox', async () => {
+  const { shells, app } = world();
+  const id = sid();
+  shells.set(id, makeEntry(id, null, { waitingForInput: false, inputState: 'busy' }));
+
+  const { body } = await app.call('GET', '/api/inbox/items');
+  assert.deepStrictEqual(rowsFor(body, id), []);
+});
+
+test('a session with no terminal emulator is not on the Inbox', async () => {
+  // Nothing can be read off its screen, so the daemon can never say it is asking.
+  const { shells, app } = world();
+  const id = sid();
+  shells.set(id, makeEntry(id, null));
+
+  const { body } = await app.call('GET', '/api/inbox/items');
+  assert.deepStrictEqual(rowsFor(body, id), []);
+});
+
+test('a merge that did not land is not on the Inbox', async () => {
+  // The tab strip carries that state (mergeBlock); it is not a question for the Inbox.
+  const { shells, app } = world();
+  const id = sid();
+  shells.set(id, idleEntry(id, 'Merge refused.', {
+    worktree: 'github-issue-700',
+    mergeBlock: { status: 'target-dirty', at: Date.now(), branch: 'github-issue-700', target: 'main' },
+  }));
+
+  const { body } = await app.call('GET', '/api/inbox/items');
+  assert.deepStrictEqual(rowsFor(body, id), []);
+});
+
+test('a dialog the daemon does not call asking is not on the Inbox', async () => {
+  // Membership is the daemon's `asking` signal, the one behind the tab's `?`, so the two can
+  // never disagree. A screen that only looks like a dialog to a second reading does not count.
+  const { shells, app } = world();
+  const id = sid();
+  const entry = makeEntry(id, new FakeDialog(['Yes', 'No']));
+  Object.defineProperty(entry, 'asking', { value: null });
+  shells.set(id, entry);
+
+  const { body } = await app.call('GET', '/api/inbox/items');
+  assert.deepStrictEqual(rowsFor(body, id), []);
+});
+
+test('a briefing is never on the Inbox', async () => {
+  const { shells, tools, app } = world();
+  const id = sid();
+  shells.set(id, makeEntry(id, null, { waitingForInput: false, terminalScreen: null }));
+  const reply = said(await tools.inbox_brief.handler({ headline: 'Milestone reached' }, extraFor(id)));
+  assert.match(reply, /does not list briefings/);
+
+  const { body } = await app.call('GET', '/api/inbox/items');
+  assert.deepStrictEqual(rowsFor(body, id), []);
+  const archive = await app.call('GET', '/api/inbox/items', { query: { all: '1' } });
+  assert.ok(archive.body.items.some((i) => i.headline === 'Milestone reached'), 'it is kept in the archive');
 });
 
 test('a worktree session offers the merge its row is for', async () => {
   const { shells, app } = world();
   const id = sid();
-  shells.set(id, idleEntry(id, 'Committed. Ready to merge.', { worktree: 'github-issue-682' }));
+  shells.set(id, makeEntry(id, new FakeDialog(['Yes', 'No']), { worktree: 'github-issue-682' }));
 
-  const { body } = await app.call('GET', '/api/inbox/items', NOW_IDLE);
-  const row = body.items.find((i) => i.id === 'idle:' + id);
+  const { body } = await app.call('GET', '/api/inbox/items');
+  const row = body.items.find((i) => i.id === 'blocked:' + id);
   assert.strictEqual(row.canMerge, true);
   assert.strictEqual(row.worktree, 'github-issue-682');
-});
-
-test('an idle row waits out the grace window before it appears', async () => {
-  // The between-turns case. Without this the bench flickers a row for every session
-  // that pauses to think, which is the fastest way to teach someone to ignore it.
-  const { shells, app } = world();
-  const id = sid();
-  shells.set(id, idleEntry(id));
-
-  const early = await app.call('GET', '/api/inbox/items', { query: { idleAfter: '900' } });
-  assert.deepStrictEqual(needy(early.body), [], 'inside the grace window it is merely working');
-  assert.strictEqual(early.body.items.length, 1, 'but it is still ON the list — every tab is');
-  assert.strictEqual(early.body.items[0].kind, 'working');
-
-  const now = await app.call('GET', '/api/inbox/items', NOW_IDLE);
-  assert.strictEqual(needy(now.body).length, 1, 'the same session, past its grace window');
-});
-
-test('a plain shell at a bash prompt is never on the bench', async () => {
-  // Idle by nature, forever. sessionInputState says 'unknown' for an agent type with
-  // no screenMarkers, and that is the whole guard — without it the bench fills with
-  // terminals nobody is waiting on and stops meaning anything.
-  const { shells, app } = world();
-  const id = sid();
-  shells.set(id, idleEntry(id, 'ready', { agentType: 'terminal', inputState: 'unknown' }));
-
-  const { body } = await app.call('GET', '/api/inbox/items', NOW_IDLE);
-  assert.deepStrictEqual(needy(body), [], 'a bash prompt never asks for anything');
-  assert.deepStrictEqual(
-    body.items.map((i) => i.kind), ['working'],
-    'it is still a tab, and the list is every tab — it just carries no verb',
-  );
-});
-
-test('a session with a prompt already on its way is not waiting on you', async () => {
-  const { shells, app } = world();
-  const queued = sid();
-  shells.set(queued, idleEntry(queued, 'ok', { promptQueue: [{ prompt: 'next' }] }));
-  const inflight = sid();
-  shells.set(inflight, idleEntry(inflight, 'ok', { pendingDelivery: { len: 4 } }));
-
-  const { body } = await app.call('GET', '/api/inbox/items', NOW_IDLE);
-  assert.deepStrictEqual(
-    needy(body), [],
-    'a queued prompt is an answer that has already been given — showing it as an '
-    + 'outstanding one is how a list accumulates rows nobody needs to act on',
-  );
-  assert.strictEqual(body.items.length, 2, 'both are still on the roster as working');
-});
-
-test('a session showing a dialog is blocked, not idle — never both', async () => {
-  const { shells, app } = world();
-  const id = sid();
-  shells.set(id, makeEntry(id, new FakeDialog(['Yes', 'No'])));
-
-  const { body } = await app.call('GET', '/api/inbox/items', NOW_IDLE);
-  assert.deepStrictEqual(body.items.map((i) => i.id), ['blocked:' + id]);
-});
-
-test('answering an idle row delivers a prompt through the FIFO, never a raw write', async () => {
-  const { shells, app } = world();
-  const id = sid();
-  shells.set(id, idleEntry(id));
-
-  const { status, body } = await app.call('POST', '/api/inbox/items/:id/answer', {
-    params: { id: 'idle:' + id }, body: { text: '  now run the tests  ' },
-  });
-  assert.strictEqual(status, 200);
-  assert.strictEqual(body.deliveredVia, 'prompt');
-  assert.deepStrictEqual(
-    ctxDeliveries.map((d) => [d.id, d.prompt]), [[id, 'now run the tests']],
-    'deliverPromptWhenReady owns the per-shell FIFO and the echo-gated submit; a raw '
-    + 'engine.write here is the #656 truncation from a new caller',
-  );
-});
-
-test('an empty prompt is refused rather than delivered as a bare Enter', async () => {
-  const { shells, app } = world();
-  const id = sid();
-  shells.set(id, idleEntry(id));
-
-  const { status, body } = await app.call('POST', '/api/inbox/items/:id/answer', {
-    params: { id: 'idle:' + id }, body: { text: '   ' },
-  });
-  assert.strictEqual(status, 400);
-  assert.strictEqual(body.error, 'empty');
-  assert.deepStrictEqual(ctxDeliveries, []);
-});
-
-test('snoozing an idle row hides it, and the session moving on brings it back', async () => {
-  const { shells, app } = world();
-  const id = sid();
-  const entry = idleEntry(id, 'first thing');
-  shells.set(id, entry);
-
-  const before = await app.call('GET', '/api/inbox/items', NOW_IDLE);
-  const fp = needy(before.body)[0].fingerprint;
-
-  const snooze = await app.call('POST', '/api/inbox/items/:id/dismiss', {
-    params: { id: 'idle:' + id }, body: { expect: fp },
-  });
-  assert.strictEqual(snooze.status, 200);
-  assert.strictEqual(snooze.body.snoozed, true);
-
-  const quiet = await app.call('GET', '/api/inbox/items', NOW_IDLE);
-  assert.deepStrictEqual(needy(quiet.body), [], 'snoozed');
-
-  // The session says something else. That is a NEW wait, and a snooze is only ever a
-  // promise about the one you looked at.
-  const render = () => ['⏺ second thing', '─'.repeat(60), '❯', '─'.repeat(60), '? for shortcuts'];
-  entry.terminalScreen = { linesSync: (n) => render().slice(-n), lines: async (n) => render().slice(-n) };
-  entry.outputSeq++;
-
-  const back = await app.call('GET', '/api/inbox/items', NOW_IDLE);
-  assert.strictEqual(needy(back.body).length, 1);
-  assert.strictEqual(needy(back.body)[0].headline, 'second thing');
-});
-
-test('a snooze aimed at a wait that has already moved on is refused', async () => {
-  const { shells, app } = world();
-  const id = sid();
-  shells.set(id, idleEntry(id));
-  await app.call('GET', '/api/inbox/items', NOW_IDLE);
-
-  const { status, body } = await app.call('POST', '/api/inbox/items/:id/dismiss', {
-    params: { id: 'idle:' + id }, body: { expect: 'a fingerprint from some other screen' },
-  });
-  assert.strictEqual(status, 409);
-  assert.strictEqual(body.error, 'session-moved-on');
-});
-
-test('the idle clock survives a repaint that changed nothing', async () => {
-  // outputSeq bumps on a resize or a status-line tick. Resetting the wait clock there
-  // would make an agent that has been waiting forty minutes report forty seconds — and
-  // with a grace window in play, would keep the row from ever appearing at all.
-  const { shells, app } = world();
-  const id = sid();
-  const entry = idleEntry(id);
-  shells.set(id, entry);
-
-  const first = await app.call('GET', '/api/inbox/items', NOW_IDLE);
-  const createdAt = first.body.items[0].createdAt;
-
-  entry.outputSeq++;   // same screen, new sequence number
-  const again = await app.call('GET', '/api/inbox/items', NOW_IDLE);
-  assert.strictEqual(again.body.items[0].createdAt, createdAt);
 });
 
 test('closing a session from the bench goes through the host, and the row goes with it', async () => {
   const { shells, app } = world();
   const id = sid();
-  shells.set(id, idleEntry(id));
+  shells.set(id, makeEntry(id, new FakeDialog(['Yes', 'No'])));
 
   const { status, body } = await app.call('POST', '/api/inbox/sessions/:id/close', {
     params: { id },
@@ -507,8 +398,8 @@ test('closing a session from the bench goes through the host, and the row goes w
     + 'must never grow a second way to end a session',
   );
 
-  const after = await app.call('GET', '/api/inbox/items', NOW_IDLE);
-  assert.deepStrictEqual(after.body.items, []);
+  const after = await app.call('GET', '/api/inbox/items');
+  assert.deepStrictEqual(rowsFor(after.body, id), []);
 });
 
 test('closing a session that is already gone is a 404, not a crash', async () => {
@@ -598,34 +489,19 @@ test('a killed session and a tmux-attach are not on the list at all', async () =
   assert.deepStrictEqual(body.items, []);
 });
 
-test('a session with no terminal emulator is still a tab, and is listed as one', async () => {
-  // It used to be skipped, which was right when the list was "things waiting on you" and
-  // wrong now that it is "every tab". A session we cannot scrape has nothing to say for
-  // itself — and saying nothing is different from not existing, which is what the panel
-  // showed before.
-  const { shells, app } = world();
-  const noScreen = sid();
-  shells.set(noScreen, makeEntry(noScreen, null));
-
-  const { body } = await app.call('GET', '/api/inbox/items');
-  assert.strictEqual(body.items.length, 1);
-  assert.strictEqual(body.items[0].kind, 'working');
-  assert.strictEqual(body.items[0].id, 'session:' + noScreen);
-});
-
 test('a resolved dialog leaves the inbox on the next poll, with no tombstone', async () => {
   const { shells, app } = world();
   const id = sid();
   const dialog = new FakeDialog(['Yes', 'No']);
   shells.set(id, makeEntry(id, dialog));
 
-  assert.strictEqual(needy((await app.call('GET', '/api/inbox/items')).body).length, 1);
+  assert.strictEqual((await app.call('GET', '/api/inbox/items')).body.items.length, 1);
 
   // Answered in the terminal by the human, not through Inbox.
   shells.get(id).engine.write(id, ENTER);
 
   const { body } = await app.call('GET', '/api/inbox/items');
-  assert.deepStrictEqual(needy(body), [], 'derived rows are computed per request — nothing to reconcile');
+  assert.deepStrictEqual(body.items, [], 'derived rows are computed per request — nothing to reconcile');
 });
 
 test('an unparseable dialog stays listed but is not answerable', async () => {
@@ -635,7 +511,7 @@ test('an unparseable dialog stays listed but is not answerable', async () => {
   shells.set(id, makeEntry(id, dialog));
 
   const { body } = await app.call('GET', '/api/inbox/items');
-  const row = needy(body)[0];
+  const row = body.items[0];
   assert.ok(row, 'a blocked session we cannot read is still a blocked session');
   assert.strictEqual(row.answerable, false);
   assert.ok(Array.isArray(row.preview) && row.preview.length, 'the card falls back to a raw preview');
@@ -901,7 +777,7 @@ const rowFor = async (app, id) => {
   return body.items.find((i) => i.id === id) || null;
 };
 
-test('dismissing a live dialog demotes the row and types nothing into it', async () => {
+test('dismissing a live dialog takes the row off and types nothing into it', async () => {
   const { shells, app } = world();
   const id = sid();
   const dialog = new FakeDialog(['Yes', 'No']);
@@ -917,10 +793,10 @@ test('dismissing a live dialog demotes the row and types nothing into it', async
   assert.strictEqual(r.status, 200);
   assert.strictEqual(r.body.muted, true);
 
-  const after = await rowFor(app, 'blocked:' + id);
-  assert.ok(after, 'the tab stays on the roster — the list is every tab');
-  assert.strictEqual(after.urgency, 'fyi', 'it stops competing with real obligations');
-  assert.strictEqual(after.muted, true);
+  assert.strictEqual(await rowFor(app, 'blocked:' + id), null, 'you have seen it — it is off the list');
+  const count = await app.call('GET', '/api/inbox/count');
+  const listed = await app.call('GET', '/api/inbox/items');
+  assert.strictEqual(count.body.count, listed.body.items.length, 'and off the badge');
   assert.deepStrictEqual(dialog.writes, [], 'a mute must never touch the session');
   assert.strictEqual(dialog.selected, null, 'the dialog itself is left standing');
 });
@@ -1508,8 +1384,7 @@ test('from a scheduled run, share_result and inbox_ask say finish, not wait (#70
   // until maxRuntimeMinutes — so the reply has to agree with the scheduled-run prompt.
   const { shells, tools } = world();
   // One session per call: the inbox is module state shared by the whole file, and a result
-  // and a durable question both outlive their session — two open items on one session id
-  // would be two rows for it in every later test's roster.
+  // and a durable question both stay open in the store after their session goes.
   const scheduledRun = () => {
     const id = sid();
     const entry = liveSession(shells, id);
@@ -1519,7 +1394,8 @@ test('from a scheduled run, share_result and inbox_ask say finish, not wait (#70
 
   const { id, entry } = scheduledRun();
   const shared = said(await tools.share_result.handler({ summary: 'Weekly report: all green.' }, extraFor(id)));
-  assert.match(shared, /stays there after this session closes/);
+  assert.match(shared, /on the Inbox only until this session closes/);
+  assert.match(shared, /`report` of scheduled_task_finished/, 'a deliverable is pointed at its run history');
   assert.match(shared, /scheduled_task_finished/);
   assert.match(shared, /the way your prompt says/, 'not "now": an isolated run must still merge first');
   assert.doesNotMatch(shared, /End your turn now/i);
@@ -1532,7 +1408,7 @@ test('from a scheduled run, share_result and inbox_ask say finish, not wait (#70
     options: [{ label: 'Yes', then: 'Rotate it and report the new fingerprint.' }, { label: 'No' }],
     durable_days: 3,
   }, extraFor(scheduledRun().id)))).message;
-  assert.match(durable, /stays open after this session closes/);
+  assert.match(durable, /the question leaves the Inbox, and its url keeps answering it/);
   assert.match(durable, /inbox_answers, which later runs of this task read/);
   assert.match(durable, /scheduled_task_finished/);
   assert.doesNotMatch(durable, /end your turn now/i);
@@ -1701,7 +1577,7 @@ test('a result whose session is gone records the decision and types nowhere', as
     'NOTHING may be written toward a dead session');
 });
 
-test('an open result survives the dead-session sweep the inbox listing runs', async () => {
+test('an open result survives the dead-session sweep, and leaves the Inbox with its session', async () => {
   const { shells, tools, app } = world();
   const id = sid();
   liveSession(shells, id);
@@ -1712,10 +1588,14 @@ test('an open result survives the dead-session sweep the inbox listing runs', as
 
   await app.call('GET', '/api/inbox/items');
   await app.call('GET', '/api/inbox/items');
-  const { body } = await app.call('GET', '/api/inbox/items');
+  const { body: listed } = await app.call('GET', '/api/inbox/items');
+  assert.ok(!listed.items.some((i) => i.headline === 'outlives its tab'),
+    'nothing is waiting on a result whose session has gone, so the Inbox drops it');
 
+  // The archive still has it, open: the sweep never closes a result (#669).
+  const { body } = await app.call('GET', '/api/inbox/items', { query: { all: '1' } });
   const item = body.items.find((i) => i.kind === 'result' && i.headline === 'outlives its tab');
-  assert.ok(item, 'a result is exempt — it is read AFTER the agent has finished');
+  assert.ok(item, 'a result is exempt from the sweep — the record outlives the agent');
   assert.strictEqual(item.status, 'open');
   assert.strictEqual(item.pendingPath, 'gone',
     'and the panel is told before the click, not by a note afterwards');
@@ -1766,53 +1646,15 @@ test('share_result declares no options of its own — the two are minted server-
   );
 });
 
-/** The kind of the row for one session — never `items[0]`: the stored inbox is module
- *  state shared by every test in this file, so position says nothing. */
-const kindOfRow = async (app, sessionId) => {
-  const { body } = await app.call('GET', '/api/inbox/items');
-  const row = body.items.find((i) => i.sessionId === sessionId);
-  return row ? row.kind : null;
-};
+// ── the issue a row is about ─────────────────────────────────────────────────
 
-// ── the roster: every tab, not just the ones waiting on you ──────────────────
-//
-// The gate this replaces was `if (!entry.waitingForInput) continue;`, and its arithmetic
-// is what made Inbox look like a panel for agents that had used the MCP tools: on a
-// machine running eight agents flat out, nothing is waiting on anything, so the list was
-// empty and the only rows ever seen were the ones an agent had deliberately posted.
-
-test('an agent mid-turn is on the list, as a working row', async () => {
-  const { shells, app } = world();
-  const id = sid();
-  shells.set(id, makeEntry(id, null, {
-    waitingForInput: false,
-    inputState: 'busy',
-    terminalScreen: staticScreen(['⏺ Editing mods/inbox/tools.js']),
-  }));
-
-  const { body } = await app.call('GET', '/api/inbox/items');
-  const row = body.items.find((i) => i.id === 'session:' + id);
-  assert.ok(row, 'a busy agent is the ordinary state of the machine and belongs on the list');
-  assert.strictEqual(row.kind, 'working');
-  assert.strictEqual(row.state, 'busy');
-  assert.strictEqual(
-    row.urgency, 'fyi',
-    'scenery must never outrank an obligation — a working row that sorted with the '
-    + 'blocked ones would bury the rows that need somebody',
-  );
-  assert.strictEqual(row.headline, 'Editing mods/inbox/tools.js');
-  assert.strictEqual(row.answerable, true, 'you can always tell a working agent something');
-});
-
-test('a working row carries the issue it is on', async () => {
+test('a blocked row carries the issue it is on', async () => {
   // The number the work has in the tracker, in the branch and in the merge commit — and
   // the thing the user actually calls the tab. It is derived from the worktree, which an
   // agent cannot rename, rather than from the tab name, which it can.
   const { shells, app } = world();
   const id = sid();
-  shells.set(id, makeEntry(id, null, {
-    waitingForInput: false, inputState: 'busy', worktree: 'github-issue-691',
-  }));
+  shells.set(id, makeEntry(id, new FakeDialog(['Yes', 'No']), { worktree: 'github-issue-691' }));
 
   const { body } = await app.call('GET', '/api/inbox/items');
   const row = body.items.find((i) => i.sessionId === id);
@@ -1823,201 +1665,11 @@ test('a working row carries the issue it is on', async () => {
 test('a session with no worktree has no issue rather than a wrong one', async () => {
   const { shells, app } = world();
   const id = sid();
-  shells.set(id, makeEntry(id, null, { waitingForInput: false, inputState: 'busy' }));
+  shells.set(id, makeEntry(id, new FakeDialog(['Yes', 'No'])));
   const { body } = await app.call('GET', '/api/inbox/items');
   const row = body.items.find((i) => i.sessionId === id);
   assert.strictEqual(row.issue, null);
   assert.strictEqual(row.canMerge, false);
-});
-
-test('one session produces exactly one row, whatever state it is in', async () => {
-  // The invariant the whole roster rests on. Two rows for one tab would double-count it
-  // in every header, and the cursor would walk the same agent twice.
-  const { shells, app } = world();
-  const busy = sid();
-  shells.set(busy, makeEntry(busy, null, { waitingForInput: false, inputState: 'busy' }));
-  const blocked = sid();
-  shells.set(blocked, makeEntry(blocked, new FakeDialog(['Yes', 'No'])));
-  const waiting = sid();
-  shells.set(waiting, idleEntry(waiting));
-
-  const { body } = await app.call('GET', '/api/inbox/items', NOW_IDLE);
-  const bySession = new Map();
-  for (const row of body.items) {
-    assert.ok(!bySession.has(row.sessionId), `two rows for session ${row.sessionId}`);
-    bySession.set(row.sessionId, row.kind);
-  }
-  assert.deepStrictEqual(
-    [bySession.get(busy), bySession.get(blocked), bySession.get(waiting)],
-    ['working', 'blocked', 'idle'],
-  );
-});
-
-// ── stuck rows: a failed merge, and an agent that says it is blocked ─────────
-
-test('a merge that did not merge becomes a row that stays', async () => {
-  // Before this the outcome was a red string in the corner of the panel that the next
-  // poll wiped, so the one state you most need to come back to — work that is finished
-  // and cannot land — was the one state the list could not show.
-  const { shells, app } = world();
-  const id = sid();
-  const entry = makeEntry(id, null, {
-    waitingForInput: false, inputState: 'busy', worktree: 'github-issue-691',
-  });
-  entry.mergeBlock = {
-    status: 'target-dirty',
-    message: 'The target checkout has 3 uncommitted files.',
-    branch: 'github-issue-691', target: 'main', at: Date.now(),
-  };
-  shells.set(id, entry);
-
-  const { body } = await app.call('GET', '/api/inbox/items');
-  const row = body.items.find((i) => i.id === 'session:' + id);
-  assert.strictEqual(row.kind, 'stuck');
-  assert.strictEqual(row.urgency, 'blocking', 'work that cannot land will not resolve itself');
-  assert.strictEqual(row.stuck.mergeStatus, 'target-dirty');
-  assert.strictEqual(row.stuck.branch, 'github-issue-691');
-  assert.strictEqual(row.stuck.target, 'main');
-  assert.match(row.context, /uncommitted/i);
-});
-
-test('a stuck row names the sessions sitting in the shared checkout', async () => {
-  const { shells, app } = world();
-  const stuck = sid();
-  const entry = makeEntry(stuck, null, {
-    waitingForInput: false, inputState: 'busy', worktree: 'github-issue-691',
-  });
-  entry.mergeBlock = { status: 'target-dirty', message: '', branch: 'b', target: 'main', at: Date.now() };
-  shells.set(stuck, entry);
-
-  // A second agent working directly in the repo — the classic hog.
-  const hog = sid();
-  shells.set(hog, makeEntry(hog, null, {
-    waitingForInput: false, inputState: 'busy', name: 'remote step 1',
-  }));
-
-  const { body } = await app.call('GET', '/api/inbox/items');
-  const row = body.items.find((i) => i.id === 'session:' + stuck);
-  assert.deepStrictEqual(
-    row.stuck.holders, [{ sessionId: hog, sessionName: 'remote step 1' }],
-    'the daemon knows who is in the checkout, so it answers rather than making the agent guess',
-  );
-  assert.match(row.context, /"remote step 1" is working/);
-});
-
-test('a merge conflict names nobody', async () => {
-  // A conflict is not somebody hogging anything. Listing the sessions in the checkout
-  // next to one would be a confident accusation about the wrong thing, and after one of
-  // those the row stops being believed.
-  const { shells, app } = world();
-  const stuck = sid();
-  const entry = makeEntry(stuck, null, {
-    waitingForInput: false, inputState: 'busy', worktree: 'github-issue-691',
-  });
-  entry.mergeBlock = { status: 'conflict', message: 'CONFLICT in server.js', branch: 'b', target: 'main', at: Date.now() };
-  shells.set(stuck, entry);
-  const other = sid();
-  shells.set(other, makeEntry(other, null, { waitingForInput: false, inputState: 'busy' }));
-
-  const { body } = await app.call('GET', '/api/inbox/items');
-  const row = body.items.find((i) => i.id === 'session:' + stuck);
-  assert.deepStrictEqual(row.stuck.holders, []);
-  assert.ok(!/is working in/.test(row.context), row.context);
-});
-
-test('inbox_blocked marks the session and answers who is in the way', async () => {
-  const { shells, app, tools } = world();
-  const me = sid();
-  shells.set(me, makeEntry(me, null, {
-    waitingForInput: false, inputState: 'busy', worktree: 'github-issue-691',
-  }));
-  const hog = sid();
-  shells.set(hog, makeEntry(hog, null, {
-    waitingForInput: false, inputState: 'busy', name: 'cron fix',
-  }));
-
-  const out = said(await tools.inbox_blocked.handler(
-    { summary: 'Cannot merge — the shared checkout is dirty.', waiting_on: 'merge' },
-    extraFor(me),
-  ));
-  assert.match(out, /"cron fix" is working/, 'the tool answers the question it was asked');
-  assert.match(out, /Do NOT type into those sessions/, 'and says what not to do about it');
-
-  const { body } = await app.call('GET', '/api/inbox/items');
-  const row = body.items.find((i) => i.id === 'session:' + me);
-  assert.strictEqual(row.kind, 'stuck');
-  assert.strictEqual(row.headline, 'Cannot merge — the shared checkout is dirty.');
-  assert.strictEqual(row.stuck.source, 'agent');
-  assert.deepStrictEqual(row.stuck.holders.map((h) => h.sessionName), ['cron fix']);
-});
-
-test('a block on something that is not the checkout names nobody', async () => {
-  const { shells, tools } = world();
-  const me = sid();
-  shells.set(me, makeEntry(me, null, { waitingForInput: false, inputState: 'busy' }));
-  const other = sid();
-  shells.set(other, makeEntry(other, null, { waitingForInput: false, inputState: 'busy' }));
-
-  const out = said(await tools.inbox_blocked.handler(
-    { summary: 'Waiting on an API key I do not have.', waiting_on: 'external' },
-    extraFor(me),
-  ));
-  assert.ok(!/is working in/.test(out), out);
-});
-
-test('inbox_unblocked clears the row', async () => {
-  const { shells, app, tools } = world();
-  const me = sid();
-  shells.set(me, makeEntry(me, null, { waitingForInput: false, inputState: 'busy' }));
-
-  await tools.inbox_blocked.handler({ summary: 'Stuck on something' }, extraFor(me));
-  assert.strictEqual(await kindOfRow(app, me), 'stuck');
-
-  await tools.inbox_unblocked.handler({}, extraFor(me));
-  assert.strictEqual(await kindOfRow(app, me), 'working');
-});
-
-test('answering a stuck row clears the block, because the agent will not', async () => {
-  // An agent that reliably called inbox_unblocked would not need this. The panel must
-  // not depend on one doing so: a human who has responded to the block has made the
-  // claim "this agent is stopped and nobody has dealt with it" false.
-  const { shells, app, tools } = world();
-  const me = sid();
-  shells.set(me, makeEntry(me, null, { waitingForInput: false, inputState: 'busy' }));
-  await tools.inbox_blocked.handler({ summary: 'Stuck' }, extraFor(me));
-
-  const r = await app.call('POST', '/api/inbox/items/:id/answer', {
-    params: { id: 'session:' + me }, body: { text: 'I cleared it — go ahead' },
-  });
-  assert.strictEqual(r.status, 200);
-  assert.strictEqual(ctxDeliveries.at(-1).prompt, 'I cleared it — go ahead');
-  assert.strictEqual(await kindOfRow(app, me), 'working');
-});
-
-test('a human can clear a block the agent left behind', async () => {
-  const { shells, app, tools } = world();
-  const me = sid();
-  shells.set(me, makeEntry(me, null, { waitingForInput: false, inputState: 'busy' }));
-  await tools.inbox_blocked.handler({ summary: 'Stuck' }, extraFor(me));
-
-  const r = await app.call('POST', '/api/inbox/items/:id/dismiss', {
-    params: { id: 'session:' + me },
-  });
-  assert.strictEqual(r.status, 200);
-  assert.strictEqual(r.body.cleared, true);
-  assert.strictEqual(await kindOfRow(app, me), 'working');
-});
-
-test('no MCP tool can clear ANOTHER agent’s block', () => {
-  // The #519 line this file's header draws, restated for the two new tools: both take no
-  // session parameter, so there is no spelling of either that writes another session's
-  // state.
-  const { tools } = world();
-  assert.deepStrictEqual(Object.keys(tools.inbox_unblocked.schema), []);
-  assert.deepStrictEqual(
-    Object.keys(tools.inbox_blocked.schema).sort(),
-    ['detail', 'summary', 'waiting_on'],
-  );
 });
 
 // ── the permissions log ──────────────────────────────────────────────────────
@@ -2045,9 +1697,10 @@ test('an AskUserQuestion is not a permission and is not logged', async () => {
   // asking me for".
   const { shells, app } = world();
   const id = sid();
-  shells.set(id, makeEntry(id, null, { terminalScreen: staticScreen(fx.ASK_USER_QUESTION) }));
+  shells.set(id, makeEntry(id, null, { terminalScreen: staticScreen(fx.MULTI_QUESTION) }));
 
-  await app.call('GET', '/api/inbox/items');
+  const listed = await app.call('GET', '/api/inbox/items');
+  assert.ok(listed.body.items.some((i) => i.id === 'blocked:' + id), 'the question really is on screen');
   const { body } = await app.call('GET', '/api/inbox/permissions');
   assert.deepStrictEqual(body.entries.filter((e) => e.sessionId === id), []);
 });
@@ -2114,7 +1767,7 @@ test('the inbox lists the projects it knows about, with their live counts', asyn
 test('an empty selection means every project, not none', async () => {
   const { shells, app } = world();
   const id = sid();
-  shells.set(id, makeEntry(id, null, { waitingForInput: false, inputState: 'busy' }));
+  shells.set(id, makeEntry(id, new FakeDialog(['Yes', 'No'])));
 
   const both = await app.call('GET', '/api/inbox/items', { query: { projects: '' } });
   assert.ok(
@@ -2126,7 +1779,7 @@ test('an empty selection means every project, not none', async () => {
 test('a selection filters the rows to those projects', async () => {
   const { shells, app } = world();
   const mine = sid();
-  shells.set(mine, makeEntry(mine, null, { waitingForInput: false, inputState: 'busy' }));
+  shells.set(mine, makeEntry(mine, new FakeDialog(['Yes', 'No'])));
 
   const kept = await app.call('GET', '/api/inbox/items', { query: { projects: PROJECT_DIR } });
   assert.ok(kept.body.items.some((i) => i.sessionId === mine));

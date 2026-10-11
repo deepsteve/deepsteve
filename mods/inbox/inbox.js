@@ -112,42 +112,6 @@ function parseBlockedId(id) {
   return rest ? rest : null;
 }
 
-/** `idle:<sessionId>` — the synthetic id an idle-awaiting-you row carries (#682). */
-function idleId(sessionId) {
-  return 'idle:' + sessionId;
-}
-
-/** The session id inside an idle id, or null for anything else. */
-function parseIdleId(id) {
-  if (typeof id !== 'string' || !id.startsWith('idle:')) return null;
-  const rest = id.slice('idle:'.length);
-  return rest ? rest : null;
-}
-
-/**
- * `session:<sessionId>` — the row a live session gets when it is not asking anything.
- *
- * The third derived kind, and the one that changed what the panel is for. Inbox used
- * to build rows only for sessions that were waiting on a human, so an agent doing its
- * job appeared nowhere and the list read as "the agents that used the MCP tools". A
- * session working is the ordinary state of the machine and belongs on the list; it just
- * belongs at the bottom of it.
- *
- * A separate prefix from `idle:` rather than a flag on it, because the two carry
- * different verbs: dismissing an idle row SNOOZES a wait, and there is no wait here to
- * snooze.
- */
-function sessionRowId(sessionId) {
-  return 'session:' + sessionId;
-}
-
-/** The session id inside a session-row id, or null for anything else. */
-function parseSessionRowId(id) {
-  if (typeof id !== 'string' || !id.startsWith('session:')) return null;
-  const rest = id.slice('session:'.length);
-  return rest ? rest : null;
-}
-
 /**
  * Is this, exactly, a stored item's id? Canonical spellings only — a LINK names an item
  * exactly, and letting `/v1/decision/W7` resolve would give one item two addresses.
@@ -522,19 +486,18 @@ function sortForInbox(items) {
 }
 
 /**
- * How many things are in the Inbox (#718) — the number on the App bar's badge.
+ * Is this stored item on the Inbox right now?
  *
- * Stored items only: the questions, results and briefings agents actually posted. The derived
- * rows /api/inbox/items adds (working, idle, blocked, stuck) describe TABS, and counting them
- * would make the badge read "how many sessions are open". `pick` is the same project predicate
- * the list is filtered by, and `briefings: false` mirrors the panel's showBriefings setting, so
- * the badge counts what the panel would list.
+ * The Inbox lists what is waiting on the human now, and nothing else. A stored item
+ * qualifies while it is open, asks for an answer (a question or a result — a briefing never
+ * does), and the session that asked is still alive. Once that session has gone, nothing is
+ * waiting on the answer: the item stays in the store, its decision link still answers it,
+ * and inbox_answers still reads it, but it is no longer the human's to-do.
  */
-function countOpen(items, { pick = () => true, briefings = true } = {}) {
-  if (!Array.isArray(items)) return 0;
-  return items.filter((i) => i && i.status === 'open'
-    && (briefings || i.kind !== 'briefing')
-    && pick(i)).length;
+function isListed(item, isAlive) {
+  return !!item && item.status === 'open'
+    && (item.kind === 'question' || item.kind === 'result')
+    && !!item.sessionId && !!isAlive(item.sessionId);
 }
 
 // ── persistence ──────────────────────────────────────────────────────────────
@@ -670,10 +633,6 @@ module.exports = {
   clampText,
   blockedId,
   parseBlockedId,
-  idleId,
-  parseIdleId,
-  sessionRowId,
-  parseSessionRowId,
   isItemId,
   normalizeId,
   normalizeOptions,
@@ -690,7 +649,7 @@ module.exports = {
   sweepSuperseded,
   compareItems,
   sortForInbox,
-  countOpen,
+  isListed,
   // store
   load,
   save,

@@ -1,20 +1,28 @@
 /**
- * Inbox (#660, #669) — one inbox for every agent that needs you.
+ * Inbox (#660, #669) — what is waiting on you right now, and nothing else.
  *
- * Five MCP tools let an agent post a question, a briefing, a result or a chat reply; nine
- * REST routes let the panel read the inbox, answer from it, fetch a result's images, read
- * the project's backlog, and hold a conversation with a session. Blocked sessions — the
- * ones sitting on a real Claude Code permission / AskUserQuestion dialog — are DERIVED per
- * request from ctx.shells and never stored, so they exist exactly as long as the dialog does.
+ * A row exists only while something is blocked on the human, and goes the moment that stops
+ * being true. Two things qualify, and inboxRows() is the one builder for both:
+ *
+ *   - a tab that is ASKING: showing a permission / AskUserQuestion / plan dialog. The test is
+ *     the daemon's own `asking` signal (docs/sessions.md#asking), the one that puts the `?` on
+ *     the tab, so the Inbox and the tab strip cannot disagree. DERIVED per request from
+ *     ctx.shells and never stored, so it exists exactly as long as the dialog does.
+ *   - an open question (inbox_ask) or result (share_result) whose session is still alive
+ *     (inbox.isListed). An item whose session has gone stays in the store, answerable through
+ *     its decision link and readable by inbox_answers, but nothing is waiting on it.
+ *
+ * Briefings, idle and working sessions, and merges that did not land are not on it: none of
+ * them is a question. A scheduled run's report goes to its task's run history instead.
  *
  * The panel POLLS its own routes rather than receiving a broadcast. That is not an
  * oversight: a new push feed would need a notifyX/onXChanged pair in
  * public/js/mod-manager.js plus a dispatch line in public/js/app.js.
  *
  * The App bar's badge (#718) polls too, and it is the one reader that runs while the panel is
- * closed. The host polls the route mod.json names under `badge` — GET /api/inbox/count — which
- * counts stored items only and never reads a terminal screen, so it costs nothing with the
- * panel shut.
+ * closed. GET /api/inbox/count is the length of the same inboxRows() the list returns. It
+ * reads a screen only for a tab that is already asking, and that read is cached on the
+ * session's output sequence, so a dialog sitting on screen costs one read, not one per poll.
  *
  * Inbox shipped (#660) with no host edit at all. It now has exactly one: ctx.transcriptPath,
  * put in the mod context for the chat pane (#670). The function itself is server.js's and is
@@ -149,23 +157,6 @@ const WIDE_ROWS = 60;         // one retry when a 30-row read truncates the opti
 const PREVIEW_ROWS = 15;
 const READ_FRESH_TIMEOUT_MS = 1000;
 
-// ── idle-awaiting-you (#682) ──
-//
-// How long a session must sit unchanged at its own prompt before the bench calls it
-// "waiting on you" rather than "between turns". The panel sends its own value from a
-// setting because the right number is a property of how the human works, not of the
-// software: 15s is right if you are watching, and maddening if you are not.
-//
-// The clamp is the contract. 0 is legal and means "the moment it stops" — a real
-// choice, and the one the unit tests use so they never have to wait.
-const IDLE_AFTER_DEFAULT_MS = 15_000;
-const IDLE_AFTER_MAX_MS = 6 * 60 * 60 * 1000;
-
-// How long "I'll deal with it later" lasts when the panel does not say. Long enough
-// to clear the bench and finish what you were doing, short enough that a session you
-// snoozed and forgot comes back the same afternoon.
-const SNOOZE_DEFAULT_MS = 30 * 60 * 1000;
-
 // ── chat pane (#670) ──
 // How much of a transcript's TAIL to read for the chat pane. Four times
 // prompt-delivery-check.js's TAIL_READ_BYTES on purpose: that module wants the last user
@@ -223,30 +214,6 @@ const PROJECT_CACHE_MAX = 200;
 // Written only from POST /api/inbox/items/blocked:<id>/dismiss, which no MCP tool
 // calls — see the header. An agent must never be able to silence a human's inbox.
 const mutedDialogs = new Map();
-
-// How long a merge attempt that did not merge keeps its row on the list.
-//
-// Not forever, and not until it is cleared: a refused merge is a fact about a MOMENT
-// ("the checkout was dirty at 14:02"), and by tomorrow it says nothing about whether it
-// would be refused now. It is cleared early by a successful merge, by the human, or by
-// the agent saying it is moving again — this is only the backstop for the case where
-// nobody does any of those.
-const MERGE_BLOCK_TTL_MS = 6 * 60 * 60 * 1000;
-
-// A self-declared block (inbox_blocked) on the same backstop and for the same reason.
-const BLOCK_NOTE_TTL_MS = 6 * 60 * 60 * 1000;
-
-// sessionId -> { until, idleSince } — an idle row the human has snoozed (#682).
-//
-// The same shape of promise mutedDialogs makes, keyed on the same kind of evidence.
-// A dialog mute is keyed on the QUESTION, so it ends when the tab asks something
-// else; a snooze is keyed on `idleSince`, so it ends when the session does something
-// and comes back to its prompt with a fresh wait. Both mean "I have dealt with the
-// thing I was looking at", and neither can outlive the thing it was about.
-//
-// In memory, and written only from the panel's dismiss route — no MCP tool reaches
-// it. An agent must never be able to silence a human's bench.
-const snoozedSessions = new Map();
 
 // Sessions with a key dance in flight. A second concurrent answer would interleave
 // two key streams into one dialog.
@@ -633,8 +600,8 @@ async function backlogFor(project, label, query, now) {
 function sessionsForMatch() {
   const out = [];
   for (const [id, entry] of ctx.shells) {
-    // Same two exclusions derivedItems makes: a killed session is not working on
-    // anything, and a tmux-attach is an ephemeral view of a pane rather than a tab.
+    // A killed session is not working on anything, and a tmux-attach is an ephemeral
+    // view of a pane rather than a tab.
     if (!entry || entry.killed || entry.agentType === 'tmux-attach') continue;
     out.push({
       id,
@@ -695,9 +662,9 @@ function serializeStored(item) {
     answerable: item.kind !== 'briefing' && item.status === 'open',
     // #710: why a superseded question closed, for the archive (`all=1`).
     closedNote: item.supersededBy ? inbox.supersededNote(item.supersededBy) : null,
-    // The session verbs (#682), on every row that has a live session behind it — not
-    // just the derived idle ones. A question from an agent that has since finished its
-    // work is exactly as closable as any other, and the panel cannot work either of
+    // The session verbs (#682), on every row that has a live session behind it. A
+    // question from an agent that has since finished its work is exactly as closable as
+    // any other, and the panel cannot work either of
     // these out for itself: getSessions() reports THIS window's tabs, not the server's
     // sessions, so a row for an agent in another window would look unreachable.
     canClose: !!entry,
@@ -705,26 +672,24 @@ function serializeStored(item) {
   };
 }
 
+/** The output counter a scrape is cached against: a screen that has not moved is not re-read. */
+function outputSeqOf(entry) {
+  return entry.outputSeq != null ? entry.outputSeq : (entry.lastActivity || 0);
+}
+
 /**
- * `wantDialog` is a COST switch, not a behaviour one.
+ * Read a session's dialog off its screen, cached per session on outputSeqOf(entry).
  *
- * Every live session is scraped now, not just the ones waiting on a human, and a working
- * session's screen changes on every chunk — so its outputSeq moves every poll and the
- * cache never hits it. Running detectDialog + parseDialog + a 60-row widening retry on
- * each of those, every two seconds, buys nothing: a session that is mid-turn is by
- * definition not sitting on a dialog. The caller passes false there and gets the cheap
- * half (the lines and the two fingerprints), which is all a working row needs.
- *
- * The entry is cached under the same key either way and carries `hadDialogRead` so a
- * cheap read is never mistaken for "we looked and there was no dialog".
+ * Called only for a session that is asking, and from the answer paths that drive one, so a
+ * dialog sitting on screen is read once however often the list and the badge poll.
  */
-function scrapeFor(id, entry, now, wantDialog = true) {
-  const seq = entry.outputSeq != null ? entry.outputSeq : (entry.lastActivity || 0);
+function scrapeFor(id, entry, now) {
+  const seq = outputSeqOf(entry);
   const prev = scrapeCache.get(id);
-  if (prev && prev.seq === seq && (prev.hadDialogRead || !wantDialog)) return prev;
+  if (prev && prev.seq === seq) return prev;
 
   let lines = screenLines(entry, SCRAPE_ROWS);
-  let detected = wantDialog ? dialogParse.detectDialog(lines) : null;
+  let detected = dialogParse.detectDialog(lines);
   let parsed = detected ? dialogParse.parseDialog(lines) : null;
 
   // A dialog we can see but not read may simply have been cut off by the 30-row
@@ -747,7 +712,7 @@ function scrapeFor(id, entry, now, wantDialog = true) {
   // dialog whose option run it cannot walk, and those all shared one empty
   // fingerprint — every unreadable dialog on the machine inheriting one age, and
   // (since the mute below is keyed on this) one dismissal.
-  const questionFp = wantDialog ? dialogParse.dialogFingerprint(lines) : '';
+  const questionFp = dialogParse.dialogFingerprint(lines);
   // Carry the clock forward across a repaint: a status-line tick or a resize bumps
   // outputSeq without changing the question, and resetting the age there would make
   // the wait colouring meaningless.
@@ -755,92 +720,9 @@ function scrapeFor(id, entry, now, wantDialog = true) {
     ? prev.blockedSince
     : now;
 
-  // The idle clock (#682), on the same principle and a wider fingerprint. questionFp
-  // is '' on every screen with no dialog — which is every idle screen — so it cannot
-  // carry this one; screenFingerprint hashes the whole tail instead. A repaint that
-  // changed nothing keeps the clock running, and any change to what is on screen is
-  // the agent doing something, which restarts it.
-  const screenFp = dialogParse.screenFingerprint(lines);
-  const idleSince = (prev && prev.idleSince && prev.screenFp === screenFp)
-    ? prev.idleSince
-    : now;
-
-  const fresh = {
-    seq, lines, detected, parsed, questionFp, blockedSince, screenFp, idleSince,
-    hadDialogRead: wantDialog,
-  };
+  const fresh = { seq, lines, detected, parsed, questionFp, blockedSince };
   scrapeCache.set(id, fresh);
   return fresh;
-}
-
-/**
- * "This agent finished and is waiting on YOU" — the second derived kind (#682).
- *
- * Inbox's actionable population used to be gated entirely on detectDialog, and the
- * arithmetic of that gate is what made the panel informational: on a normal machine
- * nothing is showing a dialog most of the time, so the bench was empty and the page
- * was whatever sat below it. The state a human actually has to act on far more often
- * is this one — the turn ended, nothing is queued, and nobody has said what next.
- *
- * Every clause below exists to keep this from becoming the noise the old gate was
- * avoiding, so none of them is optional:
- *
- *   sessionInputState === 'idle'  the agent is at a prompt we can positively read.
- *                                 A plain shell has no screenMarkers and classifies
- *                                 'unknown', which is what keeps a bash prompt — idle
- *                                 by nature, forever — out of the bench.
- *   nothing queued                a prompt already on its way is not a wait on you.
- *   idle >= idleAfterMs           between-turns flicker is not a wait either.
- *   not snoozed                   you already looked at this one.
- *
- * Returns null rather than a row, so the caller's loop stays a flat scan.
- */
-function idleRowFor(id, entry, scrape, now, idleAfterMs) {
-  if (ctx.sessionInputState(entry) !== 'idle') return null;
-  if (entry.pendingDelivery) return null;
-  if (entry.promptQueue && entry.promptQueue.length > 0) return null;
-  if (now - scrape.idleSince < idleAfterMs) return null;
-
-  const snooze = snoozedSessions.get(id);
-  if (snooze) {
-    // Ends on either count: the clock ran out, or the session moved on, which makes
-    // this a different wait from the one that was snoozed.
-    //
-    // Keyed on the screen fingerprint and NOT on idleSince. Two timestamps taken in
-    // the same millisecond are equal, so a timestamp key silently reads "the session
-    // has not moved on" for any change that lands inside one tick of the clock — and
-    // a fast agent's next message is exactly that. The fingerprint is what identifies
-    // a wait; the same rule, and the same reason, as the dialog mute above.
-    if (snooze.screenFp === scrape.screenFp && now < snooze.until) return null;
-    snoozedSessions.delete(id);
-  }
-
-  const said = dialogParse.lastAgentLine(scrape.lines);
-  return {
-    ...rowBase(id, entry),
-    id: inbox.idleId(id),
-    kind: 'idle',
-    // Deliberately NOT 'blocking'. A blocked agent cannot proceed without you; this
-    // one has simply run out of instructions. Ranking them together would put every
-    // finished session above a real dialog, which is how a bench stops being read.
-    urgency: 'normal',
-    // Opaque to the panel, echoed back to /dismiss so a snooze cannot land on a wait
-    // that started after the row was drawn.
-    fingerprint: scrape.screenFp,
-    headline: said || 'Finished — waiting for you',
-    question: '',
-    context: '',
-    options: [],
-    recommendation: '',
-    cursorIndex: null,
-    multi: null,
-    // There is always something to do with an idle session: say the next thing.
-    answerable: true,
-    preview: scrape.lines.slice(-PREVIEW_ROWS),
-    createdAt: scrape.idleSince,
-    pendingPath: 'prompt',
-    inFlight: false,
-  };
 }
 
 /**
@@ -870,9 +752,8 @@ function liveSessionList() {
 /**
  * Who is holding `repoRoot` dirty, answered from the live session list.
  *
- * Wrapped rather than called directly so both readers — the stuck row and the
- * inbox_blocked tool result — go through one place and can never disagree about who
- * counts as a holder.
+ * The merge route's answer to "who is in the way" when a merge is refused because the
+ * shared checkout is dirty.
  */
 function holdersFor(repoRoot, exceptId) {
   return contention.holdersOf(repoRoot, liveSessionList(), exceptId);
@@ -897,158 +778,6 @@ function rowBase(id, entry) {
     sessionAlive: true,
     canClose: true,
     canMerge: !!entry.worktree,
-  };
-}
-
-/**
- * Drop a session's stuck state.
- *
- * Both fields together, always: a merge that was refused because the checkout was dirty
- * and an agent's own note about being unable to merge are two recordings of one
- * situation, and clearing one while leaving the other is how a row half-disappears.
- *
- * Both live ONLY in memory. serializeShellEntry does not carry them, so a ./restart.sh
- * forgets every block — which is right: a block is a claim about what is true right now,
- * and a restart is exactly the point at which we stop being able to vouch for it. Retry
- * the merge and the row comes straight back.
- */
-function clearStuck(entry, id) {
-  if (!entry) return;
-  // Through the server's own setter, so the tab-strip glyph and state.json follow. A
-  // direct `entry.mergeBlock = null` here would clear the row and leave the glyph lit.
-  if (id && ctx.setMergeBlock) ctx.setMergeBlock(id, null);
-  else entry.mergeBlock = null;
-  entry.blockedNote = null;
-}
-
-/**
- * "This agent is stuck, and here is on what" — the third derived kind.
- *
- * Two sources, one row, because they are the same statement about the machine and the
- * human reading the list does not care which of them produced it:
- *
- *   entry.mergeBlock  a merge — from ANY path, not just this panel — that did not merge.
- *                     Until #the-state-became-real that was a
- *                     red string in the corner of the panel that vanished on the next
- *                     poll, so the one state you most need to come back to was the one
- *                     state Inbox could not show you.
- *   entry.blockedNote an agent's own inbox_blocked call.
- *
- * Ranked 'blocking' because it is: the work is finished and cannot land. A stuck row
- * outranks an idle one, which is the correct reading — an agent waiting for its next
- * instruction is fine, and an agent that cannot deliver the last one is not.
- */
-function stuckRowFor(id, entry, now) {
-  // entry.mergeBlock is the SERVER's state, set by every merge path through
-  // recordMergeAttempt — not a copy Inbox keeps. That is what makes the tab-strip
-  // glyph, get_session_info and this row incapable of disagreeing.
-  const merge = entry.mergeBlock;
-  const note = entry.blockedNote;
-
-  const mergeLive = merge && contention.isMergeBlocked(merge.status)
-    && now - (merge.at || 0) < MERGE_BLOCK_TTL_MS;
-  const noteLive = note && now - (note.at || 0) < BLOCK_NOTE_TTL_MS;
-  if (!mergeLive && !noteLive) return null;
-
-  // The agent's own words win the headline when it has said something: it knows why it
-  // is stuck and the merge status only knows that git refused.
-  const desc = mergeLive ? contention.describeMerge(merge.status) : null;
-  const headline = noteLive ? note.summary : desc.label;
-
-  // Holders are re-derived on every poll, never taken from the stamp. The stamp records
-  // what was true when the merge ran; the row has to say who is holding it NOW, or it
-  // sends you to a tab that closed an hour ago.
-  const wantHolders = (mergeLive && desc.holders) || (noteLive && note.needsCheckout);
-  let repoRoot = '';
-  try { ({ repoRoot } = ctx.sessionPaths(entry)); } catch { /* no holders, then */ }
-  const holders = wantHolders && repoRoot ? holdersFor(repoRoot, id) : [];
-
-  const detail = [];
-  if (noteLive && note.detail) detail.push(note.detail);
-  if (mergeLive) {
-    detail.push(desc.hint);
-    if (merge.message && merge.message !== desc.hint) detail.push(merge.message);
-  }
-  if (wantHolders) {
-    detail.push(contention.holderSentence(holders, repoRoot ? projectScope.displayName(repoRoot) : ''));
-  }
-
-  return {
-    ...rowBase(id, entry),
-    id: inbox.sessionRowId(id),
-    kind: 'stuck',
-    urgency: 'blocking',
-    headline: headline || 'Stuck',
-    context: detail.join('\n\n'),
-    // What the panel needs to render the verbs, rather than re-deriving them from prose.
-    stuck: {
-      source: noteLive ? 'agent' : 'merge',
-      mergeStatus: mergeLive ? merge.status : null,
-      branch: mergeLive ? (merge.branch || null) : null,
-      target: mergeLive ? (merge.target || null) : null,
-      waitingOn: noteLive ? (note.waitingOn || 'other') : 'merge',
-      holders,
-      since: Math.min(
-        mergeLive ? merge.at : Infinity,
-        noteLive ? note.at : Infinity,
-      ),
-    },
-    options: [],
-    recommendation: '',
-    cursorIndex: null,
-    multi: null,
-    // You can always say something to a stuck agent, which is usually the point.
-    answerable: true,
-    preview: null,
-    createdAt: Math.min(
-      mergeLive ? merge.at : Infinity,
-      noteLive ? note.at : Infinity,
-    ),
-    pendingPath: 'prompt',
-    inFlight: false,
-  };
-}
-
-/**
- * "This agent is working" — the row that made Inbox a picture of the machine.
- *
- * There is nothing to do with one of these and that is the point: the list was gated on
- * `waitingForInput` and so contained only agents that had stopped, which meant a machine
- * running eight agents flat out showed an EMPTY panel. You could not answer "what is
- * everything doing right now" from the surface built to answer it.
- *
- * Ranked 'fyi' so it sorts below every real obligation. It is scenery — but scenery you
- * can visit, close, and send a prompt to, which is what herding actually consists of.
- */
-function workingRowFor(id, entry, scrape, now) {
-  const state = ctx.sessionInputState(entry);
-  const said = scrape ? dialogParse.lastAgentLine(scrape.lines) : '';
-  const queued = (entry.promptQueue && entry.promptQueue.length) || 0;
-
-  return {
-    ...rowBase(id, entry),
-    id: inbox.sessionRowId(id),
-    kind: 'working',
-    urgency: 'fyi',
-    // The state the classifier can actually defend. 'unknown' is the honest answer for a
-    // plain shell (no screenMarkers) and the panel renders it as "open", not as "busy".
-    state,
-    queued,
-    headline: said || (state === 'busy' ? 'Working' : 'Open'),
-    context: '',
-    options: [],
-    recommendation: '',
-    cursorIndex: null,
-    multi: null,
-    answerable: true,
-    preview: null,
-    // The session's own age, not the scrape's: a working row has no wait to time, and
-    // showing "3s" on an agent that has been running for an hour is a lie about the one
-    // number the row carries.
-    createdAt: entry.createdAt || scrape?.idleSince || now,
-    lastActivity: entry.lastActivity || null,
-    pendingPath: 'prompt',
-    inFlight: false,
   };
 }
 
@@ -1103,36 +832,49 @@ function sweepPermissions(live, now) {
   }
 }
 
-function derivedItems(now, { idleAfterMs = IDLE_AFTER_DEFAULT_MS } = {}) {
+/**
+ * Is this session asking — showing a dialog — right now?
+ *
+ * The daemon's own signal, the one that puts the `?` on the tab (docs/sessions.md#asking),
+ * rather than a second reading of the screen: a row the tab strip disagrees with is a row
+ * nobody trusts. A tmux-attach entry is somebody else's terminal; we do not drive it.
+ */
+function isAsking(entry) {
+  return !!(entry && !entry.killed && entry.agentType !== 'tmux-attach'
+    && entry.waitingForInput && entry.asking);
+}
+
+/** The live session behind a stored item, or null. Only a live one can be waiting on an answer. */
+function liveEntry(sessionId) {
+  const entry = sessionId ? ctx.shells.get(sessionId) : null;
+  return entry && !entry.killed ? entry : null;
+}
+
+/**
+ * One row per tab that is asking. Whether a tab is asking is isAsking's call; the dialog is
+ * still read off the screen, because the row renders the question and answers it.
+ *
+ * A muted dialog has no row. `e` on a row means "I have seen this one", and the mute is keyed
+ * on the dialog, so the tab's next question brings the row straight back.
+ */
+function askingRows(now) {
   const out = [];
   const live = new Set();
 
   for (const [id, entry] of ctx.shells) {
     live.add(id);
-    if (!entry || entry.killed) continue;
-    // A tmux-attach entry is somebody else's terminal; we do not drive it.
-    if (entry.agentType === 'tmux-attach') continue;
-
-    // A cheap pre-filter for whether a DIALOG is worth looking for, and nothing more:
-    // sessionInputState maps 'waiting' to 'idle', and 'idle' covers a session sitting at
-    // an empty composer just as much as one showing a dialog. detectDialog is still the
-    // real membership gate for a blocked row. It is no longer the gate for the LIST —
-    // that was what made a busy machine look like an empty one.
-    const wantDialog = !!entry.waitingForInput;
-    // A session with no terminal emulator still gets a row; it just gets one with
-    // nothing scraped. Never make readTerminalScreen build an emulator from scrollback.
-    const scrape = entry.terminalScreen ? scrapeFor(id, entry, now, wantDialog) : null;
-
-    // Stuck outranks everything: an agent that cannot land its work is the one row on
-    // the list that will not resolve itself, so it is checked before the states that will.
-    const stuck = stuckRowFor(id, entry, now);
-    if (stuck) { out.push(stuck); continue; }
-
-    if (!scrape || !scrape.detected) {
-      const row = (wantDialog && scrape) ? idleRowFor(id, entry, scrape, now, idleAfterMs) : null;
-      out.push(row || workingRowFor(id, entry, scrape, now));
+    if (!isAsking(entry)) {
+      // Forget the last read once the screen has moved: that is the dialog being answered,
+      // and the permission sweep and the mute sweep below both read "no cached dialog" as
+      // gone. An unchanged screen keeps it, so a waiting flag that flickers over a dialog
+      // still on screen does not unmute it.
+      const prev = scrapeCache.get(id);
+      if (prev && prev.seq !== outputSeqOf(entry || {})) scrapeCache.delete(id);
       continue;
     }
+    if (!entry.terminalScreen) continue;
+    const scrape = scrapeFor(id, entry, now);
+    if (!scrape.detected) continue;
 
     // Every permission dialog is recorded as it is seen, whether or not a row is built
     // for it — a muted dialog is still one that was asked, and the log's whole value is
@@ -1140,19 +882,10 @@ function derivedItems(now, { idleAfterMs = IDLE_AFTER_DEFAULT_MS } = {}) {
     // and writes once per dialog.
     notePermission(id, entry, scrape, now);
 
-    // Dismissed, and still the same question — stop SHOUTING about it. A different
-    // fingerprint means the tab moved on, so the mute expires with the dialog that
-    // earned it.
-    //
-    // A mute used to drop the row entirely. It no longer can: the list is now every tab,
-    // and a tab that vanishes from it because you pressed a key on it is exactly the
-    // hole this panel was rebuilt to close. So a muted dialog is demoted to 'fyi' — it
-    // stops competing with real obligations and keeps its place in the picture.
     const muted = mutedDialogs.get(id);
-    let isMuted = false;
     if (muted !== undefined) {
-      if (muted === scrape.questionFp) isMuted = true;
-      else mutedDialogs.delete(id);
+      if (muted === scrape.questionFp) continue;
+      mutedDialogs.delete(id);
     }
 
     const parsed = scrape.parsed;
@@ -1160,8 +893,7 @@ function derivedItems(now, { idleAfterMs = IDLE_AFTER_DEFAULT_MS } = {}) {
       ...rowBase(id, entry),
       id: inbox.blockedId(id),
       kind: 'blocked',
-      urgency: isMuted ? 'fyi' : 'blocking',
-      muted: isMuted,
+      urgency: 'blocking',
       dialogKind: scrape.detected.kind,
       // Opaque to the panel — it only ever echoes it back to /dismiss, so that muting
       // a row can refuse when the tab has started asking something else since the poll.
@@ -1193,21 +925,25 @@ function derivedItems(now, { idleAfterMs = IDLE_AFTER_DEFAULT_MS } = {}) {
   for (const id of [...scrapeCache.keys()]) {
     if (!live.has(id)) scrapeCache.delete(id);
   }
-  // A mute outlives its dialog for no one's benefit. Keyed off the CACHED scrape
-  // rather than this pass's filters on purpose: waitingForInput flickering false
-  // during a repaint skips the re-scrape, and dropping the mute there would flash a
-  // dismissed row back for one poll.
+  // A mute outlives its dialog for no one's benefit. Keyed off the CACHED scrape, which
+  // the loop above only drops once the screen has moved.
   for (const id of [...mutedDialogs.keys()]) {
     const scrape = scrapeCache.get(id);
     if (!live.has(id) || !scrape || !scrape.detected) mutedDialogs.delete(id);
   }
-  // The same sweep for snoozes. Only the dead-session half — the "moved on" half is
-  // idleRowFor's, because it needs the row's own idleSince to compare against and a
-  // snoozed session is one we deliberately did not build a row for.
-  for (const id of [...snoozedSessions.keys()]) {
-    if (!live.has(id)) snoozedSessions.delete(id);
-  }
   return out;
+}
+
+/**
+ * Everything on the Inbox right now: the tabs that are asking, and the open questions and
+ * results whose session is still alive. The list and the App bar's badge both read this, so
+ * the number on the rail is the number of rows in the panel.
+ */
+function inboxRows(now) {
+  const stored = settleStore(now)
+    .filter((i) => inbox.isListed(i, (sid) => !!liveEntry(sid)))
+    .map(serializeStored);
+  return [...stored, ...askingRows(now)];
 }
 
 // ── path 3: answering a live dialog ──────────────────────────────────────────
@@ -1409,20 +1145,21 @@ function init(context) {
   return {
     inbox_ask: {
       description:
-        'Ask the human a question and put it on the Inbox — the one surface they watch '
-        + 'for everything that needs them. Returns IMMEDIATELY by default: the answer arrives '
-        + 'later as a new message in this session, so end your turn instead of polling. Use it '
-        + 'for a decision you genuinely cannot make alone, not for progress updates (use '
-        + 'inbox_brief for those). Supply `options` whenever the decision is a choice — a '
+        'Ask the human a question. It is on their Inbox while this session is open. Returns '
+        + 'IMMEDIATELY by default: the answer arrives later as a new message in this session, so '
+        + 'end your turn instead of polling. Use it for a decision you genuinely cannot make '
+        + 'alone, not for progress updates. Supply `options` whenever the decision is a choice — a '
         + 'human answers a menu far faster than a paragraph — and say which one you would pick '
         + 'in `recommendation`. Set `wait_seconds` only when you truly cannot proceed and a '
         + 'quick yes unblocks you. You never identify yourself: session, project and worktree '
         + 'are attached automatically. The result carries a `url` that opens the question in a '
         + 'browser and answers it in one click — put it in any email or report you send about the '
-        + 'decision. If this session may close before the answer arrives (a scheduled run that '
-        + 'ends by emailing a report, say), set `durable_days` so the question survives it, give '
-        + 'each option a `then` saying what a new session should do if it is picked after you are '
-        + 'gone. A later run of the same scheduled task reads the answer with inbox_answers.',
+        + 'decision. The question leaves the Inbox when this session closes, and from then on that '
+        + 'url is the only way to it. So if this session may close before the answer arrives (a '
+        + 'scheduled run that ends by emailing a report, say), send the url, set `durable_days` so '
+        + 'it keeps answering, and give each option a `then` saying what a new session should do '
+        + 'if it is picked after you are gone. A later run of the same scheduled task reads the '
+        + 'answer with inbox_answers.',
       schema: {
         question: z.string().describe('The decision you need, in one sentence, phrased so it can be answered without opening your tab.'),
         context: z.string().optional().describe('What the human needs in order to answer: what you tried, what is at stake, the file or command involved. Markdown is fine.'),
@@ -1434,7 +1171,7 @@ function init(context) {
         recommendation: z.string().optional().describe('Which option you would pick and why, in one line.'),
         urgency: z.enum(['fyi', 'normal', 'blocking']).optional().describe('"blocking" means you are stopped until this is answered; it sorts to the top of the inbox. Default "normal".'),
         wait_seconds: z.number().int().min(1).max(MAX_WAIT_SEC).optional().describe(`Hold this call open up to N seconds waiting for an answer (1-${MAX_WAIT_SEC}). Omit unless you cannot continue — the MCP request itself dies at 60s.`),
-        durable_days: z.number().int().min(0).max(inbox.MAX_DURABLE_DAYS).optional().describe(`Keep the question open after this session closes, for up to N days (1-${inbox.MAX_DURABLE_DAYS}); after that it expires unanswered. 0 or omitted: it is archived a few minutes after this session goes.`),
+        durable_days: z.number().int().min(0).max(inbox.MAX_DURABLE_DAYS).optional().describe(`Keep the question answerable through its url after this session closes, for up to N days (1-${inbox.MAX_DURABLE_DAYS}); after that it expires unanswered. It leaves the Inbox when this session closes either way. 0 or omitted: it is archived a few minutes after this session goes.`),
       },
       handler: async (args, extra) => {
         // #710: before the count, so a question something already replaced doesn't hold a slot.
@@ -1491,9 +1228,9 @@ function init(context) {
         // #708: a scheduled run is never sent the answer as a new message — its session closes
         // when it finishes — so it is told where the answer goes instead of to wait for it.
         const message = caller.scheduledTaskId
-          ? `Question ${item.id} is on the Inbox.`
+          ? `Question ${item.id} is on the Inbox while this session is open.`
             + (item.durableUntil
-              ? ` It stays open after this session closes, until ${new Date(item.durableUntil).toISOString()}: `
+              ? ` When it closes the question leaves the Inbox, and its url keeps answering it until ${new Date(item.durableUntil).toISOString()}: `
                 + 'an option with a `then` starts a new session, and any other answer is kept for '
                 + 'inbox_answers, which later runs of this task read.'
               : ' It has no durable_days, so it is archived a few minutes after this session closes.')
@@ -1501,7 +1238,7 @@ function init(context) {
           : `Question ${item.id} is on the Inbox. The answer will arrive as a new `
             + 'message — end your turn now rather than polling.'
             + (item.durableUntil
-              ? ` If this session has closed by then, the question stays open until ${new Date(item.durableUntil).toISOString()}: `
+              ? ` If this session has closed by then, the question leaves the Inbox and its url keeps answering it until ${new Date(item.durableUntil).toISOString()}: `
                 + 'an option with a `then` starts a new session, and any other answer is kept for inbox_answers.'
               : '');
         return text(JSON.stringify({ id: item.id, url, message }, null, 2));
@@ -1510,11 +1247,11 @@ function init(context) {
 
     inbox_brief: {
       description:
-        'Post a short briefing to the Inbox — something the human should see but does '
-        + 'not have to answer. A milestone reached, a judgement call worth knowing about, '
-        + 'something surprising you found. It needs no reply and archives with one key. Do not '
-        + 'use it to ask a question (use inbox_ask), and do not narrate routine progress: a '
-        + 'briefing that says nothing trains the human to stop reading them.',
+        'Record a short briefing — a milestone reached, a judgement call worth knowing about, '
+        + 'something surprising you found. It is kept for the record but NOT shown on the '
+        + 'Inbox, which lists only what is waiting on the human right now: if they need to see '
+        + 'it, say it in your own conversation. Do not use it to ask a question (use inbox_ask), '
+        + 'and do not narrate routine progress.',
       schema: {
         headline: z.string().describe('One line carrying the whole point, useful with nothing else read.'),
         detail: z.string().optional().describe('Supporting detail. Markdown is fine.'),
@@ -1530,7 +1267,10 @@ function init(context) {
         });
         inbox.save();
         ctx.log(`[inbox] brief ${item.id} session=${item.sessionId || '?'} tag=${item.tag || '-'}`);
-        return text(`Briefing ${item.id} is on the Inbox. No reply is needed.`);
+        return text(
+          `Briefing ${item.id} is recorded. The Inbox does not list briefings, so if the human `
+          + 'needs to see this, say it in your own conversation.',
+        );
       },
     },
 
@@ -1607,11 +1347,13 @@ function init(context) {
 
         // #708: from a scheduled run a result is a deliverable, not a park. The stamp above is
         // still written (it only ever refuses a merge), but nobody reviews it inside this run,
-        // and the result outlives the session by design — so the run is told to finish.
+        // and it leaves the Inbox when the run's session closes — so the run is pointed at the
+        // place a deliverable is kept, its task's run history, and told to finish.
         if (fields.scheduledTaskId) {
           return text(
-            `Result ${item.id} is on the Inbox, and it stays there after this session `
-            + `closes. ${SCHEDULED_RUN_FINISH}${skipNote}`,
+            `Result ${item.id} is on the Inbox only until this session closes. A scheduled run's `
+            + 'deliverable belongs in the `report` of scheduled_task_finished, which keeps it in '
+            + `this task's run history. ${SCHEDULED_RUN_FINISH}${skipNote}`,
           );
         }
 
@@ -1656,93 +1398,6 @@ function init(context) {
         if (!message) return text('There was nothing to say — the text was empty.');
         ctx.log(`[inbox] say ${message.id} session=${sessionId} ${message.text.length}ch`);
         return text('Delivered to the Inbox chat pane.');
-      },
-    },
-
-    inbox_blocked: {
-      description:
-        'Say that you are STUCK and cannot make progress, and find out who is in your way. '
-        + 'This is not a question and nobody has to answer it — it puts a red row on the '
-        + 'human\'s Inbox list saying which agent is stopped and on what, so they can see '
-        + 'it without opening your tab. Use it the moment you find you cannot proceed: a '
-        + 'merge that will not land, a file another agent is holding, a credential you do not '
-        + 'have. If you say `waiting_on: "merge"` this returns THE ANSWER to "who is being a '
-        + 'hog" — the sessions currently working in the shared checkout — so do not guess at '
-        + 'that in prose, ask here. Then end your turn. Call inbox_unblocked when you are '
-        + 'moving again; a stale block on the list costs the human the trust they need to read '
-        + 'the list at all.',
-      schema: {
-        summary: z.string().describe('What you are stuck on, in one sentence, phrased so it can be understood without opening your tab. e.g. "Cannot merge — the shared checkout has uncommitted changes."'),
-        waiting_on: z.enum(['merge', 'another-agent', 'human', 'external', 'other']).optional()
-          .describe('What kind of thing you are waiting for. "merge" and "another-agent" make the reply name who is currently working in the shared checkout. Default "other".'),
-        detail: z.string().optional().describe('What you tried and what you need in order to continue. Markdown is fine.'),
-      },
-      handler: async (args, extra) => {
-        const { sessionId } = callerFields(extra);
-        const entry = sessionId ? ctx.shells.get(sessionId) : null;
-        if (!entry) {
-          return text(
-            'This session could not be identified, so there is nothing to mark as blocked. '
-            + 'Tell the user in your own words instead.',
-          );
-        }
-
-        const waitingOn = args.waiting_on || 'other';
-        // The two that are ABOUT the shared checkout. Stamped on the note so the row
-        // re-derives holders on every poll rather than freezing this moment's answer.
-        const needsCheckout = waitingOn === 'merge' || waitingOn === 'another-agent';
-
-        entry.blockedNote = {
-          summary: inbox.clampText(args.summary, 400).trim() || 'Blocked',
-          detail: inbox.clampText(args.detail, 4000).trim(),
-          waitingOn,
-          needsCheckout,
-          at: Date.now(),
-        };
-
-        let repoRoot = '';
-        try { ({ repoRoot } = ctx.sessionPaths(entry)); } catch { /* answered without holders */ }
-        const holders = needsCheckout && repoRoot ? holdersFor(repoRoot, sessionId) : [];
-
-        ctx.log(`[inbox] blocked session=${sessionId} on=${waitingOn} holders=${holders.length}`);
-
-        if (!needsCheckout) {
-          return text(
-            'Marked as blocked on the Inbox list. End your turn — the human can see it. '
-            + 'Call inbox_unblocked once you are moving again.',
-          );
-        }
-        const who = contention.holderSentence(
-          holders, repoRoot ? projectScope.displayName(repoRoot) : '',
-        );
-        return text(
-          `Marked as blocked on the Inbox list.\n\n${who}\n\n`
-          + (holders.length
-            ? 'Do NOT type into those sessions and do not commit or stash on their behalf — '
-              + 'they are mid-task. The human can see this row and will sort out the order. '
-              + 'End your turn.'
-            : 'Nothing you can do about that from here. End your turn; the human can see the row.')
-          + '\n\nCall inbox_unblocked once you are moving again.',
-        );
-      },
-    },
-
-    inbox_unblocked: {
-      description:
-        'Clear the blocked row you put on the Inbox list with inbox_blocked. Call this '
-        + 'as soon as you can make progress again — whether somebody unblocked you or you '
-        + 'found another way round. A list full of blocks that were cleared hours ago is a '
-        + 'list nobody reads.',
-      schema: {},
-      handler: async (_args, extra) => {
-        const { sessionId } = callerFields(extra);
-        const entry = sessionId ? ctx.shells.get(sessionId) : null;
-        if (!entry || (!entry.blockedNote && !entry.mergeBlock)) {
-          return text('There was no blocked row for this session.');
-        }
-        clearStuck(entry, sessionId);
-        ctx.log(`[inbox] unblocked session=${sessionId}`);
-        return text('Cleared. The row is off the Inbox list.');
       },
     },
 
@@ -1996,33 +1651,27 @@ function registerRoutes(app, context) {
 
   app.get('/api/inbox/items', (req, res) => {
     const now = Date.now();
-    const stored = settleStore(now);
-
-    const includeClosed = req.query.all === '1';
     const pick = projectFilter(req.query);
-    const items = inbox.sortForInbox([
-      ...stored.filter((i) => includeClosed || i.status === 'open').map(serializeStored),
-      ...derivedItems(now, { idleAfterMs: idleAfterFrom(req.query) }),
-    ].filter(pick));
-    res.json({ items, generatedAt: now, projects: knownProjects() });
+    // `all=1` is the archive: every stored item, open or closed, whatever became of its
+    // session. Without it, the Inbox — what is waiting on you now.
+    const rows = req.query.all === '1'
+      ? [...settleStore(now).map(serializeStored), ...askingRows(now)]
+      : inboxRows(now);
+    res.json({ items: inbox.sortForInbox(rows.filter(pick)), generatedAt: now, projects: knownProjects() });
   });
 
   /**
    * The App bar's badge (#718): how many things are in the Inbox, polled by the host while
    * the panel is closed.
    *
-   * Never scrapes. The number is the stored items alone (see countOpen), so this is one pass
-   * over an in-memory array — which is what makes it safe to poll from every browser window
-   * whether or not anyone has the panel open. It runs the same settle as /items first, and the
-   * same project filter, so the badge cannot count a question the list would already have
-   * dropped. `briefings=0` is the panel's showBriefings setting, passed through by the host.
+   * The length of the list itself, through the same inboxRows() and the same project filter,
+   * so the badge cannot count a row the panel would not show. Cheap enough to poll from every
+   * window: the only screen it reads is an asking tab's, and that read is cached until the tab
+   * draws something new.
    */
   app.get('/api/inbox/count', (req, res) => {
     const now = Date.now();
-    const count = inbox.countOpen(settleStore(now), {
-      pick: projectFilter(req.query),
-      briefings: req.query.briefings !== '0',
-    });
+    const count = inboxRows(now).filter(projectFilter(req.query)).length;
     res.json({ count, generatedAt: now });
   });
 
@@ -2128,39 +1777,12 @@ function registerRoutes(app, context) {
     const body = req.body || {};
     const blockedSession = inbox.parseBlockedId(req.params.id);
     if (blockedSession) return answerBlocked(res, blockedSession, body);
-    const idleSession = inbox.parseIdleId(req.params.id);
-    if (idleSession) return answerIdle(res, idleSession, body);
-    // A `session:` row is a working or a stuck one, and both take a prompt. Answering a
-    // stuck row also CLEARS it: the human has responded to the block, so the claim "this
-    // agent is stopped and nobody has dealt with it" has stopped being true — and an
-    // agent that will not reliably call inbox_unblocked is exactly why the panel must
-    // not depend on it doing so.
-    const sessionRow = inbox.parseSessionRowId(req.params.id);
-    if (sessionRow) {
-      const entry = ctx.shells.get(sessionRow);
-      if (entry) clearStuck(entry, sessionRow);
-      return answerIdle(res, sessionRow, body);
-    }
     return answerStored(res, req.params.id, body);
   });
 
   app.post('/api/inbox/items/:id/dismiss', (req, res) => {
     const blockedSession = inbox.parseBlockedId(req.params.id);
     if (blockedSession) return dismissBlocked(res, blockedSession, req.body || {});
-    const idleSession = inbox.parseIdleId(req.params.id);
-    if (idleSession) return snoozeIdle(res, idleSession, req.body || {});
-    // Dismissing a `session:` row means "stop telling me this one is stuck". There is
-    // nothing to snooze on a working row — it is scenery — so this only ever clears a
-    // stuck state, and says so rather than silently succeeding.
-    const sessionRow = inbox.parseSessionRowId(req.params.id);
-    if (sessionRow) {
-      const entry = ctx.shells.get(sessionRow);
-      if (!entry) return res.status(404).json({ error: 'session-gone' });
-      const had = !!(entry.mergeBlock || entry.blockedNote);
-      clearStuck(entry, sessionRow);
-      if (had) ctx.log(`[inbox] unblock session=${sessionRow} from=dismiss`);
-      return res.json({ ok: true, sessionId: sessionRow, cleared: had });
-    }
     const item = inbox.byId(req.params.id);
     if (!item) return res.status(404).json({ error: 'not-found' });
     const wasOpenResult = item.kind === 'result' && item.status === 'open';
@@ -2181,9 +1803,9 @@ function registerRoutes(app, context) {
 
   // ── managing the session itself (#682) ──
   //
-  // A bench you can only answer FROM is still a place you leave to do the work. These
-  // two are the verbs an idle row actually needs: the session is finished, so either
-  // its work goes home or the tab does.
+  // An inbox you can only answer FROM is still a place you leave to do the work. These
+  // two are the verbs a row with a live session behind it needs: either its work goes
+  // home or the tab does.
   //
   // Both are addressed by SESSION id, not item id. A row is a view of a session and is
   // rebuilt every poll; "close the session behind the row I am looking at" is the
@@ -2196,7 +1818,6 @@ function registerRoutes(app, context) {
     // rather than deleting the record — the same path the tab's own close button
     // takes. Inbox must never grow a second, tombstone-free way to end a session.
     if (!ctx.closeSession(id)) return res.status(409).json({ error: 'close-failed' });
-    snoozedSessions.delete(id);
     scrapeCache.delete(id);
     ctx.log(`[inbox] close session=${id} from=bench`);
     res.json({ ok: true, sessionId: id });
@@ -2233,15 +1854,9 @@ function registerRoutes(app, context) {
     // field of Inbox's. A merge that did not merge used to be a red string in the
     // corner of this panel that the next poll wiped, so the single state you most need to
     // come back to — work that is finished and cannot land — was invisible everywhere the
-    // moment you looked away. Now it lights the tab strip, answers get_session_info and
-    // draws this row, from one writer.
+    // moment you looked away. Now it lights the tab strip and answers get_session_info,
+    // from one writer.
     if (ctx.recordMergeAttempt) ctx.recordMergeAttempt(id, result);
-    // The agent's own note is Inbox's, and a landed merge retires it too: the thing it
-    // was blocked on is done.
-    if (!contention.isMergeBlocked(result.status)) {
-      const live = ctx.shells.get(id);
-      if (live) live.blockedNote = null;
-    }
 
     // A merge that landed is also the end of whatever the agents were queuing behind the
     // shared checkout, so re-answer the contention question for the response.
@@ -2267,21 +1882,6 @@ function registerRoutes(app, context) {
         ? contention.holderSentence(holders, projectScope.displayName(repoRoot))
         : '',
     });
-  });
-
-  /**
-   * Clear a session's stuck row.
-   *
-   * The human's half of inbox_unblocked, and the reason a stuck row is safe to make
-   * durable: every durable row needs a way off the list that does not require the agent
-   * that put it there to cooperate.
-   */
-  app.post('/api/inbox/sessions/:id/unblock', (req, res) => {
-    const entry = ctx.shells.get(req.params.id);
-    if (!entry) return res.status(404).json({ error: 'no-session' });
-    clearStuck(entry, req.params.id);
-    ctx.log(`[inbox] unblock session=${req.params.id} from=panel`);
-    res.json({ ok: true, sessionId: req.params.id });
   });
 
   // ── backlog (#671) ──
@@ -2474,10 +2074,7 @@ function registerRoutes(app, context) {
 
   app.get('/api/inbox/items/:id/screen', async (req, res) => {
     const stored = inbox.byId(req.params.id);
-    const sessionId = inbox.parseBlockedId(req.params.id)
-      || inbox.parseIdleId(req.params.id)
-      || inbox.parseSessionRowId(req.params.id)
-      || (stored && stored.sessionId);
+    const sessionId = inbox.parseBlockedId(req.params.id) || (stored && stored.sessionId);
     if (!sessionId) return res.status(404).json({ error: 'not-found' });
     const entry = ctx.shells.get(sessionId);
     if (!entry) return res.status(404).json({ error: 'session-gone' });
@@ -2594,7 +2191,9 @@ const FOLLOW_UP_CLOSE = [
   'When you are done:',
   '1. Post the outcome in a sentence or two with mcp__deepsteve__inbox_brief, so it outlives this session. If the instruction says to tell someone else or another session, do that too.',
   '2. Then call mcp__deepsteve__close_session with no arguments, on its own, as your very last action. It closes this session, and nothing after it is delivered.',
-  'If you cannot finish without the human, say what you need here and leave the session open instead.',
+  // Asked in the tab, so the daemon marks it asking and it lands on the Inbox — the only list
+  // that says something is waiting on the human now.
+  'If you cannot finish without the human, ask them in this session (with AskUserQuestion if you have it) and leave the session open instead.',
 ].join('\n');
 
 function thenPrompt(item, then) {
@@ -2880,87 +2479,6 @@ function dismissBlocked(res, sessionId, body) {
   mutedDialogs.set(sessionId, scrape.questionFp);
   ctx.log(`[inbox] mute blocked:${sessionId} fp=${scrape.questionFp}`);
   res.json({ ok: true, muted: true, sessionId, fingerprint: scrape.questionFp });
-}
-
-// ── path 4: an idle session (#682) ───────────────────────────────────────────
-
-/**
- * How long a session must have been idle, from the panel's own setting.
- *
- * Clamped rather than validated: a missing, absurd or hostile value becomes a usable
- * number instead of a 400, because this is a listing route the panel polls every two
- * seconds and there is nothing a failed poll can tell the human that a sane default
- * cannot. 0 survives the clamp on purpose — see IDLE_AFTER_DEFAULT_MS.
- */
-function idleAfterFrom(query) {
-  const raw = Number(query && query.idleAfter);
-  if (!Number.isFinite(raw) || raw < 0) return IDLE_AFTER_DEFAULT_MS;
-  return Math.min(Math.round(raw * 1000), IDLE_AFTER_MAX_MS);
-}
-
-/**
- * Answering an idle row means saying the next thing — there is no dialog to drive and
- * no stored item to stamp, so this is the ONE answer path that is purely a delivery.
- *
- * deliverPromptWhenReady, never a raw engine.write: it is the per-shell FIFO that
- * sequences this behind anything already queued, and it owns the echo-gated submit
- * that makes Ink see the Enter as its own stdin read. Writing the text here directly
- * would be the #656 truncation again, from a new caller.
- */
-function answerIdle(res, sessionId, body) {
-  const entry = ctx.shells.get(sessionId);
-  if (!entry) return res.status(404).json({ error: 'session-gone' });
-
-  const text = typeof body.text === 'string' ? body.text.trim() : '';
-  if (!text) {
-    return res.status(400).json({
-      error: 'empty',
-      hint: 'An idle session needs something to do — type the next instruction.',
-    });
-  }
-
-  // #710: the chat pane's rule. A person's prompt supersedes the questions asked before it was
-  // sent, once it is actually delivered.
-  const sentAt = Date.now();
-  ctx.deliverPromptWhenReady(sessionId, text, {
-    source: 'inbox-bench',
-    onDeliver: (sid) => recordHumanInput(sid, sentAt),
-  });
-  // The row is about to stop being true, and the panel should not have to wait a poll
-  // to find that out: a delivered prompt makes the session busy, which is the one
-  // state idleRowFor refuses. Dropping the snooze keeps a stale one from suppressing
-  // the NEXT wait, which is the one this prompt is about to create.
-  snoozedSessions.delete(sessionId);
-  ctx.log(`[inbox] prompt session=${sessionId} len=${text.length} from=bench`);
-  res.json({ ok: true, sessionId, deliveredVia: 'prompt' });
-}
-
-/**
- * Snooze an idle row. The counterpart of dismissBlocked, and the same bargain: the
- * row goes away while the thing it was about is unchanged, and comes back by itself
- * when it isn't.
- */
-function snoozeIdle(res, sessionId, body) {
-  const entry = ctx.shells.get(sessionId);
-  if (!entry) return res.status(404).json({ error: 'session-gone' });
-
-  const now = Date.now();
-  const scrape = scrapeFor(sessionId, entry, now);
-  if (body.expect && body.expect !== scrape.screenFp) {
-    return res.status(409).json({
-      error: 'session-moved-on',
-      hint: 'That session has done something since — the row will redraw with what it says now.',
-    });
-  }
-
-  const mins = Number(body.minutes);
-  const forMs = Number.isFinite(mins) && mins > 0
-    ? Math.min(Math.round(mins * 60_000), IDLE_AFTER_MAX_MS)
-    : SNOOZE_DEFAULT_MS;
-  const until = now + forMs;
-  snoozedSessions.set(sessionId, { until, screenFp: scrape.screenFp });
-  ctx.log(`[inbox] snooze idle:${sessionId} for=${Math.round(forMs / 1000)}s`);
-  res.json({ ok: true, snoozed: true, sessionId, until });
 }
 
 /**

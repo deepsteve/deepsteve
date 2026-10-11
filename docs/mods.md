@@ -144,11 +144,11 @@ leak into a second one. That is a deliberate split from which app is *open*, whi
 browser-wide `localStorage` preference.
 
 **Count badge** (#718). An app can put a red count on its rail row so you can tell something is
-waiting without opening it. Inbox's is how many things are in it. Declare the route that
-answers it:
+waiting without opening it. Inbox's is how many rows its list has, which is how many things
+are waiting on you right now. Declare the route that answers it:
 
 ```json
-"badge": { "url": "/api/inbox/count", "params": { "projects": "projects", "briefings": "showBriefings" } }
+"badge": { "url": "/api/inbox/count", "params": { "projects": "projects" } }
 ```
 
 The host polls `url` for `{ "count": n }`: every 5s, every 30s while the window is hidden, and
@@ -157,7 +157,8 @@ app is open, since the badge matters most while it is closed. Each `params` entr
 key to one of the app's own stored settings. Arrays are joined with commas, booleans become
 `1`/`0`, and empty values are left off. That is how a count is scoped the same way the app
 scopes its list, so the badge and the list can't disagree. Because the route runs every 5s in
-every window, keep it cheap. Inbox's reads only its stored items and never a terminal screen.
+every window, keep it cheap. Inbox's reads a terminal screen only for a tab that is already
+asking, and caches that read until the tab draws something new.
 The badge sits on the icon square, the one part of a row the collapsed 48px rail keeps. It is
 hidden at 0 and reads `99+` above 99. An auth rejection (401/403/429) stops the poll for the
 rest of the page's life.
@@ -670,10 +671,15 @@ a view freely: a broken view cannot lose a task or strand a session.
 
 ## Inbox
 
-One fullscreen inbox merging **blocked sessions** — anything sitting on a Claude Code permission
-or AskUserQuestion dialog, with the question and options parsed and rendered inline — and the
-**questions, briefings and results agents post deliberately** through `inbox_ask`,
-`inbox_brief`, `share_result` and `inbox_check`. You answer from the inbox instead of
+One fullscreen list of **what is waiting on you right now**, and nothing else. A row exists only
+while something is blocked on you, and it goes the moment that stops being true. Two things
+qualify: a tab that is **asking** (sitting on a Claude Code permission, AskUserQuestion or plan
+dialog, with the question and options parsed and rendered inline), and an open **question or
+result** an agent posted with `inbox_ask` or `share_result` while its session is still alive.
+Briefings, finished or working tabs, merges that did not land, and anything whose session has
+closed are not on it, and the App bar's badge is the length of the same list
+(`inboxRows()` in `tools.js` builds both). A scheduled run's report goes to its task's run
+history instead ([scheduled-tasks.md](scheduled-tasks.md)). You answer from the inbox instead of
 switching to the tab, and since #669 a finished issue has to be approved here before
 `issue_complete` will say "merge". Approving is a transaction, though, and the reaction to a
 result is usually a question — so since #670 a third column turns any item with a session
@@ -697,15 +703,18 @@ first unattended agent.
 
 **Blocked items are derived, never stored.** They are computed per request from `ctx.shells`, so
 they exist exactly as long as the dialog does — nothing to reconcile, no tombstone, and no stale
-row when a dialog resolves itself in its own terminal. Questions and briefings are stored at
-`stateDir()/inbox.json`.
+row when a dialog resolves itself in its own terminal. Questions, results and briefings are stored
+at `stateDir()/inbox.json`, and a stored item is listed only while `inbox.isListed()` holds: open,
+a question or a result, and its session alive. Leaving the list closes nothing. A question whose
+session has gone stays open in the store, so its decision link still answers it and
+`inbox_answers` still reads it, and `all=1` lists the whole store as an archive.
 
-**Membership is `detectDialog()`, not `waitingForInput`.** `sessionInputState()` maps `'waiting'`
-to `'idle'`, and `'idle'` covers a session sitting at an empty composer just as much as one
-showing a modal. `waitingForInput` is only a cheap pre-filter; the positive dialog signal in
-`dialog-parse.js` (a core module since the daemon's own **asking** signal reads it too; see
-[sessions.md](sessions.md#asking)) is what stops every agent that merely finished its turn becoming
-an inbox row. The listing reads `entry.terminalScreen.linesSync(n)` and never
+**Membership is the daemon's `asking` signal, not `waitingForInput`.** `waitingForInput` is true
+for a session sitting at an empty composer just as much as for one showing a modal, so a tab is a
+row only while `entry.waitingForInput && entry.asking` — the signal that puts the `?` on the tab
+([sessions.md](sessions.md#asking)), read with the same `dialog-parse.js` detector. The Inbox and
+the tab strip therefore cannot disagree about who is asking. The dialog itself is then read off the
+screen, cached on `outputSeq`, because the row renders and answers it. The listing reads `entry.terminalScreen.linesSync(n)` and never
 `readTerminalScreen`, which would replay the whole scrollback into a fresh emulator and `await`
 a parse queue one chatty session can defer indefinitely.
 
@@ -737,17 +746,21 @@ unit test in `test/unit/issue-prompt.test.js` fails if the stages name a tool no
 
 Turning it on is a decision about two mods' worth of state, because Inbox the *app* is off by
 default per browser while its MCP tools register server-side regardless: stages on with the app
-never enabled means agents posting into an inbox nobody is reading.
+never enabled means agents posting into an inbox nobody is reading. The two briefings the stages
+ask for are never listed at all, since the Inbox shows only what is waiting on you; they are kept
+in the store, and `inbox_brief` tells the agent to say anything you need to see in its own tab.
 
 ### How an item leaves the inbox
 
 Every row is an obligation, so nothing is dropped silently — but a row nobody will ever act on is
-its own failure, and before #663 the inbox had no way to shed one.
+its own failure, and before #663 the inbox had no way to shed one. On top of the table below, every
+stored item leaves the **list** the moment its session is gone (`isListed`); the table is about
+when it leaves the **store's open set**.
 
 | Kind | Leaves when |
 |---|---|
 | Question (`inbox_ask`) | answered, archived with `e`, **superseded** (below), or its session has been absent from `ctx.shells` for `EXPIRY_GRACE_MS` (5 min). A **durable** question (`durable_days`, #705) skips that sweep: it leaves when answered, archived, superseded, or when `durableUntil` passes (`expired`). See [links.md](links.md) |
-| Briefing (`inbox_brief`) | archived with `e` — `⏎` archives it too, since there is nothing to answer |
+| Briefing (`inbox_brief`) | never listed. Its session going sweeps it like a question |
 | Result (`share_result`) | approved, returned for changes, or archived with `e`. **Never by the dead-session sweep** — see below |
 | Blocked (derived) | the dialog resolves, the session goes, or **`e` mutes it** |
 
@@ -892,14 +905,14 @@ that calls `armSessionAutoClose`, so a session parked on a result is safe — bu
 
 #### Two rules the store enforces for results
 
-**A result outlives its session, so it is exempt from `sweepDeadSessions`.** The sweep
-dismisses open items whose session has been gone for five minutes, which is right for a
-question nobody can answer any more and exactly backwards for a result — the session being
-gone is *when you read the writeup*. Results are not even stamped with `missingSince`, so
-one cannot age into the dismissal branch later. An open result whose session has gone
-reports `pendingPath: 'gone'`, and the panel says so before you click rather than after:
-Approve still records the decision, writes to no PTY, and returns a note saying the agent
-was not told.
+**A result outlives its session in the store, so it is exempt from `sweepDeadSessions`.** The
+sweep dismisses open items whose session has been gone for five minutes; a result is the record
+of what a change did and why, and it is never closed that way. Results are not even stamped with
+`missingSince`, so one cannot age into the dismissal branch later. It does leave the Inbox
+**list** when its session goes, like every stored item: nothing is waiting on an approval once
+the agent that would act on it has closed. It stays readable with `all=1`, and an open one there
+reports `pendingPath: 'gone'`. Answering it still records the decision, writes to no PTY, and
+returns a note saying the agent was not told.
 
 **Results have their own retention bucket.** `RETENTION_CAP` keeps 200 closed items;
 `RESULT_RETENTION_CAP` keeps 200 closed *results* separately. One shared cap would let a

@@ -442,7 +442,9 @@ wired — in practice `claude` and `codex`. Mods add more; see [mods.md](mods.md
   - `inbox_ask` returns `{ id, url, message }`. `url` is `/v1/decision/<id>`, a link an agent
     puts in an email so the question opens and is answered in one click. The id is a random UUID
     the server mints; an agent never chooses or predicts it.
-  - `durable_days` (at most 30) keeps the question after the session closes.
+  - `durable_days` (at most 30) keeps the question answerable through `url` after the session
+    closes. It leaves the Inbox when the session closes either way — the Inbox lists only what is
+    waiting on the human now — so the link is the way back to it.
   - An option's `then` says what a new session in the project should do if that option is picked
     after the asker has gone. That session does it, reports the outcome with `inbox_brief`,
     and closes itself, so `then` should be a complete action.
@@ -453,11 +455,12 @@ wired — in practice `claude` and `codex`. Mods add more; see [mods.md](mods.md
     later run of the same scheduled task succeeds. `inbox_check` says so and why; the agent
     never has to close its own questions. See [mods.md](mods.md#superseded-questions-710).
   - An unattended agent needs `inbox_ask` in its allowed tools, or it stalls on a permission
-    prompt. A scheduled Claude run has it (and `inbox_answers` and `share_result`)
-    pre-permitted since #708, because its prompt names them; see
+    prompt. A scheduled Claude run has it (and `inbox_answers`) pre-permitted since #708,
+    because its prompt names them. Its deliverable goes in `scheduled_task_finished`'s `report`,
+    into the task's run history, not to `share_result`; see
     [scheduled-tasks.md](scheduled-tasks.md).
   - See [links.md](links.md).
-- **`share_result` (#669, Inbox mod)**: the other half of `issue_complete`'s gate. An agent posts a writeup — `summary` (what changed and *why this shape*), `before`/`after`, `images`, `caveats` — to the Inbox, and it **returns immediately**: the human's Approve or Request-changes arrives later as a new message, so the agent ends its turn rather than polling. It is an approval gate, not a status update: with `issueStagesEnabled` on, `issue_complete` answers `share_result` (nothing shared) or `await_review` (shared, undecided) instead of `merge` until a result has been approved. Two fields on the shell entry carry the state — `resultItemId`, written by the tool itself and which by itself *refuses* a merge, and `resultApprovedAt`, written only from the panel's answer endpoint. `images` are references, never base64: a screenshot id or a path inside the caller's own project, copied into an Inbox-owned store at share time (a screenshot would otherwise vanish under the 7-day sweep) and served from `/api/inbox/images/<file>`. See [mods.md](mods.md#inbox) for the store and the retention rules.
+- **`share_result` (#669, Inbox mod)**: the other half of `issue_complete`'s gate. An agent posts a writeup — `summary` (what changed and *why this shape*), `before`/`after`, `images`, `caveats` — to the Inbox, where it is listed while the posting session is alive, and it **returns immediately**: the human's Approve or Request-changes arrives later as a new message, so the agent ends its turn rather than polling. It is an approval gate, not a status update: with `issueStagesEnabled` on, `issue_complete` answers `share_result` (nothing shared) or `await_review` (shared, undecided) instead of `merge` until a result has been approved. Two fields on the shell entry carry the state — `resultItemId`, written by the tool itself and which by itself *refuses* a merge, and `resultApprovedAt`, written only from the panel's answer endpoint. `images` are references, never base64: a screenshot id or a path inside the caller's own project, copied into an Inbox-owned store at share time (a screenshot would otherwise vanish under the 7-day sweep) and served from `/api/inbox/images/<file>`. See [mods.md](mods.md#inbox) for the store and the retention rules.
 - **Browser Console / Screenshots**: these operate on the deepsteve UI tab only — they do NOT access your project's website or any other browser tab. `screenshot_capture` and `scene_snapshot` save PNGs to disk and return the file path; use the `Read` tool on that path to view the image. Do NOT try to base64-decode or re-save — the bytes are already on disk at the returned path. All three return an immediate `isError` when no browser window is connected, rather than broadcasting into the void.
 
 ## Adding an agent

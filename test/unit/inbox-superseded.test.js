@@ -252,19 +252,6 @@ test('an Inbox chat message supersedes, stamped when it was sent, once it is del
   assert.ok(entry.lastHumanInputAt <= sentBy, 'the stamp is when the person sent it, not when the queue drained');
 });
 
-test('an idle-row prompt supersedes the same way, and one never delivered supersedes nothing', async () => {
-  const w = world();
-  const { id: sid } = w.session();
-  const q = await w.ask(sid, { question: 'Does an idle-row prompt supersede?' });
-  await later();
-
-  const r = await w.call('POST', '/api/inbox/items/:id/answer', { params: { id: 'idle:' + sid }, body: { text: 'just ship it' } });
-  assert.strictEqual(r.status, 200);
-  assert.strictEqual(inbox.byId(q.id).status, 'open', 'not delivered yet, so it has replaced nothing');
-  w.deliveries.at(-1).opts.onDeliver(sid);
-  assert.strictEqual(inbox.byId(q.id).dismissedReason, 'superseded');
-});
-
 test('a reply survives its session being killed: the stamp on the closed record supersedes', async () => {
   const w = world();
   const { id: sid } = w.session();
@@ -299,8 +286,9 @@ test('an asker killed right after asking, with no reply, keeps its durable quest
   w.saved.set(sid, { cwd: PROJECT_DIR, agentType: 'codex', closed: true, lastHumanInputAt: null });
   w.session(); // another live session, so the listing's boot guard lets the dead-session sweep run
 
-  assert.ok(await w.listed(q.id));
-  assert.strictEqual(inbox.byId(q.id).status, 'open');
+  assert.strictEqual(await w.listed(q.id), undefined, 'nothing is waiting on it once its session has gone');
+  assert.ok(await w.listed(q.id, true), 'but the archive keeps it');
+  assert.strictEqual(inbox.byId(q.id).status, 'open', 'and its link still answers it');
 });
 
 test('a wait_seconds hold resolves the moment the person replies in the tab', async () => {

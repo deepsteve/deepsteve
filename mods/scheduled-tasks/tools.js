@@ -43,18 +43,16 @@ const ACTIVE_STATUSES = new Set(['queued', 'running', 'started']);
 // imposes that contract, so deepsteve pre-permits it: an unattended run has nobody to
 // answer "Do you want to proceed?", and blocking on it wedges the run in `running`
 // forever, which makes the overlap guard skip every subsequent fire of the task.
-// Narrow by design: exactly the deepsteve tools prefix.md names (#708 added the three
-// Inbox ones, since a run that needs a human now asks through the inbox), never a
-// blanket permission widening. None of them can approve anything — share_result only
-// ever *refuses* a merge. test/unit/scheduled-allowed-tools.test.js derives the names
-// from the fragment files and fails if this list and the prompt disagree.
+// Narrow by design: exactly the deepsteve tools prefix.md names (#708 added the Inbox
+// ones a run uses for a decision link), never a blanket permission widening. Neither can
+// approve anything. test/unit/scheduled-allowed-tools.test.js derives the names from the
+// fragment files and fails if this list and the prompt disagree.
 // `deepsteve` is the MCP server key hardcoded in server.js's mcpConfigArgs().
 const CONTRACT_TOOLS = [
   'mcp__deepsteve__scheduled_task_started',
   'mcp__deepsteve__scheduled_task_finished',
   'mcp__deepsteve__inbox_answers',
   'mcp__deepsteve__inbox_ask',
-  'mcp__deepsteve__share_result',
 ];
 
 // How long a tombstoned task (#614, see deleteTask) is kept once its last run has
@@ -80,6 +78,11 @@ const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'];
 // rather than a silent truncation.
 const MAX_CHANGELOG = 50;
 const MAX_STATUS_NOTE = 500;
+// A run's deliverable, passed as `report` to scheduled_task_finished. It lives on the run
+// record in the task's history, and only there: the Inbox lists what is waiting on a person
+// now, and a report is something you look up. Capped so twenty runs of a chatty task stay
+// a bounded share of scheduled-tasks.json.
+const MAX_REPORT_CHARS = 16000;
 const MAX_METADATA_KEYS = 32;
 const MAX_METADATA_KEY = 64;
 const MAX_METADATA_VALUE = 500;
@@ -1769,12 +1772,13 @@ function init(context) {
     },
 
     scheduled_task_finished: {
-      description: 'Mark the current scheduled-task run as finished. Call this once, when you are done, if you are running as a scheduled task. Pass a one-line summary of what you did; set success:false if the task could not be completed. The tab may auto-close afterwards depending on the task\'s settings.',
+      description: 'Mark the current scheduled-task run as finished. Call this once, when you are done, if you are running as a scheduled task. Pass a one-line summary of what you did; set success:false if the task could not be completed. If the task produced a deliverable (a report, findings, a proposal), pass it as `report`: it is kept with this run in the task\'s history. The tab may auto-close afterwards depending on the task\'s settings.',
       schema: {
         success: z.boolean().optional().describe('Whether the task completed successfully (default true).'),
         summary: z.string().optional().describe('One-line summary of what was done (or why it failed).'),
+        report: z.string().optional().describe(`The deliverable, in Markdown, if the task produces one. Kept with this run in the task's run history, not posted anywhere. Up to ${MAX_REPORT_CHARS} characters; longer is cut.`),
       },
-      handler: async ({ success, summary }, extra) => {
+      handler: async ({ success, summary, report }, extra) => {
         const shellId = callerShellId(extra);
         const found = findRunByShell(shellId);
         if (!found) return noRunResult(shellId);
@@ -1783,6 +1787,8 @@ function init(context) {
         run.status = ok ? 'succeeded' : 'failed';
         run.success = ok;
         run.summary = summary ? String(summary) : null;
+        const body = report ? String(report).trim() : '';
+        if (body) run.report = body.slice(0, MAX_REPORT_CHARS);
         run.endedAt = Date.now();
         saveTasks();
         broadcastTasks();
@@ -1821,8 +1827,15 @@ function registerRoutes(app, context) {
 
   app.get('/api/scheduled-tasks', (req, res) => {
     // Enrich each task with a human-readable schedule + project name for the panel,
-    // keeping the full stored fields (prompt, runs, nextRun) for editing/history.
-    const enriched = liveTasks().map(t => ({ ...t, schedule: scheduleLabel(t), projectName: displayName(t.project) }));
+    // keeping the full stored fields (prompt, runs, nextRun) for editing/history. A run's
+    // `report` is the exception: this payload is refetched on every broadcast, so it carries
+    // `hasReport` and the panel fetches the text from the route below when it is opened.
+    const enriched = liveTasks().map(t => ({
+      ...t,
+      runs: (t.runs || []).map(({ report, ...r }) => (report ? { ...r, hasReport: true } : r)),
+      schedule: scheduleLabel(t),
+      projectName: displayName(t.project),
+    }));
     // Groups (now the shared "contexts") arrive over /api/contexts + the 'contexts'
     // broadcast, not in this payload.
     // `defaults` (#604) is what an unpinned task actually resolves to, so the form's
@@ -1907,6 +1920,17 @@ function registerRoutes(app, context) {
     // `tombstoned` (#614): unscheduled, but the row is kept until the run still in
     // flight finishes reporting. The card disappears from the panel either way.
     res.json({ deleted: req.params.id, tombstoned: !!del.tombstoned, activeSession: del.activeSession });
+  });
+
+  // One run's report, by the run's startedAt — the key the panel already has for a run row.
+  // Read-only and not feature-gated, like the history: a report is worth reading most when
+  // the scheduler has been switched off.
+  app.get('/api/scheduled-tasks/:id/runs/:startedAt/report', (req, res) => {
+    const task = tasks.find(t => t.id === req.params.id);
+    const startedAt = Number(req.params.startedAt);
+    const run = task && Array.isArray(task.runs) ? task.runs.find(r => r.startedAt === startedAt) : null;
+    if (!run || !run.report) return res.status(404).json({ error: 'no-report' });
+    res.json({ report: run.report });
   });
 
   app.post('/api/scheduled-tasks/:id/run', (req, res) => {

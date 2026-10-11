@@ -23,14 +23,6 @@ export const URGENCY_RANK = { blocking: 0, normal: 1, fyi: 2 };
 export const AGE_WARN_MS = 30_000;
 export const AGE_ALERT_MS = 60_000;
 
-// An idle row's own clock (#682), an order of magnitude slower, because it is measuring
-// something else. Thirty seconds of a blocked agent is thirty seconds of a machine
-// stopped dead; thirty seconds of a finished one is nothing at all — it is the pause
-// while you read what it wrote. On the shared scale every row on the bench went red
-// within a minute, which is exactly how a colour stops being read.
-export const IDLE_WARN_MS = 10 * 60_000;
-export const IDLE_ALERT_MS = 45 * 60_000;
-
 const COLOR_CALM = '#8b949e';
 const COLOR_WARN = '#f0883e';
 const COLOR_ALERT = '#f85149';
@@ -136,19 +128,14 @@ export function tabOf(item) {
 export function visibleItems(items, opts = {}) {
   const {
     tab = 'agents',
-    showBriefings = true, blockingOnly = false, groupByProject: grouped = false,
-    hideWorking = false,
+    blockingOnly = false, groupByProject: grouped = false,
     backlog = [], backlogCollapsed = false,
   } = opts;
   const onBench = normalizeTab(tab) === 'agents';
 
   let list = (Array.isArray(items) ? items : []).filter(Boolean)
     .filter((i) => (tabOf(i) === 'agents') === onBench);
-  if (!showBriefings) list = list.filter((i) => i.kind !== 'briefing');
   if (blockingOnly && onBench) list = list.filter((i) => i.urgency === 'blocking');
-  // "Only the ones that need me" — the old gate, kept as a CHOICE rather than as the
-  // only behaviour. A working row is scenery, and some days you want the scenery gone.
-  if (hideWorking && onBench) list = list.filter((i) => i.kind !== 'working');
 
   // Issues live on the issues tab only, so on the agents tab there is no second section
   // and `order` is the agent list alone — which is what keeps ↓ from walking the
@@ -186,21 +173,12 @@ export function formatAge(ms) {
   return Math.floor(h / 24) + 'd';
 }
 
-/**
- * Colour never means urgency for an fyi — a briefing an hour old is still not urgent.
- *
- * `kind` picks the scale, and it is optional so every existing caller keeps the one it
- * had. Only 'idle' moves: see IDLE_WARN_MS for why a finished agent is not measured
- * against the same clock as a stopped one.
- */
-export function ageColor(ms, urgency, kind) {
+/** Colour never means urgency for an fyi — a question marked fyi an hour old is still not urgent. */
+export function ageColor(ms, urgency) {
   if (urgency === 'fyi') return COLOR_MUTED;
   const t = Number(ms) || 0;
-  const [warn, alert] = kind === 'idle'
-    ? [IDLE_WARN_MS, IDLE_ALERT_MS]
-    : [AGE_WARN_MS, AGE_ALERT_MS];
-  if (t > alert) return COLOR_ALERT;
-  if (t > warn) return COLOR_WARN;
+  if (t > AGE_ALERT_MS) return COLOR_ALERT;
+  if (t > AGE_WARN_MS) return COLOR_WARN;
   return COLOR_CALM;
 }
 
@@ -398,9 +376,8 @@ export function answerPayload(item, { picked = null, draft = '' } = {}) {
     if (text) payload.text = text;
     return payload;
   }
-  // Where an idle row lands (#682), and deliberately: it carries no options and has
-  // nothing to stage, so saying the next thing IS the whole answer. Empty text is null
-  // rather than an empty payload — a bare Enter into a live composer submits whatever
+  // A question with no options to stage: the reply text IS the whole answer. Empty text is
+  // null rather than an empty payload — a bare Enter into a live composer submits whatever
   // is already sitting in it, which is not what "I pressed send on an empty box" means.
   return text ? { text } : null;
 }
