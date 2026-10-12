@@ -9,6 +9,8 @@
  * 2. /rc inheritance on server-side spawns: start_issue from a caller whose
  *    screen shows "/rc active" delivers `/rc` to the child FIRST, then the
  *    issue prompt — sequenced by deliverPromptWhenReady's per-shell queue.
+ *    A child that draws its own Remote Control pill gets the queued `/rc`
+ *    dropped instead (`/rc` is a toggle), and the issue prompt still lands.
  *
  * Own daemon (scratch $HOME, stub `claude` on PATH, random port), spawned in
  * before() and killed in after() — never the developer's real install.
@@ -31,13 +33,21 @@ const REPO_ROOT = path.resolve(__dirname, '..', '..');
 // idle composer footer at startup and after each echo so the #568 screen-state
 // detector sees "at prompt" and deliverPromptWhenReady fires (real claude always
 // shows this footer when idle; the old BEL/silence path no longer exists).
+//
+// The pill is drawn unless NO_PILL_MARKER exists when the stub starts. A child that
+// shows its own pill has the inherited /rc dropped at delivery, so a test that needs
+// the keystroke typed plants the marker before spawning that child (#728).
+//
+// Every received line is also appended to $HOME/got-<session id>.log — see received().
+const NO_PILL_MARKER = 'stub-no-rc-pill';
 const CLAUDE_STUB = `#!/bin/bash
 footer() { echo "⏵⏵ auto mode on (shift+tab to cycle)"; }
 echo "stub claude started args: $*"
-echo "/rc active"
+[ -e "$HOME/${NO_PILL_MARKER}" ] || echo "/rc active"
 footer
 while IFS= read -r line; do
   case "$line" in *"/exit"*) exit 0 ;; esac
+  printf '%s\\n' "$line" >> "$HOME/got-$DEEPSTEVE_SESSION_ID.log"
   echo "GOT:$line"
   footer
 done
@@ -323,7 +333,21 @@ test('declining the consent dialog refuses the call and arms the cooldown', asyn
 
 // --- /rc inheritance on server-side spawns ---
 
+// Every line a stub session received, in arrival order, from the stub's own record.
+// The screen cannot answer "what arrived first": under tmux it is the 40-row
+// viewport, and the echoed issue prompt alone is taller than that, so an earlier
+// /rc has scrolled off by the time the prompt has landed (#728).
+function received(id) {
+  try {
+    return fs.readFileSync(path.join(HOME, `got-${id}.log`), 'utf8').split('\n');
+  } catch {
+    return [];
+  }
+}
+
 test('start_issue inherits /rc from the caller and delivers it before the issue prompt', async () => {
+  // The child must not draw a pill of its own, or the /rc is (correctly) dropped.
+  fs.writeFileSync(path.join(HOME, NO_PILL_MARKER), '');
   const started = parseTool(await mcp.callTool({
     name: 'start_issue',
     arguments: {
@@ -339,23 +363,43 @@ test('start_issue inherits /rc from the caller and delivers it before the issue 
   await waitFor(() => daemonLog.includes('[rc-inherit]'), 'rc-inherit log line');
 
   // Both prompts land through the per-shell queue: /rc first, then the issue
-  // prompt on the next idle. read_session_screen (also #519) is the readback.
-  const lines = await waitFor(async () => {
-    const screen = parseTool(await mcp.callTool({
-      name: 'read_session_screen',
-      arguments: { session_id: started.id, lines: 120 },
-    }));
-    const l = screen.lines;
-    return l.some(x => x.includes('GOT:/rc')) && l.some(x => x.includes('RC-MARKER-BODY-519')) ? l : null;
+  // prompt on the next idle.
+  const got = await waitFor(() => {
+    const l = received(started.id);
+    return l.includes('/rc') && l.includes('RC-MARKER-BODY-519') ? l : null;
   }, 'child to receive /rc and the issue prompt', 30000, 500);
 
-  // Compare positions on the DE-WRAPPED screen. read_session_screen returns rows of
-  // an emulated 120-column terminal, and the echoed issue prompt is longer than that,
-  // so a row break can land between "GOT:" and the issue number.
-  const flat = lines.join('');
-  const rcAt = flat.indexOf('GOT:/rc');
-  const promptAt = flat.indexOf('GOT:GitHub issue #519');
-  assert.ok(rcAt >= 0, `child should have received /rc, screen: ${JSON.stringify(lines)}`);
-  assert.ok(promptAt >= 0, `child should have received the issue prompt, screen: ${JSON.stringify(lines)}`);
-  assert.ok(rcAt < promptAt, `/rc (at ${rcAt}) must land before the issue prompt (at ${promptAt})`);
+  const rcAt = got.indexOf('/rc');
+  const promptAt = got.findIndex(x => x.startsWith('GitHub issue #519'));
+  assert.ok(promptAt >= 0, `child should have received the issue prompt, got: ${JSON.stringify(got)}`);
+  assert.ok(rcAt < promptAt, `/rc (line ${rcAt}) must land before the issue prompt (line ${promptAt})`);
+});
+
+test('a child that draws its own Remote Control pill gets the /rc dropped, and the issue prompt still lands', async () => {
+  // `/rc` is a toggle, so typing it at a child that already shows a pill would switch
+  // Remote Control OFF. The parent is still consulted; the child is asked at delivery.
+  fs.rmSync(path.join(HOME, NO_PILL_MARKER), { force: true });
+  const started = parseTool(await mcp.callTool({
+    name: 'start_issue',
+    arguments: {
+      session_id: caller.session.id,
+      number: 520,
+      title: 'rc already on in the child',
+      body: 'RC-MARKER-BODY-520',
+    },
+  }));
+  assert.ok(started.id, `start_issue should return the child id, got ${JSON.stringify(started)}`);
+
+  await waitFor(() => daemonLog.includes(`[rc-check] new=${started.id} tab parent=${caller.session.id} -> queue /rc`),
+    'the caller to be consulted for /rc');
+  await waitFor(() => daemonLog.includes(`[deliverPrompt] id=${started.id} dropping queued prompt`),
+    'the queued /rc to be dropped at delivery', 30000, 250);
+
+  // The drop must release the queue: the issue prompt behind it still submits.
+  const got = await waitFor(() => {
+    const l = received(started.id);
+    return l.includes('RC-MARKER-BODY-520') ? l : null;
+  }, 'child to receive the issue prompt', 30000, 500);
+  assert.ok(!got.includes('/rc'), `child must not receive /rc, got: ${JSON.stringify(got)}`);
+  assert.ok(!daemonLog.includes(`[rc-inherit] ${started.id} `), 'no keystroke was typed, so no [rc-inherit] line');
 });
