@@ -227,6 +227,19 @@ function tabInContext(cwd, ctx) {
   });
 }
 
+/**
+ * The directory a new tab opens in when it inherits `cwd` from the active tab: `cwd` itself,
+ * except that anywhere inside a worktree (`<repo>/.claude/worktrees/<name>/…`) maps to
+ * `<repo>`. A worktree is one agent's branch, and the display tabs and terminals that agent
+ * opens carry its path as their cwd — so with one of those active, "new tab" would otherwise
+ * start a second, unmanaged session on that branch. Picking a worktree's directory outright
+ * (the directory picker, a recent dir) is not inheriting, and still opens there.
+ */
+export function newTabCwd(cwd) {
+  const m = typeof cwd === 'string' && cwd.match(/^(.+?)\/\.claude\/worktrees\/[^/]+(?:\/|$)/);
+  return m ? m[1] : cwd;
+}
+
 // Pure (no module state / globals): split `recentDirs` into the active context's
 // repos followed by the remaining recents, for the new-tab flow (#573). The
 // context group is ALL of `contextDirs` in stored order (even repos with no
@@ -1769,8 +1782,9 @@ function onKeyUp(e) {
  *   { kind: 'inherit', cwd }            → the caller's own inherit-the-active-tab
  *                                         default is safe: contexts off, the "All"
  *                                         view, or an active tab already inside the
- *                                         context. `cwd` may be null (a mod/display
- *                                         tab is active, or nothing is open).
+ *                                         context. `cwd` is the active tab's, out of
+ *                                         any worktree (newTabCwd), and may be null (a
+ *                                         mod/display tab is active, or nothing is open).
  *   { kind: 'dirs', dirs, contextName } → the context's repos; 1 → just use it,
  *                                         N → let the user choose (#522).
  *   { kind: 'ask', contextName }        → context with NO dirs configured: nothing
@@ -1784,11 +1798,12 @@ function onKeyUp(e) {
  */
 export function resolveContextRepo() {
   const activeCwd = cb.getTabCwd?.(cb.getActiveTabId?.()) || null;
-  if (!enabled) return { kind: 'inherit', cwd: activeCwd };
+  const inherited = newTabCwd(activeCwd);
+  if (!enabled) return { kind: 'inherit', cwd: inherited };
   const ctx = getActiveContext();
-  if (!ctx) return { kind: 'inherit', cwd: activeCwd };        // "All" view → inherit is fine
+  if (!ctx) return { kind: 'inherit', cwd: inherited };        // "All" view → inherit is fine
   if (activeCwd && tabInContext(activeCwd, ctx))               // already in-context → inherit stays in-context
-    return { kind: 'inherit', cwd: activeCwd, contextName: ctx.name };
+    return { kind: 'inherit', cwd: inherited, contextName: ctx.name };
   if (ctx.dirs.length === 0) return { kind: 'ask', contextName: ctx.name };
   return { kind: 'dirs', dirs: [...ctx.dirs], contextName: ctx.name };
 }

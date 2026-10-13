@@ -39,7 +39,7 @@ import { init as initHashCommands, beforeSend as hashCommandsBeforeSend, setWait
 import { init as initOverviewMode, setEnabled as setOverviewModeEnabled, setShortcut as setOverviewModeShortcut, setDefaultLayout as setOverviewDefaultLayout, toggle as toggleOverviewMode, isOverviewActive, getLayout as getOverviewLayout, updateFocus as updateOverviewFocus, onTabsReordered as onOverviewTabsReordered, syncToContext as syncOverviewToContext } from './overview-mode.js';
 import { init as initTerminalSearch, attachSearchAddon, closeIfOpen as closeTerminalSearch } from './terminal-search.js';
 import * as SessionHistory from './session-history.js';
-import { init as initContextViews, refreshProjectAgentRows, setEnabled as setContextViewsEnabled, applyFilter as refreshContextFilter, requestNewTabInContext, resolveContextRepo, chooseContextDir, setContexts as applyServerContexts, setActiveContext as setActiveContextFromPanel, getActiveContextId, getActiveContextInfo, orderRecentDirsByContext, activeContextIsEmpty, noteActiveTab, revealTabContext, showToast, setRailSuppressed, setRailQuiet, paintProjectRows, contextsForCwd } from './context-views.js';
+import { init as initContextViews, refreshProjectAgentRows, setEnabled as setContextViewsEnabled, applyFilter as refreshContextFilter, requestNewTabInContext, resolveContextRepo, newTabCwd, chooseContextDir, setContexts as applyServerContexts, setActiveContext as setActiveContextFromPanel, getActiveContextId, getActiveContextInfo, orderRecentDirsByContext, activeContextIsEmpty, noteActiveTab, revealTabContext, showToast, setRailSuppressed, setRailQuiet, paintProjectRows, contextsForCwd } from './context-views.js';
 import * as ProjectMods from './project-mods.js';
 import * as ProjectViews from './project-views.js';
 import * as ViewFooter from './view-footer.js';
@@ -4197,6 +4197,11 @@ function renameSession(id) {
   });
 }
 
+/** The directory a new tab inherits from the active one — its cwd, never a worktree (newTabCwd). */
+function inheritedCwd() {
+  return newTabCwd(activeId ? sessions.get(activeId)?.cwd : null) || null;
+}
+
 /**
  * Quick new session in same repo as active session
  */
@@ -4204,16 +4209,12 @@ function quickNewSession() {
   // If a context is selected and the active tab isn't already inside it, open
   // the new tab in the context's repo instead (folder-based context, #522).
   if (requestNewTabInContext()) return;
-  const active = activeId && sessions.get(activeId);
-  const cwd = active?.cwd || '~';
   // Pass the active tab as the parent so the new tab can inherit its /rc state.
-  createSession(cwd, null, true, { agentType: getDefaultAgentType(), rcParent: activeId });
+  createSession(inheritedCwd() || '~', null, true, { agentType: getDefaultAgentType(), rcParent: activeId });
 }
 
 function quickNewTerminal() {
-  const active = activeId && sessions.get(activeId);
-  const cwd = active?.cwd || '~';
-  createSession(cwd, null, true, { agentType: 'terminal' });
+  createSession(inheritedCwd() || '~', null, true, { agentType: 'terminal' });
 }
 
 /** Get the default agent type from cached settings */
@@ -4624,9 +4625,7 @@ function showNewTabMenu(e) {
     } else if (action === 'mod-tab') {
       createModTab(item.dataset.modId);
     } else if (action === 'opencode') {
-      const active = activeId && sessions.get(activeId);
-      const cwdPath = active?.cwd || '~';
-      createSession(cwdPath, null, true, { agentType: 'opencode' });
+      createSession(inheritedCwd() || '~', null, true, { agentType: 'opencode' });
     } else if (action === 'new-window') {
       openNewWindow();
     } else if (action === 'restore-sessions') {
@@ -4735,8 +4734,7 @@ function wireNewTabGestures() {
  * Prompt for worktree name and create session
  */
 async function promptWorktreeSession() {
-  const active = activeId && sessions.get(activeId);
-  const cwd = active?.cwd;
+  const cwd = inheritedCwd();   // a worktree started from inside one is its repo's, not nested in it
   if (!cwd) return promptRepoSession();
 
   const overlay = document.createElement('div');

@@ -590,6 +590,45 @@ test('multi-repo context, empty of tabs → chooser owns it; no synchronous crea
   assert.strictEqual(state.promptDirCalls, 0);        // a dir picker would be the wrong prompt
 });
 
+// A new tab never inherits a worktree. The display tabs and terminals a worktree agent opens
+// carry the worktree path as their cwd, so with one active, "new tab" opened a second session
+// on that agent's branch instead of in the project.
+
+test('newTabCwd: a worktree path, or anywhere inside one, maps to its repo', async () => {
+  const { mod } = await setup();
+  assert.strictEqual(mod.newTabCwd('/repo/a/.claude/worktrees/github-issue-652'), '/repo/a');
+  assert.strictEqual(mod.newTabCwd('/repo/a/.claude/worktrees/github-issue-652/'), '/repo/a');
+  assert.strictEqual(mod.newTabCwd('/repo/a/.claude/worktrees/github-issue-652/src/lib'), '/repo/a');
+});
+
+test('newTabCwd: anything else passes through untouched', async () => {
+  const { mod } = await setup();
+  assert.strictEqual(mod.newTabCwd('/repo/a'), '/repo/a');
+  assert.strictEqual(mod.newTabCwd('/repo/a/sub'), '/repo/a/sub');
+  assert.strictEqual(mod.newTabCwd('/repo/a/.claude'), '/repo/a/.claude');
+  assert.strictEqual(mod.newTabCwd('/repo/a/.claude/worktrees'), '/repo/a/.claude/worktrees');
+  assert.strictEqual(mod.newTabCwd('/repo/a/not.claude/worktrees/x'), '/repo/a/not.claude/worktrees/x');
+  assert.strictEqual(mod.newTabCwd(null), null);
+  assert.strictEqual(mod.newTabCwd(undefined), undefined);
+});
+
+test('resolveContextRepo: active tab in a worktree → inherit the repo, not the worktree', async () => {
+  const { mod, state } = await setup({ contexts: [CTX_A], tabs: { tab1: '/repo/a/.claude/worktrees/github-issue-652' } });
+  state.activeTabId = 'tab1';
+  mod.setActiveContext('ctxa');
+
+  assert.deepStrictEqual(mod.resolveContextRepo(), { kind: 'inherit', cwd: '/repo/a', contextName: 'Alpha' });
+  assert.strictEqual(mod.requestNewTabInContext(), false); // in-context → quickNewSession inherits (newTabCwd)
+});
+
+test('resolveContextRepo: active tab in a worktree, All view or feature off → still the repo', async () => {
+  const { mod, state } = await setup({ contexts: [CTX_A], tabs: { tab1: '/repo/a/.claude/worktrees/x/sub' } });
+  state.activeTabId = 'tab1';                      // no setActiveContext → All
+  assert.deepStrictEqual(mod.resolveContextRepo(), { kind: 'inherit', cwd: '/repo/a' });
+  mod.setEnabled(false);
+  assert.deepStrictEqual(mod.resolveContextRepo(), { kind: 'inherit', cwd: '/repo/a' });
+});
+
 // #585: the closed-rail readout (#context-indicator) now carries two children —
 // a text label (every layout) and an icon chip (revealed by CSS only in the
 // collapsed vertical icon rail). updateIndicator() must fill both, follow the
