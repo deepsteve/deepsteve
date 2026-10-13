@@ -42,6 +42,7 @@ import * as SessionHistory from './session-history.js';
 import { init as initContextViews, setEnabled as setContextViewsEnabled, applyFilter as refreshContextFilter, requestNewTabInContext, resolveContextRepo, chooseContextDir, setContexts as applyServerContexts, setActiveContext as setActiveContextFromPanel, getActiveContextId, getActiveContextInfo, orderRecentDirsByContext, activeContextIsEmpty, noteActiveTab, revealTabContext, showToast, setRailSuppressed, setRailQuiet, paintProjectRows, contextsForCwd } from './context-views.js';
 import * as ProjectMods from './project-mods.js';
 import * as ProjectViews from './project-views.js';
+import * as ViewFooter from './view-footer.js';
 import * as DecisionMode from './decision-mode.js';
 import * as Onboarding from './onboarding.js';
 import { nsKey } from './storage-namespace.js';
@@ -516,6 +517,9 @@ function notifyTabsChanged() {
   // decision tab must be resolved (next decision, or the empty inbox) before it settles.
   DecisionMode.sync();
   refreshContextFilter();
+  // Also reached through onContextViewApplied, except with Projects off, where applyFilter()
+  // returns early — and a closed active tab must take its footer with it either way.
+  ViewFooter.render();
   // refreshContextFilter() normally drives this via onContextViewApplied, but it
   // early-returns when context views are disabled — and a persisted grid still
   // has to come back once the restored tabs exist (#590). syncToContext() no-ops
@@ -2129,6 +2133,8 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
             sess.mergeBlock = msg.mergeBlock || null;
           }
         }
+        // `worktree` is what a view's `worktree` rule reads, so a footer can only be decided now.
+        ViewFooter.render();
         // Painted from the (re)connect payload, not only from the live event: the state
         // is persisted server-side, so a page reload — or a ./restart.sh — must bring the
         // glyph back rather than waiting for the next merge to fail again.
@@ -3324,6 +3330,8 @@ function switchTo(id) {
   updateOverviewFocus(id);
   ModManager.notifyActiveSessionChanged(id);
   scheduleDecisionSync();
+  // Before the fit below: the footer row changes the height the incoming terminal gets.
+  ViewFooter.render();
   const session = sessions.get(id);
   if (session) {
     session.container.classList.add('active');
@@ -5475,7 +5483,7 @@ async function init() {
     onQuietChanged: (on) => setRailQuiet(on),
     // The slot went up or down (#727), so the rail's selection moves between an app row and a
     // project row. mod-manager repaints its app rows itself; the project rows are context-views'.
-    onViewVisibilityChanged: () => paintProjectRows(),
+    onViewVisibilityChanged: () => { paintProjectRows(); ViewFooter.render(); },
   });
 
   // Timelapse recorder (#667). After ModManager.init() — the recording dot mounts at the
@@ -5555,7 +5563,7 @@ async function init() {
     // hook that settles the filter re-derives the strip buttons and opens the pinned
     // ones. Deliberately not the rail rows: renderRail() pulls those itself, and
     // calling render() from inside applyFilter would re-enter it.
-    onContextViewApplied: () => { syncOverviewToContext(); refreshTabArrows(); ProjectMods.render(); ProjectViews.render(); },
+    onContextViewApplied: () => { syncOverviewToContext(); refreshTabArrows(); ProjectMods.render(); ProjectViews.render(); ViewFooter.render(); },
     // Project views (#726) narrow the selected project to one view's tabs. The filter, the
     // per-view last-tab memory and the reveal-on-focus all ask project-views.js.
     tabInView: (id, ctx) => ProjectViews.tabInView(id, ctx),
@@ -5601,7 +5609,7 @@ async function init() {
     contextsForCwd: (cwd) => contextsForCwd(cwd),
     getTabInfo: (id) => {
       const s = sessions.get(id);
-      return s ? { cwd: s.cwd || null, name: s.name || '', kind: tabKind(s), views: s.views } : null;
+      return s ? { cwd: s.cwd || null, name: s.name || '', kind: tabKind(s), views: s.views, worktree: s.worktree || null } : null;
     },
     setTabViews: (id, views) => {
       const s = sessions.get(id);
@@ -5614,6 +5622,14 @@ async function init() {
     applyFilter: () => refreshContextFilter(),
     isSuspended: () => DecisionMode.isDecisionModeActive(),
     showToast: (text) => showToast(text),
+    // The view list changed. applyFilter() redraws the footer too, but not with Projects off.
+    onViewsChanged: () => ViewFooter.render(),
+  });
+  // View footers: the row under the monitor for a tab in a view with a `footer`.
+  ViewFooter.init({
+    getActiveTabId: () => activeId,
+    footerFor: (id) => ProjectViews.footerFor(id),
+    isViewSlotUp: () => ModManager.isModViewVisible(),
   });
   TabManager.setTabViews({
     menu: (id) => ProjectViews.menuFor(id),

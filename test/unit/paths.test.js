@@ -13,7 +13,7 @@ const path = require('path');
 
 const {
   expandTilde, stateDir, statePath, agentHomeDir, tmuxSocketPath, logDir, DEFAULT_STATE_DIRNAME,
-  projectModsDir, projectViewsDir, projectPipelinePath, projectScheduledContextPath,
+  projectModsDir, projectViewsDir, globalViewsDir, projectPipelinePath, projectScheduledContextPath,
 } = require('../../paths');
 
 const REPO = path.join(__dirname, '..', '..');
@@ -95,6 +95,19 @@ test('a repo\'s own .deepsteve paths are rooted at the repo, never at the state 
   } finally {
     if (saved === undefined) delete process.env.DEEPSTEVE_HOME; else process.env.DEEPSTEVE_HOME = saved;
   }
+});
+
+test('DeepSteve-wide views live in the state dir, so DEEPSTEVE_HOME moves them', () => {
+  // The opposite call from projectViewsDir(): these are this daemon's own configuration, and a
+  // test daemon must not pick up the real install's.
+  const saved = process.env.DEEPSTEVE_HOME;
+  process.env.DEEPSTEVE_HOME = '/scratch/iso/.deepsteve';
+  try {
+    assert.strictEqual(globalViewsDir(), '/scratch/iso/.deepsteve/views');
+  } finally {
+    if (saved === undefined) delete process.env.DEEPSTEVE_HOME; else process.env.DEEPSTEVE_HOME = saved;
+  }
+  assert.strictEqual(globalViewsDir(), path.join(stateDir(), 'views'));
 });
 
 // --- agentHomeDir ---------------------------------------------------------

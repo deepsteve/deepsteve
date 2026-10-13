@@ -83,7 +83,7 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
 /* App container - flexbox for layout switching.
    Always a row: [ #context-rail | #app-main ], so the context rail can sit full-height to
    the left of everything. #app-main is the monitor, and always a column:
-   [ #views-bar | #app-body ]. The project-views bar (#726) spans its full width in BOTH tab
+   [ #views-bar | #app-body | #view-footer ]. The project-views bar (#726) spans its full width in BOTH tab
    layouts, so the horizontal / vertical switch lives one level down, on #app-body (the box
    #tabs + #content-row live in). */
 #app-container { display: flex; flex-direction: row; height: 100vh; }
@@ -175,6 +175,13 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
 .view-tab-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .view-tab-add { background: transparent; border-color: transparent; color: var(--ds-text-secondary); }
 .view-tab-add:hover { border-color: var(--ds-border); }
+/* An additive view: a push button that stacks with the selected view, not a folder tab. Set
+   off from the folder tabs by a gap, and marked ●/○ (on/off) like the chip it sits beside. */
+.view-tab.view-tab-push { background: transparent; border-color: transparent; color: var(--ds-text-secondary); }
+.view-tab.view-tab-push.first { margin-left: 10px; }
+.view-tab.view-tab-push.on { color: var(--ds-accent-blue); }
+.view-tab.view-tab-push:hover { border-color: var(--ds-border); }
+.view-tab-push .view-tab-mark { font-size: 10px; }
 .views-toggle {
   flex-shrink: 0;
   padding: 4px 8px;
@@ -200,6 +207,49 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
 #app-container.vertical-layout .views-toggle.active { background: var(--ds-bg-tertiary); }
 #app-container.vertical-layout .views-toggle.filtering { color: var(--ds-accent-blue); }
 #app-container.vertical-layout.icon-rail .views-toggle .views-caret { display: none; }
+
+/* ── View footers ─────────────────────────────────────────────────────────────────────────────
+   #view-footer is the monitor's bottom row, the views bar's mirror: facts about the tab you are
+   looking at, when it is in a view with a `footer`. view-footer.js toggles .hidden and fills it.
+   The height is FIXED at two lines of the title cell, whatever has arrived: the row appears
+   before the incoming terminal is fitted, and a late answer must not resize it again. The side
+   padding follows --ds-main-radius, so a bezelled theme's rounded corners never clip the text. */
+#view-footer {
+  display: flex;
+  align-items: flex-start;
+  flex-shrink: 0;
+  box-sizing: border-box;
+  height: calc(2.8em + 12px);
+  padding: 6px max(10px, calc(var(--ds-main-radius) - 2px));
+  overflow: hidden;
+  font-size: 12px;
+  line-height: 1.4;
+  background: var(--ds-bg-secondary);
+  border-top: 1px solid var(--ds-border);
+  color: var(--ds-text-secondary);
+  /* Below the #app-main::after bezel overlay (z-index 3), like every structural child. */
+  position: relative;
+  z-index: 1;
+}
+#view-footer.hidden { display: none; }
+#view-footer .vf-cell { flex-shrink: 0; white-space: nowrap; padding: 0 10px; border-left: 1px solid var(--ds-border); }
+#view-footer .vf-cell:first-child { padding-left: 0; border-left: none; }
+#view-footer a.vf-cell { color: var(--ds-accent-blue); text-decoration: none; }
+#view-footer a.vf-cell:hover { text-decoration: underline; }
+#view-footer .vf-repo { font-weight: 600; }
+/* The title and the start of the body take what is left, clamped to the row's two lines. */
+#view-footer .vf-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  white-space: normal;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  color: var(--ds-text-primary);
+}
+#view-footer .vf-title strong { color: var(--ds-text-bright); font-weight: 600; }
+#view-footer .vf-excerpt { color: var(--ds-text-secondary); }
 
 /* Layout toggle button */
 .layout-btn { padding: 4px 8px; background: var(--ds-bg-tertiary); border: 1px solid var(--ds-border); color: var(--ds-text-secondary); border-radius: 4px; cursor: pointer; font-size: 14px; margin-right: 8px; line-height: 1; }

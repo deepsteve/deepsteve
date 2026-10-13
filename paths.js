@@ -167,6 +167,17 @@ function projectViewsDir(repoRoot) {
 }
 
 /**
+ * Where THIS INSTALL keeps its DeepSteve-wide views: the same `<slug>.json` files as
+ * projectViewsDir(), but in the state dir, so they belong to no repo, are never committed,
+ * and show in every project. Derived from stateDir() on purpose — the opposite call from the
+ * repo dirs above — because they are this daemon's own configuration, and a test daemon
+ * isolated with DEEPSTEVE_HOME must not pick up the real install's.
+ */
+function globalViewsDir() {
+  return statePath('views');
+}
+
+/**
  * A REPO's committed issue pipeline (#717): `.deepsteve/pipeline.json`, the per-repo level
  * of the stage list an issue session runs. A sibling of projectModsDir() for the same
  * reasons — it travels with the checkout, and DEEPSTEVE_HOME must never move it. What the
@@ -284,6 +295,6 @@ function logDir({ platform = process.platform, env = process.env, homedir = os.h
 
 module.exports = {
   expandTilde, spawnCwdProblem, assertSpawnCwd,
-  stateDir, statePath, projectModsDir, projectViewsDir, projectPipelinePath, projectScheduledContextPath, agentHomeDir, tmuxSocketPath, defaultTmuxSocketPath, logDir,
+  stateDir, statePath, projectModsDir, projectViewsDir, globalViewsDir, projectPipelinePath, projectScheduledContextPath, agentHomeDir, tmuxSocketPath, defaultTmuxSocketPath, logDir,
   DEFAULT_STATE_DIRNAME,
 };

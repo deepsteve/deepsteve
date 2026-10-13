@@ -20,6 +20,16 @@
  * turned off) means no toggle, no bar and no filter; Decision Tab mode suspends them the way
  * it suspends the project filter.
  *
+ * A DeepSteve-wide view (`global`, from ~/.deepsteve/views/) belongs to no repo and is in
+ * every project's list. A view with a `footer` also names the fields view-footer.js draws
+ * along the bottom of the monitor for a tab in it — footerFor() answers which, regardless of
+ * the view that is selected.
+ *
+ * An ADDITIVE view (`additive: true`) is switched on rather than looked at: it never filters
+ * the strip and is never the selected view, but stacks with whichever one is. It is a push
+ * button in the bar rather than a folder tab, any number can be on, and what it adds is its
+ * footer. On is the default; the ones switched off are a browser-wide preference.
+ *
  * Two pieces of chrome, both host-owned:
  *   - #views-toggle: the collapsed form (the default). The first child of #tabs-list-wrapper,
  *     so it sits immediately before the first tab — above it in vertical layout, left of it
@@ -51,8 +61,13 @@ const SELECT_KEY = nsKey('deepsteve-project-view');
 // browser-wide preference. Collapsed is the default.
 const EXPANDED_KEY = nsKey('deepsteve-project-views-bar');
 
+// Additive views switched OFF, by slug. localStorage, like the bar's expanded state: "how it
+// looks", the same in every window and every project. Absent means on.
+const ADDITIVE_OFF_KEY = nsKey('deepsteve-project-views-off');
+
 let selection = loadSelection();
 let expanded = loadExpanded();
+let additiveOff = loadAdditiveOff();
 
 function loadSelection() {
   try { return JSON.parse(sessionStorage.getItem(SELECT_KEY)) || {}; } catch { return {}; }
@@ -62,6 +77,25 @@ function saveSelection() {
 }
 function loadExpanded() {
   try { return localStorage.getItem(EXPANDED_KEY) === '1'; } catch { return false; }
+}
+
+function loadAdditiveOff() {
+  try { return JSON.parse(localStorage.getItem(ADDITIVE_OFF_KEY)) || {}; } catch { return {}; }
+}
+
+/** Is the additive view `slug` switched on? */
+export const isAdditiveOn = (slug) => !additiveOff[slug];
+
+/**
+ * Switch an additive view on or off. It filters nothing, so there is no filter pass: the bar
+ * redraws, and app.js redraws the footer.
+ */
+export function setAdditive(slug, on) {
+  if (on) delete additiveOff[slug];
+  else additiveOff[slug] = true;
+  try { localStorage.setItem(ADDITIVE_OFF_KEY, JSON.stringify(additiveOff)); } catch { /* private mode */ }
+  render();
+  cb.onViewsChanged?.();
 }
 
 export const isExpanded = () => expanded;
@@ -96,28 +130,50 @@ export function viewsForContext(ctx) {
   if (!ctx || !Array.isArray(ctx.dirs)) return [];
   const key = `${version}|${ctx.id}|${ctx.dirs.join('\n')}`;
   if (mergeCache.key === key) return mergeCache.list;
-  const bySlug = new Map();
-  for (const v of views) {
-    if (!ctx.dirs.some(d => inside(v.project, d) || inside(d, v.project))) continue;
-    const rules = (Array.isArray(v.match) ? v.match : []).map(r => ({ ...r, root: v.project }));
-    const cur = bySlug.get(v.slug);
-    if (cur) {
-      cur.ids.push(v.id);
-      cur.rules.push(...rules);
-    } else {
-      bySlug.set(v.slug, { slug: v.slug, name: v.name, icon: v.icon || '', ids: [v.id], rules });
-    }
-  }
-  mergeCache = { key, list: [...bySlug.values()] };
+  mergeCache = { key, list: mergeViews(views.filter(v => v.global || ctx.dirs.some(d => inside(v.project, d) || inside(d, v.project)))) };
   return mergeCache.list;
 }
+
+let globalCache = { version: -1, list: [] };
+
+/** The DeepSteve-wide views alone, merged the same way — the footer's answer outside any project. */
+function globalViews() {
+  if (globalCache.version !== version) globalCache = { version, list: mergeViews(views.filter(v => v.global)) };
+  return globalCache.list;
+}
+
+/**
+ * Same-slug views → one. `ids` holds only the repo copies: those are what Rename and Delete
+ * write, and a DeepSteve-wide view is edited as its file. The first footer by order wins; name,
+ * icon and `additive` come from the first by order.
+ */
+function mergeViews(list) {
+  const bySlug = new Map();
+  for (const v of list) {
+    const rules = (Array.isArray(v.match) ? v.match : []).map(r => ({ ...r, root: v.project }));
+    const footer = Array.isArray(v.footer) ? v.footer : [];
+    const cur = bySlug.get(v.slug);
+    if (cur) {
+      if (!v.global) cur.ids.push(v.id);
+      cur.rules.push(...rules);
+      cur.global = cur.global || !!v.global;
+      if (!cur.footer.length) cur.footer = footer;
+    } else {
+      bySlug.set(v.slug, { slug: v.slug, name: v.name, icon: v.icon || '', ids: v.global ? [] : [v.id], rules, global: !!v.global, footer, additive: !!v.additive });
+    }
+  }
+  return [...bySlug.values()];
+}
+
+/** The views `ctx` can be looking at: all but the additive ones, which only stack. */
+export const selectableViews = (ctx) => viewsForContext(ctx).filter(v => !v.additive);
 
 /** The slug a window is looking at in `ctx`: its stored choice if that view still exists, else All. */
 export function selectedSlug(ctx) {
   if (!ctx) return ALL;
   const s = selection[ctx.id];
   if (!s || s === ALL || !loaded) return ALL;
-  return viewsForContext(ctx).some(v => v.slug === s) ? s : ALL;
+  return selectableViews(ctx).some(v => v.slug === s) ? s : ALL;
 }
 
 function setSelection(ctx, slug) {
@@ -142,8 +198,15 @@ export function repoRelative(cwd, root) {
   return wt ? (wt[1] || '') : rel;
 }
 
+/**
+ * Is this tab working in a worktree? A worktree session says so (`worktree`, its cwd being the
+ * repo root); a tab opened inside one says so with its cwd.
+ */
+export const inWorktree = (info) => !!info.worktree || /\/\.claude\/worktrees\/[^/]+(\/|$)/.test(info.cwd || '');
+
 /** One rule: EVERY field it states must match (any entry within a field). */
 export function ruleMatches(rule, info) {
+  if (typeof rule.worktree === 'boolean' && inWorktree(info) !== rule.worktree) return false;
   if (rule.names) {
     const name = String(info.name || '').toLowerCase();
     if (!rule.names.some(n => name.includes(n))) return false;
@@ -181,8 +244,28 @@ export function tabInView(id, ctx) {
   if (slug === ALL) return true;
   const info = cb.getTabInfo?.(id);
   if (!info) return true;
-  const view = viewsForContext(ctx).find(v => v.slug === slug);
+  const view = selectableViews(ctx).find(v => v.slug === slug);
   return view ? memberOf(info, view) : true;
+}
+
+/**
+ * The footer for tab `id`: the first view with a `footer` that the tab is in, by the views' own
+ * order — among the views of the projects holding the tab, else the DeepSteve-wide ones for a
+ * tab in no project. Whichever view is selected: a footer follows the tab, not the selection.
+ * An additive view that is switched off adds nothing. `{slug, name, fields}`, or null.
+ */
+export function footerFor(id) {
+  if (!loaded) return null;
+  const info = cb.getTabInfo?.(id);
+  if (!info) return null;
+  const lists = [...(cb.contextsForCwd?.(info.cwd) || []).map(viewsForContext), globalViews()];
+  for (const list of lists) {
+    for (const v of list) {
+      if (!v.footer.length || (v.additive && !isAdditiveOn(v.slug))) continue;
+      if (memberOf(info, v)) return { slug: v.slug, name: v.name, fields: v.footer };
+    }
+  }
+  return null;
 }
 
 /** The selected view's slug for last-tab memory, or '' for All (keeps the old per-project key). */
@@ -203,7 +286,7 @@ export function revealTabView(id, ctx) {
   if (slug === ALL) return null;
   const info = cb.getTabInfo?.(id);
   if (!info) return null;
-  const list = viewsForContext(ctx);
+  const list = selectableViews(ctx);
   const current = list.find(v => v.slug === slug);
   if (current && memberOf(info, current)) return null;
   const next = list.find(v => memberOf(info, v));
@@ -227,17 +310,20 @@ export function activeJoins() {
  * The filing for a tab an AGENT opens. `view` is the spawn tool's argument, already cleaned
  * by the server: a slug files it there, "all" files it nowhere. Without one, the tab is filed
  * into every view its opener is in right now — by filing or by rule — so the charts an
- * analytics agent spawns land in Analytics beside it. Exclusions are not inherited.
+ * analytics agent spawns land in Analytics beside it. Exclusions are not inherited, and nor
+ * are additive views: they decorate a tab by its own rules, and a display tab filed into GitHub
+ * because the agent that drew it was in a worktree would carry a footer about nothing.
  */
 export function spawnJoins({ view, openerId } = {}) {
   if (view === ALL) return undefined;
   if (view) return { [view]: true };
   const info = openerId ? cb.getTabInfo?.(openerId) : null;
   if (!info) return undefined;
+  const additive = new Set(views.filter(v => v.additive).map(v => v.slug));
   const out = {};
-  for (const [slug, filed] of Object.entries(info.views || {})) if (filed === true) out[slug] = true;
+  for (const [slug, filed] of Object.entries(info.views || {})) if (filed === true && !additive.has(slug)) out[slug] = true;
   for (const ctx of cb.contextsForCwd?.(info.cwd) || []) {
-    for (const v of viewsForContext(ctx)) if (memberOf(info, v)) out[v.slug] = true;
+    for (const v of selectableViews(ctx)) if (memberOf(info, v)) out[v.slug] = true;
   }
   return Object.keys(out).length ? out : undefined;
 }
@@ -275,7 +361,7 @@ export function setMembership(id, slug, on) {
 export function selectView(slug) {
   const ctx = activeContext();
   if (!ctx) return;
-  setSelection(ctx, slug && slug !== ALL && viewsForContext(ctx).some(v => v.slug === slug) ? slug : ALL);
+  setSelection(ctx, slug && slug !== ALL && selectableViews(ctx).some(v => v.slug === slug) ? slug : ALL);
   cb.applyFilter?.();
   render();
 }
@@ -296,11 +382,12 @@ export function refresh() {
       // A selection whose view is gone (deleted, or the branch that had it checked out) is
       // dropped here, so the next view of that name starts from All rather than resurrecting it.
       const ctx = activeContext();
-      if (ctx && selection[ctx.id] && !viewsForContext(ctx).some(v => v.slug === selection[ctx.id])) {
+      if (ctx && selection[ctx.id] && !selectableViews(ctx).some(v => v.slug === selection[ctx.id])) {
         setSelection(ctx, ALL);
       }
       cb.applyFilter?.();
       render();
+      cb.onViewsChanged?.();
     })
     .catch(() => {});
 }
@@ -419,6 +506,43 @@ function viewButton(view, active) {
 }
 
 /**
+ * An additive view's button: a push button, on or off, never the selection. Marked ●/○ rather
+ * than shaped as a folder tab, because it does not open a view of the strip.
+ */
+function pushButton(view, first) {
+  const on = isAdditiveOn(view.slug);
+  const btn = document.createElement('button');
+  btn.className = 'view-tab view-tab-push' + (on ? ' on' : '') + (first ? ' first' : '');
+  btn.tabIndex = -1;
+  btn.dataset.view = view.slug;
+  btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+  btn.title = `${view.name} is ${on ? 'on' : 'off'}. It adds to whichever view is selected and hides no tabs. `
+    + `Click to switch it ${on ? 'off' : 'on'}.`;
+  const mark = document.createElement('span');
+  mark.className = 'view-tab-mark';
+  mark.setAttribute('aria-hidden', 'true');
+  mark.textContent = on ? '●' : '○';
+  btn.appendChild(mark);
+  if (view.icon) {
+    const icon = document.createElement('span');
+    icon.className = 'view-tab-icon';
+    icon.setAttribute('aria-hidden', 'true');
+    icon.textContent = view.icon;
+    btn.appendChild(icon);
+  }
+  const label = document.createElement('span');
+  label.className = 'view-tab-label';
+  label.textContent = view.name;
+  btn.appendChild(label);
+  btn.addEventListener('click', () => setAdditive(view.slug, !on));
+  btn.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    showViewMenu(e.clientX, e.clientY, view);
+  });
+  return btn;
+}
+
+/**
  * Redraw the toggle and the bar. DOM only, and cheap to call on every applyFilter pass:
  * a signature of everything drawn short-circuits a pass that would change nothing.
  */
@@ -433,11 +557,14 @@ export function render() {
   const list = show ? viewsForContext(ctx) : [];
   const slug = show ? selectedSlug(ctx) : ALL;
   const open = show && expanded;
-  const sig = JSON.stringify([show, ctx?.id, slug, open, list.map(v => [v.slug, v.name, v.icon])]);
+  const sig = JSON.stringify([show, ctx?.id, slug, open,
+    list.map(v => [v.slug, v.name, v.icon, v.additive, v.additive && isAdditiveOn(v.slug)])]);
   if (sig === lastSig) return;
   lastSig = sig;
 
-  const current = list.find(v => v.slug === slug) || null;
+  const selectable = list.filter(v => !v.additive);
+  const additive = list.filter(v => v.additive);
+  const current = selectable.find(v => v.slug === slug) || null;
   if (toggle) {
     toggle.classList.toggle('hidden', !show);
     toggle.classList.toggle('active', open);
@@ -464,7 +591,8 @@ export function render() {
   bar.replaceChildren();
   if (!open) return;
   bar.appendChild(viewButton(null, slug === ALL));
-  for (const v of list) bar.appendChild(viewButton(v, v.slug === slug));
+  for (const v of selectable) bar.appendChild(viewButton(v, v.slug === slug));
+  additive.forEach((v, i) => bar.appendChild(pushButton(v, i === 0)));
   const add = document.createElement('button');
   add.className = 'view-tab view-tab-add';
   add.tabIndex = -1;
@@ -502,8 +630,17 @@ function showViewMenu(x, y, view) {
     item.onclick = () => { hideViewMenu(); onPick(); };
     menu.appendChild(item);
   };
-  add('Rename…', () => renameView(view));
-  add('Delete…', () => deleteView(view), 'var(--ds-accent-red, #f85149)');
+  // A DeepSteve-wide view has no repo copy to write: it is edited as its file.
+  if (view.ids.length) {
+    add('Rename…', () => renameView(view));
+    add('Delete…', () => deleteView(view), 'var(--ds-accent-red, #f85149)');
+  }
+  if (view.global) {
+    const note = document.createElement('div');
+    note.className = 'context-menu-item disabled';
+    note.textContent = `DeepSteve-wide: edit ~/.deepsteve/views/${view.slug}.json`;
+    menu.appendChild(note);
+  }
   menu.style.left = x + 'px';
   menu.style.top = y + 'px';
   document.body.appendChild(menu);

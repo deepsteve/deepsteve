@@ -366,6 +366,170 @@ test('"New view…" creates a rule-less view for the selected project and files 
   assert.strictEqual(state.posts.length, 1);
 });
 
+// ------------------------------------------------- DeepSteve-wide views, footers
+
+// A view from ~/.deepsteve/views/: no repo, so `project` is null and `global` is set.
+const V_GITHUB = { id: 'g1', slug: 'github', project: null, global: true, name: 'GitHub', icon: '', order: 0, match: [{ worktree: true }], footer: ['repo', 'issue', 'date', 'title'] };
+
+test('a DeepSteve-wide view is in every project, merged by slug with a repo view of the same name', async () => {
+  const repoGithub = { id: 'v9', slug: 'github', project: REPO_B, name: 'GitHub (beta)', icon: '', order: 5, match: [{ names: ['gh'] }], footer: [] };
+  const { mod } = await setup({ views: [V_GITHUB, V_MKT_A, V_BETA, repoGithub] });
+  assert.deepStrictEqual(mod.viewsForContext(CTX_A).map(v => v.slug), ['github', 'marketing']);
+  const inBeta = mod.viewsForContext({ id: 'b', name: 'Beta', dirs: [REPO_B] }).find(v => v.slug === 'github');
+  assert.strictEqual(inBeta.global, true);
+  assert.deepStrictEqual(inBeta.ids, ['v9'], 'only the repo copy is writable');
+  assert.strictEqual(inBeta.rules.length, 2, 'rules unioned');
+  assert.deepStrictEqual(inBeta.footer, V_GITHUB.footer, 'the first footer by order');
+  const onlyGlobal = mod.viewsForContext(CTX_A).find(v => v.slug === 'github');
+  assert.deepStrictEqual(onlyGlobal.ids, []);
+});
+
+test('the worktree rule: a worktree session, or a tab whose cwd is inside one', async () => {
+  const { mod } = await setup({ views: [V_GITHUB] });
+  const gh = mod.viewsForContext(CTX_A)[0];
+  assert.ok(mod.memberOf({ cwd: REPO_A, name: '#9 Footer', kind: 'agent', worktree: 'github-issue-9' }, gh));
+  assert.ok(mod.memberOf({ cwd: `${REPO_A}/.claude/worktrees/feature-x/src`, name: 'zsh', kind: 'terminal' }, gh));
+  assert.ok(!mod.memberOf({ cwd: REPO_A, name: 'Claude', kind: 'agent' }, gh));
+  assert.ok(!mod.memberOf({ cwd: `${REPO_A}/.claude/worktreesX`, name: 'zsh', kind: 'terminal' }, gh), 'a prefix is not the folder');
+  assert.ok(!mod.memberOf({ cwd: REPO_A, name: 'x', worktree: 'w', views: { github: false } }, gh), 'filed out');
+  const notWt = { rules: [{ worktree: false, root: null }], slug: 'main-only' };
+  assert.ok(mod.memberOf({ cwd: REPO_A, name: 'x' }, notWt));
+  assert.ok(!mod.memberOf({ cwd: REPO_A, name: 'x', worktree: 'w' }, notWt));
+});
+
+test('footerFor follows the tab, in any project or none, whichever view is selected', async () => {
+  const { mod, state } = await setup({
+    views: [V_GITHUB, V_MKT_A],
+    tabs: {
+      wt: { cwd: REPO_A, name: '#9 Footer', kind: 'agent', worktree: 'github-issue-9' },
+      loose: { cwd: '/elsewhere/.claude/worktrees/github-issue-3', name: 'zsh', kind: 'terminal' },
+      plain: { cwd: REPO_A, name: 'Claude', kind: 'agent' },
+      out: { cwd: REPO_A, name: 'x', kind: 'agent', worktree: 'w', views: { github: false } },
+    },
+  });
+  mod.selectView('marketing');
+  assert.deepStrictEqual(mod.footerFor('wt'), { slug: 'github', name: 'GitHub', fields: V_GITHUB.footer }, 'Marketing is selected');
+  assert.deepStrictEqual(mod.footerFor('loose')?.slug, 'github', 'a tab in no registered project still gets it');
+  assert.strictEqual(mod.footerFor('plain'), null);
+  assert.strictEqual(mod.footerFor('out'), null, 'filed out of the view, no footer');
+  assert.strictEqual(mod.footerFor('missing'), null);
+
+  // Two footer views holding one tab: the first by the views' own order answers.
+  const repoFooter = { ...V_MANUAL, match: [{ worktree: true }], footer: ['issue'] };   // order 2
+  state.serverViews = [V_GITHUB, repoFooter];
+  await mod.refresh();
+  assert.deepStrictEqual(mod.footerFor('wt').fields, V_GITHUB.footer, 'GitHub (order 0) sorts first');
+  state.serverViews = [{ ...repoFooter, order: -1 }, V_GITHUB];
+  await mod.refresh();
+  assert.deepStrictEqual(mod.footerFor('wt').fields, ['issue'], 'order -1 sorts first');
+  assert.deepStrictEqual(mod.footerFor('loose').fields, V_GITHUB.footer, 'outside that repo, only GitHub holds it');
+});
+
+test('footerFor is null until the view list has loaded, and refresh() tells app.js it changed', async () => {
+  const { mod } = await setup({ views: [V_GITHUB], tabs: { wt: { cwd: REPO_A, name: 'x', worktree: 'w' } } });
+  let changed = 0;
+  const mod2 = await import(`../../public/js/project-views.js?t=${++importCount}`);
+  mod2.init({ getTabInfo: () => ({ cwd: REPO_A, name: 'x', worktree: 'w' }), contextsForCwd: () => [], onViewsChanged: () => changed++ });
+  assert.strictEqual(mod2.footerFor('wt'), null, 'not loaded yet');
+  await flush();
+  assert.strictEqual(changed, 1);
+  assert.strictEqual(mod2.footerFor('wt').slug, 'github');
+  assert.ok(mod.footerFor('wt'));
+});
+
+test('a DeepSteve-wide view button offers no Rename or Delete, only where to edit it', async () => {
+  const { mod, bar } = await setup({ views: [V_GITHUB, V_MKT_A] });
+  mod.toggleExpanded(true);
+  const btn = bar.children.find(b => b.dataset.view === 'github');
+  let menu = null;
+  const saved = document.body.appendChild;
+  document.body.appendChild = (m) => { menu = m; };
+  try {
+    btn.listeners.contextmenu({ preventDefault() {}, clientX: 10, clientY: 10 });
+  } finally {
+    document.body.appendChild = saved;
+  }
+  assert.deepStrictEqual(menu.children.map(i => i.textContent), ['DeepSteve-wide: edit ~/.deepsteve/views/github.json']);
+  assert.ok(menu.children[0].classList.contains('disabled'));
+});
+
+// An additive view: switched on, never selected, stacks with the selected view.
+const V_GITHUB_ADD = { ...V_GITHUB, additive: true };
+
+test('an additive view hides no tab, is never the selection, and a stored selection of it falls back to All', async () => {
+  sessionStorage.map.clear();
+  const { mod } = await setup({
+    views: [V_GITHUB_ADD, V_MKT_A],
+    tabs: { wt: { cwd: REPO_A, name: 'Claude', kind: 'agent', worktree: 'w' }, plain: { cwd: REPO_A, name: 'zsh', kind: 'terminal' } },
+  });
+  assert.deepStrictEqual(mod.selectableViews(CTX_A).map(v => v.slug), ['marketing']);
+  mod.selectView('github');
+  assert.strictEqual(mod.selectedSlug(CTX_A), 'all', 'selecting it is refused');
+  assert.ok(mod.tabInView('plain', CTX_A) && mod.tabInView('wt', CTX_A), 'every tab stays in the strip');
+
+  mod.selectView('marketing');
+  assert.strictEqual(mod.selectedSlug(CTX_A), 'marketing');
+  assert.ok(!mod.tabInView('wt', CTX_A), 'the selected view still filters');
+  assert.deepStrictEqual(mod.footerFor('wt')?.slug, 'github', 'and the additive one still adds its footer on top');
+
+  // A window that had GitHub selected before it became additive.
+  const key = [...sessionStorage.map.keys()].find(k => k.endsWith('deepsteve-project-view'));
+  sessionStorage.map.set(key, JSON.stringify({ [CTX_A.id]: 'github' }));
+  const { mod: again } = await setup({ views: [V_GITHUB_ADD, V_MKT_A], tabs: {} });
+  assert.strictEqual(again.selectedSlug(CTX_A), 'all');
+});
+
+test('an additive view is a push button: on by default, off hides its footer, the choice is kept', async () => {
+  const { mod, bar } = await setup({ views: [V_GITHUB_ADD, V_MKT_A], tabs: { wt: { cwd: REPO_A, name: 'x', worktree: 'w' } } });
+  mod.toggleExpanded(true);
+  const labels = () => bar.children.map(b => b.className + ':' + (b.dataset.view || b.textContent));
+  assert.deepStrictEqual(labels(), [
+    'view-tab active:all', 'view-tab:marketing', 'view-tab view-tab-push on first:github', 'view-tab view-tab-add:+ New view',
+  ], 'folder tabs, then the push button, then + New view');
+  const push = () => bar.children.find(b => b.dataset.view === 'github');
+  assert.strictEqual(push().attrs['aria-pressed'], 'true');
+  assert.strictEqual(push().children[0].textContent, '●');
+  assert.ok(mod.footerFor('wt'));
+
+  push().listeners.click();
+  assert.strictEqual(mod.isAdditiveOn('github'), false);
+  assert.strictEqual(push().attrs['aria-pressed'], 'false', 'the bar redrew');
+  assert.strictEqual(push().children[0].textContent, '○');
+  assert.strictEqual(mod.footerFor('wt'), null, 'off: no footer');
+  assert.strictEqual(mod.selectedSlug(CTX_A), 'all', 'and the selection never moved');
+  const stored = [...localStorage.map.entries()].find(([k]) => k.endsWith('deepsteve-project-views-off'));
+  assert.deepStrictEqual(JSON.parse(stored[1]), { github: true }, 'browser-wide, only the ones switched off');
+
+  const { mod: reloaded } = await setup({ views: [V_GITHUB_ADD], tabs: { wt: { cwd: REPO_A, name: 'x', worktree: 'w' } } });
+  // setup() clears storage, so put the choice back the way a reload would find it.
+  localStorage.setItem(stored[0], stored[1]);
+  const fresh = await import(`../../public/js/project-views.js?t=${++importCount}`);
+  assert.strictEqual(fresh.isAdditiveOn('github'), false, 'read back on load');
+  assert.strictEqual(reloaded.isAdditiveOn('github'), true, 'absent means on');
+  fresh.setAdditive('github', true);
+  assert.ok(!JSON.parse(localStorage.getItem(stored[0])).github);
+});
+
+test('switching an additive view tells app.js, and applies no filter', async () => {
+  await setup({ views: [V_GITHUB_ADD] });   // fresh DOM and storage
+  let changed = 0;
+  const mod = await import(`../../public/js/project-views.js?t=${++importCount}`);
+  mod.init({ getActiveContext: () => CTX_A, onViewsChanged: () => changed++, applyFilter: () => { throw new Error('no filter pass'); } });
+  await flush();
+  changed = 0;
+  mod.setAdditive('github', false);
+  assert.strictEqual(changed, 1, 'the footer redraws');
+});
+
+test('a tab an agent opens inherits its opener\'s views, but not the additive ones', async () => {
+  const { mod } = await setup({
+    views: [V_GITHUB_ADD, V_MKT_A],
+    tabs: { opener: { cwd: REPO_A, name: 'marketing agent', kind: 'agent', worktree: 'w', views: { github: true, launch: true } } },
+  });
+  assert.deepStrictEqual(mod.spawnJoins({ openerId: 'opener' }), { launch: true, marketing: true });
+  assert.deepStrictEqual(mod.spawnJoins({ view: 'github' }), { github: true }, 'naming it explicitly still files it');
+});
+
 // --------------------------------------------------------------- source guards
 
 test('every contexts / project-mods handler in app.js refreshes the views too', () => {

@@ -1375,7 +1375,7 @@ A **project view** is a named view of a project's tabs — **Marketing** (the ta
 Only while a project is selected in the rail. The rail's **All** (or Projects turned off) means no views chrome and no view filter; Decision Tab mode sets views aside the way it sets the project filter aside.
 
 - **Collapsed (the default):** one toggle, `#views-toggle`, naming the current view — immediately before the first tab: above it in vertical layout, left of it in horizontal. It shows for any selected project, views or not, because it is how you reach "+ New view" for the first one.
-- **Expanded:** `#views-bar`, a row of folder-tab buttons — `[All] [📣 Marketing] [Analytics] [+ New view]` — across the **full width of the monitor**, above the tab strip in horizontal layout and above both the sidebar and the terminal in vertical. That is why `#app-main` is a column `[#views-bar, #app-body]` and the tab-layout switch moved to `#app-body`.
+- **Expanded:** `#views-bar`, a row of folder-tab buttons — `[All] [📣 Marketing] [Analytics] [+ New view]` — across the **full width of the monitor**, above the tab strip in horizontal layout and above both the sidebar and the terminal in vertical. That is why `#app-main` is a column `[#views-bar, #app-body, #view-footer]` and the tab-layout switch moved to `#app-body`.
 
 Expanded/collapsed is a browser-wide preference; the selected view is per window and per project ([frontend.md](frontend.md#client-side-storage)).
 
@@ -1395,8 +1395,35 @@ Expanded/collapsed is a browser-wide preference; the selected view is per window
 ```
 
 - **The slug is the identity.** Lowercase letters, digits and dashes; `all` is reserved. A tab's filings, the selected view and the spawn tools' `view` param all name it, so a rename changes `name` and never the slug. A project spanning several repos that each define `marketing` has **one** Marketing view: the client merges them (name and icon from the first by order, rules unioned).
-- **`names`**: case-insensitive substrings of the tab's name. **`paths`**: folders relative to the view's repo (`"."` is the whole repo); the tab's cwd must be inside one, and a worktree under `.claude/worktrees/<name>/` counts as its repo. A path outside the repo is dropped — and a rule that loses a field it stated is dropped *whole*, so a bad path never widens a rule. **`kinds`**: `agent`, `terminal`, `display-tab`, `project-mod`, `mod-tab`.
+- **`names`**: case-insensitive substrings of the tab's name. **`paths`**: folders relative to the view's repo (`"."` is the whole repo); the tab's cwd must be inside one, and a worktree under `.claude/worktrees/<name>/` counts as its repo. A path outside the repo is dropped — and a rule that loses a field it stated is dropped *whole*, so a bad path never widens a rule. **`kinds`**: `agent`, `terminal`, `display-tab`, `project-mod`, `mod-tab`. **`worktree`**: `true` for a tab working in a worktree (a worktree session, or a tab whose cwd is inside `.claude/worktrees/<name>/`), `false` for one that isn't.
 - **No `match` at all is a manual view**: it holds exactly the tabs filed into it.
+
+### DeepSteve-wide views and footers
+
+A view file in the install's own state dir — **`~/.deepsteve/views/<slug>.json`** (`globalViewsDir()`) — is **DeepSteve-wide**: it belongs to no repo, is never committed, and is in **every** project's list, merged by slug with any repo view of the same name. That makes it the place for a view that is about *how you work* rather than about one project. Its rules can't use `paths` (there is no repo for them to be relative to; such a rule is dropped whole). Nothing writes one — the tools and the REST routes edit repo views only (a REST write answers 409 and names the file), and its button's right-click says where to edit it — so change the file, then reload the page or call `refresh_project_mods`.
+
+Any view may also name a **`footer`**: fields drawn in `#view-footer`, a row along the bottom of the monitor (the views bar's mirror), for the tab you are looking at **whenever that tab is in the view — whichever view is selected**. A footer follows the tab, not the selection; with two footer views holding one tab, the first by `order` wins.
+
+**`"additive": true`** makes a view one you switch *on* rather than one you look *at*. It never filters the strip and is never the selected view; it stacks with whichever view is. In the bar it is a push button marked ●/○ after the folder tabs, any number can be on at once, and what it adds is its footer — so Marketing selected with GitHub on shows the Marketing tabs, with the GitHub row under the worktree ones. Additive views are **on by default**; the ones switched off are a browser-wide `localStorage` preference (`deepsteve-project-views-off`, by slug). A tab an agent opens does not inherit its opener's additive views — they decorate by the tab's own rules — though a spawn tool's explicit `view` still files it.
+
+```jsonc
+// ~/.deepsteve/views/github.json
+{
+  "name": "GitHub",
+  "additive": true,
+  "match": [{ "worktree": true }],
+  "footer": ["repo", "issue", "date", "title"]   // drawn in this order
+}
+```
+
+| Field | Shows |
+|---|---|
+| `repo` | `owner/name`, linked — from the session's issue URL, else the checkout's `origin` remote (the folder name when that isn't GitHub) |
+| `issue` | `#n`, linked — the session's issue stamp, else a `github-issue-<n>` worktree name |
+| `date` | when the issue was opened |
+| `title` | the issue title, then the start of its body as plain prose — title and excerpt capped at 100 words together, and clamped to the row's two lines with an ellipsis |
+
+The facts come from `GET /api/project-views/footer/:sessionId` (`mods/project-mods/view-footer.js`): the repo and number are read locally, and only the title, body and date cost a `gh issue view`, cached per issue for 10 minutes (a failed lookup for one). A field with nothing to say is left out, and a tab the lookup knows nothing about (a display tab is not a session) gets no row. The row has a fixed height whatever has arrived, and `switchTo()` renders it **before** it fits the incoming terminal, so the fit sees the row in place and a late answer never resizes the terminal a second time. It is hidden while the fullscreen view slot is up.
 
 ### Membership: rules plus filings
 
@@ -1418,6 +1445,7 @@ The same worktree trap as `create_project_mod`: from a worktree session the proj
 
 - **Server:** a "Project views" section of `mods/project-mods/tools.js`, not a sibling module — it shares `scan()`, `ensureScanned()`, `commit()` and `refresh()`, so `refresh_project_mods`, both merge funnels and the root-set rescan cover views with no wiring of their own, and the browser ping stays `{type:'project-mods'}`. The repo path is `projectViewsDir()` in `paths.js`. Routes: `GET /api/project-views` (every repo's, the client scopes), and for the manual mode `POST /api/project-views` (`{contextId, name, cwd?}` → a rule-less view), `PUT`/`DELETE /api/project-views/:id`. A view's id is derived like a mod's (`sha1(root, slug)`), but only the REST routes use it.
 - **Client:** `public/js/project-views.js` owns the selection, membership, the toggle, the bar and the menus; like `project-mods.js` it never imports `context-views.js`. The filter itself stays in `applyFilter()`, which ANDs `cb.tabInView(id, ctx)` with the project match and reuses `.context-hidden`, so navigation, the arrows, timelapse and overview see one answer. **`render()` never applies the filter** — it is called *from* `onContextViewApplied` — only `refresh()`, `selectView()` and `setMembership()` ask for a pass. `revealTabContext()` settles the destination's view *before* `selectContext()` filters, or a remembered view that lacks the tab would snap away from it. Overview mode is keyed per project-and-view.
+- **DeepSteve-wide views and footers:** `scan()` reads `globalViewsDir()` alongside the repos (`root`/`project` null, `global: true`, ids derived from a NUL-prefixed key so they can't collide with a repo's). The client's `mergeViews()` keeps only repo ids in `ids`, which is what Rename/Delete write. Everything that selects or filters reads `selectableViews()` — the list without the additive views — and `footerFor()` skips an additive view that is switched off. `footerFor(id)` in `project-views.js` answers from the views of the projects holding the tab (global ones included, by order), else the global ones alone for a tab in no project; `public/js/view-footer.js` draws the row and never imports `project-views.js` — `app.js` injects `footerFor`. Tests: `test/unit/view-footer.test.js`, plus global-view cases in `project-views-client.test.js`.
 - **Not yet:** key bindings, tab counts on view buttons, views on `list_sessions` / `window.deepsteve`, and filings through "Reopen closed tab" or the restore modal (neither server record carries them).
 - **Tests:** `test/unit/project-views.test.js` (validation, scan, tools, REST, the gate exemption), `test/unit/project-views-client.test.js` (scoping and merging, the membership truth table, storage, the chrome, filing, the re-entrancy rule), plus view cases in `context-views.test.js`, `session-stores.test.js`, `terminal-run-tool.test.js`, `display-tab-decision.test.js` and `theme-pane-parity.test.js`.
 

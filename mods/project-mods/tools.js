@@ -55,11 +55,12 @@
 const { z } = require('zod');
 const { createHash } = require('crypto');
 const fs = require('fs');
-const { projectModsDir, projectViewsDir } = require('../../paths');
+const { projectModsDir, projectViewsDir, globalViewsDir } = require('../../paths');
 const path = require('path');
 
 const { resolveHtml } = require('../../html-source.js');
 const projectScope = require('../../project-scope.js');
+const { FOOTER_FIELDS, createFooterSource } = require('./view-footer.js');
 
 // The manifest field that says "this directory is a project mod". Anything else under
 // .deepsteve/mods/ — including a regular DeepSteve Mod someone distributes in their repo —
@@ -229,7 +230,7 @@ function readMod(root, dirname) {
 function scan(roots = scanRoots()) {
   if (!ctx) return;
   const out = [];
-  const outViews = [];
+  const outViews = readGlobalViews();
   for (const root of roots) {
     outViews.push(...readViews(root));
     let entries;
@@ -635,6 +636,21 @@ function refresh(reason) {
 // one of the view's rules matches it, or when it was filed there — by hand, by being opened
 // while the view was selected, or by the agent tab that opened it. This file owns only the
 // definitions.
+//
+// A DeepSteve-wide view is the same file in the install's state dir instead of a repo —
+// `~/.deepsteve/views/<slug>.json` (globalViewsDir()). It belongs to no repo, is never
+// committed, and shows in EVERY project, merged by slug like any other. Nothing here writes
+// one: the tools and the REST routes edit repo views only, so a global view is edited as a
+// file, followed by refresh_project_mods or a page reload. Its rules cannot use `paths`
+// (there is no repo for them to be relative to); `names`, `kinds` and `worktree` all work.
+//
+// A view may also carry a `footer`: fields drawn in a row along the bottom of the monitor
+// whenever the tab you are looking at is in the view, whichever view is selected. The facts
+// in it are the tab's (view-footer.js), served by GET /api/project-views/footer/:sessionId.
+//
+// `additive: true` makes a view one you switch ON rather than one you look AT: it never
+// filters the strip and is never the selected view, but stacks with whichever one is — a
+// push button in the views bar, any number on at once. What it adds is its footer.
 
 const VIEW_SLUG_RE = /^[a-z0-9][a-z0-9-]{0,39}$/;
 const RESERVED_VIEW = 'all';   // the built-in default, never a file
@@ -647,6 +663,12 @@ const MAX_VIEW_ORDER = 1e6;
 
 let views = [];
 
+// The footer route's lookups (view-footer.js), made on first use so the log is the daemon's.
+// setFooterSource() lets a test swap in one with a fake git/gh.
+let footerSource = null;
+const getFooterSource = () => footerSource || (footerSource = createFooterSource({ log: (...a) => ctx && ctx.log && ctx.log(...a) }));
+const setFooterSource = (src) => { footerSource = src; };
+
 const unregisteredViewMsg = (proj) =>
   `${proj} is not part of any registered project, so a view written there would never be ` +
   'discovered. Views are found by scanning the repos of the projects in the rail. Ask the user ' +
@@ -654,6 +676,9 @@ const unregisteredViewMsg = (proj) =>
 
 // Keyed apart from modId() so a view and a mod can never share an id.
 const viewId = (root, slug) => createHash('sha1').update(`${root}\0views\0${slug}`).digest('hex').slice(0, 8);
+// What a DeepSteve-wide view's id is derived from in place of a repo root. No path starts
+// with a NUL, so it can never collide with a repo's view of the same slug.
+const GLOBAL_VIEW_KEY = '\0global';
 
 /** A slug as stored: lowercase, safe in a filename and a URL, and never the reserved "all". */
 function cleanViewSlug(raw) {
@@ -712,25 +737,31 @@ function cleanRuleField(raw, clean) {
 /**
  * A view's `match`: a list of rules. A tab is in the view when ANY rule matches, and a rule
  * matches when EVERY field it states does (`names`: a substring of the tab name, any entry;
- * `paths`: the tab's cwd inside one of these repo subfolders; `kinds`: the tab's kind). A bare
- * object is accepted as a one-rule list.
+ * `paths`: the tab's cwd inside one of these repo subfolders; `kinds`: the tab's kind;
+ * `worktree`: true for a tab working in a worktree, false for one that isn't). A bare object
+ * is accepted as a one-rule list.
  *
  * A rule that states a field and has none of that field's entries survive is dropped WHOLE,
  * not with the field removed: `{kinds:['display-tab'], paths:['../elsewhere']}` must not widen
- * into "every display tab in the project". An empty list is legal — a view tabs are filed into
- * only by hand.
+ * into "every display tab in the project". The same goes for `paths` in a DeepSteve-wide view
+ * (`global`), which has no repo to resolve them against. An empty list is legal — a view tabs
+ * are filed into only by hand.
  */
-function cleanMatch(raw) {
+function cleanMatch(raw, { global = false } = {}) {
   const list = Array.isArray(raw) ? raw : (raw && typeof raw === 'object' ? [raw] : []);
   const rules = [];
   for (const r of list) {
     if (!r || typeof r !== 'object' || Array.isArray(r)) continue;
     const rule = {};
-    let lostAField = false;
+    let lostAField = global && r.paths !== undefined;
     for (const [field, clean] of [['names', cleanNeedle], ['paths', cleanViewPath], ['kinds', cleanKind]]) {
       if (r[field] === undefined) continue;
       const cleaned = cleanRuleField(r[field], clean);
       if (cleaned.length) rule[field] = cleaned;
+      else lostAField = true;
+    }
+    if (r.worktree !== undefined) {
+      if (typeof r.worktree === 'boolean') rule.worktree = r.worktree;
       else lostAField = true;
     }
     if (!lostAField && Object.keys(rule).length) rules.push(rule);
@@ -744,21 +775,35 @@ function cleanViewOrder(raw) {
   return Number.isFinite(n) ? Math.max(-MAX_VIEW_ORDER, Math.min(MAX_VIEW_ORDER, n)) : 0;
 }
 
-/** One view file → the in-memory row, or null if it is not a view we can make sense of. */
-function normalizeView(raw, root, slug) {
+/** A view's `footer`: the known fields, each once, in the order the file lists them. */
+function cleanFooter(raw) {
+  if (!Array.isArray(raw)) return [];
+  return raw.filter((f, i) => FOOTER_FIELDS.includes(f) && raw.indexOf(f) === i);
+}
+
+/**
+ * One view file → the in-memory row, or null if it is not a view we can make sense of.
+ * `global` reads a DeepSteve-wide view: no repo (`root` and `project` are null), its file in
+ * the state dir.
+ */
+function normalizeView(raw, root, slug, { global = false } = {}) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
-  if (!root || !cleanViewSlug(slug) || cleanViewSlug(slug) !== slug) return null;
+  if ((!global && !root) || !cleanViewSlug(slug) || cleanViewSlug(slug) !== slug) return null;
+  const home = global ? null : root;
   return {
-    id: viewId(root, slug),
+    id: viewId(global ? GLOBAL_VIEW_KEY : home, slug),
     // Server-only — serializeView() keeps it off the wire.
-    root,
-    file: path.join(projectViewsDir(root), slug + VIEW_FILE_EXT),
+    root: home,
+    file: path.join(global ? globalViewsDir() : projectViewsDir(home), slug + VIEW_FILE_EXT),
     slug,
-    project: root,
+    project: home,
+    global,
     name: cleanName(raw.name) || slug,
     icon: cleanIcon(raw.icon),
     order: cleanViewOrder(raw.order),
-    match: cleanMatch(raw.match),
+    match: cleanMatch(raw.match, { global }),
+    footer: cleanFooter(raw.footer),
+    additive: raw.additive === true,
   };
 }
 
@@ -768,12 +813,20 @@ function normalizeView(raw, root, slug) {
  * are all skipped rather than guessed at. Oversized and corrupt files are skipped too.
  */
 function readViews(root) {
-  const dir = projectViewsDir(root);
+  return readViewsDir(projectViewsDir(root), root);
+}
+
+/** The install's DeepSteve-wide views, by the same rules as a repo's. */
+function readGlobalViews() {
+  return readViewsDir(globalViewsDir(), null, { global: true });
+}
+
+function readViewsDir(dir, root, opts) {
   let entries;
   try {
     entries = fs.readdirSync(dir, { withFileTypes: true });
   } catch {
-    return [];   // no .deepsteve/views in this repo, which is the common case
+    return [];   // no views directory here, which is the common case
   }
   const out = [];
   for (const e of entries) {
@@ -788,14 +841,15 @@ function readViews(root) {
     } catch {
       continue;
     }
-    const v = normalizeView(raw, root, slug);
+    const v = normalizeView(raw, root, slug, opts);
     if (v) out.push(v);
   }
   return out;
 }
 
+// A DeepSteve-wide view has no project; it sorts as '' on the last tie-break.
 const compareViews = (a, b) =>
-  (a.order - b.order) || a.name.localeCompare(b.name) || a.project.localeCompare(b.project);
+  (a.order - b.order) || a.name.localeCompare(b.name) || (a.project || '').localeCompare(b.project || '');
 
 /** The file's contents, in the order they read best in a diff. Empty icon / zero order are left out. */
 function viewManifestOf(v) {
@@ -803,6 +857,8 @@ function viewManifestOf(v) {
   if (v.icon) out.icon = v.icon;
   if (v.order) out.order = v.order;
   out.match = v.match;
+  if (v.footer && v.footer.length) out.footer = v.footer;
+  if (v.additive) out.additive = true;
   return out;
 }
 
@@ -826,12 +882,19 @@ function removeView(v) {
 }
 
 // The browser's shape. `root` and `file` stay server-side; `project` is the repo root, which
-// is what the client scopes by (the same field a mod carries).
+// is what the client scopes by (the same field a mod carries) — null, with `global`, for a
+// DeepSteve-wide view, which the client puts in every project.
 const serializeView = (v) => ({
-  id: v.id, slug: v.slug, project: v.project, name: v.name, icon: v.icon, order: v.order, match: v.match,
+  id: v.id, slug: v.slug, project: v.project, global: !!v.global, name: v.name, icon: v.icon, order: v.order,
+  match: v.match, footer: v.footer || [], additive: !!v.additive,
 });
 
-const serializeViewForAgent = (v) => ({ ...serializeView(v), path: path.relative(v.root, v.file) });
+// A repo view's path is relative to its repo; a DeepSteve-wide view's is absolute.
+const serializeViewForAgent = (v) => ({ ...serializeView(v), path: v.global ? v.file : path.relative(v.root, v.file) });
+
+// What the REST writes say when asked to change a DeepSteve-wide view.
+const globalViewMsg = (v) =>
+  `"${v.name}" is a DeepSteve-wide view, defined in ${v.file}. Edit that file, then reload the page.`;
 
 const viewCommitReminder = (v) =>
   `This view is a file in the repo. Commit ${path.relative(v.root, v.file)} so it travels with the ` +
@@ -1134,7 +1197,7 @@ function init(context) {
 
     refresh_project_mods: {
       description:
-        'Re-read every registered project\'s .deepsteve/mods/ and .deepsteve/views/ from disk and tell every open window ' +
+        'Re-read every registered project\'s .deepsteve/mods/ and .deepsteve/views/ (and the install\'s own ~/.deepsteve/views/) from disk and tell every open window ' +
         'to redraw its project mods (rail rows, tab-strip buttons, pinned tabs) and project views, with no page reload. ' +
         'The create/update/edit/delete tools already do this. Call it after changing a project mod or view ANY OTHER WAY: ' +
         'writing mod.json, a page or a view file with your own Edit/Write tool, or a git pull, checkout or rebase that ' +
@@ -1154,7 +1217,7 @@ function init(context) {
           enabled: featureEnabled(),
           project: proj || null,
           mods: (proj ? mods.filter(m => m.project === proj) : mods).map(serializeForAgent),
-          views: (proj ? views.filter(v => v.project === proj) : views).map(serializeViewForAgent),
+          views: (proj ? views.filter(v => v.global || v.project === proj) : views).map(serializeViewForAgent),
         };
         // Why nothing may show up, in the order an agent would want to fix it.
         if (!out.enabled) out.note = FEATURE_OFF_MSG;
@@ -1191,7 +1254,8 @@ function init(context) {
         'in the rail; picking one shows only the tabs in it, and the built-in "All" shows everything. A tab is in a view ' +
         'when ANY of its match rules matches — within one rule EVERY field given must match: `names` (case-insensitive ' +
         'substrings of the tab name, any of them), `paths` (folders relative to the repo root; "." is the whole repo — ' +
-        'the tab\'s cwd must be inside one), `kinds` (agent, terminal, display-tab, project-mod, mod-tab). Tabs also ' +
+        'the tab\'s cwd must be inside one), `kinds` (agent, terminal, display-tab, project-mod, mod-tab), `worktree` ' +
+        '(true/false: the tab is working in a worktree). Tabs also ' +
         'join a view without any rule: a tab the user opens while the view is selected, a tab filed there from its ' +
         'right-click menu, and a tab an agent opens — which goes into every view ITS OPENER is in, unless the spawn ' +
         'tool (open_terminal, start_issue, create_display_tab) passes `view`. So a view with no rules at all is a ' +
@@ -1206,6 +1270,7 @@ function init(context) {
           names: z.array(z.string()).optional().describe('Case-insensitive substrings of the tab name; any one matches'),
           paths: z.array(z.string()).optional().describe('Folders relative to the repo root ("." = the whole repo); the tab\'s cwd must be inside one. A worktree counts as its repo'),
           kinds: z.array(z.enum(VIEW_KINDS)).optional().describe('Tab kinds; any one matches'),
+          worktree: z.boolean().optional().describe('true = only tabs working in a worktree; false = only tabs that are not'),
         })).optional().describe('Rules, OR\'d together; the fields of one rule are AND\'d. Omit for a view tabs are only filed into'),
         session_id: z.string().optional().describe('Your DEEPSTEVE_SESSION_ID env var — the project is inferred from your session\'s repo root. Omit only if you pass project'),
         project: z.string().optional().describe('Absolute path to the project, canonicalized to its git repo root. Defaults to the calling session\'s repo root'),
@@ -1247,6 +1312,7 @@ function init(context) {
           names: z.array(z.string()).optional(),
           paths: z.array(z.string()).optional(),
           kinds: z.array(z.enum(VIEW_KINDS)).optional(),
+          worktree: z.boolean().optional(),
         })).optional().describe('The new rule list — replaces the old one'),
         session_id: z.string().optional().describe('Your DEEPSTEVE_SESSION_ID env var — the project is inferred from your session\'s repo root'),
         project: z.string().optional().describe('Absolute path to the project instead of your own'),
@@ -1324,7 +1390,8 @@ function init(context) {
             note: 'No project could be determined for this session — pass session_id or project, or use scope:"all".',
           });
         }
-        const out = { scope: 'project', project: proj, views: views.filter(v => v.project === proj).map(serializeViewForAgent) };
+        // A DeepSteve-wide view is in every project, so it is in this one's list too.
+        const out = { scope: 'project', project: proj, views: views.filter(v => v.global || v.project === proj).map(serializeViewForAgent) };
         if (!scanRoots().has(proj)) out.note = unregisteredViewMsg(proj);
         return ok(out);
       },
@@ -1463,10 +1530,24 @@ function registerRoutes(app, context) {
     res.status(201).json({ view: serializeView(made.view), path: path.relative(proj, made.view.file) });
   });
 
+  // A footer's facts for one tab: its repo, its issue, and that issue's title, start and date.
+  // Asked by the browser when the tab you are looking at is in a view with a `footer`.
+  app.get('/api/project-views/footer/:sessionId', async (req, res) => {
+    const entry = ctx && ctx.shells && typeof ctx.shells.get === 'function' ? ctx.shells.get(req.params.sessionId) : null;
+    if (!entry) return res.status(404).json({ error: 'Session not found' });
+    const paths = typeof ctx.sessionPaths === 'function' ? ctx.sessionPaths(entry) : { cwd: entry.cwd, repoRoot: entry.cwd };
+    try {
+      res.json(await getFooterSource().footerFor(entry, paths));
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
   // Rename / re-icon from the view button's menu. Rules stay agent- or file-edited.
   app.put('/api/project-views/:id', (req, res) => {
     const v = findViewById(req.params.id);
     if (!v) return res.status(404).json({ error: 'View not found' });
+    if (v.global) return res.status(409).json({ error: globalViewMsg(v) });
     const { name, icon } = req.body || {};
     if (name !== undefined) {
       const cleaned = cleanName(name);
@@ -1487,6 +1568,7 @@ function registerRoutes(app, context) {
   app.delete('/api/project-views/:id', (req, res) => {
     const v = findViewById(req.params.id);
     if (!v) return res.status(404).json({ error: 'View not found' });
+    if (v.global) return res.status(409).json({ error: globalViewMsg(v) });
     try {
       removeView(v);
     } catch (e) {
@@ -1512,6 +1594,6 @@ module.exports = {
   FEATURE_OFF_MSG,
   // Project views (#726). cleanSpawnView is not test-only: the spawn tools validate `view` with it.
   cleanSpawnView, SPAWN_VIEW_DESCRIPTION, cleanViewSlug, slugifyView, cleanMatch, cleanViewPath, normalizeView, viewId,
-  serializeView, serializeViewForAgent, viewManifestOf,
+  serializeView, serializeViewForAgent, viewManifestOf, cleanFooter, setFooterSource,
   VIEW_KINDS, VIEW_SLUG_RE, RESERVED_VIEW,
 };

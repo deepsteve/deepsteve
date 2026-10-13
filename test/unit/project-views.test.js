@@ -144,7 +144,7 @@ test('normalizeView defaults, and the file shape leaves empty icon / zero order 
   assert.strictEqual(normalizeView({}, REPO_A, 'all'), null);
   assert.strictEqual(normalizeView([], REPO_A, 'ok'), null);
   assert.strictEqual(normalizeView({ order: 9e9 }, REPO_A, 'ok').order, 1e6, 'order clamped');
-  assert.deepStrictEqual(Object.keys(serializeView(v)).sort(), ['icon', 'id', 'match', 'name', 'order', 'project', 'slug'], 'no root/file on the wire');
+  assert.deepStrictEqual(Object.keys(serializeView(v)).sort(), ['additive', 'footer', 'global', 'icon', 'id', 'match', 'name', 'order', 'project', 'slug'], 'no root/file on the wire');
 });
 
 test('cleanSpawnView: undefined = inherit, "all" = none, otherwise a slug or an error', () => {
