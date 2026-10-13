@@ -1,7 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const { stateDir, spawnCwdProblem } = require('../../paths');
-const { callerShellId } = require('../../project-scope');
+const { callerShellId, getContexts, pathInside } = require('../../project-scope');
 const { z } = require('zod');
 
 const TASKS_FILE = path.join(stateDir(), 'tasks.json');
@@ -74,24 +74,34 @@ function describeSession(ref) {
 }
 
 /**
+ * The registered project a directory sits in: the first whose dirs contain it. { id, name, dir }
+ * or null. The one rule for both sides of list_tasks' scoping — a task's project and the caller's.
+ */
+function projectForCwd(cwd) {
+  if (!cwd) return null;
+  for (const c of getContexts(ctx)) {
+    const dir = (c.dirs || []).find(d => pathInside(cwd, d, ctx));
+    if (dir) return { id: c.id, name: c.name, dir };
+  }
+  return null;
+}
+
+/**
  * The project a task belongs to, derived from where its sessions ran: the first session whose cwd
  * sits inside a registered project's directory. { id, name, dir } or null. Derived rather than
  * stored for the same reason as a session's state — a project can be renamed or archived.
  */
 function taskProject(task) {
-  const contexts = ctx && ctx.getContexts ? ctx.getContexts() : [];
-  if (!Array.isArray(contexts) || contexts.length === 0) return null;
   for (const ref of sessionRefs(task)) {
     const entry = sessionEntry(ref.id);
-    const cwd = entry && entry.cwd;
-    if (!cwd) continue;
-    for (const c of contexts) {
-      const dir = (c.dirs || []).find(d => cwd === d || cwd.startsWith(String(d).replace(/\/+$/, '') + '/'));
-      if (dir) return { id: c.id, name: c.name, dir };
-    }
+    const project = projectForCwd(entry && entry.cwd);
+    if (project) return project;
   }
   return null;
 }
+
+/** Not done. The rail badge counts these, and they are what list_tasks lists by default. */
+const isOpen = (t) => t.status !== 'done';
 
 /** The task list as it goes over the wire: each reference decorated with its session's state. */
 function wireTasks() {
@@ -121,7 +131,18 @@ function connectedWindow(windowId) {
   return null;
 }
 
-function formatTaskList(filtered) {
+// list_tasks' `status` values, as the word the header and the footer use. `open` is pending plus
+// in-progress; `all` adds done.
+const STATUS_WORDS = { open: 'open', pending: 'pending', 'in-progress': 'in-progress', done: 'done', all: '' };
+
+function statusMatches(task, status) {
+  if (status === 'all') return true;
+  if (status === 'open') return isOpen(task);
+  return task.status === status;
+}
+
+/** `withProject` adds each task's project, for a listing that spans projects. */
+function formatTaskList(filtered, { withProject = false } = {}) {
   if (filtered.length === 0) return 'No tasks found.';
   return filtered.map(t => {
     const status = t.status === 'done' ? '[x]' : t.status === 'in-progress' ? '[~]' : '[ ]';
@@ -132,7 +153,8 @@ function formatTaskList(filtered) {
     const sessions = refs.length
       ? `\n    sessions: ${refs.map(r => `${r.label} (${r.id}, ${r.state})`).join(', ')}`
       : '';
-    return `${status} #${t.id}: ${t.title}${priority}${tag}${desc}${sessions}`;
+    const project = withProject ? `\n    project: ${(taskProject(t) || { name: 'none' }).name}` : '';
+    return `${status} #${t.id}: ${t.title}${priority}${tag}${desc}${sessions}${project}`;
   }).join('\n');
 }
 
@@ -213,16 +235,44 @@ function init(context) {
     },
 
     list_tasks: {
-      description: 'List current tasks',
+      description: 'List tasks. By default lists only the OPEN tasks (pending and in-progress) of YOUR project — the registered Deep Steve project your working directory sits in, the same list the Tasks panel\'s "This project" toggle shows. A task belongs to a project through the sessions attached to it, so a task the human wrote in the Tasks app with no session attached has no project and is listed only with scope "all". Pass status "done" or "all" to include finished tasks, and scope "all" for every project. A caller outside every registered project gets every project\'s tasks, and the result says so.',
       schema: {
-        status: z.enum(['pending', 'in-progress', 'done']).optional().describe('Filter by status'),
+        status: z.enum(['open', 'pending', 'in-progress', 'done', 'all']).optional().describe('open (default: pending + in-progress), pending, in-progress, done, or all'),
+        scope: z.enum(['project', 'all']).optional().describe('project (default: the calling session\'s project) or all'),
         session_tag: z.string().optional().describe('Filter by session tag'),
       },
-      handler: async ({ status, session_tag }) => {
-        let filtered = tasks;
-        if (status) filtered = filtered.filter(t => t.status === status);
-        if (session_tag) filtered = filtered.filter(t => t.session_tag === session_tag);
-        return { content: [{ type: 'text', text: formatTaskList(filtered) }] };
+      handler: async ({ status, scope, session_tag }, extra) => {
+        const effStatus = status || 'open';
+        const callerId = callerShellId(extra);
+        const caller = callerId ? ctx.shells.get(callerId) : null;
+        // The caller's project is derived exactly as a task's is, so "in my project" means what the
+        // panel's toggle means. No project means the unscoped list, said out loud below.
+        const project = scope === 'all' ? null : projectForCwd(caller && caller.cwd);
+
+        let matching = tasks.filter(t => statusMatches(t, effStatus));
+        if (session_tag) matching = matching.filter(t => t.session_tag === session_tag);
+        const listed = project
+          ? matching.filter(t => { const p = taskProject(t); return !!p && p.id === project.id; })
+          : matching;
+
+        const word = STATUS_WORDS[effStatus];
+        const what = word ? `${word[0].toUpperCase()}${word.slice(1)} tasks` : 'Tasks';
+        const tagged = session_tag ? ` tagged "${session_tag}"` : '';
+        const where = project ? `in ${project.name}` : 'in every project';
+        const lines = [];
+        if (!project && scope !== 'all') {
+          lines.push(caller
+            ? 'This session is not in a registered project, so this lists every project\'s tasks.'
+            : 'The caller is not a Deep Steve session, so this lists every project\'s tasks.');
+        }
+        lines.push(`${what}${tagged} ${where} (${listed.length}):`, '', formatTaskList(listed, { withProject: !project }));
+        // What the scope hid, so an empty list cannot read as "there are no tasks".
+        const hidden = matching.length - listed.length;
+        if (hidden > 0) {
+          const one = hidden === 1;
+          lines.push('', `${hidden} more ${word ? `${word} ` : ''}task${one ? ' is' : 's are'} in another project or in none — scope: "all" lists ${one ? 'it' : 'them'}.`);
+        }
+        return { content: [{ type: 'text', text: lines.join('\n') }] };
       },
     },
   };
@@ -241,7 +291,7 @@ function registerRoutes(app, context) {
   // The Tasks app's rail badge: how many tasks are not done. Polled every 5s by every window, so it
   // reads the in-memory list and nothing else.
   app.get('/api/tasks/count', (req, res) => {
-    res.json({ count: tasks.filter(t => t.status !== 'done').length });
+    res.json({ count: tasks.filter(isOpen).length });
   });
 
   // A task the human writes in the Tasks app. add_task is the agents' door; this is the human's, so

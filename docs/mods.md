@@ -621,6 +621,14 @@ followed through `onActiveContextChanged`. A task with no session in any project
 and is hidden while it is on. With **All** selected in the rail there is nothing to narrow to, so
 every task shows.
 
+**`list_tasks` is scoped the same way (#729).** With no arguments an agent gets the *open* tasks
+(`pending` + `in-progress`) of its own project. Its project is `projectForCwd()` of the caller's
+cwd, the same derivation as a task's `project`, so a worktree session lands on its parent project
+and the list is what **This project** would show. A task with no project is left out, and a footer
+counts whatever the scope hid. `scope: "all"` and `status: "done" | "all"` widen the list. A
+caller in no registered project, or one that is not a session at all, gets the unscoped list with a
+line saying so. Tests: `test/unit/tasks-list-scope.test.js`.
+
 **Clicking a badge**
 
 - **Live session:** focuses its tab.
