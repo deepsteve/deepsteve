@@ -34,6 +34,11 @@
  * the head of the strip for the one tab that holds that role in the project. tab-slot.js draws
  * it; this module answers slotFor() and keeps the holder in every view while the slot is on.
  *
+ * A selectable view may carry `launcher` and `cards`, and both show only while it is the
+ * selected view. The launcher is #view-launch-btn beside the +, drawn here: a new agent tab in
+ * the project, filed into the view. The cards are a superview at the head of the strip, drawn
+ * by view-cards.js; this module answers cardsFor().
+ *
  * Two pieces of chrome, both host-owned:
  *   - #views-toggle: the collapsed form (the default). The first child of #tabs-list-wrapper,
  *     so it sits immediately before the first tab — above it in vertical layout, left of it
@@ -187,8 +192,11 @@ function mergeViews(list) {
       cur.global = cur.global || !!v.global;
       if (!cur.footer.length) cur.footer = footer;
       if (!cur.slot) cur.slot = v.slot || null;
+      // Either copy asking for the launcher or the superview is enough to show it.
+      cur.launcher = cur.launcher || !!v.launcher;
+      cur.cards = cur.cards || !!v.cards;
     } else {
-      bySlug.set(v.slug, { slug: v.slug, name: v.name, icon: v.icon || '', ids: v.global ? [] : [v.id], rules, global: !!v.global, footer, additive: !!v.additive, slot: v.slot || null });
+      bySlug.set(v.slug, { slug: v.slug, name: v.name, icon: v.icon || '', ids: v.global ? [] : [v.id], rules, global: !!v.global, footer, additive: !!v.additive, slot: v.slot || null, launcher: !!v.launcher, cards: !!v.cards });
     }
   }
   return [...bySlug.values()];
@@ -206,6 +214,20 @@ export function slotFor(ctx) {
   const v = viewsForContext(ctx).find(x => x.additive && x.slot && isAdditiveOn(x.slug));
   return v ? v.slot : null;
 }
+
+/** The view `ctx` is looking at when it asks for `flag`, else null. Nothing while suspended. */
+function selectedWith(ctx, flag) {
+  if (!ctx || !loaded || suspended()) return null;
+  const slug = selectedSlug(ctx);
+  if (slug === ALL) return null;
+  return selectableViews(ctx).find(v => v.slug === slug && v[flag]) || null;
+}
+
+/** The selected view of `ctx` when it has a launcher (the button beside the +), else null. */
+export const launcherFor = (ctx) => selectedWith(ctx, 'launcher');
+
+/** The selected view of `ctx` when it has a superview (view-cards.js), else null. */
+export const cardsFor = (ctx) => selectedWith(ctx, 'cards');
 
 /** Does this tab hold `ctx`'s slot right now? Its marker names the project and the role. */
 export const holdsSlot = (info, ctx) =>
@@ -273,6 +295,12 @@ export function memberOf(info, view) {
   if (filed === true) return true;
   if (filed === false) return false;
   return rulesMatch(view, info || {});
+}
+
+/** Is tab `id` in `view` (one of viewsForContext()'s merged views)? */
+export function isMember(id, view) {
+  const info = cb.getTabInfo?.(id);
+  return !!(info && view && memberOf(info, view));
 }
 
 /**
@@ -615,9 +643,11 @@ export function render() {
   const agentCount = show ? (cb.countProjectAgents?.(ctx) || 0) : 0;
   const agentsOff = projectAgentsHidden(ctx);
   const sig = JSON.stringify([show, ctx?.id, slug, open, agentCount, agentsOff,
-    list.map(v => [v.slug, v.name, v.icon, v.additive, v.additive && isAdditiveOn(v.slug)])]);
+    list.map(v => [v.slug, v.name, v.icon, v.additive, v.additive && isAdditiveOn(v.slug), v.launcher, v.cards])]);
   if (sig === lastSig) return;
   lastSig = sig;
+
+  renderLauncher(show ? launcherFor(ctx) : null);
 
   const selectable = list.filter(v => !v.additive);
   const additive = list.filter(v => v.additive);
@@ -669,6 +699,40 @@ export function render() {
     chip.addEventListener('click', () => setProjectAgentsHidden(ctx, !agentsOff));
     bar.appendChild(chip);
   }
+}
+
+// The plus #new-btn carries, for a launcher whose view has no emoji of its own.
+const PLUS_SVG = '<svg viewBox="0 0 16 16"><path d="M8 3.5v9M3.5 8h9" stroke="currentColor" fill="none" stroke-width="1.6" stroke-linecap="round"/></svg>';
+
+/**
+ * #view-launch-btn, the button beside the + (index.html): shown only while a view with a
+ * launcher is selected, labelled for it. The click is wired once, in init().
+ */
+function renderLauncher(view) {
+  const btn = document.getElementById('view-launch-btn');
+  if (!btn) return;
+  btn.classList.toggle('hidden', !view);
+  if (!view) return;
+  const label = `New ${view.name} tab`;
+  btn.dataset.view = view.slug;
+  btn.title = `${label} — an agent in this project's folder, never a worktree, filed into ${view.name}`;
+  btn.setAttribute('aria-label', label);
+  const [icon, text] = btn.children;
+  if (icon) {
+    if (view.icon) {
+      icon.className = 'btn-icon is-text is-emoji';
+      icon.textContent = view.icon;
+    } else {
+      icon.className = 'btn-icon';
+      icon.innerHTML = PLUS_SVG;
+    }
+  }
+  if (text) text.textContent = label;
+}
+
+function onLaunchClick() {
+  const view = launcherFor(activeContext());
+  if (view) cb.launchInView?.(view.slug);
 }
 
 // ---------------------------------------------------------- view button menu
@@ -725,6 +789,7 @@ function showViewMenu(x, y, view) {
 
 export function init(callbacks) {
   cb = callbacks || {};
+  document.getElementById('view-launch-btn')?.addEventListener('click', onLaunchClick);
   render();
   refresh();
 }

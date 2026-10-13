@@ -44,6 +44,7 @@ import * as ProjectMods from './project-mods.js';
 import * as ProjectViews from './project-views.js';
 import * as ViewFooter from './view-footer.js';
 import * as TabSlot from './tab-slot.js';
+import * as ViewCards from './view-cards.js';
 import * as DecisionMode from './decision-mode.js';
 import * as Onboarding from './onboarding.js';
 import { nsKey } from './storage-namespace.js';
@@ -328,6 +329,7 @@ function applySettings(settings) {
     // applyFilter() returns early with Projects off, so the views chrome needs its own pass.
     ProjectViews.render();
     TabSlot.render();
+    ViewCards.render();
   }
   if (settings.timelapseEnabled !== undefined) {
     setTimelapseEnabled(settings.timelapseEnabled);
@@ -1866,6 +1868,7 @@ settingsBtn?.addEventListener('click', async () => {
     setContextViewsEnabled(contextViewsEnabled);
     ProjectViews.render();   // see the settings-broadcast twin: applyFilter() skips it with Projects off
     TabSlot.render();
+    ViewCards.render();
     setTimelapseEnabled(timelapseEnabled);
     setTimelapseInterval(timelapseIntervalMinutes);
     ProjectMods.refresh();   // the project-mods gate ships with the list, not with settings (#618)
@@ -3331,6 +3334,8 @@ function scheduleDecisionSync() {
  * Switch to a specific session tab
  */
 function switchTo(id) {
+  // A view's cards grid covers the terminals; any tab switched to is what you look at next.
+  ViewCards.dismiss();
   // If mod view is active, delegate to ModManager to show terminal with back button
   if (ModManager.isModViewVisible()) {
     ModManager.showTerminalForSession(id);
@@ -4203,14 +4208,15 @@ function inheritedCwd() {
 }
 
 /**
- * Quick new session in same repo as active session
+ * Quick new session in same repo as active session. `extra` is merged into the new session's
+ * opts — a view launcher passes its filing as `views`.
  */
-function quickNewSession() {
+function quickNewSession(extra = {}) {
   // If a context is selected and the active tab isn't already inside it, open
   // the new tab in the context's repo instead (folder-based context, #522).
-  if (requestNewTabInContext()) return;
+  if (requestNewTabInContext(extra)) return;
   // Pass the active tab as the parent so the new tab can inherit its /rc state.
-  createSession(inheritedCwd() || '~', null, true, { agentType: getDefaultAgentType(), rcParent: activeId });
+  createSession(inheritedCwd() || '~', null, true, { agentType: getDefaultAgentType(), rcParent: activeId, ...extra });
 }
 
 function quickNewTerminal() {
@@ -4777,7 +4783,7 @@ async function promptWorktreeSession() {
 /**
  * Prompt for directory and create session
  */
-async function promptRepoSession() {
+async function promptRepoSession(extra = {}) {
   // Pure directory picker (#575): the per-session "Recent sessions" list was removed —
   // session resume lives on dedicated surfaces (empty-state recents, the ▾ menu's
   // "Restore sessions…" #560 modal, the command palette). With a context active, still
@@ -4788,7 +4794,7 @@ async function promptRepoSession() {
     contextLabel: ctxInfo ? ctxInfo.name : '',
   });
   if (result === null) return;
-  createSession(result, null, true, { agentType: getDefaultAgentType() });
+  createSession(result, null, true, { agentType: getDefaultAgentType(), ...extra });
 }
 
 /**
@@ -5568,11 +5574,11 @@ async function init() {
     switchToTab: switchTo,
     updateEmptyState,
     isFilterSuspended: () => DecisionMode.isDecisionModeActive(),
-    createSessionInDir: (cwd) => createSession(cwd, null, true, { agentType: getDefaultAgentType() }),
+    createSessionInDir: (cwd, extra) => createSession(cwd, null, true, { agentType: getDefaultAgentType(), ...extra }),
     // Empty context (no dirs) new-tab: prompt the directory picker instead of
     // inheriting the last-active tab's (foreign) cwd (#581). promptRepoSession
     // already surfaces the active context's repos first via #573 ordering.
-    promptNewTabDir: () => promptRepoSession(),
+    promptNewTabDir: (extra) => promptRepoSession(extra),
     showDirPicker: () => showDirectoryPicker(),
     getRecentDirs: () => SessionStore.getRecentDirs(),
     // The built-in project's welcome tab (#696) has to land in the window that opened the
@@ -5591,7 +5597,7 @@ async function init() {
     // hook that settles the filter re-derives the strip buttons and opens the pinned
     // ones. Deliberately not the rail rows: renderRail() pulls those itself, and
     // calling render() from inside applyFilter would re-enter it.
-    onContextViewApplied: () => { syncOverviewToContext(); refreshTabArrows(); ProjectMods.render(); ProjectViews.render(); TabSlot.render(); ViewFooter.render(); },
+    onContextViewApplied: () => { syncOverviewToContext(); refreshTabArrows(); ProjectMods.render(); ProjectViews.render(); TabSlot.render(); ViewCards.render(); ViewFooter.render(); },
     // Project views (#726) narrow the selected project to one view's tabs. The filter, the
     // per-view last-tab memory and the reveal-on-focus all ask project-views.js.
     tabInView: (id, ctx) => ProjectViews.tabInView(id, ctx),
@@ -5655,7 +5661,10 @@ async function init() {
     showToast: (text) => showToast(text),
     // The view list changed, or an additive view was switched. applyFilter() redraws the footer
     // and the slot too, but not with Projects off, and switching a footer applies no filter.
-    onViewsChanged: () => { ViewFooter.render(); TabSlot.render(); },
+    onViewsChanged: () => { ViewFooter.render(); TabSlot.render(); ViewCards.render(); },
+    // A view's launcher (the button beside the +): the + 's own path — the project's folder,
+    // never a worktree (newTabCwd) — filed into the view by name rather than by the selection.
+    launchInView: (slug) => quickNewSession({ views: { [slug]: true } }),
   });
   // The tab slot (the orchestrator): a reserved place at the head of the strip, switched on by
   // an additive view with a `slot`. Its holder is the tab whose session carries the marker.
@@ -5683,11 +5692,31 @@ async function init() {
     getWindowId: () => getWindowId(),
     showToast: (text) => showToast(text),
   });
+  // A view's superview: the cards grid of every agent tab in a selected view with `cards`. The
+  // cards are the strip as filtered (a tab hidden there is hidden here), agents only, and only
+  // members — the orchestrator is kept in every view but is not in this one by being kept.
+  ViewCards.init({
+    getActiveContext: () => {
+      const id = getActiveContextId();
+      const info = getActiveContextInfo();
+      return id && info ? { id, ...info } : null;
+    },
+    cardsFor: (ctx) => ProjectViews.cardsFor(ctx),
+    cardTabs: (view) => getAllTabIds().filter((id) => {
+      const s = sessions.get(id);
+      const el = TabManager.getTab(id);
+      return s && el && !el.classList.contains('context-hidden') && tabKind(s) === 'agent' && ProjectViews.isMember(id, view);
+    }).map(id => ({ id, name: sessions.get(id).name || getDefaultTabName(sessions.get(id).cwd || ''), current: id === activeId })),
+    openTab: (id) => onTabStripClick(id),
+    setStripActive: (on) => TabManager.setActive(on ? activeId : null),
+    // The footer describes the tab you are looking at, and with the grid up that is none.
+    onUpChanged: () => ViewFooter.render(),
+  });
   // View footers: the row under the monitor for a tab in a view with a `footer`.
   ViewFooter.init({
     getActiveTabId: () => activeId,
     footerFor: (id) => ProjectViews.footerFor(id),
-    isViewSlotUp: () => ModManager.isModViewVisible(),
+    isViewSlotUp: () => ModManager.isModViewVisible() || ViewCards.isUp(),
   });
   TabManager.setTabViews({
     menu: (id) => ProjectViews.menuFor(id),

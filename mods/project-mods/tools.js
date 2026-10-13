@@ -61,6 +61,7 @@ const path = require('path');
 const { resolveHtml } = require('../../html-source.js');
 const projectScope = require('../../project-scope.js');
 const { FOOTER_FIELDS, createFooterSource } = require('./view-footer.js');
+const { createPromptSource } = require('./view-cards.js');
 
 // The manifest field that says "this directory is a project mod". Anything else under
 // .deepsteve/mods/ — including a regular DeepSteve Mod someone distributes in their repo —
@@ -658,6 +659,14 @@ function refresh(reason) {
 // something switched on, not a way of looking at the strip. The tab that holds it is an ordinary
 // agent tab marked `slot: { contextId, role }` on its shell entry; POST /api/project-views/slot
 // starts it, and keeps it to one per project.
+//
+// Two flags belong to the view you are looking AT, so an additive view never carries them, and
+// both show only while their view is the selected one:
+//   - `launcher: true` puts a "New <name> tab" button beside the + : an agent tab in the
+//     project's folder (never a worktree), filed into the view.
+//   - `cards: true` puts a superview at the head of the strip: a grid of cards, one per agent
+//     tab in the view, each showing the tab's first prompt (view-cards.js), served by
+//     GET /api/project-views/cards.
 
 const VIEW_SLUG_RE = /^[a-z0-9][a-z0-9-]{0,39}$/;
 const VIEW_SLOTS = ['orchestrator'];
@@ -678,6 +687,17 @@ let views = [];
 let footerSource = null;
 const getFooterSource = () => footerSource || (footerSource = createFooterSource({ log: (...a) => ctx && ctx.log && ctx.log(...a) }));
 const setFooterSource = (src) => { footerSource = src; };
+
+// The superview's lookups (view-cards.js), made on first use like the footer's.
+let promptSource = null;
+const getPromptSource = () => promptSource || (promptSource = createPromptSource({
+  transcriptPath: (e) => ctx && typeof ctx.transcriptPath === 'function' ? ctx.transcriptPath(e) : null,
+  getAgentConfig: (t) => ctx && typeof ctx.getAgentConfig === 'function' ? ctx.getAgentConfig(t) : null,
+  log: (...a) => ctx && ctx.log && ctx.log(...a),
+}));
+const setPromptSource = (src) => { promptSource = src; };
+// One superview asks for every card at once; a strip longer than this is not a grid anyone reads.
+const MAX_CARD_IDS = 100;
 
 const unregisteredViewMsg = (proj) =>
   `${proj} is not part of any registered project, so a view written there would never be ` +
@@ -818,6 +838,8 @@ function normalizeView(raw, root, slug, { global = false } = {}) {
     footer: cleanFooter(raw.footer),
     additive: raw.additive === true,
     slot: raw.additive === true ? cleanSlot(raw.slot) : null,
+    launcher: raw.additive !== true && raw.launcher === true,
+    cards: raw.additive !== true && raw.cards === true,
   };
 }
 
@@ -874,6 +896,8 @@ function viewManifestOf(v) {
   if (v.footer && v.footer.length) out.footer = v.footer;
   if (v.additive) out.additive = true;
   if (v.slot) out.slot = v.slot;
+  if (v.launcher) out.launcher = true;
+  if (v.cards) out.cards = true;
   return out;
 }
 
@@ -902,6 +926,7 @@ function removeView(v) {
 const serializeView = (v) => ({
   id: v.id, slug: v.slug, project: v.project, global: !!v.global, name: v.name, icon: v.icon, order: v.order,
   match: v.match, footer: v.footer || [], additive: !!v.additive, slot: v.slot || null,
+  launcher: !!v.launcher, cards: !!v.cards,
 });
 
 // A repo view's path is relative to its repo; a DeepSteve-wide view's is absolute.
@@ -1558,6 +1583,24 @@ function registerRoutes(app, context) {
     }
   });
 
+  // A superview's cards: each tab's first prompt, `{ prompts: { [id]: { prompt, supported } } }`.
+  // Asked by the browser for the agent tabs in a view with `cards` while its superview is up.
+  // An id that is not a live session answers `{ prompt: null, supported: false }`.
+  app.get('/api/project-views/cards', async (req, res) => {
+    const ids = [...new Set(String(req.query.ids || '').split(',').map(s => s.trim()).filter(Boolean))].slice(0, MAX_CARD_IDS);
+    const shells = ctx && ctx.shells && typeof ctx.shells.get === 'function' ? ctx.shells : null;
+    const prompts = {};
+    try {
+      await Promise.all(ids.map(async (id) => {
+        const entry = shells ? shells.get(id) : null;
+        prompts[id] = entry ? await getPromptSource().promptFor(entry) : { prompt: null, supported: false };
+      }));
+    } catch (e) {
+      return res.status(500).json({ error: e.message });
+    }
+    res.json({ prompts });
+  });
+
   // Start the tab that holds a project's slot — the empty slot's "Open orchestrator". One per
   // project and role, whichever window asks: a live holder is answered with its id (and the
   // window it is in) rather than doubled. A new one is an ordinary agent tab in the project's
@@ -1642,6 +1685,6 @@ module.exports = {
   FEATURE_OFF_MSG,
   // Project views (#726). cleanSpawnView is not test-only: the spawn tools validate `view` with it.
   cleanSpawnView, SPAWN_VIEW_DESCRIPTION, cleanViewSlug, slugifyView, cleanMatch, cleanViewPath, normalizeView, viewId,
-  serializeView, serializeViewForAgent, viewManifestOf, cleanFooter, cleanSlot, setFooterSource,
+  serializeView, serializeViewForAgent, viewManifestOf, cleanFooter, cleanSlot, setFooterSource, setPromptSource,
   VIEW_KINDS, VIEW_SLUG_RE, RESERVED_VIEW, VIEW_SLOTS,
 };

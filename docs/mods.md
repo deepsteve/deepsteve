@@ -1545,6 +1545,20 @@ An additive view can also carry **`"slot": "orchestrator"`**, which reserves a p
 - Switching the push button off makes the holder an ordinary tab, filtered like any other. Unlike a footer, a slot changes what the strip shows, so `setAdditive()` asks for a filter pass for a view with one.
 - Code: `slotFor()` / `holdsSlot()` in `project-views.js`, the chrome in `public/js/tab-slot.js` (which imports neither views module; `app.js` injects the holder lookup and the pin, `TabManager.moveToFront()`), and the route in `mods/project-mods/tools.js`. Tests: `test/unit/tab-slot.test.js`, plus slot cases in `project-views.test.js` and `project-views-client.test.js`.
 
+### Launchers and superviews
+
+Two flags belong to the view you look **at**, so they are dropped from an additive view, and both show **only while their view is the selected one**:
+
+```jsonc
+// ~/.deepsteve/views/analytics.json — no `match`, so a tab is in it only if it opted in
+{ "name": "Analytics", "icon": "📈", "launcher": true, "cards": true }
+```
+
+- **`launcher: true`** shows `#view-launch-btn`, **New Analytics tab**, beside the + (`index.html`; `project-views.js` draws it). It is the +'s own path (`quickNewSession`) with the filing passed by name, `views: {analytics: true}`, rather than read off the selection: the default agent, in the project's folder (the chooser for a multi-folder project), never a worktree.
+- **`cards: true`** puts a **superview** at the head of the strip: `#view-cards-tab`, in `#tabs-list-wrapper` after `#views-toggle` and before `#tab-slot`, with the ▦ mark, the view's name and a count. Pressing it raises `#view-cards` over `#terminals`, a grid with one card per **agent** tab in the view (the strip as filtered, members only, so a slot holder kept in every view is not a card unless it was filed). Each card shows the tab's name and its **first prompt**. Clicking a card opens that tab the way clicking the tab would. While the grid is up no real tab reads as active, the terminal under it has lost focus, and the view footer is hidden. Switching to any tab, or selecting another view or project, takes the grid down. A reload starts with it down.
+- **The first prompt** is `GET /api/project-views/cards?ids=a,b` → `{prompts: {[id]: {prompt, supported}}}` (`mods/project-mods/view-cards.js`). It is the first user text in the session's Claude Code transcript that `transcript-view.js` does not flag as meta, which rules out slash commands such as an inherited `/rc`, caveats, hook output, sidechains and compaction summaries. Only the head is read (four 512 KB windows at most). A found prompt is cached for good, keyed by transcript file. A tab with no prompt yet is asked about again every 5s while the grid is up. Claude-only: any other agent answers `supported: false`, and its card says so.
+- Code: `launcherFor()` / `cardsFor()` / `isMember()` in `project-views.js`. The superview is `public/js/view-cards.js`, which imports neither views module (`app.js` injects the card list and `switchTo()` calls `dismiss()`). Tests: `test/unit/view-cards.test.js`, plus launcher cases in `project-views-client.test.js`.
+
 ### Membership: rules plus filings
 
 A tab is in a view when one of its rules matches, **or** when the tab has been filed there. A filing lives with the tab in the client session stores (`views: {slug: true | false}`, never committed); `false` takes a tab *out* of a view whose rules would otherwise include it, which is what lets "remove" mean something for a rule-matched tab. Ways a tab gets filed:

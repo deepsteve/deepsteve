@@ -242,6 +242,67 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
 #app-container.vertical-layout.icon-rail .tab-slot-label { display: none; }
 #app-container.vertical-layout.icon-rail .tab.slot-tab .tab-icon { box-shadow: 0 0 0 1px var(--ds-accent-blue); }
 
+/* ── Superviews and launchers ─────────────────────────────────────────────────────────────────
+   Both belong to the selected project view, and show only while a view asking for them is the
+   one selected. #view-cards-tab (view-cards.js) is a tab-shaped button at the head of the strip,
+   after #views-toggle and before #tab-slot: .tab for the look, but outside #tabs-list so no walk
+   of the strip counts it. #view-cards is the grid it opens over #terminals, lifted above
+   #empty-state.context-empty (z-index 12), which an empty view puts up. #view-launch-btn
+   (project-views.js) sits beside the +, an outlined twin of it, because it opens a tab too. */
+#view-cards-tab.hidden { display: none; }
+.tab.view-cards-tab { flex-shrink: 0; min-width: 0; margin-right: 4px; }
+.view-cards-tab .view-cards-glyph { font-size: 11px; color: var(--ds-accent-blue); }
+.view-cards-tab .view-cards-count { flex-shrink: 0; padding: 0 5px; border-radius: 8px; font-size: 11px; background: var(--ds-bg-secondary); color: var(--ds-text-secondary); }
+#app-container.vertical-layout .tab.view-cards-tab { margin-right: 0; margin-bottom: 4px; padding-right: 12px; }
+#app-container.vertical-layout .view-cards-tab .view-cards-count { margin-left: auto; }
+#app-container.vertical-layout.icon-rail .view-cards-tab .view-cards-glyph,
+#app-container.vertical-layout.icon-rail .view-cards-tab .view-cards-count { display: none; }
+
+#view-cards { position: absolute; inset: 0; z-index: 13; box-sizing: border-box; overflow-y: auto; padding: 20px 24px; background: var(--ds-bg-primary); color: var(--ds-text-primary); }
+#view-cards.hidden { display: none; }
+#view-cards .view-cards-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 16px; }
+#view-cards .view-cards-title { font-size: 18px; color: var(--ds-text-bright); }
+#view-cards .view-cards-sub { font-size: 12px; color: var(--ds-text-secondary); }
+#view-cards .view-cards-empty { font-size: 13px; color: var(--ds-text-secondary); }
+#view-cards .view-cards-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; }
+.view-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 120px;
+  padding: 12px 14px;
+  text-align: left;
+  font: inherit;
+  color: var(--ds-text-primary);
+  background: var(--ds-bg-secondary);
+  border: 1px solid var(--ds-border);
+  border-radius: 8px;
+  cursor: pointer;
+}
+.view-card:hover { border-color: var(--ds-accent-blue); }
+.view-card:focus-visible { outline: 2px solid var(--ds-accent-blue); outline-offset: 1px; }
+/* The tab you were on before opening the grid: where a click elsewhere would have left you. */
+.view-card.current { border-color: var(--ds-text-secondary); }
+.view-card-name { font-size: 13px; font-weight: 600; color: var(--ds-text-bright); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.view-card-prompt {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 6;
+  overflow: hidden;
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--ds-text-secondary);
+}
+.view-card-prompt.empty { font-style: italic; opacity: 0.7; }
+
+#view-launch-btn.hidden { display: none; }
+#view-launch-btn { flex-shrink: 0; margin-left: 4px; padding: 4px 10px; background: transparent; border: 1px solid var(--ds-accent-green); border-radius: 4px; color: var(--ds-text-primary); font: inherit; font-size: 13px; white-space: nowrap; cursor: pointer; user-select: none; }
+#view-launch-btn:hover { background: var(--ds-bg-tertiary); }
+/* Vertical: the shared .nav-btn row shape, kept outlined so it reads as the +'s twin. */
+#app-container.vertical-layout #view-launch-btn { margin: 6px 0 0 0; border: 1px solid var(--ds-accent-green); }
+
 /* ── View footers ─────────────────────────────────────────────────────────────────────────────
    #view-footer is the monitor's bottom row, the views bar's mirror: facts about the tab you are
    looking at, when it is in a view with a `footer`. view-footer.js toggles .hidden and fills it.

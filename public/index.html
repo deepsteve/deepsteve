@@ -59,6 +59,12 @@
         <!-- Not a .nav-btn: a caret, not a row. It is display:none in the rail. -->
         <button id="new-btn-dropdown" title="New tab options">&#9662;</button>
       </div>
+      <!-- A view's launcher: "New Analytics tab", shown only while a project view with
+           `launcher: true` is selected. project-views.js owns its display, icon and label. -->
+      <button id="view-launch-btn" class="nav-btn hidden" tabindex="-1">
+        <span class="btn-icon" aria-hidden="true"></span>
+        <span class="btn-label"></span>
+      </button>
       <!-- The bolt is filled and #automations-btn's play is outlined. They differ on two channels
            (silhouette AND weight), not one, because in the rail there is no label to tell them apart. -->
       <button id="issue-btn" class="nav-btn is-glyph" aria-label="New issue" title="Pick a GitHub issue">

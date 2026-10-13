@@ -81,6 +81,7 @@ Claude is the one agent never probed, because it is the default and the fallback
 | Resume retry → fresh fallback | yes | — | — | — | — | — |
 | Transcript-derived tab label | yes | — | — | — | — | — |
 | History view (JSONL transcript) | yes | — | — | — | — | — |
+| First prompt on a view's superview card | yes | — | — | — | — | — |
 | Listed in Recent Sessions | yes | yes | yes | yes | yes | — |
 | Graceful exit | `/exit` | SIGTERM | Ctrl+C | Ctrl+C | SIGTERM | SIGHUP |
 | Test coverage | deep | moderate | negative only | negative only | negative only | incidental |

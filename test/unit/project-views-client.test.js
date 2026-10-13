@@ -128,8 +128,13 @@ async function setup({ views = [V_MKT_A, V_MKT_SITE, V_ANALYTICS, V_MANUAL, V_BE
   byId.set('views-bar', bar);
   const appMain = fakeElement();
   byId.set('app-main', appMain);
+  // The launcher beside the + (index.html): an icon and a label.
+  const launch = fakeElement('button');
+  launch.className = 'nav-btn hidden';
+  launch.append(fakeElement('span'), fakeElement('span'));
+  byId.set('view-launch-btn', launch);
 
-  const state = { ctx, tabs, suspended, filterCalls: 0, setViews: [], toasts: [], posts: [], serverViews: views };
+  const state = { ctx, tabs, suspended, filterCalls: 0, setViews: [], toasts: [], posts: [], launches: [], serverViews: views };
   globalThis.fetch = async (url, opts = {}) => {
     if (opts.method === 'POST') {
       const body = JSON.parse(opts.body);
@@ -150,9 +155,10 @@ async function setup({ views = [V_MKT_A, V_MKT_SITE, V_ANALYTICS, V_MANUAL, V_BE
     applyFilter: () => { state.filterCalls++; mod.render(); },
     isSuspended: () => state.suspended,
     showToast: (t) => state.toasts.push(t),
+    launchInView: (slug) => state.launches.push(slug),
   });
   await flush();
-  return { mod, state, wrapper, list, bar, appMain };
+  return { mod, state, wrapper, list, bar, appMain, launch };
 }
 
 // ------------------------------------------------------------- scoping / merge
@@ -582,6 +588,58 @@ test('a repo view and a DeepSteve-wide one of the same slug merge their slot', a
 });
 
 // --------------------------------------------------------------- source guards
+
+// ------------------------------------------------------- launchers and superviews
+
+// The DeepSteve-wide Analytics view the docs describe: manual, with a launcher and cards.
+const V_ANALYTICS_WIDE = { id: 'g1', slug: 'analytics', project: null, global: true, name: 'Analytics', icon: '📈', order: 0, match: [], launcher: true, cards: true };
+
+test('a launcher and a superview belong to the selected view only', async () => {
+  const { mod, state, launch } = await setup({ views: [V_ANALYTICS_WIDE, V_MANUAL], tabs: {} });
+  assert.strictEqual(mod.launcherFor(CTX_A), null, 'All is selected');
+  assert.strictEqual(mod.cardsFor(CTX_A), null);
+  assert.ok(launch.classList.contains('hidden'));
+
+  mod.selectView('analytics');
+  assert.strictEqual(mod.launcherFor(CTX_A).slug, 'analytics');
+  assert.strictEqual(mod.cardsFor(CTX_A).slug, 'analytics');
+  assert.ok(!launch.classList.contains('hidden'), 'the launcher shows beside the +');
+  assert.strictEqual(launch.children[0].textContent, '📈');
+  assert.strictEqual(launch.children[1].textContent, 'New Analytics tab');
+  assert.strictEqual(launch.dataset.view, 'analytics');
+
+  launch.listeners.click();
+  assert.deepStrictEqual(state.launches, ['analytics'], 'filed by name');
+
+  mod.selectView('launch');
+  assert.strictEqual(mod.launcherFor(CTX_A), null, 'a view without one');
+  assert.strictEqual(mod.cardsFor(CTX_A), null);
+  assert.ok(launch.classList.contains('hidden'));
+  launch.listeners.click();
+  assert.deepStrictEqual(state.launches, ['analytics'], 'a stale click launches nothing');
+
+  mod.selectView('analytics');
+  state.suspended = true;   // Decision Tab mode sets views aside
+  assert.strictEqual(mod.launcherFor(CTX_A), null);
+  assert.strictEqual(mod.cardsFor(CTX_A), null);
+  assert.strictEqual(mod.launcherFor(null), null, 'no project, no views');
+});
+
+test('a manual view holds exactly its filed tabs, and either copy of a merged view can ask for the extras', async () => {
+  const repoCopy = { id: 'r1', slug: 'analytics', project: REPO_A, name: 'Analytics', icon: '', order: 5, match: [] };
+  const { mod } = await setup({
+    views: [V_ANALYTICS_WIDE, repoCopy],
+    tabs: {
+      filed: { cwd: REPO_A, name: 'Retention', kind: 'agent', views: { analytics: true } },
+      loose: { cwd: REPO_A, name: 'analytics refactor', kind: 'agent' },
+    },
+  });
+  const view = mod.viewsForContext(CTX_A).find(v => v.slug === 'analytics');
+  assert.ok(view.launcher && view.cards, 'the repo copy has neither; the DeepSteve-wide one brings both');
+  assert.ok(mod.isMember('filed', view));
+  assert.ok(!mod.isMember('loose', view), 'opt-in: a name alone does not put a tab in a rule-less view');
+  assert.ok(!mod.isMember('nope', view));
+});
 
 test('every contexts / project-mods handler in app.js refreshes the views too', () => {
   const src = fs.readFileSync(path.join(__dirname, '../../public/js/app.js'), 'utf8');

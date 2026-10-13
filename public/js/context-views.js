@@ -1813,16 +1813,17 @@ export function resolveContextRepo() {
  * the new tab — either opening it in the active context or prompting for a dir —
  * so quickNewSession must NOT fall through. Returns false only when the default
  * inherit-the-active-tab's-cwd flow is safe (see resolveContextRepo above).
+ * `opts` rides along to the session it opens (a view launcher's filing).
  */
-export function requestNewTabInContext() {
+export function requestNewTabInContext(opts) {
   const d = resolveContextRepo();
   if (d.kind === 'inherit') return false;
   if (d.kind === 'ask') {
-    cb.promptNewTabDir?.();              // empty context, no inferable repo → directory picker (#581)
+    cb.promptNewTabDir?.(opts);          // empty context, no inferable repo → directory picker (#581)
     return true;
   }
-  if (d.dirs.length === 1) cb.createSessionInDir?.(d.dirs[0]);
-  else chooseDir(d.dirs).then(dir => { if (dir) cb.createSessionInDir?.(dir); });  // multiple → chooser (#522)
+  if (d.dirs.length === 1) cb.createSessionInDir?.(d.dirs[0], opts);
+  else chooseDir(d.dirs).then(dir => { if (dir) cb.createSessionInDir?.(dir, opts); });  // multiple → chooser (#522)
   return true;                           // handled — never let quickNewSession inherit a foreign cwd
 }
 
