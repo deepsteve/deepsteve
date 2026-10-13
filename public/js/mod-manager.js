@@ -1517,7 +1517,7 @@ function _modToggle(mod, row, marketplaceOverlay) {
 function _createModRow(mod, marketplaceOverlay, { expandedIds, mcpReady = true } = {}) {
   const isSkill = mod.type === 'skill';
   const isInstalled = !isSkill && allMods.some(m => m.id === mod.id);
-  const hasSettings = !isSkill && mod.settings && mod.settings.length > 0;
+  const hasSettings = !isSkill && ((mod.settings && mod.settings.length > 0) || !!mod.settingsModule);
 
   const row = document.createElement('div');
   row.className = 'mod-row' + (mod.compatible === false ? ' mod-row-incompatible' : '');
@@ -1825,6 +1825,7 @@ function _buildModDetail(mod, row, marketplaceOverlay, mcpReady) {
  * Show a settings modal for a mod.
  */
 function _showSettingsModal(mod) {
+  if (mod.settingsModule) return _showModuleSettingsModal(mod);
   const settings = _loadModSettings(mod);
 
   const overlay = document.createElement('div');
@@ -1882,6 +1883,50 @@ function _showSettingsModal(mod) {
   const close = () => overlay.remove();
   modal.querySelector('[data-close]').addEventListener('click', close);
   overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+}
+
+/**
+ * A mod whose settings are more than checkboxes and numbers ships its own page:
+ * `"settingsModule": "settings.js"` in mod.json names an ES module in the mod's folder that
+ * exports `render(container)`. It saves its own values as they change — usually server settings,
+ * which is why a mod with a daemon half needs this — so the modal has only a Close button, like
+ * the generic one above. The module is the mod's own code, with the authority the mod's page
+ * already has; validate-mods.js keeps the name a plain file in the mod's folder.
+ */
+function _showModuleSettingsModal(mod) {
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  const modal = document.createElement('div');
+  modal.className = 'modal';
+  modal.style.cssText = 'width: 560px; max-width: 92vw; max-height: 85vh; overflow-y: auto;';
+  const h = document.createElement('h2');
+  h.textContent = `${mod.name} Settings`;
+  const body = document.createElement('div');
+  body.textContent = 'Loading…';
+  const btns = document.createElement('div');
+  btns.className = 'modal-buttons';
+  const closeBtn = document.createElement('button');
+  closeBtn.className = 'btn-secondary';
+  closeBtn.textContent = 'Close';
+  btns.appendChild(closeBtn);
+  modal.append(h, body, btns);
+  overlay.appendChild(modal);
+  document.body.appendChild(overlay);
+
+  const close = () => overlay.remove();
+  closeBtn.addEventListener('click', close);
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+
+  if (!/^[\w-]+(\.[\w-]+)*\.js$/.test(mod.settingsModule)) {
+    body.textContent = 'This mod names an invalid settings page.';
+    return;
+  }
+  import(`/mods/${encodeURIComponent(mod.id)}/${mod.settingsModule}?v=${encodeURIComponent(mod.version || '')}`)
+    .then((m) => {
+      if (typeof m.render !== 'function') throw new Error('its settings page exports no render()');
+      return m.render(body);
+    })
+    .catch((e) => { body.textContent = `Couldn’t load the settings: ${e.message}`; });
 }
 
 /**

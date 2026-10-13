@@ -455,6 +455,7 @@ function renderRail() {
   for (const ctx of visibleContexts()) {
     list.appendChild(makeRow(ctx.id, ctx.name, projectRowSelected(ctx.id), ctx));
     appendProjectModRows(list, ctx);
+    appendProjectAgentRows(list, ctx);
   }
   rail.appendChild(list);
 
@@ -528,6 +529,45 @@ function appendProjectModRows(list, ctx) {
   if (!ctx) return;
   if (ctx.id !== activeContextId && !alwaysShowsMods(ctx)) return;
   appendRailRows(list, railModsFor(ctx), ctx.id);
+}
+
+/**
+ * The project's longstanding agents (GitHub Webhooks' Work), beneath its mods. Every project
+ * that has one shows it, active or not: there are few of them, and an agent the project runs on
+ * its own is exactly the thing you want to find without hunting for its project first.
+ */
+function appendProjectAgentRows(list, ctx) {
+  const agents = ctx && cb.getProjectAgents ? cb.getProjectAgents(ctx.id) : [];
+  if (!agents.length) return;
+  const head = document.createElement('div');
+  head.className = 'project-agents-head';
+  head.textContent = 'Longstanding agents';
+  list.appendChild(head);
+  for (const a of agents) {
+    const row = document.createElement('div');
+    row.className = 'context-row project-mod-row project-agent-row' + (a.waiting ? ' waiting' : '');
+    row.dataset.sessionId = a.id;
+    row.title = `${a.name} — runs for this project while its Work is on`;
+    const iconEl = document.createElement('span');
+    iconEl.className = 'context-row-icon';
+    iconEl.setAttribute('aria-hidden', 'true');
+    iconEl.textContent = '◆';
+    row.appendChild(iconEl);
+    const label = document.createElement('span');
+    label.className = 'context-row-label';
+    label.textContent = a.name;
+    row.appendChild(label);
+    row.onclick = () => {
+      if (ctx.id !== activeContextId) applyContext(ctx.id);
+      cb.jumpToTab?.(a.id);
+    };
+    list.appendChild(row);
+  }
+}
+
+/** Redraw the rail when the set of project agents changed (app.js decides that). */
+export function refreshProjectAgentRows() {
+  renderRail();
 }
 
 /** Default ON — an absent flag (every context written before #647) means "show them". */

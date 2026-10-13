@@ -71,6 +71,15 @@ function validateManifest(mod, manifest) {
     }
   }
 
+  // A mod's own settings page, opened by the gear in the Mods modal. A plain file in the mod's
+  // folder — the browser imports it from /mods/<id>/, so a path could reach another mod's code.
+  if ('settingsModule' in manifest) {
+    const f = manifest.settingsModule;
+    if (typeof f !== 'string' || !/^[\w-]+(\.[\w-]+)*\.js$/.test(f)) {
+      errors.push(`[${mod}] "settingsModule" must be a .js file name in the mod's folder (e.g. "settings.js")`);
+    }
+  }
+
   return errors;
 }
 
@@ -101,6 +110,11 @@ function main() {
 
     for (const msg of validateManifest(mod, manifest)) {
       console.error(msg);
+      errors++;
+    }
+    // The one rule that needs the disk, so it lives here rather than in the pure validator.
+    if (typeof manifest.settingsModule === 'string' && !fs.existsSync(path.join(modsDir, mod, manifest.settingsModule))) {
+      console.error(`[${mod}] "settingsModule" names ${manifest.settingsModule}, which does not exist`);
       errors++;
     }
   }

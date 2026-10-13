@@ -144,7 +144,18 @@ test('normalizeView defaults, and the file shape leaves empty icon / zero order 
   assert.strictEqual(normalizeView({}, REPO_A, 'all'), null);
   assert.strictEqual(normalizeView([], REPO_A, 'ok'), null);
   assert.strictEqual(normalizeView({ order: 9e9 }, REPO_A, 'ok').order, 1e6, 'order clamped');
-  assert.deepStrictEqual(Object.keys(serializeView(v)).sort(), ['additive', 'footer', 'global', 'icon', 'id', 'match', 'name', 'order', 'project', 'slug'], 'no root/file on the wire');
+  assert.deepStrictEqual(Object.keys(serializeView(v)).sort(), ['additive', 'footer', 'global', 'icon', 'id', 'match', 'name', 'order', 'project', 'slot', 'slug'], 'no root/file on the wire');
+});
+
+test('a slot is kept only on an additive view, and only for a known role', () => {
+  const orch = normalizeView({ name: 'Orchestrator', additive: true, slot: 'orchestrator' }, REPO_A, 'orch');
+  assert.strictEqual(orch.slot, 'orchestrator');
+  assert.strictEqual(serializeView(orch).slot, 'orchestrator');
+  assert.deepStrictEqual(viewManifestOf(orch), { name: 'Orchestrator', match: [], additive: true, slot: 'orchestrator' }, 'written back as read');
+  assert.strictEqual(normalizeView({ slot: 'orchestrator' }, REPO_A, 'orch').slot, null, 'a view you look at has no slot');
+  assert.strictEqual(normalizeView({ additive: true, slot: 'janitor' }, REPO_A, 'orch').slot, null, 'unknown role');
+  assert.strictEqual(normalizeView({ additive: true }, REPO_A, 'orch').slot, null);
+  assert.strictEqual(serializeView(normalizeView({}, REPO_A, 'plain')).slot, null);
 });
 
 test('cleanSpawnView: undefined = inherit, "all" = none, otherwise a slug or an error', () => {
@@ -305,4 +316,64 @@ test('PUT renames (never the slug) and DELETE removes, by id', async () => {
   assert.strictEqual(del.body.deleted, true);
   assert.ok(!fs.existsSync(fileOf(REPO_A, 'launch')));
   assert.strictEqual(app.call('DELETE /api/project-views/:id', { params: { id: made.id } }).statusCode, 404);
+});
+
+// ------------------------------------------------------------------- the slot
+
+test('POST /api/project-views/slot starts one holder per project, in its first folder, as an ordinary tab', () => {
+  const spawned = [];
+  ctx.spawnAgentSession = (args) => {
+    spawned.push(args);
+    const id = `orch-${spawned.length}`;
+    shells.set(id, { cwd: args.cwd, slot: args.slot, windowId: args.windowId });
+    return { id, name: args.name, cwd: args.cwd };
+  };
+  try {
+    const res = app.call('POST /api/project-views/slot', { body: { contextId: 'ctx-2', slot: 'orchestrator', windowId: 'win-a' } });
+    assert.strictEqual(res.statusCode, 201);
+    assert.deepStrictEqual(res.body, { id: 'orch-1', existing: false });
+    assert.strictEqual(spawned.length, 1);
+    const [args] = spawned;
+    assert.strictEqual(args.cwd, REPO_B, 'the project\'s first folder');
+    assert.strictEqual(args.agentType, 'claude');
+    assert.strictEqual(args.name, 'Orchestrator');
+    assert.strictEqual(args.windowId, 'win-a', 'opens in the window that asked');
+    assert.deepStrictEqual(args.slot, { contextId: 'ctx-2', role: 'orchestrator' });
+    assert.ok(!args.projectAgent && !args.prompt, 'no project-agent marker, no prompt: it is just a tab');
+
+    // Asked again — from another window too — the live holder answers; nothing is doubled.
+    const again = app.call('POST /api/project-views/slot', { body: { contextId: 'ctx-2', slot: 'orchestrator', windowId: 'win-b' } });
+    assert.deepStrictEqual(again.body, { id: 'orch-1', existing: true, windowId: 'win-a' });
+    assert.strictEqual(spawned.length, 1);
+
+    // Another project gets its own; a codex default is honoured, any other agent falls back to claude.
+    settings.defaultAgent = 'codex';
+    app.call('POST /api/project-views/slot', { body: { contextId: 'ctx-1', slot: 'orchestrator' } });
+    assert.strictEqual(spawned[1].agentType, 'codex');
+    assert.strictEqual(spawned[1].cwd, REPO_A);
+    assert.strictEqual(spawned[1].windowId, null);
+    shells.delete('orch-2');
+    settings.defaultAgent = 'opencode';
+    app.call('POST /api/project-views/slot', { body: { contextId: 'ctx-1', slot: 'orchestrator' } });
+    assert.strictEqual(spawned[2].agentType, 'claude');
+
+    assert.strictEqual(app.call('POST /api/project-views/slot', { body: { contextId: 'ctx-1', slot: 'janitor' } }).statusCode, 400);
+    assert.strictEqual(app.call('POST /api/project-views/slot', { body: { contextId: 'nope', slot: 'orchestrator' } }).statusCode, 404);
+    assert.strictEqual(spawned.length, 3, 'a refused request starts nothing');
+  } finally {
+    for (const id of [...shells.keys()]) if (id.startsWith('orch-')) shells.delete(id);
+    delete ctx.spawnAgentSession;
+    delete settings.defaultAgent;
+  }
+});
+
+test('POST /api/project-views/slot passes a refused spawn through as a 400', () => {
+  ctx.spawnAgentSession = () => ({ error: { code: 'cwd-missing', message: 'gone' } });
+  try {
+    const res = app.call('POST /api/project-views/slot', { body: { contextId: 'ctx-1', slot: 'orchestrator' } });
+    assert.strictEqual(res.statusCode, 400);
+    assert.strictEqual(res.body.error, 'gone');
+  } finally {
+    delete ctx.spawnAgentSession;
+  }
 });

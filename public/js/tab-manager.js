@@ -746,6 +746,20 @@ export const TabManager = {
   },
 
   /**
+   * Move a tab to the head of the strip — the tab slot's holder (tab-slot.js). Returns true when
+   * it moved, so the caller persists the new order only then. Never mid-drag: the drag owns the
+   * order until it drops, and the drop's reorder brings the holder back here.
+   */
+  moveToFront(sessionId) {
+    const list = document.getElementById('tabs-list');
+    const tab = document.getElementById('tab-' + sessionId);
+    if (dragState || !list || !tab || tab.parentNode !== list || list.firstElementChild === tab) return false;
+    list.insertBefore(tab, list.firstElementChild);
+    updateTabArrows();
+    return true;
+  },
+
+  /**
    * Remove a tab from the tab bar
    */
   removeTab(sessionId) {

@@ -312,6 +312,27 @@ test('a merged issue branch closes its issue, with the target named in the comme
   assert.strictEqual(close.argv, 'issue close 688 --comment Merged into main.');
 });
 
+test('the close comment carries the merging session\'s marker, and the issue-closed hook hears it', async () => {
+  // GitHub Webhooks watches the issue after the merge; without the marker it would hand the
+  // session its own "Merged into main." back as new context.
+  const issueHooks = require('../../issue-hooks');
+  issueHooks._reset();
+  const heard = [];
+  issueHooks.registerIssueClosed('test', args => { heard.push(args); });
+  const ghCalls = [];
+  const git = gitFor({ table: MERGE_OK });
+  const gh = scriptedGh([['issue view', { stdout: 'T\n' }], ['issue close', { stdout: '' }]], ghCalls);
+  try {
+    const r = await mergeSession({ git, gh, cwd: WT, repoRoot: ROOT, isWorktree: true, sessionId: 'abc12345' });
+    assert.strictEqual(r.status, 'merged');
+    const close = ghCalls.find(c => c.argv.startsWith('issue close'));
+    assert.strictEqual(close.argv, 'issue close 688 --comment Merged into main.\n\n<!-- deepsteve:session=abc12345 -->');
+    assert.deepStrictEqual(heard.map(h => [h.id, h.number]), [['abc12345', 688]]);
+  } finally {
+    issueHooks._reset();
+  }
+});
+
 test('a gh that cannot close the issue does not downgrade a successful merge', async () => {
   const git = gitFor({ table: MERGE_OK });
   const gh = scriptedGh([['issue view', { stdout: 'T\n' }]]);   // close falls through to the error

@@ -650,9 +650,19 @@ function refresh(reason) {
 //
 // `additive: true` makes a view one you switch ON rather than one you look AT: it never
 // filters the strip and is never the selected view, but stacks with whichever one is — a
-// push button in the views bar, any number on at once. What it adds is its footer.
+// push button in the views bar, any number on at once. What it adds is its footer, its
+// `slot`, or both.
+//
+// A `slot` reserves a place at the head of the project's tab strip for one tab with a role —
+// `orchestrator` is the only role so far. Only an additive view carries one, because a slot is
+// something switched on, not a way of looking at the strip. The tab that holds it is an ordinary
+// agent tab marked `slot: { contextId, role }` on its shell entry; POST /api/project-views/slot
+// starts it, and keeps it to one per project.
 
 const VIEW_SLUG_RE = /^[a-z0-9][a-z0-9-]{0,39}$/;
+const VIEW_SLOTS = ['orchestrator'];
+// The holder's tab name when it starts. The user can rename it; the role stays on the entry.
+const SLOT_TAB_NAMES = { orchestrator: 'Orchestrator' };
 const RESERVED_VIEW = 'all';   // the built-in default, never a file
 const VIEW_KINDS = ['agent', 'terminal', 'display-tab', 'project-mod', 'mod-tab'];
 const VIEW_FILE_EXT = '.json';
@@ -781,6 +791,9 @@ function cleanFooter(raw) {
   return raw.filter((f, i) => FOOTER_FIELDS.includes(f) && raw.indexOf(f) === i);
 }
 
+/** A view's `slot`: a known role, or null. */
+const cleanSlot = (raw) => (VIEW_SLOTS.includes(raw) ? raw : null);
+
 /**
  * One view file → the in-memory row, or null if it is not a view we can make sense of.
  * `global` reads a DeepSteve-wide view: no repo (`root` and `project` are null), its file in
@@ -804,6 +817,7 @@ function normalizeView(raw, root, slug, { global = false } = {}) {
     match: cleanMatch(raw.match, { global }),
     footer: cleanFooter(raw.footer),
     additive: raw.additive === true,
+    slot: raw.additive === true ? cleanSlot(raw.slot) : null,
   };
 }
 
@@ -859,6 +873,7 @@ function viewManifestOf(v) {
   out.match = v.match;
   if (v.footer && v.footer.length) out.footer = v.footer;
   if (v.additive) out.additive = true;
+  if (v.slot) out.slot = v.slot;
   return out;
 }
 
@@ -886,7 +901,7 @@ function removeView(v) {
 // DeepSteve-wide view, which the client puts in every project.
 const serializeView = (v) => ({
   id: v.id, slug: v.slug, project: v.project, global: !!v.global, name: v.name, icon: v.icon, order: v.order,
-  match: v.match, footer: v.footer || [], additive: !!v.additive,
+  match: v.match, footer: v.footer || [], additive: !!v.additive, slot: v.slot || null,
 });
 
 // A repo view's path is relative to its repo; a DeepSteve-wide view's is absolute.
@@ -1543,6 +1558,39 @@ function registerRoutes(app, context) {
     }
   });
 
+  // Start the tab that holds a project's slot — the empty slot's "Open orchestrator". One per
+  // project and role, whichever window asks: a live holder is answered with its id (and the
+  // window it is in) rather than doubled. A new one is an ordinary agent tab in the project's
+  // first folder, opened in the asking window through the same open-session path an agent's
+  // tab takes. claude or codex only — the agents with deepsteve's MCP tools, which is what
+  // the rules an orchestrator is given later will be written against.
+  app.post('/api/project-views/slot', (req, res) => {
+    const { contextId, slot, windowId } = req.body || {};
+    const role = cleanSlot(slot);
+    if (!role) return res.status(400).json({ error: `slot must be one of: ${VIEW_SLOTS.join(', ')}` });
+    const project = projectScope.getContexts(ctx).find(c => c && c.id === contextId);
+    if (!project) return res.status(404).json({ error: 'Project not found' });
+    for (const [id, e] of ctx.shells) {
+      if (e && e.slot && e.slot.contextId === project.id && e.slot.role === role) {
+        return res.json({ id, existing: true, windowId: e.windowId || null });
+      }
+    }
+    const cwd = (Array.isArray(project.dirs) ? project.dirs : []).find(Boolean);
+    if (!cwd) return res.status(400).json({ error: 'This project has no folder to start an agent in' });
+    if (typeof ctx.spawnAgentSession !== 'function') return res.status(503).json({ error: 'Sessions cannot be started yet' });
+    const requested = ctx.settings && ctx.settings.defaultAgent;
+    const made = ctx.spawnAgentSession({
+      cwd,
+      agentType: requested === 'codex' ? 'codex' : 'claude',
+      name: SLOT_TAB_NAMES[role],
+      windowId: typeof windowId === 'string' && windowId.length <= 64 ? windowId : null,
+      slot: { contextId: project.id, role },
+      source: `${role}-slot`,
+    });
+    if (!made || made.error) return res.status(400).json({ error: (made && made.error && made.error.message) || 'Could not start the session' });
+    res.status(201).json({ id: made.id, existing: false });
+  });
+
   // Rename / re-icon from the view button's menu. Rules stay agent- or file-edited.
   app.put('/api/project-views/:id', (req, res) => {
     const v = findViewById(req.params.id);
@@ -1594,6 +1642,6 @@ module.exports = {
   FEATURE_OFF_MSG,
   // Project views (#726). cleanSpawnView is not test-only: the spawn tools validate `view` with it.
   cleanSpawnView, SPAWN_VIEW_DESCRIPTION, cleanViewSlug, slugifyView, cleanMatch, cleanViewPath, normalizeView, viewId,
-  serializeView, serializeViewForAgent, viewManifestOf, cleanFooter, setFooterSource,
-  VIEW_KINDS, VIEW_SLUG_RE, RESERVED_VIEW,
+  serializeView, serializeViewForAgent, viewManifestOf, cleanFooter, cleanSlot, setFooterSource,
+  VIEW_KINDS, VIEW_SLUG_RE, RESERVED_VIEW, VIEW_SLOTS,
 };

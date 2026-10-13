@@ -530,6 +530,57 @@ test('a tab an agent opens inherits its opener\'s views, but not the additive on
   assert.deepStrictEqual(mod.spawnJoins({ view: 'github' }), { github: true }, 'naming it explicitly still files it');
 });
 
+// An additive view with a slot: the orchestrator's reserved place at the head of the strip.
+const V_ORCH = { id: 'g2', slug: 'orchestrator', project: null, global: true, name: 'Orchestrator', icon: '', order: 0, match: [], footer: [], additive: true, slot: 'orchestrator' };
+const ORCH_TAB = { cwd: REPO_A, name: 'Orchestrator', kind: 'agent', slot: { contextId: CTX_A.id, role: 'orchestrator' } };
+
+test('a slot view gives its project a slot while it is on, and nothing to select', async () => {
+  const { mod } = await setup({ views: [V_ORCH, V_MKT_A] });
+  assert.strictEqual(mod.slotFor(CTX_A), 'orchestrator', 'on by default, like any additive view');
+  assert.strictEqual(mod.slotFor(CTX_AS), 'orchestrator', 'a DeepSteve-wide one is in every project');
+  assert.deepStrictEqual(mod.selectableViews(CTX_A).map(v => v.slug), ['marketing']);
+  mod.setAdditive('orchestrator', false);
+  assert.strictEqual(mod.slotFor(CTX_A), null, 'off: no slot');
+  assert.strictEqual(mod.slotFor(null), null);
+
+  const { mod: plain } = await setup({ views: [V_GITHUB_ADD] });
+  assert.strictEqual(plain.slotFor(CTX_A), null, 'an additive view without a slot adds none');
+
+  const { mod: held, state } = await setup({ views: [V_ORCH], suspended: true });
+  assert.strictEqual(held.slotFor(CTX_A), null, 'Decision Tab mode sets it aside');
+  state.suspended = false;
+  assert.strictEqual(held.slotFor(CTX_A), 'orchestrator');
+});
+
+test('the slot\'s holder is in every view while the slot is on, and only in its own project', async () => {
+  const { mod, state } = await setup({
+    views: [V_ORCH, V_MKT_A],
+    tabs: { orch: { ...ORCH_TAB }, other: { cwd: REPO_A, name: 'zsh', kind: 'terminal' } },
+  });
+  mod.selectView('marketing');
+  assert.ok(mod.tabInView('orch', CTX_A), 'Marketing is selected, and the orchestrator stays');
+  assert.ok(!mod.tabInView('other', CTX_A), 'while the view still filters everything else');
+  assert.strictEqual(mod.revealTabView('orch', CTX_A), null, 'focusing it moves no view');
+  assert.strictEqual(mod.selectedSlug(CTX_A), 'marketing');
+  assert.ok(mod.holdsSlot(state.tabs.orch, CTX_A));
+  assert.ok(!mod.holdsSlot(state.tabs.orch, CTX_AS), 'the marker names its project');
+  assert.ok(!mod.holdsSlot(state.tabs.other, CTX_A));
+
+  const before = state.filterCalls;
+  mod.setAdditive('orchestrator', false);
+  assert.strictEqual(state.filterCalls, before + 1, 'switching a slot asks for a filter pass, unlike a footer');
+  assert.ok(!mod.tabInView('orch', CTX_A), 'off: it is an ordinary tab, filtered like one');
+  assert.ok(!mod.holdsSlot(state.tabs.orch, CTX_A));
+});
+
+test('a repo view and a DeepSteve-wide one of the same slug merge their slot', async () => {
+  const repoOrch = { id: 'v10', slug: 'orchestrator', project: REPO_A, name: 'Lead', icon: '', order: -1, match: [], footer: [], additive: true, slot: null };
+  const { mod } = await setup({ views: [repoOrch, V_ORCH] });
+  const v = mod.viewsForContext(CTX_A).find(x => x.slug === 'orchestrator');
+  assert.strictEqual(v.name, 'Lead');
+  assert.strictEqual(v.slot, 'orchestrator', 'the first one with a slot gives it');
+});
+
 // --------------------------------------------------------------- source guards
 
 test('every contexts / project-mods handler in app.js refreshes the views too', () => {

@@ -39,6 +39,8 @@ const { landWorktree } = require('./land-origin');
 // The same module instance mcp-server.js loaded, so refresh() reaches the live daemon's
 // context. With no context it does nothing, so this file's tests still need no daemon.
 const projectMods = require('../project-mods/tools.js');
+// The issue-session seams optional mods fill (GitHub Webhooks). Empty, they do nothing.
+const issueHooks = require('../../issue-hooks');
 
 // A branch this daemon opened for a GitHub issue. Matched on the BRANCH rather than on
 // `entry.worktree` because the branch is what git reports and what skills/merge.md has
@@ -86,13 +88,16 @@ async function deriveCommitSubject({ gh, cwd, branch, target, issueNumber }) {
  * @param {string=} target      branch to merge into; defaults to whatever repoRoot has checked out
  * @param {string=} subject     overrides the derived commit subject
  * @param {string=} body        second `-m` on the commit
+ * @param {string=} sessionId   the session being merged. Its marker ends the issue-close
+ *                              comment, so a watcher never hands the session its own
+ *                              comment back, and the issue-closed hook is told about it
  *
  * @returns {Promise<object>} `status` is a mergeWorktree status, or one of the three this
  *   routine adds ahead of it: `commit-failed`, `pushed`, `push-failed`. Every result also
  *   carries `committed` (did we write a commit), `subject` (what it said, or would have)
  *   and `issue` (`null`, or `{ number, closed, error? }`).
  */
-async function mergeSession({ git, gh, gitNet, cwd, repoRoot, isWorktree, target, subject, body }) {
+async function mergeSession({ git, gh, gitNet, cwd, repoRoot, isWorktree, target, subject, body, sessionId }) {
   const head = git(['branch', '--show-current'], cwd);
   if (!head.ok) {
     return { status: 'error', message: `Could not read the current branch in ${cwd}: ${head.stderr.trim()}` };
@@ -195,11 +200,14 @@ async function mergeSession({ git, gh, gitNet, cwd, repoRoot, isWorktree, target
   // target untouched, so the work the issue describes is not in it.
   let issue = issueNumber == null ? null : { number: issueNumber, closed: false };
   if (result.status === 'merged' && issueNumber != null) {
-    const closed = await gh(
-      ['issue', 'close', String(issueNumber), '--comment', `Merged into ${result.target}.`], cwd);
+    const comment = `Merged into ${result.target}.` + (sessionId ? `\n\n${issueHooks.commentMarker(sessionId)}` : '');
+    const closed = await gh(['issue', 'close', String(issueNumber), '--comment', comment], cwd);
     issue = closed && !closed.error
       ? { number: issueNumber, closed: true }
       : { number: issueNumber, closed: false, error: (closed && closed.error) || 'gh-failed' };
+    // Every merge path comes through here, human and agent alike, so this is the one place
+    // a watcher can learn the issue it watches was closed by its own session's merge.
+    if (issue.closed && sessionId) issueHooks.notifyIssueClosed({ id: sessionId, number: issueNumber, cwd, repoRoot });
   }
 
   return { ...result, committed, subject: commitSubject, issue };

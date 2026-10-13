@@ -1,0 +1,8 @@
+{
+  "name": "GitHub Webhooks",
+  "version": "0.1.0",
+  "minDeepsteveVersion": "0.26.0",
+  "description": "GitHub issue activity reaches the agents working on it. An issue session hears about new collaborator comments and is held before merging until it has; a project can turn on Work, so a longstanding agent picks up issues as they are filed. Reads GitHub rarely, with conditional requests — no webhook server, nothing hosted.",
+  "enabledByDefault": true,
+  "settingsModule": "settings.js"
+}

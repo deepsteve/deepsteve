@@ -30,6 +30,10 @@
  * button in the bar rather than a folder tab, any number can be on, and what it adds is its
  * footer. On is the default; the ones switched off are a browser-wide preference.
  *
+ * An additive view may also carry a `slot` (only `orchestrator` so far): a reserved place at
+ * the head of the strip for the one tab that holds that role in the project. tab-slot.js draws
+ * it; this module answers slotFor() and keeps the holder in every view while the slot is on.
+ *
  * Two pieces of chrome, both host-owned:
  *   - #views-toggle: the collapsed form (the default). The first child of #tabs-list-wrapper,
  *     so it sits immediately before the first tab — above it in vertical layout, left of it
@@ -60,6 +64,10 @@ const SELECT_KEY = nsKey('deepsteve-project-view');
 // Expanded or collapsed. localStorage, like the rail's width: it is "how it looks", a
 // browser-wide preference. Collapsed is the default.
 const EXPANDED_KEY = nsKey('deepsteve-project-views-bar');
+// Project agents (the long-lived agents a project owns — GitHub Webhooks' Work) hidden from
+// the strip, per project. localStorage: "how it looks", like the bar's expanded state. A hidden
+// agent's tab still holds its socket, so it stays reachable; this only filters the strip.
+const AGENTS_HIDDEN_KEY = nsKey('deepsteve-project-agents-hidden');
 
 // Additive views switched OFF, by slug. localStorage, like the bar's expanded state: "how it
 // looks", the same in every window and every project. Absent means on.
@@ -67,6 +75,7 @@ const ADDITIVE_OFF_KEY = nsKey('deepsteve-project-views-off');
 
 let selection = loadSelection();
 let expanded = loadExpanded();
+let agentsHidden = loadAgentsHidden();
 let additiveOff = loadAdditiveOff();
 
 function loadSelection() {
@@ -87,15 +96,34 @@ function loadAdditiveOff() {
 export const isAdditiveOn = (slug) => !additiveOff[slug];
 
 /**
- * Switch an additive view on or off. It filters nothing, so there is no filter pass: the bar
- * redraws, and app.js redraws the footer.
+ * Switch an additive view on or off. A footer filters nothing, so there is no filter pass: the
+ * bar redraws, and app.js redraws the footer. A slot is the exception — its holder is kept in
+ * every view only while the slot is on — so a view with one asks for a pass.
  */
 export function setAdditive(slug, on) {
   if (on) delete additiveOff[slug];
   else additiveOff[slug] = true;
   try { localStorage.setItem(ADDITIVE_OFF_KEY, JSON.stringify(additiveOff)); } catch { /* private mode */ }
+  if (views.some(v => v.slug === slug && v.slot)) cb.applyFilter?.();
   render();
   cb.onViewsChanged?.();
+}
+
+function loadAgentsHidden() {
+  try { return JSON.parse(localStorage.getItem(AGENTS_HIDDEN_KEY)) || {}; } catch { return {}; }
+}
+
+/** Is the project-agent kind filtered out of `ctx`'s strip? */
+export const projectAgentsHidden = (ctx) => !!(ctx && agentsHidden[ctx.id]);
+
+/** Show or hide `ctx`'s project agents. One filter pass, which ends in render(). */
+export function setProjectAgentsHidden(ctx, hidden) {
+  if (!ctx) return;
+  if (hidden) agentsHidden[ctx.id] = true;
+  else delete agentsHidden[ctx.id];
+  try { localStorage.setItem(AGENTS_HIDDEN_KEY, JSON.stringify(agentsHidden)); } catch { /* private mode */ }
+  cb.applyFilter?.();
+  render();
 }
 
 export const isExpanded = () => expanded;
@@ -144,8 +172,8 @@ function globalViews() {
 
 /**
  * Same-slug views → one. `ids` holds only the repo copies: those are what Rename and Delete
- * write, and a DeepSteve-wide view is edited as its file. The first footer by order wins; name,
- * icon and `additive` come from the first by order.
+ * write, and a DeepSteve-wide view is edited as its file. The first footer and the first slot by
+ * order win; name, icon and `additive` come from the first by order.
  */
 function mergeViews(list) {
   const bySlug = new Map();
@@ -158,8 +186,9 @@ function mergeViews(list) {
       cur.rules.push(...rules);
       cur.global = cur.global || !!v.global;
       if (!cur.footer.length) cur.footer = footer;
+      if (!cur.slot) cur.slot = v.slot || null;
     } else {
-      bySlug.set(v.slug, { slug: v.slug, name: v.name, icon: v.icon || '', ids: v.global ? [] : [v.id], rules, global: !!v.global, footer, additive: !!v.additive });
+      bySlug.set(v.slug, { slug: v.slug, name: v.name, icon: v.icon || '', ids: v.global ? [] : [v.id], rules, global: !!v.global, footer, additive: !!v.additive, slot: v.slot || null });
     }
   }
   return [...bySlug.values()];
@@ -167,6 +196,20 @@ function mergeViews(list) {
 
 /** The views `ctx` can be looking at: all but the additive ones, which only stack. */
 export const selectableViews = (ctx) => viewsForContext(ctx).filter(v => !v.additive);
+
+/**
+ * The slot `ctx` shows at the head of its strip — the role of the first additive view that has
+ * one and is switched on — or null. Nothing while suspended or before the views have loaded.
+ */
+export function slotFor(ctx) {
+  if (!ctx || !loaded || suspended()) return null;
+  const v = viewsForContext(ctx).find(x => x.additive && x.slot && isAdditiveOn(x.slug));
+  return v ? v.slot : null;
+}
+
+/** Does this tab hold `ctx`'s slot right now? Its marker names the project and the role. */
+export const holdsSlot = (info, ctx) =>
+  !!(info && info.slot && ctx && info.slot.contextId === ctx.id && info.slot.role === slotFor(ctx));
 
 /** The slug a window is looking at in `ctx`: its stored choice if that view still exists, else All. */
 export function selectedSlug(ctx) {
@@ -240,9 +283,12 @@ export function memberOf(info, view) {
  */
 export function tabInView(id, ctx) {
   if (!ctx || suspended()) return true;
+  const info = cb.getTabInfo?.(id);
+  if (info && info.projectAgent && projectAgentsHidden(ctx)) return false;
+  // The slot's holder has its place in every view, like the slot itself.
+  if (holdsSlot(info, ctx)) return true;
   const slug = selectedSlug(ctx);
   if (slug === ALL) return true;
-  const info = cb.getTabInfo?.(id);
   if (!info) return true;
   const view = selectableViews(ctx).find(v => v.slug === slug);
   return view ? memberOf(info, view) : true;
@@ -282,13 +328,21 @@ export function viewKey(ctx) {
  */
 export function revealTabView(id, ctx) {
   if (!ctx || suspended()) return null;
-  const slug = selectedSlug(ctx);
-  if (slug === ALL) return null;
   const info = cb.getTabInfo?.(id);
-  if (!info) return null;
+  // A hidden project agent you were just sent to comes back with the rest of them.
+  let shown = null;
+  if (info && info.projectAgent && projectAgentsHidden(ctx)) {
+    delete agentsHidden[ctx.id];
+    try { localStorage.setItem(AGENTS_HIDDEN_KEY, JSON.stringify(agentsHidden)); } catch { /* private mode */ }
+    render();
+    shown = 'project agents shown';
+  }
+  const slug = selectedSlug(ctx);
+  if (slug === ALL) return shown;
+  if (!info || holdsSlot(info, ctx)) return shown;
   const list = selectableViews(ctx);
   const current = list.find(v => v.slug === slug);
-  if (current && memberOf(info, current)) return null;
+  if (current && memberOf(info, current)) return shown;
   const next = list.find(v => memberOf(info, v));
   setSelection(ctx, next ? next.slug : ALL);
   render();
@@ -557,7 +611,10 @@ export function render() {
   const list = show ? viewsForContext(ctx) : [];
   const slug = show ? selectedSlug(ctx) : ALL;
   const open = show && expanded;
-  const sig = JSON.stringify([show, ctx?.id, slug, open,
+  // The project-agents chip appears only for a project that has one (GitHub Webhooks' Work).
+  const agentCount = show ? (cb.countProjectAgents?.(ctx) || 0) : 0;
+  const agentsOff = projectAgentsHidden(ctx);
+  const sig = JSON.stringify([show, ctx?.id, slug, open, agentCount, agentsOff,
     list.map(v => [v.slug, v.name, v.icon, v.additive, v.additive && isAdditiveOn(v.slug)])]);
   if (sig === lastSig) return;
   lastSig = sig;
@@ -596,10 +653,22 @@ export function render() {
   const add = document.createElement('button');
   add.className = 'view-tab view-tab-add';
   add.tabIndex = -1;
-  add.title = 'New view — tabs are filed into it from their right-click menu';
+  add.title = 'Make a named view that shows only the tabs you pick for it';
   add.textContent = '+ New view';
   add.addEventListener('click', () => createView());
   bar.appendChild(add);
+  if (agentCount > 0) {
+    const chip = document.createElement('button');
+    chip.className = 'view-tab view-tab-agents' + (agentsOff ? '' : ' active');
+    chip.tabIndex = -1;
+    chip.setAttribute('aria-pressed', agentsOff ? 'false' : 'true');
+    chip.title = agentsOff
+      ? `Show this project's long-lived agents (${agentCount}) in the tab strip`
+      : `Hide this project's long-lived agents (${agentCount}) from the tab strip. They keep running.`;
+    chip.textContent = `${agentsOff ? '○' : '●'} Project agents`;
+    chip.addEventListener('click', () => setProjectAgentsHidden(ctx, !agentsOff));
+    bar.appendChild(chip);
+  }
 }
 
 // ---------------------------------------------------------- view button menu

@@ -11,6 +11,7 @@ const { stateDir, spawnCwdProblem } = require('../../paths');
 const projectScope = require('../../project-scope');
 const { usableWorktree } = require('../../worktree-support');
 const { splitAtMarker, capOutput, createRunLog } = require('../../terminal-run');
+const issueHooks = require('../../issue-hooks');
 
 // git via execFile with an argv array — no shell, so no quoting/injection concerns
 // and no dependence on `zsh -l` for PATH (git is /usr/bin/git, already on the
@@ -194,8 +195,18 @@ function init(context) {
     if (!cwd || !repoRoot) {
       return { ok: false, message: 'Could not resolve this session\'s working directory.' };
     }
+    // A mod's merge gate (GitHub Webhooks: new context on the issue this session has not
+    // seen) gets its say BEFORE anything is committed. A hold is not a failed merge — the
+    // target is untouched and nothing is recorded as blocked; the agent reads the context
+    // and calls again. Required here, not taken from ctx, so a partial test ctx still runs.
+    const held = await issueHooks.checkMergeGates({ id: callerId, entry: caller, via: 'mcp' }, { log });
+    if (held) {
+      log?.(`[MCP] merge held for ${callerId} by ${held.gate}`);
+      return { ok: true, payload: { status: 'held', ...held } };
+    }
     const result = await mergeSession({
       git: runGit, gh: runGh, gitNet: runGitNet, cwd, repoRoot, isWorktree: !!caller.worktree, target, subject, body,
+      sessionId: callerId,
     });
     // The outcome becomes SESSION STATE, not just a return value. An agent that is told
     // "target-dirty" has already been told to stop, so without this the one fact worth
@@ -693,7 +704,11 @@ function init(context) {
             return { content: [{ type: 'text', text: outcome.message }], isError: true };
           }
           const r = outcome.payload;
-          if (r.status === 'merged') {
+          if (r.status === 'held') {
+            // Nothing ran. The gate wrote the instruction; it says what to read and to call
+            // this tool again, which is the whole of the answer.
+            payload = { autopilot: true, ...r, next: r.next || 'read_new_context' };
+          } else if (r.status === 'merged') {
             payload = {
               autopilot: true, next: 'merged', ...r,
               instruction: `Merged into ${r.target}. `
@@ -803,6 +818,12 @@ function init(context) {
         const { cwd, repoRoot } = sessionPaths(caller);
         if (!cwd || !repoRoot) {
           return { content: [{ type: 'text', text: 'Could not resolve this session\'s working directory.' }], isError: true };
+        }
+        // The bare primitive is still an agent's merge, so the same mod gates apply.
+        const held = await issueHooks.checkMergeGates({ id: callerId, entry: caller, via: 'mcp' }, { log });
+        if (held) {
+          log?.(`[MCP] merge_worktree held for ${callerId} by ${held.gate}`);
+          return { content: [{ type: 'text', text: JSON.stringify({ status: 'held', ...held }, null, 2) }], isError: true };
         }
         const result = await landWorktree({ git: runGit, gitNet: runGitNet, worktreeCwd: cwd, repoRoot, target });
         log(`[MCP] merge_worktree: ${result.branch || '?'} -> ${result.target || '?'} = ${result.status}${describeLanding(result)}`);
@@ -1367,7 +1388,7 @@ function registerRoutes(app, context) {
       ? req.body.target.trim()
       : undefined;
     const result = await mergeSession({
-      git: runGit, gh: runGh, gitNet: runGitNet, cwd, repoRoot, isWorktree: true, target,
+      git: runGit, gh: runGh, gitNet: runGitNet, cwd, repoRoot, isWorktree: true, target, sessionId: id,
     });
     context.log(`[API] merge ${id}: ${result.branch || '?'} -> ${result.target || '?'} = ${result.status}${describeLanding(result)}`
       + `${result.committed ? ' (committed)' : ''}`

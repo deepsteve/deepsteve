@@ -46,13 +46,13 @@ test('every shipped manifest lands in exactly one section', () => {
 
   // Exact membership where it is small enough to be worth naming. If one of these fails the
   // question is not "loosen the test" — it is which section the new mod should appear under.
-  assert.deepStrictEqual((buckets.app || []).sort(), ['fly-tiktok', 'inbox', 'local-ui-lab', 'simeon', 'tasks-app', 'timecard'],
+  assert.deepStrictEqual((buckets.app || []).sort(), ['fly-tiktok', 'inbox', 'local-ui-lab', 'project-notes', 'simeon', 'tasks-app', 'timecard'],
     'Apps are the mods declaring `app: true` — a place you work from, not a way to draw');
   assert.deepStrictEqual(buckets.fullscreen, ['tower'],
     'Fullscreen holds only the non-game fullscreen mods — a game belongs under Games');
   assert.deepStrictEqual((buckets.tab || []).sort(), ['baby-browser', 'steveonardo']);
   assert.deepStrictEqual((buckets.background || []).sort(),
-    ['connectome', 'deepsteve-core', 'display-tab', 'project-mods', 'session-lifecycle'],
+    ['connectome', 'deepsteve-core', 'display-tab', 'github-webhooks', 'project-mods', 'session-lifecycle'],
     'Background is the tools-only mods: no entry, so no UI to put anywhere else');
   assert.strictEqual(buckets.panel.length, 9);
   assert.strictEqual(buckets.game.length, 6);

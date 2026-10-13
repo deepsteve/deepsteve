@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    /* Mod iframes receive no theme variables from the host, so every var() carries a
+       fallback. notes.js mirrors the host's computed --ds-* tokens onto :root, which is
+       what makes the page follow a light theme; the fallbacks are the floor. */
+    * { margin: 0; box-sizing: border-box; }
+    html, body { height: 100%; }
+    body {
+      background: var(--ds-bg-primary, #0d1117);
+      color: var(--ds-text-primary, #c9d1d9);
+      font-family: system-ui, -apple-system, sans-serif;
+      font-size: 13px;
+      -webkit-font-smoothing: antialiased;
+      overflow: hidden;
+    }
+    button, input, select, textarea { font: inherit; color: inherit; }
+    :focus-visible { outline: 1px solid var(--ds-accent-blue, #58a6ff); outline-offset: -1px; }
+    [hidden] { display: none !important; }
+
+    #pn { display: flex; height: 100%; }
+    .pn-col { display: flex; flex-direction: column; min-width: 0; }
+    .pn-head {
+      display: flex; align-items: center; gap: 8px;
+      height: 44px; padding: 0 12px; flex: 0 0 auto;
+      border-bottom: 1px solid var(--ds-border, #30363d);
+    }
+    .pn-head h2 {
+      font-size: 13px; font-weight: 600; flex: 1;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+
+    /* --- Projects --- */
+    #pn-projects {
+      width: 210px; flex: 0 0 auto;
+      background: var(--ds-bg-secondary, #161b22);
+      border-right: 1px solid var(--ds-border, #30363d);
+    }
+    #pn-project-list { overflow-y: auto; padding: 6px; flex: 1; }
+    .pn-project {
+      display: flex; align-items: center; gap: 8px; width: 100%;
+      padding: 6px 8px; border: none; border-radius: 6px;
+      background: none; cursor: pointer; text-align: left;
+    }
+    .pn-project:hover { background: var(--ds-bg-tertiary, #21262d); }
+    .pn-project.active { background: var(--ds-selected-bg, #1f3a2e); color: var(--ds-text-bright, #f0f6fc); }
+    .pn-project .pn-icon { width: 18px; height: 18px; flex: 0 0 auto; display: grid; place-items: center; font-size: 14px; }
+    .pn-project .pn-icon img { width: 18px; height: 18px; border-radius: 4px; object-fit: cover; }
+    .pn-project .pn-icon svg { width: 15px; height: 15px; color: var(--ds-text-secondary, #8b949e); }
+    .pn-project .pn-name { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .pn-project .pn-count { color: var(--ds-text-secondary, #8b949e); font-size: 12px; }
+    .pn-divider { height: 1px; background: var(--ds-border, #30363d); margin: 6px 4px; }
+
+    /* --- Notes list --- */
+    #pn-notes { width: 300px; flex: 0 0 auto; border-right: 1px solid var(--ds-border, #30363d); }
+    #pn-new {
+      border: none; background: none; cursor: pointer; padding: 4px 6px; border-radius: 6px;
+      color: var(--ds-text-secondary, #8b949e); display: grid; place-items: center;
+    }
+    #pn-new:hover:not(:disabled) { background: var(--ds-bg-tertiary, #21262d); color: var(--ds-text-primary, #c9d1d9); }
+    #pn-new:disabled { opacity: 0.35; cursor: default; }
+    #pn-new svg { width: 17px; height: 17px; }
+    .pn-search { padding: 8px 10px; border-bottom: 1px solid var(--ds-border, #30363d); }
+    #pn-search {
+      width: 100%; padding: 5px 9px; border-radius: 6px;
+      border: 1px solid var(--ds-border, #30363d);
+      background: var(--ds-bg-secondary, #161b22);
+    }
+    #pn-search::placeholder { color: var(--ds-text-secondary, #8b949e); }
+    #pn-note-list { overflow-y: auto; flex: 1; padding: 0 6px 12px; }
+    .pn-group {
+      font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em;
+      color: var(--ds-text-secondary, #8b949e); padding: 14px 10px 6px;
+    }
+    .pn-note {
+      display: block; width: 100%; text-align: left; cursor: pointer;
+      padding: 8px 10px; border: none; border-radius: 6px; background: none;
+    }
+    .pn-note + .pn-note { box-shadow: 0 -1px 0 var(--ds-border, #30363d); }
+    .pn-note:hover { background: var(--ds-bg-tertiary, #21262d); }
+    .pn-note.active { background: var(--ds-selected-bg, #1f3a2e); box-shadow: none; }
+    .pn-note.active + .pn-note { box-shadow: none; }
+    .pn-note-title {
+      font-weight: 600; color: var(--ds-text-bright, #f0f6fc);
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .pn-note-meta { display: flex; gap: 8px; margin-top: 3px; white-space: nowrap; overflow: hidden; }
+    .pn-note-date { color: var(--ds-text-primary, #c9d1d9); flex: 0 0 auto; }
+    .pn-note-snippet { color: var(--ds-text-secondary, #8b949e); overflow: hidden; text-overflow: ellipsis; }
+    .pn-note-project {
+      margin-top: 3px; font-size: 12px; color: var(--ds-text-secondary, #8b949e);
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .pn-empty { color: var(--ds-text-secondary, #8b949e); padding: 28px 12px; text-align: center; line-height: 1.5; }
+
+    /* --- Editor --- */
+    #pn-editor { flex: 1; }
+    #pn-editor .pn-head { justify-content: space-between; }
+    #pn-note-project {
+      max-width: 220px; padding: 3px 6px; border-radius: 6px;
+      border: 1px solid var(--ds-border, #30363d);
+      background: var(--ds-bg-secondary, #161b22);
+    }
+    #pn-edited { color: var(--ds-text-secondary, #8b949e); flex: 1; text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .pn-actions { display: flex; gap: 4px; flex: 0 0 auto; }
+    .pn-actions button {
+      border: 1px solid transparent; background: none; cursor: pointer;
+      padding: 3px 8px; border-radius: 6px; color: var(--ds-text-secondary, #8b949e);
+    }
+    .pn-actions button:hover { background: var(--ds-bg-tertiary, #21262d); color: var(--ds-text-primary, #c9d1d9); }
+    #pn-delete.confirm { color: var(--ds-accent-red, #f85149); border-color: var(--ds-accent-red, #f85149); }
+    #pn-trashed-label { color: var(--ds-text-secondary, #8b949e); }
+
+    /* --- Pins, Trash --- */
+    .pn-note-title svg { width: 11px; height: 11px; margin-right: 5px; vertical-align: -1px; color: var(--ds-accent-orange, #d29922); }
+    .pn-note.menu-target { outline: 1px solid var(--ds-accent-blue, #58a6ff); outline-offset: -1px; }
+    .pn-project.menu-target { outline: 1px solid var(--ds-accent-blue, #58a6ff); outline-offset: -1px; }
+
+    /* --- Context menu --- */
+    #pn-menu {
+      position: fixed; z-index: 10; min-width: 180px; padding: 4px;
+      background: var(--ds-bg-secondary, #161b22);
+      border: 1px solid var(--ds-border, #30363d);
+      border-radius: 8px;
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+    }
+    #pn-menu button {
+      display: block; width: 100%; text-align: left; cursor: pointer;
+      padding: 5px 10px; border: none; border-radius: 5px; background: none;
+    }
+    #pn-menu button:hover:not(:disabled), #pn-menu button:focus-visible {
+      background: var(--ds-accent-blue, #58a6ff); color: var(--ds-bg-primary, #0d1117); outline: none;
+    }
+    #pn-menu button:disabled { color: var(--ds-text-secondary, #8b949e); cursor: default; }
+    #pn-menu button.danger { color: var(--ds-accent-red, #f85149); }
+    #pn-menu button.danger:hover, #pn-menu button.danger:focus-visible { background: var(--ds-accent-red, #f85149); color: var(--ds-bg-primary, #0d1117); }
+    #pn-menu hr { border: none; height: 1px; background: var(--ds-border, #30363d); margin: 4px 6px; }
+    #pn-text {
+      flex: 1; width: 100%; resize: none; border: none; outline: none;
+      padding: 22px 32px; background: transparent;
+      font-size: 15px; line-height: 1.55;
+      color: var(--ds-text-bright, #f0f6fc);
+    }
+    #pn-text::placeholder { color: var(--ds-text-secondary, #8b949e); }
+    #pn-status { color: var(--ds-accent-red, #f85149); padding: 6px 32px; flex: 0 0 auto; }
+  </style>
+</head>
+<body>
+  <div id="pn">
+    <section id="pn-projects" class="pn-col">
+      <div class="pn-head"><h2>Projects</h2></div>
+      <div id="pn-project-list"></div>
+    </section>
+
+    <section id="pn-notes" class="pn-col">
+      <div class="pn-head">
+        <h2 id="pn-notes-title">All Notes</h2>
+        <button type="button" id="pn-new" title="New note" aria-label="New note">
+          <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3H5a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-4"/><path d="M14.5 2.5a1.6 1.6 0 0 1 2.3 2.3L10 11.6 7 12.5l.9-3z"/></svg>
+        </button>
+      </div>
+      <div class="pn-search"><input id="pn-search" type="search" placeholder="Search" autocomplete="off" spellcheck="false"></div>
+      <div id="pn-note-list"></div>
+    </section>
+
+    <section id="pn-editor" class="pn-col">
+      <div class="pn-head" id="pn-editor-head" hidden>
+        <select id="pn-note-project" aria-label="Project"></select>
+        <span id="pn-trashed-label" hidden>In Trash</span>
+        <span id="pn-edited"></span>
+        <div class="pn-actions">
+          <button type="button" id="pn-restore" hidden>Restore</button>
+          <button type="button" id="pn-delete">Delete</button>
+        </div>
+      </div>
+      <textarea id="pn-text" placeholder="Start writing…" spellcheck="true" hidden></textarea>
+      <div class="pn-empty" id="pn-editor-empty"></div>
+      <div id="pn-status" hidden></div>
+    </section>
+  </div>
+  <div id="pn-menu" role="menu" hidden></div>
+  <script type="module" src="notes.js"></script>
+</body>
+</html>

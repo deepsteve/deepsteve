@@ -36,6 +36,7 @@ const { wrapRunCommand } = require('./terminal-run');
 const { isTerminalReport, isPointerReport, hasSubmitKey } = require('./terminal-input');
 const { renderIssuePrompt, issueWorktreeName, issueTabName, resumePromptText, WORKFLOW_STAGES, WAND_DEFAULT_TEMPLATE, migrateWandTemplate } = require('./issue-prompt');
 const issuePipeline = require('./issue-pipeline');
+const issueHooks = require('./issue-hooks');
 const { renderOnboardingPrompt, ONBOARDING_TOOLS, TOUR_PAGE_REL } = require('./onboarding-prompt');
 // The display-tab / project-mod HTML resolver, reused here for the built-in project's
 // welcome page (#696) — its `replacements` are what let a reviewed static file name the
@@ -897,6 +898,27 @@ const SETTINGS_SCHEMA = [
   { name: 'preventSleepWhileActive',    type: 'boolean', default: true, broadcast: false },
   { name: 'displayTabAudioIndicator',   type: 'boolean', default: true, broadcast: false },
   { name: 'scheduledTasksEnabled',      type: 'boolean', default: true },
+  // GitHub Webhooks (mods/github-webhooks/). Server-side, so they are real settings rather
+  // than the mod's per-browser toggle — the same reason scheduledTasksEnabled exists. Read
+  // live by the mod on every tick, so a change applies with no restart.
+  //
+  // githubIssueWatch: how an issue session re-reads its issue — { preset, custom }. The
+  // shape is checked here; the mod's watch-policy.js normalizes and clamps it on read, so a
+  // hand-edited value can be slow but never faster than its 30s floor.
+  { name: 'githubIssueWatch',           type: 'custom',  default: { preset: 'safety-net', custom: null },
+    sanitize: (raw) => {
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+      const preset = typeof raw.preset === 'string' && /^[a-z0-9-]{1,32}$/.test(raw.preset) ? raw.preset : null;
+      if (!preset) return null;
+      const custom = raw.custom && typeof raw.custom === 'object' && !Array.isArray(raw.custom) ? raw.custom : null;
+      if (custom && JSON.stringify(custom).length > 4096) return null;
+      return { preset, custom };
+    },
+    logValue: v => v.preset },
+  // githubWorkEnabled: the master switch for Work. Each project still opts in on its own
+  // (its triggers live in the mod's state file); off here stops every project's Work and
+  // closes their project agents.
+  { name: 'githubWorkEnabled',          type: 'boolean', default: true },
   // Scheduled runs are unattended, so their tab opens without stealing focus (#600).
   // Turn off to get the old behavior (the new tab becomes active as it opens).
   { name: 'scheduledTasksOpenInBackground', type: 'boolean', default: true },
@@ -4089,7 +4111,7 @@ let stateFrozen = false;  // Set during shutdown to prevent onExit handlers from
 // reads it off the live entry or the closed record to see that a question was overtaken, so it
 // has to outlive both a restart and the session closing.
 function serializeShellEntry(entry) {
-  return { cwd: entry.cwd, claudeSessionId: entry.claudeSessionId, agentType: entry.agentType || 'claude', codexHomeId: entry.codexHomeId || null, configDir: entry.configDir || null, engineType: entry.engineType || 'node-pty', worktree: entry.worktree || null, name: entry.name || null, planMode: !!entry.planMode, model: entry.model || null, effort: entry.effort || null, allowedTools: Array.isArray(entry.allowedTools) && entry.allowedTools.length ? entry.allowedTools : null, forkParent: entry.forkParent || null, lastActivity: entry.lastActivity || null, createdAt: entry.createdAt || null, windowId: entry.windowId || null, scheduled: !!entry.scheduled, scheduledTaskId: entry.scheduledTaskId || null, autopilot: !!entry.autopilot, resumedWorktree: entry.resumedWorktree || null, pipeline: entry.pipeline || null, resultItemId: entry.resultItemId || null, resultApprovedAt: entry.resultApprovedAt || null, mergeBlock: entry.mergeBlock || null, lastHumanInputAt: entry.lastHumanInputAt || null };
+  return { cwd: entry.cwd, claudeSessionId: entry.claudeSessionId, agentType: entry.agentType || 'claude', codexHomeId: entry.codexHomeId || null, configDir: entry.configDir || null, engineType: entry.engineType || 'node-pty', worktree: entry.worktree || null, name: entry.name || null, planMode: !!entry.planMode, model: entry.model || null, effort: entry.effort || null, allowedTools: Array.isArray(entry.allowedTools) && entry.allowedTools.length ? entry.allowedTools : null, forkParent: entry.forkParent || null, lastActivity: entry.lastActivity || null, createdAt: entry.createdAt || null, windowId: entry.windowId || null, scheduled: !!entry.scheduled, scheduledTaskId: entry.scheduledTaskId || null, autopilot: !!entry.autopilot, resumedWorktree: entry.resumedWorktree || null, pipeline: entry.pipeline || null, resultItemId: entry.resultItemId || null, resultApprovedAt: entry.resultApprovedAt || null, mergeBlock: entry.mergeBlock || null, lastHumanInputAt: entry.lastHumanInputAt || null, issue: entry.issue || null, projectAgent: entry.projectAgent || null, slot: entry.slot || null };
 }
 
 // #561: a session record is never hard-deleted by any runtime path. Every close
@@ -7252,6 +7274,57 @@ function restorePipelineSnapshot(raw) {
   };
 }
 
+// Which GitHub issue a session is working on. Stamped at start and persisted, so the GitHub
+// Webhooks mod can find the sessions it watches — after a restart too — without re-parsing
+// a worktree name. The url is kept only when it is a github.com url; a hand-edited
+// state.json must not point the watcher anywhere else.
+function issueStamp(number, url) {
+  const n = Number(number);
+  if (!Number.isInteger(n) || n <= 0) return null;
+  return { number: n, url: typeof url === 'string' && /^https:\/\/github\.com\//.test(url) ? url : null };
+}
+
+function restoreIssueStamp(raw) {
+  return raw && typeof raw === 'object' ? issueStamp(raw.number, raw.url) : null;
+}
+
+// A project agent's owner, re-checked on restore for the same reason.
+function restoreProjectAgent(raw) {
+  if (!raw || typeof raw !== 'object' || typeof raw.contextId !== 'string' || typeof raw.role !== 'string') return null;
+  return { contextId: raw.contextId.slice(0, 64), role: raw.role.slice(0, 32) };
+}
+
+// The project slot a session holds — the orchestrator (project views' `slot`, started by
+// POST /api/project-views/slot) — re-checked on restore like the two above. A project has one
+// holder per role, so a closed holder brought back after a new one started comes back as an
+// ordinary tab rather than as a second orchestrator.
+function restoreSlot(raw, id) {
+  if (!raw || typeof raw !== 'object' || typeof raw.contextId !== 'string' || typeof raw.role !== 'string') return null;
+  const slot = { contextId: raw.contextId.slice(0, 64), role: raw.role.slice(0, 32) };
+  for (const [other, e] of shells) {
+    if (other !== id && e.slot && e.slot.contextId === slot.contextId && e.slot.role === slot.role) return null;
+  }
+  return slot;
+}
+
+/**
+ * Type an issue session's first prompt once the mods have had their say.
+ *
+ * Every issue start renders through here, so a mod's additions (issue-hooks.js — the
+ * discussion already on the issue, the comment-marker rule) reach all three entry points
+ * alike. `render(extras)` returns the prompt; extras are empty strings when no mod adds
+ * anything, which renders the exact prompt a session got before the hooks existed. The
+ * wait is bounded inside collectPromptExtras, and it overlaps the agent's own startup.
+ */
+function deliverIssuePrompt(id, { number, url, cwd }, render) {
+  issueHooks.collectPromptExtras({ id, entry: shells.get(id), number, url, cwd }, { log })
+    .catch(() => ({ discussion: '', commentRule: '' }))
+    .then(extras => {
+      if (!shells.has(id)) return;
+      deliverPromptWhenReady(id, render(extras));
+    });
+}
+
 /**
  * The sessions currently living in a given worktree directory (#689).
  *
@@ -7344,7 +7417,7 @@ function resumedStamp(status) {
  * Returns `{ error: <spawnCwdProblem> }` for a bad cwd — the caller formats it,
  * because an HTTP 400 body and an MCP isError result are not the same shape.
  */
-function startIssueSession({ number, title, body, labels, url, cwd, agentType, configDir, windowId, callerId, openBrowser = false, autopilot, view, source = 'unknown' }) {
+function startIssueSession({ number, title, body, labels, url, cwd, agentType, configDir, windowId, callerId, openBrowser = false, autopilot, view, model, source = 'unknown' }) {
   // #653: which branch decides autopilot (below) is what the log needs — see
   // autopilotLogLabel(). Kept as its own flag rather than re-derived at the log line,
   // so the two can never disagree about what "explicit" meant.
@@ -7427,10 +7500,14 @@ function startIssueSession({ number, title, body, labels, url, cwd, agentType, c
   // The plan stage is prompt text, never `--permission-mode plan` (PLAN_DEFAULT_INSTRUCTIONS
   // in issue-pipeline.js says why), so an issue session spawns in the user's default
   // permission mode and `planMode` stays false on its entry.
+  // `model` is only ever passed by GitHub Webhooks' Work (the model a project picked for its
+  // workers); every other caller omits it and the agent runs its own default.
+  const sessionModel = validateModel(model);
   const spawnArgs = getSpawnArgs(agentType, {
     sessionId: claudeSessionId,
     worktree,
-    shellId: id
+    shellId: id,
+    model: sessionModel,
   });
 
   const name = issueTabName(number, title, settings.maxIssueTitleLength);
@@ -7440,7 +7517,7 @@ function startIssueSession({ number, title, body, labels, url, cwd, agentType, c
   const sessionEngine = spawnSession(getDefaultEngine(), id, agentType, spawnArgs, spawnCwd, { cols: 120, rows: 40, env: sessionEnv(id, { name, worktree, windowId: windowId || null, cwd: spawnCwd, agentType, configDir, codexHomeId }) });
   const engineType = sessionEngine === tmuxEngine ? 'tmux' : 'node-pty';
   logIssueStart({ number, id, source, agentType, engineType, worktree, cwd: spawnCwd, on: autopilotOn, explicit: autopilotExplicit, stages: !!stages, resume: resumeStatus, pipeline });
-  shells.set(id, { clients: new Set(), cwd: spawnCwd, claudeSessionId, agentType, codexHomeId, configDir: configDir || null, engine: sessionEngine, engineType, worktree: worktree || null, windowId: windowId || null, name, planMode: false, autopilot: autopilotOn, pipeline: pipelineSnapshot, resumedWorktree: resumedStamp(resumeStatus), waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now(), loading: true });
+  shells.set(id, { clients: new Set(), cwd: spawnCwd, claudeSessionId, agentType, codexHomeId, configDir: configDir || null, engine: sessionEngine, engineType, worktree: worktree || null, windowId: windowId || null, name, planMode: false, model: sessionModel, autopilot: autopilotOn, pipeline: pipelineSnapshot, resumedWorktree: resumedStamp(resumeStatus), issue: issueStamp(number, url), waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now(), loading: true });
   wireShellOutput(id);
   emitSessionOpen(id);
   recordRecentSession(id);
@@ -7460,20 +7537,25 @@ function startIssueSession({ number, title, body, labels, url, cwd, agentType, c
   // readiness wait or their configured delay. An inline body renders now; without
   // one, fetch from GitHub and render when it lands.
   if (body) {
-    deliverPromptWhenReady(id, renderIssuePrompt(settings.wandPromptTemplate, { number, title, labels, url, body }, { stages, resume, steps }));
+    deliverIssuePrompt(id, { number, url, cwd }, ({ discussion, commentRule }) =>
+      renderIssuePrompt(settings.wandPromptTemplate, { number, title, labels, url, body }, { stages, resume, steps, discussion, commentRule }));
   } else {
     fetchIssueFromGitHub(number, cwd).then(gh => {
       // `stages`, `steps` and `resume` are the consts captured at the top, not fresh
       // reads: this closure runs seconds later, after the log line already reported the
       // decision (#668, #717) and — for `resume` — after ensureWorktree may have created
       // the very worktree whose absence it recorded (#689).
-      deliverPromptWhenReady(id, renderIssuePrompt(settings.wandPromptTemplate, {
-        number,
-        title,
-        labels: labels || (gh ? gh.labels : null),
-        url: url || (gh ? gh.url : null),
-        body: gh ? gh.body : null,
-      }, { stages, resume, steps }));
+      const issueUrl = url || (gh ? gh.url : null);
+      const entry = shells.get(id);
+      if (entry && issueUrl && !entry.issue?.url) { entry.issue = issueStamp(number, issueUrl); saveState(); }
+      deliverIssuePrompt(id, { number, url: issueUrl, cwd }, ({ discussion, commentRule }) =>
+        renderIssuePrompt(settings.wandPromptTemplate, {
+          number,
+          title,
+          labels: labels || (gh ? gh.labels : null),
+          url: issueUrl,
+          body: gh ? gh.body : null,
+        }, { stages, resume, steps, discussion, commentRule }));
     });
   }
 
@@ -7502,10 +7584,19 @@ function startIssueSession({ number, title, body, labels, url, cwd, agentType, c
  * window, else the first connected one, else queues and opens the UI — the human just clicked a
  * link in a browser, so bringing Deep Steve up is what they asked for.
  *
+ * `projectAgent` ({ contextId, role }) marks a long-lived agent a project owns — GitHub
+ * Webhooks' Work coordinator. It persists with the session, rides on the tab's `session`
+ * message so the strip and rail can show or hide it on its own, and opens as a background tab without
+ * launching a browser: the daemon starts these on its own, often with nobody at the screen.
+ *
+ * `slot` ({ contextId, role }) marks the tab holding a project's slot — the orchestrator a
+ * person started from the empty slot at the head of the strip. Unlike a project agent it is an
+ * ordinary foreground tab; the marker only gives it its place (public/js/tab-slot.js).
+ *
  * Returns { id, name, cwd, engineType, tabDelivery }, or { error } for a directory that is gone
  * (#632): refused, never rehomed to $HOME.
  */
-function spawnAgentSession({ cwd, agentType, configDir, name, prompt, windowId = null, source = 'unknown' }) {
+function spawnAgentSession({ cwd, agentType, configDir, name, prompt, windowId = null, source = 'unknown', projectAgent = null, model = null, slot = null }) {
   const problem = cwd ? spawnCwdProblem(cwd) : { code: 'cwd-missing', cwd, message: 'No working directory given' };
   if (problem) {
     log(`[spawn] ${source} refused: ${problem.message}`);
@@ -7518,7 +7609,10 @@ function spawnAgentSession({ cwd, agentType, configDir, name, prompt, windowId =
   const id = randomUUID().slice(0, 8);
   const claudeSessionId = agentType === 'codex' ? null : randomUUID();
   const codexHomeId = agentType === 'codex' ? id : null;
-  const spawnArgs = getSpawnArgs(agentType, { sessionId: claudeSessionId, shellId: id });
+  // `model` is optional and validated by modelArgs at the argv boundary; an agent whose
+  // config declares no model flag ignores it.
+  const sessionModel = validateModel(model);
+  const spawnArgs = getSpawnArgs(agentType, { sessionId: claudeSessionId, shellId: id, model: sessionModel });
 
   let sessionEngine;
   try {
@@ -7530,7 +7624,7 @@ function spawnAgentSession({ cwd, agentType, configDir, name, prompt, windowId =
   }
   const engineType = sessionEngine === tmuxEngine ? 'tmux' : 'node-pty';
   log(`[spawn] ${source}: id=${id} agent=${agentType} engine=${engineType} cwd=${cwd}`);
-  shells.set(id, { clients: new Set(), cwd, claudeSessionId, agentType, codexHomeId, configDir: configDir || null, engine: sessionEngine, engineType, worktree: null, windowId, name: name || null, waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now() });
+  shells.set(id, { clients: new Set(), cwd, claudeSessionId, agentType, codexHomeId, configDir: configDir || null, engine: sessionEngine, engineType, worktree: null, windowId, name: name || null, model: sessionModel, projectAgent: projectAgent || null, slot: slot || null, waitingForInput: false, lastActivity: Date.now(), createdAt: Date.now() });
   wireShellOutput(id);
   emitSessionOpen(id);
   recordRecentSession(id);
@@ -7542,7 +7636,10 @@ function spawnAgentSession({ cwd, agentType, configDir, name, prompt, windowId =
   });
   saveState();
 
-  const tabDelivery = deliverToWindow({ type: 'open-session', id, cwd, name, windowId }, windowId, { openBrowser: true });
+  const openMsg = { type: 'open-session', id, cwd, name, windowId };
+  if (projectAgent) Object.assign(openMsg, { background: true, projectAgent });
+  if (slot) openMsg.slot = slot;
+  const tabDelivery = deliverToWindow(openMsg, windowId, { openBrowser: !projectAgent });
   noteSpawnDelivery(id, { tabDelivery, windowId, source });
   return { id, name: name || id, cwd, engineType, tabDelivery };
 }
@@ -8793,7 +8890,7 @@ function handleWsConnection(ws, req) {
       }
       sessionEngine = spawnedEngine;
       restoredEngineType = spawnedEngine === tmuxEngine ? 'tmux' : 'node-pty';
-      shells.set(id, { clients: new Set(), cwd, claudeSessionId, agentType: savedAgentType, codexHomeId, configDir: restored.configDir || null, engine: sessionEngine, engineType: restoredEngineType, worktree: savedWorktree, name: restoredName, planMode: savedPlanMode, model: restored.model || null, effort: restored.effort || null, allowedTools: restored.allowedTools || null, forkParent: restored.forkParent || null, restored: true, scheduled: !!restored.scheduled, scheduledTaskId: restored.scheduledTaskId || null, autopilot: !!restored.autopilot, resumedWorktree: restored.resumedWorktree || null, pipeline: restorePipelineSnapshot(restored.pipeline), resultItemId: restored.resultItemId || null, resultApprovedAt: restored.resultApprovedAt || null, mergeBlock: restored.mergeBlock || null, lastHumanInputAt: restored.lastHumanInputAt || null, waitingForInput: false, lastActivity: Date.now(), createdAt: restored.createdAt || Date.now(), windowId: restoredWindowId });
+      shells.set(id, { clients: new Set(), cwd, claudeSessionId, agentType: savedAgentType, codexHomeId, configDir: restored.configDir || null, engine: sessionEngine, engineType: restoredEngineType, worktree: savedWorktree, name: restoredName, planMode: savedPlanMode, model: restored.model || null, effort: restored.effort || null, allowedTools: restored.allowedTools || null, forkParent: restored.forkParent || null, restored: true, scheduled: !!restored.scheduled, scheduledTaskId: restored.scheduledTaskId || null, autopilot: !!restored.autopilot, resumedWorktree: restored.resumedWorktree || null, pipeline: restorePipelineSnapshot(restored.pipeline), resultItemId: restored.resultItemId || null, resultApprovedAt: restored.resultApprovedAt || null, mergeBlock: restored.mergeBlock || null, lastHumanInputAt: restored.lastHumanInputAt || null, issue: restoreIssueStamp(restored.issue), projectAgent: restoreProjectAgent(restored.projectAgent), slot: restoreSlot(restored.slot, id), waitingForInput: false, lastActivity: Date.now(), createdAt: restored.createdAt || Date.now(), windowId: restoredWindowId });
       wireShellOutput(id, initialCols, initialRows);
       recordRecentSession(id);  // bump recency on same-browser reconnect + cross-browser restore
       if (agentConfig.supportsSessionWatch) watchClaudeSessionDir(id);
@@ -9046,7 +9143,7 @@ function handleWsConnection(ws, req) {
   // pingPong: capability flag (#563) — clients only send {type:'ping'} probes when
   // the server advertises it, because an older server would type the raw JSON into
   // the PTY (unknown control messages fall through to the input write).
-  ws.send(JSON.stringify({ type: 'session', id, restored: entry.restored || false, cwd: entry.cwd, name: entry.name || null, agentType: entry.agentType || 'claude', configDir: entry.configDir || null, engineType: entry.engineType || 'node-pty', claudeSessionId: entry.claudeSessionId || null, worktree: entry.worktree || null, autopilot: !!entry.autopilot, scrollback: hasScrollback, existingClients, waitingForInput: entry.waitingForInput || false, asking: (entry.waitingForInput && entry.asking) || null, mergeBlock: entry.mergeBlock || null, pingPong: true }));
+  ws.send(JSON.stringify({ type: 'session', id, restored: entry.restored || false, cwd: entry.cwd, name: entry.name || null, agentType: entry.agentType || 'claude', configDir: entry.configDir || null, engineType: entry.engineType || 'node-pty', claudeSessionId: entry.claudeSessionId || null, worktree: entry.worktree || null, autopilot: !!entry.autopilot, scrollback: hasScrollback, existingClients, waitingForInput: entry.waitingForInput || false, asking: (entry.waitingForInput && entry.asking) || null, mergeBlock: entry.mergeBlock || null, projectAgent: entry.projectAgent || null, slot: entry.slot || null, pingPong: true }));
 
   // Send buffered scrollback so the client can render the terminal immediately
   if (hasScrollback) {
@@ -9119,6 +9216,7 @@ function handleWsConnection(ws, req) {
           : null;
         entry.resumedWorktree = resumedStamp(resumeStatus);
         const resume = issueResumeText(resumeStatus, id);
+        entry.issue = issueStamp(parsed.issue?.number, parsed.issue?.url);
         saveState();
         broadcastAutopilot(id);
         // This path never calls startIssueSession, so it logs its own start line (#653) —
@@ -9134,11 +9232,12 @@ function handleWsConnection(ws, req) {
           on: entry.autopilot, explicit: autopilotExplicit, stages: !!stages,
           resume: resumeStatus, pipeline,
         });
-        // `{ stages, resume, steps }` is the THIRD argument. Folding any into the second —
-        // the variable bag — would render as nothing (an unknown {{name}} is empty by
-        // design) and the picker would be the one surface silently starting a different
-        // kind of session.
-        deliverPromptWhenReady(id, renderIssuePrompt(settings.wandPromptTemplate, parsed.issue || {}, { stages, resume, steps }));
+        // `{ stages, resume, steps, discussion, commentRule }` is the THIRD argument. Folding
+        // any into the second — the variable bag — would render as nothing (an unknown
+        // {{name}} is empty by design) and the picker would be the one surface silently
+        // starting a different kind of session.
+        deliverIssuePrompt(id, { number: entry.issue?.number, url: entry.issue?.url, cwd: sessionPaths(entry).repoRoot }, ({ discussion, commentRule }) =>
+          renderIssuePrompt(settings.wandPromptTemplate, parsed.issue || {}, { stages, resume, steps, discussion, commentRule }));
         return;
       }
       if (parsed.type === 'rename') { entry.name = parsed.name || null; return; }

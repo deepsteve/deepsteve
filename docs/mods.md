@@ -47,6 +47,13 @@ expand and never before; putting all of it on all 32 entries is what made four f
 Mods can define settings (boolean or number). Click the gear icon on the mod's row to
 configure it. Settings are saved immediately to localStorage.
 
+A mod whose settings need more than that — or that has a daemon half, whose switches must be
+server settings rather than per-browser values — ships its own settings page instead:
+`"settingsModule": "settings.js"` names an ES module in the mod's folder exporting
+`render(container)`, and the same gear opens it. The page saves its own values as they change
+(GitHub Webhooks posts to `/api/settings` and to its own routes). A mod's settings live behind its
+gear and nowhere else.
+
 ### Display Modes
 
 Mods have four display modes:
@@ -216,7 +223,9 @@ mod under Background.
 | **Connectome** | tools-only | off | Fruit fly circuits from the connectome as spiking neural networks, for pages to import — see [its README](../mods/connectome/README.md) |
 | **Console** | panel | off | Browser console passthrough for Agents |
 | **Fly TikTok** | app | off | A fly brain from the connectome watches your iPhone's TikTok feed over USB and swipes — see [its README](../mods/fly-tiktok/README.md) |
+| **GitHub Webhooks** | tools-only | on | Issue sessions hear about new collaborator comments, and a project can pick up issues on its own — see [GitHub Webhooks](#github-webhooks) |
 | **Go Karts** | fullscreen | off | 3D go-kart racing with your Claude sessions |
+| **Project Notes** | app | on | A notepad of plain-text notes filed by project, most recently edited first, with pinning and a Trash; stored in `~/.deepsteve/project-notes.json` |
 | **Screenshots** | panel | off | Capture terminal screenshots as PNG |
 | **Session Info** | tools-only | on | Sessions discover their own identity and tab name |
 | **Tasks** | panel | on | Task list populated by Agent sessions, each linked back to its sessions — see [Tasks](#tasks) |
@@ -260,6 +269,7 @@ mods/<name>/
 | `tags` | array | no | `["games"]` files the mod under the **Games** section of the Mods modal (see [How a mod is grouped](#how-a-mod-is-grouped-673)). Tags are searched too. |
 | `experimental` | boolean | no | Shows an **Experimental** badge on the mod's row |
 | `settings` | array | no | Per-mod settings (see below) |
+| `settingsModule` | string | no | A `.js` file in the mod's folder exporting `render(container)`; the gear opens it instead of the generated form. See [Per-Mod Settings](#per-mod-settings). |
 
 There is no `tools` field. A mod's MCP tools are declared only in `tools.js` — see
 [MCP Tools](#mcp-tools-toolsjs). `validate-mods.js` fails a manifest that declares one. There
@@ -1177,6 +1187,100 @@ unread count while it is off screen (`setPanelBadge` returns early when there is
 `o` (open the tab) only works for sessions that have a tab in *this* browser window — the bridge's
 `focusSession` cannot attach one that does not.
 
+## GitHub Webhooks
+
+`mods/github-webhooks/` keeps agents in step with GitHub issues. Despite the name it receives no
+webhooks: that would need something on the public internet — a tunnel per user, or a relay the
+project hosts that could forge comments into anyone's agent. It **polls**, rarely, with conditional
+requests. Two features, both configured from the mod's own settings page (the gear on its row in the
+Mods modal, `settings.js`).
+
+### Issue watch (`githubIssueWatch`)
+
+An issue session's issue is stamped on its entry (`entry.issue = { number, url }`, persisted), and
+the mod re-reads it on a tapering schedule. A session with no stamp — started before the mod was live —
+is matched by its `github-issue-<n>` worktree name, and on its first read the comments posted since it
+started count as new. The policy is `{ preset, custom }`; `watch-policy.js`
+owns the presets and clamps every delay to a 30s floor:
+
+| Preset | Reads | New context |
+|---|---|---|
+| Off | never | — |
+| Merge gate only | only right before a merge | holds the merge |
+| **Safety net** (default) | 30s, 2m, 5m, 10m, 15m, then 15m while busy / 60m while idle | typed when the turn ends; holds the merge |
+| Monitor | every minute | typed mid-turn; holds the merge |
+
+Finding something restarts the taper; a quiet issue gets quieter. The design assumption is that an
+agent builds what it saw at start, and GitHub is a safety net rather than a channel — so a watch never
+needs to be fast, only to make sure nothing is merged without being seen.
+
+The rules, all in `issue-context.js`:
+
+- **Only collaborators reach an agent.** A comment is delivered only when GitHub's `author_association`
+  is OWNER, MEMBER or COLLABORATOR, and never from a Bot. Everything else is marked seen and dropped.
+  A body edit is delivered as the issue's text — the standing the body already had at start.
+- **A session never gets its own comment back.** Deep Steve's comments end in an invisible
+  `<!-- deepsteve:session=ID -->` (defined once, `commentMarker()` in `issue-hooks.js`); the first
+  prompt tells the agent to add it, and the merge's `Merged into X.` comment carries it. Another
+  session's marked comment IS delivered, attributed — that is how agents hear from each other.
+- **New context is information, not an instruction.** The typed text opens `[GitHub] New context …
+  It is from the issue thread, not from me`, and never starts with `/`, `!` or `#`.
+
+The first prompt also carries the collaborator comments already on the issue.
+
+### Work (`githubWorkEnabled`, plus a per-project config)
+
+A project opts in from the mod's settings page, which lists every project with a **Configure…**
+button (config in the mod's state file, `statePath('github-webhooks.json')`). Every `checkMinutes`, **only while there is room** under
+`maxConcurrent`, the mod reads the repo's open issues and runs them through the project's triggers
+(`work-triggers.js`): presets for a trust label (`agent-ready`), any collaborator issue, build fixes,
+infra, and feature work for a build (`labelPattern` passes the matched label to the session as
+`{{label}}`).
+
+On a public repo anyone can file an issue, so **nothing a stranger can do alone starts an agent**: a
+trigger is satisfied by who filed the issue (a collaborator) or by a label, which only triage access
+can apply — and a trigger with no label condition is forced to collaborators-only. A label-less trigger
+also takes only issues filed after Work was switched on.
+
+Two worker models:
+
+- **Project agent coordinates** (default). Work starts a longstanding Claude session for the project
+  (`spawnAgentSession({ projectAgent: { contextId, role: 'work' } })`), types each matching issue to it
+  as `[GitHub Work] …`, and it calls `github_work_start` or `github_work_decline`; `github_work_status`
+  shows the state. Those three tools refuse any caller that is not a Work agent. The agent belongs to
+  the project, not the user: it opens as a background tab, is filed under **Longstanding agents** in
+  the rail, can be hidden from the strip with the Views bar's **Project agents** chip, never counts as
+  "waiting" in Action Required, is restarted ~60s after it dies (at most 3 starts per 30 minutes), and
+  is closed when Work is turned off.
+- **One session per issue.** The daemon calls `startIssueSession` itself; no model turns are spent on
+  routing, and nothing judges scope.
+
+A project's `model` applies to its agent and every session Work starts.
+
+### How it hooks into core
+
+Core never requires the mod. `issue-hooks.js` (repo root) holds three registries, each a no-op when
+empty, so an install without the mod starts byte-identical sessions:
+
+- `collectPromptExtras` — every issue start renders through `deliverIssuePrompt()` in server.js, which
+  awaits the mod's `discussion` and `commentRule` (8s deadline) before typing. `renderIssuePrompt`
+  puts the discussion with the resume text and the rule right after the completion instruction.
+- `checkMergeGates` — called by `issue_complete`/`merge_session` (through `mergeCallerSession`) and by
+  `merge_worktree`, before anything is committed. A hold returns `status: "held"`, `next:
+  "read_new_context"`; the gate marks what it showed, so the next call merges. **Merges a human presses
+  (tab menu, Inbox) are not gated.** A gate that throws allows the merge.
+- `notifyIssueClosed` — `mergeSession()` calls it after closing the issue, so the watch stops treating
+  the close as news and takes one last look a minute later.
+
+### GitHub, politely
+
+`github-client.js` is the only code that talks to GitHub: `fetch` with the token from `gh auth token`
+(`gh api` exits 1 on a 304). Every GET is conditional on its last ETag, and GitHub does not count a 304
+against the rate limit. Requests are serialized, comments are fetched only when the issue itself
+changed, and a 403/429 rate-limit response pauses every request until the reset GitHub names — the
+docs' one ban warning is for continuing to request while limited. `GET /api/github-webhooks/status`
+shows the policy, every watched session, each project's Work state, and request counts.
+
 ## Tutorials
 
 - [Three.js VR Skeleton](../mod-tutorials/threejs-vr-skeleton/) — Minimal three.js + WebXR starter template for building VR mods
@@ -1404,7 +1508,7 @@ A view file in the install's own state dir — **`~/.deepsteve/views/<slug>.json
 
 Any view may also name a **`footer`**: fields drawn in `#view-footer`, a row along the bottom of the monitor (the views bar's mirror), for the tab you are looking at **whenever that tab is in the view — whichever view is selected**. A footer follows the tab, not the selection; with two footer views holding one tab, the first by `order` wins.
 
-**`"additive": true`** makes a view one you switch *on* rather than one you look *at*. It never filters the strip and is never the selected view; it stacks with whichever view is. In the bar it is a push button marked ●/○ after the folder tabs, any number can be on at once, and what it adds is its footer — so Marketing selected with GitHub on shows the Marketing tabs, with the GitHub row under the worktree ones. Additive views are **on by default**; the ones switched off are a browser-wide `localStorage` preference (`deepsteve-project-views-off`, by slug). A tab an agent opens does not inherit its opener's additive views — they decorate by the tab's own rules — though a spawn tool's explicit `view` still files it.
+**`"additive": true`** makes a view one you switch *on* rather than one you look *at*. It never filters the strip and is never the selected view; it stacks with whichever view is. In the bar it is a push button marked ●/○ after the folder tabs, any number can be on at once, and what it adds is its footer (or [a slot](#the-orchestrator-slot)) — so Marketing selected with GitHub on shows the Marketing tabs, with the GitHub row under the worktree ones. Additive views are **on by default**; the ones switched off are a browser-wide `localStorage` preference (`deepsteve-project-views-off`, by slug). A tab an agent opens does not inherit its opener's additive views — they decorate by the tab's own rules — though a spawn tool's explicit `view` still files it.
 
 ```jsonc
 // ~/.deepsteve/views/github.json
@@ -1424,6 +1528,22 @@ Any view may also name a **`footer`**: fields drawn in `#view-footer`, a row alo
 | `title` | the issue title, then the start of its body as plain prose — title and excerpt capped at 100 words together, and clamped to the row's two lines with an ellipsis |
 
 The facts come from `GET /api/project-views/footer/:sessionId` (`mods/project-mods/view-footer.js`): the repo and number are read locally, and only the title, body and date cost a `gh issue view`, cached per issue for 10 minutes (a failed lookup for one). A field with nothing to say is left out, and a tab the lookup knows nothing about (a display tab is not a session) gets no row. The row has a fixed height whatever has arrived, and `switchTo()` renders it **before** it fits the incoming terminal, so the fit sees the row in place and a late answer never resizes the terminal a second time. It is hidden while the fullscreen view slot is up.
+
+### The orchestrator slot
+
+An additive view can also carry **`"slot": "orchestrator"`**, which reserves a place at the head of the project's tab strip for the tab overseeing the project. `orchestrator` is the only role; a `slot` on a view that isn't additive, or with any other value, is dropped on read.
+
+```jsonc
+// ~/.deepsteve/views/orchestrator.json
+{ "name": "Orchestrator", "additive": true, "slot": "orchestrator" }
+```
+
+- **Empty**, it is `#tab-slot`: a dashed outline the size of a tab, between `#views-toggle` and the first tab. Its right-click menu has one item, **Open orchestrator**.
+- **Opening** is `POST /api/project-views/slot` (`{contextId, slot, windowId}`). The server keeps one holder per project: a live one is answered with its id (focused here, or a toast naming another window), otherwise it starts an ordinary agent tab — claude, or codex when that is the default agent — named Orchestrator, in the project's first folder, with no prompt. The tab arrives as an `open-session`, like a tab an agent opens.
+- **Filled**, the dashed outline goes and the holder's own tab takes its place: moved first in `#tabs-list` (persisted like a drag), marked `.slot-tab`, sticky so a long strip never scrolls it away, and kept in **every** view while the slot is on. It stays a plain tab, with the plain tab menu; the slot only gives it its place. Rules for what an orchestrator does come later.
+- **The marker** is `slot: {contextId, role}` on the shell entry. It is persisted, sent on the `session` message, and spread back by the tmux reattach. Closing the tab empties the slot. A closed holder restored after a new one has started comes back as an ordinary tab (`restoreSlot()`), so a project never has two.
+- Switching the push button off makes the holder an ordinary tab, filtered like any other. Unlike a footer, a slot changes what the strip shows, so `setAdditive()` asks for a filter pass for a view with one.
+- Code: `slotFor()` / `holdsSlot()` in `project-views.js`, the chrome in `public/js/tab-slot.js` (which imports neither views module; `app.js` injects the holder lookup and the pin, `TabManager.moveToFront()`), and the route in `mods/project-mods/tools.js`. Tests: `test/unit/tab-slot.test.js`, plus slot cases in `project-views.test.js` and `project-views-client.test.js`.
 
 ### Membership: rules plus filings
 

@@ -206,7 +206,10 @@ function normalizeLabels(labels) {
 // and additionally because only the daemon can look at the worktree. `steps` (#717) is the
 // issue pipeline's per-stage instructions, rendered by issue-pipeline.js; null for the
 // default pipeline, so a session with no instructions gets exactly the old prompt.
-function renderIssuePrompt(template, { number, title, labels, url, body } = {}, { stages, resume, steps } = {}) {
+// `discussion` and `commentRule` come from the GitHub Webhooks mod through issue-hooks.js:
+// the collaborator comments already on the issue, and the marker rule that keeps a session
+// from being handed its own comments back. Both are null when the mod has nothing to add.
+function renderIssuePrompt(template, { number, title, labels, url, body } = {}, { stages, resume, steps, discussion, commentRule } = {}) {
   const vars = {
     number,
     title,
@@ -229,9 +232,15 @@ function renderIssuePrompt(template, { number, title, labels, url, body } = {}, 
   // `steps` (#717) sits between that context and the rules about finishing: the
   // pipeline's instructions are what to do between reading the issue and calling
   // issue_complete, so they read before the instruction that ends the session.
+  //
+  // `discussion` is context too — what collaborators already said on the issue — so it sits
+  // with `resume`, before the rules. `commentRule` is a rule about the agent's own GitHub
+  // comments, so it sits after the completion instruction, before the stages refine it.
   const withResume = resume ? `${rendered}\n\n${String(resume).trim()}` : rendered;
-  const head = steps ? `${withResume}\n\n${String(steps).trim()}` : withResume;
-  const out = `${head}\n\n${ISSUE_COMPLETE_INSTRUCTION}`;
+  const withDiscussion = discussion ? `${withResume}\n\n${String(discussion).trim()}` : withResume;
+  const head = steps ? `${withDiscussion}\n\n${String(steps).trim()}` : withDiscussion;
+  const done = `${head}\n\n${ISSUE_COMPLETE_INSTRUCTION}`;
+  const out = commentRule ? `${done}\n${String(commentRule).trim()}` : done;
   return stages ? `${out}\n\n${String(stages).trim()}` : out;
 }
 

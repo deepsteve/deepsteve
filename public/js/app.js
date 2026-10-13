@@ -39,10 +39,11 @@ import { init as initHashCommands, beforeSend as hashCommandsBeforeSend, setWait
 import { init as initOverviewMode, setEnabled as setOverviewModeEnabled, setShortcut as setOverviewModeShortcut, setDefaultLayout as setOverviewDefaultLayout, toggle as toggleOverviewMode, isOverviewActive, getLayout as getOverviewLayout, updateFocus as updateOverviewFocus, onTabsReordered as onOverviewTabsReordered, syncToContext as syncOverviewToContext } from './overview-mode.js';
 import { init as initTerminalSearch, attachSearchAddon, closeIfOpen as closeTerminalSearch } from './terminal-search.js';
 import * as SessionHistory from './session-history.js';
-import { init as initContextViews, setEnabled as setContextViewsEnabled, applyFilter as refreshContextFilter, requestNewTabInContext, resolveContextRepo, chooseContextDir, setContexts as applyServerContexts, setActiveContext as setActiveContextFromPanel, getActiveContextId, getActiveContextInfo, orderRecentDirsByContext, activeContextIsEmpty, noteActiveTab, revealTabContext, showToast, setRailSuppressed, setRailQuiet, paintProjectRows, contextsForCwd } from './context-views.js';
+import { init as initContextViews, refreshProjectAgentRows, setEnabled as setContextViewsEnabled, applyFilter as refreshContextFilter, requestNewTabInContext, resolveContextRepo, chooseContextDir, setContexts as applyServerContexts, setActiveContext as setActiveContextFromPanel, getActiveContextId, getActiveContextInfo, orderRecentDirsByContext, activeContextIsEmpty, noteActiveTab, revealTabContext, showToast, setRailSuppressed, setRailQuiet, paintProjectRows, contextsForCwd } from './context-views.js';
 import * as ProjectMods from './project-mods.js';
 import * as ProjectViews from './project-views.js';
 import * as ViewFooter from './view-footer.js';
+import * as TabSlot from './tab-slot.js';
 import * as DecisionMode from './decision-mode.js';
 import * as Onboarding from './onboarding.js';
 import { nsKey } from './storage-namespace.js';
@@ -326,6 +327,7 @@ function applySettings(settings) {
     setContextViewsEnabled(settings.contextViewsEnabled);
     // applyFilter() returns early with Projects off, so the views chrome needs its own pass.
     ProjectViews.render();
+    TabSlot.render();
   }
   if (settings.timelapseEnabled !== undefined) {
     setTimelapseEnabled(settings.timelapseEnabled);
@@ -500,10 +502,32 @@ function getSessionList() {
     id,
     name: s.name || getDefaultTabName(s.cwd),
     cwd: s.cwd,
-    waitingForInput: s.waitingForInput || false,
+    // A project agent (GitHub Webhooks' Work) idles at its prompt by design, between the
+    // issues it is sent, so it is never "waiting on you" — only when it is actually asking.
+    waitingForInput: s.projectAgent ? !!s.asking : (s.waitingForInput || false),
     asking: s.asking || null,
     type: s.type || 'terminal',
+    projectAgent: !!s.projectAgent,
   }));
+}
+
+// What the rail's "Longstanding agents" rows last drew, so they redraw only when it changes.
+let projectAgentSig = '';
+
+function projectAgentRows(contextId) {
+  const out = [];
+  for (const [id, s] of sessions) {
+    if (s.projectAgent && s.projectAgent.contextId === contextId) out.push({ id, name: s.name || 'Project agent', waiting: !!s.waitingForInput });
+  }
+  return out;
+}
+
+function syncProjectAgentRows() {
+  const sig = JSON.stringify([...sessions].filter(([, s]) => s.projectAgent).map(([id, s]) => [id, s.name, s.projectAgent.contextId]));
+  if (sig === projectAgentSig) return;
+  projectAgentSig = sig;
+  refreshProjectAgentRows();
+  ProjectViews.render();
 }
 
 /**
@@ -513,6 +537,7 @@ function getSessionList() {
  */
 function notifyTabsChanged() {
   ModManager.notifySessionsChanged(getSessionList());
+  syncProjectAgentRows();
   // Before the context filter: it reads DecisionMode as its suspend switch, and a closed
   // decision tab must be resolved (next decision, or the empty inbox) before it settles.
   DecisionMode.sync();
@@ -1840,6 +1865,7 @@ settingsBtn?.addEventListener('click', async () => {
     notifyOnlyWhenAsking = notifyOnlyWhenAskingChecked;
     setContextViewsEnabled(contextViewsEnabled);
     ProjectViews.render();   // see the settings-broadcast twin: applyFilter() skips it with Projects off
+    TabSlot.render();
     setTimelapseEnabled(timelapseEnabled);
     setTimelapseInterval(timelapseIntervalMinutes);
     ProjectMods.refresh();   // the project-mods gate ships with the list, not with settings (#618)
@@ -2083,7 +2109,7 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
           const sessionName = opts.name || msg.name;
           // views + agentType ride in now (#726), not after: initTerminal focuses the tab, and
           // whether it is in the selected view has to be answerable by then.
-          initTerminal(msg.id, ws, cwd, sessionName, { hasScrollback, pendingData, restoreActive: opts.restoreActive, background: opts.background, cols, rows, views: opts.views, agentType: msg.agentType });
+          initTerminal(msg.id, ws, cwd, sessionName, { hasScrollback, pendingData, restoreActive: opts.restoreActive, background: opts.background, cols, rows, views: opts.views, agentType: msg.agentType, projectAgent: msg.projectAgent || null, slot: msg.slot || null });
           resolveReady(msg.id);
           if (opts.loading) {
             const sess = sessions.get(msg.id);
@@ -2131,6 +2157,8 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
             sess.worktree = msg.worktree || null;
             sess.autopilot = !!msg.autopilot;
             sess.mergeBlock = msg.mergeBlock || null;
+            sess.projectAgent = msg.projectAgent || null;
+            sess.slot = msg.slot || null;
           }
         }
         // `worktree` is what a view's `worktree` rule reads, so a footer can only be decided now.
@@ -2696,7 +2724,7 @@ function dismissLoadingBanner(sessionId) {
  */
 const nothingOnScreen = () => !activeId && !ModManager.isModViewVisible();
 
-function initTerminal(id, ws, cwd, initialName, { hasScrollback = false, pendingData = [], restoreActive = false, background = false, cols, rows, views, agentType } = {}) {
+function initTerminal(id, ws, cwd, initialName, { hasScrollback = false, pendingData = [], restoreActive = false, background = false, cols, rows, views, agentType, projectAgent = null, slot = null } = {}) {
   const container = document.createElement('div');
   container.className = 'terminal-container';
   container.id = 'term-' + id;
@@ -2726,7 +2754,7 @@ function initTerminal(id, ws, cwd, initialName, { hasScrollback = false, pending
   const searchAddon = attachSearchAddon(term);
   // A reconnect or restore that didn't carry its project-view filings (#726) reads them back.
   const tabViews = views !== undefined ? views : storedViews(id);
-  sessions.set(id, { term, fit, ws, container, cwd, name, waitingForInput: false, hasUnseenActivity: false, scrollControl, searchAddon, views: tabViews, agentType });
+  sessions.set(id, { term, fit, ws, container, cwd, name, waitingForInput: false, hasUnseenActivity: false, scrollControl, searchAddon, views: tabViews, agentType, projectAgent, slot });
 
   // Flush any buffered data that arrived before the terminal was created
   for (const data of pendingData) {
@@ -5532,6 +5560,8 @@ async function init() {
   initContextViews({
     getOrderedTabIds: getAllTabIds,
     getActiveTabId: () => activeId,
+    getProjectAgents: (contextId) => projectAgentRows(contextId),
+    jumpToTab: (id) => userJumpTo(id),
     getTabCwd: (id) => sessions.get(id)?.cwd || null,
     getTabName: (id) => {
       const s = sessions.get(id);
@@ -5563,7 +5593,7 @@ async function init() {
     // hook that settles the filter re-derives the strip buttons and opens the pinned
     // ones. Deliberately not the rail rows: renderRail() pulls those itself, and
     // calling render() from inside applyFilter would re-enter it.
-    onContextViewApplied: () => { syncOverviewToContext(); refreshTabArrows(); ProjectMods.render(); ProjectViews.render(); ViewFooter.render(); },
+    onContextViewApplied: () => { syncOverviewToContext(); refreshTabArrows(); ProjectMods.render(); ProjectViews.render(); TabSlot.render(); ViewFooter.render(); },
     // Project views (#726) narrow the selected project to one view's tabs. The filter, the
     // per-view last-tab memory and the reveal-on-focus all ask project-views.js.
     tabInView: (id, ctx) => ProjectViews.tabInView(id, ctx),
@@ -5609,7 +5639,9 @@ async function init() {
     contextsForCwd: (cwd) => contextsForCwd(cwd),
     getTabInfo: (id) => {
       const s = sessions.get(id);
-      return s ? { cwd: s.cwd || null, name: s.name || '', kind: tabKind(s), views: s.views, worktree: s.worktree || null } : null;
+      // `projectAgent`: a long-lived agent a project owns (GitHub Webhooks' Work). Its kind is
+      // still 'agent', so view rules match it like any agent; the strip can hide it on its own.
+      return s ? { cwd: s.cwd || null, name: s.name || '', kind: tabKind(s), views: s.views, projectAgent: !!s.projectAgent, slot: s.slot || null, worktree: s.worktree || null } : null;
     },
     setTabViews: (id, views) => {
       const s = sessions.get(id);
@@ -5620,10 +5652,38 @@ async function init() {
     },
     getActiveTabCwd: () => (activeId ? sessions.get(activeId)?.cwd || null : null),
     applyFilter: () => refreshContextFilter(),
+    countProjectAgents: (ctx) => [...sessions.values()].filter(s => s.projectAgent && s.projectAgent.contextId === ctx.id).length,
     isSuspended: () => DecisionMode.isDecisionModeActive(),
     showToast: (text) => showToast(text),
-    // The view list changed. applyFilter() redraws the footer too, but not with Projects off.
-    onViewsChanged: () => ViewFooter.render(),
+    // The view list changed, or an additive view was switched. applyFilter() redraws the footer
+    // and the slot too, but not with Projects off, and switching a footer applies no filter.
+    onViewsChanged: () => { ViewFooter.render(); TabSlot.render(); },
+  });
+  // The tab slot (the orchestrator): a reserved place at the head of the strip, switched on by
+  // an additive view with a `slot`. Its holder is the tab whose session carries the marker.
+  TabSlot.init({
+    getActiveContext: () => {
+      const id = getActiveContextId();
+      const info = getActiveContextInfo();
+      return id && info ? { id, ...info } : null;
+    },
+    slotFor: (ctx) => ProjectViews.slotFor(ctx),
+    holderFor: (ctx, role) => {
+      for (const [id, s] of sessions) if (s.slot && s.slot.contextId === ctx.id && s.slot.role === role) return id;
+      return null;
+    },
+    getTabEl: (id) => TabManager.getTab(id),
+    // Persisted like a drag, so a reload restores the holder where it is shown.
+    pinFirst: (id) => {
+      if (!TabManager.moveToFront(id)) return;
+      const ordered = getAllTabIds();
+      SessionStores.reorder(getWindowId(), ordered);
+      onOverviewTabsReordered(ordered);
+    },
+    hasTab: (id) => sessions.has(id),
+    focusTab: (id) => userJumpTo(id),
+    getWindowId: () => getWindowId(),
+    showToast: (text) => showToast(text),
   });
   // View footers: the row under the monitor for a tab in a view with a `footer`.
   ViewFooter.init({

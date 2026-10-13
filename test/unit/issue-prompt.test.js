@@ -231,6 +231,21 @@ test('the issue pipeline snapshot is persisted, and issue_complete never re-read
     'issueReviewEnabled must use the spawn snapshot, never re-read .deepsteve/pipeline.json (#717)');
 });
 
+test('the issue and project-agent stamps are persisted and re-checked on restore', () => {
+  // The GitHub Webhooks mod finds the sessions it watches by `entry.issue`, and the Work
+  // coordinator by `entry.projectAgent`; a restart that dropped either would orphan both.
+  const server = read('server.js');
+  const ser = server.slice(server.indexOf('function serializeShellEntry('));
+  const serBody = ser.slice(0, ser.indexOf('\n}'));
+  assert.match(serBody, /issue: entry\.issue \|\| null/);
+  assert.match(serBody, /projectAgent: entry\.projectAgent \|\| null/);
+  assert.match(server, /issue: restoreIssueStamp\(restored\.issue\)/);
+  assert.match(server, /projectAgent: restoreProjectAgent\(restored\.projectAgent\)/);
+  // Both issue-start paths stamp it: startIssueSession on the entry, the picker in its handler.
+  assert.equal(server.split('issue: issueStamp(number, url)').length - 1, 1, 'startIssueSession stamps entry.issue');
+  assert.ok(server.includes('entry.issue = issueStamp(parsed.issue?.number, parsed.issue?.url)'), 'the picker path stamps entry.issue');
+});
+
 test('an omitted autopilot seeds from the remembered preference, not from off (#651)', () => {
   // The bug this guards: `autopilot = false` in the signature (and `!!autopilot`
   // at the call sites) made "not specified" indistinguishable from "off", so every
@@ -268,6 +283,21 @@ test('the stages land after the completion instruction, at the very end', () => 
   // nothing is repeated after the list.
   const out = renderIssuePrompt('BODY', { number: 1, title: 't' }, { stages: 'STAGES' });
   assert.equal(out, `BODY\n\n${ISSUE_COMPLETE_INSTRUCTION}\n\nSTAGES`);
+});
+
+test('the discussion sits with the context, the comment rule right after the completion instruction', () => {
+  const out = renderIssuePrompt('BODY', { number: 1, title: 't' },
+    { resume: 'RESUME', discussion: 'DISCUSSION', steps: 'STEPS', commentRule: 'RULE', stages: 'STAGES' });
+  assert.equal(out, `BODY\n\nRESUME\n\nDISCUSSION\n\nSTEPS\n\n${ISSUE_COMPLETE_INSTRUCTION}\nRULE\n\nSTAGES`);
+});
+
+test('no GitHub extras renders byte-for-byte what it rendered before', () => {
+  // collectPromptExtras resolves empty strings when no mod is loaded, and that must be the old prompt.
+  const fields = { number: 1, title: 't', body: 'b' };
+  const base = renderIssuePrompt(TEMPLATE, fields, { stages: 'S' });
+  for (const extra of [{}, { discussion: '', commentRule: '' }, { discussion: null, commentRule: null }]) {
+    assert.equal(renderIssuePrompt(TEMPLATE, fields, { stages: 'S', ...extra }), base);
+  }
 });
 
 test('no stages renders byte-for-byte what it rendered before (#668)', () => {
@@ -355,6 +385,17 @@ test('every renderIssuePrompt call site decides about stages (#668)', () => {
     // instructions, so a project or repo pipeline works from MCP and not from the picker.
     assert.match(call, /\bsteps\b/,
       `a renderIssuePrompt call site does not pass the pipeline steps (#717):\n${call}`);
+    // And the GitHub Webhooks extras: a surface that skips them starts sessions that never
+    // see the discussion already on the issue and get their own comments handed back.
+    assert.match(call, /\bdiscussion\b/,
+      `a renderIssuePrompt call site does not pass the issue discussion:\n${call}`);
+    assert.match(call, /\bcommentRule\b/,
+      `a renderIssuePrompt call site does not pass the comment-marker rule:\n${call}`);
+    // ...which only exist inside deliverIssuePrompt's render callback, so a site typed
+    // straight through deliverPromptWhenReady could not have them.
+    const before = server.slice(Math.max(0, at - 400), at);
+    assert.ok(before.lastIndexOf('deliverIssuePrompt(') > before.lastIndexOf('deliverPromptWhenReady('),
+      `a renderIssuePrompt call site is not inside deliverIssuePrompt:\n${call}`);
   }
   // The COUNT matters as much as the per-site check: a refactor that inlined a site to
   // zero would pass the loop vacuously.

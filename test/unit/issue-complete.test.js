@@ -190,6 +190,46 @@ test('autopilot on: the tool MERGES, and the answer reports it', async () => {
   assert.ok(p.autoCloseAt > Date.now());
 });
 
+test('a mod merge gate holds the merge once: nothing lands, and the next call merges', async () => {
+  // GitHub Webhooks registers a gate that refuses while the issue has context the session
+  // has not been shown. The hold must leave the target untouched and arm nothing.
+  const issueHooks = require('../../issue-hooks');
+  issueHooks._reset();
+  let holds = 1;
+  issueHooks.registerMergeGate('test', ({ id }) => (holds-- > 0
+    ? { next: 'read_new_context', instruction: `Merge held for ${id}: read the new comment.` }
+    : null));
+  try {
+    const { tools, armCalls, repo } = mergeTools();
+    const held = parse(await tools.issue_complete.handler({}, callerExtra('s')));
+    assert.equal(held.status, 'held');
+    assert.equal(held.next, 'read_new_context');
+    assert.equal(held.gate, 'test');
+    assert.match(held.instruction, /Merge held for s/);
+    assert.equal(fs.readFileSync(path.join(repo, 'a.txt'), 'utf8'), 'one\n', 'nothing landed');
+    assert.deepStrictEqual(armCalls, [], 'nothing armed');
+
+    const merged = parse(await tools.issue_complete.handler({}, callerExtra('s')));
+    assert.equal(merged.next, 'merged');
+  } finally {
+    issueHooks._reset();
+  }
+});
+
+test('a merge gate that throws does not wedge the merge', async () => {
+  const issueHooks = require('../../issue-hooks');
+  issueHooks._reset();
+  issueHooks.registerMergeGate('broken', () => { throw new Error('boom'); });
+  try {
+    const { tools, logs } = mergeTools();
+    const p = parse(await tools.issue_complete.handler({}, callerExtra('s')));
+    assert.equal(p.next, 'merged');
+    assert.ok(logs.some(l => /merge gate broken threw/.test(l)));
+  } finally {
+    issueHooks._reset();
+  }
+});
+
 test('the answer tells the agent to write its summary and close the tab, and nothing else', async () => {
   const { tools } = mergeTools();
   const p = parse(await tools.issue_complete.handler({}, callerExtra('s')));

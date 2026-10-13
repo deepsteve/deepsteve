@@ -208,6 +208,40 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
 #app-container.vertical-layout .views-toggle.filtering { color: var(--ds-accent-blue); }
 #app-container.vertical-layout.icon-rail .views-toggle .views-caret { display: none; }
 
+/* ── Tab slot ─────────────────────────────────────────────────────────────────────────────────
+   A reserved place at the head of the strip for the tab holding a project's role — the
+   orchestrator (tab-slot.js). Empty, it is #tab-slot: a dashed outline the size of a tab,
+   between #views-toggle and #tabs-list, whose right-click opens the holder. Filled, the holder's
+   own tab takes the place — first in #tabs-list, .slot-tab, and sticky, so scrolling a long strip
+   never carries it away. Sticky needs a background that hides what slides under it, which the
+   vertical layout's transparent tab doesn't have. */
+#tab-slot.hidden { display: none; }
+.tab-slot {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  min-width: 80px;
+  padding: 5px 12px;
+  border: 1px dashed var(--ds-border);
+  border-radius: 6px 6px 0 0;
+  color: var(--ds-text-secondary);
+  font-size: 13px;
+  opacity: 0.6;
+  cursor: context-menu;
+  user-select: none;
+}
+.tab-slot:hover { opacity: 1; border-color: var(--ds-text-secondary); }
+.tab-slot-icon { font-size: 10px; }
+.tab.slot-tab { position: sticky; left: 0; z-index: 1; margin-right: 4px; }
+.tab.slot-tab .tab-label::before { content: '◆ '; font-size: 10px; color: var(--ds-accent-blue); }
+#app-container.vertical-layout .tab-slot { padding: 7px 12px; border-radius: 8px; margin-bottom: 4px; }
+#app-container.vertical-layout .tab.slot-tab { position: sticky; top: 0; left: auto; margin-right: 0; margin-bottom: 4px; }
+#app-container.vertical-layout .tab.slot-tab:not(.active):not(:hover) { background: var(--ds-bg-secondary); }
+#app-container.vertical-layout.icon-rail .tab-slot { justify-content: center; padding: 7px 0; min-width: 0; }
+#app-container.vertical-layout.icon-rail .tab-slot-label { display: none; }
+#app-container.vertical-layout.icon-rail .tab.slot-tab .tab-icon { box-shadow: 0 0 0 1px var(--ds-accent-blue); }
+
 /* ── View footers ─────────────────────────────────────────────────────────────────────────────
    #view-footer is the monitor's bottom row, the views bar's mirror: facts about the tab you are
    looking at, when it is in a view with a `footer`. view-footer.js toggles .hidden and fills it.
@@ -1995,6 +2029,15 @@ kbd {
    peer of it. In the collapsed rail the indent goes away (there is no hierarchy to
    show at 48px, and 12px of it would push the square off-centre). */
 .context-row.project-mod-row { padding-left: 26px; font-size: 12px; }
+/* GitHub Webhooks' Work agents, beneath their project's mods. */
+.project-agents-head { padding: 6px 12px 2px 26px; font-size: 10px; letter-spacing: 0.04em; text-transform: uppercase; color: var(--ds-text-secondary); opacity: 0.8; }
+#context-rail.collapsed .project-agents-head { display: none; }
+.context-row.project-agent-row .context-row-icon { color: var(--ds-accent-blue); }
+.context-row.project-agent-row.waiting .context-row-label { opacity: 0.75; }
+/* The project-agents show/hide chip: a switch, not a view, so it never draws as a selected tab. */
+.view-tab.view-tab-agents { margin-left: auto; background: transparent; border-color: transparent; color: var(--ds-text-secondary); }
+.view-tab.view-tab-agents.active { background: transparent; border-color: transparent; color: var(--ds-accent-blue); }
+.view-tab.view-tab-agents:hover { border-color: var(--ds-border); }
 .context-row.project-mod-row .context-row-icon { opacity: 0.85; }
 #context-rail.collapsed .context-row.project-mod-row { padding-left: 12px; }
 

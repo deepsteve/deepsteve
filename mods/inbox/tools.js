@@ -1847,7 +1847,7 @@ function registerRoutes(app, context) {
     // and closes the branch's GitHub issue afterwards — the same thing every other Merge
     // in the product now does, which is the point of there being one routine.
     const result = await mergeSession({
-      git: runGit, gh: runGh, gitNet: runGitNet, cwd, repoRoot, isWorktree: true, target,
+      git: runGit, gh: runGh, gitNet: runGitNet, cwd, repoRoot, isWorktree: true, target, sessionId: id,
     });
 
     // The outcome becomes SESSION STATE, through the server's own recorder rather than a
