@@ -578,6 +578,29 @@ pins all five with those reasons in the failure messages.
 is the design (mods, display tabs and project mods are same-origin and trusted), and it is why
 `allow-popups-to-escape-sandbox` grants a mod no authority it did not already have.
 
+**Pages from the internet are the exception (#731).** Baby Browser is a trusted mod, but the page
+inside it is not: `/api/proxy` serves remote HTML from *our* origin, so `proxy.js` stamps every
+response with `Content-Security-Policy: sandbox allow-scripts allow-forms allow-popups`. That puts
+the document in an opaque origin however it is loaded, Baby Browser's inner iframe (itself
+sandboxed without `allow-same-origin`) or top-level through `open_browser_tab`. Its requests send
+`Origin: null` and no `SameSite=Strict` cookie, and `top`, `localStorage` and service workers
+throw. Upstream headers pass through an allowlist (`FORWARDED_HEADERS`), never a denylist,
+because `Set-Cookie`, `Clear-Site-Data` and `Service-Worker-Allowed` all act on our origin.
+
+Since the parent cannot touch an opaque frame, the proxy injects a bridge script first in
+`<head>`. It talks to the parent by `postMessage`, tagged `deepsteve-proxy`:
+
+| Message | Direction | Meaning |
+|---|---|---|
+| `{ kind: 'read', id }` | parent → page | asks for the page text (`baby_browser_read`) |
+| `{ kind: 'read-result', id, title, text }` | page → parent | the answer; no answer within 5s means a non-HTML page or one that left the proxy |
+| `{ kind: 'navigate', url }` | page → parent | a plain left-click on a link or a GET form submit; the parent navigates the frame and keeps history |
+
+The parent accepts a message only when `event.source === frame.contentWindow`. The page controls
+what it says, so a forged message can only lie about the page itself. Links are not rewritten
+server-side: the injected `<base>` resolves a root-relative `/api/proxy?url=…` against the remote
+origin, so a rewritten link never reached us.
+
 ### Panel Mods
 
 Panel mod iframes are created when the mod is enabled and stay alive for the duration of the session. When you switch between panel tabs, iframes are shown/hidden via `display: none` — they are not destroyed. This is important because MCP tools registered by panel mods (e.g. `browser_eval`) need the iframe to be alive to handle requests.

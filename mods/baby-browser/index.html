@@ -71,7 +71,9 @@
     <input type="text" id="url" value="https://example.com" spellcheck="false" autocomplete="off">
     <button class="go-btn" id="go">Go</button>
   </div>
-  <iframe id="browser" sandbox="allow-same-origin allow-scripts allow-forms allow-popups"></iframe>
+  <!-- No allow-same-origin: the page is from the internet, served from our origin by /api/proxy,
+       which also sandboxes it with a CSP. We learn about it only through proxy.js's bridge (#731). -->
+  <iframe id="browser" sandbox="allow-scripts allow-forms allow-popups"></iframe>
 
   <script>
     let _d=0;try{let w=window;while(w!==w.parent){w=w.parent;_d++}}catch{}
@@ -152,36 +154,50 @@
       navigate(false);
     });
 
-    // Track in-iframe navigation (link clicks) and update URL bar + history
-    frame.addEventListener('load', () => {
-      try {
-        const frameSrc = frame.contentWindow.location.href;
-        const match = frameSrc.match(/[?&]url=([^&]+)/);
-        if (match) {
-          const realUrl = decodeURIComponent(match[1]);
-          if (realUrl && realUrl !== navHistory[historyIndex]) {
-            urlInput.value = realUrl;
-            navHistory.length = historyIndex + 1;
-            navHistory.push(realUrl);
-            historyIndex = navHistory.length - 1;
-            updateNavButtons();
-            saveState();
-          }
-        }
-      } catch {}
+    // The framed page is opaque-origin, so its DOM and location are out of reach. proxy.js
+    // injects a bridge that posts to us instead: a link click or GET form submit arrives as
+    // `navigate`, and `read` is answered as `read-result`. Only the window in our own frame is
+    // listened to; what it says can only be about the page itself, which it controls anyway.
+    const PROXY_TAG = 'deepsteve-proxy';
+    const READ_TIMEOUT_MS = 5000;
+    const pendingReads = new Map(); // id -> resolve
+    let readSeq = 0;
+
+    window.addEventListener('message', (e) => {
+      if (e.source !== frame.contentWindow) return;
+      const m = e.data;
+      if (!m || m.tag !== PROXY_TAG) return;
+      if (m.kind === 'navigate' && typeof m.url === 'string' && /^https?:\/\//i.test(m.url)) {
+        urlInput.value = m.url;
+        navigate();
+      } else if (m.kind === 'read-result' && pendingReads.has(m.id)) {
+        pendingReads.get(m.id)(m);
+        pendingReads.delete(m.id);
+      }
     });
+
+    function readPage() {
+      return new Promise((resolve) => {
+        const id = ++readSeq;
+        const timer = setTimeout(() => { pendingReads.delete(id); resolve(null); }, READ_TIMEOUT_MS);
+        pendingReads.set(id, (m) => { clearTimeout(timer); resolve(m); });
+        frame.contentWindow.postMessage({ tag: PROXY_TAG, kind: 'read', id }, '*');
+      });
+    }
 
     goBtn.addEventListener('click', () => navigate());
     urlInput.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') navigate();
     });
 
+    // ─── Baby Browser MCP bridge ───────────────────────────────────────
+    // Declared before the first navigate(), which calls registerWithServer(): reading a `let`
+    // ahead of its declaration throws, and that killed the script before initBridge() ever ran.
+    let tabInstanceId = null;
+
     // Load current page from history
     urlInput.value = navHistory[historyIndex];
     navigate(false);
-
-    // ─── Baby Browser MCP bridge ───────────────────────────────────────
-    let tabInstanceId = null;
 
     function registerWithServer() {
       if (!tabInstanceId) return;
@@ -228,21 +244,13 @@
               navigate();
             });
           } else if (action === 'read') {
-            try {
-              const doc = frame.contentDocument;
-              if (!doc || !doc.body) {
-                error = 'No page loaded in Baby Browser';
-              } else {
-                const clone = doc.body.cloneNode(true);
-                for (const tag of clone.querySelectorAll('script, style, noscript, svg, link, meta')) {
-                  tag.remove();
-                }
-                const title = doc.title || '';
-                const bodyText = clone.innerText.replace(/\n{3,}/g, '\n\n').trim();
-                result = (title ? `# ${title}\n\n` : '') + bodyText;
-              }
-            } catch (e) {
-              error = 'Cannot read page content (cross-origin restriction): ' + e.message;
+            const page = await readPage();
+            if (!page) {
+              error = 'The page did not answer: it is not an HTML page, or it has navigated outside the proxy';
+            } else {
+              const title = typeof page.title === 'string' ? page.title : '';
+              const bodyText = typeof page.text === 'string' ? page.text : '';
+              result = (title ? `# ${title}\n\n` : '') + bodyText;
             }
           } else if (action === 'url') {
             result = navHistory[historyIndex] || '';

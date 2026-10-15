@@ -443,9 +443,10 @@ function createSecurity(cfg) {
   //    port-qualified). Runs after hostGuard, so DNS-rebinding victims are already gone.
   //
   //    Origin is NOT authentication, and nothing behind this gate may assume it is. Anything on
-  //    our own origin passes — including a display tab, a project-mod page, and any remote HTML
-  //    the Baby Browser is serving through /api/proxy — and so does any local process willing to
-  //    set the header. It is a same-origin check, so what it guards must be safe to hand a
+  //    our own origin passes — including a display tab and a project-mod page — and so does any
+  //    local process willing to set the header. (Remote HTML served through /api/proxy does not:
+  //    proxy.js sandboxes it into an opaque origin, so it sends `Origin: null` (#731).)
+  //    It is a same-origin check, so what it guards must be safe to hand a
   //    same-origin caller. For the beacon that holds: its only power is writing bounded, sanitized
   //    strings into the daemon log, which every one of those callers could already do by other
   //    means. Do not put a second route behind this and assume more.

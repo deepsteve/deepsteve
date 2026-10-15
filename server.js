@@ -10,6 +10,7 @@ const net = require('net');
 const { initMCP, getModTools, isMcpReady } = require('./mcp-server');
 const { createSecurity, UI_HOST } = require('./security');
 const { createLinks } = require('./links');
+const { createProxy } = require('./proxy');
 const { createSleepWatch } = require('./sleep-watch');
 const { createPowerAssertion } = require('./power-assertion');
 const { resolveForkTip } = require('./fork-resolve');
@@ -578,76 +579,9 @@ const links = createLinks({ log, baseUrl: UI_URL });
 app.get('/v1/:type/:id', links.handleGet);
 app.post('/v1/:type/:id', security.requireAllowedOrigin, links.handlePost);
 
-// Proxy endpoint for Baby Browser — fetches URLs and strips iframe-blocking headers.
-// Resources (CSS/JS/images) load directly from origin via <base> tag — only HTML
-// pages need proxying to bypass X-Frame-Options.
-app.get('/api/proxy', async (req, res) => {
-  const url = req.query.url;
-  log(`[proxy] url=${url}`);
-  if (!url) return res.status(400).json({ error: 'Missing url parameter' });
-  let parsed;
-  try {
-    parsed = new URL(url);
-  } catch {
-    return res.status(400).json({ error: 'Invalid URL' });
-  }
-  try {
-    const resp = await fetch(parsed.href, {
-      headers: { 'User-Agent': req.headers['user-agent'] || 'Mozilla/5.0' },
-      redirect: 'follow',
-    });
-    res.status(resp.status);
-    const skipHeaders = new Set(['x-frame-options', 'content-security-policy', 'content-security-policy-report-only', 'content-encoding', 'transfer-encoding', 'connection']);
-    for (const [key, value] of resp.headers.entries()) {
-      if (!skipHeaders.has(key.toLowerCase())) {
-        res.setHeader(key, value);
-      }
-    }
-    const contentType = resp.headers.get('content-type') || '';
-    let body = Buffer.from(await resp.arrayBuffer());
-    if (contentType.includes('text/html')) {
-      const finalUrl = new URL(resp.url);
-      const origin = finalUrl.origin;
-      let html = body.toString('utf-8');
-      // Rewrite only <a href> and <form action> — not <link href> (stylesheets) or other tags.
-      // Resources load directly from origin via <base> tag.
-      html = html.replace(/<(a\s[^>]*?)href="(\/[^"]*?)"([^>]*?>)/gi, (match, pre, pathVal, post) => {
-        if (pathVal.startsWith('//')) return match;
-        if (pathVal === '#' || pathVal.startsWith('/#')) return match;
-        const absolute = new URL(pathVal, origin + '/').href;
-        return `<${pre}href="/api/proxy?url=${encodeURIComponent(absolute)}"${post}`;
-      });
-      html = html.replace(/<(a\s[^>]*?)href="(https?:\/\/[^"]*?)"([^>]*?>)/gi, (match, pre, urlVal, post) => {
-        try {
-          const u = new URL(urlVal);
-          if (u.origin === origin) {
-            return `<${pre}href="/api/proxy?url=${encodeURIComponent(urlVal)}"${post}`;
-          }
-        } catch {}
-        return match;
-      });
-      html = html.replace(/<(form\s[^>]*?)action="(\/[^"]*?)"([^>]*?>)/gi, (match, pre, pathVal, post) => {
-        if (pathVal.startsWith('//')) return match;
-        const absolute = new URL(pathVal, origin + '/').href;
-        return `<${pre}action="/api/proxy?url=${encodeURIComponent(absolute)}"${post}`;
-      });
-      // Inject <base> so resources (CSS/JS/images) with relative src resolve to origin
-      const baseTag = `<base href="${origin}/">`;
-      if (/<head[^>]*>/i.test(html)) {
-        html = html.replace(/<head([^>]*)>/i, `<head$1>${baseTag}`);
-      } else if (/<html[^>]*>/i.test(html)) {
-        html = html.replace(/<html([^>]*)>/i, `<html$1><head>${baseTag}</head>`);
-      } else {
-        html = baseTag + html;
-      }
-      body = Buffer.from(html, 'utf-8');
-      res.setHeader('content-length', body.length);
-    }
-    res.send(body);
-  } catch (err) {
-    res.status(502).json({ error: err.message });
-  }
-});
+// Proxy endpoint for Baby Browser. Remote HTML is served from our origin, so proxy.js puts every
+// response in an opaque origin (a sandbox CSP) and forwards only an allowlist of upstream headers (#731).
+app.get('/api/proxy', createProxy({ log }));
 
 // File upload endpoint — writes to /tmp/deepsteve-drops/ and returns the full path
 const DROPS_DIR = path.join(os.tmpdir(), 'deepsteve-drops');
