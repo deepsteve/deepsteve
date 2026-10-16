@@ -48,6 +48,24 @@ describe('PUT /api/upload/:filename', () => {
     assert.match(res.body.path, /ds-upload-typed(-\d+)?\.png$/);
   });
 
+  it('accepts a .json file sent as application/json', async () => {
+    // The browser types a .json drop as application/json, which the global
+    // express.json parser used to claim first: req.body became an object and
+    // the route answered "Missing request body".
+    const res = await upload('ds-upload-typed.json', Buffer.from('{"project_info":{}}'), {
+      'Content-Type': 'application/json',
+    });
+    assert.strictEqual(res.status, 200, JSON.stringify(res.body));
+    assert.match(res.body.path, /ds-upload-typed(-\d+)?\.json$/);
+  });
+
+  it('accepts a JSON-typed file larger than the global parser limit', async () => {
+    // Over express.json's default 100KB, the global parser answered 413 instead.
+    const big = Buffer.from(JSON.stringify({ pad: 'x'.repeat(200 * 1024) }));
+    const res = await upload('ds-upload-big.json', big, { 'Content-Type': 'application/json' });
+    assert.strictEqual(res.status, 200, JSON.stringify(res.body));
+  });
+
   it('rejects a path traversal in the filename', async () => {
     const res = await upload('../escaped.txt', Buffer.from('x'));
     assert.strictEqual(res.status, 400);

@@ -566,6 +566,10 @@ app.use((req, res, next) => {
   if (req.path.startsWith('/api/screenshots')) return next();
   // Same reason for timelapse frames (#667) — each one carries a base64 PNG.
   if (req.path.startsWith('/api/timelapse')) return next();
+  // A dropped file is raw bytes whatever its type. A .json drop arrives as
+  // application/json, so this parser would turn it into an object (or reject it
+  // as malformed or over 100KB) before the route's express.raw ever saw it.
+  if (req.path.startsWith('/api/upload/')) return next();
   express.json()(req, res, next);
 });
 
