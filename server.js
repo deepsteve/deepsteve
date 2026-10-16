@@ -2916,6 +2916,13 @@ function drainPromptQueue(id) {
     }, 60000);
   }
 
+  // #695: a caller may buy more ambiguous time than the shared default. The one
+  // caller that does is onboarding, where the ambiguous screen is very often Claude
+  // Code's trust dialog and the thing being waited for is a HUMAN reading it — which
+  // takes longer than any agent's startup. Carried on the pending entry so the
+  // 'working' refresh in servePendingDelivery extends by the same amount it armed with.
+  const readyMs = Number(options.readyDeadlineMs) > 0 ? Number(options.readyDeadlineMs) : PROMPT_READY_DEADLINE_MS;
+
   function submitAndNotify() {
     // Re-fetch: with the level-triggered readiness deadline this can fire tens of
     // seconds after the drain that scheduled it (#607).
@@ -2926,6 +2933,18 @@ function drainPromptQueue(id) {
     if (options.skipIf && options.skipIf(id)) {
       log(`[deliverPrompt] id=${id} dropping queued prompt: ${options.skipReason || 'skipIf'}`);
       finishDelivery();
+      return;
+    }
+    // The screen read idle when this was scheduled, but that was up to 500ms ago (longer
+    // behind a Codex or initialPromptDelay timer), and a dialog can open in between. The
+    // last look is taken here, at the keystroke, and a dialog sends the prompt back to an
+    // armed delivery, which holds until the dialog is answered (#732). Before onDeliver,
+    // so a caller is only ever told about a prompt that was typed into a composer.
+    if (readAsking(live)) {
+      log(`[deliverPrompt] id=${id} a dialog opened before the prompt was typed — holding it until the dialog is answered (len=${prompt.length})`);
+      live.pendingDelivery = options.midTurn
+        ? { submit: submitAndNotify, midTurn: true, len: prompt.length, armedAt: Date.now(), dialogLogged: true }
+        : { submit: submitAndNotify, deadline: Date.now() + readyMs, len: prompt.length, readyMs, dialogLogged: true };
       return;
     }
     if (options.onDeliver) options.onDeliver(id);
@@ -2993,7 +3012,9 @@ function drainPromptQueue(id) {
   // immediately. Otherwise, unclassified agents with a fixed initialPromptDelay
   // use that delay; everything else installs a single-shot onIdleOnce that fires
   // on the next idle transition (#568 — replaces the old BEL-recency heuristic).
-  if (computeWaiting(e)) {
+  // A dialog reads 'waiting' too, and is not idle (#732): it is armed like an ambiguous
+  // screen, and servePendingDelivery holds it until the dialog has been answered.
+  if (computeWaiting(e) && !readAsking(e)) {
     setWaiting(e, id, false, 'deliver-immediate');
     log(`[deliverPrompt] id=${id} submitting immediately (screen idle)`);
     setTimeout(submitAndNotify, 500);
@@ -3010,12 +3031,6 @@ function drainPromptQueue(id) {
     // 2nd queued prompt (inherited /rc, then the issue prompt) and for the async
     // fetchIssueFromGitHub path, which arms delivery seconds after the tab has
     // already gone idle.
-    // #695: a caller may buy more ambiguous time than the shared default. The one
-    // caller that does is onboarding, where the ambiguous screen is very often Claude
-    // Code's trust dialog and the thing being waited for is a HUMAN reading it — which
-    // takes longer than any agent's startup. Carried on the pending entry so the
-    // 'working' refresh below extends by the same amount it armed with.
-    const readyMs = Number(options.readyDeadlineMs) > 0 ? Number(options.readyDeadlineMs) : PROMPT_READY_DEADLINE_MS;
     log(`[deliverPrompt] id=${id} arming pending delivery (deadline ${readyMs}ms)`);
     e.pendingDelivery = { submit: submitAndNotify, deadline: Date.now() + readyMs, len: prompt.length, readyMs };
   }
@@ -3029,6 +3044,27 @@ function drainPromptQueue(id) {
 // input is blocked and the client's loading banner is up. Raise one of the three
 // and you must re-check the others.
 const PROMPT_READY_DEADLINE_MS = parseInt(process.env.DEEPSTEVE_PROMPT_READY_DEADLINE_MS, 10) || 30000;
+
+/**
+ * Is a dialog on screen, so this delivery has to wait? (#732)
+ *
+ * The classifier reads a permission prompt, an AskUserQuestion and the plan-approval gate
+ * as 'waiting', exactly like an empty composer. Submitting on that typed the prompt into
+ * the modal, and its Enter answered the person's question with whichever option was
+ * highlighted (the one Claude marked Recommended), while the prompt itself never reached
+ * the agent. So a delivery holds while readAsking() — the detector behind the tab's `?`
+ * and the Inbox's blocked rows — finds a dialog, with no deadline: what it is waiting
+ * for is a person. Logged once per delivery, so a held prompt is visible.
+ */
+function heldByDialog(e, id, pending) {
+  const dialog = readAsking(e);
+  if (!dialog) return false;
+  if (!pending.dialogLogged) {
+    pending.dialogLogged = true;
+    log(`[deliverPrompt] id=${id} held: a ${dialog.kind} dialog is on screen${dialog.text ? ` (${dialog.text})` : ''} — delivering once it is answered (len=${pending.len})`);
+  }
+  return true;
+}
 
 /**
  * Serve an armed pending delivery (#607). Called from reclassifyWaiting, which
@@ -3048,6 +3084,9 @@ function servePendingDelivery(e, id, state) {
     // suggested next prompt in the empty composer, and read as a draft it made every
     // click after a turn wait until the person sent something. The stash indicator is
     // read off the full screen, so how it is styled can never hide it.
+    // A dialog is asked first, by name: an empty-looking composer under one must not be
+    // typed into, and a ctrl+s stash pressed into one is a key it was never meant to get.
+    if (heldByDialog(e, id, pending)) return;
     const lines = e.terminalScreen ? e.terminalScreen.linesSync(SUBMIT_TIMINGS.screenLines) : [];
     const draft = readComposerDraft(e.terminalScreen ? e.terminalScreen.linesSync(SUBMIT_TIMINGS.screenLines, { skipDim: true }) : []);
     if (draft === '') {
@@ -3078,19 +3117,25 @@ function servePendingDelivery(e, id, state) {
     }
     return;
   }
+  // A decisively-working screen is not the hang condition — a turn has to end
+  // eventually — so only AMBIGUOUS time counts against the deadline. This also
+  // stops a legitimately long turn from getting a queued prompt shoved into it.
+  if (state === 'working') { pending.deadline = Date.now() + (pending.readyMs || PROMPT_READY_DEADLINE_MS); return; }
+  if (state !== 'waiting' && Date.now() < pending.deadline) return;
+  // About to submit: the screen reads idle, or the deadline ran out on an ambiguous one.
+  // Neither may type into a dialog, and time spent in one is not ambiguous time either —
+  // a person is answering it, and the turn that follows ends on a composer.
+  if (heldByDialog(e, id, pending)) {
+    pending.deadline = Date.now() + (pending.readyMs || PROMPT_READY_DEADLINE_MS);
+    return;
+  }
+  e.pendingDelivery = null;
   if (state === 'waiting') {
-    e.pendingDelivery = null;
     setWaiting(e, id, false, 'deliver-level');
     log(`[deliverPrompt] id=${id} screen idle — submitting pending prompt (len=${pending.len})`);
     setTimeout(pending.submit, 500);
     return;
   }
-  // A decisively-working screen is not the hang condition — a turn has to end
-  // eventually — so only AMBIGUOUS time counts against the deadline. This also
-  // stops a legitimately long turn from getting a queued prompt shoved into it.
-  if (state === 'working') { pending.deadline = Date.now() + (pending.readyMs || PROMPT_READY_DEADLINE_MS); return; }
-  if (Date.now() < pending.deadline) return;
-  e.pendingDelivery = null;
   log(`[deliverPrompt] id=${id} readiness deadline reached (state=${state}) — submitting anyway (len=${pending.len})`);
   auditWaiting('deliver-deadline', id, e, { len: pending.len, screen: auditScreenTail(e, 500) });
   setTimeout(pending.submit, 0);

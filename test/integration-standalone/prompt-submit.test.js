@@ -583,6 +583,43 @@ test('#656: an interior newline never submits a fragment on its own', async () =
   await closeSession(id);
 });
 
+// --- #732: a dialog is not an idle composer ---------------------------------
+
+test('#732: a prompt queued while the tab shows a dialog never answers it, and lands once the dialog is gone', async () => {
+  // arkfloodfever#16: the plan stage's question was up, the screen read idle, and a
+  // queued GitHub update was typed into it. Its Enter chose "Begin" for the person and
+  // the update never reached the agent. menuOnBoot puts the stub straight into such a
+  // dialog, which logs menu-select on the Enter that would answer it.
+  const { c, id } = await openSession({
+    menuOnBoot: true,
+    menu: {
+      question: 'Begin with this plan?',
+      options: ['Begin (Recommended)', 'Revise'],
+      footer: 'Enter to select · ↑/↓ to navigate · Esc to cancel',
+    },
+  });
+  await waitFor(async () => (await shellState(id)).asking, 'the daemon to see the dialog');
+  const before = daemonLog.length;
+  // Not `loading`: that blocks keystrokes, and the Esc below is a person's.
+  c.ws.send(JSON.stringify({ type: 'initialPrompt', text: PROMPT }));
+
+  // Past the 8s readiness deadline, which on its own submits into an ambiguous screen.
+  await sleep(10000);
+  assert.ok(!events(id).some((e) => e.event === 'menu-select'), 'the queued prompt answered the dialog');
+  assert.strictEqual(textChunks(id).length, 0, 'the prompt was typed into the dialog');
+  assert.strictEqual(enterChunks(id).length, 0, 'an Enter reached the dialog');
+  assert.ok(daemonLog.slice(before).includes('held: a question dialog is on screen (Begin with this plan?)'),
+    daemonLog.slice(before));
+
+  // The person dismisses it. The composer comes back, and the held prompt goes in.
+  c.ws.send('\x1b');
+  await waitFor(() => events(id).some((e) => e.event === 'menu-cancel'), 'the Esc to reach the dialog');
+  await waitFor(() => submits(id).length === 1, 'the held prompt to submit', 20000);
+  assert.ok(submits(id)[0].text.includes(MARKER), submits(id)[0].text.slice(0, 80));
+  assert.ok(!events(id).some((e) => e.event === 'menu-select'));
+  await closeSession(id);
+});
+
 // NOTE: everything below stops the daemon. New cases go ABOVE this line.
 test('graceful shutdown of idle sessions is not slowed by echo confirmation', async () => {
   // killShell disposes the terminal screen and drops the data handler BEFORE sending

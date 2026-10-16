@@ -414,6 +414,117 @@ test('midTurn: a suggested prompt in the composer is not a draft — no stash, t
   screen.dispose();
 });
 
+// --- #732: a turn-end delivery never answers a dialog -------------------------
+//
+// The classifier reads a dialog as 'waiting', the same as an empty composer, and a
+// turn-end delivery submitted on 'waiting'. arkfloodfever#16: a GitHub update went into
+// the plan stage's Begin/Revise question, its Enter chose "Begin" for the person, and the
+// update never reached the agent. These put real dialog captures on the interpreted
+// screen while the classifier's tail reads idle, which is what a live dialog looks like.
+
+test('#732: a dialog on an idle-looking screen holds the prompt instead of answering it', async () => {
+  const h = makeHarness({ waitingForInput: true, screen: 'waiting' });
+  h.entry.composerLines = DIALOGS.MULTI_QUESTION;
+  const delivered = [];
+  h.deliverPromptWhenReady(ID, '[GitHub] New context on issue #16', { onDeliver: () => delivered.push(h.now) });
+
+  for (let i = 0; i < 10; i++) { h.advance(DEADLINE_MS); h.sweep(); await h.runDue(); }
+  assert.deepStrictEqual(h.submits, [], 'typed into the dialog');
+  assert.deepStrictEqual(delivered, [], 'told the caller it was delivered');
+  assert.strictEqual(h.entry.waitingForInput, true, 'the question was reported answered');
+  assert.ok(!h.logs.some((l) => l.includes('answered (deliver-')), h.logs.join('\n'));
+  assert.strictEqual(h.logs.filter((l) => l.includes('held: a question dialog is on screen (How wide')).length, 1,
+    'the hold is logged once, with the question');
+
+  // The person answers. The turn that follows runs, then ends on a composer.
+  h.entry.composerLines = COMPOSER.WORKING_EMPTY_COMPOSER;
+  h.setScreen('working');
+  h.sweep();
+  h.entry.composerLines = COMPOSER.EMPTY_COMPOSER;
+  h.setScreen('waiting');
+  h.sweep();
+  while (h.submits.length < 1 && await h.step()) { /* next timer */ }
+  assert.deepStrictEqual(h.submits.map((s) => s.text), ['[GitHub] New context on issue #16']);
+  assert.strictEqual(delivered.length, 1);
+});
+
+test('#732: a prompt armed behind a turn waits out the dialog the turn ends on', async () => {
+  const h = makeHarness({ waitingForInput: false, screen: 'working' });
+  h.entry.composerLines = COMPOSER.WORKING_EMPTY_COMPOSER;
+  h.deliverPromptWhenReady(ID, 'queued offer');
+  assert.ok(h.entry.pendingDelivery, 'armed behind the running turn');
+
+  h.entry.composerLines = DIALOGS.PLAN_APPROVAL;
+  h.setScreen('waiting');
+  h.sweep();
+  for (let i = 0; i < 5; i++) { h.advance(60000); h.sweep(); await h.runDue(); }
+  assert.deepStrictEqual(h.submits, [], 'typed into the plan-approval gate');
+
+  // Esc takes the dialog away and leaves the session at its prompt.
+  h.entry.composerLines = COMPOSER.EMPTY_COMPOSER;
+  h.sweep();
+  while (h.submits.length < 1 && await h.step()) { /* next timer */ }
+  assert.deepStrictEqual(h.submits.map((s) => s.text), ['queued offer']);
+});
+
+test('#732: the readiness deadline does not submit into a dialog, and time in one is not ambiguous time', async () => {
+  const h = makeHarness({ screen: 'unknown' });
+  h.entry.composerLines = DIALOGS.PERMISSION_CURSOR_MID;
+  h.deliverPromptWhenReady(ID, 'do the issue');
+  h.advance(DEADLINE_MS * 3);
+  h.sweep();
+  await h.runDue();
+  assert.deepStrictEqual(h.submits, []);
+  assert.ok(!h.logs.some((l) => l.includes('deadline reached')), h.logs.join('\n'));
+  assert.ok(h.logs.some((l) => l.includes('held: a permission dialog is on screen (Bash(rm -rf node_modules))')));
+
+  // The dialog goes and the screen stays ambiguous: a whole deadline of it, then it goes in.
+  h.entry.composerLines = COMPOSER.EMPTY_COMPOSER;
+  h.advance(DEADLINE_MS - 1);
+  h.sweep();
+  await h.runDue();
+  assert.deepStrictEqual(h.submits, [], 'the time spent in the dialog was counted against the deadline');
+  h.advance(2);
+  h.sweep();
+  await h.runDue();
+  assert.deepStrictEqual(h.submits.map((s) => s.text), ['do the issue']);
+});
+
+test('#732: a dialog that opens between "idle" and the keystroke sends the prompt back to wait', async () => {
+  const h = makeHarness({ waitingForInput: true, screen: 'waiting' });
+  h.entry.composerLines = COMPOSER.EMPTY_COMPOSER;
+  const delivered = [];
+  h.deliverPromptWhenReady(ID, 'do the issue', { onDeliver: () => delivered.push(true) });
+  const submitTimer = h.timers.find((t) => t.ms === 500);
+  assert.ok(submitTimer, 'scheduled 500ms out, as an idle screen is');
+
+  // The agent raises a question before the timer fires.
+  h.entry.composerLines = DIALOGS.MULTI_QUESTION;
+  while (!submitTimer.fired && await h.step()) { /* up to the keystroke */ }
+  assert.deepStrictEqual(h.submits, [], 'typed into the dialog');
+  assert.deepStrictEqual(delivered, []);
+  assert.ok(h.entry.pendingDelivery, 'handed back to an armed delivery');
+  assert.ok(h.logs.some((l) => l.includes('a dialog opened before the prompt was typed')), h.logs.join('\n'));
+
+  for (let i = 0; i < 5; i++) { h.advance(DEADLINE_MS); h.sweep(); await h.runDue(); }
+  assert.deepStrictEqual(h.submits, []);
+
+  h.entry.composerLines = COMPOSER.EMPTY_COMPOSER;
+  h.sweep();
+  while (h.submits.length < 1 && await h.step()) { /* next timer */ }
+  assert.deepStrictEqual(h.submits.map((s) => s.text), ['do the issue']);
+  assert.deepStrictEqual(delivered, [true], 'onDeliver fires once, for the keystroke that happened');
+});
+
+test('#732: an idle composer with no dialog still delivers at once', async () => {
+  const h = makeHarness({ waitingForInput: true, screen: 'waiting' });
+  h.entry.composerLines = COMPOSER.EMPTY_COMPOSER;
+  h.deliverPromptWhenReady(ID, 'do the issue');
+  assert.ok(h.logs.some((l) => l.includes('submitting immediately (screen idle)')));
+  await h.step();
+  assert.deepStrictEqual(h.submits.map((s) => s.text), ['do the issue']);
+});
+
 // --- asking: a dialog on a waiting screen (docs/sessions.md#asking) ----------
 //
 // The waiting flag cannot say whether an agent finished or is showing a dialog. The
