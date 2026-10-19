@@ -220,13 +220,17 @@ function hourLabel(h) {
 function dayRange(d) {
   return `${WEEKDAY_LONG[d.getDay()]} ${d.getDate()} ${MONTH_SHORT[d.getMonth()]}`;
 }
-function weekRange(start, end) {
+function weekRange(start, end, now = end) {
   // A week straddling two months has to name both, or "Sun 27 – Sat 2 Aug" reads as a
   // week that runs backwards.
   const from = start.getMonth() === end.getMonth()
     ? `${WEEKDAY_SHORT[start.getDay()]} ${start.getDate()}`
     : `${WEEKDAY_SHORT[start.getDay()]} ${start.getDate()} ${MONTH_SHORT[start.getMonth()]}`;
-  return `${from} – ${WEEKDAY_SHORT[end.getDay()]} ${end.getDate()} ${MONTH_SHORT[end.getMonth()]}`;
+  const to = `${WEEKDAY_SHORT[end.getDay()]} ${end.getDate()} ${MONTH_SHORT[end.getMonth()]}`;
+  // History reaches back past a year, so a week from last October has to say so or it
+  // reads as this one.
+  const year = end.getFullYear() === new Date(now).getFullYear() ? '' : ` ${end.getFullYear()}`;
+  return `${from} – ${to}${year}`;
 }
 function monthRange(d) { return `${MONTH_LONG[d.getMonth()]} ${d.getFullYear()}`; }
 
@@ -321,8 +325,12 @@ function buildDay(samples, now, logStart) {
   return buildView('day', dayRange(start), labels, values, started);
 }
 
-function buildWeek(samples, now, logStart) {
-  const start = startOfWeek(now);
+function weekKey(d) {
+  return `${monthKey(d)}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+/** The week starting on the Sunday `start`, judged as of `now` — see buildMonth. */
+function buildWeek(samples, now, logStart, start = startOfWeek(now)) {
   const labels = [];
   const values = [];
   const started = [];
@@ -334,7 +342,7 @@ function buildWeek(samples, now, logStart) {
     started.push(observed(from.getTime(), to.getTime(), now, logStart));
   }
   const end = new Date(start); end.setDate(end.getDate() + 6);
-  return buildView('week', weekRange(start, end), labels, values, started);
+  return { ...buildView('week', weekRange(start, end, now), labels, values, started), key: weekKey(start) };
 }
 
 function monthKey(d) {
@@ -368,30 +376,30 @@ function buildMonth(samples, now, logStart, first = startOfMonth(now)) {
 }
 
 /**
- * Every month before this one that has samples in it, oldest first. A month the sampler
- * never ran in is skipped rather than offered as a row of zeros — there is nothing in it
- * to look at. Samples are grouped by the month their span started in, the same
- * attribution hoursIn uses, so each month is built from its own rows and the work stays
- * one pass over the log however much history there is.
+ * Every period before the current one that has samples in it, oldest first. A period the
+ * sampler never ran in is skipped rather than offered as a row of zeros — there is
+ * nothing in it to look at. Samples are grouped by the period their span started in, the
+ * same attribution hoursIn uses, so each period is built from its own rows and the work
+ * stays one pass over the log however much history there is.
  */
-function buildPastMonths(samples, now, logStart) {
-  const current = startOfMonth(now).getTime();
-  const byMonth = new Map();
+function buildPast(samples, now, logStart, startOf, build) {
+  const current = startOf(now).getTime();
+  const byPeriod = new Map();
   for (const s of samples) {
     const at = s.t - (Number(s.m) || 0) * 60000;
     if (!(at < current)) continue;
-    const key = startOfMonth(at).getTime();
-    if (!byMonth.has(key)) byMonth.set(key, []);
-    byMonth.get(key).push(s);
+    const key = startOf(at).getTime();
+    if (!byPeriod.has(key)) byPeriod.set(key, []);
+    byPeriod.get(key).push(s);
   }
-  return [...byMonth.keys()]
+  return [...byPeriod.keys()]
     .sort((a, b) => a - b)
-    .map((key) => buildMonth(byMonth.get(key), now, logStart, new Date(key)));
+    .map((key) => build(byPeriod.get(key), now, logStart, new Date(key)));
 }
 
 /**
- * All three datasets at once, plus every earlier month with data, so the card can switch
- * views and step back through months with no round trip.
+ * All three datasets at once, plus every earlier week and month with data, so the card
+ * can switch views and step back through weeks and months with no round trip.
  */
 function buildViews(samples, now = Date.now()) {
   const logStart = logStartOf(samples);
@@ -399,7 +407,8 @@ function buildViews(samples, now = Date.now()) {
     day: buildDay(samples, now, logStart),
     week: buildWeek(samples, now, logStart),
     month: buildMonth(samples, now, logStart),
-    pastMonths: buildPastMonths(samples, now, logStart),
+    pastWeeks: buildPast(samples, now, logStart, startOfWeek, buildWeek),
+    pastMonths: buildPast(samples, now, logStart, startOfMonth, buildMonth),
   };
 }
 
@@ -420,12 +429,16 @@ function seedViews(now = Date.now()) {
   const weekEnd = new Date(weekStart); weekEnd.setDate(weekEnd.getDate() + 6);
   return {
     day: buildView('day', dayRange(startOfDay(now)), dayLabels, SEED_VALUES.day),
-    week: buildView('week', weekRange(weekStart, weekEnd), WEEK_LABELS.slice(), SEED_VALUES.week),
+    week: {
+      ...buildView('week', weekRange(weekStart, weekEnd), WEEK_LABELS.slice(), SEED_VALUES.week),
+      key: weekKey(weekStart),
+    },
     month: {
       ...buildView('month', monthRange(startOfMonth(now)), ['W1', 'W2', 'W3', 'W4', 'W5'], SEED_VALUES.month),
       key: monthKey(startOfMonth(now)),
     },
     // Example data is one period of each; it has no history to step back through.
+    pastWeeks: [],
     pastMonths: [],
   };
 }

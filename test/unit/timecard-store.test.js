@@ -418,9 +418,57 @@ test('a past month is judged as a whole month, not as of the day it was picked b
   assert.deepStrictEqual(sep.stats.map((s) => s.label), STAT_LABELS.month);
 });
 
+// ------------------------------------------------------------------ past weeks
+
+test('every earlier week with samples is offered, oldest first', () => {
+  const now = new Date(2026, 9, 14, 12, 0, 0).getTime(); // Wed 14 Oct 2026
+  const samples = [
+    ...activeRun(new Date(2026, 8, 22, 11, 0, 0).getTime(), 12), // Sun 20 – Sat 26 Sep: 1h
+    { t: new Date(2026, 8, 30, 11, 0, 0).getTime(), a: 0, m: 5, s: 0 }, // Sun 27 Sep –: idle only
+    // Sun 4 – Sat 10 Oct: nothing — the daemon never ran
+    ...activeRun(new Date(2026, 9, 12, 12, 0, 0).getTime(), 24), // this week: 2h
+  ];
+  const { week, pastWeeks } = buildViews(samples, now);
+  assert.deepStrictEqual(pastWeeks.map((w) => w.range), ['Sun 20 – Sat 26 Sep', 'Sun 27 Sep – Sat 3 Oct'],
+    'an idle week is still history; a week the sampler never ran in is not');
+  assert.deepStrictEqual(pastWeeks.map((w) => w.key), ['2026-09-20', '2026-09-27'],
+    'keyed by the Sunday it starts on');
+  assert.deepStrictEqual(pastWeeks.map((w) => w.total), [1, 0]);
+  assert.strictEqual(week.range, 'Sun 11 – Sat 17 Oct', 'the current week stays where it was');
+  assert.strictEqual(week.key, '2026-10-11');
+  assert.strictEqual(week.total, 2, 'and keeps only its own hours');
+});
+
+test('a sample is filed under the week its minutes started in', () => {
+  // Stamped 00:03 on Sun 11 Oct, covering 23:58–00:03: it belongs to the week before.
+  const now = new Date(2026, 9, 14, 12, 0, 0).getTime();
+  const samples = [{ t: new Date(2026, 9, 11, 0, 3, 0).getTime(), a: 1, m: 5, s: 1 }];
+  const { week, pastWeeks } = buildViews(samples, now);
+  assert.deepStrictEqual(pastWeeks.map((w) => w.key), ['2026-10-04']);
+  assert.strictEqual(week.total, 0);
+});
+
+test('a past week is judged as a whole week, and names its year once it is not this one', () => {
+  // Hours on the Tuesday only, with the log running from the Sunday: all seven days have
+  // begun, so six are days off.
+  const now = new Date(2027, 0, 13, 12, 0, 0).getTime(); // Wed 13 Jan 2027
+  const samples = [
+    { t: new Date(2026, 9, 11, 9, 0, 0).getTime(), a: 0, m: 5, s: 0 },
+    ...activeRun(new Date(2026, 9, 13, 11, 0, 0).getTime(), 12),
+  ];
+  const [oct] = buildViews(samples, now).pastWeeks;
+  assert.strictEqual(oct.range, 'Sun 11 – Sat 17 Oct 2026');
+  assert.strictEqual(oct.stats.find((s) => s.label === 'Days off').value, 6);
+  assert.deepStrictEqual(oct.stats.map((s) => s.label), STAT_LABELS.week);
+});
+
 test('example data has no history to step back through', () => {
-  assert.deepStrictEqual(seedViews(new Date(2026, 9, 2, 12, 0, 0).getTime()).pastMonths, []);
+  const seed = seedViews(new Date(2026, 9, 2, 12, 0, 0).getTime());
+  assert.deepStrictEqual(seed.pastMonths, []);
+  assert.deepStrictEqual(seed.pastWeeks, []);
+  assert.strictEqual(seed.week.key, '2026-09-27', 'the seed week is keyed like a real one');
   assert.deepStrictEqual(buildViews([], Date.now()).pastMonths, []);
+  assert.deepStrictEqual(buildViews([], Date.now()).pastWeeks, []);
 });
 
 // ------------------------------------------------------------------ bar scaling

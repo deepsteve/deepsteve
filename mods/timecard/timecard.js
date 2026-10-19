@@ -18,6 +18,8 @@ const THEME_TOKENS = [
 ];
 
 const VIEWS = ['day', 'week', 'month'];
+// The views the ‹ › arrows step through, and where each one's earlier periods arrive.
+const HISTORY = { week: 'pastWeeks', month: 'pastMonths' };
 const REFRESH_MS = 60 * 1000;
 
 const el = {
@@ -35,10 +37,10 @@ const el = {
 let data = null;
 // Week is the default view.
 let view = 'week';
-// Which month the Month view shows, by key; null follows the current month. Held by key
-// rather than by index so the 60s refresh — which grows the list at midnight on the 1st
-// — never silently moves the selection to a different month.
-let monthKey = null;
+// Which week and month each view shows, by key; null follows the current one. Held by key
+// rather than by index so the 60s refresh — which grows the list at midnight on a Sunday
+// or on the 1st — never silently moves the selection to a different period.
+const pickedKey = { week: null, month: null };
 // The bar the hover readout is currently describing, so a mousemove within one bar is
 // free and a re-render under a stationary pointer still re-anchors.
 let tipBar = null;
@@ -162,23 +164,28 @@ function renderStats(dataset) {
   }
 }
 
-/** Every month the card can show, oldest first; the last is the current one. */
-function months() {
-  return [...(data.views.pastMonths || []), data.views.month];
+/** Every period the view can show, oldest first; the last is the current one. */
+function periods(name) {
+  return [...(data.views[HISTORY[name]] || []), data.views[name]];
 }
 
 function currentDataset() {
-  if (view !== 'month') return data.views[view];
-  // A month that has aged out of the log falls back to the current one.
-  return months().find((m) => m.key === monthKey) || data.views.month;
+  if (!HISTORY[view]) return data.views[view];
+  // A period that has aged out of the log falls back to the current one.
+  return periods(view).find((p) => p.key === pickedKey[view]) || data.views[view];
 }
 
 function renderNav(dataset) {
-  const list = months();
+  const list = HISTORY[view] ? periods(view) : [];
   const i = list.indexOf(dataset);
-  el.nav.hidden = view !== 'month' || list.length < 2;
-  el.nav.querySelector('[data-step="-1"]').disabled = i <= 0;
-  el.nav.querySelector('[data-step="1"]').disabled = i >= list.length - 1;
+  el.nav.hidden = list.length < 2;
+  const prev = el.nav.querySelector('[data-step="-1"]');
+  const next = el.nav.querySelector('[data-step="1"]');
+  prev.disabled = i <= 0;
+  next.disabled = i >= list.length - 1;
+  // The arrows are glyphs, so they need names, and the name says which period they move.
+  prev.setAttribute('aria-label', `Previous ${view}`);
+  next.setAttribute('aria-label', `Next ${view}`);
 }
 
 function render() {
@@ -240,14 +247,14 @@ el.views.addEventListener('click', (e) => {
 
 el.nav.addEventListener('click', (e) => {
   const button = e.target.closest('button[data-step]');
-  if (!button || button.disabled) return;
-  const list = months();
+  if (!button || button.disabled || !HISTORY[view]) return;
+  const list = periods(view);
   const target = list[list.indexOf(currentDataset()) + Number(button.dataset.step)];
   if (!target) return;
-  // Stepping forward onto the newest month goes back to following the present, so the
-  // card rolls over to a new month on its own instead of pinning this one.
-  monthKey = target === data.views.month ? null : target.key;
-  render(); // no fetch — every past month arrived with the rest
+  // Stepping forward onto the newest period goes back to following the present, so the
+  // card rolls over to a new week or month on its own instead of pinning this one.
+  pickedKey[view] = target === data.views[view] ? null : target.key;
+  render(); // no fetch — every past week and month arrived with the rest
 });
 
 syncTheme();

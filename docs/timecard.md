@@ -83,8 +83,9 @@ until real time caught up.
 ## Aggregation
 
 Happens on read. `GET /api/timecard` returns all three datasets in one response, plus
-`pastMonths` — every earlier month with at least one sample, oldest first — so the card
-switches views and steps back through months with no round trip.
+`pastWeeks` and `pastMonths` — every earlier week and month with at least one sample,
+oldest first — so the card switches views and steps back through weeks and months with no
+round trip.
 
 | View | Buckets | Range | Stats |
 |---|---|---|---|
@@ -101,10 +102,12 @@ Details that are deliberate rather than incidental:
   with nothing logged, so every begun period is either logged or off, and one still ahead
   is neither; a week from before the timecard existed is not quiet either, which matters
   because the first month of history always starts partway through.
-- **A month the sampler never ran in is not offered.** An idle-only month is (that is
-  history); a month with no rows at all has nothing to show. Months are keyed `YYYY-MM`,
-  and the card holds its selection by key, so the 60s refresh crossing the 1st cannot
-  move it.
+- **A week or month the sampler never ran in is not offered.** An idle-only one is (that
+  is history); one with no rows at all has nothing to show. Weeks are keyed by their
+  Sunday (`YYYY-MM-DD`) and months `YYYY-MM`, and the card holds each view's selection by
+  key, so the 60s refresh crossing a Sunday or the 1st cannot move it.
+- **A week from another year names its year** (`Sun 11 – Sat 17 Oct 2026`), because
+  retention reaches back past twelve months.
 - **A sample is credited to the bucket its minutes started in**, not the one its
   timestamp lands in — otherwise the last few minutes of every bucket spill into the
   next.
@@ -136,10 +139,11 @@ something a pointer can land on. The native `title` tooltip is deliberately not 
 appears below and to the right of the cursor after a delay, which is neither over the bar
 nor immediate.
 
-In the Month view, `‹ ›` after the range label step through `pastMonths` and back to the
-current month; they are hidden in the other views and while there is no history. Stepping
-onto the newest month returns to following the present, so the card rolls over on the 1st
-on its own.
+In the Week and Month views, `‹ ›` after the range label step through `pastWeeks` /
+`pastMonths` and back to the current period; each view keeps its own selection. The arrows
+are hidden in the Day view and while there is no history. Stepping onto the newest period
+returns to following the present, so the card rolls over on a Sunday or the 1st on its
+own.
 
 While the store is empty the card shows seeded example data and says so in the range
 line; the note disappears the moment a real sample lands. A paused sampler says

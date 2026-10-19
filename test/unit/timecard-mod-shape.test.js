@@ -138,20 +138,25 @@ test('switching views re-renders from memory and never fetches', () => {
   assert.ok(!/fetch|refresh|load/.test(handler), 'and must not go to the network');
 });
 
-test('stepping through months re-renders from memory and never fetches', () => {
+test('stepping through weeks and months re-renders from memory and never fetches', () => {
   const handler = js.match(/el\.nav\.addEventListener\('click',[\s\S]*?\n\}\);/)[0]
     .replace(/\/\/.*$/gm, '');
-  assert.match(handler, /render\(\)/, 'a month step re-renders');
+  assert.match(handler, /render\(\)/, 'a step re-renders');
   assert.ok(!/fetch|refresh|load/.test(handler), 'and must not go to the network');
-  assert.match(html, /aria-label="Previous month"/, 'the arrows are glyphs, so they need names');
-  assert.match(html, /aria-label="Next month"/);
+  assert.match(js, /HISTORY = \{ week: 'pastWeeks', month: 'pastMonths' \}/,
+    'both Week and Month step, each through its own history');
+  assert.match(html, /aria-label="Previous"/, 'the arrows are glyphs, so they need names');
+  assert.match(html, /aria-label="Next"/);
+  assert.match(js, /`Previous \$\{view\}`/, 'and the name says which period they move');
+  assert.match(js, /`Next \$\{view\}`/);
 });
 
-test('the chosen month is held by key, so a refresh cannot move it', () => {
-  // An index into pastMonths would shift by one when the 60s refresh crosses midnight on
-  // the 1st, swapping the month on screen under a user who never touched anything.
-  assert.match(js, /let monthKey = null/);
-  assert.match(js, /m\.key === monthKey/);
+test('the chosen week and month are held by key, so a refresh cannot move them', () => {
+  // An index into pastWeeks or pastMonths would shift by one when the 60s refresh crosses
+  // midnight on a Sunday or the 1st, swapping the period on screen under a user who never
+  // touched anything.
+  assert.match(js, /const pickedKey = \{ week: null, month: null \}/);
+  assert.match(js, /p\.key === pickedKey\[view\]/);
 });
 
 test('the stat row re-renders its labels as well as its values', () => {
