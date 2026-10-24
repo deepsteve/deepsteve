@@ -18,6 +18,7 @@ const { formatLogTimestamp, createLogRotator, defaultLogPaths } = require('./log
 const { findGitRoot } = require('./git-root');
 const { modKind } = require('./mod-kind');
 const { isValidReleaseTag, installShUrl, safeReleaseUrl } = require('./release-check');
+const { nodeVersionWarnings } = require('./node-advisories');
 const { usableWorktree } = require('./worktree-support');
 const { worktreePath, worktreeExists, worktreeStatus, worktreeStatuses, freshWorktreeName, mainCheckoutOf } = require('./worktree-status');
 const { stateDir, agentHomeDir, expandTilde, spawnCwdProblem, assertSpawnCwd, tmuxSocketPath, defaultTmuxSocketPath } = require('./paths');
@@ -394,6 +395,12 @@ function bootMark(what) {
   log(`[startup] ${what} at +${process.uptime().toFixed(1)}s since node start`);
 }
 bootMark('first log line');
+
+// --- Known-vulnerable Node.js runtime ---
+// `engines` still admits end-of-life lines that a security release never patches, so say so
+// at every boot rather than leave the user exposed without knowing. Logged, never fatal: the
+// table and the reasoning live in node-advisories.js.
+for (const line of nodeVersionWarnings(process.versions.node)) log(line);
 
 // --- Waiting-classifier audit (#558 research instrumentation) ---
 // Records every waitingForInput decision, BEL classification, and a periodic sample
