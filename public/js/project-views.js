@@ -715,7 +715,7 @@ function renderLauncher(view) {
   if (!view) return;
   const label = `New ${view.name} tab`;
   btn.dataset.view = view.slug;
-  btn.title = `${label} — an agent in this project's folder, never a worktree, filed into ${view.name}`;
+  btn.title = label;
   btn.setAttribute('aria-label', label);
   const [icon, text] = btn.children;
   if (icon) {

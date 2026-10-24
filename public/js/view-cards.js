@@ -147,7 +147,7 @@ export function render() {
     el.setAttribute('aria-selected', up && view ? 'true' : 'false');
     if (view) {
       const [, , label, count] = el.children;
-      el.title = `${view.name} — every ${view.name} tab in this project as a card, with what it was first asked`;
+      el.title = `Show every ${view.name} tab with its first prompt`;
       label.textContent = view.name;
       count.textContent = String(tabs.length);
     }
