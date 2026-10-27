@@ -743,9 +743,15 @@ test('a background open never steals the fullscreen view (#628)', () => {
   const app = fs.readFileSync(path.join(__dirname, '..', '..', 'public', 'js', 'app.js'), 'utf8');
   assert.match(app, /const nothingOnScreen = \(\) => !activeId && !ModManager\.isModViewVisible\(\);/,
     'the escape hatch counts the view slot, not just the tab strip');
+  // Two shapes: the pinned project mod's inline decision, and openUnfocused() (#741), the helper
+  // the terminal and display-tab opens share because both also mark the tab new.
   const decisions = [...app.matchAll(/!(?:opts\.)?restoreActive && \([^)]*\)/g)].map(m => m[0]);
-  assert.strictEqual(decisions.length, 2, 'one per background-capable open — update this guard if that changes');
+  assert.strictEqual(decisions.length, 1, 'one inline background-capable open — update this guard if that changes');
   for (const d of decisions) assert.match(d, /nothingOnScreen\(\)/, d);
+  assert.match(app, /function openUnfocused\(id\) \{\n  if \(nothingOnScreen\(\)\) focusTab\(id\);/,
+    'the shared background open asks the same escape hatch');
+  const helperOpens = [...app.matchAll(/if \((?:opts\.)?background\) openUnfocused\(id\);/g)].length;
+  assert.strictEqual(helperOpens, 2, 'initTerminal and createDisplayTab — update this guard if that changes');
   assert.ok(!/\|\| !activeId\b/.test(app), 'no focus decision may read activeId alone');
 });
 

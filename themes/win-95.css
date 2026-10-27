@@ -139,6 +139,11 @@ body {
   background: #000080 !important;
   border-radius: 50% !important;
 }
+/* …but the "new tab" ring (#741) stays hollow, or the !important above fills it in. */
+.tab.unseen-new:not(.reconnecting):not(.auth-blocked) .badge:not(.visible) {
+  background: transparent !important;
+  box-shadow: inset 0 0 0 2px #000080;
+}
 
 /* ── Buttons — Win95 raised 3D ── */
 #new-btn,

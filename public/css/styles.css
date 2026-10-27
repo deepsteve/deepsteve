@@ -504,6 +504,16 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
    tabs went quiet because of it. MUST follow .tab.reconnecting (equal specificity):
    a blocked connection is also marked reconnecting, and refused is the truer word. */
 .tab.auth-blocked .badge { visibility: visible; background: var(--ds-accent-red); animation: pulse 1.5s ease-in-out infinite; }
+/* New, not yet seen (#741): a tab that opened in the background, before you have looked at it.
+   A hollow ring rather than the filled dot, because a tab that merely appeared is not one that
+   wants you. It yields the slot to everything that says more — the filled dot once it starts
+   waiting (.visible), and both connection states — and the selector says so outright, rather
+   than leaning on source order the way the two rules above have to. */
+.tab.unseen-new:not(.reconnecting):not(.auth-blocked) .badge:not(.visible) {
+  visibility: visible;
+  background: transparent;
+  box-shadow: inset 0 0 0 2px var(--ds-accent-blue);
+}
 .tab.dragging { opacity: 0.3; }
 .tab-drag-ghost { opacity: 0.9; box-shadow: 0 4px 12px rgba(0,0,0,0.5); }
 #tabs-list.tab-drag-active { user-select: none; }
@@ -2242,6 +2252,17 @@ kbd {
   text-align: center;
   font-variant-numeric: tabular-nums; /* 1- vs 2-digit counts don't jitter */
 }
+/* The project holds a tab that opened in the background and hasn't been looked at (#741) —
+   the same ring the tab itself carries, beside the count. */
+.context-row-new {
+  display: none;
+  flex-shrink: 0;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  box-shadow: inset 0 0 0 2px var(--ds-accent-blue);
+}
+.context-row.has-new .context-row-new { display: inline-block; }
 /* Archived contexts (#601): a muted disclosure row + its list, rendered between the
    context list and "+ New context". The rows reuse .context-row wholesale (icon, count,
    right-click menu, drag) and are just dimmed so the tier reads as secondary. */
@@ -2328,6 +2349,15 @@ kbd {
 }
 #context-rail.collapsed .context-row-label,
 #context-rail.collapsed .context-row-count { display: none; }
+/* The count goes but the "new tab" ring (#741) stays, floated onto the icon's corner the way
+   the collapsed tab rail floats its badge. */
+#context-rail.collapsed .context-row.has-new { position: relative; }
+#context-rail.collapsed .context-row.has-new .context-row-new {
+  position: absolute;
+  top: 4px;
+  right: 8px;
+  z-index: 1;
+}
 
 /* Show a square for every row — chosen icon or derived glyph. */
 #context-rail.collapsed .context-row-icon { display: inline-flex; }

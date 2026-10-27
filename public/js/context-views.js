@@ -321,6 +321,20 @@ function contextTabCount(ctx) {
   }, 0);
 }
 
+// Does this project hold a tab that opened in the background and hasn't been looked at (#741)?
+// Counted the way contextTabCount counts, so the ring sits on exactly the rows whose number the
+// new tab added to; "All" (ctx null) holds every tab.
+function contextHasNewTab(ctx) {
+  if (!cb.isTabNew) return false;
+  const ids = cb.getOrderedTabIds ? cb.getOrderedTabIds() : [];
+  return ids.some(id => {
+    if (!cb.isTabNew(id)) return false;
+    if (!ctx) return true;
+    const cwd = cb.getTabCwd?.(id);
+    return !!cwd && tabInContext(cwd, ctx);
+  });
+}
+
 // --------------------------------------------------------------------- filter
 
 // True when a real context is active but none of the open tabs belong to it —
@@ -434,6 +448,18 @@ const projectRows = new Map();
  */
 export function paintProjectRows() {
   for (const [id, row] of projectRows) row.classList.toggle('active', projectRowSelected(id));
+}
+
+/**
+ * Re-derive which project rows carry the "new tab" ring (#741). A sweep for the same reason
+ * paintProjectRows is one: it runs from inside switchTo(), and a renderRail() there would wipe
+ * the rail out from under the press that may have started the switch (#546).
+ */
+export function paintNewMarks() {
+  for (const [id, row] of projectRows) {
+    const ctx = id == null ? null : contexts.find(c => c.id === id);
+    row.classList.toggle('has-new', (id == null || !!ctx) && contextHasNewTab(ctx));
+  }
 }
 
 function renderRail() {
@@ -617,6 +643,14 @@ function makeRow(id, name, active, ctx) {
   label.className = 'context-row-label';
   label.textContent = name;
   row.appendChild(label);
+
+  // The "new tab" ring (#741). Always present and toggled by .has-new, so paintNewMarks() can
+  // flip it without rebuilding the row. Collapsed, it floats onto the icon like the tab badge.
+  const newMark = document.createElement('span');
+  newMark.className = 'context-row-new';
+  newMark.setAttribute('aria-label', 'Has a new tab');
+  row.appendChild(newMark);
+  if (contextHasNewTab(ctx)) row.classList.add('has-new');
 
   const n = contextTabCount(ctx);
   if (n > 0) {

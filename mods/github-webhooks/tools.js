@@ -593,6 +593,8 @@ function startWork(c, cfg, { number, title, body, labels, url }, rec, callerId =
     res = ctx.startIssueSession({
       number, title: title || `Issue #${number}`, body: body || undefined, labels, url,
       cwd: root, model: cfg.model || undefined, callerId: callerId || undefined, source: 'github-work', openBrowser: false,
+      // #741: Work starts these on its own, often while the user is mid-thought elsewhere.
+      background: ctx.settings.agentTabsOpenInBackground !== false,
     });
   } catch (e) {
     res = { error: { message: e.message } };

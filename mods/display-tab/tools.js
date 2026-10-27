@@ -299,6 +299,8 @@ function init(context) {
         // `view`, else every view the calling tab is in, so an analytics agent's charts land in
         // Analytics beside it.
         const viewFields = { openerId: caller ? session_id : null, ...(spawnView.view ? { view: spawnView.view } : {}) };
+        // #741: an agent's page lands behind what the user is looking at, marked new.
+        if (context.settings?.agentTabsOpenInBackground !== false) viewFields.background = true;
         const openMsg = JSON.stringify({ type: 'open-display-tab', id, name: tabName, cwd, windowId, ...viewFields });
         const broadcastMsg = JSON.stringify({ type: 'open-display-tab', id, name: tabName, cwd, ...viewFields });
         let delivered = false;

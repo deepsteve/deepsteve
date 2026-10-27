@@ -867,6 +867,10 @@ const SETTINGS_SCHEMA = [
   // Scheduled runs are unattended, so their tab opens without stealing focus (#600).
   // Turn off to get the old behavior (the new tab becomes active as it opens).
   { name: 'scheduledTasksOpenInBackground', type: 'boolean', default: true },
+  // #741: the same for every other tab the user didn't open themselves — an agent's
+  // open_terminal / start_issue / display tab, GitHub Work, an Inbox follow-up. The tab
+  // lands inactive with a "new" mark. Read live at each open, so a toggle needs no restart.
+  { name: 'agentTabsOpenInBackground',  type: 'boolean', default: true },
   // #604: system-level fallback model / thinking level for scheduled runs that don't
   // pin their own (#592). '' = inherit Claude Code's own default, i.e. pre-#604
   // behavior. Sanitized here through the same validators the argv boundary uses, so
@@ -7404,10 +7408,13 @@ function resumedStamp(status) {
  * about which cwd to report to the browser, which cwd pre-flight to run, and
  * whether a start with no browser window open should open one.
  *
+ * `background` (#741) is the caller's to set: a person picking an issue wants the tab,
+ * an agent's start_issue or GitHub Work should not take it from them.
+ *
  * Returns `{ error: <spawnCwdProblem> }` for a bad cwd — the caller formats it,
  * because an HTTP 400 body and an MCP isError result are not the same shape.
  */
-function startIssueSession({ number, title, body, labels, url, cwd, agentType, configDir, windowId, callerId, openBrowser = false, autopilot, view, model, source = 'unknown' }) {
+function startIssueSession({ number, title, body, labels, url, cwd, agentType, configDir, windowId, callerId, openBrowser = false, autopilot, view, model, background = false, source = 'unknown' }) {
   // #653: which branch decides autopilot (below) is what the log needs — see
   // autopilotLogLabel(). Kept as its own flag rather than re-derived at the log line,
   // so the two can never disagree about what "explicit" meant.
@@ -7553,7 +7560,7 @@ function startIssueSession({ number, title, body, labels, url, cwd, agentType, c
   // explicit `view` (an already-cleaned slug or "all"), else the views of the tab that started it.
   const tabDelivery = deliverToWindow({
     type: 'open-session', id, cwd: spawnCwd, name, windowId, loading: true,
-    openerId: callerId || null, ...(view ? { view } : {}),
+    openerId: callerId || null, ...(view ? { view } : {}), ...(background ? { background: true } : {}),
   }, windowId, { openBrowser });
   noteSpawnDelivery(id, { tabDelivery, windowId, source: `start_issue #${number} (${source})` });
   // `resumed` (#689) is the facts, not a flag: the MCP path has no human to confirm
@@ -7583,10 +7590,13 @@ function startIssueSession({ number, title, body, labels, url, cwd, agentType, c
  * person started from the empty slot at the head of the strip. Unlike a project agent it is an
  * ordinary foreground tab; the marker only gives it its place (public/js/tab-slot.js).
  *
+ * `background` (#741) opens the tab without taking focus. Every caller but Inbox's `then`
+ * follow-up is a person's click, so it is opt-in rather than a default here.
+ *
  * Returns { id, name, cwd, engineType, tabDelivery }, or { error } for a directory that is gone
  * (#632): refused, never rehomed to $HOME.
  */
-function spawnAgentSession({ cwd, agentType, configDir, name, prompt, windowId = null, source = 'unknown', projectAgent = null, model = null, slot = null }) {
+function spawnAgentSession({ cwd, agentType, configDir, name, prompt, windowId = null, source = 'unknown', projectAgent = null, model = null, slot = null, background = false }) {
   const problem = cwd ? spawnCwdProblem(cwd) : { code: 'cwd-missing', cwd, message: 'No working directory given' };
   if (problem) {
     log(`[spawn] ${source} refused: ${problem.message}`);
@@ -7628,6 +7638,7 @@ function spawnAgentSession({ cwd, agentType, configDir, name, prompt, windowId =
 
   const openMsg = { type: 'open-session', id, cwd, name, windowId };
   if (projectAgent) Object.assign(openMsg, { background: true, projectAgent });
+  else if (background) openMsg.background = true;
   if (slot) openMsg.slot = slot;
   const tabDelivery = deliverToWindow(openMsg, windowId, { openBrowser: !projectAgent });
   noteSpawnDelivery(id, { tabDelivery, windowId, source });

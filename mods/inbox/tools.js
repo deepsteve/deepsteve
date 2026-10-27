@@ -2226,7 +2226,7 @@ function discussPrompt(item) {
  * asker's, and is the thing most likely to have been merged and removed by now. The asker's
  * agent and config profile carry over from its saved record.
  */
-function startFollowUp(item, { prompt, name, source }) {
+function startFollowUp(item, { prompt, name, source, background = false }) {
   if (typeof ctx.spawnAgentSession !== 'function') return { error: 'this daemon cannot start sessions for Inbox' };
   const saved = item.sessionId && ctx.getSavedSession ? ctx.getSavedSession(item.sessionId) : null;
   const cwd = item.project || (saved && saved.cwd) || '';
@@ -2238,6 +2238,7 @@ function startFollowUp(item, { prompt, name, source }) {
     name,
     prompt,
     source,
+    background,
   });
   if (!result || result.error) {
     const err = result && result.error;
@@ -2342,8 +2343,13 @@ function answerStored(res, id, body) {
     // from a run that closed itself can still act on a click. Any other answer is recorded,
     // and inbox_answers is how the next run of a recurring job hears it.
     const then = chosenThen(item);
+    // Background (#741): the human answered a question; the work it sets off is the closed
+    // asker's, not a tab they asked to be taken to. Discuss, which is, stays foreground.
     const spawned = then
-      ? startFollowUp(item, { prompt: thenPrompt(item, then), name: 'Decision follow-up', source: 'inbox then' })
+      ? startFollowUp(item, {
+        prompt: thenPrompt(item, then), name: 'Decision follow-up', source: 'inbox then',
+        background: ctx.settings?.agentTabsOpenInBackground !== false,
+      })
       : null;
     if (spawned && !spawned.error) {
       via = 'then';

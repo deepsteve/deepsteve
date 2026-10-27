@@ -166,6 +166,10 @@ function init(context) {
   const resolveProject = (raw, shellId) => projectScope.resolveProject(raw, shellId, context);
   const inScope = (project, proj, effScope) => projectScope.inScope(project, proj, effScope, context);
 
+  // #741: a tab an agent opens lands behind whatever the user is doing, unless they turned
+  // that off. Read at each open, so the toggle applies without a restart.
+  const agentOpenBackground = () => settings?.agentTabsOpenInBackground !== false;
+
   // Read the interpreted terminal buffer maintained at the PTY boundary. Tests
   // and third-party embedders without that context helper retain a transcript
   // fallback for compatibility.
@@ -537,6 +541,7 @@ function init(context) {
           // rather than being silently forced off.
           autopilot,
           view: spawnView.view,
+          background: agentOpenBackground(),
           // #653: which surface started the session. Before this the `[issue] #N:` line
           // was identical for MCP, HTTP and the picker, so "an agent overrode Autopilot"
           // was invisible after the fact.
@@ -954,6 +959,8 @@ function init(context) {
         // with the tab there — so the open carries what it needs to decide: the explicit `view`,
         // and the opener whose views the new tab inherits when there is none.
         const viewFields = { openerId: callerId, ...(spawnView.view ? { view: spawnView.view } : {}) };
+        // Both branches below — plain shell, agent, fork — open the same way (#741).
+        const openFields = { ...viewFields, ...(agentOpenBackground() ? { background: true } : {}) };
 
         const effectiveCwd = cwd || caller.cwd;
         // Covers both branches below — the plain shell and the agent session, whose
@@ -1007,7 +1014,7 @@ function init(context) {
             handleShellGone(id);
           });
           saveState();
-          const shellDelivery = deliverToWindow({ type: 'open-session', id, cwd: effectiveCwd, name: tabName, windowId, ...viewFields }, windowId);
+          const shellDelivery = deliverToWindow({ type: 'open-session', id, cwd: effectiveCwd, name: tabName, windowId, ...openFields }, windowId);
           noteSpawnDelivery(id, { tabDelivery: shellDelivery, windowId, source: 'open_terminal (shell)' });
           return { content: [{ type: 'text', text: JSON.stringify({
             id, name: tabName || id, cwd: effectiveCwd, worktree: null,
@@ -1109,7 +1116,7 @@ function init(context) {
         });
         saveState();
 
-        const agentDelivery = deliverToWindow({ type: 'open-session', id, cwd: spawnCwd, name: tabName, windowId, ...viewFields }, windowId);
+        const agentDelivery = deliverToWindow({ type: 'open-session', id, cwd: spawnCwd, name: tabName, windowId, ...openFields }, windowId);
         noteSpawnDelivery(id, { tabDelivery: agentDelivery, windowId, source: `open_terminal (${effectiveAgentType})` });
 
         return { content: [{ type: 'text', text: JSON.stringify({ id, name: tabName || id, cwd: spawnCwd, worktree: validatedWorktree, ...tabDeliveryNote(agentDelivery) }) }] };

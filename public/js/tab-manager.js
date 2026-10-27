@@ -811,6 +811,15 @@ export const TabManager = {
   },
 
   /**
+   * Mark a tab that opened in the background and hasn't been looked at (#741). Drawn in the
+   * badge slot as a ring, and only while nothing more urgent holds it — see styles.css.
+   */
+  updateNew(sessionId, on) {
+    const tab = document.getElementById('tab-' + sessionId);
+    if (tab) tab.classList.toggle('unseen-new', !!on);
+  },
+
+  /**
    * Mark a tab as having a readable transcript (#672), which is what makes its
    * history glyph appear. Derived from the agentType the server sends on the
    * session socket, so a Codex tab, a plain shell and every iframe-backed tab

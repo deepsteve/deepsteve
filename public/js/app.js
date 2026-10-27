@@ -39,7 +39,7 @@ import { init as initHashCommands, beforeSend as hashCommandsBeforeSend, setWait
 import { init as initOverviewMode, setEnabled as setOverviewModeEnabled, setShortcut as setOverviewModeShortcut, setDefaultLayout as setOverviewDefaultLayout, toggle as toggleOverviewMode, isOverviewActive, getLayout as getOverviewLayout, updateFocus as updateOverviewFocus, onTabsReordered as onOverviewTabsReordered, syncToContext as syncOverviewToContext } from './overview-mode.js';
 import { init as initTerminalSearch, attachSearchAddon, closeIfOpen as closeTerminalSearch } from './terminal-search.js';
 import * as SessionHistory from './session-history.js';
-import { init as initContextViews, refreshProjectAgentRows, setEnabled as setContextViewsEnabled, applyFilter as refreshContextFilter, requestNewTabInContext, resolveContextRepo, newTabCwd, chooseContextDir, setContexts as applyServerContexts, setActiveContext as setActiveContextFromPanel, getActiveContextId, getActiveContextInfo, orderRecentDirsByContext, activeContextIsEmpty, noteActiveTab, revealTabContext, showToast, setRailSuppressed, setRailQuiet, paintProjectRows, contextsForCwd } from './context-views.js';
+import { init as initContextViews, refreshProjectAgentRows, setEnabled as setContextViewsEnabled, applyFilter as refreshContextFilter, requestNewTabInContext, resolveContextRepo, newTabCwd, chooseContextDir, setContexts as applyServerContexts, setActiveContext as setActiveContextFromPanel, getActiveContextId, getActiveContextInfo, orderRecentDirsByContext, activeContextIsEmpty, noteActiveTab, revealTabContext, showToast, setRailSuppressed, setRailQuiet, paintProjectRows, paintNewMarks as paintRailNewMarks, contextsForCwd } from './context-views.js';
 import * as ProjectMods from './project-mods.js';
 import * as ProjectViews from './project-views.js';
 import * as ViewFooter from './view-footer.js';
@@ -950,6 +950,7 @@ settingsBtn?.addEventListener('click', async () => {
     ? settingsData.timecardSampleMinutes : 5;
   const currentScheduledTasksEnabled = settingsData.scheduledTasksEnabled !== false;
   const currentScheduledTasksOpenInBackground = settingsData.scheduledTasksOpenInBackground !== false;
+  const currentAgentTabsOpenInBackground = settingsData.agentTabsOpenInBackground !== false;
   // #604: system-wide fallback model/effort for scheduled runs. '' = inherit Claude
   // Code's own. Anything that isn't one of the offered aliases (e.g. a full model id
   // like claude-fable-5) preselects "Custom…" and fills the free-text field.
@@ -1078,6 +1079,13 @@ settingsBtn?.addEventListener('click', async () => {
         </label>
         <p style="font-size: 11px; color: var(--ds-text-secondary); margin-top: 4px;">
           Hold Command for this long to activate, then press 1-9 to jump to a tab or &lt; / &gt; to cycle. Set to 0 for instant.
+        </p>
+        <label style="font-size: 13px; color: var(--ds-text-primary); cursor: pointer; display: flex; align-items: center; gap: 8px; margin-top: 10px;">
+          <input type="checkbox" id="agent-tabs-open-in-background" ${currentAgentTabsOpenInBackground ? 'checked' : ''} style="accent-color: var(--ds-accent-green);">
+          Open tabs that agents start in the background
+        </label>
+        <p style="font-size: 11px; color: var(--ds-text-secondary); margin-top: 4px;">
+          A tab an agent or Deep Steve opens for you (a terminal, an issue session, a display tab) stays behind the one you're on, with a ring on the tab and on its project until you look at it. Tabs you open yourself always switch. On by default.
         </p>
       </div>
       <div class="settings-section">
@@ -1245,7 +1253,7 @@ settingsBtn?.addEventListener('click', async () => {
           Open runs in the background
         </label>
         <p style="font-size: 11px; color: var(--ds-text-secondary); margin-top: 4px;">
-          A scheduled run opens its tab without switching to it, so an unattended run never interrupts what you're doing. The tab shows an unread dot until you visit it. The Scheduled panel's own "Run now" button always switches. On by default.
+          A scheduled run opens its tab without switching to it, so an unattended run never interrupts what you're doing. The tab shows a "new" ring until you visit it. The Scheduled panel's own "Run now" button always switches. On by default.
         </p>
         <label style="font-size: 13px; color: var(--ds-text-primary); display: flex; align-items: center; gap: 8px; margin-top: 10px;">
           Default model:
@@ -1839,6 +1847,7 @@ settingsBtn?.addEventListener('click', async () => {
     const timecardSampleMinutes = Number(overlay.querySelector('#timecard-sample-minutes').value);
     const scheduledTasksEnabled = overlay.querySelector('#scheduled-tasks-enabled').checked;
     const scheduledTasksOpenInBackground = overlay.querySelector('#scheduled-tasks-open-in-background').checked;
+    const agentTabsOpenInBackground = overlay.querySelector('#agent-tabs-open-in-background').checked;
     const scheduledModelChoice = overlay.querySelector('#scheduled-default-model').value;
     const scheduledDefaultModel = scheduledModelChoice === '__custom__'
       ? overlay.querySelector('#scheduled-default-model-custom').value.trim()
@@ -1847,7 +1856,7 @@ settingsBtn?.addEventListener('click', async () => {
     const preventSleepWhileActive = overlay.querySelector('#prevent-sleep-while-active').checked;
     const inheritRemoteControl = overlay.querySelector('#inherit-rc-newtab').checked;
     const inheritRemoteControlOnFork = overlay.querySelector('#inherit-rc-fork').checked;
-    const settingsPayload = { shellProfile, maxIssueTitleLength: newMaxTitle, ...pipelinePayload, wandPromptTemplate, symlinkWorktreeSettings, cmdTabSwitch, cmdTabSwitchHoldMs, commandPaletteEnabled, commandPaletteShortcut, shortcutsHelpEnabled, shortcutsHelpShortcut, hashCommandsEnabled, notifyOnlyWhenAsking: notifyOnlyWhenAskingChecked, contextViewsEnabled, projectModsEnabled, timelapseEnabled, timelapseIntervalMinutes, metaControlsEnabled, inheritRemoteControl, inheritRemoteControlOnFork, overviewDefaultLayout, enabledAgents, ...agentBinaries, ...(selectedEngine ? { engine: selectedEngine } : {}), scrollbackKB, recentSessionsLimit, autoUpdateCheckEnabled, autoUpdateCheckIntervalHours, autoUpdateApply, sessionLogEnabled, timecardEnabled, timecardSampleMinutes, scheduledTasksEnabled, scheduledTasksOpenInBackground, scheduledDefaultModel, scheduledDefaultEffort, preventSleepWhileActive, customAgentConfigs };
+    const settingsPayload = { shellProfile, maxIssueTitleLength: newMaxTitle, ...pipelinePayload, wandPromptTemplate, symlinkWorktreeSettings, cmdTabSwitch, cmdTabSwitchHoldMs, commandPaletteEnabled, commandPaletteShortcut, shortcutsHelpEnabled, shortcutsHelpShortcut, hashCommandsEnabled, notifyOnlyWhenAsking: notifyOnlyWhenAskingChecked, contextViewsEnabled, projectModsEnabled, timelapseEnabled, timelapseIntervalMinutes, metaControlsEnabled, inheritRemoteControl, inheritRemoteControlOnFork, overviewDefaultLayout, enabledAgents, ...agentBinaries, ...(selectedEngine ? { engine: selectedEngine } : {}), scrollbackKB, recentSessionsLimit, autoUpdateCheckEnabled, autoUpdateCheckIntervalHours, autoUpdateApply, sessionLogEnabled, timecardEnabled, timecardSampleMinutes, scheduledTasksEnabled, scheduledTasksOpenInBackground, agentTabsOpenInBackground, scheduledDefaultModel, scheduledDefaultEffort, preventSleepWhileActive, customAgentConfigs };
     let resp = await fetch('/api/settings', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -2732,6 +2741,38 @@ function dismissLoadingBanner(sessionId) {
  */
 const nothingOnScreen = () => !activeId && !ModManager.isModViewVisible();
 
+/**
+ * The "new, not yet seen" mark (#741): a tab that opened in the background and that you have
+ * not looked at yet. Deliberately not hasUnseenActivity — that one means "this tab wants you",
+ * and it is what updateTitle() and updateAppBadge() count; a tab that merely appeared does not
+ * want anything. If it later starts waiting, the waiting path sets hasUnseenActivity on top,
+ * and the filled dot takes the badge slot from the ring.
+ *
+ * Set only by a background open, cleared only by switchTo() — every route to a tab ends there.
+ * In memory and per window, like hasUnseenActivity: a reload drops it.
+ */
+function markTabNew(id) {
+  const sess = sessions.get(id);
+  if (!sess) return;
+  sess.unseenNew = true;
+  TabManager.updateNew(id, true);
+  paintRailNewMarks();
+}
+
+function clearTabNew(id) {
+  const sess = sessions.get(id);
+  if (!sess?.unseenNew) return;
+  sess.unseenNew = false;
+  TabManager.updateNew(id, false);
+  paintRailNewMarks();
+}
+
+/** Land a tab the user didn't open: focused only if nothing else is on screen (#600), else marked new. */
+function openUnfocused(id) {
+  if (nothingOnScreen()) focusTab(id);
+  else markTabNew(id);
+}
+
 function initTerminal(id, ws, cwd, initialName, { hasScrollback = false, pendingData = [], restoreActive = false, background = false, cols, rows, views, agentType, projectAgent = null, slot = null } = {}) {
   const container = document.createElement('div');
   container.className = 'terminal-container';
@@ -2829,18 +2870,15 @@ function initTerminal(id, ws, cwd, initialName, { hasScrollback = false, pending
   // correct tab after all sessions are initialized. For new sessions,
   // always switch to the new tab immediately.
   //
-  // A background open (an unattended scheduled run, #600) is the exception: the
-  // tab lands inactive so the user isn't yanked out of what they were doing —
-  // focusTab() would also drag the context rail to the new tab's context. It
-  // still takes focus when nothing is on screen yet, since an inactive lone tab
-  // would leave a blank pane behind a hidden empty state. The unseen badge is
-  // what makes it discoverable; switchTo() clears it when the user visits.
-  if (!restoreActive && (!background || nothingOnScreen())) {
-    focusTab(id); // switch to the new tab + jump to its context / All (#547/#559)
-  } else if (background) {
-    const sess = sessions.get(id);
-    if (sess) sess.hasUnseenActivity = true;
-    TabManager.updateBadge(id, true);
+  // A background open (an unattended scheduled run, #600; anything an agent or the
+  // server opened, #741) is the exception: the tab lands inactive so the user isn't
+  // yanked out of what they were doing — focusTab() would also drag the context rail
+  // to the new tab's context. It still takes focus when nothing is on screen yet,
+  // since an inactive lone tab would leave a blank pane behind a hidden empty state.
+  // The "new" mark is what makes it discoverable; switchTo() clears it on a visit.
+  if (!restoreActive) {
+    if (background) openUnfocused(id);
+    else focusTab(id); // switch to the new tab + jump to its context / All (#547/#559)
   }
 
   // Per-tab store (sessionStorage) is truth for this tab, SessionStore (localStorage)
@@ -3090,7 +3128,9 @@ function createDisplayTab(id, name, opts = {}) {
   TabManager.updateLocked(id, sessions.get(id).locked);
   updateEmptyState();
   if (!opts.restoreActive) {
-    focusTab(id); // (#547/#559)
+    // An agent's page lands behind the tab you're on, marked new (#741) — same rule as initTerminal.
+    if (opts.background) openUnfocused(id);
+    else focusTab(id); // (#547/#559)
   }
 
   // Forward resize events to iframe
@@ -3380,6 +3420,7 @@ function switchTo(id) {
     // viewing the tab acknowledges any unseen activity.
     session.hasUnseenActivity = false;
     TabManager.updateBadge(id, false);
+    clearTabNew(id); // and it is no longer new (#741) — the tab's ring and, if it was the last, its project's
     clearNotification(id);
     updateTitle();
     updateAppBadge();
@@ -5574,6 +5615,7 @@ async function init() {
     getProjectAgents: (contextId) => projectAgentRows(contextId),
     jumpToTab: (id) => userJumpTo(id),
     getTabCwd: (id) => sessions.get(id)?.cwd || null,
+    isTabNew: (id) => !!sessions.get(id)?.unseenNew,
     getTabName: (id) => {
       const s = sessions.get(id);
       return s?.name || getDefaultTabName(s?.cwd || '');
@@ -5841,7 +5883,7 @@ async function init() {
       }
       if (msg.type === 'open-display-tab') {
         if (msg.windowId && msg.windowId !== getWindowId()) return;
-        createDisplayTab(msg.id, msg.name, { cwd: msg.cwd, views: ProjectViews.spawnJoins({ view: msg.view, openerId: msg.openerId }) });
+        createDisplayTab(msg.id, msg.name, { cwd: msg.cwd, background: !!msg.background, views: ProjectViews.spawnJoins({ view: msg.view, openerId: msg.openerId }) });
       }
       if (msg.type === 'open-browser-tab') {
         if (msg.windowId && msg.windowId !== getWindowId()) return;

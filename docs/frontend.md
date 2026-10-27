@@ -416,6 +416,27 @@ inconsistent pair of states. `noteBlocked()` is the #677 addition; blocked handl
 excluded from the reconnect banner's count, since they are not reconnecting in any sense
 that banner's wording would survive.
 
+The **new, not yet seen** mark (#741) is a hollow ring in the badge slot:
+`TabManager.updateNew` → `.tab.unseen-new`. A tab gets it when it opens in the background
+(`initTerminal` / `createDisplayTab` with `background`, via `openUnfocused()`, which still
+focuses when `nothingOnScreen()`), and loses it in `switchTo()`, which every route to a tab
+reaches. It is the session's `unseenNew` flag, deliberately **not** `hasUnseenActivity`: that
+one means "wants you" and is what `updateTitle()` and `updateAppBadge()` count, and a tab that
+merely appeared wants nothing. The ring yields the slot to the filled dot and to both
+connection states. Its selector spells that out with `:not()`, so it does not depend on source
+order the way the two dots above do. The projects rail shows the same ring on every project
+row holding such a tab ("All" included), and when the rail is collapsed it floats on the
+icon. `paintNewMarks()` re-derives the rail rings by sweeping rows, not by calling
+`renderRail()`, because it runs inside `switchTo()` (#546). The mark lives in memory, per
+window, so a reload drops it.
+
+Which opens arrive with `background` is the server's call. Scheduled runs use
+`scheduledTasksOpenInBackground`. Opens started by an agent or the server use
+`agentTabsOpenInBackground`: `open_terminal`, `start_issue`, `create_display_tab`, GitHub Work,
+and Inbox's `then` follow-up. `run_in_terminal` and project agents always open in the
+background. An open a person asked for always focuses: the issue picker, Inbox's start-issue
+and Discuss, Tasks, the project slot, and automations.
+
 ### Two silences closed with it
 
 A socket parked in the `/healthz` gate never reaches `attemptConnect()`, so
