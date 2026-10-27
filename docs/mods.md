@@ -1570,7 +1570,7 @@ An additive view can also carry **`"slot": "orchestrator"`**, which reserves a p
 
 ### Launchers and superviews
 
-Two flags belong to the view you look **at**, so they are dropped from an additive view, and both show **only while their view is the selected one**:
+Three flags belong to the view you look **at**, so they are dropped from an additive view, and each shows **only while its view is the selected one**:
 
 ```jsonc
 // ~/.deepsteve/views/analytics.json — no `match`, so a tab is in it only if it opted in
@@ -1581,6 +1581,21 @@ Two flags belong to the view you look **at**, so they are dropped from an additi
 - **`cards: true`** puts a **superview** at the head of the strip: `#view-cards-tab`, in `#tabs-list-wrapper` after `#views-toggle` and before `#tab-slot`, with the ▦ mark, the view's name and a count. Pressing it raises `#view-cards` over `#terminals`, a grid with one card per **agent** tab in the view (the strip as filtered, members only, so a slot holder kept in every view is not a card unless it was filed). Each card shows the tab's name and its **first prompt**. Clicking a card opens that tab the way clicking the tab would. While the grid is up no real tab reads as active, the terminal under it has lost focus, and the view footer is hidden. Switching to any tab, or selecting another view or project, takes the grid down. A reload starts with it down.
 - **The first prompt** is `GET /api/project-views/cards?ids=a,b` → `{prompts: {[id]: {prompt, supported}}}` (`mods/project-mods/view-cards.js`). It is the first user text in the session's Claude Code transcript that `transcript-view.js` does not flag as meta, which rules out slash commands such as an inherited `/rc`, caveats, hook output, sidechains and compaction summaries. Only the head is read (four 512 KB windows at most). A found prompt is cached for good, keyed by transcript file. A tab with no prompt yet is asked about again every 5s while the grid is up. Claude-only: any other agent answers `supported: false`, and its card says so.
 - Code: `launcherFor()` / `cardsFor()` / `isMember()` in `project-views.js`. The superview is `public/js/view-cards.js`, which imports neither views module (`app.js` injects the card list and `switchTo()` calls `dismiss()`). Tests: `test/unit/view-cards.test.js`, plus launcher cases in `project-views-client.test.js`.
+
+### Task boards
+
+```jsonc
+// ~/.deepsteve/views/tasks.json — every running agent in the project, grouped by hand
+{ "name": "Tasks", "match": [{ "kinds": ["agent"] }], "tasks": true }
+```
+
+- **`tasks: true`** gives the view the other kind of superview: `#view-tasks-tab`, in the cards superview's place, with the ▥ mark, the view's name and the number of tasks. Pressing it raises `#view-tasks` over `#terminals`: a board of the project's **tasks**, each an ad hoc grouping of the view's agent tabs (the same list the cards grid draws: the strip as filtered, agents, members). A view is a grid or a board, never both, so `tasks` drops `cards`, in one file or across two that share a slug. While the board is up it behaves like the grid: no real tab reads as active, the terminal has lost focus, the footer is hidden, and switching to any tab or another view or project takes it down.
+- **Layout.** **Ungrouped** is on the left: the tabs that are in no task. It collapses to a narrow strip, which is a browser-wide preference (`localStorage` `deepsteve-view-tasks-ungrouped`). Then comes one card per task, oldest first, then **+ New task**. Each row shows the tab's name and its first prompt, from the cards superview's `GET /api/project-views/cards`. A board starts empty.
+- **Gestures.** A click opens the tab, as clicking it in the strip would. ⌘/Ctrl-click toggles a tab into the selection, and ⇧-click extends it within one list. Dragging any selected tab drags the whole selection. A tab is in **at most one** of a project's tasks, so a drop *moves* it: onto a card files it there, onto Ungrouped takes it out, and onto **+ New task** makes a task named "New task" holding it, with the name opened for editing. Clicking anywhere on the **+ New task** card asks for a name first. A card's title renames it on click (Enter or leaving the field saves, Escape cancels), and its × deletes it, which sends its tabs back to Ungrouped and does nothing else to them. Only our own drags are taken, so a dropped file still reaches file-drop.
+- **The tasks are the daemon's**, per project, in `~/.deepsteve/view-tasks.json` (`mods/project-mods/view-tasks.js`). A session id means nothing on another machine, so they are never committed, and every window should see one board, so they are not client-side. Routes, all scoped by context id: `GET /api/project-views/tasks/:contextId`, `POST` there to create (`{title?, sessions?}`), `POST …/move` (`{sessions, to}`, where `to: null` means no task), and `PUT` / `DELETE …/:taskId`. Every write answers the project's whole list and pings `{type:'view-tasks', contextId}` on both channels; a window holding that board refetches. The board draws a write at once, then takes the daemon's answer; a failed write toasts and refetches.
+- **Closed and other-window tabs.** A task keeps a session's id after its tab closes, so a reopened tab is back on its card. The id is dropped only once the daemon has no record of the session at all (the retention sweep purged its tombstone), and only on a write, so a read never shrinks a board. Each id goes out marked `live`. The board draws only this window's tabs; a task's live tabs in another window are counted on its card ("+1 tab in another window"), and closed ones are not shown.
+- Unrelated to the Tasks mod (`mods/tasks/`), which is a to-do list.
+- Code: `tasksFor()` in `project-views.js`; the board is `public/js/view-tasks.js`, which imports neither views module (`app.js` injects the tab list, `hasTab`, `showToast`; `switchTo()` calls `dismiss()`). Tests: `test/unit/view-tasks.test.js` (the flag, the store, the routes, the board), plus a `tasksFor` case in `project-views-client.test.js`.
 
 ### Membership: rules plus filings
 

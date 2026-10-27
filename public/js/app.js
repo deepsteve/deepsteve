@@ -45,6 +45,7 @@ import * as ProjectViews from './project-views.js';
 import * as ViewFooter from './view-footer.js';
 import * as TabSlot from './tab-slot.js';
 import * as ViewCards from './view-cards.js';
+import * as ViewTasks from './view-tasks.js';
 import * as DecisionMode from './decision-mode.js';
 import * as Onboarding from './onboarding.js';
 import { nsKey } from './storage-namespace.js';
@@ -330,6 +331,7 @@ function applySettings(settings) {
     ProjectViews.render();
     TabSlot.render();
     ViewCards.render();
+    ViewTasks.render();
   }
   if (settings.timelapseEnabled !== undefined) {
     setTimelapseEnabled(settings.timelapseEnabled);
@@ -1869,6 +1871,7 @@ settingsBtn?.addEventListener('click', async () => {
     ProjectViews.render();   // see the settings-broadcast twin: applyFilter() skips it with Projects off
     TabSlot.render();
     ViewCards.render();
+    ViewTasks.render();
     setTimelapseEnabled(timelapseEnabled);
     setTimelapseInterval(timelapseIntervalMinutes);
     ProjectMods.refresh();   // the project-mods gate ships with the list, not with settings (#618)
@@ -2310,6 +2313,8 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
         // (#726) share the scan and the ping.
         ProjectMods.refresh();
         ProjectViews.refresh();
+      } else if (msg.type === 'view-tasks') {
+        ViewTasks.onPing(msg.contextId);   // a task board changed, in this window or another
       } else if (msg.type === 'agent-chat') {
         ModManager.notifyAgentChatChanged(msg.channels);
       } else if (msg.type === 'browser-eval-request') {
@@ -3334,8 +3339,10 @@ function scheduleDecisionSync() {
  * Switch to a specific session tab
  */
 function switchTo(id) {
-  // A view's cards grid covers the terminals; any tab switched to is what you look at next.
+  // A view's cards grid or task board covers the terminals; any tab switched to is what you
+  // look at next.
   ViewCards.dismiss();
+  ViewTasks.dismiss();
   // If mod view is active, delegate to ModManager to show terminal with back button
   if (ModManager.isModViewVisible()) {
     ModManager.showTerminalForSession(id);
@@ -5597,7 +5604,7 @@ async function init() {
     // hook that settles the filter re-derives the strip buttons and opens the pinned
     // ones. Deliberately not the rail rows: renderRail() pulls those itself, and
     // calling render() from inside applyFilter would re-enter it.
-    onContextViewApplied: () => { syncOverviewToContext(); refreshTabArrows(); ProjectMods.render(); ProjectViews.render(); TabSlot.render(); ViewCards.render(); ViewFooter.render(); },
+    onContextViewApplied: () => { syncOverviewToContext(); refreshTabArrows(); ProjectMods.render(); ProjectViews.render(); TabSlot.render(); ViewCards.render(); ViewTasks.render(); ViewFooter.render(); },
     // Project views (#726) narrow the selected project to one view's tabs. The filter, the
     // per-view last-tab memory and the reveal-on-focus all ask project-views.js.
     tabInView: (id, ctx) => ProjectViews.tabInView(id, ctx),
@@ -5661,7 +5668,7 @@ async function init() {
     showToast: (text) => showToast(text),
     // The view list changed, or an additive view was switched. applyFilter() redraws the footer
     // and the slot too, but not with Projects off, and switching a footer applies no filter.
-    onViewsChanged: () => { ViewFooter.render(); TabSlot.render(); ViewCards.render(); },
+    onViewsChanged: () => { ViewFooter.render(); TabSlot.render(); ViewCards.render(); ViewTasks.render(); },
     // A view's launcher (the button beside the +): the + 's own path — the project's folder,
     // never a worktree (newTabCwd) — filed into the view by name rather than by the selection.
     launchInView: (slug) => quickNewSession({ views: { [slug]: true } }),
@@ -5692,31 +5699,45 @@ async function init() {
     getWindowId: () => getWindowId(),
     showToast: (text) => showToast(text),
   });
-  // A view's superview: the cards grid of every agent tab in a selected view with `cards`. The
-  // cards are the strip as filtered (a tab hidden there is hidden here), agents only, and only
-  // members — the orchestrator is kept in every view but is not in this one by being kept.
+  // A view's superviews: the cards grid, or the task board, of every agent tab in a selected
+  // view with `cards` or `tasks`. Either one draws the strip as filtered (a tab hidden there is
+  // hidden here), agents only, and only members — the orchestrator is kept in every view but is
+  // not in this one by being kept.
+  const superviewContext = () => {
+    const id = getActiveContextId();
+    const info = getActiveContextInfo();
+    return id && info ? { id, ...info } : null;
+  };
+  const viewAgentTabs = (view) => getAllTabIds().filter((id) => {
+    const s = sessions.get(id);
+    const el = TabManager.getTab(id);
+    return s && el && !el.classList.contains('context-hidden') && tabKind(s) === 'agent' && ProjectViews.isMember(id, view);
+  }).map(id => ({ id, name: sessions.get(id).name || getDefaultTabName(sessions.get(id).cwd || ''), current: id === activeId }));
   ViewCards.init({
-    getActiveContext: () => {
-      const id = getActiveContextId();
-      const info = getActiveContextInfo();
-      return id && info ? { id, ...info } : null;
-    },
+    getActiveContext: superviewContext,
     cardsFor: (ctx) => ProjectViews.cardsFor(ctx),
-    cardTabs: (view) => getAllTabIds().filter((id) => {
-      const s = sessions.get(id);
-      const el = TabManager.getTab(id);
-      return s && el && !el.classList.contains('context-hidden') && tabKind(s) === 'agent' && ProjectViews.isMember(id, view);
-    }).map(id => ({ id, name: sessions.get(id).name || getDefaultTabName(sessions.get(id).cwd || ''), current: id === activeId })),
+    cardTabs: viewAgentTabs,
     openTab: (id) => onTabStripClick(id),
     setStripActive: (on) => TabManager.setActive(on ? activeId : null),
     // The footer describes the tab you are looking at, and with the grid up that is none.
     onUpChanged: () => ViewFooter.render(),
   });
+  ViewTasks.init({
+    getActiveContext: superviewContext,
+    tasksFor: (ctx) => ProjectViews.tasksFor(ctx),
+    memberTabs: viewAgentTabs,
+    // A task's tab in this window but outside the view is not "in another window".
+    hasTab: (id) => sessions.has(id),
+    openTab: (id) => onTabStripClick(id),
+    setStripActive: (on) => TabManager.setActive(on ? activeId : null),
+    onUpChanged: () => ViewFooter.render(),
+    showToast: (text) => showToast(text),
+  });
   // View footers: the row under the monitor for a tab in a view with a `footer`.
   ViewFooter.init({
     getActiveTabId: () => activeId,
     footerFor: (id) => ProjectViews.footerFor(id),
-    isViewSlotUp: () => ModManager.isModViewVisible() || ViewCards.isUp(),
+    isViewSlotUp: () => ModManager.isModViewVisible() || ViewCards.isUp() || ViewTasks.isUp(),
   });
   TabManager.setTabViews({
     menu: (id) => ProjectViews.menuFor(id),
@@ -5759,6 +5780,7 @@ async function init() {
       // The reload channel is the one that reaches a window with no session sockets,
       // which is exactly when an unattended agent registers a project mod (#618).
       if (msg.type === 'project-mods') { ProjectMods.refresh(); ProjectViews.refresh(); }
+      if (msg.type === 'view-tasks') ViewTasks.onPing(msg.contextId);
       if (msg.type === 'recent-sessions') {
         recentSessions = msg.sessions || [];
         renderEmptyStateRecent();

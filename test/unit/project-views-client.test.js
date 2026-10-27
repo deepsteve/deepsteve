@@ -641,6 +641,26 @@ test('a manual view holds exactly its filed tabs, and either copy of a merged vi
   assert.ok(!mod.isMember('nope', view));
 });
 
+test('a task board belongs to the selected view only, and a view with one has no cards', async () => {
+  const V_TASKS = { id: 'g2', slug: 'tasks', project: null, global: true, name: 'Tasks', icon: '', order: 1, match: [{ kinds: ['agent'] }], tasks: true };
+  // Two copies of one slug that disagree: the board wins, as it does in a single file.
+  const repoCards = { id: 'r2', slug: 'tasks', project: REPO_A, name: 'Tasks', icon: '', order: 1, match: [], cards: true };
+  const { mod, state } = await setup({ views: [V_TASKS, repoCards, V_ANALYTICS_WIDE], tabs: {} });
+  assert.strictEqual(mod.tasksFor(CTX_A), null, 'All is selected');
+
+  mod.selectView('tasks');
+  assert.strictEqual(mod.tasksFor(CTX_A).slug, 'tasks');
+  assert.strictEqual(mod.cardsFor(CTX_A), null, 'never both superviews');
+
+  mod.selectView('analytics');
+  assert.strictEqual(mod.tasksFor(CTX_A), null);
+  assert.strictEqual(mod.cardsFor(CTX_A).slug, 'analytics');
+
+  mod.selectView('tasks');
+  state.suspended = true;
+  assert.strictEqual(mod.tasksFor(CTX_A), null, 'Decision Tab mode sets it aside');
+});
+
 test('every contexts / project-mods handler in app.js refreshes the views too', () => {
   const src = fs.readFileSync(path.join(__dirname, '../../public/js/app.js'), 'utf8');
   const mods = src.match(/ProjectMods\.refresh\(\)/g).length;

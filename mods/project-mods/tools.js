@@ -55,13 +55,14 @@
 const { z } = require('zod');
 const { createHash } = require('crypto');
 const fs = require('fs');
-const { projectModsDir, projectViewsDir, globalViewsDir } = require('../../paths');
+const { projectModsDir, projectViewsDir, globalViewsDir, statePath } = require('../../paths');
 const path = require('path');
 
 const { resolveHtml } = require('../../html-source.js');
 const projectScope = require('../../project-scope.js');
 const { FOOTER_FIELDS, createFooterSource } = require('./view-footer.js');
 const { createPromptSource } = require('./view-cards.js');
+const { createTaskStore } = require('./view-tasks.js');
 
 // The manifest field that says "this directory is a project mod". Anything else under
 // .deepsteve/mods/ — including a regular DeepSteve Mod someone distributes in their repo —
@@ -586,8 +587,11 @@ const commitReminder = (mod) =>
 // idiom). reloadClients matters as much as wss here — a window sitting on the empty
 // state has no session socket, and that is exactly when a project mod is registered.
 function broadcastMods() {
+  ping({ type: 'project-mods' });
+}
+
+function ping(msg) {
   if (!ctx) return;
-  const msg = { type: 'project-mods' };
   try { ctx.broadcast(msg); } catch {}
   const data = JSON.stringify(msg);
   for (const client of ctx.reloadClients || []) {
@@ -660,13 +664,17 @@ function refresh(reason) {
 // agent tab marked `slot: { contextId, role }` on its shell entry; POST /api/project-views/slot
 // starts it, and keeps it to one per project.
 //
-// Two flags belong to the view you are looking AT, so an additive view never carries them, and
-// both show only while their view is the selected one:
+// Three flags belong to the view you are looking AT, so an additive view never carries them,
+// and all show only while their view is the selected one:
 //   - `launcher: true` puts a "New <name> tab" button beside the + : an agent tab in the
 //     project's folder (never a worktree), filed into the view.
 //   - `cards: true` puts a superview at the head of the strip: a grid of cards, one per agent
 //     tab in the view, each showing the tab's first prompt (view-cards.js), served by
 //     GET /api/project-views/cards.
+//   - `tasks: true` puts a superview there that opens a board instead: the project's tasks,
+//     each an ad hoc grouping of the view's agent tabs, with the ones in no task in a column
+//     beside them (view-tasks.js), kept by the daemon under /api/project-views/tasks. A view is
+//     a grid or a board, never both, so `tasks` drops `cards`.
 
 const VIEW_SLUG_RE = /^[a-z0-9][a-z0-9-]{0,39}$/;
 const VIEW_SLOTS = ['orchestrator'];
@@ -698,6 +706,15 @@ const getPromptSource = () => promptSource || (promptSource = createPromptSource
 const setPromptSource = (src) => { promptSource = src; };
 // One superview asks for every card at once; a strip longer than this is not a grid anyone reads.
 const MAX_CARD_IDS = 100;
+
+// The task boards' store (view-tasks.js), made on first use like the footer's. A session is
+// "known" while the daemon has any record of it — running, or a tombstone that can be reopened.
+let taskStore = null;
+const getTaskStore = () => taskStore || (taskStore = createTaskStore({
+  file: () => statePath('view-tasks.json'),
+  sessionKnown: (id) => !!(ctx && ((ctx.shells && ctx.shells.has(id)) || (typeof ctx.getSavedSession === 'function' && ctx.getSavedSession(id)))),
+}));
+const setTaskStore = (store) => { taskStore = store; };
 
 const unregisteredViewMsg = (proj) =>
   `${proj} is not part of any registered project, so a view written there would never be ` +
@@ -839,7 +856,8 @@ function normalizeView(raw, root, slug, { global = false } = {}) {
     additive: raw.additive === true,
     slot: raw.additive === true ? cleanSlot(raw.slot) : null,
     launcher: raw.additive !== true && raw.launcher === true,
-    cards: raw.additive !== true && raw.cards === true,
+    cards: raw.additive !== true && raw.cards === true && raw.tasks !== true,
+    tasks: raw.additive !== true && raw.tasks === true,
   };
 }
 
@@ -898,6 +916,7 @@ function viewManifestOf(v) {
   if (v.slot) out.slot = v.slot;
   if (v.launcher) out.launcher = true;
   if (v.cards) out.cards = true;
+  if (v.tasks) out.tasks = true;
   return out;
 }
 
@@ -926,7 +945,7 @@ function removeView(v) {
 const serializeView = (v) => ({
   id: v.id, slug: v.slug, project: v.project, global: !!v.global, name: v.name, icon: v.icon, order: v.order,
   match: v.match, footer: v.footer || [], additive: !!v.additive, slot: v.slot || null,
-  launcher: !!v.launcher, cards: !!v.cards,
+  launcher: !!v.launcher, cards: !!v.cards, tasks: !!v.tasks,
 });
 
 // A repo view's path is relative to its repo; a DeepSteve-wide view's is absolute.
@@ -1601,6 +1620,54 @@ function registerRoutes(app, context) {
     res.json({ prompts });
   });
 
+  // A task board's tasks (view-tasks.js): each a title and the sessions grouped under it, kept
+  // per project. The browser names the project by context id. Every write answers the project's
+  // whole list and pings every window with `{ type: 'view-tasks', contextId }`, so another
+  // window's board refetches. A stored session with no running shell stays on its task — its
+  // tab may be reopened — but the board draws only live ones, so each goes out marked.
+  const taskProject = (req, res) => {
+    const project = projectScope.getContexts(ctx).find(c => c && c.id === req.params.contextId);
+    if (!project) res.status(404).json({ error: 'Project not found' });
+    return project || null;
+  };
+  const isLive = (id) => !!(ctx && ctx.shells && typeof ctx.shells.has === 'function' && ctx.shells.has(id));
+  const wireTask = (t) => ({ ...t, sessions: t.sessions.map(id => ({ id, live: isLive(id) })) });
+  const writeTasks = (req, res, write, status = 200) => {
+    const project = taskProject(req, res);
+    if (!project) return;
+    let out;
+    try {
+      out = write(getTaskStore(), project.id, req.body || {});
+    } catch (e) {
+      return res.status(500).json({ error: `Failed to save the tasks: ${e.message}` });
+    }
+    if (out.error) return res.status(out.status || 400).json({ error: out.error });
+    ping({ type: 'view-tasks', contextId: project.id });
+    const body = { tasks: out.tasks.map(wireTask) };
+    if (out.task) body.task = wireTask(out.task);
+    res.status(status).json(body);
+  };
+
+  app.get('/api/project-views/tasks/:contextId', (req, res) => {
+    const project = taskProject(req, res);
+    if (!project) return;
+    res.json({ tasks: getTaskStore().list(project.id).map(wireTask) });
+  });
+
+  // "+ New task", or sessions dropped on it: `{ title?, sessions? }`. No title is "New task".
+  app.post('/api/project-views/tasks/:contextId', (req, res) =>
+    writeTasks(req, res, (store, id, b) => store.create(id, { title: b.title, sessions: b.sessions }), 201));
+
+  // A drag: `{ sessions: [id…], to: taskId | null }`. null takes them out of every task.
+  app.post('/api/project-views/tasks/:contextId/move', (req, res) =>
+    writeTasks(req, res, (store, id, b) => store.move(id, b.sessions, b.to == null ? null : String(b.to))));
+
+  app.put('/api/project-views/tasks/:contextId/:taskId', (req, res) =>
+    writeTasks(req, res, (store, id, b) => store.rename(id, req.params.taskId, b.title)));
+
+  app.delete('/api/project-views/tasks/:contextId/:taskId', (req, res) =>
+    writeTasks(req, res, (store, id) => store.remove(id, req.params.taskId)));
+
   // Start the tab that holds a project's slot — the empty slot's "Open orchestrator". One per
   // project and role, whichever window asks: a live holder is answered with its id (and the
   // window it is in) rather than doubled. A new one is an ordinary agent tab in the project's
@@ -1685,6 +1752,6 @@ module.exports = {
   FEATURE_OFF_MSG,
   // Project views (#726). cleanSpawnView is not test-only: the spawn tools validate `view` with it.
   cleanSpawnView, SPAWN_VIEW_DESCRIPTION, cleanViewSlug, slugifyView, cleanMatch, cleanViewPath, normalizeView, viewId,
-  serializeView, serializeViewForAgent, viewManifestOf, cleanFooter, cleanSlot, setFooterSource, setPromptSource,
+  serializeView, serializeViewForAgent, viewManifestOf, cleanFooter, cleanSlot, setFooterSource, setPromptSource, setTaskStore,
   VIEW_KINDS, VIEW_SLUG_RE, RESERVED_VIEW, VIEW_SLOTS,
 };

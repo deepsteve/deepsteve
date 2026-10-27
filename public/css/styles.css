@@ -297,6 +297,66 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
 }
 .view-card-prompt.empty { font-style: italic; opacity: 0.7; }
 
+/* ── Task boards ──────────────────────────────────────────────────────────────────────────────
+   The other superview (view-tasks.js), for a view with `tasks`. #view-tasks-tab takes the cards
+   superview's place and look; a view has one or the other. #view-tasks is the board it opens
+   over #terminals, at the grid's z-index: Ungrouped on the left — a full-height column that
+   collapses to a narrow strip — then the task cards, wrapping, then "+ New task". .drop-over
+   marks whichever of them a drag of tab rows would land in. */
+#view-tasks-tab.hidden { display: none; }
+.tab.view-tasks-tab { flex-shrink: 0; min-width: 0; margin-right: 4px; }
+.view-tasks-tab .view-tasks-glyph { font-size: 11px; color: var(--ds-accent-blue); }
+.view-tasks-tab .view-tasks-count { flex-shrink: 0; padding: 0 5px; border-radius: 8px; font-size: 11px; background: var(--ds-bg-secondary); color: var(--ds-text-secondary); }
+#app-container.vertical-layout .tab.view-tasks-tab { margin-right: 0; margin-bottom: 4px; padding-right: 12px; }
+#app-container.vertical-layout .view-tasks-tab .view-tasks-count { margin-left: auto; }
+#app-container.vertical-layout.icon-rail .view-tasks-tab .view-tasks-glyph,
+#app-container.vertical-layout.icon-rail .view-tasks-tab .view-tasks-count { display: none; }
+
+#view-tasks { position: absolute; inset: 0; z-index: 13; box-sizing: border-box; display: flex; flex-direction: column; padding: 20px 24px; background: var(--ds-bg-primary); color: var(--ds-text-primary); }
+#view-tasks.hidden { display: none; }
+#view-tasks button { font: inherit; color: inherit; background: none; border: none; padding: 0; cursor: pointer; text-align: left; }
+#view-tasks .view-tasks-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 16px; flex-shrink: 0; }
+#view-tasks .view-tasks-title { font-size: 18px; color: var(--ds-text-bright); }
+#view-tasks .view-tasks-sub { font-size: 12px; color: var(--ds-text-secondary); }
+#view-tasks .view-tasks-empty { padding: 4px 2px; font-size: 12px; font-style: italic; color: var(--ds-text-secondary); }
+#view-tasks .view-tasks-board { flex: 1; min-height: 0; display: flex; gap: 12px; }
+
+#view-tasks .view-tasks-ungrouped { flex: 0 0 260px; min-height: 0; display: flex; flex-direction: column; gap: 8px; padding: 10px; box-sizing: border-box; overflow-y: auto; background: var(--ds-bg-secondary); border: 1px solid var(--ds-border); border-radius: 8px; }
+#view-tasks .view-tasks-ungrouped.collapsed { flex-basis: 40px; padding: 10px 0; align-items: center; }
+#view-tasks .view-tasks-col-head { display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; color: var(--ds-text-secondary); }
+#view-tasks .view-tasks-col-head:hover { color: var(--ds-text-bright); }
+#view-tasks .view-tasks-col-count { padding: 0 6px; border-radius: 8px; font-weight: normal; background: var(--ds-bg-tertiary); }
+/* Collapsed, the header reads top to bottom down the narrow strip. */
+#view-tasks .view-tasks-ungrouped.collapsed .view-tasks-col-head { flex-direction: column; }
+#view-tasks .view-tasks-ungrouped.collapsed .view-tasks-col-name { writing-mode: vertical-rl; }
+
+#view-tasks .view-tasks-cards { flex: 1; min-width: 0; overflow-y: auto; display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; align-content: start; }
+#view-tasks .view-task { display: flex; flex-direction: column; gap: 8px; min-height: 120px; padding: 10px; box-sizing: border-box; background: var(--ds-bg-secondary); border: 1px solid var(--ds-border); border-radius: 8px; }
+#view-tasks .view-task-head { display: flex; align-items: center; gap: 8px; }
+#view-tasks .view-task-title { flex: 1; min-width: 0; font-size: 13px; font-weight: 600; color: var(--ds-text-bright); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#view-tasks .view-task-title:hover { text-decoration: underline dotted; }
+#view-tasks .view-task-title-input { flex: 1; min-width: 0; padding: 2px 6px; font: inherit; font-size: 13px; color: var(--ds-text-bright); background: var(--ds-bg-primary); border: 1px solid var(--ds-accent-blue); border-radius: 4px; outline: none; }
+#view-tasks .view-task-count { flex-shrink: 0; padding: 0 6px; border-radius: 8px; font-size: 11px; background: var(--ds-bg-tertiary); color: var(--ds-text-secondary); }
+#view-tasks .view-task-delete { flex-shrink: 0; width: 18px; text-align: center; font-size: 14px; line-height: 1; color: var(--ds-text-secondary); opacity: 0; }
+#view-tasks .view-task:hover .view-task-delete, #view-tasks .view-task-delete:focus-visible { opacity: 1; }
+#view-tasks .view-task-delete:hover { color: var(--ds-accent-red); }
+#view-tasks .view-task-more { font-size: 12px; color: var(--ds-text-secondary); }
+#view-tasks .view-task-new { justify-content: center; align-items: center; text-align: center; border-style: dashed; background: transparent; cursor: pointer; }
+#view-tasks .view-task-new:hover { border-color: var(--ds-accent-blue); }
+#view-tasks .view-task-new-btn { font-size: 13px; color: var(--ds-accent-blue); text-align: center; }
+#view-tasks .view-task-new .view-task-title-input { flex: 0 0 auto; width: 100%; box-sizing: border-box; }
+#view-tasks .drop-over { border-color: var(--ds-accent-blue); background: var(--ds-bg-tertiary); }
+
+#view-tasks .view-tasks-list { display: flex; flex-direction: column; gap: 6px; }
+#view-tasks .view-tasks-session { display: flex; flex-direction: column; gap: 3px; padding: 7px 9px; background: var(--ds-bg-primary); border: 1px solid var(--ds-border); border-radius: 6px; cursor: grab; user-select: none; }
+#view-tasks .view-tasks-session:hover { border-color: var(--ds-text-secondary); }
+#view-tasks .view-tasks-session.current { border-left: 3px solid var(--ds-text-secondary); }
+#view-tasks .view-tasks-session.selected { border-color: var(--ds-accent-blue); box-shadow: 0 0 0 1px var(--ds-accent-blue); }
+#view-tasks .view-tasks-session.dragging { opacity: 0.4; }
+#view-tasks .view-tasks-session-name { font-size: 12px; font-weight: 600; color: var(--ds-text-bright); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#view-tasks .view-tasks-session-prompt { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; font-size: 11px; line-height: 1.4; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--ds-text-secondary); }
+#view-tasks .view-tasks-session-prompt.empty { font-style: italic; opacity: 0.7; }
+
 #view-launch-btn.hidden { display: none; }
 #view-launch-btn { flex-shrink: 0; margin-left: 4px; padding: 4px 10px; background: transparent; border: 1px solid var(--ds-accent-green); border-radius: 4px; color: var(--ds-text-primary); font: inherit; font-size: 13px; white-space: nowrap; cursor: pointer; user-select: none; }
 #view-launch-btn:hover { background: var(--ds-bg-tertiary); }

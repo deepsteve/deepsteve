@@ -34,10 +34,12 @@
  * the head of the strip for the one tab that holds that role in the project. tab-slot.js draws
  * it; this module answers slotFor() and keeps the holder in every view while the slot is on.
  *
- * A selectable view may carry `launcher` and `cards`, and both show only while it is the
- * selected view. The launcher is #view-launch-btn beside the +, drawn here: a new agent tab in
- * the project, filed into the view. The cards are a superview at the head of the strip, drawn
- * by view-cards.js; this module answers cardsFor().
+ * A selectable view may carry `launcher`, `cards` and `tasks`, and each shows only while it is
+ * the selected view. The launcher is #view-launch-btn beside the +, drawn here: a new agent tab
+ * in the project, filed into the view. The cards are a superview at the head of the strip, drawn
+ * by view-cards.js; this module answers cardsFor(). The tasks are a superview too, a board drawn
+ * by view-tasks.js, which this module answers with tasksFor(). A view is one or the other: a
+ * view with `tasks` has no cards.
  *
  * Two pieces of chrome, both host-owned:
  *   - #views-toggle: the collapsed form (the default). The first child of #tabs-list-wrapper,
@@ -195,8 +197,9 @@ function mergeViews(list) {
       // Either copy asking for the launcher or the superview is enough to show it.
       cur.launcher = cur.launcher || !!v.launcher;
       cur.cards = cur.cards || !!v.cards;
+      cur.tasks = cur.tasks || !!v.tasks;
     } else {
-      bySlug.set(v.slug, { slug: v.slug, name: v.name, icon: v.icon || '', ids: v.global ? [] : [v.id], rules, global: !!v.global, footer, additive: !!v.additive, slot: v.slot || null, launcher: !!v.launcher, cards: !!v.cards });
+      bySlug.set(v.slug, { slug: v.slug, name: v.name, icon: v.icon || '', ids: v.global ? [] : [v.id], rules, global: !!v.global, footer, additive: !!v.additive, slot: v.slot || null, launcher: !!v.launcher, cards: !!v.cards, tasks: !!v.tasks });
     }
   }
   return [...bySlug.values()];
@@ -226,8 +229,17 @@ function selectedWith(ctx, flag) {
 /** The selected view of `ctx` when it has a launcher (the button beside the +), else null. */
 export const launcherFor = (ctx) => selectedWith(ctx, 'launcher');
 
-/** The selected view of `ctx` when it has a superview (view-cards.js), else null. */
-export const cardsFor = (ctx) => selectedWith(ctx, 'cards');
+/**
+ * The selected view of `ctx` when it has a cards superview (view-cards.js), else null. Two repos
+ * can disagree about one slug; the board wins, as it does in a single file.
+ */
+export function cardsFor(ctx) {
+  const v = selectedWith(ctx, 'cards');
+  return v && !v.tasks ? v : null;
+}
+
+/** The selected view of `ctx` when it has a task board (view-tasks.js), else null. */
+export const tasksFor = (ctx) => selectedWith(ctx, 'tasks');
 
 /** Does this tab hold `ctx`'s slot right now? Its marker names the project and the role. */
 export const holdsSlot = (info, ctx) =>
