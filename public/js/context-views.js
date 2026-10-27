@@ -345,10 +345,25 @@ export function activeContextIsEmpty() {
   return enabled && !filterSuspended() && !!getActiveContext() && !activeContextHasTabs();
 }
 
-export function applyFilter() {
+// The active tab can be one the filter is hiding: a project or view with no tab of its own has
+// nothing to snap to, so the tab you left stays active behind its empty state — and closing a
+// project's last tab hands "active" to its DOM neighbour, usually the last tab of the project
+// before it in the strip. Such a tab was never on screen here, so it is not where you were.
+function activeTabOffscreen() {
+  const id = cb.getActiveTabId?.();
+  return !!id && !!document.getElementById('tab-' + id)?.classList.contains('context-hidden');
+}
+
+// `picked`: the user just chose what to look at — a project (selectContext) or one of its views.
+// An active tab the OUTGOING filter was hiding then gets replaced from last-tab memory even when
+// the incoming filter shows it. Without this, coming back to the project that owns that tab
+// skipped the memory and landed on it. Only for picks: revealTabContext() also re-filters with a
+// tab that was hidden a moment ago, and there that tab is exactly where you were sent.
+export function applyFilter({ picked = false } = {}) {
   if (!enabled) return;
   const ctx = filterSuspended() ? null : getActiveContext();
   const ids = cb.getOrderedTabIds ? cb.getOrderedTabIds() : [];
+  const wasOffscreen = picked && activeTabOffscreen(); // read before the loop rewrites the classes
   let firstVisible = null;
 
   for (const id of ids) {
@@ -364,13 +379,12 @@ export function applyFilter() {
   // when there's no memory yet or the remembered tab is gone / no longer matches.
   if (ctx) {
     const activeTab = cb.getActiveTabId?.();
-    const activeHidden = !activeTab ||
-      document.getElementById('tab-' + activeTab)?.classList.contains('context-hidden');
+    const activeHidden = !activeTab || wasOffscreen || activeTabOffscreen();
     if (activeHidden) {
       const remembered = lastTabByContext[memoKey(ctx)];
       const rEl = remembered ? document.getElementById('tab-' + remembered) : null;
       const target = (rEl && !rEl.classList.contains('context-hidden')) ? remembered : firstVisible;
-      if (target) cb.switchToTab?.(target);
+      if (target && target !== activeTab) cb.switchToTab?.(target);
     }
   }
 
@@ -1166,18 +1180,18 @@ function endRowDrag() {
 // before this, an app stayed fullscreen whenever the filter had no tab to snap-switch to.
 function selectContext(id) {
   ModManager.leaveForProject();
-  applyContext(id);
+  applyContext(id, { picked: true });
 }
 
 // Set the active project WITHOUT touching the view slot — for the paths that follow the
 // screen rather than change it. revealTabContext() is the one that matters: it runs inside
 // every excursion (visitSession → focusTab → reveal), where leaving would end the very
 // excursion that just put you there.
-function applyContext(id) {
+function applyContext(id, { picked = false } = {}) {
   activeContextId = id;
   saveActive();
   notifyActive();
-  applyFilter();
+  applyFilter({ picked });
   maybeWelcomeBuiltin(id);
 }
 

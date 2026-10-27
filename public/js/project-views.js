@@ -456,7 +456,7 @@ export function selectView(slug) {
   const ctx = activeContext();
   if (!ctx) return;
   setSelection(ctx, slug && slug !== ALL && selectableViews(ctx).some(v => v.slug === slug) ? slug : ALL);
-  cb.applyFilter?.();
+  cb.applyFilter?.({ picked: true }); // a pick, like choosing a project: see context-views' applyFilter
   render();
 }
 

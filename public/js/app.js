@@ -3613,7 +3613,14 @@ async function restoreSessions(sessionList, opts = {}) {
     } else {
       console.log('[restore] Saved active tab', savedActiveId, 'not found, falling back to', target);
     }
-    focusTab(target); // reveal the restored tab's context if it diverges from the saved one (#559)
+    // A saved active tab the saved project hides was never on screen. That is the empty-project
+    // state: the tab you left stays active behind the empty state, and closing a project's last
+    // tab hands "active" to a DOM neighbour from another project. Revealing it would move the
+    // window into that tab's project on every reload, so it is activated without the reveal and
+    // the filter below keeps the project the window was showing. Anything else reveals (#559).
+    const offscreen = document.getElementById('tab-' + target)?.classList.contains('context-hidden');
+    if (offscreen) switchTo(target);
+    else focusTab(target); // reveal the restored tab's context if it diverges from the saved one (#559)
   }
 
   // Re-apply the context filter once all tabs exist and the active tab is
@@ -5704,7 +5711,7 @@ async function init() {
       refreshContextFilter();
     },
     getActiveTabCwd: () => (activeId ? sessions.get(activeId)?.cwd || null : null),
-    applyFilter: () => refreshContextFilter(),
+    applyFilter: (opts) => refreshContextFilter(opts),
     countProjectAgents: (ctx) => [...sessions.values()].filter(s => s.projectAgent && s.projectAgent.contextId === ctx.id).length,
     isSuspended: () => DecisionMode.isDecisionModeActive(),
     showToast: (text) => showToast(text),

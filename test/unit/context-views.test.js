@@ -1429,3 +1429,100 @@ test('contextsForCwd lists every project holding a path, as copies (#726)', asyn
   mod.contextsForCwd('/repo/a')[0].dirs.push('/mutated');
   assert.deepStrictEqual(CTX_A.dirs, ['/repo/a']);
 });
+
+// ------------------------------------------------ an active tab the filter hides is not "where you were"
+
+// The close fallback as app.js's killSession() runs it: the tab goes, "active" moves to its DOM
+// neighbour whatever project that is in (a bare switchTo, so noteActiveTab ignores one outside the
+// project), and notifyTabsChanged() re-filters. When the closed tab was its project's last, the
+// filter has nothing to snap to and the neighbour stays active behind the empty state.
+function closeActiveTab(mod, state, id, neighbour) {
+  delete state.tabCwds[id];
+  tabEls.delete(id);
+  state.activeTabId = neighbour;
+  mod.noteActiveTab(neighbour);
+  mod.applyFilter();
+}
+
+test('closing a project\'s last tab, then coming back to its neighbour\'s project → the remembered tab', async () => {
+  const { mod, state } = await setup({ tabs: { a1: '/repo/a', a2: '/repo/a', a3: '/repo/a', b1: '/repo/b' } });
+  mod.setActiveContext('ctxa');
+  state.activeTabId = 'a1';
+  mod.noteActiveTab('a1');
+  mod.setActiveContext('ctxb');
+  assert.strictEqual(state.activeTabId, 'b1');
+
+  closeActiveTab(mod, state, 'b1', 'a3');   // a3 sits left of b1 in the strip
+  assert.strictEqual(state.activeTabId, 'a3', 'Beta has nothing to snap to');
+  assert.strictEqual(isHidden('a3'), true);
+
+  state.switchCalls.length = 0;
+  mod.setActiveContext('ctxa');
+  assert.strictEqual(state.activeTabId, 'a1', 'not a3, which was never on screen in Alpha');
+  assert.deepStrictEqual(state.switchCalls, ['a1']);
+});
+
+test('an empty project and back → still the tab you left, with no extra switch', async () => {
+  const { mod, state } = await setup({ tabs: { a1: '/repo/a', a2: '/repo/a' } });
+  mod.setActiveContext('ctxa');
+  state.activeTabId = 'a2';
+  mod.noteActiveTab('a2');
+  mod.setActiveContext('ctxb');             // Beta holds no tabs
+  assert.strictEqual(state.activeTabId, 'a2');
+
+  state.switchCalls.length = 0;
+  mod.setActiveContext('ctxa');
+  assert.strictEqual(state.activeTabId, 'a2');
+  assert.deepStrictEqual(state.switchCalls, []);
+});
+
+test('a jump out of an empty project still lands on the tab it was sent to', async () => {
+  // revealTabContext re-filters with a tab that was hidden a moment ago too — but there that tab
+  // is the destination, so it must not be traded for the project's memory.
+  const { mod, state, jumpToTab } = await setup({ tabs: { a1: '/repo/a', a2: '/repo/a', b1: '/repo/b' } });
+  mod.setActiveContext('ctxa');
+  state.activeTabId = 'a1';
+  mod.noteActiveTab('a1');
+  mod.setActiveContext('ctxb');
+  closeActiveTab(mod, state, 'b1', 'a2');
+
+  jumpToTab('a2');                          // an Inbox row, a notification click, …
+  assert.strictEqual(mod.getActiveContextId(), 'ctxa');
+  assert.strictEqual(state.activeTabId, 'a2');
+  assert.deepStrictEqual(state.switchCalls, []);
+  assert.strictEqual(JSON.parse(storeMap.get('deepsteve-context-last-tab')).ctxa, 'a2');
+});
+
+test('a tab every project shows stays put across a project pick', async () => {
+  const { mod, state } = await setup({ tabs: { a1: '/repo/a', b1: '/repo/b', g: null } });
+  mod.setActiveContext('ctxb');
+  state.activeTabId = 'b1';
+  mod.noteActiveTab('b1');
+  mod.setActiveContext('ctxa');
+  state.activeTabId = 'g';                  // a display tab with no cwd, on screen in Alpha
+  mod.noteActiveTab('g');
+
+  state.switchCalls.length = 0;
+  mod.setActiveContext('ctxb');
+  assert.strictEqual(state.activeTabId, 'g', 'it was on screen, and Beta shows it too');
+  assert.deepStrictEqual(state.switchCalls, []);
+});
+
+test('picking All out of a view whose last tab closed → the remembered tab (#726)', async () => {
+  const vm = viewModel({ members: { mkt: new Set(['t3']) } });
+  const { mod, state } = await setup({ tabs: { t1: '/repo/a', t2: '/repo/a', t3: '/repo/a' }, extraCb: vm.cb });
+  mod.setActiveContext('ctxa');
+  state.activeTabId = 't1';
+  mod.noteActiveTab('t1');
+  vm.sel.ctxa = 'mkt';
+  mod.applyFilter({ picked: true });        // project-views' selectView()
+  assert.strictEqual(state.activeTabId, 't3');
+  mod.noteActiveTab('t3');
+
+  closeActiveTab(mod, state, 't3', 't2');
+  assert.strictEqual(state.activeTabId, 't2', 'the view has nothing to snap to');
+
+  delete vm.sel.ctxa;
+  mod.applyFilter({ picked: true });
+  assert.strictEqual(state.activeTabId, 't1');
+});
