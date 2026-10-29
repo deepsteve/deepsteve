@@ -593,8 +593,8 @@ function TasksPanel() {
   const [tagFilter, setTagFilter] = useState('all');
   const [compactView, setCompactView] = useState(false);
   // "This project": only the tasks of the project selected in the rail. null there means All,
-  // which leaves nothing to narrow to, so every task shows.
-  const [projectOnly, setProjectOnly] = useState(false);
+  // which leaves nothing to narrow to, so every task shows. On unless this browser turned it off.
+  const [projectOnly, setProjectOnly] = useState(true);
   const [activeProjectId, setActiveProjectId] = useState(null);
   const [projects, setProjects] = useState([]);
   const [now, setNow] = useState(Date.now());
