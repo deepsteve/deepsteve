@@ -18,7 +18,7 @@ const { formatLogTimestamp, createLogRotator, defaultLogPaths } = require('./log
 const { findGitRoot } = require('./git-root');
 const { modKind } = require('./mod-kind');
 const { isValidReleaseTag, installShUrl, safeReleaseUrl } = require('./release-check');
-const { nodeVersionWarnings } = require('./node-advisories');
+const { nodeVersionWarnings, affectingAdvisories, describeAdvisory } = require('./node-advisories');
 const { usableWorktree } = require('./worktree-support');
 const { worktreePath, worktreeExists, worktreeStatus, worktreeStatuses, freshWorktreeName, mainCheckoutOf } = require('./worktree-status');
 const { stateDir, agentHomeDir, expandTilde, spawnCwdProblem, assertSpawnCwd, tmuxSocketPath, defaultTmuxSocketPath } = require('./paths');
@@ -401,6 +401,17 @@ bootMark('first log line');
 // at every boot rather than leave the user exposed without knowing. Logged, never fatal: the
 // table and the reasoning live in node-advisories.js.
 for (const line of nodeVersionWarnings(process.versions.node)) log(line);
+// The same verdict for the UI (#745): the log line alone reached nobody. Served on
+// /api/version, which the page already fetches at load, and shown there as a banner. Computed
+// once, because the runtime cannot change under a running daemon. execPath is there so the
+// user can tell WHICH node to upgrade — a curl install's ~/.deepsteve/node, or their own.
+const NODE_SECURITY = {
+  version: process.versions.node,
+  execPath: process.execPath,
+  advisories: affectingAdvisories(process.versions.node).map(a => ({
+    id: a.id, url: a.url, upgradeTo: a.upgradeTo, blocksProxy: a.blocksProxy, message: describeAdvisory(a),
+  })),
+};
 
 // --- Waiting-classifier audit (#558 research instrumentation) ---
 // Records every waitingForInput decision, BEL classification, and a periodic sample
@@ -4714,6 +4725,7 @@ app.get('/api/version', (req, res) => {
     // Always present as a boolean (#562): test helpers require `testMode === true`,
     // which uniformly refuses both a live daemon (false) and a pre-#562 build (absent).
     testMode: TEST_MODE,
+    node: NODE_SECURITY,
   });
 });
 
