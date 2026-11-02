@@ -75,6 +75,7 @@
        which also sandboxes it with a CSP. We learn about it only through proxy.js's bridge (#731). -->
   <iframe id="browser" sandbox="allow-scripts allow-forms allow-popups"></iframe>
 
+  <script src="nav-trust.js"></script>
   <script>
     let _d=0;try{let w=window;while(w!==w.parent){w=w.parent;_d++}}catch{}
     const STORAGE_KEY = (_d > 0 ? 'ds'+_d+'-' : '') + 'baby-browser-state';
@@ -85,28 +86,40 @@
     const refreshBtn = document.getElementById('refresh');
     const frame = document.getElementById('browser');
 
-    // Restore state from sessionStorage
-    let navHistory = ['https://example.com'];
+    // Each history entry records who chose it: { url, by: 'user' | 'page' } (nav-trust.js).
+    // Only a 'user' entry is fetched with &by=user, which lets /api/proxy reach local addresses
+    // (#746). Back, forward and refresh replay an entry as it was chosen; they never upgrade it.
+    function withScheme(url) {
+      url = String(url ?? '').trim();
+      return !url || /^https?:\/\//i.test(url) ? url : 'https://' + url;
+    }
+
+    let navHistory = [{ url: 'https://example.com', by: 'user' }];
     let historyIndex = 0;
     try {
       const saved = JSON.parse(sessionStorage.getItem(STORAGE_KEY));
-      if (saved && saved.history?.length) {
-        navHistory = saved.history;
-        historyIndex = Math.min(saved.index ?? 0, saved.history.length - 1);
+      // Entries saved before #746 are bare strings with no record of who chose them, so 'page'.
+      const restored = (saved?.history || [])
+        .map((e) => (typeof e === 'string' ? { url: withScheme(e), by: 'page' }
+          : { url: withScheme(e?.url), by: e?.by === 'user' ? 'user' : 'page' }))
+        .filter((e) => e.url);
+      if (restored.length) {
+        navHistory = restored;
+        historyIndex = Math.max(0, Math.min(saved.index ?? 0, restored.length - 1));
       }
     } catch {}
 
-    // Support ?url= query param for window config restore
+    // Support ?url= query param for window config restore: a URL the user had open.
     try {
       const paramUrl = new URLSearchParams(window.location.search).get('url');
-      if (paramUrl) {
-        navHistory = [paramUrl];
+      if (withScheme(paramUrl)) {
+        navHistory = [{ url: withScheme(paramUrl), by: 'user' }];
         historyIndex = 0;
       }
     } catch {}
 
-    function proxyUrl(url) {
-      return '/api/proxy?url=' + encodeURIComponent(url);
+    function proxyUrl(entry) {
+      return '/api/proxy?url=' + encodeURIComponent(entry.url) + (entry.by === 'user' ? '&by=user' : '');
     }
 
     function saveState() {
@@ -118,58 +131,84 @@
       forwardBtn.disabled = historyIndex >= navHistory.length - 1;
     }
 
-    function navigate(pushHistory = true) {
-      let url = urlInput.value.trim();
-      if (!url) return;
-      if (!/^https?:\/\//i.test(url)) url = 'https://' + url;
-      urlInput.value = url;
-
-      if (pushHistory) {
-        navHistory.length = historyIndex + 1;
-        navHistory.push(url);
-        historyIndex = navHistory.length - 1;
-      }
-
-      frame.src = proxyUrl(url);
+    // Loads the current history entry into the frame.
+    function replay() {
+      const entry = navHistory[historyIndex];
+      urlInput.value = entry.url;
+      frame.src = proxyUrl(entry);
       updateNavButtons();
       saveState();
       registerWithServer();
     }
 
+    // Pushes a new entry, chosen by `by`, and loads it.
+    function openUrl(url, by) {
+      url = withScheme(url);
+      if (!url) return;
+      navHistory.length = historyIndex + 1;
+      navHistory.push({ url, by });
+      historyIndex = navHistory.length - 1;
+      replay();
+    }
+
+    // The address bar and Go: typed, so the user chose it.
+    function navigate() {
+      openUrl(urlInput.value, 'user');
+    }
+
     backBtn.addEventListener('click', () => {
       if (historyIndex <= 0) return;
       historyIndex--;
-      urlInput.value = navHistory[historyIndex];
-      navigate(false);
+      replay();
     });
 
     forwardBtn.addEventListener('click', () => {
       if (historyIndex >= navHistory.length - 1) return;
       historyIndex++;
-      urlInput.value = navHistory[historyIndex];
-      navigate(false);
+      replay();
     });
 
     refreshBtn.addEventListener('click', () => {
-      navigate(false);
+      replay();
     });
 
     // The framed page is opaque-origin, so its DOM and location are out of reach. proxy.js
     // injects a bridge that posts to us instead: a link click or GET form submit arrives as
     // `navigate`, and `read` is answered as `read-result`. Only the window in our own frame is
     // listened to; what it says can only be about the page itself, which it controls anyway.
+    //
+    // Except the URL in a `navigate`: the page writes that message itself, so it can name any URL,
+    // in a loop, and each one is a fetch by the daemon (#746). So a `navigate` is 'page'-chosen
+    // (public addresses only, nav-trust.js), and a token bucket caps how many get through: a
+    // burst of a few for quick clicks, then one a second. The excess is dropped.
     const PROXY_TAG = 'deepsteve-proxy';
     const READ_TIMEOUT_MS = 5000;
+    const PAGE_NAV_BURST = 3;
+    const PAGE_NAV_PER_SEC = 1;
     const pendingReads = new Map(); // id -> resolve
     let readSeq = 0;
+    let pageNavTokens = PAGE_NAV_BURST;
+    let pageNavRefilledAt = performance.now();
+
+    function takePageNavToken() {
+      const now = performance.now();
+      pageNavTokens = Math.min(PAGE_NAV_BURST, pageNavTokens + ((now - pageNavRefilledAt) / 1000) * PAGE_NAV_PER_SEC);
+      pageNavRefilledAt = now;
+      if (pageNavTokens < 1) return false;
+      pageNavTokens -= 1;
+      return true;
+    }
 
     window.addEventListener('message', (e) => {
       if (e.source !== frame.contentWindow) return;
       const m = e.data;
       if (!m || m.tag !== PROXY_TAG) return;
       if (m.kind === 'navigate' && typeof m.url === 'string' && /^https?:\/\//i.test(m.url)) {
-        urlInput.value = m.url;
-        navigate();
+        if (!takePageNavToken()) {
+          console.warn('Baby Browser: dropped a navigate from the page (rate limit)', m.url);
+          return;
+        }
+        openUrl(m.url, BabyBrowserNavTrust.pageNavigationBy(navHistory[historyIndex], m.url));
       } else if (m.kind === 'read-result' && pendingReads.has(m.id)) {
         pendingReads.get(m.id)(m);
         pendingReads.delete(m.id);
@@ -196,15 +235,14 @@
     let tabInstanceId = null;
 
     // Load current page from history
-    urlInput.value = navHistory[historyIndex];
-    navigate(false);
+    replay();
 
     function registerWithServer() {
       if (!tabInstanceId) return;
       fetch('/api/baby-browser/register', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ tabId: tabInstanceId, url: navHistory[historyIndex] || '' }),
+        body: JSON.stringify({ tabId: tabInstanceId, url: navHistory[historyIndex]?.url || '' }),
       }).catch(e => console.warn('Baby Browser register failed:', e));
     }
 
@@ -229,7 +267,6 @@
 
         try {
           if (action === 'navigate') {
-            urlInput.value = req.url;
             result = await new Promise((resolve, reject) => {
               const timeout = setTimeout(() => {
                 frame.removeEventListener('load', onLoad);
@@ -241,7 +278,8 @@
                 resolve(`Navigated to ${req.url}`);
               }
               frame.addEventListener('load', onLoad);
-              navigate();
+              // An agent's baby_browser_navigate is chosen like a typed URL.
+              openUrl(req.url, 'user');
             });
           } else if (action === 'read') {
             const page = await readPage();
@@ -253,7 +291,7 @@
               result = (title ? `# ${title}\n\n` : '') + bodyText;
             }
           } else if (action === 'url') {
-            result = navHistory[historyIndex] || '';
+            result = navHistory[historyIndex]?.url || '';
           } else {
             error = `Unknown action: ${action}`;
           }

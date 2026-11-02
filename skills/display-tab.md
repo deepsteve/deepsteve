@@ -14,7 +14,7 @@ A display tab renders and can call back into deepsteve over HTTP, but it gets **
 
 2. **Write the page**: a complete document that starts with `<!DOCTYPE html>` and contains a `<head>` — the server injects a small script after `<head>`, and a page missing one can land in quirks mode. Keep CSS and JS inline so the page stands on its own. Four constraints that actually bite:
    - The page is served **same-origin** from the deepsteve origin, so call back with relative `/api/...` URLs or `window.location.origin` — **never a hard-coded port**. Your auth cookie rides along automatically.
-   - For an external API that sends no CORS headers, fetch it through `/api/proxy?url=` + `encodeURIComponent(url)` rather than directly.
+   - For an external API that sends no CORS headers, fetch it through `/api/proxy?url=` + `encodeURIComponent(url)` rather than directly. That reaches public addresses only; for a service on this machine or the LAN, append `&by=user`.
    - `alert()`, `confirm()`, `prompt()` and `window.open()` are **inert** — the iframe has no `allow-modals` or `allow-popups`. Render your own in-page UI instead of a browser dialog.
    - The host posts `{type:'resize', width, height}` to the page on container resize, if you need to re-lay-out.
 

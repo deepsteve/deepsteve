@@ -608,6 +608,7 @@ app.post('/v1/:type/:id', security.requireAllowedOrigin, links.handlePost);
 
 // Proxy endpoint for Baby Browser. Remote HTML is served from our origin, so proxy.js puts every
 // response in an opaque origin (a sandbox CSP) and forwards only an allowlist of upstream headers (#731).
+// A bare request reaches public addresses only, `&by=user` reaches any; every fetch is capped (#746).
 app.get('/api/proxy', createProxy({ log }));
 
 // File upload endpoint — writes to /tmp/deepsteve-drops/ and returns the full path

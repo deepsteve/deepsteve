@@ -610,6 +610,35 @@ explanation to an agent. Anything else, such as a display tab's `fetch()`, gets 
 `{ error, advisories }`. Upgrading Node and restarting the daemon turns the proxy back on. See
 [platform.md](platform.md#which-nodejs-runs-the-daemon-745).
 
+**Where a proxied page can make the daemon go (#746).** The page writes its own `navigate`
+messages, so it picks the next URL the daemon fetches, from the daemon's host. `/api/proxy`
+therefore decides where a fetch may go by who chose the URL:
+
+| Request | Chosen by | May reach |
+|---|---|---|
+| `/api/proxy?url=…&by=user` | the user (Baby Browser's address bar or Go, a restored tab, back/forward/refresh of such an entry) or an agent (`baby_browser_navigate`, a display tab's own code) | any address |
+| `/api/proxy?url=…` | anyone else, a page's `navigate` included | public addresses only |
+
+- A page's `navigate` is sent bare, with one exception so a local dev server's own links work: a
+  same-origin link on a `by=user` page inherits `by=user` when that page's host is one DNS cannot
+  rebind (an IP literal, `localhost`, `*.localhost`, `.local`, `.test`, `.internal`, `.home.arpa`,
+  or a single label). A public hostname the user typed does not lend its trust to its links. The
+  rule lives in `mods/baby-browser/nav-trust.js`.
+- Whoever started it, a redirect chain that has connected to a public address never steps back to
+  a non-public one. A public site's 302 to `localhost` is refused; open that URL from the address
+  bar instead.
+- "Public" is `proxy-address.js`'s allowlist: IPv4 outside the IANA special-purpose registry, IPv6
+  inside `2000::/3` minus its special blocks, with IPv4-mapped and well-known NAT64 addresses judged
+  by the IPv4 address they carry, and anything non-canonical refused. It is checked on the address
+  the socket dials, inside its own DNS lookup, on every redirect hop, so DNS rebinding cannot pass
+  the check and then connect elsewhere.
+- Baby Browser takes a page's `navigate` from a token bucket (a burst of 3, then one a second) and
+  drops the excess, and the proxy abandons an upstream fetch once the browser stops waiting for it.
+- Every fetch has a 30s deadline over the whole chain and a 20 MiB cap on decoded body bytes, so a
+  gzip bomb hits it too. Either answers 502 with `limit: "time"` or `"size"`; more than 10 redirects
+  is `limit: "redirects"`. A refusal is a 403 with `refused: { url, address, class }`. The Fetch
+  standard's bad ports (25, 6667, …) stay blocked, as they were when the proxy used `fetch()`.
+
 ### Panel Mods
 
 Panel mod iframes are created when the mod is enabled and stay alive for the duration of the session. When you switch between panel tabs, iframes are shown/hidden via `display: none` — they are not destroyed. This is important because MCP tools registered by panel mods (e.g. `browser_eval`) need the iframe to be alive to handle requests.

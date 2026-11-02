@@ -23,13 +23,58 @@
  * root-relative `/api/proxy?url=…` against the REMOTE origin, so a rewritten link never reached
  * us. The bridge sends the link's real URL to the parent, which navigates the frame.
  *
- * This is also the one route that feeds arbitrary internet bytes to Node itself. While the
- * running Node has a hole those bytes can reach (an advisory marked `blocksProxy` in
- * node-advisories.js), every request is refused with a 503 before anything is fetched (#745).
+ * Since that bridge, the PAGE picks the next URL the daemon fetches: it can post a `navigate`
+ * with any URL, in a loop. So the fetch itself is bounded too (#746):
+ *
+ *   4. Destination policy, keyed on who chose the URL. A bare `/api/proxy?url=…` reaches public
+ *      addresses only. `&by=user` says the user or an agent chose it (Baby Browser's address
+ *      bar, baby_browser_navigate, a display tab's own code), and may reach anything they could
+ *      already reach. Baby Browser never adds it for a page's `navigate`, except a same-origin
+ *      link on a local host the user opened (mods/baby-browser/nav-trust.js). Independent of
+ *      who started it, a redirect chain that has connected to a public address never steps back
+ *      to a non-public one. proxy-address.js does the classifying.
+ *   5. The check is on the address actually connected to: it runs inside the socket's own DNS
+ *      lookup, so the vetted answer is the one dialed and rebinding has no window. IP literals
+ *      skip lookup, so they are vetted before the request. Redirects are followed here, one hop
+ *      at a time, each hop vetted. No connection pooling, or a socket opened by a `by=user` fetch
+ *      could be reused by a page's.
+ *   6. A deadline over the whole chain (DNS, connect, headers, body) and a cap on decoded body
+ *      bytes, so one URL that streams forever cannot grow the daemon until it dies. Both answer
+ *      502 naming the limit. The upstream is also dropped when the browser goes away.
+ *
+ * This is also the one route that feeds arbitrary internet bytes to Node itself, including its
+ * gzip and Brotli decoders (readCapped below). While the running Node has a hole those bytes can
+ * reach (an advisory marked `blocksProxy` in node-advisories.js), every request is refused with a
+ * 503 before anything is fetched (#745).
  */
 
+const http = require('node:http');
+const https = require('node:https');
+const dns = require('node:dns');
+const net = require('node:net');
+const zlib = require('node:zlib');
+const { Writable } = require('node:stream');
+const { pipeline } = require('node:stream/promises');
 const { jsonForScript, escapeHtml } = require('./links');
 const { NODE_ADVISORIES, affectingAdvisories, describeAdvisory } = require('./node-advisories');
+const { classifyAddress } = require('./proxy-address');
+
+const PROXY_TIMEOUT_MS = 30_000;
+const PROXY_MAX_BYTES = 20 * 1024 * 1024;
+const PROXY_MAX_REDIRECTS = 10;
+
+// The Fetch standard's "bad port" list. The proxy used fetch() until #746, which refused these;
+// http.request does not, so the list moved here to keep cross-protocol requests (SMTP, IRC, X11…)
+// out of reach of a page.
+const BAD_PORTS = new Set([
+  0, 1, 7, 9, 11, 13, 15, 17, 19, 20, 21, 22, 23, 25, 37, 42, 43, 53, 69, 77, 79, 87, 95, 101, 102,
+  103, 104, 109, 110, 111, 113, 115, 117, 119, 123, 135, 137, 139, 143, 161, 179, 389, 427, 465,
+  512, 513, 514, 515, 526, 530, 531, 532, 540, 548, 554, 556, 563, 587, 601, 636, 989, 990, 993,
+  995, 1719, 1720, 1723, 2049, 3659, 4045, 4190, 5060, 5061, 6000, 6566, 6665, 6666, 6667, 6668,
+  6669, 6679, 6697, 10080,
+]);
+
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 
 // No allow-same-origin, ever: that one token is the difference between an opaque origin and ours.
 const PROXY_CSP = 'sandbox allow-scripts allow-forms allow-popups';
@@ -49,7 +94,7 @@ function forwardedHeaders(upstreamHeaders, { rewritten = false } = {}) {
   const out = [];
   for (const name of FORWARDED_HEADERS) {
     if (rewritten && UPSTREAM_VALIDATORS.has(name)) continue;
-    const value = upstreamHeaders.get(name);
+    const value = upstreamHeaders[name];
     if (value != null) out.push([name, value]);
   }
   return out;
@@ -137,8 +182,170 @@ function refuse(req, res, advisories, pageUrl) {
     + `<p>Restart Deep Steve after upgrading Node.js.</p></body></html>`);
 }
 
+// An answer we chose to give, as opposed to an upstream failure: carries its own status and
+// any extra JSON fields (`limit`, `refused`).
+class ProxyError extends Error {
+  constructor(status, message, extra = {}) {
+    super(message);
+    this.status = status;
+    this.extra = extra;
+  }
+}
+
+const isHttp = (u) => u.protocol === 'http:' || u.protocol === 'https:';
+const mib = (n) => `${Math.round((n / (1024 * 1024)) * 10) / 10} MiB`;
+
+function refusal(url, address, cls, afterPublic) {
+  const why = afterPublic
+    ? 'it is a redirect from a public address, and a redirect may not step back into a local network'
+    : 'neither you nor an agent chose this URL (it came from a page, or from /api/proxy without by=user), so it may only reach public addresses';
+  return new ProxyError(403,
+    `Refused ${url.href}: ${address} is not a public address (${cls}), and ${why}. To open it yourself, enter the URL in Baby Browser's address bar.`,
+    { refused: { url: url.href, address, class: cls } });
+}
+
+// Decoders for a Content-Encoding list, applied last-first. null for one we cannot decode, which
+// cannot happen unless a server ignores our Accept-Encoding. Lenient flushing, as fetch() was:
+// a truncated body still yields what arrived.
+function decodersFor(header) {
+  const codings = String(header || '').split(',').map((s) => s.trim().toLowerCase()).filter((s) => s && s !== 'identity');
+  const out = [];
+  for (const c of codings.reverse()) {
+    if (c === 'gzip' || c === 'x-gzip' || c === 'deflate') {
+      out.push(zlib.createUnzip({ flush: zlib.constants.Z_SYNC_FLUSH, finishFlush: zlib.constants.Z_SYNC_FLUSH }));
+    } else if (c === 'br') {
+      out.push(zlib.createBrotliDecompress({
+        flush: zlib.constants.BROTLI_OPERATION_FLUSH, finishFlush: zlib.constants.BROTLI_OPERATION_FLUSH,
+      }));
+    } else {
+      return null;
+    }
+  }
+  return out;
+}
+
+// Reads the decoded body, refusing past maxBytes instead of buffering it. Counting the DECODED
+// bytes is what makes a gzip bomb hit the cap too. Any error tears down the upstream socket.
+async function readCapped(up, { maxBytes, signal }) {
+  const tooBig = () => new ProxyError(502, `Upstream response exceeded the ${mib(maxBytes)} limit`, { limit: 'size' });
+  const decoders = decodersFor(up.headers['content-encoding']);
+  if (!decoders) {
+    up.destroy();
+    throw new ProxyError(502, `Unsupported Content-Encoding: ${up.headers['content-encoding']}`);
+  }
+  if (!decoders.length && Number(up.headers['content-length']) > maxBytes) {
+    up.destroy();
+    throw tooBig();
+  }
+  const chunks = [];
+  let total = 0;
+  const sink = new Writable({
+    write(chunk, _enc, cb) {
+      total += chunk.length;
+      if (total > maxBytes) return cb(tooBig());
+      chunks.push(chunk);
+      cb();
+    },
+  });
+  await pipeline(up, ...decoders, sink, { signal });
+  return Buffer.concat(chunks);
+}
+
+// One hop. Resolves with the upstream response and the address its socket connected to.
+function requestOnce(url, { mayReachLocal, afterPublic, classify, lookup, signal, userAgent }) {
+  const host = url.hostname.replace(/^\[(.*)\]$/, '$1');
+  const port = url.port ? Number(url.port) : (url.protocol === 'https:' ? 443 : 80);
+  if (BAD_PORTS.has(port)) {
+    return Promise.reject(new ProxyError(403, `Refused ${url.href}: port ${port} is blocked, as it is in browsers`));
+  }
+  const vet = (address) => {
+    const cls = classify(address);
+    return cls === 'public' || mayReachLocal ? null : refusal(url, address, cls, afterPublic);
+  };
+  // An IP literal never reaches the lookup below, so it is vetted here; the request then dials
+  // exactly this string.
+  if (net.isIP(host)) {
+    const refused = vet(host);
+    if (refused) return Promise.reject(refused);
+  }
+  // Everything else is vetted inside the socket's own lookup: what passes is what connects.
+  function vettedLookup(hostname, options, cb) {
+    lookup(hostname, { ...options, all: true }, (err, addresses) => {
+      if (err) return cb(err);
+      if (!addresses.length) return cb(new ProxyError(502, `No address found for ${hostname}`));
+      const allowed = addresses.filter((a) => !vet(a.address));
+      if (!allowed.length) return cb(vet(addresses[0].address));
+      if (options.all) return cb(null, allowed);
+      return cb(null, allowed[0].address, allowed[0].family);
+    });
+  }
+  const https_ = url.protocol === 'https:';
+  return new Promise((resolve, reject) => {
+    const req = (https_ ? https : http).request({
+      hostname: host,
+      port,
+      path: url.pathname + url.search,
+      method: 'GET',
+      agent: false,
+      signal,
+      lookup: vettedLookup,
+      ...(https_ && !net.isIP(host) ? { servername: host } : {}),
+      headers: {
+        host: url.host,
+        'user-agent': userAgent,
+        accept: '*/*',
+        'accept-language': '*',
+        'accept-encoding': 'gzip, deflate, br',
+      },
+    }, (up) => {
+      const address = up.socket && up.socket.remoteAddress;
+      // Cannot fail after the vetting above; if it ever does, the body is not read.
+      if (vet(address || '')) {
+        up.destroy();
+        return reject(new ProxyError(502, `Connected to ${address || 'an unknown address'}, which is not the address that was vetted`));
+      }
+      resolve({ up, address });
+    });
+    req.on('error', reject);
+    req.end();
+  });
+}
+
+// Follows redirects one hop at a time, vetting each. `byUser` may reach a non-public address
+// only until the chain has connected to a public one: a public site's 302 never leads inward.
+async function fetchChain(start, { byUser, maxRedirects, classify, ...hop }) {
+  let url = start;
+  let touchedPublic = false;
+  for (let n = 0; ; n++) {
+    const { up, address } = await requestOnce(url, {
+      ...hop, classify, mayReachLocal: byUser && !touchedPublic, afterPublic: touchedPublic,
+    });
+    const connected = classify(address || '');
+    if (connected === 'public' || connected === 'not-an-ip') touchedPublic = true;
+    const location = up.headers.location;
+    if (!REDIRECT_STATUSES.has(up.statusCode) || !location) return { up, url };
+    up.destroy();
+    if (n >= maxRedirects) throw new ProxyError(502, `Stopped after ${maxRedirects} redirects`, { limit: 'redirects' });
+    let next;
+    try {
+      next = new URL(location, url);
+    } catch {
+      throw new ProxyError(502, `Upstream redirected to an invalid URL: ${location}`);
+    }
+    if (!isHttp(next)) throw new ProxyError(502, `Upstream redirected to a ${next.protocol} URL, which the proxy does not follow`);
+    url = next;
+  }
+}
+
 function createProxy({
-  log = () => {}, fetch = globalThis.fetch, nodeVersion = process.versions.node, advisories = NODE_ADVISORIES,
+  log = () => {},
+  classify = classifyAddress,
+  lookup = dns.lookup,
+  timeoutMs = PROXY_TIMEOUT_MS,
+  maxBytes = PROXY_MAX_BYTES,
+  maxRedirects = PROXY_MAX_REDIRECTS,
+  nodeVersion = process.versions.node,
+  advisories = NODE_ADVISORIES,
 } = {}) {
   // Read once: the runtime cannot change under a running daemon. Both inputs are injectable so a
   // test can exercise every verdict without running an old Node.
@@ -147,28 +354,54 @@ function createProxy({
     // First, before any early return: an error page is a document too.
     res.setHeader('Content-Security-Policy', PROXY_CSP);
     const url = req.query.url;
-    log(`[proxy] url=${url}${blocking.length ? ' (refused: Node.js needs a security upgrade)' : ''}`);
+    const byUser = req.query.by === 'user';
+    log(`[proxy] url=${url}${byUser ? ' by=user' : ''}${blocking.length ? ' (refused: Node.js needs a security upgrade)' : ''}`);
     // Before anything else, so no code path below can reach the decoder.
     if (blocking.length) return refuse(req, res, blocking, url);
     if (!url) return res.status(400).json({ error: 'Missing url parameter' });
     let parsed;
     try {
+      if (typeof url !== 'string') throw new TypeError();
       parsed = new URL(url);
     } catch {
       return res.status(400).json({ error: 'Invalid URL' });
     }
+    if (!isHttp(parsed)) return res.status(400).json({ error: 'Only http and https URLs can be proxied' });
+
+    // One deadline for the whole chain. The browser leaving (Baby Browser navigating again, a
+    // tab closing) also aborts it, so a page's rapid navigates do not pile up upstream fetches.
+    const controller = new AbortController();
+    let timedOut = false;
+    let clientGone = false;
+    const timer = setTimeout(() => { timedOut = true; controller.abort(); }, timeoutMs);
+    res.on('close', () => {
+      clientGone = !res.writableFinished;
+      controller.abort();
+    });
     try {
-      const resp = await fetch(parsed.href, {
-        headers: { 'User-Agent': req.headers['user-agent'] || 'Mozilla/5.0' },
-        redirect: 'follow',
+      const { up, url: finalUrl } = await fetchChain(parsed, {
+        byUser, maxRedirects, classify, lookup,
+        signal: controller.signal,
+        userAgent: req.headers['user-agent'] || 'Mozilla/5.0',
       });
-      res.status(resp.status);
-      const isHtml = (resp.headers.get('content-type') || '').includes('text/html');
-      for (const [name, value] of forwardedHeaders(resp.headers, { rewritten: isHtml })) res.setHeader(name, value);
-      let body = Buffer.from(await resp.arrayBuffer());
-      if (isHtml) body = Buffer.from(injectIntoHtml(body.toString('utf-8'), resp.url), 'utf-8');
+      let body = await readCapped(up, { maxBytes, signal: controller.signal });
+      clearTimeout(timer);
+      res.status(up.statusCode);
+      const isHtml = String(up.headers['content-type'] || '').includes('text/html');
+      for (const [name, value] of forwardedHeaders(up.headers, { rewritten: isHtml })) res.setHeader(name, value);
+      if (isHtml) body = Buffer.from(injectIntoHtml(body.toString('utf-8'), finalUrl.href), 'utf-8');
       res.send(body);
     } catch (err) {
+      clearTimeout(timer);
+      if (clientGone || res.headersSent) return;
+      if (timedOut) {
+        log(`[proxy] timed out after ${timeoutMs}ms: ${parsed.href}`);
+        return res.status(502).json({ error: `Upstream did not finish within ${timeoutMs / 1000}s`, limit: 'time' });
+      }
+      if (err instanceof ProxyError) {
+        log(`[proxy] ${err.status}: ${err.message}`);
+        return res.status(err.status).json({ error: err.message, ...err.extra });
+      }
       res.status(502).json({ error: err.message });
     }
   };
@@ -178,6 +411,10 @@ module.exports = {
   PROXY_CSP,
   FORWARDED_HEADERS,
   BRIDGE_TAG,
+  PROXY_TIMEOUT_MS,
+  PROXY_MAX_BYTES,
+  PROXY_MAX_REDIRECTS,
+  BAD_PORTS,
   forwardedHeaders,
   bridgeScript,
   injectIntoHtml,
