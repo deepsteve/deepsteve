@@ -12,7 +12,8 @@
 // tree would notice. Same source-scanning idiom as integration-scratch-guard.test.js (#637) and
 // compose-projects.test.js (#616).
 //
-// Pure fs reads, so it runs in the bare `unit` CI job.
+// Source scans, plus one in-process express app for the beacon's body parser (#744) — express is
+// a plain-JS dependency the bare `unit` CI job installs, so all of it runs there.
 //
 // Run: node --test test/unit/auth-exempt-routes.test.js
 
@@ -73,4 +74,57 @@ test('the auth-exempt surface stays exactly what it is meant to be', async (t) =
     assert.match(decl[1], /requireAllowedOrigin/,
       'Origin is the only thing gating this endpoint — it must run before we parse 8kb of JSON');
   });
+
+  await t.test('the beacon parser refuses compressed bodies (#744)', () => {
+    // The one body parser an unauthenticated caller reaches. Decompression is where
+    // body-parser's pre-auth advisories live (GHSA-27r3-jxmh-p828), the beacon never sends
+    // a compressed body, and `inflate: false` is the advisory's own workaround.
+    assert.strictEqual(beaconJsonOptions().inflate, false,
+      "/api/client-log's express.json must carry inflate: false");
+  });
+});
+
+/** The options object literal server.js hands the beacon's express.json, evaluated. */
+function beaconJsonOptions() {
+  const src = fs.readFileSync(SERVER, 'utf8');
+  const m = /app\.post\(\s*'\/api\/client-log',[^\n]*?express\.json\((\{[^}\n]*\})\)/.exec(src);
+  assert.ok(m, "expected express.json({ ... }) on the /api/client-log line");
+  return Function(`"use strict"; return (${m[1]});`)();
+}
+
+test('a gzip body to the beacon is a 4xx, and no decoder is ever created (#744)', async () => {
+  // Behavioral half of the pin above: build the parser from server.js's OWN options and
+  // count zlib decoders while a gzip body goes through it. body-parser looks zlib's
+  // factories up at call time, so wrapping them on the module object sees every one.
+  const zlib = require('node:zlib');
+  const http = require('node:http');
+  const express = require('express');
+  const FACTORIES = ['createGunzip', 'createInflate', 'createUnzip', 'createBrotliDecompress'];
+  const real = {};
+  let decoders = 0;
+  for (const f of FACTORIES) {
+    real[f] = zlib[f];
+    zlib[f] = (...a) => { decoders++; return real[f](...a); };
+  }
+  const app = express();
+  app.post('/beacon', express.json(beaconJsonOptions()), (req, res) => res.status(204).end(),
+    (err, req, res, _next) => res.status(err.status || 500).end());
+  const server = app.listen(0, '127.0.0.1');
+  try {
+    await new Promise((r) => server.once('listening', r));
+    const body = zlib.gzipSync(JSON.stringify({ windowId: 'w', entries: [] }));
+    const status = await new Promise((resolve, reject) => {
+      const req = http.request({
+        host: '127.0.0.1', port: server.address().port, path: '/beacon', method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Content-Encoding': 'gzip', 'Content-Length': body.length },
+      }, (res) => { res.resume(); resolve(res.statusCode); });
+      req.on('error', reject);
+      req.end(body);
+    });
+    assert.ok(status >= 400 && status < 500, `expected a 4xx, got ${status}`);
+    assert.strictEqual(decoders, 0, 'body-parser created a decompressor for an unauthenticated body');
+  } finally {
+    server.close();
+    for (const f of FACTORIES) zlib[f] = real[f];
+  }
 });

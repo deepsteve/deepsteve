@@ -276,3 +276,78 @@ test('every public/*.html is embedded by release.sh (#695)', () => {
       `release.sh does not embed public/${page} — add it beside the other public/ embeds`);
   }
 });
+
+// --- the dependency tree ships from the lockfile (#744) -------------------
+//
+// A Dependabot security patch to a transitive dependency changes package-lock.json and
+// nothing else. restart.sh copied only package.json and reinstalled only when IT changed,
+// and install.sh never embedded the lockfile — so every one of those merges was a no-op
+// for the running daemon. The install itself is ds_install_deps in service.sh, which
+// service-lib.test.js drives under sh. These pin the two callers.
+
+/** The POSTAMBLE heredoc body — the tail of the generated install.sh — comments dropped. */
+function postamble() {
+  const m = /<< 'POSTAMBLE'\n([\s\S]*?)\nPOSTAMBLE\n/.exec(src['release.sh']);
+  assert.ok(m, 'expected the POSTAMBLE heredoc in release.sh');
+  return m[1].split('\n').filter((l) => !/^\s*#/.test(l)).join('\n');
+}
+
+test('restart.sh deploys package-lock.json next to package.json', () => {
+  const cpLine = code['restart.sh'].split('\n')
+    .find((l) => /^\s*cp\b.*\bpackage\.json\b.*~\/\.deepsteve\/$/.test(l));
+  assert.ok(cpLine, 'restart.sh must copy package.json into ~/.deepsteve');
+  assert.match(cpLine, /\bpackage-lock\.json\b/,
+    'restart.sh must copy package-lock.json alongside package.json — the install reads it');
+});
+
+test('restart.sh installs through ds_install_deps, which keys on both files', () => {
+  const rs = code['restart.sh'];
+  assert.match(rs, /^\s*ds_install_deps ~\/\.deepsteve\s*$/m,
+    'restart.sh must install via ds_install_deps, pointed at the dir it just deployed');
+  // The old inline block keyed on package.json alone and piped npm through `tail`, which
+  // threw away npm's exit status and stamped package.json.prev even when npm failed.
+  assert.ok(!/\bnpm (install|ci)\b/.test(rs), 'no inline npm install — one routine, in service.sh');
+  assert.ok(!/package\.json\.prev/.test(rs), 'the .prev stamps belong to ds_install_deps');
+});
+
+test('a failed dependency install does not stop restart.sh from restarting', () => {
+  // ds_install_deps puts the previous node_modules back on failure, so the right move is
+  // to carry on and start the daemon on it. An `exit` here would leave the OLD daemon
+  // running in front of today's freshly copied code — worse than either.
+  const lines = code['restart.sh'].split('\n');
+  const call = lines.findIndex((l) => /^\s*ds_install_deps\b/.test(l));
+  const start = lines.findIndex((l) => /^\s*ds_service_start\b/.test(l));
+  assert.ok(call >= 0 && start > call, 'the install must run before the daemon is started');
+  assert.ok(!/\bexit\b/.test(lines.slice(call, start).join('\n')),
+    'nothing between the install and ds_service_start may abort the restart');
+});
+
+test('install.sh embeds package-lock.json and installs from it via ds_install_deps', () => {
+  assert.ok(src['release.sh'].includes('embed_text "package-lock.json" "package-lock.json"'),
+    'release.sh must embed the lockfile, or a curl install resolves a tree nobody tested');
+  const post = postamble();
+  assert.ok(!/^\s*npm (install|ci)\b/m.test(post), 'no bare npm install in the postamble');
+  // install.sh runs under `set -e`: a bare failing call would abort before the service
+  // starts even when the previous node_modules was restored and is perfectly usable.
+  assert.match(post, /ds_install_deps "\$INSTALL_DIR" \|\| DEPS_RC=\$\?/);
+});
+
+test('install.sh sources service.sh before it calls ds_install_deps', () => {
+  // The function lives in the embedded service.sh; calling it first is "command not
+  // found", which under `set -e` is a silent abort halfway through an install.
+  const lines = src['release.sh'].split('\n').map((l) => (/^\s*#/.test(l) ? '' : l));
+  const source = lines.findIndex((l) => /echo '\. "\$INSTALL_DIR\/service\.sh"'/.test(l));
+  const call = lines.findIndex((l) => /^\s*ds_install_deps\b/.test(l));
+  assert.ok(source >= 0, 'expected the emitted source line');
+  assert.ok(call > source, 'ds_install_deps must be called after service.sh is sourced');
+});
+
+test('no deploy path runs npm ci', () => {
+  // ci deletes node_modules before it fetches anything, so an offline deploy or a failed
+  // native build would strand a daemon that cannot start (#744).
+  const service = executableLines(fs.readFileSync(path.join(REPO, 'service.sh'), 'utf8'));
+  for (const [name, text] of [['service.sh', service], ['restart.sh', code['restart.sh']],
+    ['install.sh postamble', postamble()]]) {
+    assert.ok(!/\bnpm ci\b/.test(text), `${name} must never run npm ci`);
+  }
+});

@@ -213,6 +213,10 @@ embed_binary() {
 # in server.js (e.g. sleep-watch.js in #563) missing here would crash-loop
 # every fresh install with MODULE_NOT_FOUND.
 embed_text "package.json" "package.json"
+# The lockfile is what makes the install the TESTED tree (#744). Without it, npm resolved
+# every transitive dependency fresh on day one and then never moved one again: every
+# auto-update reinstall ran against the lockfile that first install had written.
+embed_text "package-lock.json" "package-lock.json"
 for rootjs in *.js; do
   embed_text "$rootjs" "$rootjs"
 done
@@ -318,7 +322,18 @@ embed_text "status.sh" "status.sh"
 # --- Postamble: npm install, fix permissions, start ---
 cat >> "$OUT" << 'POSTAMBLE'
 cd "$INSTALL_DIR"
-npm install
+# From the embedded lockfile, through the same routine restart.sh uses (#744). A
+# reinstall (the in-app auto-update) whose npm step fails gets its previous node_modules
+# back and carries on, as restart.sh does; a first install has nothing to fall back on.
+# `|| DEPS_RC=$?` rather than a bare call: this script runs under `set -e`.
+DEPS_RC=0
+ds_install_deps "$INSTALL_DIR" || DEPS_RC=$?
+if [ "$DEPS_RC" = 1 ]; then
+  echo "deepsteve: dependency install failed; keeping the previous node_modules. The next update retries." >&2
+elif [ "$DEPS_RC" != 0 ]; then
+  echo "deepsteve: dependency install failed and there is no previous install to fall back on." >&2
+  exit 1
+fi
 
 # Fix node-pty spawn-helper permissions.
 # Tolerate a missing dir: install.sh runs under `set -e`, so if npm install didn't

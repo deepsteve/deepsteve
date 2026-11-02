@@ -76,6 +76,7 @@ test('the exported ds_* surface is exactly this list', () => {
   const defined = [...serviceSrc.matchAll(/^(ds_[a-z_]+)\(\)/gm)].map((m) => m[1]).sort();
   assert.deepStrictEqual(defined, [
     'ds_daemon_reload',
+    'ds_install_deps',
     'ds_install_dir',
     'ds_is_enabled',
     'ds_is_responding',
@@ -402,4 +403,172 @@ test('ds_service_status reports both arms without touching the daemon', () => {
     assert.match(out, /MISSING — run install\.sh/, 'a missing definition must be named');
     assert.match(out, /ssh -L 3000:localhost:3000/, 'the loopback-bind escape hatch belongs here');
   }
+});
+
+// --- ds_install_deps (#744) ------------------------------------------------
+//
+// The one dependency install behind restart.sh and install.sh. The bug it fixes: the
+// reinstall keyed on package.json alone, so a lockfile-only Dependabot patch never
+// reached the daemon. The property it must keep: a failed npm leaves the previous
+// node_modules usable, because the daemon is about to be started on it.
+
+/**
+ * A sandbox with an install dir and a fake `npm` on PATH. The fake records each call
+ * and "installs" by copying the lockfile it was handed into node_modules/dep/from-lock,
+ * so a test can read back which lockfile the tree came from. When told to fail it first
+ * vandalizes node_modules — the half-finished tree a real failed reify can leave — and
+ * exits 1.
+ */
+function depsSandbox(opts) {
+  const s = sandbox(opts);
+  const inst = path.join(s.dir, 'install');
+  fs.mkdirSync(inst);
+  const npmLog = path.join(s.dir, 'npm.log');
+  const failFlag = path.join(s.dir, 'npm-fails');
+  const npm = path.join(s.bin, 'npm');
+  fs.writeFileSync(npm, [
+    '#!/bin/sh',
+    `echo "$(pwd) $*" >> "${npmLog}"`,
+    `if [ -e "${failFlag}" ]; then`,
+    '  rm -rf node_modules/dep; mkdir -p node_modules; echo half > node_modules/half-written',
+    '  exit 1',
+    'fi',
+    'mkdir -p node_modules/dep',
+    'cat package-lock.json > node_modules/dep/from-lock 2>/dev/null || echo none > node_modules/dep/from-lock',
+    'exit 0',
+    '',
+  ].join('\n'));
+  fs.chmodSync(npm, 0o755);
+  const p = (f) => path.join(inst, f);
+  return {
+    ...s,
+    inst,
+    write: (f, body) => fs.writeFileSync(p(f), body),
+    read: (f) => fs.readFileSync(p(f), 'utf8'),
+    exists: (f) => fs.existsSync(p(f)),
+    /** Run ds_install_deps against the install dir; returns its exit code. */
+    install: () => Number(s.run(`ds_install_deps "${inst}" 2>/dev/null; echo $?`)),
+    npmCalls: () => (fs.existsSync(npmLog)
+      ? fs.readFileSync(npmLog, 'utf8').trim().split('\n').filter(Boolean) : []),
+    failNpm: (on) => (on ? fs.writeFileSync(failFlag, '') : fs.rmSync(failFlag, { force: true })),
+  };
+}
+
+test('ds_install_deps: a first install runs npm in the dir, from the lockfile, and stamps both', () => {
+  const s = depsSandbox();
+  s.write('package.json', '{"v":1}\n');
+  s.write('package-lock.json', 'lock-1\n');
+  assert.strictEqual(s.install(), 0);
+  const calls = s.npmCalls();
+  assert.strictEqual(calls.length, 1, calls.join(' | '));
+  assert.ok(calls[0].startsWith(`${fs.realpathSync(s.inst)} `) || calls[0].startsWith(`${s.inst} `),
+    `npm must run inside the install dir: ${calls[0]}`);
+  // install, never ci (ci deletes node_modules before it fetches anything); --no-save so
+  // npm cannot rewrite the lockfile it was handed, which keeps the deployed copy
+  // byte-identical to the source's.
+  assert.match(calls[0], / install --omit=dev --no-save\b/);
+  assert.strictEqual(s.read('node_modules/dep/from-lock'), 'lock-1\n');
+  assert.strictEqual(s.read('package.json.prev'), '{"v":1}\n');
+  assert.strictEqual(s.read('package-lock.json.prev'), 'lock-1\n');
+  assert.ok(!s.exists('node_modules.prev'), 'a successful install leaves no snapshot behind');
+});
+
+test('ds_install_deps: an unchanged pair is a no-op', () => {
+  const s = depsSandbox();
+  s.write('package.json', '{"v":1}\n');
+  s.write('package-lock.json', 'lock-1\n');
+  assert.strictEqual(s.install(), 0);
+  assert.strictEqual(s.install(), 0);
+  assert.strictEqual(s.npmCalls().length, 1, 'the second deploy must not reinstall');
+});
+
+test('ds_install_deps: a lockfile-only change reinstalls — the #744 bug', () => {
+  // Exactly what a Dependabot transitive bump looks like: package.json byte-identical.
+  const s = depsSandbox();
+  s.write('package.json', '{"v":1}\n');
+  s.write('package-lock.json', 'lock-1\n');
+  assert.strictEqual(s.install(), 0);
+  s.write('package-lock.json', 'lock-2\n');
+  assert.strictEqual(s.install(), 0);
+  assert.strictEqual(s.npmCalls().length, 2, 'a lockfile-only change must trigger the reinstall');
+  assert.strictEqual(s.read('node_modules/dep/from-lock'), 'lock-2\n');
+  assert.strictEqual(s.read('package-lock.json.prev'), 'lock-2\n');
+});
+
+test('ds_install_deps: a package.json-only change, or a missing tree, reinstalls too', () => {
+  const s = depsSandbox();
+  s.write('package.json', '{"v":1}\n');
+  s.write('package-lock.json', 'lock-1\n');
+  assert.strictEqual(s.install(), 0);
+  s.write('package.json', '{"v":2}\n');
+  assert.strictEqual(s.install(), 0);
+  assert.strictEqual(s.npmCalls().length, 2);
+  fs.rmSync(path.join(s.inst, 'node_modules'), { recursive: true });
+  assert.strictEqual(s.install(), 0);
+  assert.strictEqual(s.npmCalls().length, 3, 'current stamps are not an excuse for no node_modules');
+});
+
+test('ds_install_deps: with no lockfile on either side, it is still a stable no-op', () => {
+  const s = depsSandbox();
+  s.write('package.json', '{"v":1}\n');
+  assert.strictEqual(s.install(), 0);
+  assert.ok(!s.exists('package-lock.json.prev'));
+  assert.strictEqual(s.install(), 0);
+  assert.strictEqual(s.npmCalls().length, 1, 'a missing lockfile must not reinstall on every deploy');
+});
+
+test('ds_install_deps: a failed npm restores the previous node_modules and does not stamp', () => {
+  // Both arms: darwin snapshots with `cp -Rc`, linux with `cp -a --reflink=auto`, and
+  // whichever one the host's cp rejects exercises the plain-copy fallback.
+  for (const platform of ['darwin', 'linux']) {
+    const s = depsSandbox({ platform });
+    s.write('package.json', '{"v":1}\n');
+    s.write('package-lock.json', 'lock-1\n');
+    assert.strictEqual(s.install(), 0, platform);
+
+    s.write('package-lock.json', 'lock-2\n');
+    s.failNpm(true);
+    assert.strictEqual(s.install(), 1, `${platform}: 1 means "failed, previous tree restored"`);
+    assert.strictEqual(s.read('node_modules/dep/from-lock'), 'lock-1\n',
+      `${platform}: the tree the daemon is about to start on must be the old, whole one`);
+    assert.ok(!s.exists('node_modules/half-written'), `${platform}: the half-written tree must be gone`);
+    assert.ok(!s.exists('node_modules.prev'), `${platform}: the snapshot is consumed by the restore`);
+    assert.strictEqual(s.read('package-lock.json.prev'), 'lock-1\n',
+      `${platform}: a failure must not stamp, or the next deploy would skip the retry`);
+
+    s.failNpm(false);
+    assert.strictEqual(s.install(), 0, platform);
+    assert.strictEqual(s.npmCalls().length, 3, `${platform}: the next deploy retries`);
+    assert.strictEqual(s.read('node_modules/dep/from-lock'), 'lock-2\n', platform);
+  }
+});
+
+test('ds_install_deps: a failed FIRST install says so with 2 and stamps nothing', () => {
+  // install.sh aborts on 2 (there is nothing to start) and carries on after 1.
+  const s = depsSandbox();
+  s.write('package.json', '{"v":1}\n');
+  s.write('package-lock.json', 'lock-1\n');
+  s.failNpm(true);
+  assert.strictEqual(s.install(), 2);
+  assert.ok(!s.exists('package.json.prev') && !s.exists('package-lock.json.prev'));
+});
+
+test('ds_install_deps: a snapshot left by an interrupted install is restored before anything else', () => {
+  // An install killed between the snapshot and npm finishing leaves node_modules.prev
+  // (the last good tree) beside a half-written node_modules. The next run must not
+  // snapshot the broken tree over the good one.
+  const s = depsSandbox();
+  s.write('package.json', '{"v":1}\n');
+  s.write('package-lock.json', 'lock-1\n');
+  assert.strictEqual(s.install(), 0);
+  fs.cpSync(path.join(s.inst, 'node_modules'), path.join(s.inst, 'node_modules.prev'), { recursive: true });
+  fs.rmSync(path.join(s.inst, 'node_modules', 'dep'), { recursive: true });
+  s.write('node_modules/half-written', 'half\n');
+  s.write('package-lock.json', 'lock-2\n');
+
+  s.failNpm(true);
+  assert.strictEqual(s.install(), 1);
+  assert.strictEqual(s.read('node_modules/dep/from-lock'), 'lock-1\n', 'the good tree came back');
+  assert.ok(!s.exists('node_modules/half-written'));
+  assert.ok(!s.exists('node_modules.prev'));
 });

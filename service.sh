@@ -453,6 +453,98 @@ ds_wait_responding() {
     return 1
 }
 
+# ------------------------------------------------------------- dependencies
+
+# Install <dir>'s runtime dependencies from the package.json and package-lock.json the
+# caller has already put there (#744). restart.sh and the generated install.sh both
+# call this, so the two deploy paths cannot drift.
+#
+# The directory is an argument, not ds_install_dir: restart.sh copies into a literal
+# ~/.deepsteve, and installing wherever DEEPSTEVE_HOME happened to point would update a
+# different tree than the one just deployed.
+#
+# Keyed on BOTH files. A Dependabot patch to a transitive dependency changes only the
+# lockfile, and keying on package.json alone made every one of those a no-op for the
+# running daemon. The .prev stamps record what last installed SUCCESSFULLY; a failure
+# never writes them, so the next deploy retries.
+#
+# `npm install`, never `npm ci`: ci deletes node_modules before it fetches anything, so
+# an offline deploy or a failed native build would leave a daemon that cannot start.
+# With an in-sync lockfile, install reifies exactly the locked tree anyway, and
+# --no-save stops npm rewriting the lockfile it was handed, so the deployed copy stays
+# byte-identical to the source's.
+#
+# A failed install must leave the previous tree usable, and npm's own rollback is not
+# something to bet a daemon on. So node_modules is snapshotted first, as a
+# copy-on-write clone where the filesystem has one (the bin/deepsteve.js trick), and
+# put back if npm fails. A snapshot still on disk at entry means an earlier run died
+# mid-install, so it is restored before anything else looks at the tree.
+#
+#   0  installed, or already current
+#   1  npm failed; the previous node_modules is back in place
+#   2  failed with no previous tree to fall back on (a first install, or the
+#      snapshot itself could not be put back)
+ds_install_deps() {
+    local dir snap
+    dir="$1"
+    if [ -z "$dir" ] || [ ! -f "$dir/package.json" ]; then
+        echo "deepsteve: no package.json in '$dir' — nothing to install" >&2
+        return 2
+    fi
+    snap="$dir/node_modules.prev"
+
+    if [ -d "$snap" ]; then
+        echo "deepsteve: an earlier dependency install was interrupted; restoring its snapshot" >&2
+        rm -rf "$dir/node_modules"
+        mv "$snap" "$dir/node_modules" || return 2
+    fi
+
+    if [ -d "$dir/node_modules" ] \
+        && cmp -s "$dir/package.json" "$dir/package.json.prev" \
+        && { { [ ! -e "$dir/package-lock.json" ] && [ ! -e "$dir/package-lock.json.prev" ]; } \
+             || cmp -s "$dir/package-lock.json" "$dir/package-lock.json.prev"; }; then
+        return 0
+    fi
+
+    if [ -d "$dir/node_modules" ]; then
+        if [ "$(ds_platform)" = "darwin" ]; then
+            cp -Rc "$dir/node_modules" "$snap" 2>/dev/null
+        else
+            cp -a --reflink=auto "$dir/node_modules" "$snap" 2>/dev/null
+        fi || {
+            # No CoW on this filesystem (or a BSD cp handed GNU flags): a plain copy.
+            rm -rf "$snap"
+            cp -Rp "$dir/node_modules" "$snap"
+        } || {
+            rm -rf "$snap"
+            echo "deepsteve: could not snapshot $dir/node_modules; leaving it untouched" >&2
+            return 1
+        }
+    fi
+
+    if (cd "$dir" && npm install --omit=dev --no-save --no-audit --no-fund); then
+        # Snapshot first, stamps second: a snapshot on disk must always mean "this
+        # install did not finish", which is what the recovery above relies on.
+        rm -rf "$snap"
+        cp "$dir/package.json" "$dir/package.json.prev"
+        if [ -e "$dir/package-lock.json" ]; then
+            cp "$dir/package-lock.json" "$dir/package-lock.json.prev"
+        else
+            rm -f "$dir/package-lock.json.prev"
+        fi
+        return 0
+    fi
+
+    echo "deepsteve: npm install failed in $dir" >&2
+    if [ -d "$snap" ]; then
+        rm -rf "$dir/node_modules"
+        mv "$snap" "$dir/node_modules" || return 2
+        echo "deepsteve: restored the previous node_modules; the next deploy will retry" >&2
+        return 1
+    fi
+    return 2
+}
+
 # Without lingering, `systemd --user` is torn down when the user's last login session
 # ends: ssh in, install, log out, daemon dies — and it never starts at boot. On the
 # headless box this whole issue exists for, that is the difference between a deployment

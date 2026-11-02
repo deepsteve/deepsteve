@@ -539,10 +539,15 @@ app.get('/healthz', (req, res) => res.json({ ok: true }));
 // express.json marks req._body, and the global parser below skips a request already flagged, so a
 // fall-through would leave a later route parsing under this route's 8kb limit instead of its own.
 // test/unit/auth-exempt-routes.test.js pins all three.
+//
+// `inflate: false` (#744): the beacon never sends a compressed body, so a Content-Encoding is
+// refused before body-parser creates a decoder. Decompression is where body-parser's pre-auth
+// advisories live (GHSA-27r3-jxmh-p828), and this is the one parser an unauthenticated caller
+// reaches. The rejection lands in the error handler below as a 4xx.
 const BEACON_WINDOW_MS = 10_000;
 const BEACON_MAX_REQUESTS = 20;
 let beaconWindowStart = 0, beaconRequests = 0, beaconDropped = 0;
-app.post('/api/client-log', security.requireAllowedOrigin, express.json({ limit: '8kb' }), (req, res) => {
+app.post('/api/client-log', security.requireAllowedOrigin, express.json({ limit: '8kb', inflate: false }), (req, res) => {
   const now = Date.now();
   if (now - beaconWindowStart > BEACON_WINDOW_MS) {
     if (beaconDropped > 0) log(`[client] ${beaconDropped} beacon request(s) dropped — rate limit`);

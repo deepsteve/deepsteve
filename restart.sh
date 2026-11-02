@@ -129,7 +129,9 @@ fi
 SCRIPT_DIR="$BG_DIR"
 cd "$SCRIPT_DIR"
 
-cp package.json ~/.deepsteve/
+# The lockfile ships too (#744): ds_install_deps below installs FROM it, so a transitive
+# security patch — which changes only package-lock.json — actually reaches the daemon.
+cp package.json package-lock.json ~/.deepsteve/
 # ALL root modules, not a hand-maintained list: a new require() in server.js
 # (e.g. sleep-watch.js in #563) must never be missable here — a missed copy
 # crash-loops the daemon on the next restart with MODULE_NOT_FOUND.
@@ -170,11 +172,16 @@ mkdir -p ~/.deepsteve/commands
 mkdir -p ~/.deepsteve/skills
 cp -r skills/*.md ~/.deepsteve/skills/ 2>/dev/null || true
 
-# Install deps if package.json changed
-if ! diff -q package.json ~/.deepsteve/package.json.prev &>/dev/null; then
-    (cd ~/.deepsteve && npm install --omit=dev 2>&1 | tail -1)
-    cp package.json ~/.deepsteve/package.json.prev
-fi
+# Install deps if package.json OR package-lock.json changed since the last successful
+# install (#744). A failure is not fatal: ds_install_deps puts the previous node_modules
+# back, so restarting on it is the same daemon with today's code, and the next deploy
+# retries. Not piped through `tail` — that is what used to swallow npm's exit status.
+ds_install_deps ~/.deepsteve
+case $? in
+    0) ;;
+    1) echo "deepsteve: dependency install failed; restarting on the previous node_modules." >&2 ;;
+    *) echo "deepsteve: dependency install failed and there is no previous node_modules to fall back on." >&2 ;;
+esac
 
 # Stamp install-source marker so the server knows this is a git-checkout install.
 # Used by the auto-update system (GET /api/version, POST /api/update/git-pull).
