@@ -24,6 +24,7 @@ import { createWebSocket } from './ws-client.js';
 import { createConnectionTracker } from './connection-status.js';
 import { formatElapsed, relativeTime } from './elapsed.js';
 import { showDirectoryPicker } from './dir-picker.js';
+import { recentDirItem, sessionRow } from './menu-rows.js';
 import { showSessionRestoreModal } from './session-restore-modal.js';
 import { LayoutManager } from './layout-manager.js';
 import { initLiveReload } from './live-reload.js';
@@ -105,7 +106,7 @@ function refreshAutomationsDropdown() {
   let html = '';
   for (const auto of cachedAutomations) {
     const icon = auto.icon || '\u26A1';
-    html += `<div class="dropdown-item clickable" data-automation-id="${auto.id}">${icon} ${auto.name}</div>`;
+    html += `<div class="dropdown-item clickable" data-automation-id="${escapeHtml(String(auto.id))}">${escapeHtml(`${icon} ${auto.name}`)}</div>`;
   }
   html += '<div style="height:1px;background:var(--ds-border);margin:4px 0;"></div>';
   html += '<div class="dropdown-item clickable" data-action="manage">Manage Automations\u2026</div>';
@@ -654,7 +655,9 @@ async function refreshSessionsDropdown() {
     const closedShells = allShells.filter(s => s.status === 'closed');
     const visibleShells = showClosedSessions ? allShells : allShells.filter(s => s.status !== 'closed');
 
-    sessionsMenu.innerHTML = visibleShells.map(shell => {
+    // Rows are built by sessionRow() (menu-rows.js), not a template: a session's name
+    // defaults to its cwd's leaf and an issue session's is the issue title (#747).
+    sessionsMenu.replaceChildren(...visibleShells.map(shell => {
       const isThisTab = thisTab(shell);
       const isOtherWindow = otherWindow(shell);
       const isClosed = shell.status === 'closed';
@@ -674,16 +677,13 @@ async function refreshSessionsDropdown() {
         agentLabel = shell.agentType === 'opencode' ? 'OpenCode' : (shell.agentType ? shell.agentType.charAt(0).toUpperCase() + shell.agentType.slice(1) : '');
       }
 
-      return `
-        <div class="dropdown-item ${isThisTab ? 'connected' : 'clickable'} ${isClosed ? 'closed' : ''}" data-id="${shell.id}" data-cwd="${shell.cwd}" data-name="${escapeHtml(name)}"${isOtherWindow ? ' data-other-window="true"' : ''}>
-          <div class="session-info">
-            <span class="session-name">${name}${showAgentBadge && agentLabel ? ` <span class="session-agent-badge">${agentLabel}</span>` : ''}</span>
-            <span class="session-status ${statusClass}">${statusText}</span>
-          </div>
-          ${canClose ? `<span class="session-close" data-id="${shell.id}"${isClosed ? ' data-closed="1"' : ''}>✕</span>` : ''}
-        </div>
-      `;
-    }).join('') || '<div class="dropdown-empty">No sessions</div>';
+      return sessionRow({
+        id: shell.id, cwd: shell.cwd, name,
+        agentLabel: showAgentBadge ? agentLabel : '',
+        statusText, statusClass, isThisTab, isOtherWindow, isClosed, canClose,
+      });
+    }));
+    if (visibleShells.length === 0) sessionsMenu.innerHTML = '<div class="dropdown-empty">No sessions</div>';
 
     // Add "Clear disconnected" button at the top — only count truly disconnected
     // sessions. Closed tombstones are excluded: the endpoint never hard-deletes
@@ -4368,7 +4368,7 @@ function refreshEnginesDropdown() {
   // Build menu items
   menu.innerHTML = enabledAgents.map(a => {
     const isDefault = a.id === window.__deepsteveDefaultAgent;
-    return `<div class="dropdown-item ${isDefault ? 'active' : 'clickable'}" data-agent="${a.id}">${a.name}${isDefault ? ' ✓' : ''}</div>`;
+    return `<div class="dropdown-item ${isDefault ? 'active' : 'clickable'}" data-agent="${escapeHtml(String(a.id))}">${escapeHtml(String(a.name))}${isDefault ? ' ✓' : ''}</div>`;
   }).join('');
 
   // Write the LABEL, never the button. #engines-btn is the only nav button with a dynamic label, and
@@ -4445,7 +4445,7 @@ function showNewTabMenu(e) {
   let html = '';
   if (enabledAgents.length > 1) {
     const currentAgentName = agentLabel(agents.find(a => a.id === currentAgent)) || 'Claude Code';
-    html += `<div class="context-menu-item context-menu-has-submenu" id="agent-submenu-trigger">Agent: ${currentAgentName} <span class="context-menu-arrow"></span></div>`;
+    html += `<div class="context-menu-item context-menu-has-submenu" id="agent-submenu-trigger">Agent: ${escapeHtml(currentAgentName)} <span class="context-menu-arrow"></span></div>`;
   }
 
   // Build recent dirs section. With a context active (#573), the context's repos
@@ -4467,20 +4467,27 @@ function showNewTabMenu(e) {
     const leaf = d.path.split('/').pop();
     leafCounts[leaf] = (leafCounts[leaf] || 0) + 1;
   }
-  const dirItemHtml = (d) => {
+  const dirItem = (d) => {
     const parts = d.path.split('/');
     const leaf = parts.pop();
     const label = leafCounts[leaf] > 1 && parts.length > 0
       ? `${leaf} (${parts.pop()})`
       : leaf;
-    const p = d.path.replace(/"/g, '&quot;');
-    return `<div class="context-menu-item" data-action="recent" data-path="${p}" title="${p}">${label}</div>`;
+    return recentDirItem(d.path, label);
+  };
+  // The rest of this menu is a template, but a directory name must never pass through
+  // one (#747). Each recent dir gets an empty slot here, and the slot is replaced with a
+  // real element from dirItem() once `menu.innerHTML` has been set.
+  const recentSlots = [];
+  const dirSlotHtml = (d) => {
+    recentSlots.push(d);
+    return `<div data-recent-slot="${recentSlots.length - 1}"></div>`;
   };
 
   // Top group: the active context's repos (all of them, stored order).
   if (contextGroup.length > 0) {
     if (ctxHeaderLabel) html += `<div class="context-menu-header">${escapeHtml(ctxHeaderLabel)}</div>`;
-    for (const d of contextGroup) html += dirItemHtml(d);
+    for (const d of contextGroup) html += dirSlotHtml(d);
     html += '<div class="context-menu-separator"></div>';
   }
 
@@ -4489,7 +4496,7 @@ function showNewTabMenu(e) {
     html += '<div class="context-menu-header">Recent</div>';
     const initialSlice = rest.slice(0, INITIAL_SHOW);
     recentShown = initialSlice.length;
-    for (const d of initialSlice) html += dirItemHtml(d);
+    for (const d of initialSlice) html += dirSlotHtml(d);
     if (rest.length > INITIAL_SHOW) {
       html += `<div class="context-menu-item context-menu-more" data-action="more">More...</div>`;
     }
@@ -4508,7 +4515,7 @@ function showNewTabMenu(e) {
   for (const auto of cachedAutomations) {
     const icon = auto.icon || '\u26A1';
     const label = `${icon} ${auto.name}`;
-    html += `<div class="context-menu-item" data-action="automation" data-automation-id="${auto.id.replace(/"/g, '&quot;')}">${label}</div>`;
+    html += `<div class="context-menu-item" data-action="automation" data-automation-id="${escapeHtml(String(auto.id))}">${escapeHtml(label)}</div>`;
   }
   html += '<div class="context-menu-item" data-action="manage-automations">Manage Automations\u2026</div>';
 
@@ -4517,7 +4524,7 @@ function showNewTabMenu(e) {
   if (modTabItems.length > 0) {
     html += '<div class="context-menu-separator"></div>';
     for (const item of modTabItems) {
-      html += `<div class="context-menu-item" data-action="mod-tab" data-mod-id="${item.modId}">${item.label}</div>`;
+      html += `<div class="context-menu-item" data-action="mod-tab" data-mod-id="${escapeHtml(String(item.modId))}">${escapeHtml(String(item.label))}</div>`;
     }
   }
 
@@ -4527,6 +4534,9 @@ function showNewTabMenu(e) {
   html += '<div class="context-menu-item" data-action="restore-sessions">Restore sessions…</div>';
 
   menu.innerHTML = html;
+  menu.querySelectorAll('[data-recent-slot]').forEach(slot => {
+    slot.replaceWith(dirItem(recentSlots[Number(slot.dataset.recentSlot)]));
+  });
 
   // Set up agent submenu
   const agentTrigger = menu.querySelector('#agent-submenu-trigger');
@@ -4538,7 +4548,7 @@ function showNewTabMenu(e) {
       submenu.className = 'context-menu context-submenu';
       submenu.innerHTML = enabledAgents.map(a => {
         const isSelected = a.id === getDefaultAgentType();
-        return `<div class="context-menu-item" data-agent="${a.id}">${isSelected ? '&#10003; ' : '&nbsp;&nbsp; '}${agentLabel(a)}</div>`;
+        return `<div class="context-menu-item" data-agent="${escapeHtml(String(a.id))}">${isSelected ? '&#10003; ' : '&nbsp;&nbsp; '}${escapeHtml(String(agentLabel(a)))}</div>`;
       }).join('');
       // Append to body (not agentTrigger) to avoid overflow clipping from .new-tab-menu
       document.body.appendChild(submenu);
@@ -4563,7 +4573,7 @@ function showNewTabMenu(e) {
         const agentId = item.dataset.agent;
         window.__deepsteveDefaultAgent = agentId;
         const newName = agents.find(a => a.id === agentId)?.name || 'Claude Code';
-        agentTrigger.innerHTML = `Agent: ${newName} <span class="context-menu-arrow"></span>`;
+        agentTrigger.innerHTML = `Agent: ${escapeHtml(newName)} <span class="context-menu-arrow"></span>`;
         initEnginesDropdown();
         hideSubmenu();
       });
@@ -4615,7 +4625,7 @@ function showNewTabMenu(e) {
         } else {
           tmuxSubmenu.innerHTML = sessions.map(s => {
             const label = s.attached ? `${s.name} (attached)` : s.name;
-            return `<div class="context-menu-item" data-tmux-session="${s.name.replace(/"/g, '&quot;')}">${label}</div>`;
+            return `<div class="context-menu-item" data-tmux-session="${escapeHtml(s.name)}">${escapeHtml(label)}</div>`;
           }).join('');
           tmuxSubmenu.addEventListener('click', (ev) => {
             const item = ev.target.closest('.context-menu-item');
@@ -4689,20 +4699,7 @@ function showNewTabMenu(e) {
       const nextSlice = rest.slice(recentShown, recentShown + MORE_INCREMENT);
       recentShown += nextSlice.length;
       const separator = menu.querySelector('#recent-dirs-separator');
-      for (const d of nextSlice) {
-        const parts = d.path.split('/');
-        const leaf = parts.pop();
-        const label = leafCounts[leaf] > 1 && parts.length > 0
-          ? `${leaf} (${parts.pop()})`
-          : leaf;
-        const el = document.createElement('div');
-        el.className = 'context-menu-item';
-        el.dataset.action = 'recent';
-        el.dataset.path = d.path;
-        el.title = d.path;
-        el.textContent = label;
-        menu.insertBefore(el, moreBtn);
-      }
+      for (const d of nextSlice) menu.insertBefore(dirItem(d), moreBtn);
       if (recentShown >= rest.length) {
         moreBtn.remove();
       }

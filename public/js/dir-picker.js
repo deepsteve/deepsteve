@@ -26,6 +26,37 @@ function esc(s) {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
+/**
+ * Fill the picker's tree with one row per directory, and return the rows.
+ *
+ * Built with textContent and dataset, never an HTML template (#747): `dirs` is a raw
+ * readdir of whatever the user is browsing, and a directory name can hold anything but
+ * `/` and NUL — a cloned repo can carry one named `<img onerror=…>`. Exported so
+ * test/unit/name-sink-escape.test.js can render it with exactly such a name.
+ */
+export function renderDirTree(tree, dirs) {
+  tree.textContent = '';
+  if (!dirs.length) {
+    const empty = document.createElement('div');
+    empty.className = 'dir-empty';
+    empty.textContent = 'No subdirectories';
+    tree.appendChild(empty);
+    return [];
+  }
+  return dirs.map(d => {
+    const item = document.createElement('div');
+    item.className = 'dir-item';
+    item.dataset.path = d;
+    const icon = document.createElement('span');
+    icon.className = 'dir-icon';
+    icon.textContent = '\u{1F4C1}';
+    item.appendChild(icon);
+    item.appendChild(document.createTextNode(d.split('/').pop()));
+    tree.appendChild(item);
+    return item;
+  });
+}
+
 export function showDirectoryPicker({ contextDirs = [], contextLabel = '' } = {}) {
   return new Promise(async (resolve) => {
     const home = await fetchHome();
@@ -55,7 +86,7 @@ export function showDirectoryPicker({ contextDirs = [], contextLabel = '' } = {}
         <h2>Select working directory</h2>
         ${ctxHtml}
         <div class="path-wrap">
-          <input type="text" id="cwd-input" value="${defaultPath}">
+          <input type="text" id="cwd-input">
           <button class="path-up" id="up-btn">&#8593;</button>
           <button class="new-folder" id="mkdir-btn">+</button>
         </div>
@@ -73,6 +104,7 @@ export function showDirectoryPicker({ contextDirs = [], contextLabel = '' } = {}
     document.body.appendChild(overlay);
 
     const input = overlay.querySelector('#cwd-input');
+    input.value = defaultPath;   // a property, not value="${…}" — the last cwd is a path too (#747)
 
     // Context-repo quick-pick (#573): behave like typing that path + Start.
     overlay.querySelectorAll('.context-dir-btn[data-path]').forEach(btn => {
@@ -86,26 +118,16 @@ export function showDirectoryPicker({ contextDirs = [], contextLabel = '' } = {}
 
     async function refreshTree() {
       const r = await fetchDirs(input.value + '/');
-      if (!r.dirs.length) {
-        tree.innerHTML = '<div class="dir-empty">No subdirectories</div>';
-      } else {
-        tree.innerHTML = r.dirs.map(d =>
-          `<div class="dir-item" data-path="${d}">
-            <span class="dir-icon">&#128193;</span>${d.split('/').pop()}
-          </div>`
-        ).join('');
-
-        tree.querySelectorAll('.dir-item').forEach(el => {
-          el.onclick = () => {
-            input.value = el.dataset.path;
-            refreshTree();
-          };
-          el.ondblclick = () => {
-            input.value = el.dataset.path;
-            submit();
-          };
-        });
-      }
+      renderDirTree(tree, r.dirs).forEach(el => {
+        el.onclick = () => {
+          input.value = el.dataset.path;
+          refreshTree();
+        };
+        el.ondblclick = () => {
+          input.value = el.dataset.path;
+          submit();
+        };
+      });
     }
 
     function goUp() {
