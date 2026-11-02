@@ -53,7 +53,7 @@
     "test:docker:public:clean": "docker compose -f test/docker-compose.public.yml down -v --rmi local"
   },
   "engines": {
-    "node": ">=18"
+    "node": "^22.23.4 || ^24.22.1 || >=26.12.1"
   },
   "overrides": {
     "@hono/node-server": "^2.1.3",

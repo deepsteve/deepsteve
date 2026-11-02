@@ -349,12 +349,13 @@ Typing went nowhere. The only way to find out was to read the daemon log.
 
 ### The page-level banners
 
-Four of them, all at `top: 12px` centred, deliberately sharing one spot so two cannot both
+Five of them, all at `top: 12px` centred, deliberately sharing one spot so two cannot both
 claim to be the headline. They are ordered by how much they outrank each other as an
 *explanation*:
 
 | Banner | Class / z-index | Shown when |
 |---|---|---|
+| Node.js advisory | `.node-advisory-banner` / 2599 | the daemon's Node has a known hole: `/api/version`'s `node.advisories` is non-empty at page load. Dismissible for that page load (#745) |
 | Pending create | `.pending-session-banner` / 2600 | a brand-new session's first connect is slow (#563) |
 | Connection lost | `.reconnect-banner` / 2600 | ≥1 socket reconnecting for longer than `graceMs` (#556) |
 | Refused session | `.session-error-banner` / 2601 | the server declined to spawn — persistent, dismissible (#632) |

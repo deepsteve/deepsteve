@@ -7,7 +7,9 @@
  * nodeVersionWarnings() once at boot and logs whatever it returns.
  *
  * Advisory only, never fatal. Refusing to boot would take every agent session down with it,
- * on a machine whose node the user may not be able to change right now.
+ * on a machine whose node the user may not be able to change right now. Since #745 the verdict
+ * also reaches the UI (`/api/version`'s `node` field, shown as a page banner), and /api/proxy
+ * refuses while an advisory marked `blocksProxy` applies.
  *
  * Lives at the repo root, not inside server.js, so a plain `node --test` can require it
  * without booting a daemon — same reason as release-check.js. Root *.js files are copied by
@@ -21,12 +23,20 @@
 //   - older than the newest line listed: end-of-life when the fix shipped, so never fixed;
 //   - newer than every line listed: branched after the fix, so not affected.
 // To record a new advisory, append an entry. To record a late backport, add its line.
+//
+// `blocksProxy: true` marks a hole that bytes chosen by a remote server can reach. /api/proxy is
+// the route that hands arbitrary internet responses to Node, so it refuses to fetch while such
+// an advisory applies (proxy.js). Leave it off for a hole the proxy cannot reach: refusing then
+// would cost the user Baby Browser and buy nothing.
 const NODE_ADVISORIES = [
   {
     id: 'CVE-2026-111497',
     title: 'Brotli decoder out-of-bounds write, can lead to remote code execution',
     url: 'https://nodejs.org/en/blog/vulnerability/october-2026-security-releases',
     fixed: { 22: '22.23.4', 24: '24.22.1', 26: '26.12.1' },
+    // Node's fetch decodes a `Content-Encoding: br` body even when the request asked for
+    // identity, so a proxied page — or any hop of its redirect chain — reaches the decoder.
+    blocksProxy: true,
   },
 ];
 
@@ -48,10 +58,10 @@ function compareVersions(a, b) {
 /**
  * The advisories that apply to `version`.
  *
- * @returns {Array<{id, title, url, running, line, fixedIn, upgradeTo}>} `fixedIn` is this
- *   line's patched release, or null when the line will never get one; `upgradeTo` is what to
- *   move to — this line's patch, or else the patched releases of every newer line. Empty when
- *   nothing applies or the version string cannot be read.
+ * @returns {Array<{id, title, url, blocksProxy, running, line, fixedIn, upgradeTo}>} `fixedIn`
+ *   is this line's patched release, or null when the line will never get one; `upgradeTo` is
+ *   what to move to — this line's patch, or else the patched releases of every newer line.
+ *   Empty when nothing applies or the version string cannot be read.
  */
 function affectingAdvisories(version, advisories = NODE_ADVISORIES) {
   const running = parseNodeVersion(version);
@@ -59,7 +69,10 @@ function affectingAdvisories(version, advisories = NODE_ADVISORIES) {
   const line = running[0];
   const hits = [];
   for (const adv of advisories) {
-    const hit = { id: adv.id, title: adv.title, url: adv.url, running: running.join('.'), line };
+    const hit = {
+      id: adv.id, title: adv.title, url: adv.url, blocksProxy: adv.blocksProxy === true,
+      running: running.join('.'), line,
+    };
     const ownFix = adv.fixed[line];
     if (ownFix) {
       if (compareVersions(running, parseNodeVersion(ownFix)) >= 0) continue;
@@ -73,15 +86,22 @@ function affectingAdvisories(version, advisories = NODE_ADVISORIES) {
   return hits;
 }
 
-/** One log line per advisory that applies to `version`. */
-function nodeVersionWarnings(version, advisories = NODE_ADVISORIES) {
-  return affectingAdvisories(version, advisories).map(hit => {
-    const what = `WARNING: Node.js ${hit.running} is affected by ${hit.id} (${hit.title}).`;
-    const fix = hit.fixedIn
-      ? `Upgrade to Node.js ${hit.fixedIn} or later.`
-      : `Node.js ${hit.line}.x is end-of-life and will never get a fix — upgrade to a patched line: ${hit.upgradeTo.map(v => `${v}+`).join(', ')}.`;
-    return `[node-security] ${what} ${fix} ${hit.url}`;
-  });
+/**
+ * What is wrong and what to do about it, in one sentence pair. The one wording for every place
+ * that says so — the boot log, the page banner and /api/proxy's refusal — so they cannot drift.
+ */
+function describeAdvisory(hit) {
+  const what = `Node.js ${hit.running} is affected by ${hit.id} (${hit.title}).`;
+  const fix = hit.fixedIn
+    ? `Upgrade to Node.js ${hit.fixedIn} or later.`
+    : `Node.js ${hit.line}.x is end-of-life and will never get a fix — upgrade to a patched line: ${hit.upgradeTo.map(v => `${v}+`).join(', ')}.`;
+  return `${what} ${fix}`;
 }
 
-module.exports = { NODE_ADVISORIES, parseNodeVersion, affectingAdvisories, nodeVersionWarnings };
+/** One log line per advisory that applies to `version`. */
+function nodeVersionWarnings(version, advisories = NODE_ADVISORIES) {
+  return affectingAdvisories(version, advisories)
+    .map(hit => `[node-security] WARNING: ${describeAdvisory(hit)} ${hit.url}`);
+}
+
+module.exports = { NODE_ADVISORIES, parseNodeVersion, affectingAdvisories, describeAdvisory, nodeVersionWarnings };

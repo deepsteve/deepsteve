@@ -22,9 +22,14 @@
  * Links are no longer rewritten to /api/proxy server-side: the injected <base> resolves a
  * root-relative `/api/proxy?url=…` against the REMOTE origin, so a rewritten link never reached
  * us. The bridge sends the link's real URL to the parent, which navigates the frame.
+ *
+ * This is also the one route that feeds arbitrary internet bytes to Node itself. While the
+ * running Node has a hole those bytes can reach (an advisory marked `blocksProxy` in
+ * node-advisories.js), every request is refused with a 503 before anything is fetched (#745).
  */
 
-const { jsonForScript } = require('./links');
+const { jsonForScript, escapeHtml } = require('./links');
+const { NODE_ADVISORIES, affectingAdvisories, describeAdvisory } = require('./node-advisories');
 
 // No allow-same-origin, ever: that one token is the difference between an opaque origin and ours.
 const PROXY_CSP = 'sandbox allow-scripts allow-forms allow-popups';
@@ -108,12 +113,43 @@ function injectIntoHtml(html, finalUrl) {
   return inject + html;
 }
 
-function createProxy({ log = () => {}, fetch = globalThis.fetch } = {}) {
+// The refusal while the daemon runs a Node with a hole that remote bytes can reach (#745). A
+// navigation (Baby Browser's iframe, or the page opened top-level) gets a page that says why,
+// carrying the bridge so baby_browser_read hands the same explanation to an agent. Anything
+// else — a display tab's fetch() of a JSON API — gets JSON.
+function refuse(req, res, advisories, pageUrl) {
+  const messages = advisories.map(describeAdvisory);
+  res.status(503);
+  if (!(req.headers.accept || '').includes('text/html')) {
+    return res.json({
+      error: `Deep Steve's web proxy is off: ${messages.join(' ')}`,
+      advisories: advisories.map(a => ({ id: a.id, url: a.url, upgradeTo: a.upgradeTo })),
+    });
+  }
+  const items = advisories.map((a, i) =>
+    `<p>${escapeHtml(messages[i])} <a href="${escapeHtml(a.url)}" target="_blank" rel="noopener">Advisory</a></p>`).join('\n');
+  res.type('html').send(`<!doctype html><html><head><meta charset="utf-8">${bridgeScript(String(pageUrl || ''))}`
+    + `<title>Proxy off: Node.js needs a security upgrade</title></head>`
+    + `<body style="font-family:system-ui,sans-serif;max-width:40em;margin:3em auto;padding:0 1em;line-height:1.5">`
+    + `<h1 style="font-size:1.3em">Deep Steve's web proxy is off</h1>`
+    + `<p>The Node.js running Deep Steve has a security hole that a web page can reach, so nothing `
+    + `is fetched until it is upgraded.</p>\n${items}\n`
+    + `<p>Restart Deep Steve after upgrading Node.js.</p></body></html>`);
+}
+
+function createProxy({
+  log = () => {}, fetch = globalThis.fetch, nodeVersion = process.versions.node, advisories = NODE_ADVISORIES,
+} = {}) {
+  // Read once: the runtime cannot change under a running daemon. Both inputs are injectable so a
+  // test can exercise every verdict without running an old Node.
+  const blocking = affectingAdvisories(nodeVersion, advisories).filter(a => a.blocksProxy);
   return async function handleProxy(req, res) {
     // First, before any early return: an error page is a document too.
     res.setHeader('Content-Security-Policy', PROXY_CSP);
     const url = req.query.url;
-    log(`[proxy] url=${url}`);
+    log(`[proxy] url=${url}${blocking.length ? ' (refused: Node.js needs a security upgrade)' : ''}`);
+    // Before anything else, so no code path below can reach the decoder.
+    if (blocking.length) return refuse(req, res, blocking, url);
     if (!url) return res.status(400).json({ error: 'Missing url parameter' });
     let parsed;
     try {

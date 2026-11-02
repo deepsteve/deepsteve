@@ -601,6 +601,15 @@ what it says, so a forged message can only lie about the page itself. Links are 
 server-side: the injected `<base>` resolves a root-relative `/api/proxy?url=…` against the remote
 origin, so a rewritten link never reached us.
 
+**On a Node with a hole that remote bytes can reach, the proxy is off (#745).** The proxy is the
+one route that hands arbitrary internet responses, and every redirect hop, to Node's own
+decoders. So while an advisory marked `blocksProxy` in `node-advisories.js` applies to the running
+Node, every `/api/proxy` request gets a 503 before anything is fetched. A navigation
+(`Accept: text/html`) gets a page saying why, with the bridge, so `baby_browser_read` hands the
+explanation to an agent. Anything else, such as a display tab's `fetch()`, gets JSON
+`{ error, advisories }`. Upgrading Node and restarting the daemon turns the proxy back on. See
+[platform.md](platform.md#which-nodejs-runs-the-daemon-745).
+
 ### Panel Mods
 
 Panel mod iframes are created when the mod is enabled and stay alive for the duration of the session. When you switch between panel tabs, iframes are shown/hidden via `display: none` — they are not destroyed. This is important because MCP tools registered by panel mods (e.g. `browser_eval`) need the iframe to be alive to handle requests.

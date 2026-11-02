@@ -54,11 +54,15 @@ if [ -n "$NPM_VERSION" ] && [ -n "$LATEST_TAG" ] && [ "v$NPM_VERSION" != "$LATES
   echo "         The previous release never reached npm — don't skip step 7 again (RELEASING.md)." >&2
 fi
 
-NODE_VERSION="22.14.0"
-NODE_SHA256_ARM64="e9404633bc02a5162c5c573b1e2490f5fb44648345d64a958b17e325729a5e42"
-NODE_SHA256_X64="6698587713ab565a94a360e091df9f6d91c8fadda6d00f0cf6526e9b40bed250"
-NODE_SHA256_LINUX_ARM64="8cf30ff7250f9463b53c18f89c6c606dfda70378215b2c905d0a9a8b08bd45e0"
-NODE_SHA256_LINUX_X64="9d942932535988091034dc94cc5f42b6dc8784d6366df3a36c4c9ccb3996f0c2"
+# The Node the installer puts in ~/.deepsteve/node on a machine with neither node nor Homebrew,
+# and upgrades that copy to on every reinstall. Each SHA256 is the `node-v<ver>-<os>-<arch>.tar.gz`
+# line of https://nodejs.org/dist/v<ver>/SHASUMS256.txt. test/unit/installer-node.test.js fails
+# if this version is one node-advisories.js lists as affected.
+NODE_VERSION="22.23.4"
+NODE_SHA256_ARM64="c9e1dbc748b33ed2d14f42445191ecaf14c56259c7a9a26d0042c49ec2b66428"
+NODE_SHA256_X64="efcc2b0db6f94bf53eddb038fe2b370277a042bd29e4f19b8f8e23598795b819"
+NODE_SHA256_LINUX_ARM64="f7a1e486dbc8b286847815b477d4fb5e9fb963ed4489c3e1588853d685f589f9"
+NODE_SHA256_LINUX_X64="b8492284c76a54baf58d61668dd0e41ee0fc98adabf9503d30f05d08f55b4406"
 
 OUT="install.sh"
 
@@ -86,44 +90,106 @@ EOF
 # --- Preamble ---
 cat >> "$OUT" << 'PREAMBLE'
 
+# --- bundled node: begin ---
+# test/unit/installer-node.test.js runs exactly the text between these two markers.
 OS=$(uname -s)
 
-if ! command -v node &>/dev/null; then
-  echo "Node.js not found, installing..."
-  if command -v brew &>/dev/null; then
-    brew install node
+# ~/.deepsteve/node is the ONE Node this installer owns: it put it there, on a machine that
+# had neither node nor Homebrew. Any other node is the user's and is never touched, however
+# old — the daemon's boot-time advisory check is what tells that user (#745).
+#
+# Ours is upgraded whenever it is older than the pin. Moving the pin alone fixed fresh
+# installs only: a reinstall — the in-app auto-update runs this script with
+# ~/.deepsteve/node/bin first on PATH — found the old copy with `command -v node`, so the
+# download never ran and a vulnerable Node survived every update.
+#
+# It is replaced at the same path, so the node recorded in the plist/unit stays right and
+# nothing needs re-pointing; the ds_service_stop/start at the end loads the new binary.
+DS_NODE_DIR="$HOME/.deepsteve/node"
+
+# Is version $1 older than version $2? Plain bash: this runs before any node is known to work.
+ds_version_lt() {
+  local IFS=.
+  local -a a b
+  local i
+  a=($1)
+  b=($2)
+  for i in 0 1 2; do
+    if [ "${a[i]:-0}" -lt "${b[i]:-0}" ]; then return 0; fi
+    if [ "${a[i]:-0}" -gt "${b[i]:-0}" ]; then return 1; fi
+  done
+  return 1
+}
+
+# Download the pinned Node, verify it against the pinned SHA256, and install it at
+# $DS_NODE_DIR. It is unpacked beside the old copy and swapped in with mv, so a failed
+# download or a checksum mismatch leaves an existing copy exactly as it was. Either one
+# exits under `set -e`, and that happens before this script has stopped the daemon.
+ds_fetch_node() {
+  local arch platform sha actual stage
+  arch=$(uname -m)
+  case "$arch" in arm64|aarch64) arch="arm64";; *) arch="x64";; esac
+  if [ "$OS" = "Darwin" ]; then
+    platform="darwin"
+    if [ "$arch" = "arm64" ]; then sha="$NODE_SHA256_ARM64"; else sha="$NODE_SHA256_X64"; fi
   else
-    ARCH=$(uname -m)
-    case "$ARCH" in arm64|aarch64) ARCH="arm64";; *) ARCH="x64";; esac
-    if [ "$OS" = "Darwin" ]; then
-      NODE_PLATFORM="darwin"
-      if [ "$ARCH" = "arm64" ]; then NODE_SHA256="$NODE_SHA256_ARM64"; else NODE_SHA256="$NODE_SHA256_X64"; fi
-    else
-      NODE_PLATFORM="linux"
-      if [ "$ARCH" = "arm64" ]; then NODE_SHA256="$NODE_SHA256_LINUX_ARM64"; else NODE_SHA256="$NODE_SHA256_LINUX_X64"; fi
-    fi
-    NODE_DIR="$HOME/.deepsteve/node"
-    mkdir -p "$NODE_DIR"
-    NODE_TGZ=$(mktemp)
-    trap 'rm -f "$NODE_TGZ"' EXIT
-    curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-${NODE_PLATFORM}-${ARCH}.tar.gz" -o "$NODE_TGZ"
-    if command -v shasum &>/dev/null; then
-      ACTUAL_SHA256=$(shasum -a 256 "$NODE_TGZ" | awk '{print $1}')
-    else
-      ACTUAL_SHA256=$(sha256sum "$NODE_TGZ" | awk '{print $1}')
-    fi
-    if [ "$ACTUAL_SHA256" != "$NODE_SHA256" ]; then
-      echo "ERROR: Node.js checksum verification failed!" >&2
-      echo "  Expected: $NODE_SHA256" >&2
-      echo "  Got:      $ACTUAL_SHA256" >&2
-      rm -f "$NODE_TGZ"
-      exit 1
-    fi
-    tar xz -C "$NODE_DIR" --strip-components=1 < "$NODE_TGZ"
+    platform="linux"
+    if [ "$arch" = "arm64" ]; then sha="$NODE_SHA256_LINUX_ARM64"; else sha="$NODE_SHA256_LINUX_X64"; fi
+  fi
+  stage="$DS_NODE_DIR.new"
+  mkdir -p "$(dirname "$DS_NODE_DIR")"
+  NODE_TGZ=$(mktemp)
+  trap 'rm -f "$NODE_TGZ"' EXIT
+  curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-${platform}-${arch}.tar.gz" -o "$NODE_TGZ"
+  if command -v shasum &>/dev/null; then
+    actual=$(shasum -a 256 "$NODE_TGZ" | awk '{print $1}')
+  else
+    actual=$(sha256sum "$NODE_TGZ" | awk '{print $1}')
+  fi
+  if [ "$actual" != "$sha" ]; then
+    echo "ERROR: Node.js checksum verification failed!" >&2
+    echo "  Expected: $sha" >&2
+    echo "  Got:      $actual" >&2
     rm -f "$NODE_TGZ"
-    export PATH="$NODE_DIR/bin:$PATH"
+    exit 1
+  fi
+  rm -rf "$stage"
+  mkdir -p "$stage"
+  tar xz -C "$stage" --strip-components=1 < "$NODE_TGZ"
+  rm -f "$NODE_TGZ"
+  rm -rf "$DS_NODE_DIR.old"
+  if [ -d "$DS_NODE_DIR" ]; then mv "$DS_NODE_DIR" "$DS_NODE_DIR.old"; fi
+  mv "$stage" "$DS_NODE_DIR"
+  rm -rf "$DS_NODE_DIR.old"
+}
+
+if [ -x "$DS_NODE_DIR/bin/node" ]; then
+  DS_NODE_CURRENT=$("$DS_NODE_DIR/bin/node" -p process.versions.node 2>/dev/null || true)
+  DS_NODE_CURRENT="${DS_NODE_CURRENT%%-*}"
+  # A copy that cannot even report its version is ours and broken: replace it too.
+  if [[ ! "$DS_NODE_CURRENT" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then DS_NODE_CURRENT="0.0.0"; fi
+  if ds_version_lt "$DS_NODE_CURRENT" "$NODE_VERSION"; then
+    echo "Upgrading Deep Steve's Node.js from $DS_NODE_CURRENT to $NODE_VERSION..."
+    ds_fetch_node
   fi
 fi
+
+if ! command -v node &>/dev/null; then
+  if [ -x "$DS_NODE_DIR/bin/node" ]; then
+    # Ours, at the pin by now, just not on this PATH (a `curl | bash` from a terminal).
+    # Use it rather than download it again or install a second node with brew.
+    export PATH="$DS_NODE_DIR/bin:$PATH"
+  else
+    echo "Node.js not found, installing..."
+    if command -v brew &>/dev/null; then
+      brew install node
+    else
+      ds_fetch_node
+      export PATH="$DS_NODE_DIR/bin:$PATH"
+    fi
+  fi
+fi
+# --- bundled node: end ---
 
 # tmux is a declared dependency off macOS (#620/#621), and this is where declaring it
 # is cheap: a human is watching a terminal right now.

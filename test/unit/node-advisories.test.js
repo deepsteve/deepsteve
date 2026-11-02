@@ -10,7 +10,7 @@ const assert = require('node:assert');
 const fs = require('fs');
 const path = require('path');
 
-const { NODE_ADVISORIES, parseNodeVersion, affectingAdvisories, nodeVersionWarnings } = require('../../node-advisories');
+const { NODE_ADVISORIES, parseNodeVersion, affectingAdvisories, describeAdvisory, nodeVersionWarnings } = require('../../node-advisories');
 
 const ROOT = path.join(__dirname, '..', '..');
 const CVE = 'CVE-2026-111497';
@@ -110,4 +110,30 @@ test('server.js runs the check at boot against the live runtime', () => {
   assert.match(src, /require\('\.\/node-advisories'\)/);
   assert.match(src, /nodeVersionWarnings\(process\.versions\.node\)/,
     'the boot check must read the version of the node actually running the daemon');
+});
+
+test('the log line, banner and proxy refusal share one wording (#745)', () => {
+  for (const version of ['22.14.0', '20.20.2']) {
+    const [hit] = affectingAdvisories(version);
+    const [line] = nodeVersionWarnings(version);
+    assert.ok(line.includes(describeAdvisory(hit)), `the log line for ${version} embeds describeAdvisory`);
+    assert.doesNotMatch(describeAdvisory(hit), /\[node-security\]|WARNING|https:/,
+      'the shared text carries no log prefix and no URL — each surface adds its own');
+  }
+});
+
+test('the Brotli CVE is marked as reachable through /api/proxy, and the flag reaches each hit', () => {
+  assert.strictEqual(NODE_ADVISORIES.find(a => a.id === CVE).blocksProxy, true);
+  assert.strictEqual(cveHit('22.14.0').blocksProxy, true);
+  const [plain] = affectingAdvisories('22.14.0', [{ id: 'CVE-2026-1', title: 't', url: 'https://nodejs.org/x', fixed: { 22: '22.23.4' } }]);
+  assert.strictEqual(plain.blocksProxy, false, 'an advisory without the flag never blocks the proxy');
+});
+
+test('server.js serves the verdict for the page banner on /api/version (#745)', () => {
+  const src = fs.readFileSync(path.join(ROOT, 'server.js'), 'utf8');
+  assert.match(src, /affectingAdvisories\(process\.versions\.node\)/,
+    'the banner must describe the node actually running the daemon');
+  assert.match(src, /node: NODE_SECURITY,/, '/api/version carries the verdict');
+  const app = fs.readFileSync(path.join(ROOT, 'public', 'js', 'app.js'), 'utf8');
+  assert.match(app, /showNodeAdvisoryBanner\(data\.node\)/, 'the page renders it from its startup /api/version fetch');
 });

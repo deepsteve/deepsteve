@@ -21,6 +21,7 @@ const http = require('node:http');
 const path = require('node:path');
 const express = require('express');
 const { PROXY_CSP, FORWARDED_HEADERS, BRIDGE_TAG, injectIntoHtml, createProxy } = require('../../proxy.js');
+const { NODE_ADVISORIES } = require('../../node-advisories.js');
 
 // Every header a hostile upstream might use against our origin, each with a value we can spot.
 const HOSTILE = {
@@ -39,6 +40,9 @@ const HOSTILE = {
 const PAGE_ETAG = '"upstream-page-etag"';
 const PAGE = '<!doctype html><html><head><meta http-equiv="Content-Security-Policy" content="script-src \'none\'">'
   + '<title>Remote</title></head><body><a href="/next">next</a><form action="/search"><input name="q"></form></body></html>';
+
+const PATCHED_NODE = '22.23.4';
+const AFFECTED_NODE = '22.14.0';
 
 let upstream, app, U, P;
 
@@ -74,7 +78,9 @@ before(async () => {
   });
   U = `http://127.0.0.1:${await listen(upstream)}`;
   const ex = express();
-  ex.get('/api/proxy', createProxy());
+  // Pinned to a patched Node, so the suite behaves the same whichever Node runs it: the refusal
+  // on an affected one (#745) is tested on its own below, with injected versions.
+  ex.get('/api/proxy', createProxy({ nodeVersion: PATCHED_NODE }));
   app = http.createServer(ex);
   P = `http://127.0.0.1:${await listen(app)}/api/proxy`;
 });
@@ -168,4 +174,97 @@ test('Baby Browser frames the proxy without allow-same-origin and listens for th
   // The first navigate() calls registerWithServer(), which reads tabInstanceId: declared later, it
   // threw at load, so initBridge() never ran and no baby_browser_* tool could reach the tab.
   assert.ok(page.indexOf('let tabInstanceId') < page.indexOf('\n    navigate(false);\n'));
+});
+
+// #745: while the daemon's Node has a hole that remote bytes can reach, nothing is fetched.
+async function refusingProxy(nodeVersion) {
+  const calls = [];
+  const ex = express();
+  ex.get('/api/proxy', createProxy({ nodeVersion, fetch: async (...args) => { calls.push(args); return globalThis.fetch(...args); } }));
+  const server = http.createServer(ex);
+  const base = `http://127.0.0.1:${await listen(server)}/api/proxy`;
+  return { calls, base, close: () => server.close() };
+}
+
+test('on an affected Node the proxy refuses with 503 and never fetches', async () => {
+  const p = await refusingProxy(AFFECTED_NODE);
+  try {
+    const target = `${U}/page`;
+    // A display tab's fetch(): JSON naming the CVE and the upgrade target.
+    const json = await fetch(`${p.base}?url=${encodeURIComponent(target)}`);
+    assert.strictEqual(json.status, 503);
+    assert.strictEqual(json.headers.get('content-security-policy'), PROXY_CSP);
+    const body = await json.json();
+    assert.match(body.error, /CVE-2026-111497/);
+    assert.match(body.error, /Node\.js 22\.14\.0 is affected/);
+    assert.match(body.error, /Upgrade to Node\.js 22\.23\.4 or later/);
+    assert.deepStrictEqual(body.advisories.map(a => a.upgradeTo), [['22.23.4']]);
+
+    // Baby Browser's iframe navigation: a page that says why, with the bridge so
+    // baby_browser_read can hand the explanation to an agent.
+    const page = await fetch(`${p.base}?url=${encodeURIComponent(target)}`, { headers: { accept: 'text/html,*/*' } });
+    assert.strictEqual(page.status, 503);
+    assert.strictEqual(page.headers.get('content-security-policy'), PROXY_CSP);
+    assert.match(page.headers.get('content-type'), /^text\/html/);
+    const html = await page.text();
+    assert.ok(html.includes('CVE-2026-111497'));
+    assert.ok(html.includes('Upgrade to Node.js 22.23.4 or later'));
+    assert.ok(html.includes(JSON.stringify(BRIDGE_TAG)), 'carries the bridge');
+    assert.ok(!html.includes('Remote'), 'the upstream page was not fetched');
+
+    // No url, or a bad one, is refused the same way: no path below the check runs.
+    assert.strictEqual((await fetch(p.base)).status, 503);
+    assert.strictEqual((await fetch(`${p.base}?url=not%20a%20url`)).status, 503);
+
+    assert.strictEqual(p.calls.length, 0, 'fetch must never be called on an affected Node');
+  } finally {
+    p.close();
+  }
+});
+
+test('an end-of-life Node is refused too, and told which lines to move to', async () => {
+  const p = await refusingProxy('20.20.2');
+  try {
+    const body = await (await fetch(`${p.base}?url=${encodeURIComponent(`${U}/page`)}`)).json();
+    assert.match(body.error, /Node\.js 20\.x is end-of-life/);
+    assert.deepStrictEqual(body.advisories[0].upgradeTo, ['22.23.4', '24.22.1', '26.12.1']);
+    assert.strictEqual(p.calls.length, 0);
+  } finally {
+    p.close();
+  }
+});
+
+test('on a patched Node the proxy fetches exactly as before', async () => {
+  for (const nodeVersion of [PATCHED_NODE, '24.22.1', '26.12.1', '27.0.0']) {
+    const p = await refusingProxy(nodeVersion);
+    try {
+      const res = await fetch(`${p.base}?url=${encodeURIComponent(`${U}/page`)}`, { headers: { accept: 'text/html' } });
+      assert.strictEqual(res.status, 200, nodeVersion);
+      assert.ok((await res.text()).includes('<title>Remote</title>'), nodeVersion);
+      assert.strictEqual(p.calls.length, 1, nodeVersion);
+    } finally {
+      p.close();
+    }
+  }
+});
+
+test('an advisory without blocksProxy does not switch the proxy off', async () => {
+  // A future CVE the proxy cannot reach must cost the user nothing.
+  const unreachable = NODE_ADVISORIES.map(({ blocksProxy, ...rest }) => rest);
+  const calls = [];
+  const ex = express();
+  ex.get('/api/proxy', createProxy({
+    nodeVersion: AFFECTED_NODE, advisories: unreachable,
+    fetch: async (...args) => { calls.push(args); return globalThis.fetch(...args); },
+  }));
+  const server = http.createServer(ex);
+  try {
+    const base = `http://127.0.0.1:${await listen(server)}/api/proxy`;
+    const res = await fetch(`${base}?url=${encodeURIComponent(`${U}/page`)}`);
+    assert.strictEqual(res.status, 200);
+    await res.arrayBuffer();
+    assert.strictEqual(calls.length, 1);
+  } finally {
+    server.close();
+  }
 });

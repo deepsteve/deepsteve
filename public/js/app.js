@@ -783,6 +783,7 @@ function setEngineFallbackBadge(on) { badgeEngineFallback = !!on; refreshSetting
 // even before any WebSocket broadcast arrives.
 fetch('/api/version').then(r => r.json()).then(data => {
   setUpdateAvailableBadge(!!data.updateAvailable);
+  showNodeAdvisoryBanner(data.node);
 }).catch(() => {});
 
 // Same idea for the engine (#620): without tmux we're on node-pty, every session
@@ -2572,6 +2573,52 @@ function showSessionErrorBanner(message) {
   line.className = 'session-error-banner-line';
   line.textContent = message;
   sessionErrorBannerEl.querySelector('.session-error-banner-list').appendChild(line);
+}
+
+/**
+ * Banner for a daemon running a Node.js with a known security hole (#745), read from
+ * `/api/version`'s `node` field at page load. Before this the verdict went only to the daemon
+ * log, which nobody reads. The server writes the advisory text; this only lays it out.
+ *
+ * Lowest z-index of the page-level banners: it shares their spot, and while one of those is
+ * up it is the better explanation of what the user is looking at. Dismiss lasts for this page
+ * load only — the hole is still there after a reload, so the banner is too.
+ */
+let nodeAdvisoryBannerEl = null;
+
+function showNodeAdvisoryBanner(node) {
+  const advisories = Array.isArray(node?.advisories) ? node.advisories : [];
+  if (!advisories.length || nodeAdvisoryBannerEl) return;
+  nodeAdvisoryBannerEl = document.createElement('div');
+  nodeAdvisoryBannerEl.className = 'node-advisory-banner';
+  nodeAdvisoryBannerEl.setAttribute('role', 'alert');
+  const list = document.createElement('div');
+  list.className = 'node-advisory-banner-list';
+  const addLine = (text, href) => {
+    const line = document.createElement('div');
+    line.className = 'node-advisory-banner-line';
+    line.textContent = text;
+    if (href) {
+      const a = document.createElement('a');
+      a.href = href;
+      a.target = '_blank';
+      a.rel = 'noopener';
+      a.textContent = 'Advisory';
+      line.append(' ', a);
+    }
+    list.appendChild(line);
+  };
+  for (const adv of advisories) addLine(`Security: ${adv.message}`, adv.url);
+  if (advisories.some(a => a.blocksProxy)) addLine('Baby Browser\'s web proxy is off until then.');
+  if (node.execPath) addLine(`Deep Steve runs ${node.execPath} — restart it after upgrading.`);
+  const btn = document.createElement('button');
+  btn.className = 'node-advisory-banner-dismiss';
+  btn.textContent = 'Dismiss';
+  btn.addEventListener('click', () => {
+    nodeAdvisoryBannerEl.remove();
+  });
+  nodeAdvisoryBannerEl.append(list, btn);
+  document.body.appendChild(nodeAdvisoryBannerEl);
 }
 
 /**

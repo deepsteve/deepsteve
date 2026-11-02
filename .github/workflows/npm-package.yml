@@ -26,12 +26,16 @@ jobs:
   # LaunchAgent under the label com.deepsteve, which is global to the user session —
   # the full start/stop path is covered by test/docker-compose.npm.yml, in a container
   # where the service manager is a stub.
+  #
+  # The node lines are exactly the ones package.json's `engines` admits (#745): the three
+  # that got the CVE-2026-111497 fix. 18 and 20 are end-of-life and will never get it.
+  # setup-node resolves a bare major to that line's newest release, which is patched.
   install:
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
-        node: ['18', '20', '22']
+        node: ['22', '24', '26']
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
