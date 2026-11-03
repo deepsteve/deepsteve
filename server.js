@@ -33,7 +33,7 @@ const { classifyScreenTail, CLAUDE_SCREEN_MARKERS } = require('./screen-classifi
 const { askingSummary } = require('./dialog-parse');
 const { TerminalScreen } = require('./terminal-screen');
 const { terminalEnv } = require('./terminal-env');
-const { createClaudeLogins, loginForSpawn, withTokenFromFile, isLoginId, TOKEN_FILE_ENV, SUBSCRIPTION_ENV } = require('./claude-logins');
+const { createClaudeLogins, loginForSpawn, withTokenFromFile, isLoginId, cleanToken, TOKEN_FILE_ENV, SUBSCRIPTION_ENV, PLANS } = require('./claude-logins');
 const { readComposerDraft, hasStashedDraft, isPromptStaged, isPromptOnScreen, promptDraftVerdict } = require('./composer-state');
 const { wrapRunCommand } = require('./terminal-run');
 const { isTerminalReport, isPointerReport, hasSubmitKey } = require('./terminal-input');
@@ -6865,11 +6865,22 @@ app.post('/api/claude-logins', (req, res) => {
   res.json({ login: r.login, logins: claudeLogins.list() });
 });
 
-// The plan is the one thing about a login that changes in place; the token never does
-// (remove the login and add it again). Takes effect at each session's next spawn.
+// Change a login in place: its plan, its token, or both. The id never changes, so the
+// projects on it stay on it — replacing a bad token is not remove-and-re-add, which would
+// move every one of them to System. Takes effect at each session's next spawn. The token
+// is checked before anything is written, so a refused one changes nothing.
 app.post('/api/claude-logins/:id', (req, res) => {
   const b = req.body || {};
-  const r = claudeLogins.setPlan(req.params.id, b.plan);
+  const hasPlan = b.plan !== undefined;
+  const hasToken = b.token !== undefined;
+  if (!hasPlan && !hasToken) return res.status(400).json({ error: 'Send a plan, a token, or both.' });
+  if (!claudeLogins.get(req.params.id)) return res.status(404).json({ error: 'No such login' });
+  const badToken = hasToken && cleanToken(b.token).error;
+  if (badToken) return res.status(400).json({ error: badToken });
+  if (hasPlan && !PLANS.includes(b.plan)) return res.status(400).json({ error: `The plan must be one of: ${PLANS.join(', ')}.` });
+  let r = null;
+  if (hasToken) r = claudeLogins.setToken(req.params.id, b.token);
+  if (hasPlan) r = claudeLogins.setPlan(req.params.id, b.plan);
   if (r.error) return res.status(r.notFound ? 404 : 400).json({ error: r.error });
   res.json({ login: r.login, logins: claudeLogins.list() });
 });

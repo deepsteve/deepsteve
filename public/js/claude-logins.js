@@ -166,6 +166,11 @@ export function mountClaudeLoginsSettings(container, { fetchLogins = fetchClaude
         }
       };
       row.appendChild(plan);
+      const replace = el('button', 'claude-login-replace', 'Replace token');
+      replace.type = 'button';
+      replace.title = 'Paste a new token for this login. Its projects stay on it.';
+      replace.onclick = () => openReplace(row, l);
+      row.appendChild(replace);
       const rm = el('button', 'claude-login-remove', 'Remove');
       rm.type = 'button';
       rm.onclick = async () => {
@@ -184,6 +189,56 @@ export function mountClaudeLoginsSettings(container, { fetchLogins = fetchClaude
       row.appendChild(rm);
       list.appendChild(row);
     }
+  }
+
+  // Replacing a token keeps the login's id, so the projects on it stay on it — unlike
+  // Remove + Add, which moves every one of them to System. One editor at a time, under
+  // its row; the token is sent once, in this POST, and the field is cleared after.
+  function openReplace(row, l) {
+    const open = list.querySelector('.claude-login-replace-form');
+    if (open) {
+      const same = open.dataset.loginId === l.id;
+      open.remove();
+      if (same) return;
+    }
+    const f = el('div', 'claude-login-replace-form');
+    f.dataset.loginId = l.id;
+    const input = el('input', 'claude-login-token');
+    input.type = 'password';
+    input.placeholder = `New token for ${l.name}`;
+    input.autocomplete = 'off';
+    input.spellcheck = false;
+    const save = el('button', 'claude-login-add-btn', 'Save token');
+    save.type = 'button';
+    const cancel = el('button', 'claude-login-remove', 'Cancel');
+    cancel.type = 'button';
+    cancel.onclick = () => f.remove();
+    save.onclick = async () => {
+      const token = input.value.trim();
+      if (!token) { input.focus(); return; }
+      save.disabled = true;
+      try {
+        const d = await fetchJSON('/api/claude-logins/' + encodeURIComponent(l.id), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ token }),
+        });
+        input.value = '';
+        renderList(d.logins || []);
+        say(`Replaced the token for "${l.name}". Sessions started or resumed from now on use it; running ones keep the old one until reopened.`);
+      } catch (e) {
+        save.disabled = false;
+        say(`Could not replace the token: ${e.message}`, true);
+      }
+    };
+    // Enter saves and Escape cancels, and neither reaches the Settings modal.
+    input.onkeydown = (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); e.stopPropagation(); save.click(); }
+      else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); f.remove(); }
+    };
+    f.append(input, save, cancel);
+    row.after(f);
+    input.focus();
   }
 
   addBtn.onclick = async () => {

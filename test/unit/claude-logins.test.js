@@ -124,6 +124,32 @@ test('a login has a plan: chosen at add, changed in place, Pro for a row saved b
   assert.deepStrictEqual(store(root, []).list().map(l => l.plan), ['pro', 'pro']);
 });
 
+test('replacing a token keeps the id, rewrites the 0600 file and the hint; a bad one changes nothing', (t) => {
+  const root = scratch();
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const s = store(root);
+  s.add({ name: 'Work', token: TOKEN_A, plan: 'max' });
+  const file = path.join(s.dir, 'aaaa0001.token');
+
+  assert.match(s.setToken('aaaa0001', 'two words').error, /line/);
+  assert.strictEqual(fs.readFileSync(file, 'utf8'), TOKEN_A, 'a refused token leaves the old one');
+  assert.strictEqual(s.setToken('nope0000', TOKEN_B).notFound, true);
+
+  const r = s.setToken('aaaa0001', ` ${TOKEN_B}\n`);
+  assert.deepStrictEqual(r.login, { id: 'aaaa0001', name: 'Work', hint: '…1234', plan: 'max', addedAt: 1000, missing: false });
+  assert.ok(!JSON.stringify(r).includes(TOKEN_B), 'setToken never echoes the token');
+  assert.strictEqual(fs.readFileSync(file, 'utf8'), TOKEN_B);
+  assert.strictEqual(mode(file), 0o600);
+  assert.ok(!fs.readFileSync(path.join(s.dir, 'index.json'), 'utf8').includes(TOKEN_B), 'the index holds the hint, not the token');
+  assert.deepStrictEqual(store(root, []).list().map(l => [l.id, l.hint]), [['aaaa0001', '…1234']], 'on disk');
+
+  // A login whose token file went missing gets one back.
+  fs.unlinkSync(file);
+  assert.strictEqual(s.list()[0].missing, true);
+  assert.strictEqual(s.setToken('aaaa0001', TOKEN_A).login.missing, false);
+  assert.strictEqual(s.tokenFile('aaaa0001'), file);
+});
+
 test('a token file that went missing is reported, and resolves to no file', (t) => {
   const root = scratch();
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));

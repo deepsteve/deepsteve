@@ -185,6 +185,24 @@ function createClaudeLogins({ dir, genId = () => randomUUID().replace(/-/g, '').
     return { login: { ...login, missing: !fs.existsSync(tokenPath(id)) } };
   }
 
+  /**
+   * Replace a login's token, keeping its id — so every project on it stays on it. For a
+   * token that was pasted wrong or has since been revoked. Returns { login } or { error };
+   * `notFound` for an unknown id. A refused token leaves the old one in place.
+   */
+  function setToken(id, token) {
+    const login = get(id);
+    if (!login) return { error: 'No such login', notFound: true };
+    const t = cleanToken(token);
+    if (t.error) return { error: t.error };
+    ensureDir();
+    writePrivate(tokenPath(id), t.token);
+    login.hint = tokenHint(t.token);
+    save();
+    log(`[claude-logins] replaced the token for "${login.name}" (${id}); sessions started or resumed after this use it`);
+    return { login: { ...login, missing: false } };
+  }
+
   /** Remove a login and its token file. False when there was no such login. */
   function remove(id) {
     const login = get(id);
@@ -206,7 +224,7 @@ function createClaudeLogins({ dir, genId = () => randomUUID().replace(/-/g, '').
   }
 
   load();
-  return { list, get, add, setPlan, remove, tokenFile, load, dir };
+  return { list, get, add, setPlan, setToken, remove, tokenFile, load, dir };
 }
 
 // True when `p` is `dir` or inside it. Same rule as server.js's pathInside, so "this

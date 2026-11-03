@@ -16,6 +16,7 @@
  *   - The token is in neither the tmux session's environment nor the daemon log — only
  *     the token file's path is.
  *   - A project edit that omits claudeLoginId keeps the login.
+ *   - Replacing a login's token keeps its id and its projects, and the next spawn uses it.
  *   - Moving a project leaves a running session alone, and a session respawned after
  *     the move (a restore, via --resume) comes back under the NEW login.
  *   - Removing a login moves its projects to System and deletes its token file.
@@ -41,6 +42,7 @@ const SKIP = TmuxSandbox.skipReason();
 
 const TOKEN_WORK = 'sk-ant-oat01-WORKWORKWORKWORKWORKWORKWORKWORKwork';
 const TOKEN_PERSONAL = 'sk-ant-oat01-PERSONALPERSONALPERSONALPERSONALpers';
+const TOKEN_WORK_NEW = 'sk-ant-oat01-NEWNEWNEWNEWNEWNEWNEWNEWNEWNEWNEWNEWnext';
 
 // Stub `claude`: logs the token and plan it was started with plus its argv, then acts like a
 // live REPL so the session stays up until /exit.
@@ -289,6 +291,31 @@ test('an edit that leaves out claudeLoginId keeps the login', { skip: SKIP }, as
   const c = (await api('GET', '/api/contexts')).json.contexts.find(x => x.id === 'workproj');
   assert.strictEqual(c.name, 'Work repo (renamed)');
   assert.strictEqual(c.claudeLoginId, workId);
+});
+
+test('replacing a login\'s token keeps its projects on it, and the next spawn uses the new one', { skip: SKIP }, async () => {
+  const file = path.join(HOME, '.deepsteve', 'claude-logins', `${workId}.token`);
+  assert.strictEqual((await api('POST', `/api/claude-logins/${workId}`, {})).status, 400, 'nothing to change');
+  const bad = await api('POST', `/api/claude-logins/${workId}`, { token: 'two words', plan: 'pro' });
+  assert.strictEqual(bad.status, 400);
+  assert.strictEqual(fs.readFileSync(file, 'utf8'), TOKEN_WORK, 'a refused token changes nothing');
+  assert.strictEqual((await api('GET', '/api/claude-logins')).json.logins.find(l => l.id === workId).plan, 'max', 'not even the plan sent with it');
+  assert.strictEqual((await api('POST', '/api/claude-logins/ffff0000', { token: TOKEN_WORK_NEW })).status, 404);
+
+  const r = await api('POST', `/api/claude-logins/${workId}`, { token: TOKEN_WORK_NEW });
+  assert.strictEqual(r.status, 200, r.text);
+  assert.strictEqual(r.json.login.id, workId, 'same login');
+  assert.strictEqual(r.json.login.hint, '…next');
+  assert.ok(!r.text.includes(TOKEN_WORK_NEW), 'the response carries no token');
+  assert.strictEqual(fs.readFileSync(file, 'utf8'), TOKEN_WORK_NEW);
+  assert.strictEqual(fs.statSync(file).mode & 0o777, 0o600);
+  const c = (await api('GET', '/api/contexts')).json.contexts.find(x => x.id === 'workproj');
+  assert.strictEqual(c.claudeLoginId, workId, 'the project is still on it');
+
+  const n = await track(new Client()).connect({ cwd: projWork, new: '1', agentType: 'claude' });
+  assert.strictEqual(await tokenSeenFor(n.claudeSessionId), TOKEN_WORK_NEW);
+  assert.match(daemonLog, /replaced the token for "Work"/);
+  assert.ok(!daemonLog.includes(TOKEN_WORK_NEW), 'the daemon never logs a token');
 });
 
 test('moving a project: running sessions keep theirs, a respawned one comes back under the new login', { skip: SKIP }, async () => {

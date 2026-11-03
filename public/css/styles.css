@@ -2456,6 +2456,9 @@ kbd {
 .claude-login-row-hint { font-family: monospace; color: var(--ds-text-secondary); }
 .claude-login-remove, .claude-login-add-btn { padding: 4px 8px; font-size: 12px; border-radius: 4px; border: 1px solid var(--ds-border); background: var(--ds-bg-secondary); color: var(--ds-text-primary); cursor: pointer; }
 .claude-login-remove:hover { color: var(--ds-accent-red); }
+.claude-login-replace { padding: 4px 8px; font-size: 12px; border-radius: 4px; border: 1px solid var(--ds-border); background: var(--ds-bg-secondary); color: var(--ds-text-primary); cursor: pointer; white-space: nowrap; }
+.claude-login-replace-form { display: flex; gap: 6px; align-items: center; padding: 2px 0 4px; }
+.claude-login-replace-form input { flex: 1; min-width: 120px; padding: 4px 8px; border-radius: 4px; border: 1px solid var(--ds-border); background: var(--ds-bg-secondary); color: var(--ds-text-primary); font-size: 12px; font-family: monospace; }
 .claude-logins-add { display: flex; gap: 6px; align-items: center; }
 .claude-logins-add input { padding: 4px 8px; border-radius: 4px; border: 1px solid var(--ds-border); background: var(--ds-bg-secondary); color: var(--ds-text-primary); font-size: 12px; }
 .claude-logins-add .claude-login-name { width: 130px; }
