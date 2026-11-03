@@ -180,6 +180,16 @@ macOS sleep freezes the daemon and suspends browser pages at *different* times (
 
 Simulating sleep in tests: `SIGSTOP`/`SIGCONT` the daemon (see `test/integration-standalone/sleep-reap.test.js`).
 
+## Claude logins (#748)
+
+Several Claude accounts on one install, chosen per project. A login is a token from `claude setup-token`, added in Settings → General → Enabled Agents → Claude logins and picked in a project's Edit dialog (the Claude Login row). Claude Code reads it from `CLAUDE_CODE_OAUTH_TOKEN`, and that changes the sign-in and nothing else: `claude auth status` reports `authMethod: "oauth_token"` while `configDirectory` and `projectsDirectory` stay `~/.claude`, so settings, transcripts and `--resume` are shared across logins. That is the difference from a #537 config profile, which moves the whole config root.
+
+- **Storage.** `~/.deepsteve/claude-logins/` (0700): `index.json` (id, name, last-four `hint`) and one `<id>.token` per login, both 0600 (`claude-logins.js`). Not `settings.json`, which is broadcast and logged. No endpoint returns a token: `GET /api/claude-logins` lists hints, `POST` adds, `DELETE /:id` removes and moves that login's projects back to System in the same step.
+- **System** is the absence of a login, not a row: nothing is injected and Claude uses whatever `claude /login` stored. A project's `claudeLoginId` (contexts.json) is null until someone picks a login, so an install that never adds one spawns exactly what it did before. The upsert keeps the stored value when the key is absent, so a client that doesn't know the field can't reset it.
+- **Resolved at spawn, every time.** `sessionEnv()` picks the project whose folder contains the spawn cwd (the longest match wins, archived projects included) and, for a Claude session that is not a config-profile session, adds the token file's *path* as `DEEPSTEVE_CLAUDE_TOKEN_FILE`. Every spawn path goes through it, including restore and the resume ladder, so a session comes back under its project's **current** login and no login is stored on the session.
+- **The token is in no argv.** tmux receives a pane's env as `new-session -e K=V`, and argv is readable by anyone who can run `ps`. So `spawnSession` runs `CLAUDE_CODE_OAUTH_TOKEN="$(cat "$DEEPSTEVE_CLAUDE_TOKEN_FILE")" claude …` and the pane's own shell reads the file.
+- **Moving a project** takes effect at the next spawn. A live tmux session keeps the login it started with across daemon restarts, because a reattach does not respawn. A missing token file is logged at spawn and the session runs as System. Claude Code ranks `ANTHROPIC_API_KEY` above the OAuth token (measured on 2.1.317: with both set, `authMethod` is `api_key`), so a key in the daemon's environment or the user's login profile would override every login.
+
 ## Worktree sessions, and merging out of one
 
 Almost every issue-solving session in this repo is a worktree session, so this is the part of

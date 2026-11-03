@@ -55,6 +55,8 @@ import { ModManager, appendAppRows } from './mod-manager.js';
 // The issue-pipeline stage editor (#717), shared with Settings. A leaf module: it
 // imports nothing, so this adds no cycle.
 import { createPipelineEditor } from './pipeline-editor.js';
+// The project editor's Claude Login row (#748). Imports only api.js — no cycle.
+import { createLoginPicker } from './claude-logins.js';
 
 // Context definitions are server-owned (#526): they are the same entity as the
 // Scheduled Tasks "project groups", loaded from /api/contexts and kept fresh by
@@ -2017,6 +2019,10 @@ function openContextEditor(ctx) {
 
   renderDirs();
 
+  // Claude Login (#748): which Claude account this project's sessions sign in as.
+  const loginPicker = createLoginPicker({ selectedId: ctx?.claudeLoginId || null });
+  modal.appendChild(loginPicker.element);
+
   const btns = document.createElement('div');
   btns.className = 'modal-buttons';
 
@@ -2046,13 +2052,17 @@ function openContextEditor(ctx) {
     // Optimistic local upsert so the rail updates immediately; the server
     // broadcast (setContexts) reconciles this and every other window.
     const existing = contexts.find(c => c.id === draft.id);
+    // The login rides the upsert only once the picker has the list: before that (or if
+    // the fetch failed) the key is left out, and the server keeps the stored login.
+    const login = loginPicker.loaded() ? { claudeLoginId: loginPicker.value() } : {};
     if (existing) {
       existing.name = name;
       existing.dirs = draft.dirs;
+      Object.assign(existing, login);
     } else {
-      contexts.push({ id: draft.id, name, dirs: draft.dirs });
+      contexts.push({ id: draft.id, name, dirs: draft.dirs, ...login });
     }
-    saveContext({ id: draft.id, name, dirs: draft.dirs });
+    saveContext({ id: draft.id, name, dirs: draft.dirs, ...login });
     activeContextId = draft.id; // focus the context we just saved
     saveActive();
     notifyActive();

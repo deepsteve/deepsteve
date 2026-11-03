@@ -62,6 +62,7 @@ Claude is the one agent never probed, because it is the default and the fallback
 | Scheduled-task worktree isolation | yes | — | — | — | — | — |
 | Model / thinking effort | yes | — | — | — | — | — |
 | Config profiles (`CLAUDE_CONFIG_DIR`) | yes | — | — | — | — | env only |
+| Per-project Claude login (`CLAUDE_CODE_OAUTH_TOKEN`) | yes | — | — | — | — | — |
 | Scheduled self-report contract | yes | yes | — | — | — | — |
 | Contract tools pre-permitted | yes | **no** ⚠️ | — | — | — | — |
 | `/rc` inheritance | yes | — | — | — | — | — |
@@ -165,6 +166,12 @@ disposable per-run worktree (`isolateWorktree`, default on).
 **Model / effort / config profile.** All three, per session and per scheduled task.
 Values are re-validated at the argv boundary (`validateModel` / `validateEffort`), so a
 hand-edited `state.json` or `scheduled-tasks.json` can't inject arguments.
+
+**Claude login (#748).** A project can name one of the Claude logins added in Settings,
+and every Claude session spawned inside it signs in as that account through
+`CLAUDE_CODE_OAUTH_TOKEN` (a `claude setup-token` token). Only the sign-in changes; the
+config dir, transcripts and history stay `~/.claude`. A config-profile session keeps its
+profile's own credentials. Mechanism in [sessions.md](sessions.md#claude-logins-748).
 
 **Readiness and submission.** The only screen-classified agent: `CLAUDE_SCREEN_MARKERS`
 in `screen-classifier.js` drives `waitingForInput`, which in turn drives notifications,

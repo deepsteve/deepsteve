@@ -55,6 +55,7 @@ import { init as initWakeWatch } from './wake-watch.js';
 import { openNewWindow, isFreshRequest } from './new-window.js';
 import { init as initTimelapse, setEnabled as setTimelapseEnabled, setIntervalMinutes as setTimelapseInterval } from './timelapse.js';
 import { createPipelineEditor } from './pipeline-editor.js';
+import { mountClaudeLoginsSettings } from './claude-logins.js';
 
 // Configuration
 let maxIssueTitleLength = 25;
@@ -1301,6 +1302,14 @@ settingsBtn?.addEventListener('click', async () => {
           <div id="custom-configs-list">${customConfigsHtml}</div>
           <button type="button" id="add-custom-config" style="margin-top: 4px; padding: 4px 10px; font-size: 12px; border-radius: 4px; border: 1px solid var(--ds-border); background: var(--ds-bg-secondary); color: var(--ds-text-primary); cursor: pointer;">+ Add config</button>
         </div>
+        <div style="margin-top: 16px; border-top: 1px solid var(--ds-border); padding-top: 12px;">
+          <label style="font-size: 13px; color: var(--ds-text-primary); font-weight: 600;">Claude logins</label>
+          <p style="font-size: 11px; color: var(--ds-text-secondary); margin: 4px 0 8px;">
+            Each login is a Claude account. Pick one for a project in its Edit dialog (right-click the project &rarr; Edit), and Claude sessions in that project sign in as it. Only the sign-in changes &mdash; settings, transcripts and history stay in <code>~/.claude</code>. Projects without one use <em>System</em>, whatever <code>claude /login</code> signed this machine in as.
+            To add one, run <code>claude setup-token</code> in a terminal, sign in as that account, and paste the token here. Adding and removing take effect immediately.
+          </p>
+          <div id="claude-logins-settings"></div>
+        </div>
       </div>
       </div>
       <div class="settings-tab-content" data-tab="terminal">
@@ -1495,6 +1504,9 @@ settingsBtn?.addEventListener('click', async () => {
     scheduledModelCustom.style.display = custom ? '' : 'none';
     if (custom) scheduledModelCustom.focus();
   });
+
+  // Claude logins (#748): its own requests, not part of Save — see claude-logins.js.
+  mountClaudeLoginsSettings(overlay.querySelector('#claude-logins-settings'));
 
   // Custom Claude config profiles (#537): add / remove rows + Browse via dir-picker.
   const customConfigsList = overlay.querySelector('#custom-configs-list');

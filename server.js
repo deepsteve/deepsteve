@@ -33,6 +33,7 @@ const { classifyScreenTail, CLAUDE_SCREEN_MARKERS } = require('./screen-classifi
 const { askingSummary } = require('./dialog-parse');
 const { TerminalScreen } = require('./terminal-screen');
 const { terminalEnv } = require('./terminal-env');
+const { createClaudeLogins, loginForSpawn, withTokenFromFile, isLoginId, TOKEN_FILE_ENV } = require('./claude-logins');
 const { readComposerDraft, hasStashedDraft, isPromptStaged, isPromptOnScreen, promptDraftVerdict } = require('./composer-state');
 const { wrapRunCommand } = require('./terminal-run');
 const { isTerminalReport, isPointerReport, hasSubmitKey } = require('./terminal-input');
@@ -1558,6 +1559,15 @@ function sessionEnv(id, { name, worktree, windowId, cwd, agentType, configDir, c
     agentCwd = getWorktreePath(agentCwd, worktree);
   }
   const codexHome = agentType === 'codex' ? ensureCodexSessionHome(codexHomeId || id) : null;
+  // Claude login (#748): resolved from the project the spawn cwd is in, on EVERY spawn —
+  // new, issue, scheduled, MCP, restore and resume all come through here — so a session
+  // comes back under its project's current login and nothing about it is stored on the
+  // session. Only the token file's PATH goes in the env; spawnSession has the pane's shell
+  // read the file, so the token never appears in tmux's argv (see claude-logins.js).
+  const claudeLogin = loginForSpawn({ agentType, cwd, configDir, contexts, logins: claudeLogins });
+  if (claudeLogin && claudeLogin.missing) {
+    log(`[claude-logins] ${id}: project "${claudeLogin.project.name}" uses "${claudeLogin.login.name}" but its token file is missing — running as System`);
+  }
   return {
     DEEPSTEVE_SESSION_ID: id,
     DEEPSTEVE_TAB_NAME: name || '',
@@ -1572,6 +1582,8 @@ function sessionEnv(id, { name, worktree, windowId, cwd, agentType, configDir, c
     // Emitted only for profile sessions, so plain sessions stay byte-for-byte identical.
     ...(configDir ? { CLAUDE_CONFIG_DIR: configDir } : {}),
     ...(codexHome ? { CODEX_HOME: codexHome } : {}),
+    // Emitted only when a login applies, so a System session's env is unchanged.
+    ...(claudeLogin && claudeLogin.tokenFile ? { [TOKEN_FILE_ENV]: claudeLogin.tokenFile } : {}),
   };
 }
 
@@ -1670,7 +1682,13 @@ function spawnSession(eng, id, agentType, args, cwd, { cols = 120, rows = 40, en
       : agentType === 'pi' ? (settings.piBinary || 'pi')
       : 'claude';
     const quoted = args.map(a => `'${a.replace(/'/g, "'\\''")}'`).join(' ');
-    shellArgs = [...loginArgs, '-c', `${bin} ${quoted}`];
+    // A Claude login (#748): sessionEnv put the token FILE's path in the env, and the
+    // pane's shell reads it into CLAUDE_CODE_OAUTH_TOKEN — so the token itself is in no
+    // argv anywhere, tmux's `-e` included. No path in the env, no prefix.
+    const agentCmd = agentType === 'claude' && extraEnv && extraEnv[TOKEN_FILE_ENV]
+      ? withTokenFromFile(`${bin} ${quoted}`)
+      : `${bin} ${quoted}`;
+    shellArgs = [...loginArgs, '-c', agentCmd];
     // Deliberately NO opts.shellCommand (#630): the tmux engine now execs
     // [cmd, ...args] verbatim, so the login flag above reaches the pane. Handing it
     // the inner command instead — #621's way of stopping a shell nesting inside a
@@ -3838,6 +3856,17 @@ try {
 // reads these via ctx.getContexts(); the Context View reads them over /api/contexts.
 let contexts = [];
 
+// Claude logins (#748): a project's `claudeLoginId` names one of these, and a Claude
+// session spawned inside that project authenticates as it. null = System (whatever
+// `claude /login` stored). Tokens live in their own 0600 files, never in settings.json
+// or contexts.json; see claude-logins.js.
+const claudeLogins = createClaudeLogins({ dir: path.join(DS_DIR, 'claude-logins'), log });
+
+// A stored or POSTed claudeLoginId, cleaned: a known login's id, else null (System).
+function cleanClaudeLoginId(v) {
+  return isLoginId(v) && claudeLogins.get(v) ? v : null;
+}
+
 function genContextId() { return randomUUID().slice(0, 8); }
 
 // True when path `p` is `dir` itself or nested inside it (trailing slashes ignored).
@@ -3877,7 +3906,7 @@ function loadContexts() {
       const v = JSON.parse(fs.readFileSync(CONTEXTS_FILE, 'utf8'));
       contexts = (Array.isArray(v) ? v : [])
         .filter(c => c && typeof c.name === 'string')
-        .map(c => ({ id: c.id || genContextId(), name: c.name, dirs: Array.isArray(c.dirs) ? c.dirs.filter(Boolean) : [], icon: typeof c.icon === 'string' ? c.icon : '', iconImage: (c.iconImage === 'png' || c.iconImage === 'svg') ? c.iconImage : '', archived: c.archived === true, alwaysShowMods: c.alwaysShowMods !== false, builtin: c.builtin === true, welcomedAt: Number(c.welcomedAt) || 0, pipeline: issuePipeline.normalizePipeline(c.pipeline, { level: 'project' }) }));
+        .map(c => ({ id: c.id || genContextId(), name: c.name, dirs: Array.isArray(c.dirs) ? c.dirs.filter(Boolean) : [], icon: typeof c.icon === 'string' ? c.icon : '', iconImage: (c.iconImage === 'png' || c.iconImage === 'svg') ? c.iconImage : '', archived: c.archived === true, alwaysShowMods: c.alwaysShowMods !== false, builtin: c.builtin === true, welcomedAt: Number(c.welcomedAt) || 0, pipeline: issuePipeline.normalizePipeline(c.pipeline, { level: 'project' }), claudeLoginId: cleanClaudeLoginId(c.claudeLoginId) }));
       return;
     }
   } catch (e) {
@@ -3951,7 +3980,7 @@ function seedDeepsteveContext() {
   contexts.unshift({
     id: DEEPSTEVE_CONTEXT_ID, name: DEEPSTEVE_CONTEXT_NAME, dirs: [dir],
     icon: '', iconImage, archived: false, alwaysShowMods: true,
-    builtin: true, welcomedAt: 0, pipeline: null,
+    builtin: true, welcomedAt: 0, pipeline: null, claudeLoginId: null,
   });
   saveContexts();
   log(`[deepsteve-project] seeded the built-in project at ${dir}`);
@@ -6774,10 +6803,21 @@ app.post('/api/contexts', (req, res) => {
   // this handler never reads either one off the request body: only seedDeepsteveContext()
   // mints a built-in and only POST /api/contexts/:id/welcome stamps the visit, so no
   // client can forge a built-in project or un-see the welcome tab. The `existing` branch
-  // below assigns exactly the four editable fields, which is what carries them through an
+  // below assigns exactly the editable fields, which is what carries them through an
   // edit — renaming Deep Steve or repointing its folder must not demote it.
-  if (existing) { existing.name = name; existing.dirs = dirs; existing.icon = icon; existing.iconImage = iconImage; }
-  else contexts.push({ id, name, dirs, icon, iconImage, archived: false, alwaysShowMods: true, builtin: false, welcomedAt: 0, pipeline: null });
+  // `claudeLoginId` (#748) IS one of the editor's fields — the Edit dialog's Claude Login
+  // row — but optional on the wire like `icon`: a body without the key keeps the stored
+  // value, so an older client (or any other caller of this upsert) cannot silently move a
+  // project back to System. An unknown id is System, never an error that loses the edit.
+  const claudeLoginId = Object.prototype.hasOwnProperty.call(b, 'claudeLoginId')
+    ? cleanClaudeLoginId(b.claudeLoginId)
+    : (existing ? existing.claudeLoginId || null : null);
+  if (existing && (existing.claudeLoginId || null) !== claudeLoginId) {
+    const to = claudeLoginId ? `"${claudeLogins.get(claudeLoginId).name}"` : 'System';
+    log(`[claude-logins] project "${name}" now uses ${to} (new and resumed sessions; running ones keep theirs)`);
+  }
+  if (existing) { existing.name = name; existing.dirs = dirs; existing.icon = icon; existing.iconImage = iconImage; existing.claudeLoginId = claudeLoginId; }
+  else contexts.push({ id, name, dirs, icon, iconImage, archived: false, alwaysShowMods: true, builtin: false, welcomedAt: 0, pipeline: null, claudeLoginId });
   saveContexts();
   broadcastContexts();
   res.json({ contexts });
@@ -6798,6 +6838,37 @@ app.delete('/api/contexts/:id', (req, res) => {
   saveContexts();
   broadcastContexts();
   res.json({ deleted: req.params.id });
+});
+
+// --- Claude logins (#748) ---
+// Managed in Settings → Claude logins; picked per project in the project editor. Nothing
+// here ever returns a token — only its `hint` — and nothing is broadcast: both surfaces
+// fetch the list when they open, so there is no copy in a browser to go stale or leak.
+app.get('/api/claude-logins', (req, res) => res.json({ logins: claudeLogins.list() }));
+
+app.post('/api/claude-logins', (req, res) => {
+  const b = req.body || {};
+  const r = claudeLogins.add({ name: b.name, token: b.token });
+  if (r.error) return res.status(400).json({ error: r.error });
+  res.json({ login: r.login, logins: claudeLogins.list() });
+});
+
+// Removing a login moves every project on it back to System, here and in one step, so
+// no project is ever left naming a login that is gone.
+app.delete('/api/claude-logins/:id', (req, res) => {
+  const login = claudeLogins.get(req.params.id);
+  if (!login) return res.status(404).json({ error: 'No such login' });
+  claudeLogins.remove(login.id);
+  const moved = [];
+  for (const c of contexts) {
+    if (c.claudeLoginId === login.id) { c.claudeLoginId = null; moved.push(c.name); }
+  }
+  if (moved.length) {
+    saveContexts();
+    broadcastContexts();
+    log(`[claude-logins] ${moved.length} project(s) moved to System: ${moved.join(', ')}`);
+  }
+  res.json({ logins: claudeLogins.list(), movedToSystem: moved });
 });
 
 // --- Per-context uploaded icon images (#579) ---

@@ -2438,6 +2438,31 @@ kbd {
 .context-recent-select { flex: 1; padding: 6px; background: var(--ds-bg-primary); border: 1px solid var(--ds-border); border-radius: 4px; color: var(--ds-text-primary); font-size: 12px; }
 .context-dir-chooser .context-choose-dir { display: block; width: 100%; text-align: left; margin-bottom: 6px; font-family: monospace; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
+/* Claude Login row in the project editor (#748) — one push button per login */
+.context-login { margin-bottom: 16px; }
+.context-login-label { font-size: 12px; font-weight: 600; color: var(--ds-text-primary); margin-bottom: 6px; }
+.context-login-options { display: flex; flex-wrap: wrap; gap: 6px; }
+.context-login-btn { padding: 4px 12px; font-size: 12px; border-radius: 4px; border: 1px solid var(--ds-border); background: var(--ds-bg-primary); color: var(--ds-text-secondary); cursor: pointer; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.context-login-btn:hover:not(:disabled) { color: var(--ds-text-primary); border-color: var(--ds-text-secondary); }
+.context-login-btn.active { color: var(--ds-accent-blue); border-color: var(--ds-accent-blue); background: var(--ds-bg-secondary); }
+.context-login-btn:disabled { cursor: default; opacity: 0.7; }
+.context-login-note { font-size: 11px; color: var(--ds-text-secondary); margin-top: 6px; }
+
+/* Settings → Agents → Claude logins (#748) */
+.claude-logins-list { display: flex; flex-direction: column; gap: 4px; margin-bottom: 8px; }
+.claude-logins-empty { font-size: 12px; color: var(--ds-text-secondary); }
+.claude-login-row { display: flex; align-items: center; gap: 8px; background: var(--ds-bg-primary); border: 1px solid var(--ds-border); border-radius: 4px; padding: 4px 8px; font-size: 12px; }
+.claude-login-row-name { flex: 1; color: var(--ds-text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.claude-login-row-hint { font-family: monospace; color: var(--ds-text-secondary); }
+.claude-login-remove, .claude-login-add-btn { padding: 4px 8px; font-size: 12px; border-radius: 4px; border: 1px solid var(--ds-border); background: var(--ds-bg-secondary); color: var(--ds-text-primary); cursor: pointer; }
+.claude-login-remove:hover { color: var(--ds-accent-red); }
+.claude-logins-add { display: flex; gap: 6px; align-items: center; }
+.claude-logins-add input { padding: 4px 8px; border-radius: 4px; border: 1px solid var(--ds-border); background: var(--ds-bg-secondary); color: var(--ds-text-primary); font-size: 12px; }
+.claude-logins-add .claude-login-name { width: 130px; }
+.claude-logins-add .claude-login-token { flex: 1; min-width: 120px; font-family: monospace; }
+.claude-logins-status { font-size: 11px; color: var(--ds-text-secondary); margin-top: 6px; min-height: 1em; }
+.claude-logins-status.error { color: var(--ds-accent-red); }
+
 /* Issue pipeline stage editor (#717) — Settings → GitHub and the project rail's "Issue pipeline…" */
 .pipeline-editor { display: flex; flex-direction: column; gap: 6px; margin-bottom: 12px; }
 .pipeline-stage { background: var(--ds-bg-primary); border: 1px solid var(--ds-border); border-radius: 4px; padding: 6px 8px; }
