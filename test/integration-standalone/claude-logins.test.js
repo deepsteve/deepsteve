@@ -19,6 +19,8 @@
  *   - Moving a project leaves a running session alone, and a session respawned after
  *     the move (a restore, via --resume) comes back under the NEW login.
  *   - Removing a login moves its projects to System and deletes its token file.
+ *   - A login's plan reaches its sessions as CLAUDE_CODE_SUBSCRIPTION_TYPE, a System
+ *     session gets none, and changing the plan applies at the next spawn.
  *
  * Run directly: node --test --test-timeout=180000 test/integration-standalone/claude-logins.test.js
  * or: sh test/run-standalone.sh
@@ -40,10 +42,10 @@ const SKIP = TmuxSandbox.skipReason();
 const TOKEN_WORK = 'sk-ant-oat01-WORKWORKWORKWORKWORKWORKWORKWORKwork';
 const TOKEN_PERSONAL = 'sk-ant-oat01-PERSONALPERSONALPERSONALPERSONALpers';
 
-// Stub `claude`: logs the token it was started with plus its argv, then acts like a
+// Stub `claude`: logs the token and plan it was started with plus its argv, then acts like a
 // live REPL so the session stays up until /exit.
 const CLAUDE_STUB = `#!/bin/bash
-echo "token=\${CLAUDE_CODE_OAUTH_TOKEN:-<none>} args=$*" >> "$HOME/claude-invocations.log"
+echo "token=\${CLAUDE_CODE_OAUTH_TOKEN:-<none>} sub=\${CLAUDE_CODE_SUBSCRIPTION_TYPE:-<none>} args=$*" >> "$HOME/claude-invocations.log"
 while IFS= read -r line; do
   case "$line" in *"/exit"*) exit 0 ;; esac
 done
@@ -140,6 +142,12 @@ async function tokenSeenFor(marker, { resume = false } = {}) {
     `stub invocation carrying ${marker}${resume ? ' with --resume' : ''}`);
   return line.match(/^token=(\S+)/)[1];
 }
+// The plan (CLAUDE_CODE_SUBSCRIPTION_TYPE) the stub saw for that spawn.
+async function planSeenFor(marker, { resume = false } = {}) {
+  const line = await waitFor(() => stubLines().find(l => l.includes(marker) && (!resume || l.includes('--resume'))),
+    `stub invocation carrying ${marker}${resume ? ' with --resume' : ''}`);
+  return line.match(/ sub=(\S+)/)[1];
+}
 
 // Claude Code's project-dir encoding (mirrors claudeProjectDir in server.js).
 function transcriptPath(cwd, sessionId) {
@@ -207,7 +215,8 @@ test('the API stores a token and never hands one back', { skip: SKIP }, async ()
   assert.match(bad.json.error, /line/);
   assert.strictEqual((await api('POST', '/api/claude-logins', { name: 'System', token: TOKEN_WORK })).status, 400);
 
-  const w = await api('POST', '/api/claude-logins', { name: 'Work', token: TOKEN_WORK });
+  assert.match((await api('POST', '/api/claude-logins', { name: 'Work', token: TOKEN_WORK, plan: 'team' })).json.error, /plan/);
+  const w = await api('POST', '/api/claude-logins', { name: 'Work', token: TOKEN_WORK, plan: 'max' });
   assert.strictEqual(w.status, 200, w.text);
   workId = w.json.login.id;
   const p = await api('POST', '/api/claude-logins', { name: 'Personal', token: TOKEN_PERSONAL });
@@ -215,7 +224,7 @@ test('the API stores a token and never hands one back', { skip: SKIP }, async ()
   assert.strictEqual((await api('POST', '/api/claude-logins', { name: 'work', token: TOKEN_WORK })).status, 400, 'names are unique ignoring case');
 
   const list = await api('GET', '/api/claude-logins');
-  assert.deepStrictEqual(list.json.logins.map(l => [l.name, l.hint, l.missing]), [['Work', '…work', false], ['Personal', '…pers', false]]);
+  assert.deepStrictEqual(list.json.logins.map(l => [l.name, l.hint, l.plan, l.missing]), [['Work', '…work', 'max', false], ['Personal', '…pers', 'pro', false]]);
   for (const r of [w, p, list]) {
     assert.ok(!r.text.includes(TOKEN_WORK) && !r.text.includes(TOKEN_PERSONAL), 'no response carries a token');
   }
@@ -223,6 +232,8 @@ test('the API stores a token and never hands one back', { skip: SKIP }, async ()
   assert.strictEqual(fs.readFileSync(file, 'utf8'), TOKEN_WORK);
   assert.strictEqual(fs.statSync(file).mode & 0o777, 0o600);
   assert.strictEqual((await api('DELETE', '/api/claude-logins/ffff0000')).status, 404);
+  assert.strictEqual((await api('POST', '/api/claude-logins/ffff0000', { plan: 'max' })).status, 404);
+  assert.strictEqual((await api('POST', `/api/claude-logins/${personalId}`, { plan: 'enterprise' })).status, 400);
 });
 
 test('a project carries the login it is assigned; an unknown id is System', { skip: SKIP }, async () => {
@@ -243,9 +254,11 @@ test('a Claude session signs in as its project\'s login, and only that', { skip:
   assert.strictEqual(w.engineType, 'tmux', 'the default engine, where env travels as tmux -e');
   workSession = { id: w.id, claudeSessionId: w.claudeSessionId };
   assert.strictEqual(await tokenSeenFor(w.claudeSessionId), TOKEN_WORK);
+  assert.strictEqual(await planSeenFor(w.claudeSessionId), 'max', 'the login\'s plan, not a fixed one');
 
   const h = await track(new Client()).connect({ cwd: projHome, new: '1', agentType: 'claude' });
   assert.strictEqual(await tokenSeenFor(h.claudeSessionId), '<none>', 'unassigned project → System');
+  assert.strictEqual(await planSeenFor(h.claudeSessionId), '<none>', 'System keeps its stored login\'s own plan');
 
   const e = await track(new Client()).connect({ cwd: elsewhere, new: '1', agentType: 'claude' });
   assert.strictEqual(await tokenSeenFor(e.claudeSessionId), '<none>', 'no project → System');
@@ -254,8 +267,12 @@ test('a Claude session signs in as its project\'s login, and only that', { skip:
   const env = sandbox.run(['show-environment', '-t', `ds-${w.id}`]);
   assert.ok(env.includes(`DEEPSTEVE_CLAUDE_TOKEN_FILE=${path.join(HOME, '.deepsteve', 'claude-logins', `${workId}.token`)}`), env);
   assert.ok(!env.includes(TOKEN_WORK), 'the token is not in the tmux environment');
+  // An injected token has no plan, and a null plan makes Claude fetch remote managed
+  // settings with it and print a 401 warning; the login's session names one.
+  assert.ok(env.includes('CLAUDE_CODE_SUBSCRIPTION_TYPE=max'), env);
   const homeEnv = sandbox.run(['show-environment', '-t', `ds-${h.id}`]);
   assert.ok(!homeEnv.includes('DEEPSTEVE_CLAUDE_TOKEN_FILE'), 'a System session gets no token file at all');
+  assert.ok(!homeEnv.includes('CLAUDE_CODE_SUBSCRIPTION_TYPE'), 'a System session keeps its stored login\'s own plan');
   assert.ok(!daemonLog.includes(TOKEN_WORK) && !daemonLog.includes(TOKEN_PERSONAL), 'the daemon never logs a token');
 });
 
@@ -264,6 +281,7 @@ test('a plain terminal tab in an assigned project gets no token file', { skip: S
   const env = await waitFor(() => { try { return sandbox.run(['show-environment', '-t', `ds-${t.id}`]); } catch { return null; } },
     'terminal tmux session');
   assert.ok(!env.includes('DEEPSTEVE_CLAUDE_TOKEN_FILE'), env);
+  assert.ok(!env.includes('CLAUDE_CODE_SUBSCRIPTION_TYPE'), env);
 });
 
 test('an edit that leaves out claudeLoginId keeps the login', { skip: SKIP }, async () => {
@@ -278,6 +296,10 @@ test('moving a project: running sessions keep theirs, a respawned one comes back
   assert.match(daemonLog, /project "Work repo" now uses "Personal"/);
   const runningEnv = sandbox.run(['show-environment', '-t', `ds-${workSession.id}`]);
   assert.ok(runningEnv.includes(`${workId}.token`), 'the live session was not touched');
+  // A plan change applies at the next spawn too: Personal was added as Pro.
+  const pl = await api('POST', `/api/claude-logins/${personalId}`, { plan: 'max' });
+  assert.strictEqual(pl.status, 200, pl.text);
+  assert.strictEqual(pl.json.login.plan, 'max');
 
   // Give it a transcript so the restore takes the --resume path, then take its pane
   // down while the daemon is stopped: startup finds no pane, and the reconnect
@@ -293,6 +315,7 @@ test('moving a project: running sessions keep theirs, a respawned one comes back
   const r = await track(new Client()).connect({ cwd: projWork, id: workSession.id });
   assert.strictEqual(r.id, workSession.id);
   assert.strictEqual(await tokenSeenFor(workSession.claudeSessionId, { resume: true }), TOKEN_PERSONAL);
+  assert.strictEqual(await planSeenFor(workSession.claudeSessionId, { resume: true }), 'max');
 });
 
 test('removing a login moves its projects to System and deletes its token', { skip: SKIP }, async () => {

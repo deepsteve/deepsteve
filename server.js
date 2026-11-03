@@ -33,7 +33,7 @@ const { classifyScreenTail, CLAUDE_SCREEN_MARKERS } = require('./screen-classifi
 const { askingSummary } = require('./dialog-parse');
 const { TerminalScreen } = require('./terminal-screen');
 const { terminalEnv } = require('./terminal-env');
-const { createClaudeLogins, loginForSpawn, withTokenFromFile, isLoginId, TOKEN_FILE_ENV } = require('./claude-logins');
+const { createClaudeLogins, loginForSpawn, withTokenFromFile, isLoginId, TOKEN_FILE_ENV, SUBSCRIPTION_ENV } = require('./claude-logins');
 const { readComposerDraft, hasStashedDraft, isPromptStaged, isPromptOnScreen, promptDraftVerdict } = require('./composer-state');
 const { wrapRunCommand } = require('./terminal-run');
 const { isTerminalReport, isPointerReport, hasSubmitKey } = require('./terminal-input');
@@ -1582,8 +1582,12 @@ function sessionEnv(id, { name, worktree, windowId, cwd, agentType, configDir, c
     // Emitted only for profile sessions, so plain sessions stay byte-for-byte identical.
     ...(configDir ? { CLAUDE_CONFIG_DIR: configDir } : {}),
     ...(codexHome ? { CODEX_HOME: codexHome } : {}),
-    // Emitted only when a login applies, so a System session's env is unchanged.
-    ...(claudeLogin && claudeLogin.tokenFile ? { [TOKEN_FILE_ENV]: claudeLogin.tokenFile } : {}),
+    // Emitted only when a login applies, so a System session's env is unchanged. The
+    // login's plan rides along because an injected token has none (see SUBSCRIPTION_ENV);
+    // it is not a secret, so unlike the token it can travel in the env.
+    ...(claudeLogin && claudeLogin.tokenFile
+      ? { [TOKEN_FILE_ENV]: claudeLogin.tokenFile, [SUBSCRIPTION_ENV]: claudeLogin.login.plan }
+      : {}),
   };
 }
 
@@ -3861,6 +3865,14 @@ let contexts = [];
 // `claude /login` stored). Tokens live in their own 0600 files, never in settings.json
 // or contexts.json; see claude-logins.js.
 const claudeLogins = createClaudeLogins({ dir: path.join(DS_DIR, 'claude-logins'), log });
+// What mods get (the Quota mod reads each login's usage): look, don't touch. Adding,
+// removing and re-planning a login stay with the routes below, which keep projects
+// consistent with the change. tokenFile is a path; reading it is the mod's own act.
+const claudeLoginsForMods = Object.freeze({
+  list: () => claudeLogins.list(),
+  get: (id) => { const l = claudeLogins.get(id); return l ? { ...l } : null; },
+  tokenFile: (id) => claudeLogins.tokenFile(id),
+});
 
 // A stored or POSTed claudeLoginId, cleaned: a known login's id, else null (System).
 function cleanClaudeLoginId(v) {
@@ -6848,8 +6860,17 @@ app.get('/api/claude-logins', (req, res) => res.json({ logins: claudeLogins.list
 
 app.post('/api/claude-logins', (req, res) => {
   const b = req.body || {};
-  const r = claudeLogins.add({ name: b.name, token: b.token });
+  const r = claudeLogins.add({ name: b.name, token: b.token, plan: b.plan });
   if (r.error) return res.status(400).json({ error: r.error });
+  res.json({ login: r.login, logins: claudeLogins.list() });
+});
+
+// The plan is the one thing about a login that changes in place; the token never does
+// (remove the login and add it again). Takes effect at each session's next spawn.
+app.post('/api/claude-logins/:id', (req, res) => {
+  const b = req.body || {};
+  const r = claudeLogins.setPlan(req.params.id, b.plan);
+  if (r.error) return res.status(r.notFound ? 404 : 400).json({ error: r.error });
   res.json({ login: r.login, logins: claudeLogins.list() });
 });
 
@@ -9506,7 +9527,7 @@ function broadcastToWindow(windowId, msg) {
 // assigns unconditionally, and nothing here awaits the first call). The chat pane's
 // transcript reader was therefore dead from the day it shipped, silently falling back
 // to the inbox_say store. Adding a ctx field means editing this line, never copying it.
-initMCP({ app, security, shells, wss, broadcast, broadcastToWindow, log, MODS_DIR, closeSession, tombstoneSession, handleShellGone, spawnSession, sessionEnv, getSpawnArgs, mcpConfigArgs, getAgentConfig, resolveConfigDir, validateModel, validateEffort, wireShellOutput, watchClaudeSessionDir, unwatchClaudeSessionDir, resolveForkParentSession, transcriptPath, saveState, validateWorktree, ensureWorktree, sessionPaths, submitToShell, fetchIssueFromGitHub, deliverPromptWhenReady, startIssueSession, reloadClients, pendingOpens, deliverToWindow, noteSpawnDelivery, settings, isShuttingDown: () => shuttingDown, displayTabs, setDisplayTab, deleteDisplayTab, isDisplayTabLocked, setDisplayTabLocked, screenshots, setScreenshot, deleteScreenshot, getScreenshotPath, getDefaultEngine, getForegroundCommand, sessionLog, emitSessionOpen, getContexts: () => contexts, pathInside, getSavedSession: (id) => savedState[id] || null, links, linkUrl: links.urlFor, spawnAgentSession, stripEscapeSequences, readTerminalScreen, sessionInputState, setMergeBlock, recordMergeAttempt, maybeInheritRemoteControl, requestMetaControlsConsent, registerRestartBlocker, registerSubmitKeyObserver, registerDisplayTabHooks, armSessionAutoClose, issueReviewEnabled, logRcWrite }).catch(e => log('MCP init failed:', e.message));
+initMCP({ app, security, shells, wss, broadcast, broadcastToWindow, log, MODS_DIR, closeSession, tombstoneSession, handleShellGone, spawnSession, sessionEnv, getSpawnArgs, mcpConfigArgs, getAgentConfig, resolveConfigDir, validateModel, validateEffort, wireShellOutput, watchClaudeSessionDir, unwatchClaudeSessionDir, resolveForkParentSession, transcriptPath, saveState, validateWorktree, ensureWorktree, sessionPaths, submitToShell, fetchIssueFromGitHub, deliverPromptWhenReady, startIssueSession, reloadClients, pendingOpens, deliverToWindow, noteSpawnDelivery, settings, isShuttingDown: () => shuttingDown, displayTabs, setDisplayTab, deleteDisplayTab, isDisplayTabLocked, setDisplayTabLocked, screenshots, setScreenshot, deleteScreenshot, getScreenshotPath, getDefaultEngine, getForegroundCommand, sessionLog, emitSessionOpen, getContexts: () => contexts, claudeLogins: claudeLoginsForMods, pathInside, getSavedSession: (id) => savedState[id] || null, links, linkUrl: links.urlFor, spawnAgentSession, stripEscapeSequences, readTerminalScreen, sessionInputState, setMergeBlock, recordMergeAttempt, maybeInheritRemoteControl, requestMetaControlsConsent, registerRestartBlocker, registerSubmitKeyObserver, registerDisplayTabHooks, armSessionAutoClose, issueReviewEnabled, logRcWrite }).catch(e => log('MCP init failed:', e.message));
 
 // Watch themes directory for changes and broadcast to clients
 let themeWatchDebounce = null;

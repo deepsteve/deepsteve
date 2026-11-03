@@ -13,7 +13,7 @@
  * install that never adds a login spawns byte-for-byte what it did before.
  *
  * On disk, under <stateDir>/claude-logins/ (0700):
- *   index.json     { version: 1, logins: [{ id, name, hint, addedAt }] }   (0600)
+ *   index.json     { version: 1, logins: [{ id, name, hint, plan, addedAt }] }   (0600)
  *   <id>.token     the token itself, nothing else                          (0600)
  *
  * Not settings.json, on purpose: settings are broadcast to every browser, logged on
@@ -38,6 +38,25 @@ const { randomUUID } = require('crypto');
 const TOKEN_ENV = 'CLAUDE_CODE_OAUTH_TOKEN';
 /** The variable a session's env carries instead: the path of the token file. */
 const TOKEN_FILE_ENV = 'DEEPSTEVE_CLAUDE_TOKEN_FILE';
+/**
+ * A token injected through CLAUDE_CODE_OAUTH_TOKEN carries no plan: Claude Code 2.1.317
+ * builds it with `subscriptionType: CLAUDE_CODE_SUBSCRIPTION_TYPE || null`, and the
+ * banner reads "Claude API". A null plan might be Team/Enterprise, so Claude also fetches
+ * remote managed settings with the token, and when that fetch fails every session opens
+ * on "⚠ Remote managed settings failed to load (authentication rejected (401))". Naming
+ * a personal plan makes the fetch ineligible (measured: no request at all), so each login
+ * stores its plan and its sessions get it in this variable. The plan also drives
+ * client-side choices (the banner, usage messaging, plan-gated defaults), which is why it
+ * is the account's real plan and not one fixed value.
+ *
+ * Personal plans only: a Team or Enterprise account has a policy to fetch, and this
+ * would skip it.
+ */
+const SUBSCRIPTION_ENV = 'CLAUDE_CODE_SUBSCRIPTION_TYPE';
+const PLANS = ['pro', 'max'];
+// A login saved before plans existed. The only one there was is a Pro account.
+const DEFAULT_PLAN = 'pro';
+const isPlan = (p) => PLANS.includes(p);
 
 const NAME_MAX = 40;
 const TOKEN_MAX = 4096;
@@ -114,7 +133,7 @@ function createClaudeLogins({ dir, genId = () => randomUUID().replace(/-/g, '').
     for (const r of rows) {
       if (!r || !isLoginId(r.id) || typeof r.name !== 'string' || !r.name) continue;
       if (logins.some(l => l.id === r.id)) continue;
-      logins.push({ id: r.id, name: r.name, hint: typeof r.hint === 'string' ? r.hint : '…', addedAt: Number(r.addedAt) || 0 });
+      logins.push({ id: r.id, name: r.name, hint: typeof r.hint === 'string' ? r.hint : '…', plan: isPlan(r.plan) ? r.plan : DEFAULT_PLAN, addedAt: Number(r.addedAt) || 0 });
     }
   }
 
@@ -133,11 +152,12 @@ function createClaudeLogins({ dir, genId = () => randomUUID().replace(/-/g, '').
   }
 
   /** Add a login. Returns { login } (without the token) or { error }. */
-  function add({ name, token } = {}) {
+  function add({ name, token, plan = DEFAULT_PLAN } = {}) {
     const n = cleanName(name, logins.map(l => l.name));
     if (n.error) return { error: n.error };
     const t = cleanToken(token);
     if (t.error) return { error: t.error };
+    if (!isPlan(plan)) return { error: `The plan must be one of: ${PLANS.join(', ')}.` };
     let id = genId();
     for (let i = 0; i < 5 && (!isLoginId(id) || get(id)); i++) id = genId();
     if (!isLoginId(id) || get(id)) return { error: 'Could not mint a login id.' };
@@ -145,11 +165,24 @@ function createClaudeLogins({ dir, genId = () => randomUUID().replace(/-/g, '').
     // Token first, index second: a crash in between leaves an orphan file nothing
     // points at, never an index row whose token was never written.
     writePrivate(tokenPath(id), t.token);
-    const login = { id, name: n.name, hint: tokenHint(t.token), addedAt: now() };
+    const login = { id, name: n.name, hint: tokenHint(t.token), plan, addedAt: now() };
     logins.push(login);
     save();
-    log(`[claude-logins] added "${login.name}" (${id})`);
+    log(`[claude-logins] added "${login.name}" (${id}, ${plan})`);
     return { login: { ...login, missing: false } };
+  }
+
+  /** Change a login's plan. Returns { login } or { error }; `notFound` for an unknown id. */
+  function setPlan(id, plan) {
+    const login = get(id);
+    if (!login) return { error: 'No such login', notFound: true };
+    if (!isPlan(plan)) return { error: `The plan must be one of: ${PLANS.join(', ')}.` };
+    if (login.plan !== plan) {
+      login.plan = plan;
+      save();
+      log(`[claude-logins] "${login.name}" (${id}) is now ${plan} (sessions started or resumed after this)`);
+    }
+    return { login: { ...login, missing: !fs.existsSync(tokenPath(id)) } };
   }
 
   /** Remove a login and its token file. False when there was no such login. */
@@ -173,7 +206,7 @@ function createClaudeLogins({ dir, genId = () => randomUUID().replace(/-/g, '').
   }
 
   load();
-  return { list, get, add, remove, tokenFile, load, dir };
+  return { list, get, add, setPlan, remove, tokenFile, load, dir };
 }
 
 // True when `p` is `dir` or inside it. Same rule as server.js's pathInside, so "this
@@ -238,5 +271,5 @@ function withTokenFromFile(command) {
 module.exports = {
   createClaudeLogins, loginForSpawn, projectForCwd, withTokenFromFile,
   tokenHint, cleanToken, cleanName, isLoginId,
-  TOKEN_ENV, TOKEN_FILE_ENV,
+  TOKEN_ENV, TOKEN_FILE_ENV, SUBSCRIPTION_ENV, PLANS, DEFAULT_PLAN,
 };

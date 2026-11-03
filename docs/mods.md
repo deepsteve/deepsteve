@@ -499,6 +499,7 @@ Both `init` and `registerRoutes` receive a context object:
 | `shells` | Map of active shell instances |
 | `wss` | WebSocket server instance |
 | `MODS_DIR` | Absolute path to the `mods/` directory |
+| `claudeLogins` | `{ list(), get(id), tokenFile(id) }` — the Claude logins (#748), read-only. `list`/`get` never carry a token; `tokenFile` is the path of the 0600 file holding one. Resolve a project's login from `getContexts()`' `claudeLoginId` (null = System) |
 | `transcriptPath` | `transcriptPath(entry)` — where a session's `.jsonl` **would** be, or `null` if it has no `claudeSessionId`. It does not ask whether the agent keeps a transcript at all; a caller that cares must check `getAgentConfig(agentType).supportsSessionWatch` itself. Re-derive it every time — a fork rewrites the transcript id with no event (#670, #672) |
 
 The table is the short list, not the whole object: `initMCP` (`server.js`) hands both

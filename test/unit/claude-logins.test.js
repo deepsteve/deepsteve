@@ -40,7 +40,7 @@ test('adding a login writes the token to its own 0600 file, in a 0700 dir, and n
 
   const r = s.add({ name: 'Work', token: `  ${TOKEN_A}\n` });
   assert.ok(r.login, r.error);
-  assert.deepStrictEqual(r.login, { id: 'aaaa0001', name: 'Work', hint: '…wxyz', addedAt: 1000, missing: false });
+  assert.deepStrictEqual(r.login, { id: 'aaaa0001', name: 'Work', hint: '…wxyz', plan: 'pro', addedAt: 1000, missing: false });
 
   const tokenFile = path.join(s.dir, 'aaaa0001.token');
   assert.strictEqual(fs.readFileSync(tokenFile, 'utf8'), TOKEN_A, 'trimmed, and nothing but the token');
@@ -99,6 +99,29 @@ test('removing a login deletes its token file; an unknown id is a no-op', (t) =>
   assert.deepStrictEqual(store(root, []).list().map(l => l.id), ['bbbb0002'], 'the removal is on disk');
   assert.strictEqual(s.remove('aaaa0001'), false);
   assert.strictEqual(s.remove('nope'), false);
+});
+
+test('a login has a plan: chosen at add, changed in place, Pro for a row saved before plans', (t) => {
+  const root = scratch();
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const s = store(root);
+  assert.strictEqual(s.add({ name: 'Work', token: TOKEN_A, plan: 'max' }).login.plan, 'max');
+  assert.strictEqual(s.add({ name: 'Personal', token: TOKEN_B }).login.plan, 'pro', 'no plan sent → Pro');
+  assert.match(s.add({ name: 'Team', token: TOKEN_B, plan: 'team' }).error, /plan must be one of: pro, max/);
+  assert.strictEqual(s.list().length, 2, 'a refused plan adds nothing');
+
+  assert.strictEqual(s.setPlan('bbbb0002', 'max').login.plan, 'max');
+  assert.match(s.setPlan('bbbb0002', 'enterprise').error, /plan must be one of/);
+  assert.strictEqual(s.get('bbbb0002').plan, 'max', 'a refused change keeps the old plan');
+  assert.strictEqual(s.setPlan('nope0000', 'pro').notFound, true);
+  assert.deepStrictEqual(store(root, []).list().map(l => [l.name, l.plan]), [['Work', 'max'], ['Personal', 'max']], 'plans are on disk');
+
+  // A row written before plans existed, or hand-edited to something else, reads as Pro.
+  const idx = JSON.parse(fs.readFileSync(path.join(s.dir, 'index.json'), 'utf8'));
+  delete idx.logins[0].plan;
+  idx.logins[1].plan = 'team';
+  fs.writeFileSync(path.join(s.dir, 'index.json'), JSON.stringify(idx));
+  assert.deepStrictEqual(store(root, []).list().map(l => l.plan), ['pro', 'pro']);
 });
 
 test('a token file that went missing is reported, and resolves to no file', (t) => {

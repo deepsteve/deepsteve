@@ -12,7 +12,22 @@
 
 import { fetchJSON } from './api.js';
 
-/** Every login: [{ id, name, hint, addedAt, missing }]. Throws HttpError / TypeError. */
+/** The plans a login can be on, in the order the UI offers them. Server: claude-logins.js PLANS. */
+const PLANS = [['pro', 'Pro'], ['max', 'Max']];
+
+function planSelect(className, value) {
+  const s = el('select', className);
+  for (const [v, label] of PLANS) {
+    const o = el('option', '', label);
+    o.value = v;
+    s.appendChild(o);
+  }
+  s.value = value || PLANS[0][0];
+  s.title = "The account's plan. Claude Code can't read it from a token, so it is told.";
+  return s;
+}
+
+/** Every login: [{ id, name, hint, plan, addedAt, missing }]. Throws HttpError / TypeError. */
 export async function fetchClaudeLogins() {
   const d = await fetchJSON('/api/claude-logins');
   return Array.isArray(d && d.logins) ? d.logins : [];
@@ -109,9 +124,10 @@ export function mountClaudeLoginsSettings(container, { fetchLogins = fetchClaude
   tokenInput.placeholder = 'Paste token';
   tokenInput.autocomplete = 'off';
   tokenInput.spellcheck = false;
+  const planInput = planSelect('claude-login-plan');
   const addBtn = el('button', 'claude-login-add-btn', 'Add login');
   addBtn.type = 'button';
-  form.append(nameInput, tokenInput, addBtn);
+  form.append(nameInput, tokenInput, planInput, addBtn);
   container.replaceChildren(list, form, status);
 
   function say(text, isError = false) {
@@ -130,6 +146,26 @@ export function mountClaudeLoginsSettings(container, { fetchLogins = fetchClaude
       row.dataset.loginId = l.id;
       row.appendChild(el('span', 'claude-login-row-name', l.name));
       row.appendChild(el('span', 'claude-login-row-hint', l.missing ? 'token file missing' : l.hint));
+      const plan = planSelect('claude-login-row-plan', l.plan);
+      plan.onchange = async () => {
+        const want = plan.value;
+        plan.disabled = true;
+        try {
+          const d = await fetchJSON('/api/claude-logins/' + encodeURIComponent(l.id), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ plan: want }),
+          });
+          l.plan = d.login ? d.login.plan : want;
+          say(`"${l.name}" is ${plan.selectedOptions[0].textContent}. Applies to sessions started or resumed from now on.`);
+        } catch (e) {
+          plan.value = l.plan;
+          say(`Could not change the plan: ${e.message}`, true);
+        } finally {
+          plan.disabled = false;
+        }
+      };
+      row.appendChild(plan);
       const rm = el('button', 'claude-login-remove', 'Remove');
       rm.type = 'button';
       rm.onclick = async () => {
@@ -160,10 +196,11 @@ export function mountClaudeLoginsSettings(container, { fetchLogins = fetchClaude
       const d = await fetchJSON('/api/claude-logins', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name, token }),
+        body: JSON.stringify({ name, token, plan: planInput.value }),
       });
       nameInput.value = '';
       tokenInput.value = '';
+      planInput.value = PLANS[0][0];
       renderList(d.logins || []);
       say(`Added "${d.login ? d.login.name : name}". Pick it for a project in that project's Edit dialog.`);
     } catch (e) {
