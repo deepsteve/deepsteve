@@ -2,7 +2,7 @@
   "name": "Monkey Code",
   "version": "0.9.0",
   "minDeepsteveVersion": "0.4.0",
-  "description": "A monkey tagging game in WebXR. Works with a Mac running DeepSteve, connected over HTTPS. See the <a href=\"https://github.com/deepsteve/deepsteve\">README</a> for setup instructions.",
+  "description": "A monkey tagging game in VR",
   "experimental": true,
   "enabledByDefault": false,
   "tags": ["games"],

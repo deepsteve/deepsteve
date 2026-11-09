@@ -2,7 +2,7 @@
   "name": "Project Notes",
   "version": "0.1.0",
   "minDeepsteveVersion": "0.4.0",
-  "description": "A notepad for your projects: plain-text notes filed by project, most recently edited first",
+  "description": "A notepad for your projects",
   "enabledByDefault": true,
   "entry": "index.html",
   "app": true,

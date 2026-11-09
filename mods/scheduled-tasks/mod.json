@@ -2,7 +2,7 @@
   "name": "Scheduled Tasks",
   "version": "0.2.0",
   "minDeepsteveVersion": "0.4.0",
-  "description": "Locally-queued cron for recurring agent tasks (with full MCP access), organized by project",
+  "description": "Recurring agent tasks, by project",
   "enabledByDefault": true,
   "entry": "index.html",
   "display": "panel",
