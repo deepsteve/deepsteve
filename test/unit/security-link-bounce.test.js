@@ -39,7 +39,7 @@ function fresh() {
 
 function call(security, {
   method = 'GET', url = '/v1/decision/w1', host = 'deepsteve.localhost:3000',
-  accept = 'text/html,application/xhtml+xml', cookie, authorization,
+  accept = 'text/html,application/xhtml+xml', cookie, authorization, peer = '127.0.0.1',
 } = {}) {
   const headers = { host };
   if (accept) headers.accept = accept;
@@ -52,7 +52,7 @@ function call(security, {
     type: (t) => { out.type = t; return res; },
     send: (b) => { out.body = b; return res; },
   };
-  security.authGate({ method, url, originalUrl: url, headers }, res, () => { out.nexted = true; });
+  security.authGate({ method, url, originalUrl: url, headers, socket: { remoteAddress: peer } }, res, () => { out.nexted = true; });
   return out;
 }
 
@@ -116,6 +116,9 @@ describe('authGate link bounce', () => {
       { what: 'a POST', method: 'POST' },
       { what: 'a bad bearer token', authorization: 'Bearer nope' },
       { what: 'a non-loopback host', host: '192.168.1.20:3000' },
+      // setAuthCookie hands a LAN peer nothing even when it claims a loopback Host, so the page
+      // would promise a reload that cannot carry a cookie.
+      { what: 'a loopback Host from a LAN peer', peer: '192.168.1.20' },
       { what: 'a path that only starts like a version', url: '/v1decision/w1' },
     ];
     for (const c of cases) {

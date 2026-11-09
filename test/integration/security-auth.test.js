@@ -48,6 +48,10 @@ const UI_HOST = 'deepsteve.localhost';
 // URL under test rather than hardcoded, because the standalone runner picks a random port while
 // the docker compose pins 3000.
 const COOKIE = `ds_auth_${PORT}`;
+// Whether this suite's socket reaches the daemon over loopback. Locally it does. Under docker the
+// test runs in its own container and dials `server`, so it is a NETWORK peer whatever Host it
+// sends — exactly the client setAuthCookie must hand nothing to.
+const PEER_IS_LOOPBACK = ['localhost', '127.0.0.1', '[::1]'].includes(new URL(BASE_URL).hostname);
 
 // GET with an arbitrary (forged) Host header, without following redirects.
 function rawGet(pathname, headers) {
@@ -113,13 +117,20 @@ describe('Security auth contract (#536/#540)', () => {
     assert.strictEqual(result.opened, true, 'a pre-upgrade tab must keep working');
   });
 
-  it('GET / on the canonical host sets a persistent, port-qualified cookie (30d Max-Age, #545/#675)', async () => {
+  it('GET / on the canonical host sets a persistent, port-qualified cookie — for a loopback peer only (30d Max-Age, #545/#675)', async () => {
     const res = await rawGet('/', { Host: `${UI_HOST}:${PORT}`, Accept: 'text/html' });
     assert.strictEqual(res.status, 200);
     const cookies = [].concat(res.headers['set-cookie'] || []);
     // Port-qualified (#675): cookies key on host, not port, so two daemons on this machine would
     // otherwise write the same name into the same deepsteve.localhost jar and clobber each other.
     const dsAuth = cookies.find(c => c.startsWith(`${COOKIE}=`));
+    if (!PEER_IS_LOOPBACK) {
+      // Under docker this request is a forged loopback Host from another machine, which is how
+      // `--bind 0.0.0.0` once handed the token to the LAN. It must get nothing.
+      assert.strictEqual(dsAuth, undefined,
+        `a network peer claiming Host ${UI_HOST} must not be handed the token, got: ${dsAuth}`);
+      return;
+    }
     assert.ok(dsAuth, `expected a ${COOKIE} Set-Cookie, got: ${JSON.stringify(cookies)}`);
     assert.match(dsAuth, /Max-Age=2592000/i,
       `expected a persistent cookie (Max-Age=2592000), got: ${dsAuth}`);

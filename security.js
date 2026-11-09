@@ -9,8 +9,9 @@
 //   2. Origin allowlist       — stops cross-site WS hijack + CSRF (checked on the WS upgrade and on
 //                               any cookie-authed HTTP request that carries an Origin).
 //   3. Per-install token      — required on every surface. The browser gets it as an HttpOnly
-//                               cookie set on the page we serve, but only on a LOOPBACK host —
-//                               otherwise widening the allowlist hands the token to the whole LAN.
+//                               cookie set on the page we serve, but only to a LOOPBACK peer
+//                               (the socket, not just the Host header) — otherwise widening the
+//                               bind or the allowlist hands the token to the whole LAN.
 //                               The cookie's NAME carries our port (#675) — see LEGACY_COOKIE_NAME.
 //                               Non-browser/MCP/CLI clients send it as `Authorization: Bearer`.
 //   4. Failure rate limiting  — throttles auth *failures* only; valid credentials never throttle.
@@ -82,6 +83,15 @@ function hostnameOf(hostHeader) {
   h = h.replace(/\.$/, '');          // trailing-dot FQDN (localhost.)
   h = h.replace(/%.*$/, '');         // IPv6 zone id (fe80::1%en0)
   return h;
+}
+
+// Is the TCP peer on this machine? Reads the socket, which a client cannot write, unlike every
+// header. 127.0.0.0/8 and ::1, plus the IPv4-mapped form a dual-stack listener reports.
+function isLoopbackPeer(req) {
+  const addr = req && req.socket && req.socket.remoteAddress;
+  if (typeof addr !== 'string') return false;
+  const ip = addr.toLowerCase().startsWith('::ffff:') ? addr.slice(7) : addr;
+  return ip === '::1' || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(ip);
 }
 
 function normalizeOrigin(origin) {
@@ -338,11 +348,23 @@ function createSecurity(cfg) {
   // given the real per-install token in a Set-Cookie and could then drive the whole API. That
   // made --https / --allow-host a full auth bypass for anyone who could reach the address.
   // Non-loopback clients must now supply the token out of band (Authorization: Bearer).
+  //
+  // "Over loopback" means the SOCKET, not the Host header. The first cut of this check read only
+  // Host, which a browser cannot forge but every other client can: under --bind 0.0.0.0 a LAN
+  // client sending `Host: deepsteve.localhost` was handed the token. So both must hold — the
+  // connection comes from this machine, and it names a loopback host (the second still keeps a
+  // DNS-rebinding page, whose Host is the attacker's name, from being handed anything).
+  // One case this cannot see: a reverse proxy on this machine that rewrites Host to localhost
+  // makes every client it forwards look local. Don't run deepsteve behind one; use a tunnel that
+  // ends in loopback on the browser's machine (docs/remote.md).
   const LOOPBACK_HOST_SET = new Set(LOOPBACK_HOSTS);
+  function isLoopbackRequest(req) {
+    return LOOPBACK_HOST_SET.has(hostnameOf(req.headers.host)) && isLoopbackPeer(req);
+  }
   function setAuthCookie(req, res, next) {
     if (req.method === 'GET'
         && String(req.headers.accept || '').includes('text/html')
-        && LOOPBACK_HOST_SET.has(hostnameOf(req.headers.host))) {
+        && isLoopbackRequest(req)) {
       res.cookie(cookieName, token, {
         httpOnly: true, sameSite: 'strict', path: '/', secure: !!req.secure,
         maxAge: COOKIE_MAX_AGE_MS,
@@ -382,7 +404,9 @@ function createSecurity(cfg) {
   function wantsLinkBounce(req) {
     return req.method === 'GET'
       && String(req.headers.accept || '').includes('text/html')
-      && LOOPBACK_HOST_SET.has(hostnameOf(req.headers.host))
+      // Same predicate as setAuthCookie: the bounce only works because that put the cookie on
+      // this response, so it must not promise a reload to a client that was handed nothing.
+      && isLoopbackRequest(req)
       && LINK_PATH_RE.test(String(req.originalUrl || req.url || ''));
   }
 

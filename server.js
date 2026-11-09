@@ -172,7 +172,8 @@ if (!net.isIP(BIND)) {
 if (BIND !== '127.0.0.1' && BIND !== '::1') {
   // This used to read "There is NO authentication", which stopped being true when auth landed
   // (#536) and had to go. What replaced it states the tradeoff that actually applies now:
-  // setAuthCookie issues the token on LOOPBACK page loads only, so widening the bind no longer
+  // setAuthCookie issues the token on LOOPBACK page loads only (a loopback socket, not merely a
+  // loopback Host header — any non-browser client writes its own Host), so widening the bind no longer
   // hands the token to the network — but it does mean a LAN browser can't just open the UI, and
   // the token remains one shared per-install secret rather than a per-user login.
   const W = 62;

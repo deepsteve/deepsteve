@@ -1,4 +1,4 @@
-// The auth cookie must only ever be issued to a LOOPBACK host.
+// The auth cookie must only ever be issued to a LOOPBACK peer asking for a LOOPBACK host.
 //
 // setAuthCookie runs ahead of authGate, so it answers unauthenticated requests. That is safe on
 // loopback (reaching the socket proves you are the local user) but not once --https or
@@ -31,9 +31,10 @@ const security = createSecurity({
   log: () => {},
 });
 
-// Drive setAuthCookie the way express would, and report whether it set our cookie.
-function pageLoadFrom(host) {
-  const req = { method: 'GET', headers: { accept: 'text/html', host }, secure: false };
+// Drive setAuthCookie the way express would, and report whether it set our cookie. `peer` is the
+// socket's remote address — what the client cannot forge, unlike every header.
+function pageLoadFrom(host, peer = '127.0.0.1') {
+  const req = { method: 'GET', headers: { accept: 'text/html', host }, secure: false, socket: { remoteAddress: peer } };
   let cookie = null;
   const res = { cookie: (name, value, opts) => { cookie = { name, value, opts }; } };
   let nexted = false;
@@ -67,6 +68,36 @@ describe('auth cookie is issued to loopback hosts only', () => {
       const { cookie, nexted } = pageLoadFrom(host);
       assert.strictEqual(cookie, null, `token must not be handed to ${host}`);
       assert.ok(nexted, 'must still call next() so the request proceeds to authGate');
+    });
+  }
+
+  // The first cut of the scope read only the Host header. A browser cannot forge Host, but curl
+  // can: under --bind 0.0.0.0 a LAN client sending `Host: deepsteve.localhost` was handed the
+  // token. Loopback is a property of the socket.
+  for (const host of ['localhost:3000', '127.0.0.1:3000', '[::1]:3000', `${UI_HOST}:3000`]) {
+    it(`never issues the cookie to a LAN peer that claims Host ${host}`, () => {
+      const { cookie, nexted } = pageLoadFrom(host, '192.168.50.30');
+      assert.strictEqual(cookie, null, 'a forged loopback Host must not earn the token');
+      assert.ok(nexted, 'must still call next()');
+    });
+  }
+
+  it('never issues the cookie when the peer address is unknown', () => {
+    const req = { method: 'GET', headers: { accept: 'text/html', host: `${UI_HOST}:3000` }, secure: false };
+    let cookie = null;
+    security.setAuthCookie(req, { cookie: () => { cookie = true; } }, () => {});
+    assert.strictEqual(cookie, null, 'no socket to read must fail closed');
+  });
+
+  for (const peer of ['127.0.0.1', '127.8.9.10', '::1', '::ffff:127.0.0.1']) {
+    it(`treats ${peer} as a loopback peer`, () => {
+      assert.ok(pageLoadFrom(`${UI_HOST}:3000`, peer).cookie, `${peer} is this machine`);
+    });
+  }
+
+  for (const peer of ['192.168.50.30', '10.0.0.2', '::ffff:192.168.50.30', 'fe80::1', '0.0.0.0', '128.0.0.1', '::ffff:7f00:1x']) {
+    it(`does not treat ${peer} as a loopback peer`, () => {
+      assert.strictEqual(pageLoadFrom(`${UI_HOST}:3000`, peer).cookie, null);
     });
   }
 

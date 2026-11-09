@@ -15,12 +15,15 @@ this was first exercised, and nothing here depends on it.
 ## Why a tunnel, and not `--bind`
 
 `--bind 0.0.0.0` does not give you a usable remote UI, and no combination of `--allow-host` /
-`--allow-origin` changes that. `setAuthCookie` (security.js) issues the auth token **only on a
-loopback Host**, and the WebSocket upgrade guard accepts the cookie and nothing else — bearer
+`--allow-origin` changes that. `setAuthCookie` (security.js) issues the auth token **only to a
+loopback peer asking for a loopback Host** — the socket's address, not just the header, because
+any non-browser client can send `Host: localhost`. The WebSocket upgrade guard accepts the cookie and nothing else — bearer
 auth is for MCP/CLI clients, which is why a LAN browser loads the static page and then 401s on
 every fetch forever. That handout restriction is not incidental: it runs ahead of `authGate`, so
 without it any client that could reach an allowlisted non-loopback host would be *given* the
-per-install token in a `Set-Cookie`.
+per-install token in a `Set-Cookie`. The same goes for a reverse proxy on the daemon's machine
+that rewrites `Host` to `localhost`: every client it forwards arrives from loopback with a loopback
+Host, so the check cannot tell them from you. Don't put one in front of deepsteve.
 
 So the browser must reach the remote daemon over **loopback on the machine the browser is on**.
 Every reasonable transport already ends that way — `ssh -L`, Tailscale + ssh, `cloudflared
