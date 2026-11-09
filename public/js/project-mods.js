@@ -171,6 +171,16 @@ const opensAsView = (mod) => (mod?.openMode ?? 'view') === 'view';
  */
 export const tabNameFor = (mod) => (mod.icon ? `${mod.icon} ${mod.name}` : mod.name);
 
+/**
+ * False only when the server says this version may not run (mods/project-mods/provenance.js).
+ * Opening it then shows the approval page the server serves in its place; this flag exists so
+ * a pinned tab is not auto-opened onto that page, and so the launcher can say why. A server
+ * that predates the field sends nothing, which reads as approved: it serves the code anyway.
+ */
+export const needsApproval = (mod) => mod?.approved === false;
+const APPROVAL_SUFFIX = ' (needs approval)';
+const launcherTitle = (mod) => mod.name + (needsApproval(mod) ? APPROVAL_SUFFIX : '');
+
 /** The display glyph for a mod: its chosen icon, else the same derivation tabs use. */
 export function modIcon(mod) {
   if (mod.icon) return { glyph: mod.icon, isEmoji: true };
@@ -334,8 +344,9 @@ function renderButtons() {
     // Rebuilt wholesale, so the .active state can't drift from the slot (#628).
     if (openViewId === viewIdFor(mod.id)) btn.classList.add('active');
     btn.dataset.projectModId = mod.id;
-    btn.title = mod.name;
-    btn.setAttribute('aria-label', mod.name);
+    if (needsApproval(mod)) btn.classList.add('needs-approval');
+    btn.title = launcherTitle(mod);
+    btn.setAttribute('aria-label', launcherTitle(mod));
 
     const { glyph, isEmoji } = modIcon(mod);
     const iconEl = document.createElement('span');
@@ -373,6 +384,10 @@ function autoOpenPinned() {
     // pinned mod reads as openMode:'tab' — see cleanPlacement in the server tools), but the
     // client can hold a stale list mid-flight, and auto-taking over the screen would be the
     // worst possible way to find out. Re-check rather than trust.
+    //
+    // Nor is an unapproved one: its tab would only show the approval page, opened unasked in
+    // the background. It waits for a click on its launcher, which opens that page in front.
+    if (needsApproval(mod)) continue;
     if (!opensAsView(mod) && mod.surfaces.includes('tab')) cb.ensureModTab?.(mod, { background: true, pinned: true });
   }
 }
@@ -442,12 +457,13 @@ export function makeRailRow(mod, ownerContextId = null) {
   // `has-icon` follows the same rule project rows follow (#569): the expanded rail shows
   // a chip only for a CHOSEN icon, never a derived monogram — otherwise every row grows
   // an identical-looking square. The collapsed icon rail shows one either way.
-  row.className = 'context-row project-mod-row' + (mod.icon ? ' has-icon' : '');
+  row.className = 'context-row project-mod-row' + (mod.icon ? ' has-icon' : '')
+    + (needsApproval(mod) ? ' needs-approval' : '');
   row.dataset.projectModId = mod.id;
-  // The name, and nothing else. The title's job is to show what the rail truncates; a
-  // tooltip that restates the category of the thing you are already pointing at tells you
-  // nothing you didn't know before you pointed at it.
-  row.title = mod.name;
+  // The name, and nothing else — except "needs approval", which the dimmed row cannot say on
+  // its own. The title's job is to show what the rail truncates; a tooltip that restates the
+  // category of the thing you are already pointing at tells you nothing new.
+  row.title = launcherTitle(mod);
 
   const { glyph, isEmoji } = modIcon(mod);
   const iconEl = document.createElement('span');

@@ -437,6 +437,31 @@ test('a tab-surface mod auto-opens in the BACKGROUND when its project is in view
     'unattended opens must not steal focus (#600), and the tab is stamped as the pin\'s (#645)');
 });
 
+// An unapproved version (mods/project-mods/provenance.js) would only show the approval page,
+// so it is never opened unasked. A click on its launcher still opens it, onto that page.
+test('an unapproved tab-surface mod is not auto-opened, and its launchers say why', async () => {
+  const unapproved = { ...modA, surfaces: ['rail', 'button', 'tab'], approved: false };
+  const { mod, state, tabs } = await setup({ mods: [unapproved], activeContext: CTX_A });
+  assert.deepStrictEqual(state.ensured, [], 'no background tab for code nobody approved');
+
+  const row = mod.makeRailRow(unapproved);
+  assert.ok(row.className.includes('needs-approval'));
+  assert.strictEqual(row.title, `${unapproved.name} (needs approval)`);
+  const btn = tabs.children.find(c => c.dataset?.projectModId === 'ma');
+  assert.ok(btn.classList.contains('needs-approval'));
+  assert.strictEqual(btn.title, `${unapproved.name} (needs approval)`);
+
+  mod.openMod('ma');
+  assert.deepStrictEqual(state.ensured, [{ modId: 'ma', background: false, pinned: false }],
+    'the user can still open it, in front, to read and approve it');
+
+  // Approved (or a server too old to send the field): it auto-opens as before.
+  serveMods([{ ...unapproved, approved: true }]);
+  await mod.refresh();
+  assert.deepStrictEqual(state.ensured.at(-1), { modId: 'ma', background: true, pinned: true });
+  assert.strictEqual(mod.needsApproval({ ...modA }), false, 'no field means approved');
+});
+
 test('a tab-surface mod does not open while a different project is in view', async () => {
   const { mod, state } = await setup({ activeContext: CTX_B });
   assert.deepStrictEqual(state.ensured, []);

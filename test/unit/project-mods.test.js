@@ -670,26 +670,44 @@ test('resolveInMod refuses every way out of the mod directory', () => {
 
 // ----------------------------------------------------------------------- REST
 
-// Minimal express stand-in: record the handlers, then invoke them with fake req/res.
+// Minimal express stand-in: record the handlers, then invoke them with fake req/res. A route
+// registered with middleware runs only its LAST handler: the approve route's urlencoded parser
+// is express's own, and the tests hand the parsed body in directly.
 function makeApp() {
   const routes = new Map();
-  const record = (method) => (routePath, handler) => routes.set(`${method} ${routePath}`, handler);
+  const record = (method) => (routePath, ...handlers) => routes.set(`${method} ${routePath}`, handlers[handlers.length - 1]);
   return {
     get: record('GET'), put: record('PUT'), delete: record('DELETE'), post: record('POST'),
-    call(key, { params = {}, body = {}, method } = {}) {
+    call(key, { params = {}, body = {}, method, headers = {} } = {}) {
       const handler = routes.get(key);
       assert.ok(handler, `no route registered for ${key}`);
-      const res = { statusCode: 200, body: null, sentFile: null, type: () => res };
+      const res = { statusCode: 200, body: null, sentFile: null, headers: {}, location: null, type: () => res };
       res.status = (c) => { res.statusCode = c; return res; };
       res.json = (v) => { res.body = v; return res; };
       res.send = (v) => { res.body = v; return res; };
       res.end = () => { res.body = ''; return res; };
+      res.setHeader = (k, v) => { res.headers[k.toLowerCase()] = v; };
+      res.redirect = (c, loc) => { res.statusCode = c; res.location = loc; return res; };
       res.sendFile = (p) => { res.sentFile = p; res.body = fs.readFileSync(p, 'utf8'); return res; };
-      handler({ params, body, method: method || key.split(' ')[0] }, res);
+      handler({ params, body, headers, method: method || key.split(' ')[0] }, res);
       return res;
     },
     routeKeys: () => [...routes.keys()],
   };
+}
+
+// The approve route checks Origin through the daemon's security layer; this is its one method.
+const OUR_ORIGIN = 'http://deepsteve.localhost:3000';
+ctx.security = { isAllowedOrigin: (o) => o === OUR_ORIGIN };
+
+/** Approve a mod the way the approval page's form does: the hash it showed, from our origin. */
+// `origin: null` sends none at all.
+function approve(app, id, { hash, origin = OUR_ORIGIN, headers = {} } = {}) {
+  const shown = hash !== undefined ? hash : /name="hash" value="([0-9a-f]{64})"/.exec(
+    app.call('GET /api/project-mods/:id/page', { params: { id } }).body || '')?.[1];
+  return app.call('POST /api/project-mods/:id/approve', {
+    params: { id }, body: { hash: shown }, headers: { ...(origin === null ? {} : { origin }), ...headers },
+  });
 }
 
 test('REST exposes the list, the page, sibling assets, a metadata PUT and a DELETE', async () => {
@@ -701,6 +719,7 @@ test('REST exposes the list, the page, sibling assets, a metadata PUT and a DELE
     'GET /api/project-mods',
     'GET /api/project-mods/:id/*',
     'GET /api/project-mods/:id/page',
+    'POST /api/project-mods/:id/approve',
     'PUT /api/project-mods/:id',
   ]);
   // Order matters as much as membership: the wildcard must not shadow /page.
@@ -717,7 +736,8 @@ test('REST exposes the list, the page, sibling assets, a metadata PUT and a DELE
   assert.deepStrictEqual(list.body.mods.map(m => m.id), [id]);
   // The wire shape must not leak where the mod lives on disk.
   assert.deepStrictEqual(Object.keys(list.body.mods[0]).sort(),
-    ['createdAt', 'enabled', 'icon', 'id', 'name', 'openMode', 'project', 'storedOpenMode', 'surfaces', 'updatedAt']);
+    ['approved', 'createdAt', 'enabled', 'icon', 'id', 'name', 'openMode', 'project', 'storedOpenMode', 'surfaces', 'updatedAt']);
+  assert.strictEqual(list.body.mods[0].approved, true, 'an agent created it through the tools');
 
   const page = app.call('GET /api/project-mods/:id/page', { params: { id } });
   assert.strictEqual(page.body, '<p>x</p>');
@@ -730,11 +750,15 @@ test('REST exposes the list, the page, sibling assets, a metadata PUT and a DELE
   const missing = app.call('GET /api/project-mods/:id/page', { params: { id: 'nope' } });
   assert.strictEqual(missing.statusCode, 404);
 
-  // A relative "./style.css" in the page resolves to the wildcard route.
+  // A relative "./style.css" in the page resolves to the wildcard route. Written straight to
+  // disk, it is code nobody vouched for, so the whole mod waits for approval — then serves.
   fs.writeFileSync(path.join(dirOf(REPO_A, dirname), 'style.css'), 'body{color:red}');
+  assert.strictEqual(app.call('GET /api/project-mods/:id/*', { params: { id, 0: 'style.css' } }).statusCode, 403);
+  assert.strictEqual(approve(app, id).statusCode, 303);
   const asset = app.call('GET /api/project-mods/:id/*', { params: { id, 0: 'style.css' } });
   assert.strictEqual(asset.statusCode, 200);
   assert.strictEqual(asset.body, 'body{color:red}');
+  assert.strictEqual(asset.headers['x-content-type-options'], 'nosniff');
 
   for (const escape of ['../../../etc/passwd', '..%2F..%2Fetc%2Fpasswd', 'a/../../../etc/passwd']) {
     const out = app.call('GET /api/project-mods/:id/*', { params: { id, 0: escape } });
@@ -747,6 +771,7 @@ test('REST exposes the list, the page, sibling assets, a metadata PUT and a DELE
 
   const put = app.call('PUT /api/project-mods/:id', { params: { id }, body: { name: 'Renamed', surfaces: ['tab'] } });
   assert.strictEqual(put.body.mod.name, 'Renamed');
+  assert.strictEqual(put.body.mod.approved, true, 'a metadata edit through Deep Steve keeps an approval');
   assert.deepStrictEqual(put.body.mod.surfaces, ['tab']);
   assert.strictEqual(put.body.mod.openMode, 'tab', 'the wire shape carries the open mode (#628)');
   assert.strictEqual(manifestOf(REPO_A, dirname).name, 'Renamed', 'and it reached the repo');
@@ -794,6 +819,171 @@ test('REST writes 403 when the feature is off, while the reads stay open', async
     settings.projectModsEnabled = true;
   }
   await deleteAll();
+});
+
+// ------------------------------------------------------------------ provenance
+//
+// A mod's code runs only in a version an agent wrote through the tools or the user approved
+// (mods/project-mods/provenance.js). These drive that rule through the routes and tools, the
+// way a cloned repo, a pull and an agent's own Edit tool actually reach it.
+
+test('a mod that arrives on disk (a clone, a pull) is not served until the user approves it', async () => {
+  const app = makeApp();
+  registerRoutes(app, ctx);
+  handWrite(REPO_A, 'pulled', '<script>evil()</script>');
+  const pulledDir = dirOf(REPO_A, 'pulled');
+  fs.writeFileSync(path.join(pulledDir, 'app.js'), 'evil()');
+  try {
+    scan();
+    const row = app.call('GET /api/project-mods').body.mods.find(m => m.name.includes('evil'));
+    assert.ok(row, 'it is listed, so the user can find and approve it');
+    assert.strictEqual(row.approved, false);
+
+    const page = app.call('GET /api/project-mods/:id/page', { params: { id: row.id } });
+    assert.strictEqual(page.statusCode, 403);
+    assert.ok(!page.body.includes('<script>evil()</script>'), 'the repo HTML is never sent');
+    assert.ok(page.body.includes('&lt;script&gt;evil()&lt;/script&gt;'), 'its name and source are shown escaped');
+    assert.match(page.body, /Approve and run/);
+    assert.match(page.body, /<code>app\.js<\/code>/, 'the files the approval covers are listed');
+    assert.ok(!/<script/i.test(page.body), 'the approval page runs no script of its own either');
+    assert.match(page.headers['content-security-policy'], /default-src 'none'/);
+    assert.ok(!page.headers['content-security-policy'].includes('script-src'));
+    assert.strictEqual(app.call('GET /api/project-mods/:id/*', { params: { id: row.id, 0: 'app.js' } }).statusCode, 403);
+    assert.strictEqual(app.call('GET /api/project-mods/:id/page', { params: { id: row.id }, method: 'HEAD' }).statusCode, 200,
+      'the restore probe still finds it, so a restored tab comes back showing the approval page');
+
+    const done = approve(app, row.id);
+    assert.strictEqual(done.statusCode, 303);
+    assert.strictEqual(done.location, `/api/project-mods/${row.id}/page`, 'the frame lands on the real page');
+    assert.strictEqual(app.call('GET /api/project-mods/:id/page', { params: { id: row.id } }).body, '<p><script>evil()</script></p>');
+    assert.strictEqual(app.call('GET /api/project-mods').body.mods.find(m => m.id === row.id).approved, true);
+
+    // The next pull changes the code: that version was never approved.
+    fs.writeFileSync(path.join(pulledDir, 'app.js'), 'worse()');
+    assert.strictEqual(app.call('GET /api/project-mods/:id/page', { params: { id: row.id } }).statusCode, 403);
+    // Going back to the approved bytes is the approved version again.
+    fs.writeFileSync(path.join(pulledDir, 'app.js'), 'evil()');
+    assert.strictEqual(app.call('GET /api/project-mods/:id/page', { params: { id: row.id } }).statusCode, 200);
+  } finally {
+    fs.rmSync(path.join(REPO_A, '.deepsteve'), { recursive: true, force: true });
+    scan();
+  }
+});
+
+test('approval is a person on our page: no bearer token, our Origin only, and only the version shown', async () => {
+  const app = makeApp();
+  registerRoutes(app, ctx);
+  handWrite(REPO_A, 'pulled', 'Pulled');
+  try {
+    scan();
+    const id = app.call('GET /api/project-mods').body.mods[0].id;
+    const page = app.call('GET /api/project-mods/:id/page', { params: { id } }).body;
+    const hash = /name="hash" value="([0-9a-f]{64})"/.exec(page)[1];
+
+    const bearer = approve(app, id, { hash, headers: { authorization: 'Bearer anything' } });
+    assert.strictEqual(bearer.statusCode, 403, 'every agent holds the API token; approving is not an agent action');
+    assert.strictEqual(approve(app, id, { hash, origin: 'https://evil.example' }).statusCode, 403);
+    assert.strictEqual(approve(app, id, { hash, origin: null }).statusCode, 403);
+    assert.strictEqual(approve(app, id, { hash: 'f'.repeat(64) }).statusCode, 409);
+
+    // The files change while the page is open: the stale click approves nothing.
+    fs.writeFileSync(path.join(dirOf(REPO_A, 'pulled'), DEFAULT_ENTRY), '<p>swapped</p>');
+    const stale = approve(app, id, { hash });
+    assert.strictEqual(stale.statusCode, 409);
+    assert.match(stale.body, /changed while this page was open/);
+    assert.ok(stale.body.includes('&lt;p&gt;swapped&lt;/p&gt;'), 'and it shows the version on disk now');
+    assert.strictEqual(app.call('GET /api/project-mods').body.mods[0].approved, false);
+  } finally {
+    fs.rmSync(path.join(REPO_A, '.deepsteve'), { recursive: true, force: true });
+    scan();
+  }
+});
+
+test('the tools keep an approved mod approved; an edit made outside them revokes it', async () => {
+  const { id, dirname } = await create({ name: 'Dash', session_id: 'sess-a', html: '<p>x</p>' });
+  const edited = payload(await tools.edit_project_mod.handler({ mod_id: id, old_string: 'x', new_string: 'y' }, {}));
+  assert.strictEqual(edited.approved, true);
+  const updated = payload(await tools.update_project_mod.handler({ mod_id: id, html: '<p>z</p>', name: 'Dash 2' }, {}));
+  assert.strictEqual(updated.approved, true);
+  assert.strictEqual(updated.note, undefined);
+
+  // Data beside the page changes freely.
+  fs.mkdirSync(path.join(dirOf(REPO_A, dirname), 'state'));
+  fs.writeFileSync(path.join(dirOf(REPO_A, dirname), 'state', 'world.json'), '{"day":3}');
+  let listed = payload(await tools.refresh_project_mods.handler({ session_id: 'sess-a' }, {}));
+  assert.strictEqual(listed.mods.find(m => m.id === id).approved, true, 'a data file is not code');
+
+  // An agent's own Edit tool: invisible to the daemon, so indistinguishable from a pull.
+  fs.writeFileSync(path.join(dirOf(REPO_A, dirname), DEFAULT_ENTRY), '<p>edited directly</p>');
+  listed = payload(await tools.refresh_project_mods.handler({ session_id: 'sess-a' }, {}));
+  assert.strictEqual(listed.mods.find(m => m.id === id).approved, false);
+
+  // …and editing it through the tools afterwards does not launder the bytes it didn't write.
+  const after = payload(await tools.edit_project_mod.handler({ mod_id: id, old_string: 'directly', new_string: 'again' }, {}));
+  assert.strictEqual(after.approved, false);
+  assert.match(after.note, /has not been approved/);
+  const afterUpdate = payload(await tools.update_project_mod.handler({ mod_id: id, html: '<p>fresh</p>' }, {}));
+  assert.strictEqual(afterUpdate.approved, false, 'a page rewrite still leaves the manifest and any siblings unvouched');
+  await deleteAll();
+});
+
+test('a metadata edit from the UI keeps an approval but never creates one', () => {
+  const app = makeApp();
+  registerRoutes(app, ctx);
+  handWrite(REPO_A, 'pulled', 'Pulled');
+  try {
+    scan();
+    const id = app.call('GET /api/project-mods').body.mods[0].id;
+    const put = app.call('PUT /api/project-mods/:id', { params: { id }, body: { name: 'Renamed' } });
+    assert.strictEqual(put.body.mod.approved, false, 'renaming is not approving');
+  } finally {
+    fs.rmSync(path.join(REPO_A, '.deepsteve'), { recursive: true, force: true });
+    scan();
+  }
+});
+
+test('a mod with a symlink out of its repo cannot be approved, and the page says why', () => {
+  const app = makeApp();
+  registerRoutes(app, ctx);
+  const dir = handWrite(REPO_A, 'linked', 'Linked');
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-outside-'));
+  fs.writeFileSync(path.join(outside, 'id_rsa'), 'secret');
+  fs.symlinkSync(outside, path.join(dir, 'keys'));
+  try {
+    scan();
+    const id = app.call('GET /api/project-mods').body.mods[0].id;
+    const page = app.call('GET /api/project-mods/:id/page', { params: { id } });
+    assert.strictEqual(page.statusCode, 403);
+    assert.match(page.body, /can.t be approved: keys links outside the repository/);
+    assert.ok(!page.body.includes('<form'), 'no button to press');
+    assert.strictEqual(approve(app, id, { hash: 'a'.repeat(64) }).statusCode, 409);
+    assert.strictEqual(app.call('GET /api/project-mods/:id/*', { params: { id, 0: 'keys/id_rsa' } }).statusCode, 404);
+  } finally {
+    fs.rmSync(path.join(REPO_A, '.deepsteve'), { recursive: true, force: true });
+    fs.rmSync(outside, { recursive: true, force: true });
+    scan();
+  }
+});
+
+test('an approval is for one mod in one repo, not for the same bytes anywhere', () => {
+  const app = makeApp();
+  registerRoutes(app, ctx);
+  handWrite(REPO_A, 'twin', 'Twin');
+  handWrite(REPO_B, 'twin', 'Twin');   // byte-identical, in another project
+  try {
+    scan();
+    const rows = app.call('GET /api/project-mods').body.mods;
+    const inA = rows.find(m => m.project === REPO_A);
+    const inB = rows.find(m => m.project === REPO_B);
+    assert.strictEqual(approve(app, inA.id).statusCode, 303);
+    const after = app.call('GET /api/project-mods').body.mods;
+    assert.strictEqual(after.find(m => m.id === inA.id).approved, true);
+    assert.strictEqual(after.find(m => m.id === inB.id).approved, false, 'approving A must not approve its twin in B');
+  } finally {
+    fs.rmSync(path.join(REPO_A, '.deepsteve'), { recursive: true, force: true });
+    fs.rmSync(path.join(REPO_B, '.deepsteve'), { recursive: true, force: true });
+    scan();
+  }
 });
 
 // ---------------------------------------------------------------- broadcasting
@@ -921,6 +1111,8 @@ test('a repo added to a project is scanned on the very next read, not after the 
 
 test('the state dir was never used', () => {
   // The one assertion that proves the move actually happened rather than being mirrored.
+  // (project-mod-provenance.json is the deliberate exception: approvals must live outside the
+  // repo, or a repo could ship its own.)
   const stateDir = path.join(HOME, '.deepsteve');
   const leftovers = fs.existsSync(stateDir)
     ? fs.readdirSync(stateDir).filter(f => f.startsWith('project-mods'))

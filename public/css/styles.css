@@ -2181,6 +2181,11 @@ kbd {
 .view-tab.view-tab-agents.active { background: transparent; border-color: transparent; color: var(--ds-accent-blue); }
 .view-tab.view-tab-agents:hover { border-color: var(--ds-border); }
 .context-row.project-mod-row .context-row-icon { opacity: 0.85; }
+/* A project mod whose version on disk is not approved to run (mods/project-mods/provenance.js). */
+.context-row.project-mod-row.needs-approval .context-row-icon,
+.context-row.project-mod-row.needs-approval .context-row-label,
+.project-mod-btn.needs-approval .btn-icon { opacity: 0.45; }
+.context-row.project-mod-row.needs-approval .context-row-label { font-style: italic; }
 #context-rail.collapsed .context-row.project-mod-row { padding-left: 12px; }
 
 /* Compact view (#646, reshaped in #647) — the mods as bare icon squares, flowing

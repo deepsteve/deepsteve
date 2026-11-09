@@ -59,6 +59,8 @@ const { projectModsDir, projectViewsDir, globalViewsDir, statePath } = require('
 const path = require('path');
 
 const { resolveHtml } = require('../../html-source.js');
+const provenance = require('./provenance.js');
+const { renderApprovalPage, CSP: APPROVAL_CSP } = require('./approval-page.js');
 const projectScope = require('../../project-scope.js');
 const { FOOTER_FIELDS, createFooterSource } = require('./view-footer.js');
 const { createPromptSource } = require('./view-cards.js');
@@ -453,6 +455,75 @@ function readPage(mod) {
   try { return fs.readFileSync(target, 'utf8'); } catch { return null; }
 }
 
+// --- Provenance --------------------------------------------------------------
+//
+// A mod's code is served only in a version an agent wrote through the tools below or the user
+// approved — see provenance.js for the rule and what the version hash covers. Every route that
+// can hand a mod's bytes to a browser asks approvalOf() first; nothing else decides.
+
+const versionCache = provenance.createVersionCache();
+let provenanceStore = null;
+// Lazy, so the path is read after a test (or DEEPSTEVE_HOME) has pointed the state dir elsewhere.
+const approvals = () => (provenanceStore = provenanceStore || provenance.createStore(statePath(provenance.STORE_FILE)));
+
+function versionOfMod(mod, { fresh = false } = {}) {
+  return versionCache.get(mod.dir, { root: mod.root, entry: mod.entry, fresh });
+}
+
+// An approval is for THIS mod at THIS version: the key binds the version hash to the repo and
+// directory. Keyed on content alone, approving a mod in one repo would approve the same bytes
+// dropped into any other, next to whatever data that repo carries.
+const approvalKey = (mod, hash) => createHash('sha256').update(`${mod.root}\0${mod.dirname}\0${hash}`).digest('hex');
+
+/** { approved, version } for the mod's files as they are on disk right now. */
+function approvalOf(mod, opts) {
+  const version = versionOfMod(mod, opts);
+  return { version, approved: !version.error && approvals().has(approvalKey(mod, version.hash)) };
+}
+
+function recordApproval(mod, hash, info) {
+  return approvals().record(approvalKey(mod, hash), { ...info, version: hash, project: mod.root, mod: mod.dirname });
+}
+
+/** Record the mod's current version as vouched for. False when it has no hashable version. */
+function vouch(mod, by, via, extra = {}) {
+  const version = versionOfMod(mod, { fresh: true });
+  if (version.error) return false;
+  return recordApproval(mod, version.hash, { by, via, ...extra });
+}
+
+/**
+ * A write through the tools keeps approval only if the version it started from was approved.
+ * Editing an unapproved mod through them must not launder the bytes it didn't write, so the
+ * result stays unapproved and the caller is told why.
+ */
+function carryForward(mod, wasApproved, by, via, extra) {
+  if (wasApproved) vouch(mod, by, via, extra);
+  return approvalOf(mod).approved;
+}
+
+const NOT_APPROVED_NOTE =
+  'This mod\'s current version has not been approved, so it will not run: it changed outside Deep Steve\'s ' +
+  'tools (a pull, a checkout, or an Edit/Write made directly), or it arrived that way. Your change is saved. ' +
+  'The user approves it by opening the mod in Deep Steve, which shows what it would run.';
+
+// The entry page's text for the approval page's source preview, or null.
+function readSourceForApproval(mod) {
+  const target = entryPath(mod);
+  if (!target) return null;
+  try { return fs.readFileSync(target, 'utf8'); } catch { return null; }
+}
+
+function sendApprovalPage(res, mod, version, { status = 403, notice = null } = {}) {
+  res.setHeader('Content-Security-Policy', APPROVAL_CSP);
+  res.setHeader('Cache-Control', 'no-store');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.status(status).type('html').send(renderApprovalPage({
+    id: mod.id, name: mod.name, project: mod.root, dir: path.relative(mod.root, mod.dir),
+    entry: mod.entry, version, source: readSourceForApproval(mod), notice,
+  }));
+}
+
 /**
  * Remove a mod's directory, then any now-empty `.deepsteve/mods` and `.deepsteve` above it.
  *
@@ -530,10 +601,15 @@ const { callerShellId } = projectScope;
 // of them has to know about the pin override. `storedOpenMode` is the standing choice
 // underneath it, and exists for one reason: the right-click menu shows "Open as a full
 // view" still ticked, marked paused, while a pin is overriding it (#645).
+//
+// `approved` is whether the version on disk may run (see Provenance above). The client uses it
+// only to stop auto-opening a pinned tab that would show the approval page; the server refuses
+// the code either way.
 const serialize = (m) => ({
   id: m.id, project: m.project, name: m.name, icon: m.icon,
   surfaces: m.surfaces, openMode: effectiveOpenMode(m), storedOpenMode: m.openMode,
   enabled: m.enabled, createdAt: m.createdAt, updatedAt: m.updatedAt,
+  approved: approvalOf(m).approved,
 });
 
 // What an AGENT sees. Same fields plus where the mod actually lives — the point of #638 is
@@ -1059,7 +1135,10 @@ function init(context) {
         'It may load sibling files from its own directory with relative URLs (./style.css), so a mod can be more than one page. ' +
         'The result carries `url`, the link to put in an email or anywhere else outside Deep Steve: it opens the page in a ' +
         'browser tab of its own, where window.deepsteve is absent (only the Deep Steve UI injects it). Use that `url`, never a ' +
-        'hand-built /api/project-mods/... or localhost address, which a click from an email answers with 401 Unauthorized.',
+        'hand-built /api/project-mods/... or localhost address, which a click from an email answers with 401 Unauthorized. ' +
+        'A mod created here is approved to run on this machine. Its code keeps running only in versions written through ' +
+        'create/update/edit_project_mod: a code change made any other way (your own Edit or Write tool, a script, a pull) ' +
+        'stops it running until the user approves that version in Deep Steve. Data files (.json, text, images) are exempt.',
       schema: {
         name: z.string().describe('Display name, e.g. "Build Dashboard". Also the basis for the directory name'),
         session_id: z.string().optional().describe('Your DEEPSTEVE_SESSION_ID env var — the project is inferred from your session\'s repo root. Omit only if you pass project'),
@@ -1119,6 +1198,8 @@ function init(context) {
           try { fs.rmSync(mod.dir, { recursive: true, force: true }); } catch {}
           return err(`Failed to write the project mod into ${proj}: ${e.message}`);
         }
+        // A fresh directory holds only what this call wrote, so the agent vouches for all of it.
+        vouch(mod, 'agent', 'create_project_mod', { session: shellId || null });
         commit(`created ${mod.dirname} "${mod.name}" in ${proj} [${mod.surfaces.join(',')}] as ${effectiveOpenMode(mod)}`);
 
         return ok({
@@ -1130,6 +1211,7 @@ function init(context) {
           // to 'view': `surfaces:['rail','tab']` with no open_mode now stores a pinned view.
           surfaces: mod.surfaces, openMode: effectiveOpenMode(mod), storedOpenMode: mod.openMode,
           url: linkUrl(mod.id),
+          approved: approvalOf(mod).approved,
           commitReminder: commitReminder(mod),
         });
       },
@@ -1139,8 +1221,10 @@ function init(context) {
       description:
         'Update a project mod: replace its page (html or file_path) and/or its metadata (name, icon, surfaces, ' +
         'open_mode, enabled). Every field is optional — pass only what changes. An open tab or view showing this ' +
-        'mod reloads. Writes to the mod\'s directory in the repo, so commit the result. For a small page change ' +
-        'you can equally well edit the file with your own Edit tool, then call refresh_project_mods so open windows pick it up.',
+        'mod reloads. Writes to the mod\'s directory in the repo, so commit the result. Use this or edit_project_mod, ' +
+        'NOT your own Edit or Write tool, for any change to the page: a change written through these tools keeps an approved ' +
+        'mod approved, while a code change made any other way stops it running until the user approves that version. ' +
+        'Editing a mod that is already unapproved does not approve it (the result says `approved: false`).',
       schema: {
         mod_id: z.string().describe('The project mod id returned by create_project_mod'),
         html: z.string().optional().describe('New page content. Mutually exclusive with file_path'),
@@ -1152,9 +1236,10 @@ function init(context) {
         open_mode: z.enum(['tab', 'view']).optional().describe('New open mode: "tab" opens a real tab, "view" takes over the content area and consumes no tab. Passing "view" drops the "tab" surface'),
         enabled: z.boolean().optional().describe('false hides the mod from every surface without deleting it'),
       },
-      handler: async ({ mod_id, html, file_path, replacements, name, icon, surfaces, open_mode, enabled }) => {
+      handler: async ({ mod_id, html, file_path, replacements, name, icon, surfaces, open_mode, enabled }, extra) => {
         const mod = findMod(mod_id);
         if (!mod) return err(`Project mod "${mod_id}" not found.`);
+        const wasApproved = approvalOf(mod, { fresh: true }).approved;
 
         const wantsPage = typeof html === 'string' || (typeof file_path === 'string' && file_path.trim() !== '');
         if (wantsPage) {
@@ -1181,9 +1266,13 @@ function init(context) {
         } catch (e) {
           return err(`Failed to write the project mod manifest: ${e.message}`);
         }
-        commit(`updated ${mod.dirname}${wantsPage ? ' (page)' : ''}`);
+        const approved = carryForward(mod, wasApproved, 'agent', 'update_project_mod', { session: callerShellId(extra) || null });
+        commit(`updated ${mod.dirname}${wantsPage ? ' (page)' : ''}${approved ? '' : ' — not approved'}`);
 
-        return ok({ id: mod.id, updated: true, pageReplaced: wantsPage, path: path.relative(mod.root, mod.dir) });
+        return ok({
+          id: mod.id, updated: true, pageReplaced: wantsPage, path: path.relative(mod.root, mod.dir),
+          approved, ...(approved ? {} : { note: NOT_APPROVED_NOTE }),
+        });
       },
     },
 
@@ -1191,14 +1280,14 @@ function init(context) {
       description:
         'Edit a project mod\'s page by replacing an exact substring (like the Edit tool). Faster than update_project_mod ' +
         'for small changes — no need to resend the whole document. Errors if old_string is not found, or matches more than ' +
-        'once unless replace_all is set.',
+        'once unless replace_all is set. Prefer it to your own Edit tool: it keeps an approved mod approved to run.',
       schema: {
         mod_id: z.string().describe('The project mod id'),
         old_string: z.string().describe('Exact substring to find in the current page'),
         new_string: z.string().describe('Replacement string'),
         replace_all: z.boolean().optional().describe('Replace every occurrence (default false)'),
       },
-      handler: async ({ mod_id, old_string, new_string, replace_all }) => {
+      handler: async ({ mod_id, old_string, new_string, replace_all }, extra) => {
         const mod = findMod(mod_id);
         if (!mod) return err(`Project mod "${mod_id}" not found.`);
         if (old_string === '') return err('old_string must not be empty.');
@@ -1214,15 +1303,17 @@ function init(context) {
           return err(`old_string is not unique (${count} matches). Set replace_all:true or provide a longer, unique string.`);
         }
 
+        const wasApproved = approvalOf(mod, { fresh: true }).approved;
         // split/join (not String.replace) so $-sequences in new_string stay literal.
         try {
           writePage(mod, html.split(old_string).join(new_string));
         } catch (e) {
           return err(`Failed to write the project mod page: ${e.message}`);
         }
-        commit(`edited ${mod.dirname}, replacements=${count}`);
+        const approved = carryForward(mod, wasApproved, 'agent', 'edit_project_mod', { session: callerShellId(extra) || null });
+        commit(`edited ${mod.dirname}, replacements=${count}${approved ? '' : ' — not approved'}`);
 
-        return ok({ id: mod.id, replacements: count });
+        return ok({ id: mod.id, replacements: count, approved, ...(approved ? {} : { note: NOT_APPROVED_NOTE }) });
       },
     },
 
@@ -1261,6 +1352,8 @@ function init(context) {
         'The create/update/edit/delete tools already do this. Call it after changing a project mod or view ANY OTHER WAY: ' +
         'writing mod.json, a page or a view file with your own Edit/Write tool, or a git pull, checkout or rebase that ' +
         'adds, removes or renames one. (A merge through merge_worktree or issue_complete refreshes on its own.) ' +
+        'A code change made that way (anything but data files like .json, text or images) is not approved: the mod reports ' +
+        '`approved: false` and will not run until the user approves the new version, so prefer update/edit_project_mod. ' +
         'Returns the mods and views now found in your project. A mod missing from the list either has no valid mod.json (it ' +
         'needs "scope": "project") or lives in a repo that is not part of a registered project.',
       schema: {
@@ -1485,13 +1578,50 @@ function registerRoutes(app, context) {
   // The page itself. Serving only ids present in the scan is what keeps a crafted :id from
   // reaching outside a mod directory — the id is never concatenated into a path before it
   // has matched a scanned mod, and the path it then names is the manifest's own entry.
+  //
+  // An unapproved version gets the approval page instead, with a 403 (provenance.js). HEAD is
+  // the client's restore probe and asks only "does this mod still exist", so it stays 200 for an
+  // unapproved mod: a restored tab should come back showing the approval page, not vanish.
   app.get('/api/project-mods/:id/page', (req, res) => {
     const mod = findMod(req.params.id);
     if (!mod) return res.status(404).send('Not found');
     const html = readPage(mod);
     if (html === null) return res.status(404).send('Not found');
     if (req.method === 'HEAD') return res.type('html').end();
+    const { approved, version } = approvalOf(mod);
+    if (!approved) return sendApprovalPage(res, mod, version);
     res.type('html').send(html);
+  });
+
+  // Approve the version the approval page showed. A human action, so it refuses the bearer
+  // token every agent holds and requires our own Origin (which a form POST from our page
+  // carries, and a cross-site one cannot). The submitted hash must be the version on disk NOW:
+  // approving is approving what was read, so a change made while the page was open redraws it
+  // instead. Not gated on projectModsEnabled — it writes only to the state dir, never the repo.
+  const urlencoded = require('express').urlencoded({ extended: false, limit: '4kb' });
+  app.post('/api/project-mods/:id/approve', urlencoded, (req, res) => {
+    if (req.headers && req.headers.authorization) {
+      return res.status(403).type('text/plain')
+        .send('Approving a project mod is done by a person in Deep Steve, not with the API token.');
+    }
+    const security = ctx && ctx.security;
+    if (!security || !security.isAllowedOrigin(req.headers && req.headers.origin)) {
+      return res.status(403).type('text/plain').send('Forbidden: Origin not allowed');
+    }
+    const mod = findMod(req.params.id);
+    if (!mod) return res.status(404).send('Not found');
+    const { version } = approvalOf(mod, { fresh: true });
+    const submitted = String((req.body && req.body.hash) || '');
+    if (version.error) return sendApprovalPage(res, mod, version, { status: 409 });
+    if (submitted !== version.hash) {
+      return sendApprovalPage(res, mod, version, {
+        status: 409,
+        notice: 'The mod\'s files changed while this page was open. This is the version on disk now; nothing was approved.',
+      });
+    }
+    recordApproval(mod, version.hash, { by: 'user', via: 'approve' });
+    commit(`approved ${mod.dirname} in ${mod.root} at ${version.hash.slice(0, 12)}`);
+    res.redirect(303, `/api/project-mods/${encodeURIComponent(mod.id)}/page`);
   });
 
   // Sibling files, so a mod can be a directory rather than a single document: the page is
@@ -1506,11 +1636,23 @@ function registerRoutes(app, context) {
     if (!rel) return res.status(404).send('Not found');
     const target = resolveInMod(mod, rel);
     if (!target) return res.status(404).send('Not found');
+    // Dotfiles are never served (and so are outside the version hash; see provenance.js).
+    if (path.basename(target).startsWith('.')) return res.status(404).send('Not found');
     try {
       if (!fs.statSync(target).isFile()) return res.status(404).send('Not found');
+      // The lexical check above cannot see a symlink; the real path must stay in the repo.
+      const realRoot = fs.realpathSync(mod.root);
+      const real = fs.realpathSync(target);
+      if (real !== realRoot && !real.startsWith(realRoot + path.sep)) return res.status(404).send('Not found');
     } catch {
       return res.status(404).send('Not found');
     }
+    // Every file, data included, waits for approval: an unapproved mod serves nothing.
+    if (!approvalOf(mod).approved) {
+      return res.status(403).type('text/plain').send('This project mod version has not been approved to run.');
+    }
+    // nosniff is what keeps a data file (outside the hash) from being sniffed into something runnable.
+    res.setHeader('X-Content-Type-Options', 'nosniff');
     res.sendFile(target);
   });
 
@@ -1520,6 +1662,8 @@ function registerRoutes(app, context) {
     if (!featureEnabled()) return res.status(403).json({ error: FEATURE_OFF_MSG });
     const mod = findMod(req.params.id);
     if (!mod) return res.status(404).json({ error: 'Project mod not found' });
+    // Rewriting mod.json changes the version; it may keep an approval, never create one.
+    const wasApproved = approvalOf(mod, { fresh: true }).approved;
 
     const { name, icon, surfaces, openMode, enabled } = req.body || {};
     if (name !== undefined) {
@@ -1536,6 +1680,7 @@ function registerRoutes(app, context) {
     } catch (e) {
       return res.status(500).json({ error: `Failed to write the project mod manifest: ${e.message}` });
     }
+    carryForward(mod, wasApproved, 'user', 'metadata');
     // Serialize BEFORE the rescan replaces the row this response describes.
     const body = { mod: serialize(mod) };
     commit(null);
@@ -1745,6 +1890,8 @@ module.exports = {
   // scan() is the force-rescan a test needs after writing into a repo behind our back —
   // every in-process write already forces one, but a direct fs write does not.
   scan, scanRoots, modId, slugify, resolveInMod, serialize, serializeForAgent,
+  // Provenance: what decides whether a mod's code may be served.
+  approvalOf,
   // Not test-only: the merge paths in mods/deepsteve-core call it (#703).
   refresh,
   SURFACES, DEFAULT_SURFACES, OPEN_MODES, DEFAULT_OPEN_MODE,
