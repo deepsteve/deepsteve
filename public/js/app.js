@@ -5843,6 +5843,11 @@ async function init() {
     getActiveTabId: () => activeId,
     footerFor: (id) => ProjectViews.footerFor(id),
     isViewSlotUp: () => ModManager.isModViewVisible() || ViewCards.isUp() || ViewTasks.isUp(),
+    // The same two classes getVisibleTabIds() skips: the project/view filter and Decision mode.
+    isTabHidden: (id) => {
+      const el = document.getElementById('tab-' + id);
+      return !!el && (el.classList.contains('context-hidden') || el.classList.contains('decision-hidden'));
+    },
   });
   TabManager.setTabViews({
     menu: (id) => ProjectViews.menuFor(id),

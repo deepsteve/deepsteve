@@ -6,8 +6,9 @@
  * and the issue's title with the start of its body — whenever that tab is in a view whose file
  * names a `footer` (the "Project views" section of mods/project-mods/tools.js). It follows the
  * TAB, not the selection: project-views.js's footerFor() answers for any tab in any project,
- * whichever view is selected. Hidden while the fullscreen view slot is up, because then no tab
- * is what you are looking at.
+ * whichever view is selected. Hidden while the fullscreen view slot is up, and while the active
+ * tab is one the strip hides (behind an empty project's screen), because then no tab is what you
+ * are looking at.
  *
  * The facts come from GET /api/project-views/footer/:sessionId and are kept per tab for
  * FRESH_MS, so flicking between tabs repaints from memory (the server caches the GitHub half
@@ -34,7 +35,11 @@ export function init(callbacks) {
 export function render() {
   const el = document.getElementById('view-footer');
   if (!el) return;
-  const id = cb.isViewSlotUp?.() ? null : cb.getActiveTabId?.() || null;
+  const active = cb.isViewSlotUp?.() ? null : cb.getActiveTabId?.() || null;
+  // A tab the strip is hiding is not on screen either. A project or view with no tab of its own
+  // leaves the tab you came from active behind its empty state (and the empty decision inbox
+  // does the same), so its row would describe a tab from somewhere else.
+  const id = active && !cb.isTabHidden?.(active) ? active : null;
   const footer = id ? cb.footerFor?.(id) : null;
   if (!footer) {
     paint(el, null);

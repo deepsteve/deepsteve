@@ -307,13 +307,14 @@ async function setupFooter({ footerFor, slotUp = false, data }) {
   const byId = new Map([['view-footer', fakeEl()], ['app-main', fakeEl()]]);
   byId.get('view-footer').classList.add('hidden');
   globalThis.document = { getElementById: (id) => byId.get(id) || null, createElement: () => fakeEl() };
-  const state = { fetches: [], active: 't1', slotUp, footerFor };
+  const state = { fetches: [], active: 't1', slotUp, footerFor, hidden: new Set() };
   globalThis.fetch = async (url) => { state.fetches.push(url); return { ok: true, json: async () => data }; };
   const mod = await import(`../../public/js/view-footer.js?t=${++imports}`);
   mod.init({
     getActiveTabId: () => state.active,
     footerFor: (id) => state.footerFor(id),
     isViewSlotUp: () => state.slotUp,
+    isTabHidden: (id) => state.hidden.has(id),
   });
   return { mod, state, el: byId.get('view-footer'), appMain: byId.get('app-main') };
 }
@@ -367,6 +368,29 @@ test('the footer row hides for a tab in no footer view, and while the view slot 
   mod.render();
   assert.ok(!el.classList.contains('hidden'));
   assert.strictEqual(state.fetches.length, 1, 'switching back repaints from memory');
+});
+
+test('the footer row hides while the active tab is one the strip hides (an empty project)', async () => {
+  // Selecting a project with no tabs leaves the tab you came from active, context-hidden behind
+  // the empty state. Its footer is about a tab from another project, so there is no row.
+  const { el, state, mod } = await setupFooter({ footerFor: () => ({ slug: 'github', fields: ['repo'] }), data: DATA });
+  await flush(); await flush();
+  assert.ok(!el.classList.contains('hidden'));
+  state.hidden.add('t1');
+  mod.render();
+  assert.ok(el.classList.contains('hidden'), 'the active tab is behind the empty state');
+  state.hidden.delete('t1');
+  mod.render();
+  assert.ok(!el.classList.contains('hidden'), 'back in its project, the row returns');
+  assert.strictEqual(state.fetches.length, 1, 'from memory');
+});
+
+test('app.js counts both strip filters as hidden: the project/view filter and Decision mode', () => {
+  const app = fs.readFileSync(path.join(__dirname, '../../public/js/app.js'), 'utf8');
+  const init = app.slice(app.indexOf('ViewFooter.init({'));
+  const hook = init.slice(init.indexOf('isTabHidden:'), init.indexOf('});'));
+  assert.match(hook, /context-hidden/);
+  assert.match(hook, /decision-hidden/);
 });
 
 test('the footer row: a lookup that comes back empty (a tab that is no session) leaves no row', async () => {
