@@ -281,9 +281,10 @@ export function measureTerminalSize() {
     return { cols: 120, rows: 40 };
   }
 
-  // Create a temporary off-screen terminal to measure cell size
+  // Create a temporary off-screen terminal to measure cell size. It starts where a terminal
+  // container does: below the view header's row when one is showing (styles.css).
   const tmp = document.createElement('div');
-  tmp.style.cssText = 'position:absolute;inset:0;visibility:hidden;pointer-events:none;';
+  tmp.style.cssText = 'position:absolute;inset:0;top:var(--ds-view-header-h, 0px);visibility:hidden;pointer-events:none;';
   container.appendChild(tmp);
 
   const term = new Terminal({ fontSize: 14 });

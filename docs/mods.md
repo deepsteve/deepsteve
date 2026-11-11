@@ -1577,7 +1577,7 @@ Expanded/collapsed is a browser-wide preference; the selected view is per window
 - **`names`**: case-insensitive substrings of the tab's name. **`paths`**: folders relative to the view's repo (`"."` is the whole repo); the tab's cwd must be inside one, and a worktree under `.claude/worktrees/<name>/` counts as its repo. A path outside the repo is dropped — and a rule that loses a field it stated is dropped *whole*, so a bad path never widens a rule. **`kinds`**: `agent`, `terminal`, `display-tab`, `project-mod`, `mod-tab`. **`worktree`**: `true` for a tab working in a worktree (a worktree session, or a tab whose cwd is inside `.claude/worktrees/<name>/`), `false` for one that isn't.
 - **No `match` at all is a manual view**: it holds exactly the tabs filed into it.
 
-### DeepSteve-wide views and footers
+### DeepSteve-wide views, footers and headers
 
 A view file in the install's own state dir — **`~/.deepsteve/views/<slug>.json`** (`globalViewsDir()`) — is **DeepSteve-wide**: it belongs to no repo, is never committed, and is in **every** project's list, merged by slug with any repo view of the same name. That makes it the place for a view that is about *how you work* rather than about one project. Its rules can't use `paths` (there is no repo for them to be relative to; such a rule is dropped whole). Nothing writes one — the tools and the REST routes edit repo views only (a REST write answers 409 and names the file), and its button's right-click says where to edit it — so change the file, then reload the page or call `refresh_project_mods`.
 
@@ -1603,6 +1603,17 @@ Any view may also name a **`footer`**: fields drawn in `#view-footer`, a row alo
 | `title` | the issue title, then the start of its body as plain prose — title and excerpt capped at 100 words together, and clamped to the row's two lines with an ellipsis |
 
 The facts come from `GET /api/project-views/footer/:sessionId` (`mods/project-mods/view-footer.js`): the repo and number are read locally, and only the title, body and date cost a `gh issue view`, cached per issue for 10 minutes (a failed lookup for one). A field with nothing to say is left out, and a tab the lookup knows nothing about (a display tab is not a session) gets no row. The row has a fixed height whatever has arrived, and `switchTo()` renders it **before** it fits the incoming terminal, so the fit sees the row in place and a late answer never resizes the terminal a second time. It is hidden while the fullscreen view slot is up, and while the active tab is one the strip hides: a project or view with no tab of its own leaves the tab you came from active behind its empty state, and the empty decision inbox does the same.
+
+A view may name a **`header`** the same way: a row **on top of the terminal** (`#view-header`, the first child of `#terminals`), chosen by the same rules as the footer (`headerFor()`), hidden by the same conditions, and rendered in the same place in `switchTo()` (`renderViewRows()` draws both). Its one field is `prompt`: the tab's first prompt, which is what the conversation was started for. It comes from the cards superview's `GET /api/project-views/cards`, so it is Claude-only. Another agent, or a tab that is no session, gets no row. A session asked nothing yet shows "No prompt yet" and is asked again every 5s while it is on screen.
+
+```jsonc
+// ~/.deepsteve/views/prompt.json
+{ "name": "Prompt", "additive": true, "match": [{ "kinds": ["agent"] }], "header": ["prompt"] }
+```
+
+- **The toggle** is at the row's top-left, and it stays there. Hiding shrinks the row to the toggle's own line rather than removing it. Which state is a browser-wide preference (`localStorage` `deepsteve-view-header-hidden`). Turning the view's push button off removes the row entirely.
+- **The layout.** The row is absolutely placed in `#terminals`, and every `.terminal-container` starts below it. `view-header.js` only toggles `.view-header-open` / `.view-header-collapsed` on `#terminals`. `styles.css` derives `--ds-view-header-h` from them, once, and so does the probe `measureTerminalSize()` sizes a new tab with. The heights are fixed whatever has arrived. Overview mode tiles every tab, so the row stands down there.
+- Code: `public/js/view-header.js`, which imports neither views module (`app.js` injects `headerFor` and shares the footer's hooks). Tests: `test/unit/view-header.test.js`, plus a `headerFor` case in `project-views-client.test.js`.
 
 ### The orchestrator slot
 

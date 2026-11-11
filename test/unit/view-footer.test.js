@@ -387,8 +387,10 @@ test('the footer row hides while the active tab is one the strip hides (an empty
 
 test('app.js counts both strip filters as hidden: the project/view filter and Decision mode', () => {
   const app = fs.readFileSync(path.join(__dirname, '../../public/js/app.js'), 'utf8');
-  const init = app.slice(app.indexOf('ViewFooter.init({'));
-  const hook = init.slice(init.indexOf('isTabHidden:'), init.indexOf('});'));
+  // The footer and the header share one set of hooks, so they agree on which tab is on screen.
+  const init = app.slice(app.indexOf('const viewRowHooks = {'));
+  const hook = init.slice(init.indexOf('isTabHidden:'), init.indexOf('};'));
+  assert.match(init, /^const viewRowHooks = \{[\s\S]*?\};\s*ViewFooter\.init\(\{ \.\.\.viewRowHooks,[^\n]*\n\s*ViewHeader\.init\(\{ \.\.\.viewRowHooks,/);
   assert.match(hook, /context-hidden/);
   assert.match(hook, /decision-hidden/);
 });
@@ -407,9 +409,14 @@ test('view-footer.js and project-views.js stay out of each other and out of app.
   const read = (f) => fs.readFileSync(path.join(__dirname, '../../public/js', f), 'utf8');
   assert.ok(!/from '\.\/app\.js'/.test(read('view-footer.js')));
   assert.ok(!/from '\.\/project-views\.js'/.test(read('view-footer.js')), 'app.js injects footerFor');
-  // switchTo() renders the footer BEFORE it fits the incoming terminal, or the fit sees the
-  // wrong height and the row's arrival resizes the terminal a second time.
+  // switchTo() renders the footer (and the header) BEFORE it fits the incoming terminal, or the
+  // fit sees the wrong height and the row's arrival resizes the terminal a second time.
   const app = read('app.js');
   const sw = app.slice(app.indexOf('function switchTo(id)'));
-  assert.ok(sw.indexOf('ViewFooter.render()') !== -1 && sw.indexOf('ViewFooter.render()') < sw.indexOf('fitTerminal('));
+  assert.ok(sw.indexOf('renderViewRows()') !== -1 && sw.indexOf('renderViewRows()') < sw.indexOf('fitTerminal('));
+  const helper = app.slice(app.indexOf('function renderViewRows()'));
+  const body = helper.slice(0, helper.indexOf('\n}'));
+  assert.match(body, /ViewFooter\.render\(\)/);
+  assert.match(body, /ViewHeader\.render\(\)/);
+  assert.ok(!/ViewFooter\.render\(\)/.test(app.replace(body, '')), 'every other site goes through renderViewRows()');
 });

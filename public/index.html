@@ -120,6 +120,10 @@
     </div>
     <div id="sidebar-resizer"></div>
     <div id="terminals">
+      <!-- View headers: the row on top of the terminal. The first prompt of the tab you are
+           looking at, when that tab is in a view with a `header`. view-header.js fills it, and
+           every .terminal-container starts below it (--ds-view-header-h in styles.css). -->
+      <div id="view-header" class="hidden" aria-label="First prompt"></div>
       <!-- Decision Tab mode's empty inbox (#716): shown by decision-mode.js once no decision
            tab is waiting, covering whatever tab killSession fell back to. -->
       <div id="decision-inbox-empty" class="hidden">

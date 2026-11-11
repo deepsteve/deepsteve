@@ -431,6 +431,23 @@ test('footerFor follows the tab, in any project or none, whichever view is selec
   assert.deepStrictEqual(mod.footerFor('loose').fields, V_GITHUB.footer, 'outside that repo, only GitHub holds it');
 });
 
+test('headerFor answers like footerFor, from the views that name a header', async () => {
+  const V_PROMPT = { id: 'g3', slug: 'prompt', project: null, global: true, name: 'Prompt', icon: '', order: 0, match: [{ kinds: ['agent'] }], header: ['prompt'], additive: true };
+  const { mod } = await setup({
+    views: [V_GITHUB, V_PROMPT],
+    tabs: {
+      agent: { cwd: REPO_A, name: 'Claude', kind: 'agent', worktree: 'github-issue-9' },
+      shell: { cwd: REPO_A, name: 'zsh', kind: 'terminal' },
+    },
+  });
+  assert.deepStrictEqual(mod.headerFor('agent'), { slug: 'prompt', name: 'Prompt', fields: ['prompt'] });
+  assert.strictEqual(mod.footerFor('agent').slug, 'github', 'one tab, a footer from one view and a header from another');
+  assert.strictEqual(mod.headerFor('shell'), null, 'not an agent');
+  mod.setAdditive('prompt', false);
+  assert.strictEqual(mod.headerFor('agent'), null, 'switched off');
+  assert.strictEqual(mod.footerFor('agent').slug, 'github');
+});
+
 test('footerFor is null until the view list has loaded, and refresh() tells app.js it changed', async () => {
   const { mod } = await setup({ views: [V_GITHUB], tabs: { wt: { cwd: REPO_A, name: 'x', worktree: 'w' } } });
   let changed = 0;

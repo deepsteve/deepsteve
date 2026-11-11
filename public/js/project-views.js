@@ -23,12 +23,13 @@
  * A DeepSteve-wide view (`global`, from ~/.deepsteve/views/) belongs to no repo and is in
  * every project's list. A view with a `footer` also names the fields view-footer.js draws
  * along the bottom of the monitor for a tab in it — footerFor() answers which, regardless of
- * the view that is selected.
+ * the view that is selected. A `header` is the same on top of the terminal, drawn by
+ * view-header.js and answered by headerFor().
  *
  * An ADDITIVE view (`additive: true`) is switched on rather than looked at: it never filters
  * the strip and is never the selected view, but stacks with whichever one is. It is a push
  * button in the bar rather than a folder tab, any number can be on, and what it adds is its
- * footer. On is the default; the ones switched off are a browser-wide preference.
+ * footer or header. On is the default; the ones switched off are a browser-wide preference.
  *
  * An additive view may also carry a `slot` (only `orchestrator` so far): a reserved place at
  * the head of the strip for the one tab that holds that role in the project. tab-slot.js draws
@@ -179,7 +180,7 @@ function globalViews() {
 
 /**
  * Same-slug views → one. `ids` holds only the repo copies: those are what Rename and Delete
- * write, and a DeepSteve-wide view is edited as its file. The first footer and the first slot by
+ * write, and a DeepSteve-wide view is edited as its file. The first footer, header and slot by
  * order win; name, icon and `additive` come from the first by order.
  */
 function mergeViews(list) {
@@ -187,19 +188,21 @@ function mergeViews(list) {
   for (const v of list) {
     const rules = (Array.isArray(v.match) ? v.match : []).map(r => ({ ...r, root: v.project }));
     const footer = Array.isArray(v.footer) ? v.footer : [];
+    const header = Array.isArray(v.header) ? v.header : [];
     const cur = bySlug.get(v.slug);
     if (cur) {
       if (!v.global) cur.ids.push(v.id);
       cur.rules.push(...rules);
       cur.global = cur.global || !!v.global;
       if (!cur.footer.length) cur.footer = footer;
+      if (!cur.header.length) cur.header = header;
       if (!cur.slot) cur.slot = v.slot || null;
       // Either copy asking for the launcher or the superview is enough to show it.
       cur.launcher = cur.launcher || !!v.launcher;
       cur.cards = cur.cards || !!v.cards;
       cur.tasks = cur.tasks || !!v.tasks;
     } else {
-      bySlug.set(v.slug, { slug: v.slug, name: v.name, icon: v.icon || '', ids: v.global ? [] : [v.id], rules, global: !!v.global, footer, additive: !!v.additive, slot: v.slot || null, launcher: !!v.launcher, cards: !!v.cards, tasks: !!v.tasks });
+      bySlug.set(v.slug, { slug: v.slug, name: v.name, icon: v.icon || '', ids: v.global ? [] : [v.id], rules, global: !!v.global, footer, header, additive: !!v.additive, slot: v.slot || null, launcher: !!v.launcher, cards: !!v.cards, tasks: !!v.tasks });
     }
   }
   return [...bySlug.values()];
@@ -340,15 +343,20 @@ export function tabInView(id, ctx) {
  * tab in no project. Whichever view is selected: a footer follows the tab, not the selection.
  * An additive view that is switched off adds nothing. `{slug, name, fields}`, or null.
  */
-export function footerFor(id) {
+export const footerFor = (id) => rowFor(id, 'footer');
+
+/** The header for tab `id`, chosen by the same rules as its footer. */
+export const headerFor = (id) => rowFor(id, 'header');
+
+function rowFor(id, key) {
   if (!loaded) return null;
   const info = cb.getTabInfo?.(id);
   if (!info) return null;
   const lists = [...(cb.contextsForCwd?.(info.cwd) || []).map(viewsForContext), globalViews()];
   for (const list of lists) {
     for (const v of list) {
-      if (!v.footer.length || (v.additive && !isAdditiveOn(v.slug))) continue;
-      if (memberOf(info, v)) return { slug: v.slug, name: v.name, fields: v.footer };
+      if (!v[key].length || (v.additive && !isAdditiveOn(v.slug))) continue;
+      if (memberOf(info, v)) return { slug: v.slug, name: v.name, fields: v[key] };
     }
   }
   return null;

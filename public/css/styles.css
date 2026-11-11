@@ -406,6 +406,70 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
 #view-footer .vf-title strong { color: var(--ds-text-bright); font-weight: 600; }
 #view-footer .vf-excerpt { color: var(--ds-text-secondary); }
 
+/* ── View headers ─────────────────────────────────────────────────────────────────────────────
+   #view-header is the row on top of the terminal: the first prompt of the tab you are looking
+   at, when it is in a view with a `header`. view-header.js toggles .view-header-open and
+   .view-header-collapsed on #terminals; the row's height is derived from them HERE, once, and
+   every terminal container starts below it. Fixed heights, like the footer's: three 17px lines
+   shown, the toggle's one line hidden (each + 10px padding + 1px border). Overview mode tiles
+   every tab, so no single tab owns the top and the row stands down. */
+#terminals { --ds-view-header-h: 0px; }
+#terminals.view-header-open { --ds-view-header-h: calc(3 * 17px + 11px); }
+#terminals.view-header-open.view-header-collapsed { --ds-view-header-h: calc(17px + 11px); }
+#terminals.overview-mode.view-header-open { --ds-view-header-h: 0px; }
+#terminals > .terminal-container { top: var(--ds-view-header-h); }
+#view-header {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: var(--ds-view-header-h);
+  box-sizing: border-box;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 5px max(10px, calc(var(--ds-main-radius) - 2px));
+  overflow: hidden;
+  font-size: 12px;
+  line-height: 17px;
+  background: var(--ds-bg-secondary);
+  border-bottom: 1px solid var(--ds-border);
+  color: var(--ds-text-secondary);
+}
+#view-header.hidden, #terminals.overview-mode > #view-header { display: none; }
+#view-header .vh-toggle {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  box-sizing: border-box;
+  height: 17px;
+  margin: 0;
+  padding: 0 6px;
+  background: transparent;
+  border: 1px solid var(--ds-border);
+  border-radius: 4px;
+  color: var(--ds-text-secondary);
+  font: inherit;
+  font-size: 11px;
+  line-height: 15px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+#view-header .vh-toggle:hover { background: var(--ds-bg-tertiary); color: var(--ds-text-primary); }
+#view-header .vh-caret { width: 8px; text-align: center; }
+/* The whole first prompt, scrolled inside the row rather than growing it. */
+#view-header .vh-prompt {
+  flex: 1 1 auto;
+  align-self: stretch;
+  min-width: 0;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--ds-text-primary);
+}
+#view-header .vh-prompt.vh-muted { color: var(--ds-text-secondary); font-style: italic; }
+
 /* Layout toggle button */
 .layout-btn { padding: 4px 8px; background: var(--ds-bg-tertiary); border: 1px solid var(--ds-border); color: var(--ds-text-secondary); border-radius: 4px; cursor: pointer; font-size: 14px; margin-right: 8px; line-height: 1; }
 .layout-btn:hover { background: var(--ds-border); color: var(--ds-text-primary); }

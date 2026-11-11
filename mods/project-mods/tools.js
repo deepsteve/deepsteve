@@ -728,11 +728,13 @@ function refresh(reason) {
 // A view may also carry a `footer`: fields drawn in a row along the bottom of the monitor
 // whenever the tab you are looking at is in the view, whichever view is selected. The facts
 // in it are the tab's (view-footer.js), served by GET /api/project-views/footer/:sessionId.
+// A `header` is the same thing on top of the terminal (public/js/view-header.js). Its one
+// field, `prompt`, is the tab's first prompt, from the cards route below.
 //
 // `additive: true` makes a view one you switch ON rather than one you look AT: it never
 // filters the strip and is never the selected view, but stacks with whichever one is — a
 // push button in the views bar, any number on at once. What it adds is its footer, its
-// `slot`, or both.
+// header, its `slot`, or any of them.
 //
 // A `slot` reserves a place at the head of the project's tab strip for one tab with a role —
 // `orchestrator` is the only role so far. Only an additive view carries one, because a slot is
@@ -754,6 +756,7 @@ function refresh(reason) {
 
 const VIEW_SLUG_RE = /^[a-z0-9][a-z0-9-]{0,39}$/;
 const VIEW_SLOTS = ['orchestrator'];
+const HEADER_FIELDS = ['prompt'];
 // The holder's tab name when it starts. The user can rename it; the role stays on the entry.
 const SLOT_TAB_NAMES = { orchestrator: 'Orchestrator' };
 const RESERVED_VIEW = 'all';   // the built-in default, never a file
@@ -898,11 +901,13 @@ function cleanViewOrder(raw) {
   return Number.isFinite(n) ? Math.max(-MAX_VIEW_ORDER, Math.min(MAX_VIEW_ORDER, n)) : 0;
 }
 
-/** A view's `footer`: the known fields, each once, in the order the file lists them. */
-function cleanFooter(raw) {
+/** A row's fields: the known ones, each once, in the order the file lists them. */
+function cleanFields(raw, known) {
   if (!Array.isArray(raw)) return [];
-  return raw.filter((f, i) => FOOTER_FIELDS.includes(f) && raw.indexOf(f) === i);
+  return raw.filter((f, i) => known.includes(f) && raw.indexOf(f) === i);
 }
+const cleanFooter = (raw) => cleanFields(raw, FOOTER_FIELDS);
+const cleanHeader = (raw) => cleanFields(raw, HEADER_FIELDS);
 
 /** A view's `slot`: a known role, or null. */
 const cleanSlot = (raw) => (VIEW_SLOTS.includes(raw) ? raw : null);
@@ -929,6 +934,7 @@ function normalizeView(raw, root, slug, { global = false } = {}) {
     order: cleanViewOrder(raw.order),
     match: cleanMatch(raw.match, { global }),
     footer: cleanFooter(raw.footer),
+    header: cleanHeader(raw.header),
     additive: raw.additive === true,
     slot: raw.additive === true ? cleanSlot(raw.slot) : null,
     launcher: raw.additive !== true && raw.launcher === true,
@@ -988,6 +994,7 @@ function viewManifestOf(v) {
   if (v.order) out.order = v.order;
   out.match = v.match;
   if (v.footer && v.footer.length) out.footer = v.footer;
+  if (v.header && v.header.length) out.header = v.header;
   if (v.additive) out.additive = true;
   if (v.slot) out.slot = v.slot;
   if (v.launcher) out.launcher = true;
@@ -1020,7 +1027,7 @@ function removeView(v) {
 // DeepSteve-wide view, which the client puts in every project.
 const serializeView = (v) => ({
   id: v.id, slug: v.slug, project: v.project, global: !!v.global, name: v.name, icon: v.icon, order: v.order,
-  match: v.match, footer: v.footer || [], additive: !!v.additive, slot: v.slot || null,
+  match: v.match, footer: v.footer || [], header: v.header || [], additive: !!v.additive, slot: v.slot || null,
   launcher: !!v.launcher, cards: !!v.cards, tasks: !!v.tasks,
 });
 
@@ -1748,7 +1755,8 @@ function registerRoutes(app, context) {
   });
 
   // A superview's cards: each tab's first prompt, `{ prompts: { [id]: { prompt, supported } } }`.
-  // Asked by the browser for the agent tabs in a view with `cards` while its superview is up.
+  // Asked by the browser for the agent tabs in a view with `cards` while its superview is up,
+  // by the task board for its rows, and by the header row for the tab you are looking at.
   // An id that is not a live session answers `{ prompt: null, supported: false }`.
   app.get('/api/project-views/cards', async (req, res) => {
     const ids = [...new Set(String(req.query.ids || '').split(',').map(s => s.trim()).filter(Boolean))].slice(0, MAX_CARD_IDS);
@@ -1899,6 +1907,6 @@ module.exports = {
   FEATURE_OFF_MSG,
   // Project views (#726). cleanSpawnView is not test-only: the spawn tools validate `view` with it.
   cleanSpawnView, SPAWN_VIEW_DESCRIPTION, cleanViewSlug, slugifyView, cleanMatch, cleanViewPath, normalizeView, viewId,
-  serializeView, serializeViewForAgent, viewManifestOf, cleanFooter, cleanSlot, setFooterSource, setPromptSource, setTaskStore,
-  VIEW_KINDS, VIEW_SLUG_RE, RESERVED_VIEW, VIEW_SLOTS,
+  serializeView, serializeViewForAgent, viewManifestOf, cleanFooter, cleanHeader, cleanSlot, setFooterSource, setPromptSource, setTaskStore,
+  VIEW_KINDS, VIEW_SLUG_RE, RESERVED_VIEW, VIEW_SLOTS, HEADER_FIELDS,
 };
