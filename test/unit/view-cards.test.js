@@ -5,7 +5,8 @@
 //     one, round-trip through the file, and go out on the wire;
 //   - the server's prompt source (mods/project-mods/view-cards.js) and its route,
 //     GET /api/project-views/cards: the first REAL prompt of a Claude transcript — never a slash
-//     command, a meta caveat or a sidechain — cached once found, re-read until then;
+//     command, a meta caveat or a sidechain — and Claude Code's title for the conversation,
+//     each cached once found and read on from a cursor until then;
 //   - the client (public/js/view-cards.js): the superview at the head of the strip, the grid it
 //     opens, the cards' prompts, and when the grid goes down.
 //
@@ -25,7 +26,7 @@ process.env.HOME = HOME;
 
 const views = require('../../mods/project-mods/tools.js');
 const { normalizeView, serializeView, viewManifestOf } = views;
-const { createPromptSource, firstPrompt, PROMPT_CHARS } = require('../../mods/project-mods/view-cards.js');
+const { createPromptSource, firstPrompt, aiTitle, PROMPT_CHARS, TITLE_CHARS } = require('../../mods/project-mods/view-cards.js');
 const { normalizeLines } = require('../../transcript-view');
 
 const REPO = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'ds-view-cards-repo-')));
@@ -58,6 +59,7 @@ test('launcher and cards are kept on a view you look at, and dropped on an addit
 const line = (o) => JSON.stringify(o);
 const user = (content, extra = {}) => line({ type: 'user', message: { role: 'user', content }, ...extra });
 const assistant = (text) => line({ type: 'assistant', message: { role: 'assistant', id: 'm1', content: [{ type: 'text', text }] } });
+const title = (aiTitle) => line({ type: 'ai-title', aiTitle, sessionId: 's' });
 
 function transcript(name, lines) {
   const file = path.join(TRANSCRIPTS, `${name}.jsonl`);
@@ -101,27 +103,27 @@ test('promptFor reads the transcript, caches a found prompt, and re-reads until 
   const paths = { s1: file };
   const src = createPromptSource({ transcriptPath: (e) => paths[e.id] || null, getAgentConfig: agentConfig });
 
-  assert.deepStrictEqual(await src.promptFor({ id: 's1' }), { prompt: null, supported: true }, 'no file yet: never prompted');
+  assert.deepStrictEqual(await src.promptFor({ id: 's1' }), { prompt: null, title: null, supported: true }, 'no file yet: never prompted');
 
   transcript('later', [user('<command-name>/rc</command-name>')]);
-  assert.deepStrictEqual(await src.promptFor({ id: 's1' }), { prompt: null, supported: true }, 'only machinery so far');
+  assert.deepStrictEqual(await src.promptFor({ id: 's1' }), { prompt: null, title: null, supported: true }, 'only machinery so far');
 
   transcript('later', [user('<command-name>/rc</command-name>'), user('Funnel from install to first walk?')]);
-  assert.deepStrictEqual(await src.promptFor({ id: 's1' }), { prompt: 'Funnel from install to first walk?', supported: true });
+  assert.deepStrictEqual(await src.promptFor({ id: 's1' }), { prompt: 'Funnel from install to first walk?', title: null, supported: true });
 
   // Found prompts are kept: rewriting the file behind its back changes nothing.
   transcript('later', [user('something else')]);
   assert.strictEqual((await src.promptFor({ id: 's1' })).prompt, 'Funnel from install to first walk?');
 
-  assert.deepStrictEqual(await src.promptFor({ id: 's2' }), { prompt: null, supported: true }, 'no transcript path at all');
-  assert.deepStrictEqual(await src.promptFor({ id: 's1', agentType: 'codex' }), { prompt: null, supported: false }, 'an agent with no transcript');
+  assert.deepStrictEqual(await src.promptFor({ id: 's2' }), { prompt: null, title: null, supported: true }, 'no transcript path at all');
+  assert.deepStrictEqual(await src.promptFor({ id: 's1', agentType: 'codex' }), { prompt: null, title: null, supported: false }, 'an agent with no transcript');
 });
 
 test('promptFor reads past a head with no prompt in it, window by window, and stops at the cap', async () => {
   const reads = [];
   const pages = [
-    { lines: [{ offset: 0, bytes: 10, text: user('<command-name>/rc</command-name>') }], size: 100, nextAfter: 10 },
-    { lines: [{ offset: 10, bytes: 10, text: user('the real one') }], size: 100, nextAfter: 20 },
+    { lines: [{ offset: 0, bytes: 10, text: user('<command-name>/rc</command-name>') }], size: 20, nextAfter: 10 },
+    { lines: [{ offset: 10, bytes: 10, text: user('the real one') }], size: 20, nextAfter: 20 },
   ];
   const src = createPromptSource({
     transcriptPath: () => '/fake',
@@ -141,8 +143,67 @@ test('promptFor reads past a head with no prompt in it, window by window, and st
   assert.strictEqual(n, 4, 'bounded: a session with no prompt in its head is not read to the end');
 });
 
+test('aiTitle takes the first ai-title line, and nothing that only mentions one', () => {
+  const lines = (texts) => texts.map((text, i) => ({ offset: i, bytes: 1, text }));
+  assert.strictEqual(aiTitle(lines([
+    user('what does "ai-title" mean in a transcript?'),
+    line({ type: 'ai-title' }),
+    title('  Tasks view\n vs app design '),
+    title('A later one'),
+  ])), 'Tasks view vs app design');
+  assert.strictEqual(aiTitle(lines([user('hi'), '{"type":"ai-title","aiTi'])), null, 'a line cut mid-record');
+  assert.strictEqual(aiTitle([{ offset: 0, bytes: 9, text: null, oversize: true }]), null);
+  assert.strictEqual(aiTitle(lines([title('t'.repeat(TITLE_CHARS * 2))])).length, TITLE_CHARS);
+});
+
+test('promptFor reads on from where it stopped for a title that comes later, and keeps both once found', async () => {
+  const reads = [];
+  let pages = [
+    { lines: [{ offset: 0, bytes: 10, text: user('Make the tasks board show live terminals') }], size: 20, nextAfter: 10 },
+    { lines: [{ offset: 10, bytes: 10, text: assistant('Sure.') }], size: 20, nextAfter: 20 },
+  ];
+  const src = createPromptSource({
+    transcriptPath: () => '/fake-title',
+    getAgentConfig: agentConfig,
+    readWindow: async (file, { after }) => {
+      reads.push(after);
+      return pages.find(p => p.lines[0].offset === after) || { lines: [], size: pages.at(-1).nextAfter, nextAfter: after };
+    },
+  });
+  assert.deepStrictEqual(await src.promptFor({}), { prompt: 'Make the tasks board show live terminals', title: null, supported: true });
+  assert.deepStrictEqual(reads, [0, 10], 'read to the end');
+
+  reads.length = 0;
+  assert.strictEqual((await src.promptFor({})).title, null);
+  assert.deepStrictEqual(reads, [20], 'nothing new: one look at the end, not a re-read of the head');
+
+  pages.push({ lines: [{ offset: 20, bytes: 10, text: title('Live terminals on the tasks board') }], size: 30, nextAfter: 30 });
+  reads.length = 0;
+  assert.deepStrictEqual(await src.promptFor({}), { prompt: 'Make the tasks board show live terminals', title: 'Live terminals on the tasks board', supported: true });
+  assert.deepStrictEqual(reads, [20], 'read on from the cursor');
+
+  reads.length = 0;
+  await src.promptFor({});
+  assert.deepStrictEqual(reads, [], 'both found: never read again');
+});
+
+test('promptFor keeps what it found when the file turns out shorter than its cursor', async () => {
+  let rewound = false;
+  const src = createPromptSource({
+    transcriptPath: () => '/fake-rewound',
+    getAgentConfig: agentConfig,
+    readWindow: async (file, { after }) => {
+      if (rewound && after > 0) throw Object.assign(new Error('transcript rewound'), { code: 'REWOUND' });
+      return { lines: [{ offset: 0, bytes: 10, text: user('the prompt') }], size: 10, nextAfter: 10 };
+    },
+  });
+  assert.strictEqual((await src.promptFor({})).prompt, 'the prompt');
+  rewound = true;
+  assert.deepStrictEqual(await src.promptFor({}), { prompt: 'the prompt', title: null, supported: true });
+});
+
 test('GET /api/project-views/cards answers each id from its session', async () => {
-  const fileA = transcript('route-a', [user('Which ad set drives installs?')]);
+  const fileA = transcript('route-a', [user('Which ad set drives installs?'), title('Ad set installs')]);
   const shells = new Map([
     ['a', { id: 'a', cwd: REPO, agentType: 'claude' }],
     ['c', { id: 'c', cwd: REPO, agentType: 'codex' }],
@@ -169,9 +230,9 @@ test('GET /api/project-views/cards answers each id from its session', async () =
   await routes.get('GET /api/project-views/cards')({ query: { ids: 'a,c,gone,a' }, params: {} }, res);
   assert.strictEqual(res.statusCode, 200);
   assert.deepStrictEqual(res.body.prompts, {
-    a: { prompt: 'Which ad set drives installs?', supported: true },
-    c: { prompt: null, supported: false },
-    gone: { prompt: null, supported: false },
+    a: { prompt: 'Which ad set drives installs?', title: 'Ad set installs', supported: true },
+    c: { prompt: null, title: null, supported: false },
+    gone: { prompt: null, title: null, supported: false },
   });
 });
 

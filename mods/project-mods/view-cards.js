@@ -11,9 +11,18 @@
  * so a slash command, an inherited `/rc`, a hook's output or a compaction summary is never taken
  * for the prompt. It lands near the head of the file, so only the first few windows are read.
  *
- * A first prompt never changes once written, so a found one is cached for good (keyed by file —
- * a /clear starts a new transcript, which is a new conversation with its own first prompt). A
- * session with no prompt yet is read again next time it is asked about.
+ * The same pass picks up the conversation's title: the `ai-title` record Claude Code writes into
+ * its own transcript during the first reply, a few words naming what the conversation is for
+ * (the header row's Summary). Claude Code appends it again now and then, but in 300 transcripts
+ * measured on the development machine it never changed, so the first one is the one. It usually
+ * sits a few hundred KB in, after the first turn's request records; 299 of those 300 had it in
+ * the first 2 MB, and one had it 13 MB in.
+ *
+ * Neither ever changes once written, so a found one is cached for good (keyed by file — a /clear
+ * starts a new transcript, which is a new conversation with its own first prompt and title).
+ * Until both are found the cache keeps the read cursor too, and the next ask reads on from it:
+ * Claude Code only appends, so nothing before the cursor can change. A session that never gets a
+ * title costs one stat per ask once the cursor reaches the end.
  */
 
 const { readForwardWindow } = require('../../transcript-window');
@@ -21,7 +30,9 @@ const { normalizeLines } = require('../../transcript-view');
 
 // Enough for any card: the browser clamps the text to a few lines on top.
 const PROMPT_CHARS = 1200;
-// A head of 4 × 512 KB with no prompt in it is a session nobody has asked anything yet.
+// Claude Code's titles run to about eight words; this only guards against a malformed record.
+const TITLE_CHARS = 200;
+// The most one ask reads, 4 × 512 KB; the next ask reads on from where it stopped.
 const MAX_WINDOWS = 4;
 const CACHE_MAX = 500;
 
@@ -36,50 +47,77 @@ function firstPrompt(entries) {
 }
 
 /**
+ * The first `ai-title` among raw transcript lines, or null. transcript-view.js drops these records
+ * as bookkeeping, so they are read off the lines themselves, and only a line that names the type
+ * is parsed.
+ */
+function aiTitle(lines) {
+  for (const l of lines || []) {
+    if (!l || typeof l.text !== 'string' || !l.text.includes('"ai-title"')) continue;
+    let obj;
+    try { obj = JSON.parse(l.text); } catch { continue; }
+    const t = obj && obj.type === 'ai-title' && typeof obj.aiTitle === 'string' ? obj.aiTitle.replace(/\s+/g, ' ').trim() : '';
+    if (t) return t.length > TITLE_CHARS ? t.slice(0, TITLE_CHARS - 1).trimEnd() + '…' : t;
+  }
+  return null;
+}
+
+/**
  * The card lookups, made once per daemon. `transcriptPath` and `getAgentConfig` are server.js's,
  * from the mod context; `readWindow` is the transcript reader, swappable in a test.
  */
 function createPromptSource({ transcriptPath, getAgentConfig, readWindow = readForwardWindow, log = () => {} } = {}) {
-  const cache = new Map();   // transcript file → its first prompt (only found ones)
+  // transcript file → { prompt, title, after }: what was found, and where the next read starts.
+  const cache = new Map();
 
-  async function readFirstPrompt(file) {
-    let after = 0;
-    for (let i = 0; i < MAX_WINDOWS; i++) {
+  function remember(file, got) {
+    if (!cache.has(file) && cache.size >= CACHE_MAX) cache.delete(cache.keys().next().value);
+    cache.set(file, got);
+  }
+
+  /** Read on from `got.after` for whichever of the prompt and the title is still missing. */
+  async function readOn(file, got) {
+    let after = got.after;
+    for (let i = 0; i < MAX_WINDOWS && !(got.prompt && got.title); i++) {
       const page = await readWindow(file, { after });
-      const hit = firstPrompt(normalizeLines({ lines: page.lines }).entries);
-      if (hit) return hit;
-      if (page.nextAfter <= after || page.nextAfter >= page.size) return null;
+      if (!got.prompt) got.prompt = firstPrompt(normalizeLines({ lines: page.lines }).entries);
+      if (!got.title) got.title = aiTitle(page.lines);
+      if (page.nextAfter <= after) break;
       after = page.nextAfter;
+      if (after >= page.size) break;
     }
-    return null;
+    got.after = after;
+    return got;
   }
 
   /**
-   * `{ prompt, supported }` for one shell entry. `supported: false` is an agent that keeps no
-   * transcript we can read (anything but Claude today), so its card says so instead of waiting.
+   * `{ prompt, title, supported }` for one shell entry. `supported: false` is an agent that keeps
+   * no transcript we can read (anything but Claude today), so its card says so instead of waiting.
    */
   async function promptFor(entry) {
     const agentType = (entry && entry.agentType) || 'claude';
     const config = typeof getAgentConfig === 'function' ? getAgentConfig(agentType) : null;
-    if (!config || !config.supportsSessionWatch) return { prompt: null, supported: false };
+    if (!config || !config.supportsSessionWatch) return { prompt: null, title: null, supported: false };
     const file = typeof transcriptPath === 'function' ? transcriptPath(entry) : null;
-    if (!file) return { prompt: null, supported: true };
-    if (cache.has(file)) return { prompt: cache.get(file), supported: true };
-    let prompt = null;
-    try {
-      prompt = await readFirstPrompt(file);
-    } catch (e) {
-      // ENOENT is the common case, a session not prompted yet; anything else is worth a line.
-      if (e && e.code !== 'ENOENT') log(`[view-cards] reading ${file} failed: ${e.message}`);
+    if (!file) return { prompt: null, title: null, supported: true };
+    const known = cache.get(file);
+    const got = known ? { ...known } : { prompt: null, title: null, after: 0 };
+    if (!(got.prompt && got.title)) {
+      try {
+        await readOn(file, got);
+      } catch (e) {
+        // Shorter than the cursor: not the file we were reading. Keep what was found and start
+        // the rest over next time.
+        if (e && e.code === 'REWOUND') got.after = 0;
+        // ENOENT is the common case, a session not prompted yet; anything else is worth a line.
+        else if (e && e.code !== 'ENOENT') log(`[view-cards] reading ${file} failed: ${e.message}`);
+      }
+      remember(file, got);
     }
-    if (prompt) {
-      if (cache.size >= CACHE_MAX) cache.delete(cache.keys().next().value);
-      cache.set(file, prompt);
-    }
-    return { prompt, supported: true };
+    return { prompt: got.prompt, title: got.title, supported: true };
   }
 
   return { promptFor };
 }
 
-module.exports = { createPromptSource, firstPrompt, PROMPT_CHARS };
+module.exports = { createPromptSource, firstPrompt, aiTitle, PROMPT_CHARS, TITLE_CHARS };

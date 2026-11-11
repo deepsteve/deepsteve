@@ -410,9 +410,9 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
    #view-header is the row on top of the terminal: the first prompt of the tab you are looking
    at, when it is in a view with a `header`. view-header.js toggles .view-header-open and
    .view-header-collapsed on #terminals; the row's height is derived from them HERE, once, and
-   every terminal container starts below it. Fixed heights, like the footer's: one 17px line by
-   default, three expanded (each + 10px padding + 1px border). Overview mode tiles
-   every tab, so no single tab owns the top and the row stands down. */
+   every terminal container starts below it. Fixed heights, like the footer's: one 17px line for
+   Summary and First line, three for First prompt (each + 10px padding + 1px border). Overview
+   mode tiles every tab, so no single tab owns the top and the row stands down. */
 #terminals { --ds-view-header-h: 0px; }
 #terminals.view-header-open { --ds-view-header-h: calc(3 * 17px + 11px); }
 #terminals.view-header-open.view-header-collapsed { --ds-view-header-h: calc(17px + 11px); }
@@ -458,6 +458,11 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
 }
 #view-header .vh-toggle:hover { background: var(--ds-bg-tertiary); color: var(--ds-text-primary); }
 #view-header .vh-caret { width: 8px; text-align: center; }
+/* The three labels share one grid cell, and only the current one shows: the button is as wide
+   as "First prompt" in every mode, so a second click lands where the first did. */
+#view-header .vh-labels { display: inline-grid; }
+#view-header .vh-label { grid-area: 1 / 1; text-align: left; }
+#view-header .vh-label:not(.vh-current) { visibility: hidden; }
 /* The whole first prompt, scrolled inside the row rather than growing it. */
 #view-header .vh-prompt {
   flex: 1 1 auto;
@@ -469,6 +474,7 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
   color: var(--ds-text-primary);
 }
 #view-header .vh-prompt.vh-muted { color: var(--ds-text-secondary); font-style: italic; }
+#view-header .vh-prompt.vh-summary { color: var(--ds-text-bright); font-weight: 600; }
 /* One line: the prompt's newlines fold into spaces and the end is cut off with an ellipsis. */
 #terminals.view-header-collapsed > #view-header .vh-prompt {
   overflow: hidden;

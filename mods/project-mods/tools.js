@@ -729,7 +729,8 @@ function refresh(reason) {
 // whenever the tab you are looking at is in the view, whichever view is selected. The facts
 // in it are the tab's (view-footer.js), served by GET /api/project-views/footer/:sessionId.
 // A `header` is the same thing on top of the terminal (public/js/view-header.js). Its one
-// field, `prompt`, is the tab's first prompt, from the cards route below.
+// field, `prompt`, is the tab's first prompt and Claude Code's title for it, from the cards
+// route below.
 //
 // `additive: true` makes a view one you switch ON rather than one you look AT: it never
 // filters the strip and is never the selected view, but stacks with whichever one is — a
@@ -1754,10 +1755,11 @@ function registerRoutes(app, context) {
     }
   });
 
-  // A superview's cards: each tab's first prompt, `{ prompts: { [id]: { prompt, supported } } }`.
-  // Asked by the browser for the agent tabs in a view with `cards` while its superview is up,
-  // by the task board for its rows, and by the header row for the tab you are looking at.
-  // An id that is not a live session answers `{ prompt: null, supported: false }`.
+  // A superview's cards: each tab's first prompt and Claude Code's title for the conversation,
+  // `{ prompts: { [id]: { prompt, title, supported } } }`. Asked by the browser for the agent tabs
+  // in a view with `cards` while its superview is up, by the task board for its rows, and by the
+  // header row for the tab you are looking at (the only one that shows the title).
+  // An id that is not a live session answers `{ prompt: null, title: null, supported: false }`.
   app.get('/api/project-views/cards', async (req, res) => {
     const ids = [...new Set(String(req.query.ids || '').split(',').map(s => s.trim()).filter(Boolean))].slice(0, MAX_CARD_IDS);
     const shells = ctx && ctx.shells && typeof ctx.shells.get === 'function' ? ctx.shells : null;
@@ -1765,7 +1767,7 @@ function registerRoutes(app, context) {
     try {
       await Promise.all(ids.map(async (id) => {
         const entry = shells ? shells.get(id) : null;
-        prompts[id] = entry ? await getPromptSource().promptFor(entry) : { prompt: null, supported: false };
+        prompts[id] = entry ? await getPromptSource().promptFor(entry) : { prompt: null, title: null, supported: false };
       }));
     } catch (e) {
       return res.status(500).json({ error: e.message });
