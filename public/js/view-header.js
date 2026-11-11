@@ -15,9 +15,10 @@
  * saying so, asked again every POLL_MS while you look at it, so the prompt you are about to type
  * appears there without the row moving.
  *
- * The toggle sits at the row's top-left in both states. Hidden, the row shrinks to the toggle's
- * own line instead of going away, so the button stays where it was. Which state is a
- * browser-wide preference, like the task board's Ungrouped column.
+ * The row is one line by default: the toggle, then the prompt cut off with an ellipsis. The
+ * toggle expands it to three lines that hold the whole prompt (scrolled if it is longer), and
+ * sits at the row's top-left in both states, so it never moves. Which state is a browser-wide
+ * preference, like the task board's Ungrouped column.
  *
  * Layout: the row is absolutely placed at the top of #terminals and every terminal container
  * starts below it. This module only toggles .view-header-open and .view-header-collapsed on
@@ -33,7 +34,7 @@ import { nsKey } from './storage-namespace.js';
 const FRESH_MS = 5 * 60 * 1000;   // a found prompt: re-read now and then, since /clear starts a new one
 const POLL_MS = 5000;             // a session with no prompt yet, while it is on screen
 const RETRY_MS = 30 * 1000;       // no answer at all (not a session, or not one yet)
-const HIDDEN_KEY = nsKey('deepsteve-view-header-hidden');
+const EXPANDED_KEY = nsKey('deepsteve-view-header-expanded');
 
 const facts = new Map();     // tab id → { at, data: { prompt, supported } | null }
 const fetching = new Set();  // tab ids with a request in flight
@@ -46,12 +47,13 @@ export function init(callbacks) {
   render();
 }
 
+/** One line, unless the user expanded it. */
 export function isCollapsed() {
-  try { return localStorage.getItem(HIDDEN_KEY) === '1'; } catch { return false; }
+  try { return localStorage.getItem(EXPANDED_KEY) !== '1'; } catch { return true; }
 }
 
 function setCollapsed(on) {
-  try { on ? localStorage.setItem(HIDDEN_KEY, '1') : localStorage.removeItem(HIDDEN_KEY); } catch { /* private mode */ }
+  try { on ? localStorage.removeItem(EXPANDED_KEY) : localStorage.setItem(EXPANDED_KEY, '1'); } catch { /* private mode */ }
 }
 
 const maxAge = (hit) => (!hit.data ? RETRY_MS : hit.data.prompt ? FRESH_MS : POLL_MS);
@@ -100,7 +102,7 @@ function toggleButton(collapsed) {
   const btn = document.createElement('button');
   btn.type = 'button';
   btn.className = 'vh-toggle';
-  btn.title = collapsed ? 'Show the first prompt' : 'Hide the first prompt';
+  btn.title = collapsed ? 'Show the whole first prompt' : 'Show one line of the first prompt';
   btn.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
   const caret = document.createElement('span');
   caret.className = 'vh-caret';
@@ -129,7 +131,6 @@ function paint(el, state) {
   el.replaceChildren();
   if (!state) return;
   el.appendChild(toggleButton(state.collapsed));
-  if (state.collapsed) return;
   const text = document.createElement('div');
   text.className = 'vh-prompt';
   if (state.prompt === undefined) {

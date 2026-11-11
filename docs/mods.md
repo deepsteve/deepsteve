@@ -1611,7 +1611,7 @@ A view may name a **`header`** the same way: a row **on top of the terminal** (`
 { "name": "Prompt", "additive": true, "match": [{ "kinds": ["agent"] }], "header": ["prompt"] }
 ```
 
-- **The toggle** is at the row's top-left, and it stays there. Hiding shrinks the row to the toggle's own line rather than removing it. Which state is a browser-wide preference (`localStorage` `deepsteve-view-header-hidden`). Turning the view's push button off removes the row entirely.
+- **One line by default.** The row holds the toggle and the prompt, cut off with an ellipsis. The toggle at the row's top-left expands it to three lines that hold the whole prompt (scrolled when longer) and collapses it again, and it stays in place in both states. Which state is a browser-wide preference (`localStorage` `deepsteve-view-header-expanded`). Turning the view's push button off removes the row entirely.
 - **The layout.** The row is absolutely placed in `#terminals`, and every `.terminal-container` starts below it. `view-header.js` only toggles `.view-header-open` / `.view-header-collapsed` on `#terminals`. `styles.css` derives `--ds-view-header-h` from them, once, and so does the probe `measureTerminalSize()` sizes a new tab with. The heights are fixed whatever has arrived. Overview mode tiles every tab, so the row stands down there.
 - Code: `public/js/view-header.js`, which imports neither views module (`app.js` injects `headerFor` and shares the footer's hooks). Tests: `test/unit/view-header.test.js`, plus a `headerFor` case in `project-views-client.test.js`.
 

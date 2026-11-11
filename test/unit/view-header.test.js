@@ -77,12 +77,12 @@ let imports = 0;
 
 const answer = (id, prompt, supported = true) => ({ prompts: { [id]: { prompt, supported } } });
 
-async function setupHeader({ headerFor = () => ({ slug: 'prompt', name: 'Prompt', fields: ['prompt'] }), data, collapsed = false } = {}) {
+async function setupHeader({ headerFor = () => ({ slug: 'prompt', name: 'Prompt', fields: ['prompt'] }), data, expanded = false } = {}) {
   const byId = new Map([['view-header', fakeEl()], ['terminals', fakeEl()]]);
   byId.get('view-header').classList.add('hidden');
   globalThis.document = { getElementById: (id) => byId.get(id) || null, createElement: () => fakeEl() };
   globalThis.localStorage = fakeStorage();
-  if (collapsed) globalThis.localStorage.setItem('deepsteve-view-header-hidden', '1');
+  if (expanded) globalThis.localStorage.setItem('deepsteve-view-header-expanded', '1');
   const state = { fetches: [], active: 't1', slotUp: false, headerFor, hidden: new Set(), data };
   globalThis.fetch = async (url) => {
     state.fetches.push(url);
@@ -102,50 +102,52 @@ async function setupHeader({ headerFor = () => ({ slug: 'prompt', name: 'Prompt'
 const toggleOf = (el) => el.children[0];
 const textOf = (el) => el.children[1];
 
-test('the header row: placeholder at once, then the first prompt, with the toggle first', async () => {
+test('the header row: one line by default, placeholder at once, then the first prompt after the toggle', async () => {
   const { el, state, terminals } = await setupHeader({ data: answer('t1', 'Make the tasks board show live terminals') });
   assert.ok(!el.classList.contains('hidden'), 'shown before the answer, so the fit already has it');
   assert.ok(terminals.classList.contains('view-header-open'));
-  assert.ok(!terminals.classList.contains('view-header-collapsed'));
+  assert.ok(terminals.classList.contains('view-header-collapsed'), 'one line until expanded');
   assert.strictEqual(textOf(el).textContent, '…');
   assert.deepStrictEqual(state.fetches, ['/api/project-views/cards?ids=t1']);
 
   await flush(); await flush();
   assert.strictEqual(toggleOf(el).className, 'vh-toggle');
-  assert.strictEqual(toggleOf(el).attrs['aria-expanded'], 'true');
-  assert.strictEqual(toggleOf(el).textContent, '▾First prompt');
+  assert.strictEqual(toggleOf(el).attrs['aria-expanded'], 'false');
+  assert.strictEqual(toggleOf(el).textContent, '▸First prompt');
   assert.strictEqual(textOf(el).className, 'vh-prompt');
   assert.strictEqual(textOf(el).textContent, 'Make the tasks board show live terminals');
 });
 
-test('the toggle hides the prompt but keeps its own line, and the choice is kept', async () => {
+test('the toggle expands the row and collapses it to one line again, and the choice is kept', async () => {
   const { el, mod, terminals } = await setupHeader({ data: answer('t1', 'Fix the footer') });
   await flush(); await flush();
+  assert.strictEqual(mod.isCollapsed(), true);
   let prevented = false;
   toggleOf(el).listeners.mousedown({ preventDefault: () => { prevented = true; } });
   assert.ok(prevented, 'a click leaves the keyboard in the terminal');
 
   toggleOf(el).listeners.click();
-  assert.ok(!el.classList.contains('hidden'), 'the row stays, so the button does not move');
+  assert.ok(!el.classList.contains('hidden'));
   assert.ok(terminals.classList.contains('view-header-open'));
-  assert.ok(terminals.classList.contains('view-header-collapsed'));
-  assert.strictEqual(el.children.length, 1, 'only the toggle');
-  assert.strictEqual(toggleOf(el).attrs['aria-expanded'], 'false');
-  assert.strictEqual(toggleOf(el).textContent, '▸First prompt');
-  assert.strictEqual(mod.isCollapsed(), true);
-  assert.strictEqual(localStorage.getItem('deepsteve-view-header-hidden'), '1', 'browser-wide');
+  assert.ok(!terminals.classList.contains('view-header-collapsed'));
+  assert.strictEqual(toggleOf(el).attrs['aria-expanded'], 'true');
+  assert.strictEqual(toggleOf(el).textContent, '▾First prompt');
+  assert.strictEqual(textOf(el).textContent, 'Fix the footer');
+  assert.strictEqual(mod.isCollapsed(), false);
+  assert.strictEqual(localStorage.getItem('deepsteve-view-header-expanded'), '1', 'browser-wide');
 
   toggleOf(el).listeners.click();
-  assert.ok(!terminals.classList.contains('view-header-collapsed'));
+  assert.ok(terminals.classList.contains('view-header-collapsed'));
+  assert.strictEqual(el.children.length, 2, 'the toggle and the one-line prompt');
   assert.strictEqual(textOf(el).textContent, 'Fix the footer');
-  assert.strictEqual(localStorage.getItem('deepsteve-view-header-hidden'), null);
+  assert.strictEqual(localStorage.getItem('deepsteve-view-header-expanded'), null);
 });
 
-test('a hidden row starts hidden after a reload', async () => {
-  const { el, terminals } = await setupHeader({ data: answer('t1', 'x'), collapsed: true });
+test('an expanded row starts expanded after a reload', async () => {
+  const { el, terminals } = await setupHeader({ data: answer('t1', 'x'), expanded: true });
   await flush(); await flush();
-  assert.ok(terminals.classList.contains('view-header-collapsed'));
-  assert.strictEqual(el.children.length, 1);
+  assert.ok(!terminals.classList.contains('view-header-collapsed'));
+  assert.strictEqual(toggleOf(el).attrs['aria-expanded'], 'true');
 });
 
 test('a session asked nothing yet says so, and is asked again while it is on screen', async (t) => {
@@ -219,5 +221,7 @@ test('view-header.js stays out of app.js and project-views.js; styles.css owns t
   const css = read('css/styles.css');
   assert.match(css, /#terminals > \.terminal-container \{ top: var\(--ds-view-header-h\); \}/);
   assert.match(read('js/terminal.js'), /top:var\(--ds-view-header-h, 0px\)/);
+  // Collapsed, the prompt is one line cut off with an ellipsis, not a scrolling box.
+  assert.match(css, /#terminals\.view-header-collapsed > #view-header \.vh-prompt \{[^}]*white-space: nowrap;[^}]*text-overflow: ellipsis;/);
   assert.match(read('index.html'), /<div id="terminals">\s*(<!--[\s\S]*?-->\s*)?<div id="view-header" class="hidden"/);
 });

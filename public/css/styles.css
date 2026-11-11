@@ -410,8 +410,8 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
    #view-header is the row on top of the terminal: the first prompt of the tab you are looking
    at, when it is in a view with a `header`. view-header.js toggles .view-header-open and
    .view-header-collapsed on #terminals; the row's height is derived from them HERE, once, and
-   every terminal container starts below it. Fixed heights, like the footer's: three 17px lines
-   shown, the toggle's one line hidden (each + 10px padding + 1px border). Overview mode tiles
+   every terminal container starts below it. Fixed heights, like the footer's: one 17px line by
+   default, three expanded (each + 10px padding + 1px border). Overview mode tiles
    every tab, so no single tab owns the top and the row stands down. */
 #terminals { --ds-view-header-h: 0px; }
 #terminals.view-header-open { --ds-view-header-h: calc(3 * 17px + 11px); }
@@ -469,6 +469,12 @@ body { background: var(--ds-bg-primary); color: var(--ds-text-primary); font-fam
   color: var(--ds-text-primary);
 }
 #view-header .vh-prompt.vh-muted { color: var(--ds-text-secondary); font-style: italic; }
+/* One line: the prompt's newlines fold into spaces and the end is cut off with an ellipsis. */
+#terminals.view-header-collapsed > #view-header .vh-prompt {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
 
 /* Layout toggle button */
 .layout-btn { padding: 4px 8px; background: var(--ds-bg-tertiary); border: 1px solid var(--ds-border); color: var(--ds-text-secondary); border-radius: 4px; cursor: pointer; font-size: 14px; margin-right: 8px; line-height: 1; }
