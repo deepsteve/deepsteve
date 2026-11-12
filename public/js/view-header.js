@@ -35,10 +35,16 @@
  */
 
 import { nsKey } from './storage-namespace.js';
+import { clientLog } from './client-log.js';
 
 const FRESH_MS = 5 * 60 * 1000;   // a found prompt and title: re-read now and then, since /clear starts a new one
 const POLL_MS = 5000;             // a session with no prompt or no title yet, while it is on screen
 const RETRY_MS = 30 * 1000;       // no answer at all (not a session, or not one yet)
+// A tab on screen whose answer is this stale has missed three polls: worth a line in the daemon
+// log, at most once a minute per tab. Nothing reproduced the row sitting on an old answer until
+// its button was clicked, so this records the next time it does.
+const OVERDUE_MS = 3 * POLL_MS;
+const OVERDUE_LOG_MS = 60 * 1000;
 const MODE_KEY = nsKey('deepsteve-view-header-mode');
 
 const MODES = ['summary', 'line', 'full'];
@@ -50,6 +56,10 @@ const fetching = new Set();  // tab ids with a request in flight
 let cb = {};
 let lastSig = null;
 let pollTimer = null;
+let pollArmedAt = 0;
+let shownId = null;          // the tab the row is about, and since when
+let shownSince = 0;
+const overdueLogged = new Map();   // tab id → when it was last logged
 
 export function init(callbacks) {
   cb = callbacks || {};
@@ -74,21 +84,30 @@ const nextMode = (mode, title) => shownMode(MODES[(MODES.indexOf(mode) + 1) % MO
 // Found both: re-read now and then. Missing either: ask again while it is on screen.
 const maxAge = (hit) => (!hit.data ? RETRY_MS : hit.data.prompt && hit.data.title ? FRESH_MS : POLL_MS);
 
-/** Show, fill or hide the row for the active tab. Cheap: a signature skips a no-op pass. */
-export function render() {
+/**
+ * Show, fill or hide the row for the active tab. Cheap: a signature skips a no-op pass.
+ * `reason` only labels the overdue line: 'poll', 'click', or app.js's 'app'.
+ */
+export function render(reason = 'app') {
   const el = document.getElementById('view-header');
   if (!el) return;
+  const armedFor = pollTimer ? Date.now() - pollArmedAt : null;
   clearTimeout(pollTimer);
   pollTimer = null;
   const active = cb.isViewSlotUp?.() ? null : cb.getActiveTabId?.() || null;
   const id = active && !cb.isTabHidden?.(active) ? active : null;
   const header = id ? cb.headerFor?.(id) : null;
   if (!header) {
+    shownId = null;
     paint(el, null);
     return;
   }
+  if (id !== shownId) { shownId = id; shownSince = Date.now(); }
   const hit = facts.get(id);
-  if (!hit || Date.now() - hit.at >= maxAge(hit)) load(id);
+  if (!hit || Date.now() - hit.at >= maxAge(hit)) {
+    if (hit) noteOverdue(id, hit, reason, armedFor);
+    load(id);
+  }
   // Asked, and nothing came back — a tab that is not a session, or an agent whose transcript we
   // cannot read. No row, and none while it is asked again either, or the terminal would jump.
   if (hit && !hit.data) {
@@ -97,8 +116,27 @@ export function render() {
   }
   const prompt = hit ? hit.data.prompt || null : undefined;
   const title = hit ? hit.data.title || null : null;
-  if (hit && !(prompt && title)) pollTimer = setTimeout(render, POLL_MS);
+  if (hit && !(prompt && title)) {
+    pollTimer = setTimeout(() => render('poll'), POLL_MS);
+    pollArmedAt = Date.now();
+  }
   paint(el, { id, prompt, title, mode: shownMode(chosenMode(), title) });
+}
+
+/**
+ * A tab that has been on screen since its last answer, still waiting for its prompt or title,
+ * and asked again far later than POLL_MS: the poll did not do its job. Say so in the daemon log.
+ */
+function noteOverdue(id, hit, reason, armedFor) {
+  const age = Date.now() - hit.at;
+  if (!hit.data || maxAge(hit) !== POLL_MS || age < OVERDUE_MS || shownSince > hit.at) return;
+  if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+  if (overdueLogged.has(id) && Date.now() - overdueLogged.get(id) < OVERDUE_LOG_MS) return;
+  overdueLogged.set(id, Date.now());
+  const s = (ms) => `${Math.round(ms / 1000)}s`;
+  clientLog('view-header', `tab ${id}: answer ${s(age)} old, asked every ${s(POLL_MS)}; this pass from ${reason}; `
+    + `poll ${armedFor == null ? 'not armed' : `armed ${s(armedFor)} ago`}; ${fetching.has(id) ? 'a request in flight' : 'nothing in flight'}; `
+    + `has ${hit.data.prompt ? 'prompt' : 'no prompt'}, ${hit.data.title ? 'title' : 'no title'}`);
 }
 
 function load(id) {
@@ -142,7 +180,7 @@ function toggleButton(mode, title) {
   btn.addEventListener('mousedown', (e) => e.preventDefault());
   btn.addEventListener('click', () => {
     setMode(next);
-    render();
+    render('click');
   });
   return btn;
 }

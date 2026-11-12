@@ -223,6 +223,40 @@ test('a session asked nothing yet says so, and is asked again while it is on scr
   assert.strictEqual(state.fetches.length, 3, 'a found prompt and title are not polled');
 });
 
+test('a row stuck on an old answer while its tab is on screen says so in the daemon log, once a minute', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+  const settle = async () => { for (let i = 0; i < 10; i++) await Promise.resolve(); };
+  const beacon = await import('../../public/js/client-log.js');
+  const sent = [];
+  beacon.attachClientLogSender(() => ({ readyState: 1, send: (m) => sent.push(...JSON.parse(m).entries) }), 'w');
+  const lines = () => { beacon.flushClientLog(); return sent.filter(e => e.kind === 'view-header').map(e => e.msg); };
+  sent.length = 0;
+
+  const { el, mod, state } = await setupHeader({ data: (url) => answer(url.split('=')[1], null) });
+  await settle();
+  assert.strictEqual(textOf(el).textContent, 'No prompt yet');
+
+  // Switching back to a tab whose answer is old is not a missed poll: it was not on screen.
+  state.active = 't2';
+  mod.render();
+  await settle();
+  t.mock.timers.setTime(Date.now() + 16000);
+  state.active = 't1';
+  mod.render();
+  assert.deepStrictEqual(lines(), []);
+  await settle();
+
+  // On screen since its answer, and the poll never ran: the clock moves, no timer fires.
+  t.mock.timers.setTime(Date.now() + 16000);
+  mod.render('click');
+  assert.deepStrictEqual(lines(), ['tab t1: answer 16s old, asked every 5s; this pass from click; poll armed 16s ago; '
+    + 'nothing in flight; has no prompt, no title']);
+  await settle();
+  t.mock.timers.setTime(Date.now() + 16000);
+  mod.render('click');
+  assert.strictEqual(lines().length, 1, 'once a minute per tab');
+});
+
 test('no row for an agent whose transcript we cannot read, or a tab that is not a session', async () => {
   const { el, state, mod, terminals } = await setupHeader({ data: answer('t1', null, false) });
   assert.ok(!el.classList.contains('hidden'), 'held open while asking');

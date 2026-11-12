@@ -41,6 +41,25 @@ reads someone else's conversation instead of failing. Paging is by byte offset (
 Code appends only, so an offset never moves) in `transcript-window.js`, and records become
 renderable entries in the pure `transcript-view.js`.
 
+## A tab follows the conversation it is on
+
+`claudeSessionId` is what `transcriptPath()` reads and what a restore resumes, so it has to follow
+the conversation when Claude Code moves to another one inside a running tab. Every detector hands
+its id to `adoptClaudeSession()` (server.js), the single writer, which refuses an id another tab
+owns (#497) and persists the change. There are three:
+
+- **A new transcript that names ours** (`watchClaudeSessionDir`'s fs.watch): `/clear`, plan
+  approval and other self-forks start a file whose head references the old id.
+- **Claude Code's own record of the process** (`claude-process.js`): `<config dir>/sessions/<pid>.json`,
+  whose `sessionId` is the conversation the process is writing now. This is the only one that sees
+  a `/resume` typed inside the tab — Claude Code appends to the resumed conversation's old file,
+  which never names the id the tab started with, so the tab used to keep an id with no transcript:
+  no first prompt on the header row, and a restore that resumes nothing. A tmux tab's record is
+  matched by its `tmux` pane name (`ds-<shellId>:…`), a node-pty tab's by pid, and a record whose
+  process is gone (a crash leftover) is never believed. It is undocumented Claude Code state, so
+  anything unexpected is ignored rather than adopted.
+- **The PTY `--resume` line** Claude Code prints on exit.
+
 ## A session's cwd must exist (#632)
 
 **A spawn whose cwd is gone is refused, never relocated.** `spawnSession` calls `assertSpawnCwd(cwd)` (`paths.js`, next to `expandTilde`) before it touches an engine, and each surface pre-flights with `spawnCwdProblem()` so the message fits: the two WS paths send `{type:'error', code, cwd, message}`, `/api/start-issue` and `/api/start-automation` answer `400`, the MCP tools (`open_terminal`, `run_in_terminal`, `start_issue`) return `isError` telling the agent to pass an explicit `cwd`, and a scheduled task records a failed run row instead of running. Codes: `cwd-missing`, `cwd-not-a-directory`, `cwd-unusable`. A falsy cwd is deliberately allowed through — `serializeShellEntry` writes the field unconditionally, so a record can carry `undefined`, and that has always meant "inherit".

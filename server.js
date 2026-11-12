@@ -14,6 +14,7 @@ const { createProxy } = require('./proxy');
 const { createSleepWatch } = require('./sleep-watch');
 const { createPowerAssertion } = require('./power-assertion');
 const { resolveForkTip } = require('./fork-resolve');
+const { watchClaudeProcess } = require('./claude-process');
 const { formatLogTimestamp, createLogRotator, defaultLogPaths } = require('./logging');
 const { findGitRoot } = require('./git-root');
 const { modKind } = require('./mod-kind');
@@ -2070,6 +2071,9 @@ function symlinkWorktreeClaudeSettings(parentCwd, worktreePath) {
 // claudeSessionId so the next restart resumes the correct session.
 
 const CLAUDE_PROJECTS_DIR = path.join(os.homedir(), '.claude', 'projects');
+// Claude Code's own record of each running process, `<config dir>/sessions/<pid>.json`
+// (claude-process.js). A profile session (#537) keeps it under its own config root.
+const claudeProcessDir = (configDir) => path.join(configDir || path.dirname(CLAUDE_PROJECTS_DIR), 'sessions');
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 // How much of a transcript head to scan for a parent-session reference. Both the
 // fs.watch fork detector and the fork-time tip resolver (#455) use this. Larger
@@ -2197,7 +2201,8 @@ function claudeSessionOwnedElsewhere(sessionId, exceptShellId) {
 }
 
 // Single authoritative writer for a shell's Claude session id (#503). Every lineage
-// detector — the fs.watch fork detector and the PTY `--resume` matcher — funnels
+// detector — the fs.watch fork detector, Claude Code's process record (a /resume inside
+// the tab, claude-process.js) and the PTY `--resume` matcher — funnels
 // through here, so the ownership invariant and the side effects (trace, planMode
 // reset, persistence) live in ONE place and a new detector can't reintroduce the
 // #497 steal. Returns true iff the id was adopted.
@@ -2292,6 +2297,19 @@ function watchClaudeSessionDir(shellId) {
   }
 
   entry.sessionDirWatcher = watcher;
+
+  // The fork detector above sees a NEW transcript that names ours. A /resume typed inside the
+  // tab writes to an OLD one that never names ours, so only Claude Code's record of its own
+  // process says the tab moved (claude-process.js). Its pid is asked of node-pty only: a tmux
+  // tab is matched by session name, and learning its pid would be a tmux call (#553).
+  if (entry.claudeProcessWatcher) entry.claudeProcessWatcher.close();
+  entry.claudeProcessWatcher = watchClaudeProcess({
+    dir: claudeProcessDir(entry.configDir),
+    shellId,
+    getPid: () => (entry.engineType === 'tmux' ? null : (entry.engine || ptyEngine).getPid(shellId)),
+    onConversation: (id) => adoptClaudeSession(shellId, id, 'claude-process'),
+    log,
+  });
 }
 
 function unwatchClaudeSessionDir(shellId) {
@@ -2299,6 +2317,10 @@ function unwatchClaudeSessionDir(shellId) {
   if (entry && entry.sessionDirWatcher) {
     entry.sessionDirWatcher.close();
     entry.sessionDirWatcher = null;
+  }
+  if (entry && entry.claudeProcessWatcher) {
+    entry.claudeProcessWatcher.close();
+    entry.claudeProcessWatcher = null;
   }
 }
 
