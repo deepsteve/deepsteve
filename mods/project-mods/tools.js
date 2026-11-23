@@ -102,6 +102,7 @@ const OPEN_MODES = ['tab', 'view'];
 const DEFAULT_OPEN_MODE = 'view';
 
 const MAX_NAME_LEN = 60;
+const MAX_CUSTOM_LABEL_LEN = 200;   // as long as a title the header row will show (view-cards.js)
 const MAX_ICON_LEN = 8;   // one emoji can be several code points (ZWJ sequences, skin tones)
 const MAX_DIRNAME_LEN = 48;
 
@@ -351,6 +352,16 @@ function cleanIcon(raw) {
 function cleanName(raw) {
   if (typeof raw !== 'string') return '';
   return raw.replace(CONTROL_CHARS, '').trim().slice(0, MAX_NAME_LEN);
+}
+
+/**
+ * A Custom Label as stored: one line, since the header shows it on one, or null when nothing is
+ * left. Sliced by code point, like an icon, so an emoji at the cut survives whole.
+ */
+function cleanCustomLabel(raw) {
+  if (typeof raw !== 'string') return null;
+  const s = raw.replace(CONTROL_CHARS, ' ').replace(/\s+/g, ' ').trim();
+  return s ? [...s].slice(0, MAX_CUSTOM_LABEL_LEN).join('') : null;
 }
 
 /**
@@ -730,7 +741,9 @@ function refresh(reason) {
 // in it are the tab's (view-footer.js), served by GET /api/project-views/footer/:sessionId.
 // A `header` is the same thing on top of the terminal (public/js/view-header.js). Its one
 // field, `prompt`, is the tab's first prompt and Claude Code's title for it, from the cards
-// route below.
+// route below. Right-clicking the row sets the tab's Custom Label, kept on its shell entry by
+// PUT /api/project-views/custom-label/:sessionId, which the row shows first whenever you return
+// to the tab.
 //
 // `additive: true` makes a view one you switch ON rather than one you look AT: it never
 // filters the strip and is never the selected view, but stacks with whichever one is — a
@@ -1756,10 +1769,11 @@ function registerRoutes(app, context) {
   });
 
   // A superview's cards: each tab's first prompt and Claude Code's title for the conversation,
-  // `{ prompts: { [id]: { prompt, title, supported } } }`. Asked by the browser for the agent tabs
-  // in a view with `cards` while its superview is up, by the task board for its rows, and by the
-  // header row for the tab you are looking at (the only one that shows the title).
-  // An id that is not a live session answers `{ prompt: null, title: null, supported: false }`.
+  // `{ prompts: { [id]: { prompt, title, supported, customLabel } } }`. Asked by the browser for
+  // the agent tabs in a view with `cards` while its superview is up, by the task board for its
+  // rows, and by the header row for the tab you are looking at (the only one that shows the title
+  // and the Custom Label). An id that is not a live session answers
+  // `{ prompt: null, title: null, supported: false, customLabel: null }`.
   app.get('/api/project-views/cards', async (req, res) => {
     const ids = [...new Set(String(req.query.ids || '').split(',').map(s => s.trim()).filter(Boolean))].slice(0, MAX_CARD_IDS);
     const shells = ctx && ctx.shells && typeof ctx.shells.get === 'function' ? ctx.shells : null;
@@ -1767,12 +1781,31 @@ function registerRoutes(app, context) {
     try {
       await Promise.all(ids.map(async (id) => {
         const entry = shells ? shells.get(id) : null;
-        prompts[id] = entry ? await getPromptSource().promptFor(entry) : { prompt: null, title: null, supported: false };
+        prompts[id] = entry
+          ? { ...(await getPromptSource().promptFor(entry)), customLabel: entry.customLabel || null }
+          : { prompt: null, title: null, supported: false, customLabel: null };
       }));
     } catch (e) {
       return res.status(500).json({ error: e.message });
     }
     res.json({ prompts });
+  });
+
+  // A tab's Custom Label: words the user chose for the header row, set from the row's right-click
+  // menu. `{ customLabel }` is a string, or null or '' to clear it. It lives on the shell entry,
+  // so state.json keeps it through a restart, a restore and a reload, and every window is pinged
+  // with it so one showing the same tab updates too.
+  app.put('/api/project-views/custom-label/:sessionId', (req, res) => {
+    const id = req.params.sessionId;
+    const entry = ctx && ctx.shells && typeof ctx.shells.get === 'function' ? ctx.shells.get(id) : null;
+    if (!entry) return res.status(404).json({ error: 'Session not found' });
+    const raw = (req.body || {}).customLabel;
+    if (raw != null && typeof raw !== 'string') return res.status(400).json({ error: 'customLabel must be a string or null' });
+    const customLabel = cleanCustomLabel(raw);
+    entry.customLabel = customLabel;
+    if (typeof ctx.saveState === 'function') ctx.saveState();
+    ping({ type: 'custom-label', id, customLabel });
+    res.json({ customLabel });
   });
 
   // A task board's tasks (view-tasks.js): each a title and the sessions grouped under it, kept
@@ -1895,7 +1928,7 @@ function registerRoutes(app, context) {
 // The mod loader only uses init/registerRoutes; the extra named exports are for unit tests.
 module.exports = {
   init, registerRoutes,
-  resolveProject, canonicalRoot, normalize, cleanSurfaces, cleanIcon, cleanName, cleanEntry,
+  resolveProject, canonicalRoot, normalize, cleanSurfaces, cleanIcon, cleanName, cleanCustomLabel, cleanEntry,
   cleanOpenMode, cleanPlacement, applyPlacement, effectiveOpenMode,
   // scan() is the force-rescan a test needs after writing into a repo behind our back —
   // every in-process write already forces one, but a direct fs write does not.

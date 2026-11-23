@@ -2339,6 +2339,8 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
         ProjectViews.refresh();
       } else if (msg.type === 'view-tasks') {
         ViewTasks.onPing(msg.contextId);   // a task board changed, in this window or another
+      } else if (msg.type === 'custom-label') {
+        ViewHeader.onCustomLabel(msg.id, msg.customLabel);   // set or cleared in some window
       } else if (msg.type === 'agent-chat') {
         ModManager.notifyAgentChatChanged(msg.channels);
       } else if (msg.type === 'browser-eval-request') {
@@ -5902,6 +5904,7 @@ async function init() {
       // which is exactly when an unattended agent registers a project mod (#618).
       if (msg.type === 'project-mods') { ProjectMods.refresh(); ProjectViews.refresh(); }
       if (msg.type === 'view-tasks') ViewTasks.onPing(msg.contextId);
+      if (msg.type === 'custom-label') ViewHeader.onCustomLabel(msg.id, msg.customLabel);
       if (msg.type === 'recent-sessions') {
         recentSessions = msg.sessions || [];
         renderEmptyStateRecent();

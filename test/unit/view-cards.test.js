@@ -207,6 +207,7 @@ test('GET /api/project-views/cards answers each id from its session', async () =
   const shells = new Map([
     ['a', { id: 'a', cwd: REPO, agentType: 'claude' }],
     ['c', { id: 'c', cwd: REPO, agentType: 'codex' }],
+    ['l', { id: 'l', cwd: REPO, agentType: 'claude', customLabel: 'Ads, the long way round' }],
   ]);
   const ctx = {
     shells,
@@ -227,13 +228,62 @@ test('GET /api/project-views/cards answers each id from its session', async () =
   const res = { statusCode: 200, body: null };
   res.status = (c) => { res.statusCode = c; return res; };
   res.json = (v) => { res.body = v; return res; };
-  await routes.get('GET /api/project-views/cards')({ query: { ids: 'a,c,gone,a' }, params: {} }, res);
+  await routes.get('GET /api/project-views/cards')({ query: { ids: 'a,c,gone,a,l' }, params: {} }, res);
   assert.strictEqual(res.statusCode, 200);
   assert.deepStrictEqual(res.body.prompts, {
-    a: { prompt: 'Which ad set drives installs?', title: 'Ad set installs', supported: true },
-    c: { prompt: null, title: null, supported: false },
-    gone: { prompt: null, title: null, supported: false },
+    a: { prompt: 'Which ad set drives installs?', title: 'Ad set installs', supported: true, customLabel: null },
+    c: { prompt: null, title: null, supported: false, customLabel: null },
+    gone: { prompt: null, title: null, supported: false, customLabel: null },
+    l: { prompt: null, title: null, supported: true, customLabel: 'Ads, the long way round' },
   });
+});
+
+test('PUT /api/project-views/custom-label/:id keeps a cleaned label on the entry, saves, and tells every window', async () => {
+  const shells = new Map([['a', { id: 'a', cwd: REPO, agentType: 'claude' }]]);
+  const pings = [];
+  let saves = 0;
+  const ctx = {
+    shells,
+    settings: { projectModsEnabled: true },
+    reloadClients: new Set(),
+    log: () => {},
+    broadcast: (m) => pings.push(m),
+    saveState: () => { saves++; },
+    getContexts: () => [],
+    transcriptPath: () => null,
+    getAgentConfig: agentConfig,
+  };
+  views.init(ctx);
+  const routes = new Map();
+  views.registerRoutes({
+    get: (p, h) => routes.set(`GET ${p}`, h), post: (p, h) => routes.set(`POST ${p}`, h),
+    put: (p, h) => routes.set(`PUT ${p}`, h), delete: (p, h) => routes.set(`DELETE ${p}`, h),
+  }, ctx);
+  const put = routes.get('PUT /api/project-views/custom-label/:sessionId');
+  const call = (id, body) => {
+    const res = { statusCode: 200, body: null };
+    res.status = (c) => { res.statusCode = c; return res; };
+    res.json = (v) => { res.body = v; return res; };
+    put({ params: { sessionId: id }, body }, res);
+    return res;
+  };
+
+  let res = call('a', { customLabel: '  Ship the\n footer\t fix  ' });
+  assert.strictEqual(res.statusCode, 200);
+  assert.deepStrictEqual(res.body, { customLabel: 'Ship the footer fix' }, 'one line, as the row shows it');
+  assert.strictEqual(shells.get('a').customLabel, 'Ship the footer fix', 'on the entry, which state.json serializes');
+  assert.strictEqual(saves, 1);
+  assert.deepStrictEqual(pings, [{ type: 'custom-label', id: 'a', customLabel: 'Ship the footer fix' }]);
+
+  res = call('a', { customLabel: '   ' });
+  assert.deepStrictEqual(res.body, { customLabel: null }, 'blank clears it');
+  assert.strictEqual(shells.get('a').customLabel, null);
+  res = call('a', { customLabel: null });
+  assert.deepStrictEqual(res.body, { customLabel: null });
+
+  assert.strictEqual(call('a', { customLabel: 42 }).statusCode, 400);
+  assert.strictEqual(call('gone', { customLabel: 'x' }).statusCode, 404);
+  assert.strictEqual([...views.cleanCustomLabel('😀'.repeat(250))].length, 200, 'cut by code point');
 });
 
 // ------------------------------------------------------------------ the client
