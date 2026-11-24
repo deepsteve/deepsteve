@@ -86,6 +86,12 @@ function fakeElement(className = '') {
     },
     addEventListener: () => {},
   };
+  // overview-mode.js names its labels with className, so the fake keeps it in step with
+  // classList — or querySelector('.overview-label') could never find one.
+  Object.defineProperty(el, 'className', {
+    get: () => [...classes].join(' '),
+    set: (v) => { classes.clear(); String(v).split(' ').filter(Boolean).forEach(c => classes.add(c)); },
+  });
   return el;
 }
 
@@ -137,6 +143,8 @@ async function setup({ freshStorage = true } = {}) {
     restoreCalls: [],         // each restoreTerminals(dims) invocation, as arrays
     activateCalls: [],
     switchCalls: [],
+    labels: {},               // id → the tab's one-liner, when it has one
+    tiledCalls: [],           // each onTiles(ids) invocation
   };
 
   const addTab = (contextKey, id, cols, rows) => {
@@ -157,7 +165,9 @@ async function setup({ freshStorage = true } = {}) {
     getActiveTabId: () => state.activeTabId,
     getActiveContextId: () => state.activeContextId,
     getSession: (id) => state.sessions.get(id),
-    getTabName: (id) => id,
+    getTabName: (id) => `name of ${id}`,
+    getTileLabel: (id) => state.labels[id] || null,
+    onTiles: (ids) => state.tiledCalls.push([...ids]),
     switchToTab: (id) => { state.switchCalls.push(id); state.activeTabId = id; },
     activateTab: (id) => { state.activateCalls.push(id); state.activeTabId = id; },
     fitTerminals: (ids) => {
@@ -355,4 +365,31 @@ test('toggle in an empty context does not arm a phantom grid', async () => {
   switchContext('ctxa');
   switchContext('ctxb');
   assert.strictEqual(mod.isOverviewActive(), false);
+});
+
+test('a tile\'s bar is the tab\'s one-liner, else its name, and repaints when one arrives', async () => {
+  const { mod, state, addTab, switchContext } = await setup();
+  addTab('ctxa', 'a1', 200, 50);
+  addTab('ctxa', 'a2', 200, 50);
+  addTab('ctxb', 'b1', 200, 50);
+  switchContext('ctxa');
+  state.labels.a1 = 'Release notes for 1.8';
+  const bar = (id) => state.sessions.get(id).container.querySelector('.overview-label').textContent;
+
+  assert.deepStrictEqual(mod.tiledIds(), [], 'no grid, no tiles');
+  mod.toggle();
+  assert.strictEqual(bar('a1'), 'Release notes for 1.8');
+  assert.strictEqual(bar('a2'), 'name of a2', 'no one-liner yet: the tab\'s name');
+  assert.deepStrictEqual(state.tiledCalls, [['a1', 'a2']], 'told which tabs were tiled, to ask about them');
+  assert.deepStrictEqual(mod.tiledIds(), ['a1', 'a2']);
+
+  state.labels.a2 = 'Fix the login form';
+  mod.refreshLabels();
+  assert.strictEqual(bar('a2'), 'Fix the login form');
+
+  // A tab opened into the grid is tiled by the observer, and asked about too.
+  addTab('ctxa', 'a3', 200, 50);
+  observerCb();
+  assert.deepStrictEqual(state.tiledCalls.at(-1), ['a3']);
+  assert.strictEqual(bar('a3'), 'name of a3');
 });

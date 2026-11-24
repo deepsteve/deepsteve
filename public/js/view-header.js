@@ -25,7 +25,8 @@
  * Summary until there is one. The button is as wide as its widest label in every mode, so it
  * never moves and a second click lands where the first did. Its hover text names the control
  * ("Header mode"); the label already says which mode is on. Which of Summary, First line and
- * First prompt is a browser-wide preference, like the task board's Ungrouped column.
+ * First prompt is a browser-wide preference. The task board titles each tab's card with the
+ * default chain (Custom Label, else Summary, else First line) whatever the preference says.
  *
  * Right-clicking the row opens a menu that sets or clears the tab's Custom Label. It is kept on
  * the session by the server (PUT /api/project-views/custom-label/:id), and a tab that has one

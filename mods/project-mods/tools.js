@@ -1808,11 +1808,12 @@ function registerRoutes(app, context) {
     res.json({ customLabel });
   });
 
-  // A task board's tasks (view-tasks.js): each a title and the sessions grouped under it, kept
-  // per project. The browser names the project by context id. Every write answers the project's
-  // whole list and pings every window with `{ type: 'view-tasks', contextId }`, so another
-  // window's board refetches. A stored session with no running shell stays on its task — its
-  // tab may be reopened — but the board draws only live ones, so each goes out marked.
+  // A task board's groups (view-tasks.js): each a title and the sessions grouped under it, kept
+  // per project. A tab in no group is a card of its own on the board and is stored nowhere. The
+  // browser names the project by context id. Every write answers the project's whole list and
+  // pings every window with `{ type: 'view-tasks', contextId }`, so another window's board
+  // refetches. A stored session with no running shell stays on its task — its tab may be
+  // reopened — but the board draws only live ones, so each goes out marked.
   const taskProject = (req, res) => {
     const project = projectScope.getContexts(ctx).find(c => c && c.id === req.params.contextId);
     if (!project) res.status(404).json({ error: 'Project not found' });
@@ -1842,7 +1843,8 @@ function registerRoutes(app, context) {
     res.json({ tasks: getTaskStore().list(project.id).map(wireTask) });
   });
 
-  // "+ New task", or sessions dropped on it: `{ title?, sessions? }`. No title is "New task".
+  // A group, made by dragging tabs onto another tab's card: `{ title?, sessions? }`. No title is
+  // "New task".
   app.post('/api/project-views/tasks/:contextId', (req, res) =>
     writeTasks(req, res, (store, id, b) => store.create(id, { title: b.title, sessions: b.sessions }), 201));
 

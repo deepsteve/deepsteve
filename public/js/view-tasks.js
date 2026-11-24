@@ -3,24 +3,40 @@
  *
  * A selectable project view with `tasks: true` gets a board while it is the selected view: a
  * tab-shaped button at the head of the strip, like view-cards.js's superview, that opens the
- * project's tasks over the terminal area. A task is an ad hoc grouping of the view's agent tabs.
- * On the left is Ungrouped — the tabs in no task — which collapses to a narrow strip; then one
- * card per task; then "+ New task". A project's board starts empty.
+ * project's tasks over the terminal area. Every agent tab in the view is on the board without
+ * being put there. A tab in no group is a card of its own, titled with its one-liner: the words
+ * the header row shows by default (view-header.js), which are its Custom Label, else Claude
+ * Code's Summary, else the first line of its first prompt.
  *
- * A tab is in at most one of a project's tasks, so a drag moves it: onto a card files it there,
- * onto Ungrouped takes it out, onto "+ New task" makes a task holding it. ⌘/Ctrl-click and
- * ⇧-click select several, and dragging any selected tab drags them all. A plain click opens the
- * tab, exactly as clicking it in the strip would — which takes the board down.
+ * A group is the other kind of card: a name of its own over several tabs. Dragging a card onto
+ * another tab's card makes one, holding both, with its name open for editing and the target's
+ * one-liner filled in. A tab is in at most one of a project's groups, so a drag moves it: onto a
+ * group files it there, onto a lone tab's card makes a group of the two, and onto the "take it
+ * out" card, shown at the end of the board only while a grouped tab is being dragged, gives it a
+ * card of its own again. A group that a move empties is dropped (the daemon's rule, mirrored by
+ * applyMove). A lone tab's whole card is what you drag; in a group, each tab's row is.
+ * ⌘/Ctrl-click and ⇧-click select several, and dragging any selected tab drags them all. Each
+ * tab's Open button opens it, exactly as clicking it in the strip would — which takes the board
+ * down. The tab's own name is left off the board: the one-liner says what it is for.
  *
- * The tasks are the daemon's (mods/project-mods/view-tasks.js), per project, so every window
+ * A card's title renames it on click. A group's name belongs to the group. A lone tab's title is
+ * its Custom Label (PUT /api/project-views/custom-label/:id), so the board and the header row
+ * always say the same thing; clearing the field clears the label, and the Summary comes back.
+ *
+ * The cards follow the strip's order, a group in the place of its first tab there. A group with
+ * none of its tabs drawn here comes last, oldest first.
+ *
+ * The groups are the daemon's (mods/project-mods/view-tasks.js), per project, so every window
  * sees one board: /api/project-views/tasks/:contextId, and a `view-tasks` ping when any window
  * writes. A write is drawn at once and then replaced by the daemon's answer; a failed one says
- * so and refetches. A task keeps a tab's id after it closes, so a reopened tab is back on its
- * card, but the board draws only this window's tabs; a task's tabs open in another window are
- * counted on its card, not drawn.
+ * so and refetches. A group keeps a tab's id after it closes, so a reopened tab is back in it,
+ * but the board draws only this window's tabs; a group's tabs open in another window are counted
+ * on its card, not drawn.
  *
- * The rows show each tab's first prompt, from the same GET /api/project-views/cards the cards
- * superview reads.
+ * The one-liners are one-liners.js's: this board keeps its own cache of them, asked about once
+ * when the board comes up and every POLL_MS while it stays up (Claude Code writes the title during
+ * the first reply). A Custom Label set in any window arrives as the 'custom-label' ping, which
+ * app.js routes to onCustomLabel().
  *
  * Like view-cards.js this never imports project-views.js or context-views.js; app.js injects
  * what it needs. render() is called from the end of every filter pass and never asks for one.
@@ -28,15 +44,13 @@
  * it, so the pane waits for either to finish.
  */
 
-import { nsKey } from './storage-namespace.js';
+import { createOneLiners, oneLiner } from './one-liners.js';
 
 const POLL_MS = 5000;
 const BOARD_GLYPH = '▥';
 const DRAG_TYPE = 'application/x-deepsteve-sessions';
-const TITLE_MAX = 120;
-// Ungrouped collapsed or not. localStorage: it is "how it looks", like the views bar's expanded
-// state, not a place.
-const UNGROUPED_KEY = nsKey('deepsteve-view-tasks-ungrouped');
+const TITLE_MAX = 120;   // a group's name: the store's MAX_TITLE
+const LABEL_MAX = 200;   // a Custom Label: tools.js's MAX_CUSTOM_LABEL_LEN
 
 let cb = {};
 let tabEl = null;
@@ -45,8 +59,7 @@ let up = false;          // is the board showing — this window only, so a relo
 let upFor = null;        // `${contextId}|${slug}` the board was opened for
 let pollTimer = null;
 let paneSig = null;
-let fetchingPrompts = false;
-const prompts = new Map();   // tab id → { prompt, supported }, once the server has answered
+const facts = createOneLiners({ onChange: () => render() });   // every tab's one-liner, as the server last answered
 const boards = new Map();    // context id → [{ id, title, created, sessions: [{ id, live }] }]
 const loading = new Set();   // context ids with a GET in flight
 const stale = new Set();     // …and pinged during it, so asked again when it lands
@@ -54,23 +67,14 @@ let selected = new Set();    // tab ids picked with ⌘/⇧-click, in the order 
 let anchor = null;           // { list, id }: where a ⇧-click range starts
 let dragIds = null;          // the tabs being dragged, while one of our drags is on
 let editing = false;         // a title input is open
-let pendingEdit = null;      // a task id whose title opens for editing once its card is drawn
-let deferred = false;        // a redraw skipped while dragging or editing
-let titleEls = new Map();    // task id → its title button, as last drawn
+let pendingEdit = null;      // a group id whose name opens for editing once its card is drawn
+let titleEls = new Map();    // group id → its title button, as last drawn
 
 export const isUp = () => up;
 
 const ctxNow = () => cb.getActiveContext?.() || null;
 const keyOf = (ctx, view) => (ctx && view ? `${ctx.id}|${view.slug}` : null);
 const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
-
-function isCollapsed() {
-  try { return localStorage.getItem(UNGROUPED_KEY) === '1'; } catch { return false; }
-}
-
-function setCollapsed(on) {
-  try { on ? localStorage.setItem(UNGROUPED_KEY, '1') : localStorage.removeItem(UNGROUPED_KEY); } catch { /* private mode */ }
-}
 
 function ensureTab() {
   if (tabEl && tabEl.isConnected) return tabEl;
@@ -128,7 +132,7 @@ function setUp(on) {
     // No real tab is the one you are looking at, and none may take your keys.
     cb.setStripActive?.(false);
     document.activeElement?.blur?.();
-    if (!pollTimer) pollTimer = setInterval(fetchPrompts, POLL_MS);
+    if (!pollTimer) pollTimer = setInterval(fetchFacts, POLL_MS);
   } else {
     upFor = null;
     selected = new Set();
@@ -160,9 +164,14 @@ export function dismiss() {
   render();
 }
 
-/** Another window (or this one) changed a project's tasks. Refetch if we hold that board. */
+/** Another window (or this one) changed a project's groups. Refetch if we hold that board. */
 export function onPing(contextId) {
   if (boards.has(contextId) || loading.has(contextId)) loadTasks(contextId);
+}
+
+/** A tab's Custom Label was set or cleared, in this window or another ('custom-label' ping). */
+export function onCustomLabel(id, customLabel) {
+  facts.onCustomLabel(id, customLabel);
 }
 
 /**
@@ -175,9 +184,9 @@ export function render() {
   const view = currentView(ctx);
   // The board belongs to the view and project it was opened for.
   if (up && keyOf(ctx, view) !== upFor) setUp(false);
-  // The superview's count is the number of tasks, so it is fetched as soon as the view shows.
+  // The superview counts the board's cards, which needs the groups, so they are fetched as soon
+  // as the view shows.
   if (view && !boards.has(ctx.id) && !loading.has(ctx.id)) loadTasks(ctx.id);
-  const tasks = view ? boards.get(ctx.id) || [] : [];
 
   if (el) {
     el.classList.toggle('hidden', !view);
@@ -185,37 +194,52 @@ export function render() {
     el.setAttribute('aria-selected', up && view ? 'true' : 'false');
     if (view) {
       const [, , label, count] = el.children;
-      el.title = 'Show this project’s tasks and the tabs in each';
+      el.title = 'Show every tab in this view, each with its one-liner';
       label.textContent = view.name;
-      count.textContent = String(tasks.length);
+      count.textContent = String(layout(boards.get(ctx.id) || [], cb.memberTabs?.(view) || [], cb.hasTab).length);
     }
   }
   renderPane(ctx, view);
 }
 
-/** Every move is the same rule as the daemon's: out of every task, then into `to` (if any). */
+/**
+ * Every move is the same rule as the daemon's: out of every group, then into `to` (if any). A
+ * group the move empties goes; one that was empty already stays.
+ */
 export function applyMove(tasks, ids, to) {
-  return tasks.map((t) => {
+  const out = [];
+  for (const t of tasks) {
     const kept = t.sessions.filter(s => !ids.includes(s.id));
-    return t.id === to ? { ...t, sessions: [...kept, ...ids.map(id => ({ id, live: true }))] } : { ...t, sessions: kept };
-  });
+    if (t.id === to) out.push({ ...t, sessions: [...kept, ...ids.map(id => ({ id, live: true }))] });
+    else if (kept.length || !t.sessions.length) out.push({ ...t, sessions: kept });
+  }
+  return out;
 }
 
 /**
- * What the board draws: this window's tabs in the view, split into Ungrouped and one list per
- * task (in the task's order), plus how many of a task's live tabs are in another window.
+ * What the board draws, in order. A tab in no group is `{ tab }`. A group is `{ task, tabs,
+ * elsewhere }`: its tabs here in the group's own order, and how many of its live tabs are in
+ * another window. The cards follow `tabs` (the strip's order), a group in its first tab's place;
+ * a group with none of its tabs here comes last, in the groups' order.
  */
 export function layout(tasks, tabs, hasTab = () => false) {
   const here = new Map(tabs.map(t => [t.id, t]));
-  const grouped = new Set(tasks.flatMap(t => t.sessions.map(s => s.id)));
-  return {
-    ungrouped: tabs.filter(t => !grouped.has(t.id)),
-    cards: tasks.map(task => ({
-      task,
-      tabs: task.sessions.map(s => here.get(s.id)).filter(Boolean),
-      elsewhere: task.sessions.filter(s => s.live && !here.has(s.id) && !hasTab(s.id)).length,
-    })),
-  };
+  const groupOf = new Map();
+  for (const task of tasks) for (const s of task.sessions) groupOf.set(s.id, task);
+  const group = (task) => ({
+    task,
+    tabs: task.sessions.map(s => here.get(s.id)).filter(Boolean),
+    elsewhere: task.sessions.filter(s => s.live && !here.has(s.id) && !hasTab(s.id)).length,
+  });
+  const cards = [];
+  const placed = new Set();
+  for (const tab of tabs) {
+    const task = groupOf.get(tab.id);
+    if (!task) cards.push({ tab });
+    else if (!placed.has(task.id)) { placed.add(task.id); cards.push(group(task)); }
+  }
+  for (const task of tasks) if (!placed.has(task.id)) cards.push(group(task));
+  return cards;
 }
 
 function renderPane(ctx, view) {
@@ -224,26 +248,23 @@ function renderPane(ctx, view) {
   const showing = up && !!view;
   pane.classList.toggle('hidden', !showing);
   if (!showing) { paneSig = null; return; }
-  if (dragIds || editing) { deferred = true; return; }
-  deferred = false;
+  if (dragIds || editing) return;
 
   const tabs = cb.memberTabs?.(view) || [];
   const tasks = boards.get(ctx.id) || [];
-  const collapsed = isCollapsed();
-  const lay = layout(tasks, tabs, cb.hasTab);
-  const drawn = [...lay.ungrouped, ...lay.cards.flatMap(c => c.tabs)];
-  const sig = JSON.stringify([ctx.name, view.slug, view.name, view.icon, collapsed, [...selected],
+  const cards = layout(tasks, tabs, cb.hasTab);
+  const sig = JSON.stringify([ctx.name, view.slug, view.name, view.icon, [...selected],
     tasks.map(t => [t.id, t.title, t.sessions]), tabs.map(t => [t.id, t.name, !!t.current]),
-    drawn.map(t => prompts.get(t.id) || null)]);
+    tabs.map(t => oneLiner(facts.get(t.id)).text)]);
   if (sig !== paneSig) {
     paneSig = sig;
-    draw(pane, ctx, view, tabs, tasks, lay, collapsed);
+    draw(pane, ctx, view, tabs, cards);
   }
   // A tab that joined while the board is up is asked about at once rather than at the next poll.
-  if (drawn.some(t => !prompts.has(t.id))) fetchPrompts();
+  if (tabs.some(t => !facts.has(t.id))) fetchFacts();
 }
 
-function draw(pane, ctx, view, tabs, tasks, lay, collapsed) {
+function draw(pane, ctx, view, tabs, cards) {
   pane.replaceChildren();
   titleEls = new Map();
   const head = document.createElement('div');
@@ -253,17 +274,24 @@ function draw(pane, ctx, view, tabs, tasks, lay, collapsed) {
   title.textContent = view.icon ? `${view.icon} ${view.name}` : view.name;
   const sub = document.createElement('span');
   sub.className = 'view-tasks-sub';
-  sub.textContent = `${plural(tasks.length, 'task', 'tasks')} · ${plural(tabs.length, 'tab', 'tabs')}${ctx.name ? ` in ${ctx.name}` : ''}`;
+  sub.textContent = `${plural(cards.length, 'task', 'tasks')} · ${plural(tabs.length, 'tab', 'tabs')}${ctx.name ? ` in ${ctx.name}` : ''}`;
   head.append(title, sub);
 
   const board = document.createElement('div');
   board.className = 'view-tasks-board';
-  board.append(ungroupedColumn(lay.ungrouped, tabs.length, collapsed));
-  const cards = document.createElement('div');
-  cards.className = 'view-tasks-cards';
-  for (const c of lay.cards) cards.appendChild(taskCard(c));
-  cards.appendChild(newTaskCard(tasks.length === 0));
-  board.appendChild(cards);
+  const grid = document.createElement('div');
+  grid.className = 'view-tasks-cards';
+  // The lone tabs are one list for ⇧-click, in the order they are drawn.
+  const loneOrder = cards.filter(c => c.tab).map(c => c.tab.id);
+  for (const c of cards) grid.appendChild(c.task ? groupCard(c) : tabCard(c.tab, loneOrder));
+  if (!cards.length) {
+    const empty = document.createElement('div');
+    empty.className = 'view-tasks-empty';
+    empty.textContent = 'No agent tabs are open in this view.';
+    grid.appendChild(empty);
+  }
+  grid.appendChild(outCard());
+  board.appendChild(grid);
   pane.append(head, board);
 
   if (pendingEdit && titleEls.has(pendingEdit)) {
@@ -273,40 +301,38 @@ function draw(pane, ctx, view, tabs, tasks, lay, collapsed) {
   }
 }
 
-function ungroupedColumn(list, total, collapsed) {
-  const col = document.createElement('div');
-  col.className = 'view-tasks-ungrouped' + (collapsed ? ' collapsed' : '');
-  const toggle = document.createElement('button');
-  toggle.className = 'view-tasks-col-head';
-  toggle.title = collapsed ? 'Show the tabs in no task' : 'Hide the tabs in no task';
-  toggle.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
-  const caret = document.createElement('span');
-  caret.className = 'view-tasks-caret';
-  caret.textContent = collapsed ? '▸' : '▾';
-  const name = document.createElement('span');
-  name.className = 'view-tasks-col-name';
-  name.textContent = 'Ungrouped';
-  const count = document.createElement('span');
-  count.className = 'view-tasks-col-count';
-  count.textContent = String(list.length);
-  toggle.append(caret, name, count);
-  toggle.addEventListener('click', () => { setCollapsed(!collapsed); render(); });
-  col.appendChild(toggle);
-  if (!collapsed) {
-    if (list.length) {
-      col.appendChild(sessionList(list, 'ungrouped'));
-    } else {
-      const empty = document.createElement('div');
-      empty.className = 'view-tasks-empty';
-      empty.textContent = total ? 'Every tab here is in a task.' : 'No agent tabs are open in this view.';
-      col.appendChild(empty);
-    }
-  }
-  dropTarget(col, (ids) => moveTabs(ids, null));
-  return col;
+/** A card title's words, in a span: line-clamping a <button> itself is unreliable in Firefox. */
+function titleText(text) {
+  const span = document.createElement('span');
+  span.className = 'view-task-title-text';
+  span.textContent = text;
+  return span;
 }
 
-function taskCard({ task, tabs, elsewhere }) {
+/** A tab in no group: a card of its own, titled with its one-liner. The card is what you drag. */
+function tabCard(tab, order) {
+  const card = document.createElement('div');
+  card.className = 'view-task view-task-solo';
+  const head = document.createElement('div');
+  head.className = 'view-task-head';
+  const { text, empty } = oneLiner(facts.get(tab.id));
+  const title = document.createElement('button');
+  title.className = 'view-task-title' + (empty ? ' empty' : '');
+  title.appendChild(titleText(text));
+  title.title = 'Rename — sets this tab’s Custom Label, which the header row shows too';
+  title.addEventListener('click', (e) => { e?.stopPropagation?.(); relabel(title, tab.id); });
+  head.appendChild(title);
+  const foot = document.createElement('div');
+  foot.className = 'view-task-foot';
+  foot.appendChild(openButton(tab));
+  card.append(head, foot);
+  asTabHandle(card, tab, 'lone', order);
+  dropTarget(card, (ids) => groupWith(tab.id, ids));
+  return card;
+}
+
+/** A group: its name, and a row per tab, each with its one-liner. */
+function groupCard({ task, tabs, elsewhere }) {
   const card = document.createElement('div');
   card.className = 'view-task';
   card.dataset.task = task.id;
@@ -314,7 +340,7 @@ function taskCard({ task, tabs, elsewhere }) {
   head.className = 'view-task-head';
   const title = document.createElement('button');
   title.className = 'view-task-title';
-  title.textContent = task.title;
+  title.appendChild(titleText(task.title));
   title.title = 'Rename this task';
   title.addEventListener('click', () => renameTask(title, task.id));
   titleEls.set(task.id, title);
@@ -324,12 +350,18 @@ function taskCard({ task, tabs, elsewhere }) {
   const del = document.createElement('button');
   del.className = 'view-task-delete';
   del.textContent = '×';
-  del.title = 'Delete this task — its tabs go back to Ungrouped';
-  del.setAttribute('aria-label', `Delete ${task.title}`);
+  del.title = 'Ungroup — each of its tabs gets a card of its own again';
+  del.setAttribute('aria-label', `Ungroup ${task.title}`);
   del.addEventListener('click', () => deleteTask(task.id));
   head.append(title, count, del);
   card.appendChild(head);
-  if (tabs.length) card.appendChild(sessionList(tabs, task.id));
+  if (tabs.length) {
+    const list = document.createElement('div');
+    list.className = 'view-tasks-list';
+    const order = tabs.map(t => t.id);
+    for (const t of tabs) list.appendChild(sessionRow(t, task.id, order));
+    card.appendChild(list);
+  }
   if (elsewhere) {
     const more = document.createElement('div');
     more.className = 'view-task-more';
@@ -339,78 +371,64 @@ function taskCard({ task, tabs, elsewhere }) {
   if (!tabs.length && !elsewhere) {
     const empty = document.createElement('div');
     empty.className = 'view-tasks-empty';
-    empty.textContent = 'Drag tabs here.';
+    empty.textContent = 'None of its tabs are open.';
     card.appendChild(empty);
   }
   dropTarget(card, (ids) => moveTabs(ids, task.id));
   return card;
 }
 
-function newTaskCard(first) {
+/**
+ * Where a grouped tab is dropped to take it back out. Hidden until a drag that holds a grouped
+ * tab starts (onDragStart), and it is the last card, so showing it moves nothing above it.
+ */
+function outCard() {
   const card = document.createElement('div');
-  card.className = 'view-task view-task-new';
-  const btn = document.createElement('button');
-  btn.className = 'view-task-new-btn';
-  btn.textContent = '+ New task';
-  card.title = 'Make a task, then drag tabs onto it';
-  card.appendChild(btn);
-  // The whole card is the button: there is nothing else on it to click. The button stays for
-  // the keyboard, and its click bubbles here. Once the name field has replaced it, a click in
-  // the field must not start a second one, and a press on the rest of the card must not blur
-  // the field — a blur ends the edit, so the card would close what it just opened.
-  let field = null;
-  card.addEventListener('click', () => {
-    if (btn.parentNode !== card) return;
-    field = editTitle(btn, '', (title) => { if (title) createTask({ title }); });
-  });
-  card.addEventListener('mousedown', (e) => {
-    if (field && field.isConnected && e.target !== field) e.preventDefault();
-  });
-  if (first) {
-    const hint = document.createElement('div');
-    hint.className = 'view-tasks-empty';
-    hint.textContent = 'Make a task, then drag tabs onto it — or drop tabs here to make one.';
-    card.appendChild(hint);
-  }
-  dropTarget(card, (ids) => createTask({ sessions: ids, edit: true }));
+  card.className = 'view-task view-task-out';
+  card.textContent = 'Drop here to take it out of its group';
+  dropTarget(card, (ids) => moveTabs(ids, null));
   return card;
 }
 
-function sessionList(list, key) {
-  const el = document.createElement('div');
-  el.className = 'view-tasks-list';
-  const order = list.map(t => t.id);
-  for (const t of list) el.appendChild(sessionRow(t, key, order));
-  return el;
-}
-
-function promptText(p) {
-  if (!p) return { text: 'Loading…', empty: true };
-  if (p.prompt) return { text: p.prompt, empty: false };
-  return { text: p.supported ? 'No prompt yet' : 'This agent keeps no transcript to read a prompt from', empty: true };
-}
-
+/** A tab in a group: its one-liner and its Open button. The row is what you drag. */
 function sessionRow(t, key, order) {
   const el = document.createElement('div');
-  el.className = 'view-tasks-session' + (selected.has(t.id) ? ' selected' : '') + (t.current ? ' current' : '');
-  el.dataset.id = t.id;
-  el.draggable = true;
-  el.title = `Open ${t.name} · ⌘-click or ⇧-click to select several`;
-  const name = document.createElement('span');
-  name.className = 'view-tasks-session-name';
-  name.textContent = t.name;
-  const { text, empty } = promptText(prompts.get(t.id));
-  const prompt = document.createElement('span');
-  prompt.className = 'view-tasks-session-prompt' + (empty ? ' empty' : '');
-  prompt.textContent = text;
-  el.append(name, prompt);
-  el.addEventListener('click', (e) => onRowClick(e, t.id, key, order));
-  el.addEventListener('dragstart', (e) => onDragStart(e, t.id));
-  el.addEventListener('dragend', () => endDrag());
+  el.className = 'view-tasks-session';
+  const { text, empty } = oneLiner(facts.get(t.id));
+  const label = document.createElement('span');
+  label.className = 'view-tasks-session-label' + (empty ? ' empty' : '');
+  label.textContent = text;
+  el.append(label, openButton(t));
+  asTabHandle(el, t, key, order);
   return el;
 }
 
-function onRowClick(e, id, key, order) {
+/** Into the tab, as clicking it in the strip would. Its name is said only here, on hover. */
+function openButton(t) {
+  const btn = document.createElement('button');
+  btn.className = 'view-task-open';
+  btn.textContent = 'Open';
+  btn.title = `Open ${t.name}`;
+  btn.addEventListener('click', (e) => {
+    e?.stopPropagation?.();   // not also a click on the card or row it sits in
+    cb.openTab?.(t.id);
+  });
+  return btn;
+}
+
+/** Make `el` stand for tab `t` on the board: dragged, and ⌘/⇧-clicked into the selection. */
+function asTabHandle(el, t, key, order) {
+  if (selected.has(t.id)) el.classList.add('selected');
+  if (t.current) el.classList.add('current');
+  el.dataset.id = t.id;
+  el.draggable = true;
+  el.addEventListener('click', (e) => onHandleClick(e, t.id, key, order));
+  el.addEventListener('dragstart', (e) => onDragStart(e, t.id));
+  el.addEventListener('dragend', () => endDrag());
+}
+
+/** ⌘/Ctrl toggles a tab into the selection, ⇧ extends it within one list; a plain click lets go. */
+function onHandleClick(e, id, key, order) {
   if (e.metaKey || e.ctrlKey) {
     selected.has(id) ? selected.delete(id) : selected.add(id);
     anchor = { list: key, id };
@@ -423,12 +441,16 @@ function onRowClick(e, id, key, order) {
     } else {
       for (const x of order.slice(Math.min(from, to), Math.max(from, to) + 1)) selected.add(x);
     }
+  } else if (selected.size) {
+    selected = new Set();
+    anchor = null;
   } else {
-    cb.openTab?.(id);
     return;
   }
   render();
 }
+
+const groupOfTab = (id) => (boards.get(ctxNow()?.id) || []).find(t => t.sessions.some(s => s.id === id)) || null;
 
 function onDragStart(e, id) {
   dragIds = selected.has(id) ? [...selected] : [id];
@@ -438,11 +460,22 @@ function onDragStart(e, id) {
     e.dataTransfer.setData(DRAG_TYPE, JSON.stringify(dragIds));
   }
   e.currentTarget?.classList?.add('dragging');
+  // The way back out, for a drag with a grouped tab in it. A turn later: a layout change inside
+  // dragstart can cancel the drag it is starting.
+  if (dragIds.some(groupOfTab)) {
+    setTimeout(() => { if (dragIds) paneEl?.classList.add('dragging-grouped'); }, 0);
+  }
+}
+
+/** Our drag is over, dropped or not. */
+function stopDragging() {
+  dragIds = null;
+  paneEl?.classList.remove('dragging-grouped');
 }
 
 function endDrag() {
   if (!dragIds) return;
-  dragIds = null;
+  stopDragging();
   paneSig = null;   // a rebuild clears the .dragging mark
   render();
 }
@@ -464,19 +497,19 @@ function dropTarget(el, onDrop) {
     el.classList.remove('drop-over');
     const ids = dragIds;
     // The drop may redraw the board, and a removed source never hears its dragend.
-    dragIds = null;
+    stopDragging();
     onDrop(ids);
   });
 }
 
 /** Swap `label` for a one-line input. `done(text)` gets the trimmed text, or null on Escape. */
-function editTitle(label, initial, done) {
+function editTitle(label, initial, done, { max = TITLE_MAX, placeholder = 'Task name' } = {}) {
   const input = document.createElement('input');
   input.type = 'text';
   input.className = 'view-task-title-input';
   input.value = initial;
-  input.maxLength = TITLE_MAX;
-  input.placeholder = 'Task name';
+  input.maxLength = max;
+  input.placeholder = placeholder;
   let finished = false;
   const finish = (save) => {
     if (finished) return;
@@ -492,6 +525,9 @@ function editTitle(label, initial, done) {
     else if (e.key === 'Escape') { e.preventDefault(); finish(false); }
   });
   input.addEventListener('blur', () => finish(true));
+  // A lone tab's title sits in a card you drag, and a press-and-move in the field must select
+  // text rather than start a drag. finish() redraws, which makes the card draggable again.
+  for (let n = label.parentNode; n && n !== paneEl; n = n.parentNode) if (n.draggable) n.draggable = false;
   label.replaceWith(input);
   editing = true;
   input.focus?.();
@@ -539,13 +575,28 @@ function moveTabs(ids, to) {
   send(ctx.id, 'POST', '/move', { sessions: ids, to });
 }
 
+/**
+ * Tabs dropped on a lone tab's card: a group of that tab and them, named for now with the
+ * target's one-liner, and its name opened for editing.
+ */
+function groupWith(targetId, ids) {
+  const others = ids.filter(id => id !== targetId);
+  if (!others.length) {   // dropped on itself
+    selected = new Set();
+    anchor = null;
+    render();
+    return;
+  }
+  const { text, empty } = oneLiner(facts.get(targetId));
+  createTask({ title: empty ? '' : text, sessions: [targetId, ...others], edit: true });
+}
+
 async function createTask({ title, sessions, edit } = {}) {
   const ctx = ctxNow();
   if (!ctx) return;
   selected = new Set();
   anchor = null;
   const data = await send(ctx.id, 'POST', '', { title: title || '', sessions: sessions || [] });
-  // Tabs dropped on "+ New task" make a task called "New task"; its name opens for editing.
   if (data && data.task && edit && up) {
     pendingEdit = data.task.id;
     paneSig = null;
@@ -565,11 +616,49 @@ function renameTask(label, id) {
   });
 }
 
+/** Ungroup: the group goes, and its tabs are lone cards again. Nothing happens to the tabs. */
 function deleteTask(id) {
   const ctx = ctxNow();
   if (!ctx) return;
   optimistic(ctx.id, (boards.get(ctx.id) || []).filter(t => t.id !== id));
   send(ctx.id, 'DELETE', `/${encodeURIComponent(id)}`);
+}
+
+/**
+ * Rename a lone tab's card, which is its Custom Label. The field starts with what the card shows,
+ * so leaving it as it was writes nothing, and emptying it clears the label.
+ */
+function relabel(label, id) {
+  const f = facts.get(id);
+  const current = (f && f.customLabel) || '';
+  const shown = oneLiner(f);
+  const initial = current || (shown.empty ? '' : shown.text);
+  editTitle(label, initial, (text) => {
+    if (text === null || text === initial) return;
+    if (!text && !current) return;
+    saveLabel(id, text || null);
+  }, { max: LABEL_MAX, placeholder: 'Custom Label — empty for the Summary' });
+}
+
+async function saveLabel(id, customLabel) {
+  const before = facts.get(id);
+  facts.set(id, { ...(before || { at: 0, prompt: null, title: null, supported: true }), customLabel });
+  render();
+  try {
+    const res = await fetch('/api/project-views/custom-label/' + encodeURIComponent(id), {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ customLabel }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+    // The daemon pings every window, this one included; its cleaned text is the one to show.
+    if ('customLabel' in data) onCustomLabel(id, data.customLabel);
+  } catch (e) {
+    if (before) facts.set(id, before); else facts.delete(id);
+    cb.showToast?.(`Couldn’t save the Custom Label — ${e.message}`);
+    render();
+  }
 }
 
 // --- reads ----------------------------------------------------------------------------------
@@ -591,36 +680,11 @@ async function loadTasks(ctxId) {
   render();
 }
 
-/**
- * Ask the server for the prompts still missing: rows never asked about, and rows whose agent
- * keeps a transcript but has not been prompted yet. One request for all of them.
- */
-async function fetchPrompts() {
-  if (!up || fetchingPrompts) return;
-  const ctx = ctxNow();
-  const view = currentView(ctx);
-  if (!view) return;
-  const need = (cb.memberTabs?.(view) || []).map(t => t.id).filter((id) => {
-    const p = prompts.get(id);
-    return !p || (!p.prompt && p.supported);
-  });
-  if (!need.length) return;
-  fetchingPrompts = true;
-  try {
-    const res = await fetch('/api/project-views/cards?ids=' + need.map(encodeURIComponent).join(','));
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
-    for (const id of need) {
-      const p = data.prompts && data.prompts[id];
-      prompts.set(id, { prompt: (p && p.prompt) || null, supported: !p || p.supported !== false });
-    }
-  } catch {
-    // Read as "no prompt yet", so the row stops saying Loading… and the poll tries again.
-    for (const id of need) if (!prompts.has(id)) prompts.set(id, { prompt: null, supported: true });
-  } finally {
-    fetchingPrompts = false;
-  }
-  render();
+/** Ask about the board's tabs: the ones one-liners.js finds worth asking, in one request. */
+function fetchFacts() {
+  if (!up) return null;
+  const view = currentView();
+  return view ? facts.want((cb.memberTabs?.(view) || []).map(t => t.id)) : null;
 }
 
 export function init(callbacks) {

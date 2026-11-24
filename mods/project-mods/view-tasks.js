@@ -10,10 +10,12 @@
  * committed, and every window should see the same board, so they are not kept client-side. They
  * live in one state file, `view-tasks.json`, keyed by project (context) id.
  *
- * A session is in at most one of a project's tasks — moving it anywhere takes it out of every
- * other. A task keeps a session's id after its tab closes, so a reopened tab is back on its card;
- * an id is dropped only once the daemon has no record of that session at all (the retention
- * sweep purged its tombstone), and only on a write, so a read can never shrink a board.
+ * On the board every tab is a task of its own without being stored here; a stored task is a
+ * group, made by dragging tabs together. A session is in at most one of a project's groups —
+ * moving it anywhere takes it out of every other, and a group a move empties is dropped. A group
+ * keeps a session's id after its tab closes, so a reopened tab is back in it; an id is dropped
+ * only once the daemon has no record of that session at all (the retention sweep purged its
+ * tombstone), and only on a write, so a read can never shrink a board.
  *
  * Unrelated to the Tasks mod (mods/tasks/), which is a to-do list.
  */
@@ -111,10 +113,20 @@ function createTaskStore({ file, sessionKnown = () => true, now = Date.now, newI
     return list(contextId);
   }
 
-  /** Take `ids` out of every task of the project, then append them to `target` when given. */
+  /**
+   * Take `ids` out of every task of the project, then append them to `target` when given. Answers
+   * the tasks to keep: a task this empties is dropped, since a group with no tabs left is nothing
+   * on the board, but one that was empty already is left alone.
+   */
   function place(tasks, ids, target) {
-    for (const t of tasks) t.sessions = t.sessions.filter(id => !ids.includes(id));
+    const emptied = new Set();
+    for (const t of tasks) {
+      const had = t.sessions.length;
+      t.sessions = t.sessions.filter(id => !ids.includes(id));
+      if (had && !t.sessions.length && t !== target) emptied.add(t);
+    }
     if (target) target.sessions = [...target.sessions, ...ids].slice(0, MAX_TASK_SESSIONS);
+    return tasks.filter(t => !emptied.has(t));
   }
 
   /** A new task, at the end. `sessions` are moved into it. → { task, tasks } or { error, status }. */
@@ -123,8 +135,7 @@ function createTaskStore({ file, sessionKnown = () => true, now = Date.now, newI
     if (tasks.length >= MAX_TASKS) return { error: `A project holds at most ${MAX_TASKS} tasks`, status: 400 };
     const task = { id: newId(), title: cleanTitle(title) || DEFAULT_TITLE, sessions: [], created: now() };
     tasks.push(task);
-    place(tasks, cleanSessionIds(sessions), task);
-    const after = commit(contextId, tasks);
+    const after = commit(contextId, place(tasks, cleanSessionIds(sessions), task));
     return { task: after.find(t => t.id === task.id), tasks: after };
   }
 
@@ -152,8 +163,7 @@ function createTaskStore({ file, sessionKnown = () => true, now = Date.now, newI
     if (to != null && !target) return { error: 'Task not found', status: 404 };
     const ids = cleanSessionIds(sessions);
     if (!ids.length) return { error: 'sessions must name at least one session', status: 400 };
-    place(tasks, ids, target);
-    return { tasks: commit(contextId, tasks) };
+    return { tasks: commit(contextId, place(tasks, ids, target)) };
   }
 
   return { list, create, rename, remove, move };

@@ -37,7 +37,7 @@ import { init as initScheduledHistory, open as openScheduledHistory, refresh as 
 import { init as initTimecardPresence, setEnabled as setTimecardPresenceEnabled } from './timecard-presence.js';
 import { init as initProgressBar, start as progressStart, done as progressDone } from './progress-bar.js';
 import { init as initHashCommands, beforeSend as hashCommandsBeforeSend, setWaitingForInput as setHashCommandsWaiting, setEnabled as setHashCommandsEnabled, dismiss as dismissHashCommands } from './hash-commands.js';
-import { init as initOverviewMode, setEnabled as setOverviewModeEnabled, setShortcut as setOverviewModeShortcut, setDefaultLayout as setOverviewDefaultLayout, toggle as toggleOverviewMode, isOverviewActive, getLayout as getOverviewLayout, updateFocus as updateOverviewFocus, onTabsReordered as onOverviewTabsReordered, syncToContext as syncOverviewToContext } from './overview-mode.js';
+import { init as initOverviewMode, setEnabled as setOverviewModeEnabled, setShortcut as setOverviewModeShortcut, setDefaultLayout as setOverviewDefaultLayout, toggle as toggleOverviewMode, isOverviewActive, getLayout as getOverviewLayout, updateFocus as updateOverviewFocus, onTabsReordered as onOverviewTabsReordered, syncToContext as syncOverviewToContext, tiledIds as overviewTiledIds, refreshLabels as refreshOverviewLabels } from './overview-mode.js';
 import { init as initTerminalSearch, attachSearchAddon, closeIfOpen as closeTerminalSearch } from './terminal-search.js';
 import * as SessionHistory from './session-history.js';
 import { init as initContextViews, refreshProjectAgentRows, setEnabled as setContextViewsEnabled, applyFilter as refreshContextFilter, requestNewTabInContext, resolveContextRepo, newTabCwd, chooseContextDir, setContexts as applyServerContexts, setActiveContext as setActiveContextFromPanel, getActiveContextId, getActiveContextInfo, orderRecentDirsByContext, activeContextIsEmpty, noteActiveTab, revealTabContext, showToast, setRailSuppressed, setRailQuiet, paintProjectRows, paintNewMarks as paintRailNewMarks, contextsForCwd } from './context-views.js';
@@ -48,6 +48,7 @@ import * as ViewHeader from './view-header.js';
 import * as TabSlot from './tab-slot.js';
 import * as ViewCards from './view-cards.js';
 import * as ViewTasks from './view-tasks.js';
+import { createOneLiners } from './one-liners.js';
 import * as DecisionMode from './decision-mode.js';
 import * as Onboarding from './onboarding.js';
 import { nsKey } from './storage-namespace.js';
@@ -69,6 +70,12 @@ function truncateTitle(title) {
 // Active sessions in memory
 const sessions = new Map();
 let activeId = null;
+
+// What each overview tile's bar says: the tab's one-liner (one-liners.js), the words the task
+// board titles its cards with. Asked about as tabs are tiled and every 5s while the grid is up,
+// so the Summary Claude Code writes during the first reply lands without leaving the grid.
+const TILE_LABEL_POLL_MS = 5000;
+const tileLabels = createOneLiners({ onChange: () => refreshOverviewLabels() });
 
 // Cached automations for the new-tab dropdown (refreshed on load + modal close)
 let cachedAutomations = [];
@@ -2341,6 +2348,8 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
         ViewTasks.onPing(msg.contextId);   // a task board changed, in this window or another
       } else if (msg.type === 'custom-label') {
         ViewHeader.onCustomLabel(msg.id, msg.customLabel);   // set or cleared in some window
+        ViewTasks.onCustomLabel(msg.id, msg.customLabel);    // …and a lone tab's card is titled with it
+        tileLabels.onCustomLabel(msg.id, msg.customLabel);   // …and so is its overview tile
       } else if (msg.type === 'agent-chat') {
         ModManager.notifyAgentChatChanged(msg.channels);
       } else if (msg.type === 'browser-eval-request') {
@@ -5904,7 +5913,11 @@ async function init() {
       // which is exactly when an unattended agent registers a project mod (#618).
       if (msg.type === 'project-mods') { ProjectMods.refresh(); ProjectViews.refresh(); }
       if (msg.type === 'view-tasks') ViewTasks.onPing(msg.contextId);
-      if (msg.type === 'custom-label') ViewHeader.onCustomLabel(msg.id, msg.customLabel);
+      if (msg.type === 'custom-label') {
+        ViewHeader.onCustomLabel(msg.id, msg.customLabel);
+        ViewTasks.onCustomLabel(msg.id, msg.customLabel);
+        tileLabels.onCustomLabel(msg.id, msg.customLabel);
+      }
       if (msg.type === 'recent-sessions') {
         recentSessions = msg.sessions || [];
         renderEmptyStateRecent();
@@ -6122,6 +6135,9 @@ async function init() {
     getOrderedTabIds: getVisibleTabIds,
     getActiveTabId: () => activeId,
     getSession: (id) => sessions.get(id),
+    // A tile's bar is the tab's one-liner; the name only stands in for a tab with none.
+    getTileLabel: (id) => tileLabels.text(id),
+    onTiles: (ids) => tileLabels.want(ids),
     getTabName: (id) => {
       const s = sessions.get(id);
       return s?.name || getDefaultTabName(s?.cwd || '');
@@ -6170,6 +6186,11 @@ async function init() {
       }
     },
   });
+  // A no-op with no grid up: tiledIds() is empty, and so is want()'s request.
+  setInterval(() => {
+    const ids = overviewTiledIds();
+    if (ids.length) tileLabels.want(ids);
+  }, TILE_LABEL_POLL_MS);
 
   // Decision Tab mode (#716). The server pushes the list of waiting decision tabs on the
   // control socket (on connect, and on every change); see public/js/decision-mode.js.

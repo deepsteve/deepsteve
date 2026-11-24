@@ -21,6 +21,12 @@
  * context-views' applyFilter(). Before #590 there was one global `isActive`
  * boolean and no context hook at all, so the old context's tiles stayed on
  * screen under the new context's tabs.
+ *
+ * Each tile's bar says what the tab is for: its one-liner (one-liners.js, the
+ * words the task board titles its cards with), from callbacks.getTileLabel, and
+ * the tab's name when it has none (a plain terminal, a session not prompted
+ * yet). The one-liners arrive after the grid is drawn, so callbacks.onTiles(ids)
+ * says which tabs were just tiled and refreshLabels() repaints the bars.
  */
 
 import { nsKey } from './storage-namespace.js';
@@ -101,6 +107,11 @@ function applyLayout() {
 
 // -------------------------------------------------------------------- the grid
 
+/** A tile's bar: the tab's one-liner, else its name. */
+function tileLabel(id) {
+  return callbacks.getTileLabel?.(id) || callbacks.getTabName?.(id) || id;
+}
+
 /**
  * Decorate one container as a tile and remember the terminal's pre-overview grid.
  * The dimensions have to be captured BEFORE the tile is fitted — that fit is what
@@ -119,7 +130,7 @@ function addTile(id, session) {
   if (!session.container.querySelector('.overview-label')) {
     const label = document.createElement('div');
     label.className = 'overview-label';
-    label.textContent = callbacks.getTabName?.(id) || id;
+    label.textContent = tileLabel(id);
     session.container.appendChild(label);
   }
 
@@ -165,6 +176,7 @@ function showGrid() {
   }
 
   applyLayout();
+  callbacks.onTiles?.([...tiled]);
 
   const activeId = callbacks.getActiveTabId?.();
   if (activeId) updateFocusClass(activeId);
@@ -297,6 +309,7 @@ function startObserver() {
     }
     applyLayout();
     if (fresh.length) {
+      callbacks.onTiles?.(fresh);
       requestAnimationFrame(() => {
         callbacks.fitTerminals?.(fresh);
       });
@@ -475,4 +488,18 @@ export function onTabsReordered(orderedIds) {
 
 export function isOverviewActive() {
   return shownContext !== null;
+}
+
+/** The tabs tiled right now, in grid order; none while no grid is shown. */
+export function tiledIds() {
+  if (!shownContext) return [];
+  return (callbacks.getOrderedTabIds?.() || []).filter(id => callbacks.getSession?.(id)?.container);
+}
+
+/** Repaint every tile's bar: a one-liner arrived, or a tab was renamed. */
+export function refreshLabels() {
+  for (const id of tiledIds()) {
+    const label = callbacks.getSession(id).container.querySelector('.overview-label');
+    if (label) label.textContent = tileLabel(id);
+  }
 }
