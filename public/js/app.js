@@ -2350,6 +2350,8 @@ function createSession(cwd, existingId = null, isNew = false, opts = {}) {
         ViewHeader.onCustomLabel(msg.id, msg.customLabel);   // set or cleared in some window
         ViewTasks.onCustomLabel(msg.id, msg.customLabel);    // …and a lone tab's card is titled with it
         tileLabels.onCustomLabel(msg.id, msg.customLabel);   // …and so is its overview tile
+      } else if (msg.type === 'session-tasks') {
+        tileLabels.onSessionTasks(msg.tasks);   // a tab said which task it is on, or the task changed
       } else if (msg.type === 'agent-chat') {
         ModManager.notifyAgentChatChanged(msg.channels);
       } else if (msg.type === 'browser-eval-request') {
@@ -5918,6 +5920,7 @@ async function init() {
         ViewTasks.onCustomLabel(msg.id, msg.customLabel);
         tileLabels.onCustomLabel(msg.id, msg.customLabel);
       }
+      if (msg.type === 'session-tasks') tileLabels.onSessionTasks(msg.tasks);
       if (msg.type === 'recent-sessions') {
         recentSessions = msg.sessions || [];
         renderEmptyStateRecent();
@@ -6137,6 +6140,8 @@ async function init() {
     getSession: (id) => sessions.get(id),
     // A tile's bar is the tab's one-liner; the name only stands in for a tab with none.
     getTileLabel: (id) => tileLabels.text(id),
+    // …with the task it said it is working on (the Tasks mod's work_on_task) ahead of it.
+    getTileTask: (id) => tileLabels.task(id),
     onTiles: (ids) => tileLabels.want(ids),
     getTabName: (id) => {
       const s = sessions.get(id);

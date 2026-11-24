@@ -14,7 +14,8 @@
  * the tabs worth asking about go out, in one request: never asked, missing the prompt or the
  * title while their agent keeps a transcript, or answered long enough ago that a /clear may have
  * started another conversation. One request is in flight at a time. onChange(ids) is called
- * whenever facts land or a Custom Label arrives, and is the owner's cue to redraw.
+ * whenever facts land, a Custom Label arrives or a tab's task changes, and is the owner's cue to
+ * redraw. The facts carry the task each tab said it is working on (the Tasks mod's work_on_task).
  *
  * Imports nothing: a module that owns a surface makes its own cache, so a test that re-imports
  * that module starts from an empty one.
@@ -62,6 +63,7 @@ export function createOneLiners({ onChange = () => {}, freshMs = FRESH_MS } = {}
           title: p.title || null,
           customLabel: p.customLabel || null,
           supported: p.supported !== false,
+          task: p.task || null,
         });
       }
     } catch {
@@ -86,9 +88,27 @@ export function createOneLiners({ onChange = () => {}, freshMs = FRESH_MS } = {}
     onChange([id]);
   }
 
+  /**
+   * The tasks some tabs are working on changed (the 'session-tasks' ping: `{ [id]: task | null }`).
+   * Like a Custom Label, a tab never asked about is left to its first ask, which brings its task.
+   */
+  function onSessionTasks(map) {
+    const changed = [];
+    for (const [id, task] of Object.entries(map || {})) {
+      const f = facts.get(id);
+      if (!f) continue;
+      facts.set(id, { ...f, task: task || null });
+      changed.push(id);
+    }
+    if (changed.length) onChange(changed);
+  }
+
   return {
     want,
     onCustomLabel,
+    onSessionTasks,
+    /** The task the tab is working on — `{ id, title, status }` — or null. */
+    task: (id) => (facts.get(id) && facts.get(id).task) || null,
     get: (id) => facts.get(id),
     has: (id) => facts.has(id),
     set: (id, f) => facts.set(id, f),

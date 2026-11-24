@@ -57,20 +57,82 @@ function sessionEntry(id) {
  * (a record that is neither running nor closed — restorable all the same) or 'gone' (the
  * retention sweep purged the tombstone, and there is nothing left to reopen).
  */
-function describeSession(ref) {
+function describeSession(ref, taskId) {
   const live = ctx ? ctx.shells.get(ref.id) : null;
   const saved = live ? null : sessionEntry(ref.id);
   const entry = live || saved;
   const label = (entry && entry.name) || ref.name || (entry && entry.cwd ? path.basename(entry.cwd) : '') || ref.id;
-  if (live) return { id: ref.id, label, state: 'live', closedAt: null };
+  // Whether that session says this is the task it is working on (work_on_task), off its own record.
+  const working = !!(entry && entry.task && taskId != null && entry.task.id === taskId);
+  if (live) return { id: ref.id, label, state: 'live', closedAt: null, working };
   if (saved) {
     return {
       id: ref.id, label,
       state: saved.closed ? 'closed' : 'saved',
       closedAt: saved.closed ? (saved.closedAt || saved.lastActivity || null) : null,
+      working,
     };
   }
-  return { id: ref.id, label, state: 'gone', closedAt: null };
+  return { id: ref.id, label, state: 'gone', closedAt: null, working: false };
+}
+
+// ── The task a session is working on ─────────────────────────────────────────
+//
+// The other direction from the references above. A session that says which task it is working on
+// (work_on_task, or being started from one by the Tasks app) keeps it on its own shell entry, next
+// to its id: `entry.task = { id, title }`, which state.json carries through a restart, a close and
+// a restore (server.js, restoreTaskRef). So it is part of the session's own context — what
+// get_session_info tells it, what list_sessions tells other sessions, what its overview tile shows.
+//
+// Only the id is the reference. A task's title and status are read from the task as they go out
+// (sessionTask), the way a session's state is read for a task above; the stored title is shown only
+// once the task itself has been deleted.
+
+/** `{ id, title, status, description }` for the task a session entry is working on, or null. */
+function sessionTask(entry) {
+  const ref = entry && entry.task;
+  if (!ref || !Number.isInteger(ref.id)) return null;
+  const t = tasks.find(x => x.id === ref.id);
+  if (!t) return { id: ref.id, title: ref.title || null, status: 'deleted', description: '' };
+  return { id: t.id, title: t.title, status: t.status, description: t.description || '' };
+}
+
+/** Tell every window what the live sessions that have a task are working on now (and `also`). */
+function pingSessionTasks(also = []) {
+  if (!ctx || !ctx.shells) return;
+  const out = {};
+  for (const id of also) out[id] = null;
+  for (const [id, entry] of ctx.shells) {
+    const t = sessionTask(entry);
+    if (t) out[id] = { id: t.id, title: t.title, status: t.status };
+  }
+  if (!Object.keys(out).length) return;
+  const msg = { type: 'session-tasks', tasks: out };
+  try { ctx.broadcast(msg); } catch {}
+  const data = JSON.stringify(msg);
+  for (const client of ctx.reloadClients || []) {
+    if (client.readyState === 1) client.send(data);
+  }
+}
+
+/**
+ * Point a live session at a task, or at none (`task` null). Attaches the session to the task as
+ * well (the #719 reference, so the panel badges it) and moves a pending task to in-progress.
+ */
+function setSessionTask(sessionId, task) {
+  const entry = ctx && ctx.shells.get(sessionId);
+  if (!entry) return false;
+  entry.task = task ? { id: task.id, title: task.title } : null;
+  if (task) {
+    if (!sessionRefs(task).some(r => r.id === sessionId)) {
+      task.sessions = [...sessionRefs(task), { id: sessionId, name: entry.name || null }];
+    }
+    if (task.status === 'pending') task.status = 'in-progress';
+    saveTasks();
+  }
+  if (typeof ctx.saveState === 'function') ctx.saveState();
+  broadcastTasks([sessionId]);
+  return true;
 }
 
 /**
@@ -105,7 +167,7 @@ const isOpen = (t) => t.status !== 'done';
 
 /** The task list as it goes over the wire: each reference decorated with its session's state. */
 function wireTasks() {
-  return tasks.map(t => ({ ...t, sessions: sessionRefs(t).map(describeSession), project: taskProject(t) }));
+  return tasks.map(t => ({ ...t, sessions: sessionRefs(t).map(r => describeSession(r, t.id)), project: taskProject(t) }));
 }
 
 /** Every directory of every registered project — the only places the Tasks app starts a session. */
@@ -118,8 +180,14 @@ function projectDirs() {
 // scrollback.
 const SCREEN_ROWS_MAX = 60;
 
-function broadcastTasks() {
+/**
+ * Every change to the task list ends here. A rename, a status change or a delete also changes
+ * what the sessions working on that task show, so they are pinged too; `cleared` names sessions
+ * that just stopped working on one.
+ */
+function broadcastTasks(cleared = []) {
   if (ctx) ctx.broadcast({ type: 'tasks', tasks: wireTasks() });
+  pingSessionTasks(cleared);
 }
 
 /** A windowId only if that window is connected now — otherwise the open would reach nobody. */
@@ -149,9 +217,9 @@ function formatTaskList(filtered, { withProject = false } = {}) {
     const priority = t.priority ? ` (${t.priority})` : '';
     const tag = t.session_tag ? ` [${t.session_tag}]` : '';
     const desc = t.description ? `\n    ${t.description}` : '';
-    const refs = sessionRefs(t).map(describeSession);
+    const refs = sessionRefs(t).map(r => describeSession(r, t.id));
     const sessions = refs.length
-      ? `\n    sessions: ${refs.map(r => `${r.label} (${r.id}, ${r.state})`).join(', ')}`
+      ? `\n    sessions: ${refs.map(r => `${r.label} (${r.id}, ${r.state}${r.working ? ', working on it' : ''})`).join(', ')}`
       : '';
     const project = withProject ? `\n    project: ${(taskProject(t) || { name: 'none' }).name}` : '';
     return `${status} #${t.id}: ${t.title}${priority}${tag}${desc}${sessions}${project}`;
@@ -231,6 +299,28 @@ function init(context) {
         saveTasks();
         broadcastTasks();
         return { content: [{ type: 'text', text: `Task #${id} marked as done.` }] };
+      },
+    },
+
+    work_on_task: {
+      description: 'Say which task this session is working on, by its id from list_tasks. It is kept on this session\'s own record, next to its id, so it becomes part of this session\'s Deep Steve context: get_session_info returns it as `task`, other sessions see it on your row in list_sessions, and the user sees it on this tab\'s overview tile (⌘O). A pending task becomes in-progress, and this session is attached to it. A session works on one task at a time, so a second call moves it; pass id null when it is working on none. Call complete_task when the task is done.',
+      schema: {
+        id: z.number().int().nullable().describe('The task id, or null for no task'),
+      },
+      handler: async ({ id }, extra) => {
+        const callerId = callerShellId(extra);
+        if (!callerId || !ctx.shells.get(callerId)) {
+          return { content: [{ type: 'text', text: 'Only a Deep Steve session can work on a task, and this call did not come from one.' }] };
+        }
+        if (id == null) {
+          setSessionTask(callerId, null);
+          return { content: [{ type: 'text', text: 'This session is not working on a task now.' }] };
+        }
+        const task = tasks.find(t => t.id === id);
+        if (!task) return { content: [{ type: 'text', text: `Task #${id} not found.` }] };
+        setSessionTask(callerId, task);
+        const desc = task.description ? `\n\n${task.description}` : '';
+        return { content: [{ type: 'text', text: `This session is working on task #${task.id}: "${task.title}" (${task.status}).${desc}` }] };
       },
     },
 
@@ -481,10 +571,14 @@ function registerRoutes(app, context) {
     }
     task.sessions = [...sessionRefs(task), { id: result.id, name }];
     saveTasks();
-    broadcastTasks();
+    // Started for this task, so it is the task the session is working on (setSessionTask saves,
+    // moves a pending task to in-progress and broadcasts).
+    if (!setSessionTask(result.id, task)) broadcastTasks();
     ctx.log(`[tasks] task #${id} -> started ${result.id} in ${cwd}`);
     res.json({ id: result.id, tabDelivery: result.tabDelivery });
   });
 }
 
-module.exports = { init, registerRoutes };
+// sessionTask is not test-only: sessionFacts() in mods/project-mods reads it, which is how
+// get_session_info, list_sessions and the overview tiles learn a session's task.
+module.exports = { init, registerRoutes, sessionTask };

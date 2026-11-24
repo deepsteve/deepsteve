@@ -52,11 +52,16 @@ function harness({ spawnResult } = {}) {
     settings: { defaultAgent: 'codex' },
     broadcast: () => {},
     log: () => {},
-    reloadClients: new Set([{ readyState: 1, windowId: 'W1' }]),
+    reloadClients: new Set([{ readyState: 1, windowId: 'W1', send: () => {} }]),
     deliverToWindow: () => 'window',
+    saveState: () => {},
     spawnAgentSession: (opts) => {
       spawns.push(opts);
-      return spawnResult || { id: `N${spawns.length}`, name: opts.name, cwd: opts.cwd, tabDelivery: 'window' };
+      if (spawnResult) return spawnResult;
+      // As the daemon's does: the new shell is registered before the call returns.
+      const id = `N${spawns.length}`;
+      shells.set(id, { cwd: opts.cwd, name: opts.name });
+      return { id, name: opts.name, cwd: opts.cwd, tabDelivery: 'window' };
     },
   };
 
@@ -91,7 +96,7 @@ function harness({ spawnResult } = {}) {
   const wireTask = (id) => call('GET /api/tasks').body.tasks.find((t) => t.id === id);
   const storedTask = (id) => JSON.parse(fs.readFileSync(TASKS_FILE, 'utf8')).find((t) => t.id === id);
 
-  return { call, addTask, wireTask, storedTask, spawns, saved };
+  return { call, addTask, wireTask, storedTask, spawns, saved, shells };
 }
 
 // ── the task store ───────────────────────────────────────────────────────────
@@ -153,6 +158,10 @@ test('start spawns the default agent in a project directory and attaches the new
   assert.strictEqual(h.spawns[0].windowId, 'W1');
   assert.strictEqual(h.spawns[0].prompt, undefined);
   assert.deepStrictEqual(h.storedTask(id).sessions, [{ id: r.body.id, name: 'start me' }]);
+  // Started for the task, so the session is working on it: its own record says so, and the task
+  // is under way.
+  assert.deepStrictEqual(h.shells.get(r.body.id).task, { id, title: 'start me' });
+  assert.strictEqual(h.storedTask(id).status, 'in-progress');
 });
 
 test('start refuses a directory no project registers, and a window that is not connected gets no tab', async () => {

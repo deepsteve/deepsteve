@@ -58,7 +58,6 @@ function fakeElement(className = '') {
       removeProperty: (k) => { delete el.style[k]; },
     },
     children,
-    textContent: '',
     title: '',
     classList: {
       add: (...cs) => cs.forEach(c => classes.add(c)),
@@ -86,6 +85,13 @@ function fakeElement(className = '') {
     },
     addEventListener: () => {},
   };
+  // As the DOM's: an element's text is its children's, joined, and setting it replaces them —
+  // a tile's bar is a task chip and the one-liner, two spans.
+  let ownText = '';
+  Object.defineProperty(el, 'textContent', {
+    get: () => (children.length ? children.map(c => c.textContent).join('') : ownText),
+    set: (v) => { children.splice(0, children.length); ownText = String(v); },
+  });
   // overview-mode.js names its labels with className, so the fake keeps it in step with
   // classList — or querySelector('.overview-label') could never find one.
   Object.defineProperty(el, 'className', {
@@ -144,6 +150,7 @@ async function setup({ freshStorage = true } = {}) {
     activateCalls: [],
     switchCalls: [],
     labels: {},               // id → the tab's one-liner, when it has one
+    tasks: {},                // id → the task the tab is working on, when it said
     tiledCalls: [],           // each onTiles(ids) invocation
   };
 
@@ -167,6 +174,7 @@ async function setup({ freshStorage = true } = {}) {
     getSession: (id) => state.sessions.get(id),
     getTabName: (id) => `name of ${id}`,
     getTileLabel: (id) => state.labels[id] || null,
+    getTileTask: (id) => state.tasks[id] || null,
     onTiles: (ids) => state.tiledCalls.push([...ids]),
     switchToTab: (id) => { state.switchCalls.push(id); state.activeTabId = id; },
     activateTab: (id) => { state.activateCalls.push(id); state.activeTabId = id; },
@@ -392,4 +400,31 @@ test('a tile\'s bar is the tab\'s one-liner, else its name, and repaints when on
   observerCb();
   assert.deepStrictEqual(state.tiledCalls.at(-1), ['a3']);
   assert.strictEqual(bar('a3'), 'name of a3');
+});
+
+test('a tab working on a task shows it as a chip ahead of its one-liner', async () => {
+  const { mod, state, addTab, switchContext } = await setup();
+  addTab('ctxa', 'a1', 200, 50);
+  addTab('ctxa', 'a2', 200, 50);
+  switchContext('ctxa');
+  state.labels.a1 = 'Release notes for 1.8';
+  state.tasks.a1 = { id: 12, title: 'Ship 1.8', status: 'in-progress' };
+  const label = (id) => state.sessions.get(id).container.querySelector('.overview-label');
+  const chip = (id) => label(id).querySelector('.overview-task');
+
+  mod.toggle();
+  assert.strictEqual(chip('a1').textContent, '#12 Ship 1.8');
+  assert.ok(chip('a1').classList.contains('overview-task-active'));
+  assert.strictEqual(label('a1').querySelector('.overview-label-text').textContent, 'Release notes for 1.8');
+  assert.strictEqual(chip('a2'), null, 'a tab that said nothing has no chip');
+
+  state.tasks.a1 = { id: 12, title: 'Ship 1.8', status: 'done' };
+  mod.refreshLabels();
+  assert.strictEqual(chip('a1').textContent, '✓ #12 Ship 1.8', 'done reads as done');
+  assert.ok(chip('a1').classList.contains('overview-task-done'));
+
+  state.tasks.a1 = { id: 12, title: 'Ship 1.8', status: 'deleted' };
+  mod.refreshLabels();
+  assert.strictEqual(chip('a1'), null, 'a deleted task is not drawn');
+  assert.strictEqual(label('a1').textContent, 'Release notes for 1.8', 'and the bar is the one-liner alone');
 });

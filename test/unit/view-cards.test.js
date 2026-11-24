@@ -208,6 +208,8 @@ test('GET /api/project-views/cards answers each id from its session', async () =
     ['a', { id: 'a', cwd: REPO, agentType: 'claude' }],
     ['c', { id: 'c', cwd: REPO, agentType: 'codex' }],
     ['l', { id: 'l', cwd: REPO, agentType: 'claude', customLabel: 'Ads, the long way round' }],
+    // Working on a task this HOME's Tasks mod has no record of: it goes out as deleted.
+    ['t', { id: 't', cwd: REPO, agentType: 'codex', task: { id: 5, title: 'Since deleted' } }],
   ]);
   const ctx = {
     shells,
@@ -228,13 +230,14 @@ test('GET /api/project-views/cards answers each id from its session', async () =
   const res = { statusCode: 200, body: null };
   res.status = (c) => { res.statusCode = c; return res; };
   res.json = (v) => { res.body = v; return res; };
-  await routes.get('GET /api/project-views/cards')({ query: { ids: 'a,c,gone,a,l' }, params: {} }, res);
+  await routes.get('GET /api/project-views/cards')({ query: { ids: 'a,c,gone,a,l,t' }, params: {} }, res);
   assert.strictEqual(res.statusCode, 200);
   assert.deepStrictEqual(res.body.prompts, {
-    a: { prompt: 'Which ad set drives installs?', title: 'Ad set installs', supported: true, customLabel: null },
-    c: { prompt: null, title: null, supported: false, customLabel: null },
-    gone: { prompt: null, title: null, supported: false, customLabel: null },
-    l: { prompt: null, title: null, supported: true, customLabel: 'Ads, the long way round' },
+    a: { prompt: 'Which ad set drives installs?', title: 'Ad set installs', supported: true, customLabel: null, task: null },
+    c: { prompt: null, title: null, supported: false, customLabel: null, task: null },
+    gone: { prompt: null, title: null, supported: false, customLabel: null, task: null },
+    l: { prompt: null, title: null, supported: true, customLabel: 'Ads, the long way round', task: null },
+    t: { prompt: null, title: null, supported: false, customLabel: null, task: { id: 5, title: 'Since deleted', status: 'deleted' } },
   });
 });
 

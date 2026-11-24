@@ -687,6 +687,32 @@ Panel mods are auto-enabled on first visit (when no mod preferences have been sa
 - A session closing does not re-send the list, so the panel re-reads it every minute and shortly
   after its own tabs change.
 
+**A session can say which task it is working on (`work_on_task`).** That is the other direction,
+and it is kept on the **session**, not the task: `entry.task = { id, title }` on the shell entry,
+next to its id, which `state.json` carries through a restart, a close and a restore
+(`restoreTaskRef()` in `server.js`). So the task is part of the session's own Deep Steve context.
+
+- **Writers.** `work_on_task({ id })` from the session itself (it names only its caller; `id: null`
+  takes it off, and a second call moves it — one task at a time), and the Tasks app's start route,
+  whose new session is working on the task it was started for. Either one also attaches the
+  session to the task and moves a pending task to in-progress. `complete_task` leaves the
+  reference alone, so a finished session still says what it finished.
+- **Only the id is the reference.** `sessionTask(entry)` reads the task's title, status and
+  description as they go out, the way a task reads its sessions' state; the stored title is shown
+  only once the task has been deleted (status `"deleted"`).
+- **Readers.** `get_session_info` returns `task` (with the description), each `list_sessions` row
+  `{ id, title, status }`, and `list_tasks` marks the session "working on it". All three go
+  through `sessionFacts()` in `mods/project-mods/tools.js`, which the cards route shares, so
+  overview mode (⌘O) gets the task with each tile's one-liner and draws it as a chip ahead of it
+  (`paintLabel()` in `overview-mode.js`; ✓ when done, nothing once deleted).
+- **Live updates.** Every change to the task list ends in `broadcastTasks()`, which also sends
+  `{ type: 'session-tasks', tasks: { [sessionId]: task | null } }` on both channels for every live
+  session that has a task (and `null` for one just taken off), so a rename, a status change or a
+  `work_on_task` repaints the tiles without a refetch.
+- Tests: the `work_on_task` cases in `test/unit/tasks-sessions.test.js`, the start case in
+  `tasks-app.test.js`, the task cases in `list-sessions.test.js`, `one-liners.test.js` and
+  `overview-mode.test.js`.
+
 **This project.** The header's toggle (the `projectOnly` mod setting, per browser, on by default)
 keeps only the tasks whose derived `project` (see [Tasks app](#tasks-app)) is the one selected in
 the rail, followed through `onActiveContextChanged`. A task with no session in any project has no

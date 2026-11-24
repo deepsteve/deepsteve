@@ -37,9 +37,10 @@ function harness() {
   const saved = {};
   const deliveries = [];
   const broadcasts = [];
+  const sent = [];   // what the control channel carried, from one window's socket
   const reloadClients = new Set([
-    { readyState: 1, windowId: 'W-owner' },
-    { readyState: 1, windowId: 'W-click' },
+    { readyState: 1, windowId: 'W-owner', send: (d) => sent.push(JSON.parse(d)) },
+    { readyState: 1, windowId: 'W-click', send: () => {} },
   ]);
 
   shells.set('S-live', { cwd: PROJECT, name: 'Fix login', windowId: 'W-owner' });
@@ -47,9 +48,11 @@ function harness() {
   saved['S-saved'] = { cwd: PROJECT, name: null };
   saved['S-nocwd'] = { cwd: MISSING, name: 'Moved', closed: true, closedAt: 2000 };
 
+  let stateSaves = 0;
   const ctx = {
     shells,
     getSavedSession: (id) => saved[id] || null,
+    saveState: () => { stateSaves++; },
     broadcast: (m) => broadcasts.push(m),
     log: () => {},
     reloadClients,
@@ -94,7 +97,13 @@ function harness() {
     params: { id: String(id), sessionId }, body: { windowId },
   });
 
-  return { shells, saved, deliveries, broadcasts, reloadClients, tools: registered, call, addTask, wireTask, storedTask, attach, detach, open };
+  const workOn = async (id, shellId) => (await registered.work_on_task.handler({ id }, shellId ? caller(shellId) : undefined)).content[0].text;
+  const sessionTaskPings = () => broadcasts.filter((m) => m.type === 'session-tasks');
+
+  return {
+    shells, saved, deliveries, broadcasts, sent, reloadClients, tools: registered, call, addTask, wireTask, storedTask, attach, detach, open,
+    workOn, sessionTaskPings, stateSaves: () => stateSaves,
+  };
 }
 
 // ── attaching ────────────────────────────────────────────────────────────────
@@ -147,10 +156,10 @@ test('every session state is read from the daemon as the list goes out', async (
   h.attach(id, 'S-saved');
 
   assert.deepStrictEqual(h.wireTask(id).sessions, [
-    { id: 'S-live', label: 'Fix login', state: 'live', closedAt: null },
-    { id: 'S-closed', label: 'Old work', state: 'closed', closedAt: 1000 },
+    { id: 'S-live', label: 'Fix login', state: 'live', closedAt: null, working: false },
+    { id: 'S-closed', label: 'Old work', state: 'closed', closedAt: 1000, working: false },
     // No name anywhere: the folder is the label, as a tab would show it.
-    { id: 'S-saved', label: path.basename(PROJECT), state: 'saved', closedAt: null },
+    { id: 'S-saved', label: path.basename(PROJECT), state: 'saved', closedAt: null, working: false },
   ]);
 });
 
@@ -159,7 +168,7 @@ test('a purged session is "gone" and keeps the name it was attached with', async
   const id = await h.addTask('purged', 'S-live');
   h.attach(id, 'S-closed');
   delete h.saved['S-closed'];   // what pruneClosedSessions() does to an old tombstone
-  assert.deepStrictEqual(h.wireTask(id).sessions[1], { id: 'S-closed', label: 'Old work', state: 'gone', closedAt: null });
+  assert.deepStrictEqual(h.wireTask(id).sessions[1], { id: 'S-closed', label: 'Old work', state: 'gone', closedAt: null, working: false });
 });
 
 test('a live session that closes reads as closed on the next list, with no task write', async () => {
@@ -168,7 +177,7 @@ test('a live session that closes reads as closed on the next list, with no task 
   const before = fs.readFileSync(TASKS_FILE, 'utf8');
   h.shells.delete('S-live');
   h.saved['S-live'] = { cwd: PROJECT, name: 'Fix login', closed: true, closedAt: 5000 };
-  assert.deepStrictEqual(h.wireTask(id).sessions[0], { id: 'S-live', label: 'Fix login', state: 'closed', closedAt: 5000 });
+  assert.deepStrictEqual(h.wireTask(id).sessions[0], { id: 'S-live', label: 'Fix login', state: 'closed', closedAt: 5000, working: false });
   assert.strictEqual(fs.readFileSync(TASKS_FILE, 'utf8'), before);
 });
 
@@ -257,4 +266,67 @@ test('refusals push nothing: gone is 410, a missing folder 409, an unattached se
   assert.strictEqual(h.open(9999, 'S-live', 'W-click').status, 404);
 
   assert.deepStrictEqual(h.deliveries, []);
+});
+
+// ── the task a session is working on ─────────────────────────────────────────
+
+test('work_on_task keeps the task on the caller\'s own record, attaches it, and starts the task', async () => {
+  const h = harness();
+  const id = await h.addTask('write the notes');   // written with no session attached
+  h.shells.set('S-two', { cwd: PROJECT, name: 'Notes' });
+
+  const said = await h.workOn(id, 'S-two');
+  assert.match(said, new RegExp(`working on task #${id}: "write the notes" \\(in-progress\\)`));
+  assert.deepStrictEqual(h.shells.get('S-two').task, { id, title: 'write the notes' }, 'on the shell entry, which state.json carries');
+  assert.ok(h.stateSaves() > 0, 'and the daemon was told to save it');
+  assert.deepStrictEqual(h.storedTask(id).sessions, [{ id: 'S-two', name: 'Notes' }], 'attached, so the panel badges it');
+  assert.strictEqual(h.storedTask(id).status, 'in-progress', 'a pending task is started');
+
+  // Every window hears it, on both channels, so a tile updates without asking.
+  const ping = h.sessionTaskPings().at(-1);
+  assert.deepStrictEqual(ping.tasks['S-two'], { id, title: 'write the notes', status: 'in-progress' });
+  assert.deepStrictEqual(h.sent.at(-1), ping);
+
+  const wire = h.wireTask(id).sessions.find((s) => s.id === 'S-two');
+  assert.strictEqual(wire.working, true, 'the task side says who is working on it');
+  const listed = (await h.tools.list_tasks.handler({ scope: 'all' }, undefined)).content[0].text;
+  assert.match(listed, /Notes \(S-two, live, working on it\)/);
+});
+
+test('a session\'s task is read from the task as it goes out: renamed, done, then deleted', async () => {
+  const h = harness();
+  const id = await h.addTask('first name', 'S-live');
+  await h.workOn(id, 'S-live');
+  const entry = h.shells.get('S-live');
+
+  await h.tools.update_task.handler({ id, title: 'second name' });
+  assert.deepStrictEqual(tools.sessionTask(entry), { id, title: 'second name', status: 'in-progress', description: '' });
+  assert.strictEqual(h.sessionTaskPings().at(-1).tasks['S-live'].title, 'second name', 'a rename reaches the tile');
+  assert.strictEqual(entry.task.title, 'first name', 'the stored title is only a fallback, and is not rewritten');
+
+  await h.tools.complete_task.handler({ id });
+  assert.strictEqual(tools.sessionTask(entry).status, 'done', 'finishing it does not take it off the session');
+
+  h.call('DELETE /api/tasks/:id', { params: { id: String(id) } });
+  assert.deepStrictEqual(tools.sessionTask(entry), { id, title: 'first name', status: 'deleted', description: '' },
+    'a deleted task falls back to the title it had when the session took it');
+});
+
+test('a second call moves the session, null takes it off, and refusals change nothing', async () => {
+  const h = harness();
+  const a = await h.addTask('a', 'S-live');
+  const b = await h.addTask('b', 'S-live');
+  await h.workOn(a, 'S-live');
+  await h.workOn(b, 'S-live');
+  assert.strictEqual(h.shells.get('S-live').task.id, b, 'one task at a time');
+
+  assert.match(await h.workOn(null, 'S-live'), /not working on a task/);
+  assert.strictEqual(h.shells.get('S-live').task, null);
+  assert.strictEqual(h.sessionTaskPings().at(-1).tasks['S-live'], null, 'the tile is told to drop it');
+  assert.strictEqual(tools.sessionTask(h.shells.get('S-live')), null);
+
+  assert.match(await h.workOn(9999, 'S-live'), /not found/);
+  assert.strictEqual(h.shells.get('S-live').task, null);
+  assert.match(await h.workOn(a), /Only a Deep Steve session/);
+  assert.match(await h.workOn(a, 'S-unknown'), /Only a Deep Steve session/);
 });

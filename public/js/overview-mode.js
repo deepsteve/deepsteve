@@ -26,7 +26,9 @@
  * words the task board titles its cards with), from callbacks.getTileLabel, and
  * the tab's name when it has none (a plain terminal, a session not prompted
  * yet). The one-liners arrive after the grid is drawn, so callbacks.onTiles(ids)
- * says which tabs were just tiled and refreshLabels() repaints the bars.
+ * says which tabs were just tiled and refreshLabels() repaints the bars. A tab
+ * that said which task it is working on (the Tasks mod's work_on_task) shows that
+ * task as a chip ahead of its one-liner, from callbacks.getTileTask.
  */
 
 import { nsKey } from './storage-namespace.js';
@@ -113,6 +115,26 @@ function tileLabel(id) {
 }
 
 /**
+ * Fill a tile's bar: the task the tab is working on, when it said (callbacks.getTileTask —
+ * `{ id, title, status }`), as a chip ahead of its one-liner. A chip is dropped for a deleted task.
+ */
+function paintLabel(label, id) {
+  const text = tileLabel(id);
+  const task = callbacks.getTileTask?.(id) || null;
+  label.textContent = '';
+  if (task && task.status !== 'deleted') {
+    const chip = document.createElement('span');
+    chip.className = `overview-task overview-task-${task.status === 'done' ? 'done' : task.status === 'pending' ? 'pending' : 'active'}`;
+    chip.textContent = `${task.status === 'done' ? '✓ ' : ''}#${task.id} ${task.title || ''}`.trim();
+    label.appendChild(chip);
+  }
+  const span = document.createElement('span');
+  span.className = 'overview-label-text';
+  span.textContent = text;
+  label.appendChild(span);
+}
+
+/**
  * Decorate one container as a tile and remember the terminal's pre-overview grid.
  * The dimensions have to be captured BEFORE the tile is fitted — that fit is what
  * destroys them — and only on the way in, so a container that is re-synced while
@@ -130,7 +152,7 @@ function addTile(id, session) {
   if (!session.container.querySelector('.overview-label')) {
     const label = document.createElement('div');
     label.className = 'overview-label';
-    label.textContent = tileLabel(id);
+    paintLabel(label, id);
     session.container.appendChild(label);
   }
 
@@ -496,10 +518,10 @@ export function tiledIds() {
   return (callbacks.getOrderedTabIds?.() || []).filter(id => callbacks.getSession?.(id)?.container);
 }
 
-/** Repaint every tile's bar: a one-liner arrived, or a tab was renamed. */
+/** Repaint every tile's bar: a one-liner or a task arrived, or a tab was renamed. */
 export function refreshLabels() {
   for (const id of tiledIds()) {
     const label = callbacks.getSession(id).container.querySelector('.overview-label');
-    if (label) label.textContent = tileLabel(id);
+    if (label) paintLabel(label, id);
   }
 }

@@ -22,6 +22,14 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
+// A row's task is read from the Tasks mod, which loads tasks.json from the state dir when first
+// required. Point that at a scratch dir holding one task, so the real install's list is never read.
+const STATE = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-ls-state-'));
+process.env.DEEPSTEVE_HOME = STATE;
+fs.writeFileSync(path.join(STATE, 'tasks.json'), JSON.stringify([{
+  id: 3, title: 'Ship the footer', description: 'All of it', priority: 'medium', status: 'in-progress', session_tag: '', sessions: [], created: 1,
+}]));
+
 const { init } = require('../../mods/deepsteve-core/tools.js');
 
 // ------------------------------------------------------------------- fixtures
@@ -178,7 +186,7 @@ test('rows carry get_session_info\'s field names plus project and self', async (
 
   assert.deepStrictEqual(Object.keys(row).sort(), [
     'agentType', 'cwd', 'createdAt', 'id', 'lastActivity', 'name',
-    'mergeBlocked', 'project', 'repoRoot', 'self', 'state', 'summary', 'windowId', 'worktree',
+    'mergeBlocked', 'project', 'repoRoot', 'self', 'state', 'summary', 'task', 'windowId', 'worktree',
   ].sort());
   assert.strictEqual(row.mergeBlocked, false, 'a session that has never merged is not blocked');
   assert.strictEqual(row.state, 'idle', 'state comes from sessionInputState');
@@ -200,6 +208,24 @@ test('each row carries its one-liner: the Custom Label first, cut to 200 charact
   } finally {
     delete shells.get('sess-a').customLabel;
     delete shells.get('sess-sub').customLabel;
+  }
+});
+
+test('a session working on a task carries it: the brief in get_session_info, the headline in a row', async () => {
+  shells.get('sess-a').task = { id: 3, title: 'old title' };
+  shells.get('sess-sub').task = { id: 99, title: 'Since deleted' };
+  try {
+    const info = payload(await tools.get_session_info.handler({}, asSession('sess-a')));
+    assert.deepStrictEqual(info.task, { id: 3, title: 'Ship the footer', status: 'in-progress', description: 'All of it' },
+      'read from the task as it is now, not the title stored with the reference');
+    const p = await list({}, asSession('sess-a'));
+    const row = (id) => p.sessions.find((s) => s.id === id);
+    assert.deepStrictEqual(row('sess-a').task, { id: 3, title: 'Ship the footer', status: 'in-progress' }, 'no description on a roster');
+    assert.deepStrictEqual(row('sess-sub').task, { id: 99, title: 'Since deleted', status: 'deleted' });
+    assert.strictEqual(row('sess-wt').task, null);
+  } finally {
+    delete shells.get('sess-a').task;
+    delete shells.get('sess-sub').task;
   }
 });
 

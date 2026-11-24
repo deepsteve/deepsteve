@@ -98,3 +98,23 @@ test('a Custom Label from a ping replaces the one-liner, and one for a tab never
   assert.strictEqual(src.has('z'), false);
   assert.strictEqual(changes.length, n, 'nothing to redraw');
 });
+
+test('each tab\'s task comes with its facts, and a session-tasks ping moves it', async () => {
+  const { createOneLiners } = await load();
+  stubCards({ a: { task: { id: 7, title: 'Ship it', status: 'in-progress' } } });
+  const changes = [];
+  const src = createOneLiners({ onChange: (ids) => changes.push(ids) });
+  await src.want(['a', 'b']);
+  assert.deepStrictEqual(src.task('a'), { id: 7, title: 'Ship it', status: 'in-progress' });
+  assert.strictEqual(src.task('b'), null, 'a tab that said nothing');
+
+  src.onSessionTasks({ a: { id: 7, title: 'Ship it', status: 'done' }, b: { id: 8, title: 'Docs', status: 'in-progress' }, z: { id: 9, title: 'x', status: 'pending' } });
+  assert.strictEqual(src.task('a').status, 'done');
+  assert.strictEqual(src.task('b').title, 'Docs');
+  assert.strictEqual(src.has('z'), false, 'a tab never asked about waits for its first ask, which brings its task');
+  assert.deepStrictEqual(changes.at(-1), ['a', 'b']);
+
+  src.onSessionTasks({ b: null });
+  assert.strictEqual(src.task('b'), null, 'taken off');
+  assert.strictEqual(src.text('a'), 'prompt of a', 'a task never changes the one-liner');
+});

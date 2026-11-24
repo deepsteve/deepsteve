@@ -4186,7 +4186,7 @@ let stateFrozen = false;  // Set during shutdown to prevent onExit handlers from
 // reads it off the live entry or the closed record to see that a question was overtaken, so it
 // has to outlive both a restart and the session closing.
 function serializeShellEntry(entry) {
-  return { cwd: entry.cwd, claudeSessionId: entry.claudeSessionId, agentType: entry.agentType || 'claude', codexHomeId: entry.codexHomeId || null, configDir: entry.configDir || null, engineType: entry.engineType || 'node-pty', worktree: entry.worktree || null, name: entry.name || null, planMode: !!entry.planMode, model: entry.model || null, effort: entry.effort || null, allowedTools: Array.isArray(entry.allowedTools) && entry.allowedTools.length ? entry.allowedTools : null, forkParent: entry.forkParent || null, lastActivity: entry.lastActivity || null, createdAt: entry.createdAt || null, windowId: entry.windowId || null, scheduled: !!entry.scheduled, scheduledTaskId: entry.scheduledTaskId || null, autopilot: !!entry.autopilot, resumedWorktree: entry.resumedWorktree || null, pipeline: entry.pipeline || null, resultItemId: entry.resultItemId || null, resultApprovedAt: entry.resultApprovedAt || null, mergeBlock: entry.mergeBlock || null, lastHumanInputAt: entry.lastHumanInputAt || null, issue: entry.issue || null, projectAgent: entry.projectAgent || null, slot: entry.slot || null, customLabel: entry.customLabel || null };
+  return { cwd: entry.cwd, claudeSessionId: entry.claudeSessionId, agentType: entry.agentType || 'claude', codexHomeId: entry.codexHomeId || null, configDir: entry.configDir || null, engineType: entry.engineType || 'node-pty', worktree: entry.worktree || null, name: entry.name || null, planMode: !!entry.planMode, model: entry.model || null, effort: entry.effort || null, allowedTools: Array.isArray(entry.allowedTools) && entry.allowedTools.length ? entry.allowedTools : null, forkParent: entry.forkParent || null, lastActivity: entry.lastActivity || null, createdAt: entry.createdAt || null, windowId: entry.windowId || null, scheduled: !!entry.scheduled, scheduledTaskId: entry.scheduledTaskId || null, autopilot: !!entry.autopilot, resumedWorktree: entry.resumedWorktree || null, pipeline: entry.pipeline || null, resultItemId: entry.resultItemId || null, resultApprovedAt: entry.resultApprovedAt || null, mergeBlock: entry.mergeBlock || null, lastHumanInputAt: entry.lastHumanInputAt || null, issue: entry.issue || null, projectAgent: entry.projectAgent || null, slot: entry.slot || null, customLabel: entry.customLabel || null, task: entry.task || null };
 }
 
 // #561: a session record is never hard-deleted by any runtime path. Every close
@@ -7426,6 +7426,14 @@ function restoreIssueStamp(raw) {
   return raw && typeof raw === 'object' ? issueStamp(raw.number, raw.url) : null;
 }
 
+// The task a session said it is working on (work_on_task in mods/tasks): the Tasks mod's id and
+// the title it had then, which is shown only once the task itself is gone. Re-checked on restore
+// like the stamps around it.
+function restoreTaskRef(raw) {
+  if (!raw || typeof raw !== 'object' || !Number.isInteger(raw.id) || raw.id < 1) return null;
+  return { id: raw.id, title: typeof raw.title === 'string' ? raw.title.slice(0, 500) : null };
+}
+
 // A project agent's owner, re-checked on restore for the same reason.
 function restoreProjectAgent(raw) {
   if (!raw || typeof raw !== 'object' || typeof raw.contextId !== 'string' || typeof raw.role !== 'string') return null;
@@ -9035,7 +9043,7 @@ function handleWsConnection(ws, req) {
       }
       sessionEngine = spawnedEngine;
       restoredEngineType = spawnedEngine === tmuxEngine ? 'tmux' : 'node-pty';
-      shells.set(id, { clients: new Set(), cwd, claudeSessionId, agentType: savedAgentType, codexHomeId, configDir: restored.configDir || null, engine: sessionEngine, engineType: restoredEngineType, worktree: savedWorktree, name: restoredName, planMode: savedPlanMode, model: restored.model || null, effort: restored.effort || null, allowedTools: restored.allowedTools || null, forkParent: restored.forkParent || null, restored: true, scheduled: !!restored.scheduled, scheduledTaskId: restored.scheduledTaskId || null, autopilot: !!restored.autopilot, resumedWorktree: restored.resumedWorktree || null, pipeline: restorePipelineSnapshot(restored.pipeline), resultItemId: restored.resultItemId || null, resultApprovedAt: restored.resultApprovedAt || null, mergeBlock: restored.mergeBlock || null, lastHumanInputAt: restored.lastHumanInputAt || null, issue: restoreIssueStamp(restored.issue), projectAgent: restoreProjectAgent(restored.projectAgent), slot: restoreSlot(restored.slot, id), customLabel: restored.customLabel || null, waitingForInput: false, lastActivity: Date.now(), createdAt: restored.createdAt || Date.now(), windowId: restoredWindowId });
+      shells.set(id, { clients: new Set(), cwd, claudeSessionId, agentType: savedAgentType, codexHomeId, configDir: restored.configDir || null, engine: sessionEngine, engineType: restoredEngineType, worktree: savedWorktree, name: restoredName, planMode: savedPlanMode, model: restored.model || null, effort: restored.effort || null, allowedTools: restored.allowedTools || null, forkParent: restored.forkParent || null, restored: true, scheduled: !!restored.scheduled, scheduledTaskId: restored.scheduledTaskId || null, autopilot: !!restored.autopilot, resumedWorktree: restored.resumedWorktree || null, pipeline: restorePipelineSnapshot(restored.pipeline), resultItemId: restored.resultItemId || null, resultApprovedAt: restored.resultApprovedAt || null, mergeBlock: restored.mergeBlock || null, lastHumanInputAt: restored.lastHumanInputAt || null, issue: restoreIssueStamp(restored.issue), projectAgent: restoreProjectAgent(restored.projectAgent), slot: restoreSlot(restored.slot, id), customLabel: restored.customLabel || null, task: restoreTaskRef(restored.task), waitingForInput: false, lastActivity: Date.now(), createdAt: restored.createdAt || Date.now(), windowId: restoredWindowId });
       wireShellOutput(id, initialCols, initialRows);
       recordRecentSession(id);  // bump recency on same-browser reconnect + cross-browser restore
       if (agentConfig.supportsSessionWatch) watchClaudeSessionDir(id);

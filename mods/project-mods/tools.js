@@ -799,15 +799,34 @@ const getPromptSource = () => promptSource || (promptSource = createPromptSource
 const setPromptSource = (src) => { promptSource = src; };
 
 /**
- * What a tab is for: `{ prompt, title, supported, customLabel, summary }` for one shell entry —
- * the first prompt and Claude Code's title off its transcript, the Custom Label the user gave it,
- * and the one-liner they make (summaryOf). One lookup and one cache for every reader: the cards
- * route below, and get_session_info / list_sessions in mods/deepsteve-core, which require this
- * module for it.
+ * What a tab is for: `{ prompt, title, supported, customLabel, summary, task }` for one shell
+ * entry — the first prompt and Claude Code's title off its transcript, the Custom Label the user
+ * gave it, the one-liner they make (summaryOf), and the task it said it is working on (the Tasks
+ * mod's work_on_task). One lookup and one cache for every reader: the cards route below, and
+ * get_session_info / list_sessions in mods/deepsteve-core, which require this module for it.
  */
 async function sessionFacts(entry) {
   const facts = { ...(await getPromptSource().promptFor(entry)), customLabel: (entry && entry.customLabel) || null };
-  return { ...facts, summary: summaryOf(facts) };
+  return { ...facts, summary: summaryOf(facts), task: taskOf(entry) };
+}
+
+/**
+ * `{ id, title, status, description }` for the task a session is working on, or null. Read from the
+ * Tasks mod at call time (it owns the tasks; the session only holds the id), the way Inbox reads a
+ * scheduled task.
+ */
+function taskOf(entry) {
+  if (!entry || !entry.task) return null;
+  let tasksMod;
+  try {
+    tasksMod = require('../tasks/tools.js');
+  } catch (e) {
+    // An install without the Tasks mod has no tasks to name; that must not take the one-liners
+    // down with it. Anything else is a real failure.
+    if (e && e.code === 'MODULE_NOT_FOUND') return null;
+    throw e;
+  }
+  return tasksMod.sessionTask(entry);
 }
 // One superview asks for every card at once; a strip longer than this is not a grid anyone reads.
 const MAX_CARD_IDS = 100;
@@ -1781,7 +1800,8 @@ function registerRoutes(app, context) {
   });
 
   // A superview's cards: each tab's first prompt and Claude Code's title for the conversation,
-  // `{ prompts: { [id]: { prompt, title, supported, customLabel } } }`. Asked by the browser for
+  // `{ prompts: { [id]: { prompt, title, supported, customLabel, task } } }`, where `task` is
+  // `{ id, title, status }` of the task the tab is working on, or null. Asked by the browser for
   // the agent tabs in a view with `cards` while its superview is up, by the task board for its
   // rows, and by the header row for the tab you are looking at (the only one that shows the title
   // and the Custom Label). An id that is not a live session answers
@@ -1793,9 +1813,10 @@ function registerRoutes(app, context) {
     try {
       await Promise.all(ids.map(async (id) => {
         const entry = shells ? shells.get(id) : null;
-        if (!entry) { prompts[id] = { prompt: null, title: null, supported: false, customLabel: null }; return; }
-        const { summary, ...facts } = await sessionFacts(entry);
-        prompts[id] = facts;
+        if (!entry) { prompts[id] = { prompt: null, title: null, supported: false, customLabel: null, task: null }; return; }
+        const { summary, task, ...facts } = await sessionFacts(entry);
+        // The overview tile draws the task's id, title and status; its description is the agent's.
+        prompts[id] = { ...facts, task: task ? { id: task.id, title: task.title, status: task.status } : null };
       }));
     } catch (e) {
       return res.status(500).json({ error: e.message });

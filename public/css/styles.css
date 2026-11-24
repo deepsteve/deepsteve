@@ -2042,6 +2042,11 @@ kbd {
 #terminals.overview-mode .terminal-container.overview-visible.overview-focused { border-color: var(--ds-accent-blue); }
 #terminals.overview-mode #empty-state { display: none; }
 .overview-label { position: absolute; top: 0; left: 0; right: 0; padding: 4px 10px; background: var(--ds-bg-secondary); border-bottom: 1px solid var(--ds-border); font-size: 12px; color: var(--ds-text-primary); z-index: 5; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; pointer-events: none; }
+/* The task a tile's tab is working on (overview-mode.js paintLabel), ahead of its one-liner. */
+/* The outline is an inset shadow, not a border, so a bar with a chip is as tall as one without. */
+.overview-task { display: inline-block; max-width: 45%; margin-right: 8px; padding: 0 6px; vertical-align: top; border-radius: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; color: var(--ds-text-bright); background: var(--ds-bg-tertiary); box-shadow: inset 0 0 0 1px var(--ds-accent-blue); }
+.overview-task-pending { box-shadow: inset 0 0 0 1px var(--ds-border); }
+.overview-task-done { box-shadow: inset 0 0 0 1px var(--ds-accent-green); color: var(--ds-text-secondary); font-weight: normal; }
 .overview-waiting { position: absolute; top: 6px; right: 10px; width: 8px; height: 8px; border-radius: 50%; background: var(--ds-accent-green); z-index: 6; animation: overview-pulse 2s ease-in-out infinite; pointer-events: none; }
 @keyframes overview-pulse { 0%, 100% { opacity: 0.4; } 50% { opacity: 1; } }
 #terminals.overview-mode .terminal-container.overview-visible .xterm { padding-top: 25px; }
