@@ -120,4 +120,20 @@ function createPromptSource({ transcriptPath, getAgentConfig, readWindow = readF
   return { promptFor };
 }
 
-module.exports = { createPromptSource, firstPrompt, aiTitle, PROMPT_CHARS, TITLE_CHARS };
+/**
+ * A tab's one-liner from its facts — `{ customLabel, title, prompt }` — or null when it has none:
+ * the Custom Label, else Claude Code's title, else the first prompt on one line. The server twin
+ * of oneLiner() in public/js/one-liners.js, which the header row, the task board and overview
+ * tiles draw with; this one is what an agent reads (get_session_info, list_sessions), so the two
+ * must say the same words. test/unit/view-cards.test.js pins them together.
+ *
+ * `max` cuts a long one (a first prompt runs to PROMPT_CHARS) for a roster of many rows.
+ */
+function summaryOf(f, max = Infinity) {
+  if (!f) return null;
+  const text = f.customLabel || f.title || (f.prompt ? String(f.prompt).replace(/\s+/g, ' ').trim() : '');
+  if (!text) return null;
+  return text.length > max ? text.slice(0, max - 1).trimEnd() + '…' : text;
+}
+
+module.exports = { createPromptSource, firstPrompt, aiTitle, summaryOf, PROMPT_CHARS, TITLE_CHARS };

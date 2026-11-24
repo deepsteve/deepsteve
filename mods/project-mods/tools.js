@@ -63,7 +63,7 @@ const provenance = require('./provenance.js');
 const { renderApprovalPage, CSP: APPROVAL_CSP } = require('./approval-page.js');
 const projectScope = require('../../project-scope.js');
 const { FOOTER_FIELDS, createFooterSource } = require('./view-footer.js');
-const { createPromptSource } = require('./view-cards.js');
+const { createPromptSource, summaryOf } = require('./view-cards.js');
 const { createTaskStore } = require('./view-tasks.js');
 
 // The manifest field that says "this directory is a project mod". Anything else under
@@ -797,6 +797,18 @@ const getPromptSource = () => promptSource || (promptSource = createPromptSource
   log: (...a) => ctx && ctx.log && ctx.log(...a),
 }));
 const setPromptSource = (src) => { promptSource = src; };
+
+/**
+ * What a tab is for: `{ prompt, title, supported, customLabel, summary }` for one shell entry —
+ * the first prompt and Claude Code's title off its transcript, the Custom Label the user gave it,
+ * and the one-liner they make (summaryOf). One lookup and one cache for every reader: the cards
+ * route below, and get_session_info / list_sessions in mods/deepsteve-core, which require this
+ * module for it.
+ */
+async function sessionFacts(entry) {
+  const facts = { ...(await getPromptSource().promptFor(entry)), customLabel: (entry && entry.customLabel) || null };
+  return { ...facts, summary: summaryOf(facts) };
+}
 // One superview asks for every card at once; a strip longer than this is not a grid anyone reads.
 const MAX_CARD_IDS = 100;
 
@@ -1781,9 +1793,9 @@ function registerRoutes(app, context) {
     try {
       await Promise.all(ids.map(async (id) => {
         const entry = shells ? shells.get(id) : null;
-        prompts[id] = entry
-          ? { ...(await getPromptSource().promptFor(entry)), customLabel: entry.customLabel || null }
-          : { prompt: null, title: null, supported: false, customLabel: null };
+        if (!entry) { prompts[id] = { prompt: null, title: null, supported: false, customLabel: null }; return; }
+        const { summary, ...facts } = await sessionFacts(entry);
+        prompts[id] = facts;
       }));
     } catch (e) {
       return res.status(500).json({ error: e.message });
@@ -1795,7 +1807,19 @@ function registerRoutes(app, context) {
   // menu. `{ customLabel }` is a string, or null or '' to clear it. It lives on the shell entry,
   // so state.json keeps it through a restart, a restore and a reload, and every window is pinged
   // with it so one showing the same tab updates too.
+  //
+  // A human action, like approving a project mod: it refuses the bearer token every agent holds
+  // and requires our own Origin. The label is the first thing an agent reads as the tab's
+  // summary (get_session_info, list_sessions), so an agent that could write one could put words
+  // into another session's idea of what it is for.
   app.put('/api/project-views/custom-label/:sessionId', (req, res) => {
+    if (req.headers && req.headers.authorization) {
+      return res.status(403).json({ error: 'A Custom Label is set by a person in Deep Steve, not with the API token.' });
+    }
+    const security = ctx && ctx.security;
+    if (!security || !security.isAllowedOrigin(req.headers && req.headers.origin)) {
+      return res.status(403).json({ error: 'Forbidden: Origin not allowed' });
+    }
     const id = req.params.sessionId;
     const entry = ctx && ctx.shells && typeof ctx.shells.get === 'function' ? ctx.shells.get(id) : null;
     if (!entry) return res.status(404).json({ error: 'Session not found' });
@@ -1945,5 +1969,7 @@ module.exports = {
   // Project views (#726). cleanSpawnView is not test-only: the spawn tools validate `view` with it.
   cleanSpawnView, SPAWN_VIEW_DESCRIPTION, cleanViewSlug, slugifyView, cleanMatch, cleanViewPath, normalizeView, viewId,
   serializeView, serializeViewForAgent, viewManifestOf, cleanFooter, cleanHeader, cleanSlot, setFooterSource, setPromptSource, setTaskStore,
+  // Not test-only: get_session_info and list_sessions in mods/deepsteve-core read a tab's summary with it.
+  sessionFacts,
   VIEW_KINDS, VIEW_SLUG_RE, RESERVED_VIEW, VIEW_SLOTS, HEADER_FIELDS,
 };

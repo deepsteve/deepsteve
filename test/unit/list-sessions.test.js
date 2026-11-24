@@ -178,12 +178,42 @@ test('rows carry get_session_info\'s field names plus project and self', async (
 
   assert.deepStrictEqual(Object.keys(row).sort(), [
     'agentType', 'cwd', 'createdAt', 'id', 'lastActivity', 'name',
-    'mergeBlocked', 'project', 'repoRoot', 'self', 'state', 'windowId', 'worktree',
+    'mergeBlocked', 'project', 'repoRoot', 'self', 'state', 'summary', 'windowId', 'worktree',
   ].sort());
   assert.strictEqual(row.mergeBlocked, false, 'a session that has never merged is not blocked');
   assert.strictEqual(row.state, 'idle', 'state comes from sessionInputState');
   assert.strictEqual(row.agentType, 'claude');
   assert.ok(!('runningCommand' in row), 'runningCommand costs a process lookup per row — omitted on purpose');
+});
+
+test('each row carries its one-liner: the Custom Label first, cut to 200 characters for a roster', async () => {
+  shells.get('sess-a').customLabel = 'Ship the footer fix';
+  shells.get('sess-sub').customLabel = 'x'.repeat(500);
+  try {
+    const p = await list({}, asSession('sess-a'));
+    const row = (id) => p.sessions.find((s) => s.id === id);
+    assert.strictEqual(row('sess-a').summary, 'Ship the footer fix');
+    assert.strictEqual(row('sess-sub').summary.length, 200);
+    assert.ok(row('sess-sub').summary.endsWith('…'));
+    assert.strictEqual(row('sess-wt').summary, null, 'no label and no transcript to read: nothing to say yet');
+    assert.ok(!('entry' in row('sess-a')), 'the shell entry rides along only to look the summary up');
+  } finally {
+    delete shells.get('sess-a').customLabel;
+    delete shells.get('sess-sub').customLabel;
+  }
+});
+
+test('get_session_info says what the tab is for, with the label, title and first prompt apart', async () => {
+  shells.get('sess-a').customLabel = 'Ship the footer fix';
+  try {
+    const res = await tools.get_session_info.handler({}, asSession('sess-a'));
+    const info = payload(res);
+    assert.strictEqual(info.summary, 'Ship the footer fix');
+    assert.strictEqual(info.customLabel, 'Ship the footer fix');
+    assert.ok('title' in info && 'firstPrompt' in info);
+  } finally {
+    delete shells.get('sess-a').customLabel;
+  }
 });
 
 test('a session with no name falls back to its cwd basename', async () => {
