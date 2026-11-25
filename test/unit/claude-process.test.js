@@ -129,7 +129,7 @@ test('watchClaudeProcess where no directory can be made logs once and reports no
 
 test('server.js hands the id to adoptClaudeSession and closes the watcher with the session watch', () => {
   const src = fs.readFileSync(path.join(__dirname, '../../server.js'), 'utf8');
-  assert.match(src, /onConversation: \(id\) => adoptClaudeSession\(shellId, id, 'claude-process'\)/);
+  assert.match(src, /onConversation: \(id\) => \{[^}]*adoptClaudeSession\(shellId, id, 'claude-process'\);\s*\}/);
   assert.match(src, /entry\.claudeProcessWatcher\.close\(\);\s*entry\.claudeProcessWatcher = null;/);
   // A tmux tab is matched by name: asking tmux for its pid is a subprocess, which the WS create
   // path that starts this watcher must not run (#553).

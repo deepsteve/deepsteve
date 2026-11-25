@@ -58,7 +58,14 @@ owns (#497) and persists the change. There are three:
   matched by its `tmux` pane name (`ds-<shellId>:…`), a node-pty tab's by pid, and a record whose
   process is gone (a crash leftover) is never believed. It is undocumented Claude Code state, so
   anything unexpected is ignored rather than adopted.
-- **The PTY `--resume` line** Claude Code prints on exit.
+- **The resume hint Claude Code prints on exit** (`resume-hint.js`, `observeResumeHint`): a
+  `Resume this session with:` line and the command under it, which ends in `--resume <id>` or,
+  in the worktree form, `-r <id>`. It is read off the tab's output, and so is everything the
+  agent displays, so it is the fallback. **It is consulted only while the process record has
+  never named the tab**, and only a command under that header counts. A bare resume command
+  anywhere in the output used to be believed: an agent's `ps` listing or another pane's
+  `screen_tail` re-pointed its own tab at another tab's conversation, and while the tab held
+  that id, the #497 guard refused the real owner's adoption.
 
 ## A session's cwd must exist (#632)
 

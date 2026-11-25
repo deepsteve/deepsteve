@@ -15,6 +15,7 @@ const { createSleepWatch } = require('./sleep-watch');
 const { createPowerAssertion } = require('./power-assertion');
 const { resolveForkTip } = require('./fork-resolve');
 const { watchClaudeProcess } = require('./claude-process');
+const { createResumeHintScanner } = require('./resume-hint');
 const { formatLogTimestamp, createLogRotator, defaultLogPaths } = require('./logging');
 const { findGitRoot } = require('./git-root');
 const { modKind } = require('./mod-kind');
@@ -2202,7 +2203,7 @@ function claudeSessionOwnedElsewhere(sessionId, exceptShellId) {
 
 // Single authoritative writer for a shell's Claude session id (#503). Every lineage
 // detector — the fs.watch fork detector, Claude Code's process record (a /resume inside
-// the tab, claude-process.js) and the PTY `--resume` matcher — funnels
+// the tab, claude-process.js) and the exit-time resume hint (observeResumeHint) — funnels
 // through here, so the ownership invariant and the side effects (trace, planMode
 // reset, persistence) live in ONE place and a new detector can't reintroduce the
 // #497 steal. Returns true iff the id was adopted.
@@ -2227,7 +2228,7 @@ function adoptClaudeSession(shellId, newId, source) {
   recordRecentSession(shellId);  // keep the ring-buffer entry's claudeSessionId current
   // saveState() is frozen during shutdown and the process may be SIGKILLed before the
   // final snapshot runs; patch state.json directly so the new id survives a mid-shutdown
-  // kill (the PTY `--resume` line is printed on /exit, i.e. during shutdown).
+  // kill (the resume hint is printed on /exit, i.e. during shutdown).
   if (shuttingDown) {
     try {
       const current = loadStateFile();
@@ -2242,6 +2243,25 @@ function adoptClaudeSession(shellId, newId, source) {
     }
   }
   return true;
+}
+
+// The resume hint Claude Code prints as it exits, read off the tab's ANSI-stripped output
+// (resume-hint.js). Of the three detectors it is the only one that reads the screen, and the
+// screen is also where the agent's tool output is drawn: a `ps` listing, a log, another pane's
+// screen. So it is the fallback, used only while Claude Code's process record has never named
+// this tab. Once the record has, it has already followed every move the hint could report, and
+// a hint that disagrees with it came from something the agent displayed.
+function observeResumeHint(e, id, plain) {
+  if (!e.resumeHints) e.resumeHints = createResumeHintScanner();
+  const hinted = e.resumeHints.push(plain);
+  if (!hinted || hinted === e.claudeSessionId) return;
+  if (e.claudeProcessSessionId) {
+    log(`Session ${id} ignoring resume hint ${hinted} in its output — Claude Code's process record names ${e.claudeProcessSessionId}`);
+    return;
+  }
+  // adoptClaudeSession() owns the ownership guard, planMode reset, persistence, and the
+  // mid-shutdown state.json patch (the hint is printed on /exit, i.e. during shutdown) — #503.
+  adoptClaudeSession(id, hinted, 'pty-output');
 }
 
 function watchClaudeSessionDir(shellId) {
@@ -2307,7 +2327,13 @@ function watchClaudeSessionDir(shellId) {
     dir: claudeProcessDir(entry.configDir),
     shellId,
     getPid: () => (entry.engineType === 'tmux' ? null : (entry.engine || ptyEngine).getPid(shellId)),
-    onConversation: (id) => adoptClaudeSession(shellId, id, 'claude-process'),
+    onConversation: (id) => {
+      // Remembered even when adoption is refused: once the record has spoken, the resume hint
+      // read off the screen defers to it (observeResumeHint).
+      const e = shells.get(shellId);
+      if (e) e.claudeProcessSessionId = id;
+      adoptClaudeSession(shellId, id, 'claude-process');
+    },
     log,
   });
 }
@@ -3630,15 +3656,8 @@ function wireShellOutput(id, cols = 120, rows = 40) {
     const plain = (config.emitsBel || config.screenMarkers || config.codexReadiness) ? stripEscapeSequences(data) : null;
 
     if (config.emitsBel) {
-      // Detect claude --resume <UUID> in PTY output to track the actual session ID.
-      // Claude prints this line when a session exits (including /exit, /clear, shutdown).
-      const resumeMatch = plain.match(/claude --resume ([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/);
-      if (resumeMatch) {
-        // adoptClaudeSession() owns the ownership guard, planMode reset, persistence,
-        // and the mid-shutdown state.json patch (this line is printed on /exit, i.e.
-        // during shutdown) — #503.
-        adoptClaudeSession(id, resumeMatch[1], 'pty-output');
-      }
+      // The resume hint Claude Code prints as it exits (/exit, and a node-pty shutdown).
+      observeResumeHint(e, id, plain);
       // #558 audit: classify this chunk's BELs (bare vs OSC-terminator). Kept for
       // the audit taxonomy and to keep the cross-chunk OSC-open carry flag correct.
       if (settings.waitingAuditEnabled) {
